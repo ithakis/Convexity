@@ -3028,7 +3028,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"watchlists": watchlists})
         except Exception as exc:
             self._send_json(500, {"error": str(exc)})
-        
+
+
 def _pick_port(preferred: int = 8765) -> int:
     for port in [preferred, 8766, 8767, 8768, 0]:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -3070,4 +3071,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-        main()
+    main()

@@ -10,12 +10,14 @@
     - Potentially add the feature to analyse sentiment.
         - Research on how to do that, with mostly news + fundementals.
 
-(portfolio) - there should a button which one clicks and can create a new porfolio, or add companies to the existing one.
-    - make it a nice color
+(portfolio) - New Features:
+    - Add the optioin to give by text the weights, essentially having copy pasted them from AI.
+
 
 (columns) - Ability to add / create new columns.
     - The current ones should stay the default. But there should be the option to add more, and also save views of columns.
 
+(all time high again distribution?) - Similar to my previous analysis on periodic investing ?
 
 ---
 
@@ -24,3 +26,9 @@ model="google/gemini-2.5-flash-lite:free"
 
 For, News from a company:
 ...
+
+
+---
+
+Idea about connecting it with claude.
+- make it in a way which it shave is in a repo file, all the csv and the folder is very AI/agent friendly so one could use claude to to search for stocks and create portfolio, or use claude to see the portfolio (CSV and other members)

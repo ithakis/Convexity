@@ -31,6 +31,7 @@ ENV/
 Icon
 
 # Editor / IDE
+.history
 .vscode/
 .idea/
 *.swp

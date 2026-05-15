@@ -77,70 +77,226 @@ def _cache_put(key: str, val: dict) -> None:
 
 
 def _repo_root() -> Path:
-  current = Path(__file__).resolve()
-  for parent in (current.parent, *current.parents):
-    if (parent / ".git").exists():
-      return parent
-  return current.parent
+    current = Path(__file__).resolve()
+    for parent in (current.parent, *current.parents):
+        if (parent / ".git").exists():
+            return parent
+    return current.parent
 
 
 _WATCHLISTS_FILE = _repo_root() / ".portfolio_tracker_watchlists.json"
+_VIEWS_FILE = _repo_root() / ".portfolio_tracker_views.json"
+_LEGACY_SESSION_FILE = _repo_root() / ".portfolio_tracker_session.json"
+_VIEWS_LOCK = threading.Lock()
+
+_CURRENT_KEY = "__current__"
 
 
 def _watchlists_path() -> Path:
-  return Path(_WATCHLISTS_FILE)
+    return Path(_WATCHLISTS_FILE)
+
+
+def _views_path() -> Path:
+    return Path(_VIEWS_FILE)
+
+
+def _read_views_raw() -> dict:
+    """Read and return the raw views map. Migrates the legacy single-session
+    file in-place if present."""
+    path = _views_path()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+    # Migrate legacy single-session file, if any.
+    legacy = Path(_LEGACY_SESSION_FILE)
+    if legacy.exists():
+        try:
+            legacy_data = json.loads(legacy.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            legacy_data = None
+        if isinstance(legacy_data, dict) and legacy_data.get("rows"):
+            views = {
+                "views": {_CURRENT_KEY: legacy_data},
+                "last_view": _CURRENT_KEY,
+            }
+            try:
+                path.write_text(json.dumps(views, indent=2) + "\n", encoding="utf-8")
+                legacy.unlink()
+            except OSError:
+                pass
+            return views
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+    return {}
+
+
+def _write_views_raw(raw: dict) -> None:
+    body = json.dumps(raw, default=_json_default, ensure_ascii=True, indent=2)
+    _views_path().write_text(body + "\n", encoding="utf-8")
+
+
+def list_views() -> dict:
+    """Return {views: {name: meta}, last_view: name} — meta excludes the
+    heavy `rows` payload so the listing endpoint stays small."""
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+    views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+    out: dict[str, dict] = {}
+    for name, entry in views_map.items():
+        if not isinstance(entry, dict):
+            continue
+        rows = entry.get("rows") or []
+        out[name] = {
+            "entries": entry.get("entries") or "",
+            "saved_at": entry.get("saved_at"),
+            "row_count": len(rows) if isinstance(rows, list) else 0,
+            "stale": bool(entry.get("stale")),
+        }
+    return {"views": out, "last_view": raw.get("last_view")}
+
+
+def load_view(name: str) -> dict:
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+    if not name:
+        return {}
+    views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+    entry = views_map.get(name)
+    if not isinstance(entry, dict):
+        return {}
+    return entry
+
+
+def save_view(name: str, entries: str, rows: list, *, set_last: bool = True) -> dict:
+    clean_name = (name or "").strip() or _CURRENT_KEY
+    payload = {
+        "entries": str(entries or "").strip(),
+        "rows": rows or [],
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "stale": False,
+    }
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        views_map[clean_name] = payload
+        raw["views"] = views_map
+        if set_last:
+            raw["last_view"] = clean_name
+        _write_views_raw(raw)
+    return payload
+
+
+def mark_view_stale(name: str, entries: str) -> bool:
+    """Mark an existing view as stale (constituents edited) and update its
+    entries field. Returns True if a view existed and was updated."""
+    clean_name = (name or "").strip()
+    if not clean_name:
+        return False
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        entry = views_map.get(clean_name)
+        if not isinstance(entry, dict):
+            return False
+        entry["entries"] = str(entries or "").strip()
+        entry["stale"] = True
+        views_map[clean_name] = entry
+        raw["views"] = views_map
+        _write_views_raw(raw)
+    return True
+
+
+def set_last_view(name: str) -> None:
+    clean_name = (name or "").strip()
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        if clean_name:
+            views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+            if clean_name not in views_map:
+                return
+        raw["last_view"] = clean_name or None
+        _write_views_raw(raw)
+
+
+def delete_view(name: str) -> None:
+    clean_name = (name or "").strip()
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        views_map.pop(clean_name, None)
+        raw["views"] = views_map
+        if raw.get("last_view") == clean_name:
+            raw["last_view"] = None
+        _write_views_raw(raw)
 
 
 def load_watchlists() -> dict[str, str]:
-  watchlists_path = _watchlists_path()
-  with _WATCHLISTS_LOCK:
-    if not watchlists_path.exists():
-      return {}
-    try:
-      raw = json.loads(watchlists_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-      return {}
-  if not isinstance(raw, dict):
-    return {}
-  watchlists: dict[str, str] = {}
-  for name, entries in raw.items():
-    clean_name = str(name).strip()
-    clean_entries = str(entries).strip()
-    if clean_name and clean_entries:
-      watchlists[clean_name] = clean_entries
-  return watchlists
+    watchlists_path = _watchlists_path()
+    with _WATCHLISTS_LOCK:
+        if not watchlists_path.exists():
+            return {}
+        try:
+            raw = json.loads(watchlists_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    watchlists: dict[str, str] = {}
+    for name, entries in raw.items():
+        clean_name = str(name).strip()
+        clean_entries = str(entries).strip()
+        if clean_name and clean_entries:
+            watchlists[clean_name] = clean_entries
+    return watchlists
 
 
 def save_watchlists(watchlists: dict[str, str]) -> dict[str, str]:
-  watchlists_path = _watchlists_path()
-  cleaned: dict[str, str] = {}
-  for name, entries in watchlists.items():
-    clean_name = str(name).strip()
-    clean_entries = str(entries).strip()
-    if clean_name and clean_entries:
-      cleaned[clean_name] = clean_entries
-  payload = json.dumps(cleaned, ensure_ascii=True, indent=2, sort_keys=True)
-  with _WATCHLISTS_LOCK:
-    watchlists_path.write_text(payload + "\n", encoding="utf-8")
-  return cleaned
+    watchlists_path = _watchlists_path()
+    cleaned: dict[str, str] = {}
+    for name, entries in watchlists.items():
+        clean_name = str(name).strip()
+        clean_entries = str(entries).strip()
+        if clean_name and clean_entries:
+            cleaned[clean_name] = clean_entries
+    payload = json.dumps(cleaned, ensure_ascii=True, indent=2, sort_keys=True)
+    with _WATCHLISTS_LOCK:
+        watchlists_path.write_text(payload + "\n", encoding="utf-8")
+    return cleaned
 
 
-def upsert_watchlist(name: str, entries: str) -> dict[str, str]:
-  clean_name = name.strip()
-  clean_entries = entries.strip()
-  if not clean_name:
-    raise ValueError("watchlist name required")
-  if not clean_entries:
-    raise ValueError("watchlist entries required")
-  watchlists = load_watchlists()
-  watchlists[clean_name] = clean_entries
-  return save_watchlists(watchlists)
+def upsert_watchlist(name: str, entries: str) -> tuple[dict[str, str], bool]:
+    """Upsert a watchlist. Returns (watchlists_after, entries_changed)."""
+    clean_name = name.strip()
+    clean_entries = entries.strip()
+    if not clean_name:
+        raise ValueError("watchlist name required")
+    if not clean_entries:
+        raise ValueError("watchlist entries required")
+    watchlists = load_watchlists()
+    prior = watchlists.get(clean_name)
+    entries_changed = (prior is None) or (prior != clean_entries)
+    watchlists[clean_name] = clean_entries
+    saved = save_watchlists(watchlists)
+    if entries_changed:
+        mark_view_stale(clean_name, clean_entries)
+    return saved, entries_changed
 
 
 def delete_watchlist(name: str) -> dict[str, str]:
-  watchlists = load_watchlists()
-  watchlists.pop(name.strip(), None)
-  return save_watchlists(watchlists)
+    clean_name = name.strip()
+    watchlists = load_watchlists()
+    watchlists.pop(clean_name, None)
+    saved = save_watchlists(watchlists)
+    if clean_name:
+        delete_view(clean_name)
+    return saved
 
 
 # ----------------------------- Symbol resolution --------------------------
@@ -818,6 +974,421 @@ def fetch_detail(symbol: str) -> dict:
     return out
 
 
+# ----------------------------- Portfolio analytics ------------------------
+
+_PERIOD_YF = {
+    "3M": "3mo", "6M": "6mo", "YTD": "ytd",
+    "1Y": "1y", "3Y": "3y", "5Y": "5y", "MAX": "max",
+}
+_PERIOD_DAYS = {
+    "3M": 91, "6M": 182, "YTD": None, "1Y": 365,
+    "3Y": 365 * 3, "5Y": 365 * 5, "MAX": None,
+}
+
+
+def _normalize_weights(weights_in: dict, symbols: list[str]) -> dict[str, float]:
+    raw: dict[str, float] = {}
+    for s in symbols:
+        v = weights_in.get(s)
+        try:
+            f = float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            f = 0.0
+        raw[s] = max(0.0, f)
+    total = sum(raw.values())
+    if total <= 0:
+        # Fall back to equal weights.
+        n = len(symbols)
+        if not n:
+            return {}
+        return {s: 1.0 / n for s in symbols}
+    return {s: v / total for s, v in raw.items()}
+
+
+def _mcap_bucket(mcap: float | None) -> str:
+    if mcap is None or not math.isfinite(mcap) or mcap <= 0:
+        return "Unknown"
+    if mcap >= 2e11:
+        return "Mega ($200B+)"
+    if mcap >= 1e10:
+        return "Large ($10B–200B)"
+    if mcap >= 2e9:
+        return "Mid ($2B–10B)"
+    if mcap >= 3e8:
+        return "Small ($300M–2B)"
+    return "Micro (<$300M)"
+
+
+def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
+    """Return a DataFrame of Close prices indexed by date, columns = symbols
+    (those that returned data)."""
+    if not symbols:
+        return pd.DataFrame()
+    period_yf = _PERIOD_YF.get(period.upper(), "1y")
+    try:
+        df = yf.download(
+            tickers=symbols,
+            period=period_yf,
+            interval="1d",
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
+    except Exception:
+        df = None
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out: dict[str, pd.Series] = {}
+    if isinstance(df.columns, pd.MultiIndex):
+        for s in symbols:
+            try:
+                col = df[s]["Close"].dropna()
+            except (KeyError, ValueError):
+                continue
+            if not col.empty:
+                out[s] = col
+    else:
+        # Single-symbol fallback.
+        try:
+            col = df["Close"].dropna()
+            if not col.empty:
+                out[symbols[0]] = col
+        except (KeyError, ValueError):
+            pass
+    if not out:
+        return pd.DataFrame()
+    return pd.concat(out, axis=1).sort_index()
+
+
+def _analyst_for(symbol: str) -> dict:
+    """Lightweight per-symbol analyst block. Cached via _safe_info's session
+    + our own analytics cache."""
+    try:
+        info = _safe_info(yf.Ticker(symbol))
+    except Exception:
+        return {}
+    return {
+        "mean_rating": _safe_num(info.get("recommendationMean")),
+        "n_analysts": _safe_num(info.get("numberOfAnalystOpinions")),
+        "target_mean": _safe_num(info.get("targetMeanPrice")),
+        "target_low": _safe_num(info.get("targetLowPrice")),
+        "target_high": _safe_num(info.get("targetHighPrice")),
+        "div_yield": _safe_num(info.get("dividendYield")),
+        "ev_ebitda": _safe_num(info.get("enterpriseToEbitda")),
+        "price": _safe_num(info.get("currentPrice") or info.get("regularMarketPrice")),
+    }
+
+
+def analyze_portfolio(rows: list[dict], weights_in: dict, period: str) -> dict:
+    out = analyze_portfolios_multi(rows, {"__single__": weights_in or {}}, period)
+    if isinstance(out, dict) and "error" in out:
+        return out
+    return (out or {}).get("__single__", {"error": "no result"})
+
+
+def analyze_portfolios_multi(
+    rows: list[dict],
+    weight_sets: dict[str, dict],
+    period: str,
+) -> dict:
+    """Run analytics for multiple weight vectors against the same row set + period.
+
+    Shares the (slow) bulk price download, sector-ETF download, and per-symbol
+    analyst-info fetch across every weight set so swapping modes feels instant.
+    Returns ``{set_name: analytics_dict | {"error": ...}}``. If the shared
+    data cannot be produced, returns a flat ``{"error": ...}`` instead.
+    """
+    period_u = (period or "1Y").upper()
+    if period_u not in _PERIOD_YF:
+        period_u = "1Y"
+
+    rows = [r for r in (rows or []) if r and r.get("symbol")]
+    symbols = [str(r["symbol"]) for r in rows]
+    if not symbols:
+        return {"error": "no symbols"}
+
+    if not isinstance(weight_sets, dict) or not weight_sets:
+        weight_sets = {"__single__": {}}
+
+    by_sym = {r["symbol"]: r for r in rows}
+
+    # Normalize every requested weight set up-front (over the original symbol list).
+    normalized_sets: dict[str, dict[str, float]] = {
+        name: _normalize_weights(w_in or {}, symbols) for name, w_in in weight_sets.items()
+    }
+
+    # If every requested set is fully cached, return cached results immediately.
+    per_set_cache_keys: dict[str, str] = {}
+    cached_results: dict[str, dict] = {}
+    for name, weights in normalized_sets.items():
+        key = "pf|" + "|".join(f"{s}:{weights[s]:.6f}" for s in sorted(symbols)) + f"|{period_u}"
+        per_set_cache_keys[name] = key
+        hit = _cache_get(key)
+        if hit is not None:
+            cached_results[name] = hit
+    if len(cached_results) == len(normalized_sets):
+        return cached_results
+
+    closes = _bulk_close(symbols + ["SPY"], period_u)
+    warnings: list[str] = []
+    missing = [s for s in symbols if s not in closes.columns]
+    if missing:
+        warnings.append(f"No price history for: {', '.join(missing)}")
+    spy = closes["SPY"].dropna() if "SPY" in closes.columns else None
+    sym_closes = closes[[s for s in symbols if s in closes.columns]].dropna(how="all")
+    if sym_closes.empty:
+        return {"error": "no price history for portfolio", "warnings": warnings}
+
+    active = [s for s in symbols if s in sym_closes.columns]
+    if not active:
+        return {"error": "no price history for portfolio", "warnings": warnings}
+
+    sym_closes = sym_closes.ffill().dropna(how="any")
+    if sym_closes.empty or len(sym_closes) < 3:
+        return {"error": "insufficient overlapping history", "warnings": warnings}
+
+    daily_ret = sym_closes.pct_change().dropna(how="all").fillna(0.0)
+    common_index = sym_closes.index
+
+    spy_aligned_raw = None
+    spy_ret_full = None
+    if spy is not None and not spy.empty:
+        spy_aligned_raw = spy.reindex(common_index).ffill().dropna()
+        if len(spy_aligned_raw) >= 2:
+            spy_ret_full = spy_aligned_raw.pct_change().dropna()
+        else:
+            spy_aligned_raw = None
+
+    # Pre-fetch sector ETFs for every sector present in the row set (regardless
+    # of weight), so different weight modes share the same download.
+    all_sectors = {(by_sym.get(s, {}).get("sector") or "").strip() for s in active}
+    all_sectors.discard("")
+    sec_etfs = list({_SECTOR_ETF.get(sec) for sec in all_sectors if _SECTOR_ETF.get(sec)})
+    sec_ret_df = None
+    if sec_etfs:
+        sec_closes_df = _bulk_close(sec_etfs, period_u)
+        if not sec_closes_df.empty:
+            sec_closes_df = sec_closes_df.reindex(common_index).ffill().dropna(how="any")
+            if not sec_closes_df.empty:
+                sec_ret_df = sec_closes_df.pct_change().fillna(0.0)
+
+    # Per-symbol analyst blocks (shared across weight sets).
+    analyst_blocks: dict[str, dict] = {}
+    if active:
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(active)))) as pool:
+            futs = {pool.submit(_analyst_for, s): s for s in active}
+            for fut in as_completed(futs):
+                try:
+                    analyst_blocks[futs[fut]] = fut.result()
+                except Exception:
+                    analyst_blocks[futs[fut]] = {}
+
+    # Per-symbol fundamentals — gathered once.
+    pe_vals = {s: _safe_num(by_sym.get(s, {}).get("pe_ratio")) for s in active}
+    ps_vals = {s: _safe_num(by_sym.get(s, {}).get("ps_ratio")) for s in active}
+    ev_vals = {s: analyst_blocks.get(s, {}).get("ev_ebitda") for s in active}
+    div_vals = {s: analyst_blocks.get(s, {}).get("div_yield") for s in active}
+    mcap_vals = {s: _safe_num(by_sym.get(s, {}).get("market_cap")) for s in active}
+
+    period_returns: dict[str, float] = {}
+    for s in active:
+        col = sym_closes[s]
+        period_returns[s] = float(col.iloc[-1] / col.iloc[0] - 1.0) * 100.0 if len(col) >= 2 else 0.0
+
+    def _stats(ret: pd.Series, val: pd.Series) -> dict:
+        if ret.empty or val.empty:
+            return {}
+        n_days = (val.index[-1] - val.index[0]).days or 1
+        years = max(n_days / 365.25, 1e-6)
+        total_return = float(val.iloc[-1] / val.iloc[0] - 1.0) * 100.0
+        ann_return = float((val.iloc[-1] / val.iloc[0]) ** (1.0 / years) - 1.0) * 100.0
+        ann_vol = float(ret.std() * math.sqrt(252)) * 100.0
+        sharpe = float((ret.mean() * 252) / (ret.std() * math.sqrt(252))) if ret.std() else None
+        downside = ret[ret < 0].std()
+        sortino = float((ret.mean() * 252) / (downside * math.sqrt(252))) if downside and downside > 0 else None
+        run_mx = val.cummax()
+        max_dd = float((val / run_mx - 1.0).min() * 100.0)
+        calmar = (ann_return / abs(max_dd)) if max_dd < 0 else None
+        return {
+            "total_return": total_return,
+            "ann_return": ann_return,
+            "ann_vol": ann_vol,
+            "sharpe": sharpe,
+            "sortino": sortino,
+            "max_dd": max_dd,
+            "calmar": calmar,
+        }
+
+    spy_stats_shared = {}
+    spy_aligned_rebased = None
+    if spy_aligned_raw is not None:
+        spy_aligned_rebased = 100.0 * spy_aligned_raw / spy_aligned_raw.iloc[0]
+        spy_stats_shared = _stats(spy_ret_full, spy_aligned_rebased)
+    spy_points_shared = _series_to_points(spy_aligned_rebased) if spy_aligned_rebased is not None else []
+    spy_var_full = float(spy_ret_full.var()) if (spy_ret_full is not None and len(spy_ret_full) > 30) else None
+
+    daily_ret_active = daily_ret[active]
+
+    results: dict[str, dict] = dict(cached_results)
+    for name, weights in normalized_sets.items():
+        if name in results:
+            continue
+
+        # Renormalize over active symbols.
+        if len(active) != len(symbols):
+            weights = _normalize_weights({s: weights.get(s, 0.0) for s in active}, active)
+
+        w_vec = pd.Series([weights[s] for s in active], index=active)
+        port_ret = (daily_ret_active * w_vec).sum(axis=1)
+        port_val = (1.0 + port_ret).cumprod()
+        port_val = 100.0 * port_val / port_val.iloc[0] if not port_val.empty else port_val
+        drawdown = (port_val / port_val.cummax() - 1.0) * 100.0
+
+        # Sector-mix blend.
+        sec_blend = None
+        if sec_ret_df is not None:
+            sector_alloc: dict[str, float] = {}
+            for s in active:
+                sec = (by_sym.get(s, {}).get("sector") or "").strip()
+                if sec:
+                    sector_alloc[sec] = sector_alloc.get(sec, 0.0) + weights[s]
+            if sector_alloc:
+                pairs = [(sec, _SECTOR_ETF.get(sec), w) for sec, w in sector_alloc.items() if _SECTOR_ETF.get(sec)]
+                sec_w_total = sum(w for _, _, w in pairs)
+                parts = [sec_ret_df[etf] * (w / sec_w_total)
+                         for _, etf, w in pairs
+                         if sec_w_total > 0 and etf in sec_ret_df.columns]
+                if parts:
+                    sec_blend_ret = sum(parts)
+                    sec_blend = (1.0 + sec_blend_ret).cumprod()
+                    sec_blend = 100.0 * sec_blend / sec_blend.iloc[0]
+
+        pf_stats = _stats(port_ret, port_val)
+
+        beta_spy = r2_spy = te_spy = None
+        if spy_ret_full is not None and spy_var_full and len(spy_ret_full) > 30:
+            common = port_ret.index.intersection(spy_ret_full.index)
+            if len(common) >= 30:
+                rp, rb = port_ret.loc[common], spy_ret_full.loc[common]
+                var_b = float(rb.var())
+                cov = float(rp.cov(rb))
+                beta_spy = cov / var_b if var_b else None
+                corr = rp.corr(rb)
+                r2_spy = float(corr * corr) if pd.notna(corr) else None
+                te = (rp - rb).std()
+                te_spy = float(te * math.sqrt(252) * 100.0) if te and pd.notna(te) else None
+
+        def _w_avg(values, _w=weights):
+            num = 0.0
+            denom = 0.0
+            for s, v in values.items():
+                if v is None or not math.isfinite(float(v)):
+                    continue
+                num += float(v) * _w.get(s, 0.0)
+                denom += _w.get(s, 0.0)
+            return num / denom if denom > 0 else None
+
+        weighted = {
+            "pe": _w_avg(pe_vals),
+            "ps": _w_avg(ps_vals),
+            "ev_ebitda": _w_avg(ev_vals),
+            "div_yield": _w_avg(div_vals),
+            "market_cap": _w_avg(mcap_vals),
+        }
+
+        rating_num = rating_w = upside_num = upside_w = 0.0
+        n_analysts_total = 0
+        for s in active:
+            blk = analyst_blocks.get(s, {})
+            w = weights.get(s, 0.0)
+            mr = blk.get("mean_rating")
+            if mr is not None and math.isfinite(float(mr)):
+                rating_num += float(mr) * w
+                rating_w += w
+            tgt = blk.get("target_mean")
+            px = _safe_num(by_sym.get(s, {}).get("price")) or blk.get("price")
+            if tgt and px and px > 0:
+                upside = (float(tgt) / float(px) - 1.0) * 100.0
+                upside_num += upside * w
+                upside_w += w
+            na = blk.get("n_analysts")
+            if na is not None and math.isfinite(float(na)):
+                n_analysts_total += int(na)
+        analyst = {
+            "mean_rating": (rating_num / rating_w) if rating_w > 0 else None,
+            "rating_coverage_weight": rating_w,
+            "weighted_target_upside_pct": (upside_num / upside_w) if upside_w > 0 else None,
+            "target_coverage_weight": upside_w,
+            "n_analysts_total": n_analysts_total,
+        }
+
+        by_sector: dict[str, float] = {}
+        by_industry: dict[str, float] = {}
+        by_bucket: dict[str, float] = {}
+        by_country: dict[str, float] = {}
+        for s in active:
+            r = by_sym.get(s, {})
+            w = weights.get(s, 0.0)
+            sec = (r.get("sector") or "Unknown").strip() or "Unknown"
+            ind = (r.get("industry") or "Unknown").strip() or "Unknown"
+            country = (r.get("country") or "Unknown").strip() or "Unknown"
+            bucket = _mcap_bucket(_safe_num(r.get("market_cap")))
+            by_sector[sec] = by_sector.get(sec, 0.0) + w
+            by_industry[ind] = by_industry.get(ind, 0.0) + w
+            by_country[country] = by_country.get(country, 0.0) + w
+            by_bucket[bucket] = by_bucket.get(bucket, 0.0) + w
+
+        weights_sorted = sorted(weights.values(), reverse=True)
+        top5 = float(sum(weights_sorted[:5])) if weights_sorted else 0.0
+        herfindahl = float(sum(w * w for w in weights.values()))
+        effective_n = (1.0 / herfindahl) if herfindahl > 0 else 0.0
+
+        contribution = []
+        for s in active:
+            w = weights.get(s, 0.0)
+            pr = period_returns.get(s, 0.0)
+            contribution.append({
+                "symbol": s,
+                "name": by_sym.get(s, {}).get("name") or s,
+                "weight": w,
+                "period_return": pr,
+                "contribution": w * pr,
+                "sector": by_sym.get(s, {}).get("sector") or "",
+            })
+        contribution.sort(key=lambda x: x["contribution"], reverse=True)
+
+        out_one = {
+            "period": period_u,
+            "weights_applied": weights,
+            "active_symbols": active,
+            "missing_symbols": missing,
+            "series": {
+                "portfolio": _series_to_points(port_val),
+                "spy": spy_points_shared,
+                "sector_mix": _series_to_points(sec_blend) if sec_blend is not None else [],
+                "drawdown": _series_to_points(drawdown),
+            },
+            "stats": {**pf_stats, "beta_spy": beta_spy, "r2_spy": r2_spy, "te_spy": te_spy},
+            "spy_stats": spy_stats_shared,
+            "weighted": weighted,
+            "analyst": analyst,
+            "exposure": {
+                "by_sector": by_sector,
+                "by_industry": by_industry,
+                "by_bucket": by_bucket,
+                "by_country": by_country,
+            },
+            "concentration": {"top5": top5, "herfindahl": herfindahl, "effective_n": effective_n},
+            "contribution": contribution,
+            "warnings": warnings,
+        }
+        _cache_put(per_set_cache_keys[name], out_one)
+        results[name] = out_one
+
+    return results
+
+
 # ----------------------------- HTML payload --------------------------------
 
 INDEX_HTML = r"""<!doctype html>
@@ -896,6 +1467,21 @@ INDEX_HTML = r"""<!doctype html>
   .topbar button:disabled { opacity: 0.55; cursor: progress; }
   .topbar .spacer { flex: 1; }
   .topbar .status { color: var(--muted); font-size: 12px; }
+  /* Primary Portfolio button — accent fill, distinct call to action */
+  .topbar button.portfolio-btn {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+    font-weight: 600; padding: 0 14px; gap: 6px;
+    display: inline-flex; align-items: center;
+  }
+  .topbar button.portfolio-btn:hover { filter: brightness(1.08); background: var(--accent); border-color: var(--accent); }
+  .topbar button.portfolio-btn.active { box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.30); }
+  .topbar button.portfolio-btn .pf-icon { font-size: 13px; line-height: 1; }
+  /* Danger style for delete buttons */
+  .topbar button.danger, button.danger {
+    color: var(--neg); border-color: rgba(248, 81, 73, 0.4);
+  }
+  button.danger:hover { background: rgba(248, 81, 73, 0.12); border-color: var(--neg); }
+  button.danger:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* Theme toggle pill */
   .theme-switch {
@@ -1018,29 +1604,301 @@ INDEX_HTML = r"""<!doctype html>
     background: var(--bg-subtle);
     border-radius: 0 0 12px 12px;
     margin: 0 16px;
-    padding: 14px 16px;
+    padding: 12px 14px 14px;
     border: 1px solid var(--border);
     border-top: none;
   }
   #input-panel.hidden { display: none; }
   #input-panel textarea {
-    width: 100%; min-height: 70px; resize: vertical;
+    width: 100%; min-height: 56px; height: 56px; resize: vertical;
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px;
-    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    line-height: 1.5;
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px;
     background: var(--bg-canvas); color: var(--text);
   }
   #input-panel textarea:focus { outline: none; border-color: var(--accent); }
-  .panel-row { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .panel-row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
   .panel-row .status { color: var(--muted); font-size: 12px; }
-  .watchlists { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-  .chip {
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 999px;
-    padding: 3px 10px; font-size: 12px; cursor: pointer;
-    display: inline-flex; gap: 6px; align-items: center; color: var(--text);
+  .panel-row .spacer { flex: 1; }
+  .panel-row button {
+    height: 34px; padding: 0 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text);
+    font-size: 13px; font-weight: 500; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: background 0.12s, border-color 0.12s, box-shadow 0.12s, transform 0.06s;
   }
-  .chip:hover { border-color: var(--accent); }
-  .chip .x { color: var(--muted); }
-  .chip .x:hover { color: var(--neg); }
+  .panel-row button:hover { background: var(--bg-subtle); border-color: var(--accent); }
+  .panel-row button:active { transform: translateY(1px); }
+  .panel-row button:disabled { opacity: 0.55; cursor: not-allowed; }
+  .panel-row button.primary {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+    box-shadow: 0 1px 2px rgba(9, 105, 218, 0.25);
+    font-weight: 600;
+  }
+  .panel-row button.primary:hover { filter: brightness(1.08); background: var(--accent); border-color: var(--accent); }
+  .panel-row button.ghost {
+    background: transparent; border-style: dashed; color: var(--muted);
+  }
+  .panel-row button.ghost:hover { color: var(--accent); border-style: solid; }
+
+  /* Confirmation modal (delete portfolio) */
+  .confirm-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    display: none; align-items: center; justify-content: center; z-index: 80;
+    padding: 20px;
+  }
+  .confirm-bg.show { display: flex; }
+  .confirm-modal {
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px;
+    width: min(420px, 96vw);
+    box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+    overflow: hidden;
+  }
+  .confirm-head {
+    padding: 16px 18px 8px;
+    font-weight: 700; font-size: 15px; color: var(--text);
+  }
+  .confirm-body {
+    padding: 0 18px 16px; color: var(--muted); font-size: 13px; line-height: 1.5;
+  }
+  .confirm-body b { color: var(--text); }
+  .confirm-foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 16px; border-top: 1px solid var(--border);
+    background: var(--bg-subtle);
+  }
+  .confirm-foot button {
+    height: 32px; padding: 0 14px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text);
+    font-size: 12.5px; font-weight: 500; cursor: pointer;
+  }
+  .confirm-foot button:hover { background: var(--bg-subtle); }
+  .confirm-foot button.danger {
+    background: var(--neg); color: #fff; border-color: var(--neg);
+  }
+  .confirm-foot button.danger:hover { filter: brightness(1.08); }
+
+  /* Portfolio tab strip — fully rounded pill tabs */
+  .pf-tabs {
+    display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+    padding: 0 0 12px; margin-bottom: 4px;
+  }
+  .pf-tab {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px; font-size: 13px; font-weight: 500;
+    border-radius: 999px;
+    cursor: pointer;
+    max-width: 240px; min-height: 30px;
+    position: relative;
+    transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+  }
+  .pf-tab:hover { background: var(--bg-subtle); border-color: var(--accent); }
+  .pf-tab.active {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+    box-shadow: 0 1px 3px rgba(9, 105, 218, 0.18);
+  }
+  [data-theme="dark"] .pf-tab.active { color: #fff; background: rgba(47, 129, 247, 0.22); }
+  .pf-tab .pf-tab-label {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;
+  }
+  .pf-tab .pf-tab-stale {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--warn); flex-shrink: 0;
+  }
+  .pf-tab .pf-tab-close {
+    width: 18px; height: 18px; border-radius: 50%;
+    color: var(--muted); font-size: 12px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; flex-shrink: 0;
+    transition: background 0.12s, color 0.12s;
+  }
+  .pf-tab .pf-tab-close:hover { background: rgba(207, 34, 46, 0.16); color: var(--neg); }
+  .pf-tab-newadhoc {
+    background: transparent !important; border-style: dashed !important;
+  }
+  .pf-tab-add {
+    background: transparent; border: 1px dashed var(--border); color: var(--muted);
+    padding: 6px 12px; font-size: 13px; border-radius: 999px;
+    cursor: pointer; min-height: 30px;
+    transition: color 0.12s, border-color 0.12s;
+  }
+  .pf-tab-add:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* Editor header */
+  .pf-editor { padding: 0 0 4px; }
+  .pf-editor-head {
+    display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px;
+  }
+  .pf-editor-head #pf-editor-title { font-weight: 600; font-size: 13px; color: var(--text); }
+  .pf-editor-meta { color: var(--muted); font-size: 11.5px; }
+  .pf-editor-meta .stale { color: var(--warn); font-weight: 600; }
+
+  /* Analytics sub-window */
+  .pf-analytics {
+    margin-top: 14px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.04), 0 6px 14px rgba(0,0,0,0.06);
+    overflow: hidden;
+  }
+  .pf-analytics-head {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 9px 12px;
+    background: linear-gradient(180deg, var(--bg-subtle), var(--bg-canvas));
+    border-bottom: 1px solid var(--border);
+  }
+  .pf-analytics-title { font-weight: 700; font-size: 12.5px; margin-right: 6px; }
+  .pf-mode-toggle, .pf-period-tabs {
+    display: inline-flex; background: var(--bg-canvas); border: 1px solid var(--border);
+    border-radius: 7px; overflow: hidden;
+  }
+  .pf-mode-toggle button, .pf-period-tabs button {
+    background: transparent; border: none; padding: 5px 10px; font-size: 11.5px;
+    color: var(--muted); cursor: pointer; border-right: 1px solid var(--border);
+  }
+  .pf-mode-toggle button:last-child, .pf-period-tabs button:last-child { border-right: none; }
+  .pf-mode-toggle button:hover, .pf-period-tabs button:hover { color: var(--text); background: var(--bg-subtle); }
+  .pf-mode-toggle button.active, .pf-period-tabs button.active {
+    background: var(--accent); color: #fff;
+  }
+  .pf-overlay-toggles {
+    display: inline-flex; gap: 10px; margin-left: auto; flex-wrap: wrap;
+    font-size: 11.5px; color: var(--muted);
+  }
+  .pf-overlay-toggles label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+  .pf-overlay-toggles input[type="checkbox"] { accent-color: var(--accent); }
+
+  .pf-analytics-body { padding: 12px; }
+  .pf-empty {
+    color: var(--muted); font-size: 12.5px; text-align: center; padding: 32px 8px;
+  }
+  .pf-loading { display: inline-block; color: var(--muted); font-size: 11.5px; margin-left: 6px; }
+
+  .pf-grid {
+    display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+    gap: 12px; align-items: stretch;
+  }
+  @media (max-width: 900px) { .pf-grid { grid-template-columns: 1fr; } }
+
+  .pf-card {
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .pf-card h4 {
+    margin: 0 0 8px; font-size: 12px; font-weight: 700;
+    color: var(--text); display: flex; align-items: baseline; gap: 8px;
+    text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  .pf-card h4 .sub { font-size: 11px; color: var(--muted); font-weight: 500; text-transform: none; letter-spacing: 0; }
+
+  .pf-chart-wrap { position: relative; }
+  .pf-chart-wrap svg { display: block; width: 100%; height: 220px; }
+  .pf-chart-wrap .pf-dd-svg { height: 80px; margin-top: 4px; }
+  .pf-chart-legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
+  .pf-chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+
+  .pf-stats { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 6px 12px; font-size: 12px; }
+  @media (max-width: 600px) { .pf-stats { grid-template-columns: 1fr; } }
+  .pf-stat-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px dashed var(--border); }
+  .pf-stat-row:last-child { border-bottom: none; }
+  .pf-stat-row .l { color: var(--muted); }
+  .pf-stat-row .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .pf-stat-row .v.pos { color: var(--pos); }
+  .pf-stat-row .v.neg { color: var(--neg); }
+
+  .pf-bars { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
+  .pf-bars .pf-bar { display: grid; grid-template-columns: minmax(70px, 1.2fr) 4fr minmax(46px, auto); gap: 6px; align-items: center; }
+  .pf-bars .pf-bar-name { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pf-bars .pf-bar-track { background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 4px; height: 9px; overflow: hidden; }
+  .pf-bars .pf-bar-fill { height: 100%; background: var(--accent); }
+  .pf-bars .pf-bar-val { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+
+  .pf-contrib-table { width: 100%; border-collapse: collapse; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .pf-contrib-table th { text-align: right; padding: 4px 6px; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 600; }
+  .pf-contrib-table th:first-child, .pf-contrib-table td:first-child { text-align: left; }
+  .pf-contrib-table td { padding: 3px 6px; border-bottom: 1px dashed var(--border); }
+  .pf-contrib-table tr:last-child td { border-bottom: none; }
+  .pf-contrib-table td.pos { color: var(--pos); }
+  .pf-contrib-table td.neg { color: var(--neg); }
+
+  /* Custom weight popup */
+  .pf-weights-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    display: none; align-items: center; justify-content: center; z-index: 70;
+    padding: 20px;
+  }
+  .pf-weights-bg.show { display: flex; }
+  .pf-weights-modal {
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px;
+    width: min(560px, 96vw); max-height: 86vh; display: flex; flex-direction: column;
+  }
+  .pf-weights-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .pf-weights-title { font-weight: 700; font-size: 13.5px; flex: 1; }
+  .pf-weights-sum { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 12.5px; }
+  .pf-weights-sum.bad { color: var(--neg); }
+  .pf-weights-sum.good { color: var(--pos); }
+  .pf-weights-action {
+    height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg-subtle); cursor: pointer; font-size: 11.5px; color: var(--text);
+  }
+  .pf-weights-action:hover { border-color: var(--accent); }
+  .pf-weights-hint { padding: 8px 14px; color: var(--muted); font-size: 11.5px; }
+  .pf-weights-body { padding: 4px 14px 12px; overflow-y: auto; flex: 1; }
+  .pf-w-row {
+    display: grid; grid-template-columns: 64px 1fr 64px 28px; gap: 8px;
+    align-items: center; padding: 4px 0; border-bottom: 1px dashed var(--border);
+  }
+  .pf-w-row:last-child { border-bottom: none; }
+  .pf-w-row.locked .pf-w-slider { opacity: 0.55; }
+  .pf-w-sym { font-weight: 600; font-size: 12px; }
+  .pf-w-slider { width: 100%; accent-color: var(--accent); }
+  .pf-w-num {
+    width: 100%; padding: 3px 6px; border: 1px solid var(--border);
+    border-radius: 5px; background: var(--bg-canvas); color: var(--text);
+    font-size: 11.5px; font-variant-numeric: tabular-nums; text-align: right;
+  }
+  .pf-w-num:focus { outline: none; border-color: var(--accent); }
+  .pf-w-lock {
+    width: 28px; height: 24px; border-radius: 5px; border: 1px solid var(--border);
+    background: var(--bg-subtle); cursor: pointer; color: var(--muted); padding: 0;
+    font-size: 12px;
+  }
+  .pf-w-lock.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .pf-weights-foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 10px 14px; border-top: 1px solid var(--border);
+  }
+  .pf-weights-foot button {
+    height: 30px; padding: 0 14px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-subtle); cursor: pointer; color: var(--text); font-size: 12.5px;
+  }
+  .pf-weights-foot button.primary {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .pf-weights-foot button.primary:hover { filter: brightness(1.08); }
+
+  /* Stale view banner inside the analytics body */
+  .pf-stale-banner {
+    background: rgba(210, 153, 34, 0.12); border: 1px solid rgba(210, 153, 34, 0.4);
+    color: var(--warn); border-radius: 7px; padding: 7px 10px; font-size: 11.5px;
+    margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+  }
+  .pf-stale-banner button {
+    margin-left: auto; height: 24px; padding: 0 10px; border-radius: 6px;
+    border: 1px solid var(--warn); background: transparent; color: var(--warn); cursor: pointer;
+    font-size: 11.5px;
+  }
+  .pf-stale-banner button:hover { background: rgba(210, 153, 34, 0.18); }
 
   /* Sort menu */
   .sort-menu {
@@ -1390,7 +2248,7 @@ INDEX_HTML = r"""<!doctype html>
 <body>
 
 <div class="topbar" id="topbar">
-  <button id="edit-btn">✎ Edit Portfolio</button>
+  <button id="edit-btn" class="portfolio-btn"><span class="pf-icon">▦</span> Portfolio</button>
   <button id="refresh">↻ Refresh</button>
   <button id="export">⬇ CSV</button>
   <button id="save">★ Save Watchlist</button>
@@ -1409,14 +2267,85 @@ INDEX_HTML = r"""<!doctype html>
 </div>
 <div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
 
-<div id="input-panel">
-  <textarea id="tickers" placeholder="Paste tickers or company names — comma or newline separated.
+<div id="input-panel" class="hidden">
+  <!-- Browser-style tab strip of saved portfolios -->
+  <div class="pf-tabs" id="pf-tabs" role="tablist"></div>
+
+  <!-- Constituents editor -->
+  <div class="pf-editor">
+    <div class="pf-editor-head">
+      <span id="pf-editor-title">Constituents</span>
+      <span id="pf-editor-meta" class="pf-editor-meta"></span>
+    </div>
+    <textarea id="tickers" rows="2" placeholder="Paste tickers or company names — comma or newline separated.
 e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA, XLK, Trane, MSTR, COST, Apple, Microsoft"></textarea>
-  <div class="panel-row">
-    <button id="build" class="primary">Build Dashboard</button>
-    <span class="status">Paste your tickers and press Build (or Cmd/Ctrl + Enter).</span>
+    <div class="panel-row">
+      <button id="build" class="primary">Build Dashboard</button>
+      <button id="save-as" class="ghost">＋ Save as new</button>
+      <span class="spacer"></span>
+      <span class="status" id="editor-status">Paste your tickers and press Build (or Cmd/Ctrl + Enter).</span>
+    </div>
   </div>
-  <div class="watchlists" id="watchlists"></div>
+
+  <!-- Analytics sub-window -->
+  <div class="pf-analytics" id="pf-analytics">
+    <div class="pf-analytics-head">
+      <span class="pf-analytics-title">Portfolio analytics</span>
+      <div class="pf-mode-toggle" id="pf-mode-toggle">
+        <button data-mode="equal">Equal-weight</button>
+        <button data-mode="cap" class="active">Cap-weighted</button>
+        <button data-mode="custom">Custom…</button>
+      </div>
+      <div class="pf-period-tabs" id="pf-period-tabs">
+        <button data-p="3M">3M</button>
+        <button data-p="6M">6M</button>
+        <button data-p="YTD">YTD</button>
+        <button data-p="1Y" class="active">1Y</button>
+        <button data-p="3Y">3Y</button>
+        <button data-p="5Y">5Y</button>
+        <button data-p="MAX">Max</button>
+      </div>
+      <div class="pf-overlay-toggles" id="pf-overlay-toggles">
+        <label><input type="checkbox" id="pf-show-spy" checked> SPY</label>
+        <label><input type="checkbox" id="pf-show-sec"> Sector mix</label>
+        <label><input type="checkbox" id="pf-show-dd" checked> Drawdown</label>
+      </div>
+    </div>
+    <div class="pf-analytics-body" id="pf-analytics-body">
+      <div class="pf-empty" id="pf-empty">Build the dashboard to compute portfolio analytics.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete-portfolio confirmation modal -->
+<div class="confirm-bg" id="confirm-bg">
+  <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="confirm-head" id="confirm-title">Delete portfolio?</div>
+    <div class="confirm-body" id="confirm-body">This portfolio and its cached results will be removed.</div>
+    <div class="confirm-foot">
+      <button id="confirm-cancel" type="button">Cancel</button>
+      <button id="confirm-ok" class="danger" type="button">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Custom-weight popup -->
+<div class="pf-weights-bg" id="pf-weights-bg">
+  <div class="pf-weights-modal">
+    <div class="pf-weights-head">
+      <span class="pf-weights-title">Custom weights</span>
+      <div class="pf-weights-sum" id="pf-weights-sum">100.0%</div>
+      <button id="pf-weights-equal" class="pf-weights-action" title="Set all to equal weight">Equal-weighted</button>
+      <button id="pf-weights-reset" class="pf-weights-action" title="Reset to market-cap weights">Cap-weighted</button>
+      <button id="pf-weights-close" class="pf-weights-action" title="Close">✕</button>
+    </div>
+    <div class="pf-weights-hint">Slide or type to set weights. Lock pins a row; others auto-rebalance.</div>
+    <div class="pf-weights-body" id="pf-weights-body"></div>
+    <div class="pf-weights-foot">
+      <button id="pf-weights-apply" class="primary">Apply</button>
+      <button id="pf-weights-cancel">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <div class="table-wrap">
@@ -1622,6 +2551,7 @@ const THEME_COLORS = {
  * Utility helpers
  * --------------------------------------------------------------------------- */
 const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
 function escapeHtml(s) {
   return String(s).replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[c]));
 }
@@ -2617,15 +3547,38 @@ function hideProgress() {
   }, 400);
 }
 
-async function build() {
+/* ===========================================================================
+ * Portfolio state — per-portfolio views, tabs, and analytics
+ * --------------------------------------------------------------------------- */
+const AD_HOC_KEY = "__current__";
+let STATE = {
+  activeView: null,        // current view name (or AD_HOC_KEY for ad-hoc input, or null = none yet)
+  mode: "cap",             // "equal" | "cap" | "custom"
+  customWeights: null,     // {symbol: fraction}, set after user applies the popup
+  period: "1Y",
+  showSpy: true,
+  showSec: false,
+  showDd: true,
+  analytics: null,
+  analyticsLoading: false,
+  analyticsByMode: {},   // {"<mode>|<period>": result}
+};
+let WATCHLISTS = {};        // name -> entries-string (saved watchlists)
+let VIEWS = {};             // name -> {entries, saved_at, row_count, stale}
+let LAST_VIEW = null;
+
+function viewIsAdhoc(name) { return !name || name === AD_HOC_KEY; }
+function entriesArr(raw) { return String(raw || "").split(/[\n,]+/).map(s => s.trim()).filter(Boolean); }
+
+async function build(opts) {
+  opts = opts || {};
   const raw = $("#tickers").value.trim();
   if (!raw) { toast("Enter at least one ticker or company name."); return; }
-  const entries = raw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+  const entries = entriesArr(raw);
   $("#build").disabled = true; $("#refresh").disabled = true;
   $("#status").textContent = `Fetching ${entries.length} symbol${entries.length>1?"s":""}…`;
   showProgress(2);
   DATA = [];
-  /* Initial empty render so the user sees the headers fill in. */
   render();
 
   let total = entries.length;
@@ -2669,13 +3622,316 @@ async function build() {
       }
     }
     $("#status").textContent = `Loaded ${DATA.length} symbol${DATA.length>1?"s":""} · updated ${new Date().toLocaleTimeString()}`;
-    $("#input-panel").classList.add("hidden");
+    // Persist this build as a view under the active tab name (or ad-hoc).
+    const targetName = STATE.activeView || AD_HOC_KEY;
+    await persistView(targetName, raw, DATA);
+    STATE.customWeights = null;  // new build — drop stale custom weights
+    if (STATE.mode === "custom") STATE.mode = "cap";
+    STATE.analyticsByMode = {};  // invalidate cache for new data
+    requestAnalytics();
   } catch (e) {
     toast("Error: " + e.message);
     $("#status").textContent = "Error.";
   } finally {
     hideProgress();
     $("#build").disabled = false; $("#refresh").disabled = false;
+  }
+}
+
+async function persistView(name, entries, rows) {
+  const targetName = name || AD_HOC_KEY;
+  try {
+    const r = await fetch(`/api/views/${encodeURIComponent(targetName)}`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({entries, rows, set_last: true}),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      VIEWS[targetName] = {
+        entries: d.view.entries,
+        saved_at: d.view.saved_at,
+        row_count: (d.view.rows || []).length,
+        stale: false,
+      };
+      LAST_VIEW = targetName;
+      STATE.activeView = targetName;
+      renderTabs();
+      renderEditorMeta();
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+async function loadAllAtStartup() {
+  await Promise.all([loadWatchlists(), loadViews()]);
+  renderTabs();
+  // Restore the last open view if any.
+  if (LAST_VIEW && VIEWS[LAST_VIEW]) {
+    await activateTab(LAST_VIEW, {silent: true});
+  } else {
+    // No prior view — show the editor in ad-hoc mode but keep the panel closed.
+    STATE.activeView = null;
+    renderEditorMeta();
+  }
+}
+
+async function loadViews() {
+  try {
+    const r = await fetch("/api/views");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    VIEWS = d.views || {};
+    LAST_VIEW = d.last_view || null;
+  } catch (e) {
+    VIEWS = {}; LAST_VIEW = null;
+  }
+}
+
+async function activateTab(name, opts) {
+  opts = opts || {};
+  STATE.activeView = name;
+  STATE.customWeights = null;
+  STATE.analyticsByMode = {};
+  if (STATE.mode === "custom") STATE.mode = "cap";
+  renderTabs();
+  renderEditorMeta();
+  // Set the textarea to the watchlist entries (or stored view entries if ad-hoc).
+  const view = VIEWS[name];
+  const wlEntries = WATCHLISTS[name];
+  $("#tickers").value = wlEntries != null ? wlEntries : (view ? view.entries : "");
+  // Try to load cached rows for the view.
+  if (view && view.row_count > 0) {
+    try {
+      const r = await fetch(`/api/views/${encodeURIComponent(name)}`);
+      const d = await r.json();
+      const rows = (d.view && Array.isArray(d.view.rows)) ? d.view.rows : [];
+      if (rows.length) {
+        DATA = rows;
+        render();
+        const savedAt = view.saved_at ? relTime(view.saved_at) : "previously";
+        $("#status").textContent = `${viewLabel(name)} · cached ${savedAt}${view.stale ? " · stale" : ""}`;
+        if (view.stale) {
+          // Auto-refresh per user policy.
+          if (!opts.silent) toast(`Constituents changed — refreshing ${viewLabel(name)}…`);
+          await build({keepPanelOpen: true});
+        } else {
+          requestAnalytics();
+        }
+        await fetch("/api/last-view", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({name})});
+        return;
+      }
+    } catch (e) { /* fall through */ }
+  }
+  // No cached rows yet — clear the table, prompt user.
+  DATA = []; render();
+  $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Press <b>Build Dashboard</b> to load this portfolio.</div>`;
+  $("#status").textContent = viewLabel(name);
+  await fetch("/api/last-view", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({name})});
+}
+
+function viewLabel(name) {
+  if (!name) return "Ad-hoc";
+  if (name === AD_HOC_KEY) return "Ad-hoc (unsaved)";
+  return name;
+}
+
+function renderTabs() {
+  const wrap = $("#pf-tabs"); wrap.innerHTML = "";
+  // Tab order: saved watchlists alphabetically, then ad-hoc (if present), then "+ New".
+  const wlNames = Object.keys(WATCHLISTS).sort((a, b) => a.localeCompare(b));
+  const hasAdhoc = !!VIEWS[AD_HOC_KEY];
+  const tabNames = [...wlNames];
+  if (hasAdhoc) tabNames.push(AD_HOC_KEY);
+
+  for (const name of tabNames) {
+    const tab = document.createElement("div");
+    tab.className = "pf-tab" + (STATE.activeView === name ? " active" : "") + (name === AD_HOC_KEY ? " pf-tab-newadhoc" : "");
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("data-name", name);
+
+    const view = VIEWS[name];
+    const staleDot = view && view.stale ? `<span class="pf-tab-stale" title="Constituents changed — refresh to update"></span>` : "";
+    const closeBtn = `<span class="pf-tab-close" title="Delete">✕</span>`;
+    tab.innerHTML = `${staleDot}<span class="pf-tab-label">${escapeHtml(viewLabel(name))}</span>${closeBtn}`;
+    tab.addEventListener("click", (e) => {
+      if (e.target.closest(".pf-tab-close")) return;
+      activateTab(name);
+    });
+    tab.querySelector(".pf-tab-close").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await deletePortfolio(name);
+    });
+    wrap.appendChild(tab);
+  }
+
+  // "+ New" tab — always present.
+  const add = document.createElement("button");
+  add.className = "pf-tab-add";
+  add.textContent = "＋ New portfolio";
+  add.addEventListener("click", () => createNewTab());
+  wrap.appendChild(add);
+}
+
+function renderEditorMeta() {
+  const name = STATE.activeView;
+  const meta = $("#pf-editor-meta");
+  if (!name) { meta.innerHTML = ""; return; }
+  const view = VIEWS[name];
+  const parts = [];
+  if (name === AD_HOC_KEY) parts.push("Unsaved portfolio");
+  else parts.push(`Portfolio: <b>${escapeHtml(name)}</b>`);
+  if (view) {
+    parts.push(`${view.row_count} rows`);
+    if (view.saved_at) parts.push(`cached ${relTime(view.saved_at)}`);
+    if (view.stale) parts.push(`<span class="stale">stale — will auto-refresh</span>`);
+  }
+  meta.innerHTML = parts.join(" · ");
+}
+
+async function createNewTab() {
+  // Open the panel in fresh ad-hoc state.
+  STATE.activeView = AD_HOC_KEY;
+  STATE.customWeights = null;
+  $("#tickers").value = "";
+  DATA = []; render();
+  $("#input-panel").classList.remove("hidden");
+  $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Paste tickers and press <b>Build Dashboard</b>.</div>`;
+  renderTabs(); renderEditorMeta();
+  $("#tickers").focus();
+}
+
+function showConfirm({title, body, okLabel}) {
+  return new Promise((resolve) => {
+    const bg = $("#confirm-bg");
+    $("#confirm-title").textContent = title || "Are you sure?";
+    $("#confirm-body").innerHTML = body || "";
+    $("#confirm-ok").textContent = okLabel || "Delete";
+    bg.classList.add("show");
+    const cleanup = (val) => {
+      bg.classList.remove("show");
+      $("#confirm-ok").onclick = null;
+      $("#confirm-cancel").onclick = null;
+      bg.onclick = null;
+      document.removeEventListener("keydown", onKey);
+      resolve(val);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") cleanup(false);
+      else if (e.key === "Enter") cleanup(true);
+    };
+    $("#confirm-ok").onclick = () => cleanup(true);
+    $("#confirm-cancel").onclick = () => cleanup(false);
+    bg.onclick = (e) => { if (e.target.id === "confirm-bg") cleanup(false); };
+    document.addEventListener("keydown", onKey);
+    setTimeout(() => $("#confirm-ok").focus(), 30);
+  });
+}
+
+async function deletePortfolio(name) {
+  if (!name) return;
+  if (name === AD_HOC_KEY) {
+    const ok = await showConfirm({
+      title: "Discard unsaved portfolio?",
+      body: "Your unsaved ad-hoc portfolio will be removed.",
+      okLabel: "Discard",
+    });
+    if (!ok) return;
+    try { await fetch(`/api/views/${encodeURIComponent(name)}`, {method: "DELETE"}); } catch(e) {}
+    delete VIEWS[name];
+    if (STATE.activeView === name) STATE.activeView = null;
+    renderTabs(); renderEditorMeta();
+    return;
+  }
+  const ok = await showConfirm({
+    title: "Delete portfolio?",
+    body: `<b>${escapeHtml(name)}</b> and its cached results will be removed. This can't be undone.`,
+    okLabel: "Delete",
+  });
+  if (!ok) return;
+  try {
+    const r = await fetch(`/api/watchlists?name=${encodeURIComponent(name)}`, {method: "DELETE"});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Delete failed.");
+    WATCHLISTS = d.watchlists || {};
+    delete VIEWS[name];
+    if (STATE.activeView === name) {
+      STATE.activeView = null;
+      DATA = []; render();
+    }
+    renderTabs(); renderEditorMeta();
+    toast(`Deleted "${name}".`);
+  } catch (err) {
+    toast(err.message || "Delete failed.");
+  }
+}
+
+async function saveAsNewWatchlist() {
+  const raw = $("#tickers").value.trim();
+  if (!raw) return toast("Enter tickers first.");
+  const name = prompt("Save this portfolio as…", STATE.activeView && STATE.activeView !== AD_HOC_KEY ? STATE.activeView : "");
+  if (!name || !name.trim()) return;
+  const clean = name.trim();
+  try {
+    const r = await fetch("/api/watchlists", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name: clean, entries: raw}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Save failed.");
+    WATCHLISTS = d.watchlists || {};
+    // If we were on ad-hoc and have data, move that view's rows under the new name.
+    if (STATE.activeView === AD_HOC_KEY && DATA.length) {
+      await persistView(clean, raw, DATA);
+      try { await fetch(`/api/views/${encodeURIComponent(AD_HOC_KEY)}`, {method: "DELETE"}); } catch(e) {}
+      delete VIEWS[AD_HOC_KEY];
+    }
+    STATE.activeView = clean;
+    renderTabs(); renderEditorMeta();
+    toast(`Saved "${clean}".`);
+    // If the server reported the entries changed and we have rows, auto-rebuild.
+    if (d.entries_changed && DATA.length) {
+      await build({keepPanelOpen: true});
+    }
+  } catch (err) {
+    toast(err.message || "Save failed.");
+  }
+}
+
+// "Save" toolbar button — overwrite current named tab, or prompt if ad-hoc.
+async function saveWatchlist() {
+  const name = STATE.activeView;
+  if (!name || name === AD_HOC_KEY) return saveAsNewWatchlist();
+  const raw = $("#tickers").value.trim();
+  if (!raw) return toast("Enter tickers first.");
+  try {
+    const r = await fetch("/api/watchlists", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({name, entries: raw}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Save failed.");
+    WATCHLISTS = d.watchlists || {};
+    renderTabs(); renderEditorMeta();
+    toast(`Updated "${name}".`);
+    if (d.entries_changed) {
+      // Constituents changed → auto-refresh data (user preference).
+      await build({keepPanelOpen: true});
+    }
+  } catch (err) {
+    toast(err.message || "Save failed.");
+  }
+}
+
+async function loadWatchlists() {
+  try {
+    const res = await fetch("/api/watchlists");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to load watchlists.");
+    WATCHLISTS = data.watchlists || {};
+  } catch (err) {
+    WATCHLISTS = {};
+    toast(err.message || "Failed to load watchlists.");
   }
 }
 
@@ -2697,72 +3953,527 @@ function exportCsv() {
 }
 
 /* ===========================================================================
- * Watchlists (server-backed)
+ * Portfolio analytics — weights, request, render, chart
  * --------------------------------------------------------------------------- */
-let WATCHLISTS = {};
+function computeWeights() {
+  const rows = DATA.filter(r => r && r.symbol);
+  if (!rows.length) return {};
+  if (STATE.mode === "equal") {
+    const w = 1 / rows.length;
+    return Object.fromEntries(rows.map(r => [r.symbol, w]));
+  }
+  if (STATE.mode === "custom" && STATE.customWeights) {
+    // Validate and renormalize over the current row set.
+    const raw = {};
+    let total = 0;
+    for (const r of rows) {
+      const v = Number(STATE.customWeights[r.symbol] || 0);
+      raw[r.symbol] = isFinite(v) && v >= 0 ? v : 0;
+      total += raw[r.symbol];
+    }
+    if (total <= 0) {
+      const w = 1 / rows.length;
+      return Object.fromEntries(rows.map(r => [r.symbol, w]));
+    }
+    return Object.fromEntries(rows.map(r => [r.symbol, raw[r.symbol] / total]));
+  }
+  // Cap-weighted (default).
+  const caps = rows.map(r => Math.max(0, Number(r.market_cap) || 0));
+  const total = caps.reduce((a, b) => a + b, 0);
+  if (total > 0) return Object.fromEntries(rows.map((r, i) => [r.symbol, caps[i] / total]));
+  // Fallback to equal if no caps.
+  const w = 1 / rows.length;
+  return Object.fromEntries(rows.map(r => [r.symbol, w]));
+}
 
-function renderWatchlists() {
-  const wls = WATCHLISTS;
-  const wrap = $("#watchlists"); wrap.innerHTML = "";
-  const names = Object.keys(wls);
-  if (!names.length) {
-    wrap.innerHTML = '<span style="color:var(--muted); font-size:12px;">No saved watchlists yet. Build one and click <b>Save Watchlist</b>.</span>';
+function capWeightsFromData() {
+  const rows = DATA.filter(r => r && r.symbol);
+  if (!rows.length) return {};
+  const caps = rows.map(r => Math.max(0, Number(r.market_cap) || 0));
+  const total = caps.reduce((a, b) => a + b, 0);
+  if (total > 0) return Object.fromEntries(rows.map((r, i) => [r.symbol, caps[i] / total]));
+  const w = 1 / rows.length;
+  return Object.fromEntries(rows.map(r => [r.symbol, w]));
+}
+function equalWeightsFromData() {
+  const rows = DATA.filter(r => r && r.symbol);
+  if (!rows.length) return {};
+  const w = 1 / rows.length;
+  return Object.fromEntries(rows.map(r => [r.symbol, w]));
+}
+function analyticsCacheKey(mode, period) { return mode + "|" + period; }
+
+let _analyticsReqId = 0;
+async function requestAnalytics(opts) {
+  opts = opts || {};
+  if (!DATA.length) {
+    STATE.analytics = null;
+    renderAnalyticsBody();
     return;
   }
-  for (const name of names) {
-    const chip = document.createElement("span");
-    chip.className = "chip";
-    chip.innerHTML = `<span>${escapeHtml(name)}</span><span class="x" title="Delete">✕</span>`;
-    chip.firstElementChild.onclick = () => { $("#tickers").value = wls[name]; build(); };
-    chip.querySelector(".x").onclick = async (e) => {
-      e.stopPropagation();
-      try {
-        const res = await fetch(`/api/watchlists?name=${encodeURIComponent(name)}`, { method: "DELETE" });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Delete failed.");
-        WATCHLISTS = data.watchlists || {};
-        renderWatchlists();
-      } catch (err) {
-        toast(err.message || "Delete failed.");
-      }
-    };
-    wrap.appendChild(chip);
-  }
-}
+  const period = STATE.period;
+  const mode = STATE.mode;
+  const key = analyticsCacheKey(mode, period);
 
-async function loadWatchlists() {
-  try {
-    const res = await fetch("/api/watchlists");
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Failed to load watchlists.");
-    WATCHLISTS = data.watchlists || {};
-    renderWatchlists();
-  } catch (err) {
-    WATCHLISTS = {};
-    renderWatchlists();
-    toast(err.message || "Failed to load watchlists.");
+  // Cache hit → instant.
+  const cached = STATE.analyticsByMode[key];
+  if (cached && !opts.force) {
+    STATE.analytics = cached;
+    STATE.analyticsLoading = false;
+    renderAnalyticsBody();
+    return;
   }
-}
 
-async function saveWatchlist() {
-  const raw = $("#tickers").value.trim();
-  if (!raw) return toast("Enter tickers first.");
-  const name = prompt("Watchlist name?", "");
-  if (!name) return;
+  const reqId = ++_analyticsReqId;
+  STATE.analyticsLoading = true;
+  renderAnalyticsBody();
+
+  // Build the weight_sets we'll request. For equal/cap, also pre-compute the
+  // sibling mode (free piggyback on the same backend call). For custom we
+  // only request the custom set — but the first time custom is opened it's
+  // the same as cap, so we can serve it from cache instantly.
+  const cap = capWeightsFromData();
+  const eq = equalWeightsFromData();
+  const wsets = {};
+  if (mode === "custom") {
+    const cw = STATE.customWeights || cap;
+    wsets.custom = cw;
+    // Piggyback: also (re)compute equal+cap if they aren't cached for this period.
+    if (!STATE.analyticsByMode[analyticsCacheKey("equal", period)]) wsets.equal = eq;
+    if (!STATE.analyticsByMode[analyticsCacheKey("cap", period)]) wsets.cap = cap;
+  } else {
+    wsets.equal = eq;
+    wsets.cap = cap;
+  }
+
   try {
-    const res = await fetch("/api/watchlists", {
+    const r = await fetch("/api/portfolio-analytics-multi", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, entries: raw }),
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({rows: DATA, weight_sets: wsets, period}),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Save failed.");
-    WATCHLISTS = data.watchlists || {};
-    renderWatchlists();
-    toast(`Saved "${name.trim()}".`);
-  } catch (err) {
-    toast(err.message || "Save failed.");
+    const d = await r.json();
+    if (reqId !== _analyticsReqId) return;
+    if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+    if (d.error) throw new Error(d.error);
+    const results = d.results || {};
+    for (const k of Object.keys(results)) {
+      STATE.analyticsByMode[analyticsCacheKey(k, period)] = results[k];
+    }
+    // If custom wasn't explicitly computed, alias it to cap for this period
+    // so switching to Custom… is instant on first open.
+    if (!STATE.analyticsByMode[analyticsCacheKey("custom", period)] &&
+        STATE.analyticsByMode[analyticsCacheKey("cap", period)] &&
+        !STATE.customWeights) {
+      STATE.analyticsByMode[analyticsCacheKey("custom", period)] =
+          STATE.analyticsByMode[analyticsCacheKey("cap", period)];
+    }
+    STATE.analytics = STATE.analyticsByMode[key] || results[mode] || null;
+  } catch (e) {
+    STATE.analytics = {error: e.message};
+  } finally {
+    if (reqId === _analyticsReqId) STATE.analyticsLoading = false;
+    renderAnalyticsBody();
   }
+}
+
+function renderAnalyticsBody() {
+  const body = $("#pf-analytics-body");
+  if (!DATA.length) {
+    body.innerHTML = `<div class="pf-empty">Build the dashboard to compute portfolio analytics.</div>`;
+    return;
+  }
+  if (STATE.analyticsLoading && !STATE.analytics) {
+    body.innerHTML = `<div class="pf-empty">Computing analytics…</div>`;
+    return;
+  }
+  const a = STATE.analytics;
+  if (!a) { body.innerHTML = `<div class="pf-empty">No analytics yet.</div>`; return; }
+  if (a.error) { body.innerHTML = `<div class="pf-empty" style="color:var(--neg)">Analytics error: ${escapeHtml(a.error)}</div>`; return; }
+
+  // Build cards.
+  const banner = staleBannerHtml();
+  body.innerHTML = `
+    ${banner}
+    <div class="pf-grid">
+      <div class="pf-card">
+        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${labelForMode(STATE.mode)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span></h4>
+        <div class="pf-chart-wrap" id="pf-chart-host"></div>
+        <div class="pf-chart-legend" id="pf-chart-legend"></div>
+      </div>
+      <div class="pf-card">
+        <h4>Risk &amp; return <span class="sub">vs SPY</span></h4>
+        ${renderStatsHtml(a)}
+      </div>
+      <div class="pf-card">
+        <h4>Valuation &amp; analyst <span class="sub">weighted</span></h4>
+        ${renderValuationAnalystHtml(a)}
+      </div>
+      <div class="pf-card">
+        <h4>Concentration</h4>
+        ${renderConcentrationHtml(a)}
+      </div>
+      <div class="pf-card">
+        <h4>Sector exposure</h4>
+        ${renderBarsHtml(a.exposure && a.exposure.by_sector)}
+      </div>
+      <div class="pf-card">
+        <h4>Market-cap buckets</h4>
+        ${renderBarsHtml(a.exposure && a.exposure.by_bucket)}
+      </div>
+      <div class="pf-card" style="grid-column: 1 / -1;">
+        <h4>Contribution to ${escapeHtml(STATE.period)} return</h4>
+        ${renderContribHtml(a)}
+      </div>
+    </div>
+  `;
+  drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
+}
+
+function staleBannerHtml() {
+  const name = STATE.activeView;
+  if (!name || !VIEWS[name] || !VIEWS[name].stale) return "";
+  return `<div class="pf-stale-banner">Constituents changed since last build — analytics may be stale.
+    <button onclick="build({keepPanelOpen:true})">Refresh now</button></div>`;
+}
+
+function labelForMode(m) {
+  if (m === "equal") return "Equal-weight";
+  if (m === "custom") return "Custom-weight";
+  return "Cap-weighted";
+}
+
+function fmtPctSigned(v, d) {
+  if (v == null || !isFinite(v)) return "—";
+  d = d == null ? 2 : d;
+  const sign = v > 0 ? "+" : "";
+  return sign + Number(v).toFixed(d) + "%";
+}
+function fmtPctPlain(v, d) {
+  if (v == null || !isFinite(v)) return "—";
+  d = d == null ? 2 : d;
+  return Number(v).toFixed(d) + "%";
+}
+function fmtNumOr(v, d, suffix) {
+  if (v == null || !isFinite(v)) return "—";
+  d = d == null ? 2 : d;
+  return Number(v).toFixed(d) + (suffix || "");
+}
+function fmtCapBig(v) {
+  if (v == null || !isFinite(v)) return "—";
+  const abs = Math.abs(v);
+  if (abs >= 1e12) return (v/1e12).toFixed(2) + "T";
+  if (abs >= 1e9)  return (v/1e9).toFixed(2) + "B";
+  if (abs >= 1e6)  return (v/1e6).toFixed(2) + "M";
+  if (abs >= 1e3)  return (v/1e3).toFixed(2) + "K";
+  return v.toFixed(0);
+}
+
+function renderStatsHtml(a) {
+  const s = a.stats || {};
+  const sp = a.spy_stats || {};
+  const cls = (v) => v == null ? "" : (v >= 0 ? "pos" : "neg");
+  const rows = [
+    ["Period return", fmtPctSigned(s.total_return), cls(s.total_return), fmtPctSigned(sp.total_return)],
+    ["Ann. return", fmtPctSigned(s.ann_return), cls(s.ann_return), fmtPctSigned(sp.ann_return)],
+    ["Ann. vol", fmtPctPlain(s.ann_vol), "", fmtPctPlain(sp.ann_vol)],
+    ["Sharpe", fmtNumOr(s.sharpe, 2), "", fmtNumOr(sp.sharpe, 2)],
+    ["Sortino", fmtNumOr(s.sortino, 2), "", fmtNumOr(sp.sortino, 2)],
+    ["Max drawdown", fmtPctSigned(s.max_dd), cls(s.max_dd), fmtPctSigned(sp.max_dd)],
+    ["Calmar", fmtNumOr(s.calmar, 2), "", fmtNumOr(sp.calmar, 2)],
+    ["Beta (SPY)", fmtNumOr(s.beta_spy, 2), "", "—"],
+    ["R² (SPY)", fmtNumOr(s.r2_spy, 2), "", "—"],
+    ["Tracking err", fmtPctPlain(s.te_spy), "", "—"],
+  ];
+  const html = rows.map(r => `
+    <div class="pf-stat-row" title="Portfolio vs SPY">
+      <span class="l">${r[0]}</span>
+      <span class="v ${r[2]}">${r[1]} <span style="color:var(--muted); font-weight:400">/ ${r[3]}</span></span>
+    </div>`).join("");
+  return `<div class="pf-stats">${html}</div>`;
+}
+
+function renderValuationAnalystHtml(a) {
+  const w = a.weighted || {};
+  const an = a.analyst || {};
+  const rows = [
+    ["P/E (wtd)", fmtNumOr(w.pe, 2)],
+    ["P/S (wtd)", fmtNumOr(w.ps, 2)],
+    ["EV/EBITDA (wtd)", fmtNumOr(w.ev_ebitda, 2)],
+    ["Div yield (wtd)", w.div_yield == null ? "—" : fmtPctPlain(w.div_yield)],
+    ["Market cap (wtd avg)", fmtCapBig(w.market_cap)],
+    ["Analyst rating (1=SB, 5=SS)", fmtNumOr(an.mean_rating, 2)],
+    ["Weighted target upside", fmtPctSigned(an.weighted_target_upside_pct)],
+    ["Analysts covering (sum)", an.n_analysts_total != null ? an.n_analysts_total : "—"],
+  ];
+  return `<div class="pf-stats">${rows.map(r => `
+    <div class="pf-stat-row"><span class="l">${r[0]}</span><span class="v">${r[1]}</span></div>
+  `).join("")}</div>`;
+}
+
+function renderConcentrationHtml(a) {
+  const c = a.concentration || {};
+  const rows = [
+    ["Top-5 weight", fmtPctPlain((c.top5 || 0) * 100, 1)],
+    ["Herfindahl (HHI)", fmtNumOr(c.herfindahl, 3)],
+    ["Effective # of names", fmtNumOr(c.effective_n, 1)],
+    ["Active holdings", (a.active_symbols || []).length],
+    ["Dropped (no history)", (a.missing_symbols || []).join(", ") || "—"],
+  ];
+  return `<div class="pf-stats">${rows.map(r => `
+    <div class="pf-stat-row"><span class="l">${r[0]}</span><span class="v">${r[1]}</span></div>
+  `).join("")}</div>`;
+}
+
+function renderBarsHtml(map) {
+  if (!map) return `<div class="pf-empty" style="padding:6px 0;">—</div>`;
+  const entries = Object.entries(map).filter(([k, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return `<div class="pf-empty" style="padding:6px 0;">No data</div>`;
+  const max = entries[0][1];
+  return `<div class="pf-bars">${entries.map(([k, v]) => `
+    <div class="pf-bar">
+      <span class="pf-bar-name" title="${escapeHtml(k)}">${escapeHtml(k)}</span>
+      <div class="pf-bar-track"><div class="pf-bar-fill" style="width:${((v/max)*100).toFixed(1)}%"></div></div>
+      <span class="pf-bar-val">${(v*100).toFixed(1)}%</span>
+    </div>`).join("")}</div>`;
+}
+
+function renderContribHtml(a) {
+  const list = a.contribution || [];
+  if (!list.length) return `<div class="pf-empty" style="padding:6px 0;">No contribution data</div>`;
+  return `<table class="pf-contrib-table">
+    <thead><tr><th>Symbol</th><th>Weight</th><th>${escapeHtml(STATE.period)} return</th><th>Contribution</th></tr></thead>
+    <tbody>${list.map(c => `<tr>
+      <td title="${escapeHtml(c.name || c.symbol)}">${escapeHtml(c.symbol)} <span style="color:var(--muted)">${escapeHtml(c.sector || "")}</span></td>
+      <td>${(c.weight*100).toFixed(2)}%</td>
+      <td class="${c.period_return >= 0 ? 'pos':'neg'}">${fmtPctSigned(c.period_return)}</td>
+      <td class="${c.contribution >= 0 ? 'pos':'neg'}">${fmtPctSigned(c.contribution)}</td>
+    </tr>`).join("")}</tbody>
+  </table>`;
+}
+
+function drawPortfolioChart(a, hostEl, legendEl) {
+  const series = a.series || {};
+  const port = series.portfolio || [];
+  if (port.length < 2) { hostEl.innerHTML = `<div class="pf-empty">Not enough data to plot.</div>`; return; }
+  const showSpy = STATE.showSpy && series.spy && series.spy.length;
+  const showSec = STATE.showSec && series.sector_mix && series.sector_mix.length;
+  const showDd  = STATE.showDd && series.drawdown && series.drawdown.length;
+
+  const W = 720, H = 220;
+  const padL = 36, padR = 12, padT = 8, padB = 22;
+  const t0 = port[0][0], t1 = port[port.length-1][0];
+  const xScale = (t) => padL + ((t - t0) / Math.max(1, (t1 - t0))) * (W - padL - padR);
+  let lo = Infinity, hi = -Infinity;
+  for (const p of port) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  if (showSpy) for (const p of series.spy) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  if (showSec) for (const p of series.sector_mix) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  const pad = (hi - lo) * 0.06 || 1;
+  lo -= pad; hi += pad;
+  const yScale = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+  const path = (pts) => {
+    let s = "";
+    for (let i = 0; i < pts.length; i++) {
+      const x = xScale(pts[i][0]).toFixed(1), y = yScale(pts[i][1]).toFixed(1);
+      s += (i === 0 ? "M" : "L") + x + "," + y + " ";
+    }
+    return s;
+  };
+  const ticks = [];
+  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * (i/4); ticks.push({v, y: yScale(v)}); }
+  const N_XT = 5; const xt = [];
+  for (let i = 0; i <= N_XT; i++) { const t = t0 + (t1-t0)*(i/N_XT); xt.push({t, x: xScale(t)}); }
+  const fmtT = (ts) => {
+    const d = new Date(ts);
+    if (STATE.period === "3M" || STATE.period === "6M") return d.toLocaleDateString(undefined, {month:"short", day:"numeric"});
+    if (STATE.period === "YTD" || STATE.period === "1Y") return d.toLocaleDateString(undefined, {month:"short", year:"2-digit"});
+    return d.toLocaleDateString(undefined, {year:"numeric"});
+  };
+  const accent = "var(--accent)";
+  const svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    ${ticks.map(t => `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>`).join("")}
+    ${ticks.map(t => `<text x="${padL-6}" y="${(t.y+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${t.v.toFixed(0)}</text>`).join("")}
+    ${xt.map(t => `<text x="${t.x.toFixed(1)}" y="${(H-padB+12).toFixed(0)}" font-size="10" fill="var(--muted)" text-anchor="middle">${fmtT(t.t)}</text>`).join("")}
+    ${showSec ? `<path d="${path(series.sector_mix)}" fill="none" stroke="#f59e0b" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
+    ${showSpy ? `<path d="${path(series.spy)}" fill="none" stroke="#8b5cf6" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
+    <path d="${path(port)}" fill="none" stroke="${accent}" stroke-width="2"/>
+  </svg>`;
+  let ddSvg = "";
+  if (showDd) {
+    const dd = series.drawdown;
+    const W2 = W, H2 = 80, padT2 = 4, padB2 = 12;
+    const minDd = Math.min(...dd.map(p => p[1])); const maxDd = 0;
+    const yS2 = (v) => padT2 + (1 - (v - minDd) / Math.max(1e-9, (maxDd - minDd))) * (H2 - padT2 - padB2);
+    const path2 = (pts) => {
+      let s = "";
+      for (let i = 0; i < pts.length; i++) {
+        const x = xScale(pts[i][0]).toFixed(1), y = yS2(pts[i][1]).toFixed(1);
+        s += (i === 0 ? "M" : "L") + x + "," + y + " ";
+      }
+      return s + ` L ${xScale(dd[dd.length-1][0]).toFixed(1)},${yS2(0).toFixed(1)} L ${xScale(dd[0][0]).toFixed(1)},${yS2(0).toFixed(1)} Z`;
+    };
+    ddSvg = `<svg class="pf-dd-svg" viewBox="0 0 ${W2} ${H2}" preserveAspectRatio="none">
+      <line x1="${padL}" y1="${yS2(0).toFixed(1)}" x2="${W-padR}" y2="${yS2(0).toFixed(1)}" stroke="var(--border)" stroke-width="0.5"/>
+      <path d="${path2(dd)}" fill="rgba(248,81,73,0.18)" stroke="#f85149" stroke-width="1.3"/>
+      <text x="${padL-6}" y="${(yS2(minDd)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${minDd.toFixed(0)}%</text>
+      <text x="${padL-6}" y="${(yS2(0)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">0</text>
+    </svg>`;
+  }
+  hostEl.innerHTML = svg + ddSvg;
+  const legend = [];
+  legend.push(`<span><i style="background:#2f81f7"></i> Portfolio</span>`);
+  if (showSpy) legend.push(`<span><i style="background:#8b5cf6"></i> SPY</span>`);
+  if (showSec) legend.push(`<span><i style="background:#f59e0b"></i> Sector mix</span>`);
+  if (showDd)  legend.push(`<span><i style="background:#f85149"></i> Drawdown</span>`);
+  legendEl.innerHTML = legend.join("");
+}
+
+/* ===========================================================================
+ * Custom weights popup
+ * --------------------------------------------------------------------------- */
+let WEIGHTS_DRAFT = null;  // [{symbol, name, weight (0-1), locked}]
+
+function capWeightsOf(rows) {
+  const caps = rows.map(r => Math.max(0, Number(r.market_cap) || 0));
+  const total = caps.reduce((a, b) => a + b, 0);
+  if (total > 0) return Object.fromEntries(rows.map((r, i) => [r.symbol, caps[i] / total]));
+  return Object.fromEntries(rows.map(r => [r.symbol, 1 / Math.max(1, rows.length)]));
+}
+
+function openWeightsPopup() {
+  if (!DATA.length) return toast("Build a portfolio first.");
+  // Initialize draft from saved custom weights if present, otherwise from cap-weighted
+  // (per spec: the custom slider starts from cap-weighted).
+  const rows = DATA.filter(r => r && r.symbol);
+  const init = STATE.customWeights || capWeightsOf(rows);
+  WEIGHTS_DRAFT = rows.map(r => ({
+    symbol: r.symbol,
+    name: r.name || r.symbol,
+    weight: Number(init[r.symbol] || 0),
+    locked: false,
+  }));
+  renderWeightsRows();
+  $("#pf-weights-bg").classList.add("show");
+}
+
+function closeWeightsPopup() {
+  $("#pf-weights-bg").classList.remove("show");
+}
+
+function renderWeightsRows() {
+  const body = $("#pf-weights-body"); body.innerHTML = "";
+  WEIGHTS_DRAFT.forEach((row, i) => {
+    const r = document.createElement("div");
+    r.className = "pf-w-row" + (row.locked ? " locked" : "");
+    r.innerHTML = `
+      <span class="pf-w-sym" title="${escapeHtml(row.name)}">${escapeHtml(row.symbol)}</span>
+      <input class="pf-w-slider" type="range" min="0" max="1" step="0.001" value="${row.weight.toFixed(3)}" ${row.locked ? "disabled" : ""}/>
+      <input class="pf-w-num" type="number" min="0" max="100" step="0.1" value="${(row.weight*100).toFixed(2)}"/>
+      <button class="pf-w-lock${row.locked ? " on" : ""}" title="Lock">${row.locked ? "🔒" : "🔓"}</button>
+    `;
+    const slider = r.querySelector(".pf-w-slider");
+    const num = r.querySelector(".pf-w-num");
+    const lock = r.querySelector(".pf-w-lock");
+    slider.addEventListener("input", () => onWeightInput(i, Number(slider.value)));
+    num.addEventListener("input", () => onWeightInput(i, Math.max(0, Math.min(100, Number(num.value))) / 100));
+    lock.addEventListener("click", () => { row.locked = !row.locked; renderWeightsRows(); updateWeightsSum(); });
+    body.appendChild(r);
+  });
+  updateWeightsSum();
+}
+
+function onWeightInput(i, newVal) {
+  const row = WEIGHTS_DRAFT[i];
+  if (row.locked) return;
+  newVal = Math.max(0, Math.min(1, newVal));
+  // Distribute the delta proportionally over the other unlocked rows so total stays at 1.
+  const lockedTotal = WEIGHTS_DRAFT.filter(r => r.locked).reduce((a, r) => a + r.weight, 0);
+  const otherUnlocked = WEIGHTS_DRAFT.filter((r, j) => !r.locked && j !== i);
+  const otherCurrent = otherUnlocked.reduce((a, r) => a + r.weight, 0);
+  const remaining = Math.max(0, 1 - lockedTotal - newVal);
+  if (otherUnlocked.length === 0) {
+    row.weight = newVal;
+  } else if (otherCurrent <= 0) {
+    const share = remaining / otherUnlocked.length;
+    for (const r of otherUnlocked) r.weight = share;
+    row.weight = newVal;
+  } else {
+    const factor = remaining / otherCurrent;
+    for (const r of otherUnlocked) r.weight = r.weight * factor;
+    row.weight = newVal;
+  }
+  // Sync sliders without rebuilding the DOM (preserve focus).
+  syncWeightsInputs();
+  updateWeightsSum();
+}
+
+function syncWeightsInputs() {
+  const rows = $$(".pf-w-row");
+  rows.forEach((el, i) => {
+    const w = WEIGHTS_DRAFT[i];
+    if (!w) return;
+    const s = el.querySelector(".pf-w-slider"); const n = el.querySelector(".pf-w-num");
+    if (document.activeElement !== s) s.value = w.weight.toFixed(3);
+    if (document.activeElement !== n) n.value = (w.weight*100).toFixed(2);
+    el.classList.toggle("locked", w.locked);
+  });
+}
+
+function updateWeightsSum() {
+  const total = WEIGHTS_DRAFT.reduce((a, r) => a + r.weight, 0);
+  const el = $("#pf-weights-sum");
+  const pct = total * 100;
+  el.textContent = pct.toFixed(2) + "%";
+  el.className = "pf-weights-sum" + (Math.abs(pct - 100) < 0.5 ? " good" : " bad");
+}
+
+function normalizeDraft() {
+  const total = WEIGHTS_DRAFT.reduce((a, r) => a + r.weight, 0);
+  if (total <= 0) return;
+  for (const r of WEIGHTS_DRAFT) r.weight = r.weight / total;
+  syncWeightsInputs(); updateWeightsSum();
+}
+
+function resetDraftToEqual() {
+  if (!WEIGHTS_DRAFT || !WEIGHTS_DRAFT.length) return;
+  const w = 1 / WEIGHTS_DRAFT.length;
+  WEIGHTS_DRAFT.forEach((row) => { row.weight = w; row.locked = false; });
+  renderWeightsRows();
+}
+
+function resetDraftToCap() {
+  // Re-derive cap weights from DATA.
+  const caps = DATA.map(r => Math.max(0, Number(r.market_cap) || 0));
+  const total = caps.reduce((a, b) => a + b, 0);
+  const w = total > 0 ? DATA.map((r, i) => caps[i] / total) : DATA.map(() => 1 / DATA.length);
+  WEIGHTS_DRAFT.forEach((row, i) => {
+    row.weight = w[i] || 0;
+    row.locked = false;
+  });
+  renderWeightsRows();
+}
+
+function applyWeightsDraft() {
+  // Always renormalize before applying so the backend gets a sum-to-1 vector.
+  const total = WEIGHTS_DRAFT.reduce((a, r) => a + r.weight, 0);
+  if (total <= 0) { toast("Weights must sum to a positive value."); return; }
+  STATE.customWeights = {};
+  for (const r of WEIGHTS_DRAFT) STATE.customWeights[r.symbol] = r.weight / total;
+  STATE.mode = "custom";
+  // Invalidate any cached custom result (weights changed).
+  for (const k of Object.keys(STATE.analyticsByMode)) {
+    if (k.startsWith("custom|")) delete STATE.analyticsByMode[k];
+  }
+  updateModeButtons();
+  closeWeightsPopup();
+  requestAnalytics({force: true});
+}
+
+function updateModeButtons() {
+  $$("#pf-mode-toggle button").forEach(b => b.classList.toggle("active", b.dataset.mode === STATE.mode));
+}
+function updatePeriodButtons() {
+  $$("#pf-period-tabs button").forEach(b => b.classList.toggle("active", b.dataset.p === STATE.period));
 }
 
 function toast(msg) {
@@ -2790,11 +4501,23 @@ $("#info-bg").addEventListener("click", (e) => { if (e.target.id === "info-bg") 
 /* ===========================================================================
  * Wire up
  * --------------------------------------------------------------------------- */
-$("#build").onclick = build;
-$("#refresh").onclick = build;
+$("#build").onclick = () => build({keepPanelOpen: true});
+$("#refresh").onclick = () => build({keepPanelOpen: $("#input-panel").classList.contains("hidden") ? false : true});
 $("#save").onclick = saveWatchlist;
+$("#save-as").onclick = saveAsNewWatchlist;
 $("#export").onclick = exportCsv;
-$("#edit-btn").onclick = () => $("#input-panel").classList.toggle("hidden");
+$("#edit-btn").onclick = () => {
+  const panel = $("#input-panel");
+  const willOpen = panel.classList.contains("hidden");
+  panel.classList.toggle("hidden");
+  $("#edit-btn").classList.toggle("active", willOpen);
+  if (willOpen) {
+    // If we open the panel without an active view yet, start an ad-hoc tab.
+    if (!STATE.activeView) STATE.activeView = AD_HOC_KEY;
+    renderTabs(); renderEditorMeta();
+    if (DATA.length && (!STATE.analytics || STATE.analytics.error)) requestAnalytics();
+  }
+};
 $("#info-btn").onclick = openInfo;
 $("#theme-switch").onclick = () => setTheme(getTheme() === "dark" ? "light" : "dark");
 $("#sort-btn").onclick = (e) => {
@@ -2806,18 +4529,48 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest("#sort-menu")) $("#sort-menu").classList.remove("open");
 });
 $("#tickers").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); build(); }
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); build({keepPanelOpen: true}); }
 });
 window.addEventListener("scroll", () => {
   $("#topbar").classList.toggle("scrolled", window.scrollY > 4);
 });
+
+/* --- Analytics controls --- */
+$("#pf-mode-toggle").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-mode]");
+  if (!btn) return;
+  const mode = btn.dataset.mode;
+  if (mode === "custom") { openWeightsPopup(); return; }
+  STATE.mode = mode;
+  updateModeButtons();
+  requestAnalytics();
+});
+$("#pf-period-tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-p]");
+  if (!btn) return;
+  STATE.period = btn.dataset.p;
+  updatePeriodButtons();
+  requestAnalytics();
+});
+$("#pf-show-spy").addEventListener("change", (e) => { STATE.showSpy = e.target.checked; renderAnalyticsBody(); });
+$("#pf-show-sec").addEventListener("change", (e) => { STATE.showSec = e.target.checked; renderAnalyticsBody(); });
+$("#pf-show-dd").addEventListener("change", (e) => { STATE.showDd = e.target.checked; renderAnalyticsBody(); });
+
+/* --- Weights popup wiring --- */
+$("#pf-weights-bg").addEventListener("click", (e) => { if (e.target.id === "pf-weights-bg") closeWeightsPopup(); });
+$("#pf-weights-close").addEventListener("click", closeWeightsPopup);
+$("#pf-weights-cancel").addEventListener("click", closeWeightsPopup);
+$("#pf-weights-equal").addEventListener("click", resetDraftToEqual);
+$("#pf-weights-reset").addEventListener("click", resetDraftToCap);
+$("#pf-weights-apply").addEventListener("click", applyWeightsDraft);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#pf-weights-bg").classList.contains("show")) closeWeightsPopup(); });
 
 $("#footer-date").textContent = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
 setTheme(readTheme());
 renderHeader();
 renderSortMenu();
 updateSortLabel();
-loadWatchlists();
+loadAllAtStartup();
 </script>
 
 </body>
@@ -2874,8 +4627,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "ts": datetime.now(timezone.utc).isoformat()})
             return
         if parsed.path == "/api/watchlists":
-          self._send_json(200, {"watchlists": load_watchlists()})
-          return
+            self._send_json(200, {"watchlists": load_watchlists()})
+            return
+        if parsed.path == "/api/views":
+            self._send_json(200, list_views())
+            return
+        if parsed.path.startswith("/api/views/"):
+            name = parsed.path[len("/api/views/"):]
+            from urllib.parse import unquote
+            name = unquote(name)
+            view = load_view(name)
+            self._send_json(200, {"view": view, "name": name})
+            return
         if parsed.path == "/api/detail":
             from urllib.parse import parse_qs
 
@@ -2899,11 +4662,11 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             try:
                 payload = json.loads(self.rfile.read(length) or b"{}")
-                watchlists = upsert_watchlist(
+                watchlists, changed = upsert_watchlist(
                     str(payload.get("name") or ""),
                     str(payload.get("entries") or ""),
                 )
-                self._send_json(200, {"watchlists": watchlists})
+                self._send_json(200, {"watchlists": watchlists, "entries_changed": changed})
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
             except Exception as exc:
@@ -2917,6 +4680,65 @@ class Handler(BaseHTTPRequestHandler):
                 entries = payload.get("entries") or []
                 rows = fetch_portfolio([str(e) for e in entries])
                 self._send_json(200, {"rows": rows})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path.startswith("/api/views/"):
+            from urllib.parse import unquote
+            name = unquote(parsed.path[len("/api/views/"):])
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                entries = str(payload.get("entries") or "")
+                rows = payload.get("rows") or []
+                if not isinstance(rows, list):
+                    rows = []
+                set_last_arg = payload.get("set_last", True)
+                saved = save_view(name, entries, rows, set_last=bool(set_last_arg))
+                self._send_json(200, {"name": name, "view": saved})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/last-view":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                set_last_view(str(payload.get("name") or ""))
+                self._send_json(200, {"ok": True})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/portfolio-analytics":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                rows = payload.get("rows") or []
+                weights = payload.get("weights") or {}
+                period = str(payload.get("period") or "1Y")
+                if not isinstance(rows, list) or not isinstance(weights, dict):
+                    self._send_json(400, {"error": "rows[] and weights{} required"})
+                    return
+                result = analyze_portfolio(rows, weights, period)
+                self._send_json(200, result)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/portfolio-analytics-multi":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                rows = payload.get("rows") or []
+                weight_sets = payload.get("weight_sets") or {}
+                period = str(payload.get("period") or "1Y")
+                if not isinstance(rows, list) or not isinstance(weight_sets, dict) or not weight_sets:
+                    self._send_json(400, {"error": "rows[] and weight_sets{name: weights} required"})
+                    return
+                results = analyze_portfolios_multi(rows, weight_sets, period)
+                self._send_json(200, {"results": results} if "error" not in results else results)
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
@@ -2974,6 +4796,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/views/"):
+            from urllib.parse import unquote
+            name = unquote(parsed.path[len("/api/views/"):])
+            try:
+                delete_view(name)
+                self._send_json(200, {"ok": True})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
         if parsed.path != "/api/watchlists":
             self.send_response(404)
             self.end_headers()
@@ -2987,7 +4818,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"watchlists": watchlists})
         except Exception as exc:
             self._send_json(500, {"error": str(exc)})
-      
+
 
 def _pick_port(preferred: int = 8765) -> int:
     for port in [preferred, 8766, 8767, 8768, 0]:
