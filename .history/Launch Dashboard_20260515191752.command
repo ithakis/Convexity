@@ -6,23 +6,6 @@ set -e
 
 cd "$(dirname "$0")"
 
-PID_FILE=".dashboard.pid"
-
-cleanup() {
-    rm -f "$PID_FILE"
-}
-
-if [ -f "$PID_FILE" ]; then
-    EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
-        echo "Portfolio Dashboard is already running (PID $EXISTING_PID)."
-        exit 0
-    fi
-    rm -f "$PID_FILE"
-fi
-
-trap cleanup EXIT
-
 if [ -f "$HOME/miniforge3/etc/profile.d/conda.sh" ]; then
     # shellcheck disable=SC1091
     source "$HOME/miniforge3/etc/profile.d/conda.sh"
@@ -49,7 +32,9 @@ if [ "$PIP_NEEDED" = "1" ]; then
     python -m pip install --quiet yfinance pandas numpy
 fi
 
-python dashboard.py &
-DASHBOARD_PID=$!
-echo "$DASHBOARD_PID" > "$PID_FILE"
-wait "$DASHBOARD_PID"
+APP_PATH=".claude/worktrees/distracted-darwin-173f5a/dashboard.py"
+if [ -f "$APP_PATH" ]; then
+    exec python "$APP_PATH"
+fi
+
+exec python dashboard.py

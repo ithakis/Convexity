@@ -9,7 +9,6 @@ Backed by yfinance with retry + reduced concurrency to dodge Yahoo's rate
 limiter. Logos pulled from financialmodelingprep.com with Parqet and an
 initial-badge fallback.
 """
-
 from __future__ import annotations
 
 import json
@@ -31,7 +30,6 @@ warnings.filterwarnings("ignore")
 # silence by category before importing so the terminal stays readable.
 try:
     from pandas.errors import Pandas4Warning  # type: ignore
-
     warnings.simplefilter("ignore", Pandas4Warning)
 except Exception:
     pass
@@ -39,13 +37,12 @@ warnings.simplefilter("ignore", DeprecationWarning)
 warnings.simplefilter("ignore", FutureWarning)
 
 import logging
-from pathlib import Path
-
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
 
 # ----------------------------- Rate-limit handling -------------------------
 # yfinance 1.0 ships its own curl_cffi-based session (with TLS fingerprinting
@@ -58,7 +55,6 @@ import yfinance as yf
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 120.0
-_WATCHLISTS_LOCK = threading.Lock()
 
 
 def _cache_get(key: str):
@@ -74,73 +70,6 @@ def _cache_get(key: str):
 
 def _cache_put(key: str, val: dict) -> None:
     _CACHE[key] = (time.time(), val)
-
-
-def _repo_root() -> Path:
-  current = Path(__file__).resolve()
-  for parent in (current.parent, *current.parents):
-    if (parent / ".git").exists():
-      return parent
-  return current.parent
-
-
-_WATCHLISTS_FILE = _repo_root() / ".portfolio_tracker_watchlists.json"
-
-
-def _watchlists_path() -> Path:
-  return Path(_WATCHLISTS_FILE)
-
-
-def load_watchlists() -> dict[str, str]:
-  watchlists_path = _watchlists_path()
-  with _WATCHLISTS_LOCK:
-    if not watchlists_path.exists():
-      return {}
-    try:
-      raw = json.loads(watchlists_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-      return {}
-  if not isinstance(raw, dict):
-    return {}
-  watchlists: dict[str, str] = {}
-  for name, entries in raw.items():
-    clean_name = str(name).strip()
-    clean_entries = str(entries).strip()
-    if clean_name and clean_entries:
-      watchlists[clean_name] = clean_entries
-  return watchlists
-
-
-def save_watchlists(watchlists: dict[str, str]) -> dict[str, str]:
-  watchlists_path = _watchlists_path()
-  cleaned: dict[str, str] = {}
-  for name, entries in watchlists.items():
-    clean_name = str(name).strip()
-    clean_entries = str(entries).strip()
-    if clean_name and clean_entries:
-      cleaned[clean_name] = clean_entries
-  payload = json.dumps(cleaned, ensure_ascii=True, indent=2, sort_keys=True)
-  with _WATCHLISTS_LOCK:
-    watchlists_path.write_text(payload + "\n", encoding="utf-8")
-  return cleaned
-
-
-def upsert_watchlist(name: str, entries: str) -> dict[str, str]:
-  clean_name = name.strip()
-  clean_entries = entries.strip()
-  if not clean_name:
-    raise ValueError("watchlist name required")
-  if not clean_entries:
-    raise ValueError("watchlist entries required")
-  watchlists = load_watchlists()
-  watchlists[clean_name] = clean_entries
-  return save_watchlists(watchlists)
-
-
-def delete_watchlist(name: str) -> dict[str, str]:
-  watchlists = load_watchlists()
-  watchlists.pop(name.strip(), None)
-  return save_watchlists(watchlists)
 
 
 # ----------------------------- Symbol resolution --------------------------
@@ -176,7 +105,6 @@ def resolve_symbol(entry: str) -> str | None:
 
 
 # ----------------------------- Math helpers --------------------------------
-
 
 def _pct_change(series: pd.Series, lookback_days: int) -> float | None:
     if series is None or series.empty:
@@ -226,7 +154,6 @@ def _safe_info(tk: yf.Ticker) -> dict:
 
 
 # ----------------------------- Per-symbol fetch ---------------------------
-
 
 def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
     out: dict = {"symbol": symbol}
@@ -475,39 +402,6 @@ def _safe_num(v) -> float | None:
         return None
 
 
-def _statement_values(df: pd.DataFrame | None, labels: list[str]) -> list[float]:
-    if df is None or getattr(df, "empty", True):
-        return []
-    for label in labels:
-        if label not in df.index:
-            continue
-        row = df.loc[label]
-        if isinstance(row, pd.DataFrame):
-            row = row.iloc[0]
-        if not isinstance(row, pd.Series):
-            continue
-        vals: list[float] = []
-        for raw in row.tolist():
-            num = _safe_num(raw)
-            if num is not None:
-                vals.append(num)
-        if vals:
-            return vals
-    return []
-
-
-def _latest_statement_value(df: pd.DataFrame | None, labels: list[str]) -> float | None:
-    vals = _statement_values(df, labels)
-    return vals[0] if vals else None
-
-
-def _ttm_statement_value(df: pd.DataFrame | None, labels: list[str]) -> float | None:
-    vals = _statement_values(df, labels)
-    if len(vals) >= 4:
-        return float(sum(vals[:4]))
-    return vals[0] if vals else None
-
-
 def fetch_detail(symbol: str) -> dict:
     """Deep-dive payload for a single symbol — chart history, fundamentals,
     analyst recs, benchmarks, news. Designed for the click-through modal."""
@@ -614,66 +508,6 @@ def fetch_detail(symbol: str) -> dict:
     out["total_revenue"] = _safe_num(info.get("totalRevenue"))
     out["free_cashflow"] = _safe_num(info.get("freeCashflow"))
 
-    if out["roe"] is None or out["debt_equity"] is None:
-        try:
-            balance_sheet = tk.balance_sheet
-        except Exception:
-            balance_sheet = None
-        try:
-            quarterly_balance_sheet = tk.quarterly_balance_sheet
-        except Exception:
-            quarterly_balance_sheet = None
-        try:
-            income_stmt = tk.income_stmt
-        except Exception:
-            income_stmt = None
-        try:
-            quarterly_income_stmt = tk.quarterly_income_stmt
-        except Exception:
-            quarterly_income_stmt = None
-
-        equity_labels = [
-            "Stockholders Equity",
-            "Common Stock Equity",
-            "Total Stockholder Equity",
-            "Total Equity Gross Minority Interest",
-        ]
-        debt_labels = ["Total Debt"]
-        current_debt_labels = ["Current Debt", "Current Debt And Capital Lease Obligation"]
-        long_debt_labels = ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"]
-        net_income_labels = [
-            "Net Income",
-            "Diluted NI Availto Com Stockholders",
-            "Net Income Common Stockholders",
-            "Net Income Continuous Operations",
-        ]
-
-        equity = _latest_statement_value(balance_sheet, equity_labels)
-        if equity is None:
-            equity = _latest_statement_value(quarterly_balance_sheet, equity_labels)
-
-        debt = _latest_statement_value(balance_sheet, debt_labels)
-        if debt is None:
-            debt = _latest_statement_value(quarterly_balance_sheet, debt_labels)
-        if debt is None:
-            current_debt = _latest_statement_value(balance_sheet, current_debt_labels)
-            long_debt = _latest_statement_value(balance_sheet, long_debt_labels)
-            if current_debt is None:
-                current_debt = _latest_statement_value(quarterly_balance_sheet, current_debt_labels)
-            if long_debt is None:
-                long_debt = _latest_statement_value(quarterly_balance_sheet, long_debt_labels)
-            if current_debt is not None or long_debt is not None:
-                debt = float((current_debt or 0.0) + (long_debt or 0.0))
-
-        net_income = _latest_statement_value(income_stmt, net_income_labels)
-        if net_income is None:
-            net_income = _ttm_statement_value(quarterly_income_stmt, net_income_labels)
-
-        if out["roe"] is None and equity not in (None, 0) and net_income is not None:
-            out["roe"] = float(net_income / equity)
-        if out["debt_equity"] is None and equity not in (None, 0) and debt is not None:
-            out["debt_equity"] = float((debt / equity) * 100.0)
-
     out["yf_52w_change"] = _safe_num(info.get("52WeekChange") or info.get("fiftyTwoWeekChange"))
     out["sp_52w_change"] = _safe_num(info.get("SandP52WeekChange"))
 
@@ -693,16 +527,14 @@ def fetch_detail(symbol: str) -> dict:
         if rec is not None and not rec.empty:
             cols = {c.lower(): c for c in rec.columns}
             for _, row in rec.iterrows():
-                rec_trend.append(
-                    {
-                        "period": str(row.get(cols.get("period", "period"), "")),
-                        "strongBuy": int(row.get(cols.get("strongbuy", "strongBuy"), 0) or 0),
-                        "buy": int(row.get(cols.get("buy", "buy"), 0) or 0),
-                        "hold": int(row.get(cols.get("hold", "hold"), 0) or 0),
-                        "sell": int(row.get(cols.get("sell", "sell"), 0) or 0),
-                        "strongSell": int(row.get(cols.get("strongsell", "strongSell"), 0) or 0),
-                    }
-                )
+                rec_trend.append({
+                    "period": str(row.get(cols.get("period", "period"), "")),
+                    "strongBuy": int(row.get(cols.get("strongbuy", "strongBuy"), 0) or 0),
+                    "buy": int(row.get(cols.get("buy", "buy"), 0) or 0),
+                    "hold": int(row.get(cols.get("hold", "hold"), 0) or 0),
+                    "sell": int(row.get(cols.get("sell", "sell"), 0) or 0),
+                    "strongSell": int(row.get(cols.get("strongsell", "strongSell"), 0) or 0),
+                })
     except Exception:
         pass
     out["recommendations_trend"] = rec_trend[:4]
@@ -728,16 +560,9 @@ def fetch_detail(symbol: str) -> dict:
             content = n.get("content") if isinstance(n, dict) else None
             if isinstance(content, dict):
                 title = content.get("title")
-                pub = (
-                    (content.get("provider") or {}).get("displayName")
-                    if isinstance(content.get("provider"), dict)
-                    else content.get("publisher")
-                )
-                link = (
-                    (content.get("canonicalUrl") or {}).get("url")
-                    if isinstance(content.get("canonicalUrl"), dict)
-                    else None
-                ) or content.get("link")
+                pub = (content.get("provider") or {}).get("displayName") if isinstance(content.get("provider"), dict) else content.get("publisher")
+                link = ((content.get("canonicalUrl") or {}).get("url")
+                        if isinstance(content.get("canonicalUrl"), dict) else None) or content.get("link")
                 ts = content.get("pubDate") or content.get("displayTime")
             else:
                 title = n.get("title")
@@ -764,14 +589,7 @@ def fetch_detail(symbol: str) -> dict:
 
     # Stock vs benchmarks: return table
     horizons = {
-        "1d": 1,
-        "1w": 7,
-        "1m": 30,
-        "3m": 91,
-        "6m": 182,
-        "ytd": 0,
-        "1y": 365,
-        "5y": 1825,
+        "1d": 1, "1w": 7, "1m": 30, "3m": 91, "6m": 182, "ytd": 0, "1y": 365, "5y": 1825,
     }
     perf: dict[str, dict] = {}
     for label, days in horizons.items():
@@ -796,11 +614,7 @@ def fetch_detail(symbol: str) -> dict:
                 k_pct = None
         else:
             s_pct, b_pct = _aligned_pct(close, spy_close if spy_close is not None else close, days)
-            _, k_pct = (
-                _aligned_pct(close, sector_close if sector_close is not None else close, days)
-                if sector_close is not None
-                else (None, None)
-            )
+            _, k_pct = _aligned_pct(close, sector_close if sector_close is not None else close, days) if sector_close is not None else (None, None)
             if spy_close is None:
                 b_pct = None
         perf[label] = {"stock": s_pct, "spy": b_pct, "sector": k_pct}
@@ -1653,10 +1467,6 @@ function fmtPctSigned(v) {
   const sign = v > 0 ? "+" : (v < 0 ? "" : "+");
   return sign + v.toFixed(2) + "%";
 }
-function fmtPctDirect(v) {
-  if (v == null || !isFinite(v)) return na();
-  return (Number(v) * 100).toFixed(2) + "%";
-}
 function na() { return '<span class="na">n/a</span>'; }
 
 /* ===========================================================================
@@ -1989,7 +1799,7 @@ function renderModalSkeleton() {
         <span class="m-toolbar-spacer"></span>
         <button class="m-toolbar-btn" id="m-toggle-sp" title="Compare to S&P 500"><span class="dot sp"></span>S&amp;P 500</button>
         <button class="m-toolbar-btn" id="m-toggle-sec" title="Compare to sector ETF"><span class="dot sec"></span>Sector</button>
-        <button class="m-toolbar-btn active" id="m-toggle-vol" title="Toggle volume bars">Volume</button>
+        <button class="m-toolbar-btn active" id="m-toggle-vol" title="Toggle volume bars">📊 Volume</button>
       </div>
       <div class="m-chart" id="m-chart">
         <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:12.5px;">Loading detailed data…</div>
@@ -2353,12 +2163,13 @@ function pctCell(v) {
 function renderSections() {
   const d = DETAIL.data;
   const sec = $("#m-sections");
-  const fcfYield = (d.free_cashflow != null && d.market_cap != null && isFinite(d.free_cashflow) && isFinite(d.market_cap) && d.market_cap !== 0)
-    ? d.free_cashflow / d.market_cap
-    : null;
 
   // ---- Snapshot
   const snap = [
+    ["Open", fmtMoney(d.day_open)],
+    ["High", fmtMoney(d.day_high)],
+    ["Low", fmtMoney(d.day_low)],
+    ["Prev Close", fmtMoney(d.prev_close)],
     ["Volume", fmtCompactNum(d.day_volume)],
     ["Avg Volume", fmtCompactNum(d.avg_volume)],
     ["52W High", fmtMoney(d.w52_high)],
@@ -2371,17 +2182,16 @@ function renderSections() {
 
   // ---- Valuation
   const val = [
-    ["Revenue (TTM)", fmtCompactMoney(d.total_revenue)],
-    ["Revenue Growth", fmtPctFrac(d.revenue_growth)],
-    ["Free Cash Flow", fmtCompactMoney(d.free_cashflow)],
-    ["FCF Yield", fmtPctFrac(fcfYield)],
-    ["Fwd P/E", fmt2(d.forward_pe)],
     ["P/E (TTM)", fmt2(d.pe)],
+    ["Fwd P/E", fmt2(d.forward_pe)],
+    ["P/S", fmt2(d.ps)],
+    ["P/B", fmt2(d.pb)],
+    ["PEG", fmt2(d.peg)],
     ["EV/EBITDA", fmt2(d.ev_ebitda)],
     ["EV/Revenue", fmt2(d.ev_revenue)],
+    ["Profit Margin", fmtPctFrac(d.profit_margin)],
     ["Operating Mgn", fmtPctFrac(d.operating_margin)],
     ["Gross Margin", fmtPctFrac(d.gross_margin)],
-    ["Profit Margin", fmtPctFrac(d.profit_margin)],
     ["ROE", fmtPctFrac(d.roe)],
     ["D/E", fmt2(d.debt_equity)],
   ];
@@ -2697,12 +2507,12 @@ function exportCsv() {
 }
 
 /* ===========================================================================
- * Watchlists (server-backed)
+ * Watchlists (localStorage)
  * --------------------------------------------------------------------------- */
-let WATCHLISTS = {};
-
+function getWatchlists() { try { return JSON.parse(localStorage.getItem("watchlists") || "{}"); } catch { return {}; } }
+function setWatchlists(o) { localStorage.setItem("watchlists", JSON.stringify(o)); renderWatchlists(); }
 function renderWatchlists() {
-  const wls = WATCHLISTS;
+  const wls = getWatchlists();
   const wrap = $("#watchlists"); wrap.innerHTML = "";
   const names = Object.keys(wls);
   if (!names.length) {
@@ -2714,55 +2524,17 @@ function renderWatchlists() {
     chip.className = "chip";
     chip.innerHTML = `<span>${escapeHtml(name)}</span><span class="x" title="Delete">✕</span>`;
     chip.firstElementChild.onclick = () => { $("#tickers").value = wls[name]; build(); };
-    chip.querySelector(".x").onclick = async (e) => {
-      e.stopPropagation();
-      try {
-        const res = await fetch(`/api/watchlists?name=${encodeURIComponent(name)}`, { method: "DELETE" });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Delete failed.");
-        WATCHLISTS = data.watchlists || {};
-        renderWatchlists();
-      } catch (err) {
-        toast(err.message || "Delete failed.");
-      }
-    };
+    chip.querySelector(".x").onclick = (e) => { e.stopPropagation(); const o = getWatchlists(); delete o[name]; setWatchlists(o); };
     wrap.appendChild(chip);
   }
 }
-
-async function loadWatchlists() {
-  try {
-    const res = await fetch("/api/watchlists");
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Failed to load watchlists.");
-    WATCHLISTS = data.watchlists || {};
-    renderWatchlists();
-  } catch (err) {
-    WATCHLISTS = {};
-    renderWatchlists();
-    toast(err.message || "Failed to load watchlists.");
-  }
-}
-
-async function saveWatchlist() {
+function saveWatchlist() {
   const raw = $("#tickers").value.trim();
   if (!raw) return toast("Enter tickers first.");
   const name = prompt("Watchlist name?", "");
   if (!name) return;
-  try {
-    const res = await fetch("/api/watchlists", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, entries: raw }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Save failed.");
-    WATCHLISTS = data.watchlists || {};
-    renderWatchlists();
-    toast(`Saved "${name.trim()}".`);
-  } catch (err) {
-    toast(err.message || "Save failed.");
-  }
+  const o = getWatchlists(); o[name.trim()] = raw; setWatchlists(o);
+  toast(`Saved "${name}".`);
 }
 
 function toast(msg) {
@@ -2817,7 +2589,7 @@ setTheme(readTheme());
 renderHeader();
 renderSortMenu();
 updateSortLabel();
-loadWatchlists();
+renderWatchlists();
 </script>
 
 </body>
@@ -2873,43 +2645,22 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             self._send_json(200, {"ok": True, "ts": datetime.now(timezone.utc).isoformat()})
             return
-        if parsed.path == "/api/watchlists":
-          self._send_json(200, {"watchlists": load_watchlists()})
-          return
         if parsed.path == "/api/detail":
             from urllib.parse import parse_qs
-
             q = parse_qs(parsed.query)
             sym = (q.get("symbol") or [""])[0].strip().upper()
             if not sym:
-                self._send_json(400, {"error": "symbol required"})
-                return
+                self._send_json(400, {"error": "symbol required"}); return
             try:
                 payload = fetch_detail(sym)
                 self._send_json(200, payload)
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
-        self.send_response(404)
-        self.end_headers()
+        self.send_response(404); self.end_headers()
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/api/watchlists":
-            length = int(self.headers.get("Content-Length") or 0)
-            try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
-                watchlists = upsert_watchlist(
-                    str(payload.get("name") or ""),
-                    str(payload.get("entries") or ""),
-                )
-                self._send_json(200, {"watchlists": watchlists})
-            except ValueError as exc:
-                self._send_json(400, {"error": str(exc)})
-            except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
-            return
-
         if parsed.path == "/api/quotes":
             length = int(self.headers.get("Content-Length") or 0)
             try:
@@ -2950,16 +2701,9 @@ class Handler(BaseHTTPRequestHandler):
                             row = fut.result()
                             done += 1
                             try:
-                                self.wfile.write(
-                                    _safe_json(
-                                        {
-                                            "type": "row",
-                                            "row": row,
-                                            "done": done,
-                                            "total": total,
-                                        }
-                                    )
-                                )
+                                self.wfile.write(_safe_json({
+                                    "type": "row", "row": row, "done": done, "total": total,
+                                }))
                                 self.wfile.flush()
                             except (BrokenPipeError, ConnectionResetError):
                                 return
@@ -2969,25 +2713,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return
 
-        self.send_response(404)
-        self.end_headers()
+        self.send_response(404); self.end_headers()
 
-    def do_DELETE(self):
-        parsed = urlparse(self.path)
-        if parsed.path != "/api/watchlists":
-            self.send_response(404)
-            self.end_headers()
-            return
-
-        from urllib.parse import parse_qs
-
-        name = (parse_qs(parsed.query).get("name") or [""])[0]
-        try:
-            watchlists = delete_watchlist(name)
-            self._send_json(200, {"watchlists": watchlists})
-        except Exception as exc:
-            self._send_json(500, {"error": str(exc)})
-      
 
 def _pick_port(preferred: int = 8765) -> int:
     for port in [preferred, 8766, 8767, 8768, 0]:
@@ -3006,7 +2733,7 @@ def main() -> None:
     url = f"http://localhost:{port}/"
     print("=" * 60)
     print(f"  📊 Portfolio Tracker running at {url}")
-    print("  Press Ctrl+C to stop.")
+    print(f"  Press Ctrl+C to stop.")
     print("=" * 60)
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:

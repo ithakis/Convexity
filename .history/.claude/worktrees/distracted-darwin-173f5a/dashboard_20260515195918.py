@@ -87,17 +87,12 @@ def _repo_root() -> Path:
 _WATCHLISTS_FILE = _repo_root() / ".portfolio_tracker_watchlists.json"
 
 
-def _watchlists_path() -> Path:
-  return Path(_WATCHLISTS_FILE)
-
-
 def load_watchlists() -> dict[str, str]:
-  watchlists_path = _watchlists_path()
   with _WATCHLISTS_LOCK:
-    if not watchlists_path.exists():
+    if not _WATCHLISTS_FILE.exists():
       return {}
     try:
-      raw = json.loads(watchlists_path.read_text(encoding="utf-8"))
+      raw = json.loads(_WATCHLISTS_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
       return {}
   if not isinstance(raw, dict):
@@ -112,7 +107,6 @@ def load_watchlists() -> dict[str, str]:
 
 
 def save_watchlists(watchlists: dict[str, str]) -> dict[str, str]:
-  watchlists_path = _watchlists_path()
   cleaned: dict[str, str] = {}
   for name, entries in watchlists.items():
     clean_name = str(name).strip()
@@ -121,7 +115,7 @@ def save_watchlists(watchlists: dict[str, str]) -> dict[str, str]:
       cleaned[clean_name] = clean_entries
   payload = json.dumps(cleaned, ensure_ascii=True, indent=2, sort_keys=True)
   with _WATCHLISTS_LOCK:
-    watchlists_path.write_text(payload + "\n", encoding="utf-8")
+    _WATCHLISTS_FILE.write_text(payload + "\n", encoding="utf-8")
   return cleaned
 
 
@@ -2895,20 +2889,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/api/watchlists":
-            length = int(self.headers.get("Content-Length") or 0)
-            try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
-                watchlists = upsert_watchlist(
-                    str(payload.get("name") or ""),
-                    str(payload.get("entries") or ""),
-                )
-                self._send_json(200, {"watchlists": watchlists})
-            except ValueError as exc:
-                self._send_json(400, {"error": str(exc)})
-            except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
-            return
+      if parsed.path == "/api/watchlists":
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+          payload = json.loads(self.rfile.read(length) or b"{}")
+          watchlists = upsert_watchlist(
+            str(payload.get("name") or ""),
+            str(payload.get("entries") or ""),
+          )
+          self._send_json(200, {"watchlists": watchlists})
+        except ValueError as exc:
+          self._send_json(400, {"error": str(exc)})
+        except Exception as exc:
+          self._send_json(500, {"error": str(exc)})
+        return
 
         if parsed.path == "/api/quotes":
             length = int(self.headers.get("Content-Length") or 0)
@@ -2972,22 +2966,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def do_DELETE(self):
-        parsed = urlparse(self.path)
-        if parsed.path != "/api/watchlists":
-            self.send_response(404)
-            self.end_headers()
-            return
+  def do_DELETE(self):
+    parsed = urlparse(self.path)
+    if parsed.path != "/api/watchlists":
+      self.send_response(404)
+      self.end_headers()
+      return
 
-        from urllib.parse import parse_qs
+    from urllib.parse import parse_qs
 
-        name = (parse_qs(parsed.query).get("name") or [""])[0]
-        try:
-            watchlists = delete_watchlist(name)
-            self._send_json(200, {"watchlists": watchlists})
-        except Exception as exc:
-            self._send_json(500, {"error": str(exc)})
-      
+    name = (parse_qs(parsed.query).get("name") or [""])[0]
+    try:
+      watchlists = delete_watchlist(name)
+      self._send_json(200, {"watchlists": watchlists})
+    except Exception as exc:
+      self._send_json(500, {"error": str(exc)})
+
 
 def _pick_port(preferred: int = 8765) -> int:
     for port in [preferred, 8766, 8767, 8768, 0]:

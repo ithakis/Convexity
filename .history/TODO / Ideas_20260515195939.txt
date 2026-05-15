@@ -1,0 +1,17 @@
+(search) - add 'search' feature. Where with natural naguage one could search for companies which fit their criteria. 
+ "Find me technology companies with blah blah blah'
+ - This would require building a database, and then with AI going through the database.
+    - When looking for a company one should have the option to add it to the existing portfolio or create a new porfolio.
+
+(news) - News Releases - Summary (this is a big project)
+    - When looking for a company, make a tab to show the new's.
+        - This new's needs to have the top 5 biggest news. of the last 1-3 months. Now this is difficult to do, but the API should be able to find the biggest news. and also we should be able to use the price data to show how much the price of the stock changed.
+        - Then bellow that it should be will the most important news in chronological order.
+    - Potentially add the feature to analyse sentiment.
+        - Research on how to do that, with mostly 
+
+(portfolio) - there should a button which one clicks and can create a new porfolio, or add companies to the existing one.
+    - make it a nice color
+
+(columns) - Ability to add / create new columns.
+    - The current ones should stay the default. But there should be the option to add more, and also save views of columns.

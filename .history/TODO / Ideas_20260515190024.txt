@@ -1,0 +1,7 @@
+- add 'search' feature. Where with natural naguage one could search for companies which fit their criteria. 
+ "Find me technology companies with blah blah blah'
+ - This would require building a database, and then with AI going through the database.
+
+ - News Releases - Summary (this is a big project)
+  - When looking for a company, make a tab to show the new's.
+   

@@ -59,6 +59,20 @@ import yfinance as yf
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 120.0
 _WATCHLISTS_LOCK = threading.Lock()
+_CLIENT_ACTIVITY_LOCK = threading.Lock()
+_LAST_CLIENT_ACTIVITY = time.monotonic()
+_IDLE_SHUTDOWN_SECONDS = 15.0
+
+
+def _mark_client_active() -> None:
+  global _LAST_CLIENT_ACTIVITY
+  with _CLIENT_ACTIVITY_LOCK:
+    _LAST_CLIENT_ACTIVITY = time.monotonic()
+
+
+def _seconds_since_client_activity() -> float:
+  with _CLIENT_ACTIVITY_LOCK:
+    return time.monotonic() - _LAST_CLIENT_ACTIVITY
 
 
 def _cache_get(key: str):
@@ -2812,6 +2826,19 @@ window.addEventListener("scroll", () => {
   $("#topbar").classList.toggle("scrolled", window.scrollY > 4);
 });
 
+const HEARTBEAT_MS = 4000;
+
+function sendHeartbeat() {
+  return fetch("/api/ping", { cache: "no-store", keepalive: true }).catch(() => {});
+}
+
+window.addEventListener("pageshow", () => { sendHeartbeat(); });
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) sendHeartbeat();
+});
+setInterval(sendHeartbeat, HEARTBEAT_MS);
+sendHeartbeat();
+
 $("#footer-date").textContent = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
 setTheme(readTheme());
 renderHeader();
@@ -2863,6 +2890,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
+            _mark_client_active()
             body = INDEX_HTML.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -2870,13 +2898,22 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if parsed.path == "/api/ping":
+            _mark_client_active()
+            self.send_response(204)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
         if parsed.path == "/api/health":
+            _mark_client_active()
             self._send_json(200, {"ok": True, "ts": datetime.now(timezone.utc).isoformat()})
             return
         if parsed.path == "/api/watchlists":
+          _mark_client_active()
           self._send_json(200, {"watchlists": load_watchlists()})
           return
         if parsed.path == "/api/detail":
+            _mark_client_active()
             from urllib.parse import parse_qs
 
             q = parse_qs(parsed.query)
@@ -2896,6 +2933,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/watchlists":
+        _mark_client_active()
             length = int(self.headers.get("Content-Length") or 0)
             try:
                 payload = json.loads(self.rfile.read(length) or b"{}")
@@ -2911,6 +2949,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/quotes":
+          _mark_client_active()
             length = int(self.headers.get("Content-Length") or 0)
             try:
                 payload = json.loads(self.rfile.read(length) or b"{}")
@@ -2979,6 +3018,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+      _mark_client_active()
+
         from urllib.parse import parse_qs
 
         name = (parse_qs(parsed.query).get("name") or [""])[0]
@@ -3001,13 +3042,26 @@ def _pick_port(preferred: int = 8765) -> int:
 
 
 def main() -> None:
+  _mark_client_active()
     port = _pick_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://localhost:{port}/"
+
+  def shutdown_when_idle() -> None:
+    while True:
+      time.sleep(2.0)
+      if _seconds_since_client_activity() < _IDLE_SHUTDOWN_SECONDS:
+        continue
+      print(f"No browser activity for {_IDLE_SHUTDOWN_SECONDS:.0f}s; shutting down…")
+      server.shutdown()
+      return
+
     print("=" * 60)
     print(f"  📊 Portfolio Tracker running at {url}")
-    print("  Press Ctrl+C to stop.")
+  print(f"  Auto-shuts down after {_IDLE_SHUTDOWN_SECONDS:.0f}s without browser activity.")
+  print("  Press Ctrl+C to stop immediately.")
     print("=" * 60)
+  threading.Thread(target=shutdown_when_idle, daemon=True).start()
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()

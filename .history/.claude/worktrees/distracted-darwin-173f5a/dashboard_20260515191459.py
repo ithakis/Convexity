@@ -39,7 +39,6 @@ warnings.simplefilter("ignore", DeprecationWarning)
 warnings.simplefilter("ignore", FutureWarning)
 
 import logging
-from pathlib import Path
 
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
@@ -58,7 +57,6 @@ import yfinance as yf
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 120.0
-_WATCHLISTS_LOCK = threading.Lock()
 
 
 def _cache_get(key: str):
@@ -74,73 +72,6 @@ def _cache_get(key: str):
 
 def _cache_put(key: str, val: dict) -> None:
     _CACHE[key] = (time.time(), val)
-
-
-def _repo_root() -> Path:
-  current = Path(__file__).resolve()
-  for parent in (current.parent, *current.parents):
-    if (parent / ".git").exists():
-      return parent
-  return current.parent
-
-
-_WATCHLISTS_FILE = _repo_root() / ".portfolio_tracker_watchlists.json"
-
-
-def _watchlists_path() -> Path:
-  return Path(_WATCHLISTS_FILE)
-
-
-def load_watchlists() -> dict[str, str]:
-  watchlists_path = _watchlists_path()
-  with _WATCHLISTS_LOCK:
-    if not watchlists_path.exists():
-      return {}
-    try:
-      raw = json.loads(watchlists_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-      return {}
-  if not isinstance(raw, dict):
-    return {}
-  watchlists: dict[str, str] = {}
-  for name, entries in raw.items():
-    clean_name = str(name).strip()
-    clean_entries = str(entries).strip()
-    if clean_name and clean_entries:
-      watchlists[clean_name] = clean_entries
-  return watchlists
-
-
-def save_watchlists(watchlists: dict[str, str]) -> dict[str, str]:
-  watchlists_path = _watchlists_path()
-  cleaned: dict[str, str] = {}
-  for name, entries in watchlists.items():
-    clean_name = str(name).strip()
-    clean_entries = str(entries).strip()
-    if clean_name and clean_entries:
-      cleaned[clean_name] = clean_entries
-  payload = json.dumps(cleaned, ensure_ascii=True, indent=2, sort_keys=True)
-  with _WATCHLISTS_LOCK:
-    watchlists_path.write_text(payload + "\n", encoding="utf-8")
-  return cleaned
-
-
-def upsert_watchlist(name: str, entries: str) -> dict[str, str]:
-  clean_name = name.strip()
-  clean_entries = entries.strip()
-  if not clean_name:
-    raise ValueError("watchlist name required")
-  if not clean_entries:
-    raise ValueError("watchlist entries required")
-  watchlists = load_watchlists()
-  watchlists[clean_name] = clean_entries
-  return save_watchlists(watchlists)
-
-
-def delete_watchlist(name: str) -> dict[str, str]:
-  watchlists = load_watchlists()
-  watchlists.pop(name.strip(), None)
-  return save_watchlists(watchlists)
 
 
 # ----------------------------- Symbol resolution --------------------------
@@ -2697,12 +2628,12 @@ function exportCsv() {
 }
 
 /* ===========================================================================
- * Watchlists (server-backed)
+ * Watchlists (localStorage)
  * --------------------------------------------------------------------------- */
-let WATCHLISTS = {};
-
+function getWatchlists() { try { return JSON.parse(localStorage.getItem("watchlists") || "{}"); } catch { return {}; } }
+function setWatchlists(o) { localStorage.setItem("watchlists", JSON.stringify(o)); renderWatchlists(); }
 function renderWatchlists() {
-  const wls = WATCHLISTS;
+  const wls = getWatchlists();
   const wrap = $("#watchlists"); wrap.innerHTML = "";
   const names = Object.keys(wls);
   if (!names.length) {
@@ -2714,55 +2645,17 @@ function renderWatchlists() {
     chip.className = "chip";
     chip.innerHTML = `<span>${escapeHtml(name)}</span><span class="x" title="Delete">✕</span>`;
     chip.firstElementChild.onclick = () => { $("#tickers").value = wls[name]; build(); };
-    chip.querySelector(".x").onclick = async (e) => {
-      e.stopPropagation();
-      try {
-        const res = await fetch(`/api/watchlists?name=${encodeURIComponent(name)}`, { method: "DELETE" });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Delete failed.");
-        WATCHLISTS = data.watchlists || {};
-        renderWatchlists();
-      } catch (err) {
-        toast(err.message || "Delete failed.");
-      }
-    };
+    chip.querySelector(".x").onclick = (e) => { e.stopPropagation(); const o = getWatchlists(); delete o[name]; setWatchlists(o); };
     wrap.appendChild(chip);
   }
 }
-
-async function loadWatchlists() {
-  try {
-    const res = await fetch("/api/watchlists");
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Failed to load watchlists.");
-    WATCHLISTS = data.watchlists || {};
-    renderWatchlists();
-  } catch (err) {
-    WATCHLISTS = {};
-    renderWatchlists();
-    toast(err.message || "Failed to load watchlists.");
-  }
-}
-
-async function saveWatchlist() {
+function saveWatchlist() {
   const raw = $("#tickers").value.trim();
   if (!raw) return toast("Enter tickers first.");
   const name = prompt("Watchlist name?", "");
   if (!name) return;
-  try {
-    const res = await fetch("/api/watchlists", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, entries: raw }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Save failed.");
-    WATCHLISTS = data.watchlists || {};
-    renderWatchlists();
-    toast(`Saved "${name.trim()}".`);
-  } catch (err) {
-    toast(err.message || "Save failed.");
-  }
+  const o = getWatchlists(); o[name.trim()] = raw; setWatchlists(o);
+  toast(`Saved "${name}".`);
 }
 
 function toast(msg) {
@@ -2817,7 +2710,7 @@ setTheme(readTheme());
 renderHeader();
 renderSortMenu();
 updateSortLabel();
-loadWatchlists();
+renderWatchlists();
 </script>
 
 </body>
@@ -2873,9 +2766,6 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             self._send_json(200, {"ok": True, "ts": datetime.now(timezone.utc).isoformat()})
             return
-        if parsed.path == "/api/watchlists":
-          self._send_json(200, {"watchlists": load_watchlists()})
-          return
         if parsed.path == "/api/detail":
             from urllib.parse import parse_qs
 
@@ -2895,21 +2785,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/api/watchlists":
-            length = int(self.headers.get("Content-Length") or 0)
-            try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
-                watchlists = upsert_watchlist(
-                    str(payload.get("name") or ""),
-                    str(payload.get("entries") or ""),
-                )
-                self._send_json(200, {"watchlists": watchlists})
-            except ValueError as exc:
-                self._send_json(400, {"error": str(exc)})
-            except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
-            return
-
         if parsed.path == "/api/quotes":
             length = int(self.headers.get("Content-Length") or 0)
             try:
@@ -2972,22 +2847,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def do_DELETE(self):
-        parsed = urlparse(self.path)
-        if parsed.path != "/api/watchlists":
-            self.send_response(404)
-            self.end_headers()
-            return
-
-        from urllib.parse import parse_qs
-
-        name = (parse_qs(parsed.query).get("name") or [""])[0]
-        try:
-            watchlists = delete_watchlist(name)
-            self._send_json(200, {"watchlists": watchlists})
-        except Exception as exc:
-            self._send_json(500, {"error": str(exc)})
-      
 
 def _pick_port(preferred: int = 8765) -> int:
     for port in [preferred, 8766, 8767, 8768, 0]:
