@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# Conda
+.conda/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# Logs & temp
+*.log
+*.tmp
+*.bak
+*.orig
+
+# yfinance / requests cache
+.cache/
+*.sqlite
+
+# Jupyter (if notebooks ever added)
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+Thumbs.db
+ehthumbs.db
