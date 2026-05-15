@@ -553,6 +553,7 @@ INDEX_HTML = r"""<!doctype html>
     border: none; border-bottom: 1px solid var(--border);
     padding: 7px 8px; text-align: center;
     cursor: pointer; user-select: none; white-space: nowrap;
+    position: relative;
   }
   table#tbl th.no-sort { cursor: default; }
   table#tbl th:hover:not(.no-sort) { color: var(--accent); }
@@ -568,6 +569,35 @@ INDEX_HTML = r"""<!doctype html>
   table#tbl tbody tr:hover td.alt-stripe { background: var(--hover); }
   table#tbl tbody tr:hover { cursor: pointer; }
   th .arrow { margin-left: 5px; color: var(--accent); font-size: 10px; }
+
+  /* Hover-tooltip on column headers — same visual style as the About modal cards */
+  table#tbl th[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute; left: 50%; top: calc(100% + 8px);
+    transform: translateX(-50%);
+    background: var(--bg-canvas); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 11px; font-size: 11.5px; font-weight: 500; font-style: normal;
+    font-family: -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5; text-align: left; white-space: normal;
+    width: max-content; max-width: 260px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.12s ease 0.15s;
+    z-index: 40;
+  }
+  table#tbl th[data-tip]::before {
+    content: ""; position: absolute; left: 50%; top: calc(100% + 2px);
+    transform: translateX(-50%);
+    border: 6px solid transparent; border-bottom-color: var(--border);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.12s ease 0.15s; z-index: 41;
+  }
+  table#tbl th[data-tip]:hover::after,
+  table#tbl th[data-tip]:hover::before { opacity: 1; }
+  /* Right-most columns: anchor tooltip to the right edge to avoid clipping */
+  table#tbl th[data-tip]:nth-last-child(-n+4)::after { left: auto; right: 0; transform: none; }
+  table#tbl th[data-tip]:nth-last-child(-n+4)::before { left: auto; right: 4px; transform: none; }
 
   .logo {
     width: 18px; height: 18px; vertical-align: middle; border-radius: 4px;
@@ -816,6 +846,25 @@ const COLS = [
     render: (r) => triangle(r.above_sma_200),
     sortValue: (r) => r.above_sma_200 === null ? null : (r.above_sma_200 ? 1 : 0) },
 ];
+
+/* Short hover descriptions for the column-header info icons.
+   Long-form versions with formulas live in the About / Column Guide modal. */
+const COL_INFO = {
+  symbol:        "Exchange ticker symbol (e.g. AAPL, NVDA, XLK).",
+  name:          "Full company or fund name from Yahoo Finance.",
+  price:         "Last available closing price in USD, as of the build/refresh time.",
+  market_cap:    "Total market value of all outstanding shares (Price × Shares Outstanding).",
+  ps_ratio:      "Price-to-Sales: market cap ÷ trailing-12-month revenue. Heat anchors at P/S = 10; n/a is flagged.",
+  pe_ratio:      "Price-to-Earnings: price ÷ trailing-12-month EPS. Heat anchors at P/E = 40; above 50 implies heavy growth pricing.",
+  pct_ytd:       "Return from the first trading day of the current calendar year to today.",
+  spark:         "Sparkline of the last 252 trading days. Green if 1Y return is positive, red otherwise.",
+  pct_1y:        "Total price return over the last 365 calendar days.",
+  delta_ath:     "Distance from all-time high. 0% = at ATH; full bar = 50% below ATH.",
+  rs_rank:       "Relative Strength: 12 monthly bars showing where each month's close ranked within its trailing-12-month price range.",
+  above_sma_20:  "20-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 month of trading days.",
+  above_sma_50:  "50-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 quarter of trading days.",
+  above_sma_200: "200-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 year of trading days.",
+};
 
 let DATA = [];
 let SORT = { key: "pct_ytd", dir: -1 };
@@ -1088,6 +1137,10 @@ function renderHeader() {
         const a = document.createElement("span"); a.className = "arrow";
         a.textContent = SORT.dir > 0 ? "▲" : "▼"; th.appendChild(a);
       }
+    }
+    if (COL_INFO[c.key]) {
+      th.setAttribute("data-tip", COL_INFO[c.key]);
+      th.setAttribute("aria-label", (c.label || c.key) + ": " + COL_INFO[c.key]);
     }
     tr.appendChild(th);
   }
