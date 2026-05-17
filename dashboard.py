@@ -56,8 +56,9 @@ import yfinance as yf
 
 # ----------------------------- Cache --------------------------------------
 
-_CACHE: dict[str, tuple[float, dict]] = {}
-_CACHE_TTL = 120.0
+_CACHE: dict[str, tuple[float, float, dict]] = {}
+_CACHE_TTL_DEFAULT = 300.0
+_CACHE_TTL_ANALYTICS = 1800.0
 _WATCHLISTS_LOCK = threading.Lock()
 
 
@@ -65,15 +66,15 @@ def _cache_get(key: str):
     hit = _CACHE.get(key)
     if hit is None:
         return None
-    ts, val = hit
-    if time.time() - ts > _CACHE_TTL:
+    ts, ttl, val = hit
+    if time.time() - ts > ttl:
         _CACHE.pop(key, None)
         return None
     return val
 
 
-def _cache_put(key: str, val: dict) -> None:
-    _CACHE[key] = (time.time(), val)
+def _cache_put(key: str, val: dict, ttl: float | None = None) -> None:
+    _CACHE[key] = (time.time(), ttl if ttl is not None else _CACHE_TTL_DEFAULT, val)
 
 
 def _repo_root() -> Path:
@@ -303,6 +304,99 @@ def delete_watchlist(name: str) -> dict[str, str]:
 
 _TICKER_SHAPE = re.compile(r"^[A-Z0-9][A-Z0-9.\-\^=]{0,9}$")
 
+# Exchange prefix → yfinance suffix.  Lets users paste e.g. `XETRA.SAP`,
+# `EU.SAP`, `NASDAQ.MSFT` or `Euronext Amsterdam.IMAE` without hand-massaging
+# the Yahoo suffix.  Empty string means "US listing, no suffix".
+_EXCHANGE_SUFFIX: dict[str, str] = {
+    # ---- United States (Yahoo uses bare tickers, no suffix)
+    "NASDAQ": "", "NMS": "", "NSDQ": "", "NDAQ": "",
+    "NYSE": "", "NYS": "", "NYQ": "",
+    "AMEX": "", "ASE": "", "ARCA": "", "ARCX": "", "PCX": "",
+    "BATS": "", "CBOE": "", "OTC": "", "OTCQX": "", "OTCQB": "",
+    "US": "", "USA": "",
+    # ---- Europe — DACH + Northern Europe
+    "EU": ".DE",     # default European → XETRA
+    "XETRA": ".DE", "XETR": ".DE", "GER": ".DE", "DE": ".DE",
+    "FRA": ".F",     # Frankfurt
+    "BER": ".BE",    # Berlin
+    "MUN": ".MU",    # Munich
+    "HAM": ".HM",    # Hamburg
+    "STU": ".SG",    # Stuttgart
+    "SWX": ".SW", "SIX": ".SW", "CH": ".SW",
+    "VIE": ".VI", "AT": ".VI",
+    # ---- Europe — Western / Southern (Euronext family)
+    "LSE": ".L", "LON": ".L", "UK": ".L", "GB": ".L",
+    "EPA": ".PA", "PAR": ".PA", "FR": ".PA",
+    "EURONEXT": ".PA",                         # bare "Euronext" → Paris
+    "EURONEXT PARIS": ".PA",
+    "AMS": ".AS", "NL": ".AS",
+    "EURONEXT AMSTERDAM": ".AS",
+    "BRU": ".BR", "BE": ".BR",
+    "EURONEXT BRUSSELS": ".BR",
+    "LIS": ".LS", "PT": ".LS",
+    "EURONEXT LISBON": ".LS",
+    "EURONEXT MILAN": ".MI",
+    "BIT": ".MI", "MIL": ".MI", "IT": ".MI", "BORSA ITALIANA": ".MI",
+    "BME": ".MC", "MAD": ".MC", "ES": ".MC", "BOLSA MADRID": ".MC",
+    "ATH": ".AT", "GR": ".AT", "ATHEX": ".AT", "ASEX": ".AT",
+    # ---- Europe — Nordics + Baltics
+    "STO": ".ST", "OMX": ".ST", "SE": ".ST", "STOCKHOLM": ".ST",
+    "HEL": ".HE", "FI": ".HE", "HELSINKI": ".HE",
+    "CPH": ".CO", "DK": ".CO", "COPENHAGEN": ".CO",
+    "OSL": ".OL", "NO": ".OL", "OSLO": ".OL",
+    "ICE": ".IC", "REYKJAVIK": ".IC",
+    "WSE": ".WA", "PL": ".WA", "WARSAW": ".WA",
+    "PRA": ".PR", "CZ": ".PR", "PRAGUE": ".PR",
+    "BUD": ".BD", "HU": ".BD", "BUDAPEST": ".BD",
+    # ---- Other regions
+    "TYO": ".T", "JP": ".T", "TOKYO": ".T",
+    "HKG": ".HK", "HK": ".HK", "HKEX": ".HK", "HONG KONG": ".HK",
+    "SHA": ".SS", "SSE": ".SS", "SHANGHAI": ".SS",
+    "SHE": ".SZ", "SZSE": ".SZ", "SHENZHEN": ".SZ",
+    "TSX": ".TO", "TO": ".TO", "TORONTO": ".TO",
+    "TSXV": ".V", "TSX VENTURE": ".V",
+    "ASX": ".AX", "AU": ".AX", "AUSTRALIA": ".AX",
+    "NZX": ".NZ", "NZ": ".NZ",
+    "NSE": ".NS",
+    "BSE": ".BO",
+    "JSE": ".JO", "ZA": ".JO", "JOHANNESBURG": ".JO",
+    "SGX": ".SI", "SG": ".SI", "SINGAPORE": ".SI",
+    "KRX": ".KS", "KR": ".KS", "KOREA": ".KS",
+    "TWSE": ".TW", "TW": ".TW", "TAIWAN": ".TW",
+    "BMV": ".MX", "MX": ".MX",
+    "SAO": ".SA", "B3": ".SA", "BR": ".SA",
+    "BVL": ".LM",
+    "TASE": ".TA", "IL": ".TA",
+}
+
+# Tail-symbol validator: alnum + dot + dash, plus spaces inside a tail are
+# disallowed (we trim the tail). The prefix may contain ASCII letters,
+# whitespace and a few common separators (so "Euronext Amsterdam" works).
+_TAIL_OK = re.compile(r"[A-Z0-9.\-]+")
+
+
+def _normalize_exchange_prefix(entry: str) -> tuple[str, str] | None:
+    """Map prefixed forms (`XETRA.SAP`, `NASDAQ.MSFT`,
+    `Euronext Amsterdam.IMAE` …) into ``(symbol, suffix)``.
+
+    Returns ``None`` when the prefix is not recognised (caller falls through
+    to the existing ticker / search logic). ``suffix`` is the Yahoo suffix
+    appended to the tail (empty string for US listings)."""
+    if not entry or "." not in entry:
+        return None
+    head, _, tail = entry.partition(".")
+    head_up = " ".join(head.strip().upper().split())   # collapse spaces
+    tail_up = tail.strip().upper()
+    if not head_up or not tail_up:
+        return None
+    if head_up not in _EXCHANGE_SUFFIX:
+        return None
+    suffix = _EXCHANGE_SUFFIX[head_up]
+    tail_clean = tail_up.lstrip(".")
+    if not _TAIL_OK.fullmatch(tail_clean):
+        return None
+    return tail_clean + suffix, suffix
+
 
 def _looks_like_ticker(s: str) -> bool:
     s = s.strip()
@@ -313,22 +407,92 @@ def _looks_like_ticker(s: str) -> bool:
     return bool(_TICKER_SHAPE.match(s))
 
 
+# Per-process cache: entry-string → final resolved Yahoo symbol. Keeps the
+# fast_info + yf.Search refinement cost a one-time hit per unique input.
+_RESOLVED_CACHE: dict[str, str] = {}
+
+
+def _yf_symbol_has_data(sym: str) -> bool:
+    """Cheap existence check via `fast_info.last_price`. Single network round
+    trip — much faster than `.history()`."""
+    try:
+        fi = yf.Ticker(sym).fast_info
+        v = getattr(fi, "last_price", None)
+        return v is not None and isinstance(v, (int, float)) and math.isfinite(v) and v > 0
+    except Exception:
+        return False
+
+
+def _refine_via_search(tail: str, expected_suffix: str) -> str | None:
+    """Use yf.Search to refine a tail that doesn't match a real Yahoo symbol
+    (e.g. `LSE.SHELL` → search "SHELL" + prefer ".L" → `SHEL.L`)."""
+    try:
+        search = yf.Search(tail, max_results=10, news_count=0)
+        quotes = getattr(search, "quotes", None) or []
+    except Exception:
+        return None
+    suf = expected_suffix.upper()
+    # Pass 1: result whose symbol ends with the expected suffix.
+    for q in quotes:
+        if not isinstance(q, dict):
+            continue
+        sym = str(q.get("symbol") or "").strip()
+        if not sym:
+            continue
+        if suf == "" and "." not in sym:
+            return sym
+        if suf and sym.upper().endswith(suf):
+            return sym
+    # Pass 2: any result.
+    for q in quotes:
+        if isinstance(q, dict) and q.get("symbol"):
+            return str(q["symbol"]).strip()
+    return None
+
+
 def resolve_symbol(entry: str) -> str | None:
     entry = entry.strip()
     if not entry:
         return None
+    cached = _RESOLVED_CACHE.get(entry)
+    if cached:
+        return cached
+
+    # Exchange-prefixed forms (XETRA.SAP, NASDAQ.MSFT, Euronext Paris.BNP, …).
+    mapped = _normalize_exchange_prefix(entry)
+    if mapped is not None:
+        symbol, suffix = mapped
+        # Literal mapping wins if Yahoo recognises it.
+        if _yf_symbol_has_data(symbol):
+            _RESOLVED_CACHE[entry] = symbol
+            return symbol
+        # Otherwise search for the tail with the prefix's market as a hint.
+        tail = symbol[: -len(suffix)] if suffix and symbol.endswith(suffix) else symbol
+        refined = _refine_via_search(tail, suffix)
+        if refined and _yf_symbol_has_data(refined):
+            _RESOLVED_CACHE[entry] = refined
+            return refined
+        _RESOLVED_CACHE[entry] = symbol  # give up; row will surface as "no data"
+        return symbol
+
     if _looks_like_ticker(entry):
-        return entry.upper()
+        upper = entry.upper()
+        _RESOLVED_CACHE[entry] = upper
+        return upper
+
     try:
         search = yf.Search(entry, max_results=1, news_count=0)
         quotes = getattr(search, "quotes", None) or []
         if quotes and isinstance(quotes[0], dict):
             sym = quotes[0].get("symbol")
             if sym:
+                _RESOLVED_CACHE[entry] = sym
                 return sym
     except Exception:
         pass
-    return entry.upper()
+    fallback = entry.upper()
+    _RESOLVED_CACHE[entry] = fallback
+    return fallback
 
 
 # ----------------------------- Math helpers --------------------------------
@@ -522,6 +686,323 @@ def fetch_portfolio(entries: list[str]) -> list[dict]:
         rows.sort(key=lambda r: order.get(r["symbol"], 9999))
     _cache_put(cache_key, {"rows": rows})
     return rows
+
+
+# ----------------------------- FX -----------------------------------------
+# Spot rates and basket-index history for the topbar denomination selector.
+# yfinance pairs are `<BASE><QUOTE>=X` where the close is QUOTE per BASE.
+
+SUPPORTED_FX: list[str] = [
+    "USD", "EUR", "GBP", "JPY", "CHF",
+    "CAD", "AUD", "NZD", "CNY", "ZAR",
+    "MXN", "SGD", "HKD", "INR",
+]
+# Major basket used by the hover currency-index chart. Whichever currency the
+# user is hovering over is excluded; the remaining six form the basket.
+_FX_BASKET_MAJORS: list[str] = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD"]
+
+_FX_RATES_CACHE: dict[str, tuple[float, dict]] = {}
+_FX_HIST_CACHE: dict[str, tuple[float, list]] = {}
+_FX_CCY_HIST_CACHE: dict[str, tuple[float, pd.Series]] = {}
+_FX_RATES_TTL = 1800.0   # 30 min for spot
+_FX_HIST_TTL = 14400.0   # 4 h for the 1Y index series
+_FX_CCY_HIST_TTL = 14400.0  # 4 h for per-ccy USD series (analytics FX adjustment)
+
+
+def _norm_ccy_for_fx(ccy: str) -> str:
+    """Normalize subunit currencies: GBp/GBX→GBP, ZAc→ZAR."""
+    c = (ccy or "USD").upper()
+    if c in ("GBP", "GBX"):
+        return "GBP"
+    if c == "ZAC":
+        return "ZAR"
+    return c
+
+
+def _fx_usd_series(ccy: str, period_yf: str) -> "pd.Series | None":
+    """Daily close for {CCY}USD=X (USD per 1 unit of ccy). None for USD. Cached 4 h."""
+    ccy = _norm_ccy_for_fx(ccy)
+    if ccy == "USD":
+        return None
+    key = f"{ccy}|{period_yf}"
+    hit = _FX_CCY_HIST_CACHE.get(key)
+    if hit and (time.time() - hit[0]) < _FX_CCY_HIST_TTL:
+        return hit[1]
+    try:
+        df = yf.download(f"{ccy}USD=X", period=period_yf, auto_adjust=True, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.droplevel(1, axis=1)
+        series = df["Close"].dropna() if "Close" in df.columns else pd.Series(dtype=float)
+    except Exception:
+        series = pd.Series(dtype=float)
+    _FX_CCY_HIST_CACHE[key] = (time.time(), series)
+    return series
+
+
+def _apply_fx_to_closes(
+    sym_closes: "pd.DataFrame",
+    by_sym: dict,
+    display_ccy: str,
+    period_yf: str,
+) -> "pd.DataFrame":
+    """Re-express every column of sym_closes in display_ccy.
+
+    Multiplies each price series by (USD_per_stock_ccy / USD_per_display_ccy).
+    GBp pence-vs-pound scaling cancels in return ratios so no special handling needed.
+    """
+    display_ccy = _norm_ccy_for_fx(display_ccy)
+    syms = list(sym_closes.columns)
+    sym_ccy = {s: _norm_ccy_for_fx(by_sym.get(s, {}).get("currency") or "USD") for s in syms}
+
+    need: set[str] = set()
+    for c in sym_ccy.values():
+        if c != "USD":
+            need.add(c)
+    if display_ccy != "USD":
+        need.add(display_ccy)
+
+    if not need:
+        return sym_closes  # all USD → display USD, no-op
+
+    # Bulk download all needed {CCY}USD=X pairs in one call.
+    pairs = [f"{c}USD=X" for c in need]
+    fx_hist: dict[str, pd.Series] = {}
+    try:
+        raw = yf.download(pairs, period=period_yf, auto_adjust=True, progress=False)
+        if not raw.empty:
+            if isinstance(raw.columns, pd.MultiIndex):
+                cl = raw["Close"]
+                for c in need:
+                    p = f"{c}USD=X"
+                    if p in cl.columns:
+                        s = cl[p].dropna()
+                        if not s.empty:
+                            fx_hist[c] = s
+            elif "Close" in raw.columns and len(pairs) == 1:
+                c = next(iter(need))
+                s = raw["Close"].dropna()
+                if not s.empty:
+                    fx_hist[c] = s
+    except Exception:
+        pass
+
+    # Per-pair fallback for any still missing.
+    for c in need:
+        if c not in fx_hist:
+            s = _fx_usd_series(c, period_yf)
+            if s is not None and not s.empty:
+                fx_hist[c] = s
+
+    disp_usd = fx_hist.get(display_ccy)  # None ↔ display_ccy is USD
+    idx = sym_closes.index
+    result = sym_closes.copy()
+
+    for s in syms:
+        stock_ccy = sym_ccy[s]
+        if stock_ccy == display_ccy:
+            continue
+        stock_usd = fx_hist.get(stock_ccy)  # None ↔ stock_ccy is USD
+        if stock_usd is None and disp_usd is None:
+            continue
+        if stock_usd is None:
+            # USD stock → non-USD display
+            fx = (1.0 / disp_usd).reindex(idx, method="ffill").bfill().fillna(1.0)
+        elif disp_usd is None:
+            # non-USD stock → USD display
+            fx = stock_usd.reindex(idx, method="ffill").bfill().fillna(1.0)
+        else:
+            fx = (stock_usd / disp_usd).reindex(idx, method="ffill").bfill().fillna(1.0)
+        result[s] = result[s].values * fx.values
+
+    return result
+
+
+def _fx_pair_symbol(base: str, quote: str) -> str:
+    return f"{base.upper()}{quote.upper()}=X"
+
+
+def _fx_latest_close(base: str, quote: str) -> float | None:
+    if base == quote:
+        return 1.0
+    try:
+        tk = yf.Ticker(_fx_pair_symbol(base, quote))
+        hist = tk.history(period="5d", auto_adjust=True, actions=False)
+        if hist is None or hist.empty:
+            return None
+        close = hist["Close"].dropna()
+        if close.empty:
+            return None
+        return float(close.iloc[-1])
+    except Exception:
+        return None
+
+
+def fx_rates(base: str = "USD") -> dict:
+    """Return {ccy: rate} where rate = `ccy` per 1 `base`. Cached."""
+    base = (base or "USD").upper()
+    if base not in SUPPORTED_FX:
+        base = "USD"
+    key = f"rates|{base}"
+    hit = _FX_RATES_CACHE.get(key)
+    if hit and time.time() - hit[0] < _FX_RATES_TTL:
+        return hit[1]
+
+    quotes = [q for q in SUPPORTED_FX if q != base]
+    syms = [_fx_pair_symbol(base, q) for q in quotes]
+    out: dict[str, float] = {base: 1.0}
+    try:
+        df = yf.download(
+            tickers=syms,
+            period="5d",
+            interval="1d",
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
+    except Exception:
+        df = None
+    if df is not None and not df.empty:
+        if isinstance(df.columns, pd.MultiIndex):
+            for q in quotes:
+                sym = _fx_pair_symbol(base, q)
+                try:
+                    col = df[sym]["Close"].dropna()
+                except (KeyError, ValueError):
+                    col = pd.Series(dtype=float)
+                if not col.empty:
+                    out[q] = float(col.iloc[-1])
+        else:
+            try:
+                col = df["Close"].dropna()
+                if not col.empty and len(quotes) == 1:
+                    out[quotes[0]] = float(col.iloc[-1])
+            except (KeyError, ValueError):
+                pass
+    # Per-symbol fallback for any pair the bulk fetch missed.
+    for q in quotes:
+        if q in out:
+            continue
+        v = _fx_latest_close(base, q)
+        if v is not None:
+            out[q] = v
+    payload = {
+        "base": base,
+        "rates": out,
+        "supported": SUPPORTED_FX,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    _FX_RATES_CACHE[key] = (time.time(), payload)
+    return payload
+
+
+_PERIOD_DOWNLOAD = {
+    # yfinance returns empty for "1y" on many FX pairs; fetch a longer window
+    # and slice client-side to keep the requested view honest.
+    "1y": ("2y", 365),
+    "1Y": ("2y", 365),
+    "6mo": ("6mo", None),
+    "3mo": ("3mo", None),
+    "2y": ("2y", None),
+    "5y": ("5y", None),
+    "max": ("max", None),
+}
+
+def fx_index_history(base: str, period: str = "1y") -> list:
+    """Return [[ts_ms, level], ...] for a synthetic trade-weighted index of
+    `base` vs the other six majors (USD/EUR/GBP/JPY/CHF/CAD/AUD basket).
+    Level is normalised to 100 at the start of the window; rising = `base`
+    is strengthening vs the basket.
+    """
+    base = (base or "USD").upper()
+    if base not in SUPPORTED_FX:
+        return []
+    key = f"hist|{base}|{period}"
+    hit = _FX_HIST_CACHE.get(key)
+    if hit and time.time() - hit[0] < _FX_HIST_TTL:
+        return hit[1]
+
+    download_period, slice_days = _PERIOD_DOWNLOAD.get(period, (period, None))
+    others = [c for c in _FX_BASKET_MAJORS if c != base]
+    if base not in _FX_BASKET_MAJORS:
+        # For non-major bases (e.g. ZAR), benchmark against the full G7 majors.
+        others = list(_FX_BASKET_MAJORS)
+    syms = [_fx_pair_symbol(base, c) for c in others]
+    try:
+        df = yf.download(
+            tickers=syms,
+            period=download_period,
+            interval="1d",
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
+    except Exception:
+        df = None
+    # If bulk fails (rate-limited), retry sequentially as a last resort.
+    if df is None or df.empty:
+        try:
+            parts = {}
+            for s in syms:
+                try:
+                    h = yf.Ticker(s).history(period=download_period, auto_adjust=True, actions=False)
+                    if h is not None and not h.empty and "Close" in h.columns:
+                        parts[s] = h["Close"].dropna()
+                except Exception:
+                    continue
+            if parts:
+                df = pd.concat({s: pd.DataFrame({"Close": v}) for s, v in parts.items()}, axis=1)
+        except Exception:
+            df = None
+    if df is None or df.empty:
+        _FX_HIST_CACHE[key] = (time.time() - _FX_HIST_TTL + 60.0, [])
+        return []
+    series_list: list[pd.Series] = []
+    if isinstance(df.columns, pd.MultiIndex):
+        for c in others:
+            sym = _fx_pair_symbol(base, c)
+            try:
+                s = df[sym]["Close"].dropna()
+            except (KeyError, ValueError):
+                continue
+            if s.empty or float(s.iloc[0]) == 0.0:
+                continue
+            series_list.append(s / float(s.iloc[0]))
+    else:
+        try:
+            s = df["Close"].dropna()
+            if not s.empty and float(s.iloc[0]) != 0.0:
+                series_list.append(s / float(s.iloc[0]))
+        except (KeyError, ValueError):
+            pass
+    if not series_list:
+        _FX_HIST_CACHE[key] = (time.time(), [])
+        return []
+    combined = pd.concat(series_list, axis=1).ffill().dropna(how="any")
+    if combined.empty:
+        # Cache empties briefly so a transient yfinance hiccup doesn't lock us
+        # out of fresh data for the full TTL.
+        _FX_HIST_CACHE[key] = (time.time() - _FX_HIST_TTL + 60.0, [])
+        return []
+    if slice_days is not None and len(combined) > 0:
+        cutoff = combined.index[-1] - pd.Timedelta(days=slice_days)
+        sliced = combined[combined.index >= cutoff]
+        if not sliced.empty:
+            combined = sliced
+        # Re-base each pair so the level starts at 100 at the slice start.
+        combined = combined.div(combined.iloc[0]).fillna(1.0)
+    basket = combined.mean(axis=1) * 100.0
+    out: list[list[float]] = []
+    for ts, v in basket.items():
+        if pd.isna(v):
+            continue
+        try:
+            out.append([int(ts.timestamp() * 1000), float(v)])
+        except Exception:
+            continue
+    _FX_HIST_CACHE[key] = (time.time(), out)
+    return out
 
 
 # ----------------------------- Detail fetch --------------------------------
@@ -1019,69 +1500,183 @@ def _mcap_bucket(mcap: float | None) -> str:
     return "Micro (<$300M)"
 
 
+_BULK_CLOSE_CACHE: dict[tuple[str, str], tuple[float, "pd.Series | None"]] = {}
+_BULK_CLOSE_TTL = 1800.0  # 30 min
+_BULK_CLOSE_NEG_TTL = 60.0  # empty results re-tried after 60s
+_BULK_CLOSE_MISS = object()  # sentinel — distinguish "cache miss" from a valid Series
+
+
+def _bulk_close_get_cached(sym: str, period_yf: str):
+    """Return a cached Close Series (possibly empty), or the _BULK_CLOSE_MISS sentinel
+    when there is no usable entry (never cached, or TTL expired)."""
+    hit = _BULK_CLOSE_CACHE.get((sym, period_yf))
+    if hit is None:
+        return _BULK_CLOSE_MISS
+    ts, ser = hit
+    is_empty = ser is None or ser.empty
+    ttl = _BULK_CLOSE_NEG_TTL if is_empty else _BULK_CLOSE_TTL
+    if time.time() - ts > ttl:
+        return _BULK_CLOSE_MISS
+    return ser
+
+
+def _bulk_close_put(sym: str, period_yf: str, ser: "pd.Series | None") -> None:
+    _BULK_CLOSE_CACHE[(sym, period_yf)] = (time.time(), ser)
+
+
 def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
     """Return a DataFrame of Close prices indexed by date, columns = symbols
-    (those that returned data)."""
+    (those that returned data).
+
+    Caches per-symbol so reload/period-mix calls reuse data. Retries missing
+    symbols via per-ticker downloads with a small delay between calls so
+    yfinance's rate-limiter is less likely to drop them on the floor."""
     if not symbols:
         return pd.DataFrame()
     period_yf = _PERIOD_YF.get(period.upper(), "1y")
-    try:
-        df = yf.download(
-            tickers=symbols,
-            period=period_yf,
-            interval="1d",
-            auto_adjust=True,
-            group_by="ticker",
-            threads=True,
-            progress=False,
-        )
-    except Exception:
-        df = None
-    if df is None or df.empty:
-        return pd.DataFrame()
+
     out: dict[str, pd.Series] = {}
-    if isinstance(df.columns, pd.MultiIndex):
-        for s in symbols:
-            try:
-                col = df[s]["Close"].dropna()
-            except (KeyError, ValueError):
-                continue
-            if not col.empty:
-                out[s] = col
-    else:
-        # Single-symbol fallback.
+    to_fetch: list[str] = []
+    for s in symbols:
+        cached = _bulk_close_get_cached(s, period_yf)
+        if cached is _BULK_CLOSE_MISS:
+            to_fetch.append(s)
+        elif cached is not None and not cached.empty:
+            out[s] = cached
+        # else: cached as empty within neg-TTL — skip retrying
+
+    if to_fetch:
         try:
-            col = df["Close"].dropna()
-            if not col.empty:
-                out[symbols[0]] = col
-        except (KeyError, ValueError):
-            pass
+            df = yf.download(
+                tickers=to_fetch,
+                period=period_yf,
+                interval="1d",
+                auto_adjust=True,
+                group_by="ticker",
+                threads=True,
+                progress=False,
+            )
+        except Exception:
+            df = None
+        got: set[str] = set()
+        if df is not None and not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                for s in to_fetch:
+                    try:
+                        col = df[s]["Close"].dropna()
+                    except (KeyError, ValueError):
+                        continue
+                    if not col.empty:
+                        out[s] = col
+                        _bulk_close_put(s, period_yf, col)
+                        got.add(s)
+            else:
+                # Single-symbol shape: columns are OHLCV.
+                try:
+                    col = df["Close"].dropna()
+                    if not col.empty:
+                        out[to_fetch[0]] = col
+                        _bulk_close_put(to_fetch[0], period_yf, col)
+                        got.add(to_fetch[0])
+                except (KeyError, ValueError):
+                    pass
+
+        missing = [s for s in to_fetch if s not in got]
+        # Retry each missing symbol individually with backoff — yfinance often
+        # drops a couple of symbols in a bulk request under rate-limit pressure.
+        for i, s in enumerate(missing):
+            delay = 0.4 + 0.2 * min(i, 6)
+            time.sleep(delay)
+            ser = None
+            for attempt in range(3):
+                try:
+                    tk = yf.Ticker(s)
+                    h = tk.history(period=period_yf, interval="1d", auto_adjust=True)
+                    if h is not None and not h.empty:
+                        col = h["Close"].dropna()
+                        if not col.empty:
+                            # Normalise to tz-naive DatetimeIndex so it lines up with
+                            # the tz-naive index returned by yf.download() above.
+                            try:
+                                if getattr(col.index, "tz", None) is not None:
+                                    col.index = col.index.tz_convert(None)
+                            except Exception:
+                                try:
+                                    col.index = col.index.tz_localize(None)
+                                except Exception:
+                                    pass
+                            ser = col
+                            break
+                except Exception:
+                    pass
+                time.sleep(0.6 * (attempt + 1))
+            if ser is not None:
+                out[s] = ser
+                _bulk_close_put(s, period_yf, ser)
+            else:
+                _bulk_close_put(s, period_yf, pd.Series(dtype=float))
+
     if not out:
         return pd.DataFrame()
     return pd.concat(out, axis=1).sort_index()
 
 
 def _analyst_for(symbol: str) -> dict:
-    """Lightweight per-symbol analyst block. Cached via _safe_info's session
-    + our own analytics cache."""
+    """Per-symbol analyst block. Pulls fields from `Ticker.info` plus the
+    current-month row of `Ticker.recommendations` for the rating distribution.
+    Cached for 30 min via the global analytics cache."""
+    cache_key = f"analyst|{symbol}"
+    hit = _cache_get(cache_key)
+    if hit is not None:
+        return hit
+    info: dict = {}
     try:
-        info = _safe_info(yf.Ticker(symbol))
+        tk = yf.Ticker(symbol)
+        info = _safe_info(tk)
     except Exception:
-        return {}
-    return {
+        tk = None  # type: ignore
+    out = {
         "mean_rating": _safe_num(info.get("recommendationMean")),
+        "rec_key": (info.get("recommendationKey") or "").strip().lower() or None,
         "n_analysts": _safe_num(info.get("numberOfAnalystOpinions")),
         "target_mean": _safe_num(info.get("targetMeanPrice")),
+        "target_median": _safe_num(info.get("targetMedianPrice")),
         "target_low": _safe_num(info.get("targetLowPrice")),
         "target_high": _safe_num(info.get("targetHighPrice")),
         "div_yield": _safe_num(info.get("dividendYield")),
         "ev_ebitda": _safe_num(info.get("enterpriseToEbitda")),
         "price": _safe_num(info.get("currentPrice") or info.get("regularMarketPrice")),
+        "currency": (info.get("financialCurrency") or info.get("currency") or "").upper() or None,
+        "dist": None,  # populated below when recommendations are available
     }
+    if tk is not None:
+        try:
+            recs = tk.recommendations
+        except Exception:
+            recs = None
+        try:
+            if recs is not None and not recs.empty:
+                row = recs.iloc[0]
+                d = {
+                    "strongBuy": int(row.get("strongBuy", 0) or 0),
+                    "buy": int(row.get("buy", 0) or 0),
+                    "hold": int(row.get("hold", 0) or 0),
+                    "sell": int(row.get("sell", 0) or 0),
+                    "strongSell": int(row.get("strongSell", 0) or 0),
+                }
+                if any(d.values()):
+                    out["dist"] = d
+        except Exception:
+            pass
+    # If yfinance was rate-limited and we got almost nothing useful back,
+    # cache only briefly so the next analytics run gets a real result.
+    thin = (out["mean_rating"] is None and out["target_mean"] is None and out["price"] is None)
+    _cache_put(cache_key, out, ttl=300.0 if thin else _CACHE_TTL_ANALYTICS)
+    return out
 
 
-def analyze_portfolio(rows: list[dict], weights_in: dict, period: str) -> dict:
-    out = analyze_portfolios_multi(rows, {"__single__": weights_in or {}}, period)
+def analyze_portfolio(rows: list[dict], weights_in: dict, period: str, display_ccy: str = "USD") -> dict:
+    out = analyze_portfolios_multi(rows, {"__single__": weights_in or {}}, period, display_ccy=display_ccy)
     if isinstance(out, dict) and "error" in out:
         return out
     return (out or {}).get("__single__", {"error": "no result"})
@@ -1091,6 +1686,7 @@ def analyze_portfolios_multi(
     rows: list[dict],
     weight_sets: dict[str, dict],
     period: str,
+    display_ccy: str = "USD",
 ) -> dict:
     """Run analytics for multiple weight vectors against the same row set + period.
 
@@ -1102,6 +1698,8 @@ def analyze_portfolios_multi(
     period_u = (period or "1Y").upper()
     if period_u not in _PERIOD_YF:
         period_u = "1Y"
+
+    display_ccy = _norm_ccy_for_fx(display_ccy or "USD")
 
     rows = [r for r in (rows or []) if r and r.get("symbol")]
     symbols = [str(r["symbol"]) for r in rows]
@@ -1122,7 +1720,7 @@ def analyze_portfolios_multi(
     per_set_cache_keys: dict[str, str] = {}
     cached_results: dict[str, dict] = {}
     for name, weights in normalized_sets.items():
-        key = "pf|" + "|".join(f"{s}:{weights[s]:.6f}" for s in sorted(symbols)) + f"|{period_u}"
+        key = "pf|" + "|".join(f"{s}:{weights[s]:.6f}" for s in sorted(symbols)) + f"|{period_u}|{display_ccy}"
         per_set_cache_keys[name] = key
         hit = _cache_get(key)
         if hit is not None:
@@ -1130,12 +1728,13 @@ def analyze_portfolios_multi(
     if len(cached_results) == len(normalized_sets):
         return cached_results
 
-    closes = _bulk_close(symbols + ["SPY"], period_u)
+    closes = _bulk_close(symbols + ["SPY", "QQQ"], period_u)
     warnings: list[str] = []
     missing = [s for s in symbols if s not in closes.columns]
     if missing:
         warnings.append(f"No price history for: {', '.join(missing)}")
     spy = closes["SPY"].dropna() if "SPY" in closes.columns else None
+    ndx = closes["QQQ"].dropna() if "QQQ" in closes.columns else None
     sym_closes = closes[[s for s in symbols if s in closes.columns]].dropna(how="all")
     if sym_closes.empty:
         return {"error": "no price history for portfolio", "warnings": warnings}
@@ -1143,6 +1742,25 @@ def analyze_portfolios_multi(
     active = [s for s in symbols if s in sym_closes.columns]
     if not active:
         return {"error": "no price history for portfolio", "warnings": warnings}
+
+    # Convert all price series to display_ccy so all returns are FX-adjusted.
+    # SPY is included in the same pass to share the FX download.
+    period_yf = _PERIOD_YF.get(period_u, "1y")
+    if display_ccy != "USD":
+        combined = sym_closes.copy()
+        if spy is not None and not spy.empty:
+            combined = combined.join(spy.rename("__SPY__"), how="outer")
+        if ndx is not None and not ndx.empty:
+            combined = combined.join(ndx.rename("__QQQ__"), how="outer")
+        combined_by_sym = dict(by_sym)
+        combined_by_sym["__SPY__"] = {"currency": "USD"}
+        combined_by_sym["__QQQ__"] = {"currency": "USD"}
+        converted = _apply_fx_to_closes(combined, combined_by_sym, display_ccy, period_yf)
+        sym_closes = converted[[c for c in converted.columns if c not in ("__SPY__", "__QQQ__")]]
+        if "__SPY__" in converted.columns:
+            spy = converted["__SPY__"].dropna()
+        if "__QQQ__" in converted.columns:
+            ndx = converted["__QQQ__"].dropna()
 
     sym_closes = sym_closes.ffill().dropna(how="any")
     if sym_closes.empty or len(sym_closes) < 3:
@@ -1159,6 +1777,15 @@ def analyze_portfolios_multi(
             spy_ret_full = spy_aligned_raw.pct_change().dropna()
         else:
             spy_aligned_raw = None
+
+    ndx_aligned_raw = None
+    ndx_ret_full = None
+    if ndx is not None and not ndx.empty:
+        ndx_aligned_raw = ndx.reindex(common_index).ffill().dropna()
+        if len(ndx_aligned_raw) >= 2:
+            ndx_ret_full = ndx_aligned_raw.pct_change().dropna()
+        else:
+            ndx_aligned_raw = None
 
     # Pre-fetch sector ETFs for every sector present in the row set (regardless
     # of weight), so different weight modes share the same download.
@@ -1225,8 +1852,35 @@ def analyze_portfolios_multi(
     if spy_aligned_raw is not None:
         spy_aligned_rebased = 100.0 * spy_aligned_raw / spy_aligned_raw.iloc[0]
         spy_stats_shared = _stats(spy_ret_full, spy_aligned_rebased)
+        # The SPY benchmark vs itself: beta=1, R²=1, tracking error=0.
+        spy_stats_shared.setdefault("beta_spy", 1.0)
+        spy_stats_shared.setdefault("r2_spy", 1.0)
+        spy_stats_shared.setdefault("te_spy", 0.0)
     spy_points_shared = _series_to_points(spy_aligned_rebased) if spy_aligned_rebased is not None else []
     spy_var_full = float(spy_ret_full.var()) if (spy_ret_full is not None and len(spy_ret_full) > 30) else None
+
+    ndx_stats_shared = {}
+    ndx_aligned_rebased = None
+    if ndx_aligned_raw is not None:
+        ndx_aligned_rebased = 100.0 * ndx_aligned_raw / ndx_aligned_raw.iloc[0]
+        ndx_stats_shared = _stats(ndx_ret_full, ndx_aligned_rebased)
+        # NASDAQ vs SPY benchmark — compute beta/R²/TE if SPY available.
+        if spy_ret_full is not None and spy_var_full and len(spy_ret_full) > 30:
+            common_n = ndx_ret_full.index.intersection(spy_ret_full.index)
+            if len(common_n) >= 30:
+                rp = ndx_ret_full.loc[common_n]
+                rb = spy_ret_full.loc[common_n]
+                cov = float(rp.cov(rb))
+                var_b = float(rb.var())
+                if var_b:
+                    ndx_stats_shared["beta_spy"] = cov / var_b
+                corr = rp.corr(rb)
+                if pd.notna(corr):
+                    ndx_stats_shared["r2_spy"] = float(corr * corr)
+                te = (rp - rb).std()
+                if te and pd.notna(te):
+                    ndx_stats_shared["te_spy"] = float(te * math.sqrt(252) * 100.0)
+    ndx_points_shared = _series_to_points(ndx_aligned_rebased) if ndx_aligned_rebased is not None else []
 
     daily_ret_active = daily_ret[active]
 
@@ -1299,28 +1953,80 @@ def analyze_portfolios_multi(
 
         rating_num = rating_w = upside_num = upside_w = 0.0
         n_analysts_total = 0
+        dist_sum = {"strongBuy": 0.0, "buy": 0.0, "hold": 0.0, "sell": 0.0, "strongSell": 0.0}
+        dist_w = 0.0
+        holdings_out: list[dict] = []
+        not_covered: list[dict] = []
         for s in active:
             blk = analyst_blocks.get(s, {})
+            row = by_sym.get(s, {})
             w = weights.get(s, 0.0)
             mr = blk.get("mean_rating")
-            if mr is not None and math.isfinite(float(mr)):
-                rating_num += float(mr) * w
-                rating_w += w
             tgt = blk.get("target_mean")
-            px = _safe_num(by_sym.get(s, {}).get("price")) or blk.get("price")
+            tgt_med = blk.get("target_median")
+            tgt_lo = blk.get("target_low")
+            tgt_hi = blk.get("target_high")
+            px = _safe_num(row.get("price")) or blk.get("price")
+            na = blk.get("n_analysts")
+            dist = blk.get("dist")
+            upside = None
             if tgt and px and px > 0:
                 upside = (float(tgt) / float(px) - 1.0) * 100.0
                 upside_num += upside * w
                 upside_w += w
-            na = blk.get("n_analysts")
+            if mr is not None and math.isfinite(float(mr)):
+                rating_num += float(mr) * w
+                rating_w += w
             if na is not None and math.isfinite(float(na)):
                 n_analysts_total += int(na)
+            if dist and isinstance(dist, dict):
+                tot_votes = sum(int(v or 0) for v in dist.values())
+                if tot_votes > 0:
+                    for k in dist_sum:
+                        dist_sum[k] += float(dist.get(k, 0) or 0) * w
+                    dist_w += w
+            has_coverage = bool((na and na > 0) or mr is not None or tgt or dist)
+            if has_coverage:
+                holdings_out.append({
+                    "symbol": s,
+                    "name": row.get("name") or s,
+                    "currency": row.get("currency") or blk.get("currency") or "USD",
+                    "weight": w,
+                    "price": px,
+                    "target_mean": tgt,
+                    "target_median": tgt_med,
+                    "target_low": tgt_lo,
+                    "target_high": tgt_hi,
+                    "upside_pct": upside,
+                    "mean_rating": mr,
+                    "rec_key": blk.get("rec_key"),
+                    "n_analysts": int(na) if (na is not None and math.isfinite(float(na))) else None,
+                    "dist": dist,
+                })
+            else:
+                not_covered.append({
+                    "symbol": s,
+                    "name": row.get("name") or s,
+                    "weight": w,
+                })
+        holdings_out.sort(key=lambda h: (-(h.get("weight") or 0), h["symbol"]))
+        dist_norm = None
+        if dist_w > 0:
+            dist_total_w = sum(dist_sum.values())
+            if dist_total_w > 0:
+                dist_norm = {k: (v / dist_total_w) * 100.0 for k, v in dist_sum.items()}
         analyst = {
             "mean_rating": (rating_num / rating_w) if rating_w > 0 else None,
             "rating_coverage_weight": rating_w,
             "weighted_target_upside_pct": (upside_num / upside_w) if upside_w > 0 else None,
             "target_coverage_weight": upside_w,
             "n_analysts_total": n_analysts_total,
+            "distribution_pct": dist_norm,
+            "distribution_weight": dist_w,
+            "holdings": holdings_out,
+            "not_covered": not_covered,
+            "covered_count": len(holdings_out),
+            "active_count": len(active),
         }
 
         by_sector: dict[str, float] = {}
@@ -1360,17 +2066,20 @@ def analyze_portfolios_multi(
 
         out_one = {
             "period": period_u,
+            "display_ccy": display_ccy,
             "weights_applied": weights,
             "active_symbols": active,
             "missing_symbols": missing,
             "series": {
                 "portfolio": _series_to_points(port_val),
                 "spy": spy_points_shared,
+                "nasdaq": ndx_points_shared,
                 "sector_mix": _series_to_points(sec_blend) if sec_blend is not None else [],
                 "drawdown": _series_to_points(drawdown),
             },
             "stats": {**pf_stats, "beta_spy": beta_spy, "r2_spy": r2_spy, "te_spy": te_spy},
             "spy_stats": spy_stats_shared,
+            "nasdaq_stats": ndx_stats_shared,
             "weighted": weighted,
             "analyst": analyst,
             "exposure": {
@@ -1383,7 +2092,7 @@ def analyze_portfolios_multi(
             "contribution": contribution,
             "warnings": warnings,
         }
-        _cache_put(per_set_cache_keys[name], out_one)
+        _cache_put(per_set_cache_keys[name], out_one, ttl=_CACHE_TTL_ANALYTICS)
         results[name] = out_one
 
     return results
@@ -1482,6 +2191,51 @@ INDEX_HTML = r"""<!doctype html>
   }
   button.danger:hover { background: rgba(248, 81, 73, 0.12); border-color: var(--neg); }
   button.danger:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* FX (denomination) selector */
+  .fx-menu { position: relative; display: inline-block; }
+  .fx-btn {
+    height: 30px; padding: 0 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg-canvas);
+    cursor: pointer; font-size: 12.5px; color: var(--text);
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: background 0.12s, border-color 0.12s;
+    font-variant-numeric: tabular-nums;
+  }
+  .fx-btn:hover { background: var(--bg-subtle); border-color: var(--accent); }
+  .fx-btn.open { border-color: var(--accent); background: var(--bg-subtle); }
+  .fx-btn-label { font-weight: 600; letter-spacing: 0.02em; }
+  .fx-btn-caret { font-size: 10px; color: var(--muted); }
+  .fx-dropdown {
+    position: absolute; right: 0; top: 36px;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    border-radius: 10px; padding: 6px; min-width: 168px;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.18);
+    display: none; z-index: 80;
+  }
+  .fx-dropdown.show { display: block; }
+  .fx-opt {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 6px 10px; border-radius: 6px; cursor: pointer;
+    font-size: 12.5px; color: var(--text);
+  }
+  .fx-opt:hover, .fx-opt.focused { background: var(--bg-subtle); }
+  .fx-opt.selected { background: rgba(47, 129, 247, 0.12); color: var(--accent); font-weight: 600; }
+  .fx-opt .fx-opt-code { font-weight: 600; letter-spacing: 0.02em; }
+  .fx-opt .fx-opt-name { color: var(--muted); font-size: 11.5px; }
+  .fx-hover {
+    position: absolute; right: 180px; top: 36px;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px; width: 240px;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.18);
+    display: none; z-index: 81;
+  }
+  .fx-hover.show { display: block; }
+  .fx-hover-title { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+  .fx-hover-svg { width: 100%; height: 80px; display: block; }
+  .fx-hover-foot { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .fx-hover-foot .pos { color: var(--pos); font-weight: 600; }
+  .fx-hover-foot .neg { color: var(--neg); font-weight: 600; }
 
   /* Theme toggle pill */
   .theme-switch {
@@ -1768,11 +2522,107 @@ INDEX_HTML = r"""<!doctype html>
     background: var(--accent); color: #fff;
   }
   .pf-overlay-toggles {
-    display: inline-flex; gap: 10px; margin-left: auto; flex-wrap: wrap;
-    font-size: 11.5px; color: var(--muted);
+    display: inline-flex; gap: 6px; margin-left: auto; flex-wrap: wrap;
+    font-size: 11.5px;
   }
-  .pf-overlay-toggles label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
-  .pf-overlay-toggles input[type="checkbox"] { accent-color: var(--accent); }
+  .pf-overlay-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 9px; border-radius: 999px; cursor: pointer;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    color: var(--muted); user-select: none; transition: all 0.12s ease;
+    position: relative;
+  }
+  .pf-overlay-pill:hover { color: var(--text); border-color: var(--accent); }
+  .pf-overlay-pill .swatch {
+    width: 9px; height: 9px; border-radius: 2px; display: inline-block;
+    background: var(--muted); transition: background 0.12s;
+  }
+  .pf-overlay-pill[data-on="1"] {
+    color: var(--text); background: var(--accent-soft, rgba(47,129,247,0.10));
+    border-color: var(--accent); font-weight: 600;
+  }
+  .pf-overlay-pill[data-on="1"] .swatch.spy { background: #8b5cf6; }
+  .pf-overlay-pill[data-on="1"] .swatch.ndx { background: #06b6d4; }
+  .pf-overlay-pill[data-on="1"] .swatch.sec { background: #f59e0b; }
+  .pf-overlay-pill[data-on="1"] .swatch.dd  { background: #f85149; }
+  .pf-overlay-pill[data-on="0"] .swatch { opacity: 0.35; }
+  .pf-overlay-pill .ovl-info {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 13px; height: 13px; border-radius: 50%; border: 1px solid currentColor;
+    font-size: 9px; font-weight: 700; opacity: 0.55; cursor: help;
+    font-family: -apple-system, "Segoe UI", sans-serif;
+  }
+  .pf-overlay-pill .ovl-info:hover { opacity: 1; }
+  .pf-overlay-pill [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute; top: calc(100% + 8px); right: 0;
+    background: var(--bg-canvas); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 11px; font-size: 11.5px; font-weight: 500;
+    line-height: 1.5; text-align: left; white-space: normal;
+    width: max-content; max-width: 280px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.22);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.12s ease 0.15s;
+    z-index: 1000;
+  }
+  .pf-overlay-pill [data-tip]:hover::after { opacity: 1; }
+
+  /* Risk & Return metric hover tooltips (LaTeX + explanation) */
+  .pf-stat-row[data-info] { position: relative; }
+  .pf-stat-row[data-info] .l { cursor: help; }
+  .pf-metric-tip {
+    position: absolute; left: 0; top: 24px; z-index: 1000;
+    width: 340px; max-width: 92vw;
+    background: var(--bg-canvas); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 11px 13px;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.20);
+    font-size: 11.5px; line-height: 1.55;
+    display: none;
+  }
+  .pf-stat-row[data-info]:hover .pf-metric-tip { display: block; }
+  .pf-metric-tip .mt-name { font-weight: 700; font-size: 12.5px; margin-bottom: 4px; }
+  .pf-metric-tip .mt-formula { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin: 4px 0 6px; overflow-x: auto; }
+  .pf-metric-tip .mt-formula .katex { font-size: 1.0em; }
+  .pf-metric-tip .mt-formula .katex-display { margin: 0 !important; }
+  .pf-metric-tip .mt-desc { color: var(--text); margin-bottom: 4px; }
+  .pf-metric-tip .mt-range { color: var(--muted); font-size: 11px; }
+  .pf-metric-tip .mt-range b { color: var(--text); font-weight: 600; }
+  /* Right-side metric: anchor tooltip to the right edge so it doesn't clip */
+  .pf-stats .pf-stat-row:nth-child(2n)[data-info] .pf-metric-tip { left: auto; right: 0; }
+
+  /* Portfolio chart interaction (brush + crosshair tooltip) */
+  .pf-chart-wrap svg .pf-cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; pointer-events: none; }
+  .pf-chart-wrap svg .pf-dot   { fill: var(--accent); stroke: var(--bg-canvas); stroke-width: 2; opacity: 0; pointer-events: none; }
+  .pf-chart-wrap svg .pf-dot.spy { fill: #8b5cf6; }
+  .pf-chart-wrap svg .pf-dot.ndx { fill: #06b6d4; }
+  .pf-chart-wrap svg .pf-dot.sec { fill: #f59e0b; }
+  .pf-chart-wrap svg .pf-sel { fill: var(--accent); opacity: 0.10; pointer-events: none; }
+  .pf-chart-wrap .pf-tt {
+    position: absolute; pointer-events: none; z-index: 5;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 10px; font-size: 11.5px; line-height: 1.5; color: var(--text);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.15);
+    opacity: 0; transition: opacity 0.08s;
+    min-width: 140px; white-space: nowrap;
+  }
+  .pf-chart-wrap .pf-tt.show { opacity: 1; }
+  .pf-chart-wrap .pf-tt .tt-date { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+  .pf-chart-wrap .pf-tt .tt-row { display: flex; justify-content: space-between; gap: 10px; }
+  .pf-chart-wrap .pf-tt .tt-row b { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pf-chart-wrap .pf-tt .pos { color: var(--pos); }
+  .pf-chart-wrap .pf-tt .neg { color: var(--neg); }
+  .pf-chart-info {
+    margin-top: 6px; padding: 6px 10px;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 6px;
+    font-size: 11.5px; color: var(--muted);
+    display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .pf-chart-info b { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pf-chart-info .pos { color: var(--pos); }
+  .pf-chart-info .neg { color: var(--neg); }
+  .pf-chart-info .selection-hint { color: var(--muted); margin-left: auto; font-style: italic; }
 
   .pf-analytics-body { padding: 12px; }
   .pf-empty {
@@ -2010,16 +2860,204 @@ INDEX_HTML = r"""<!doctype html>
   .tri-down { color: var(--neg); font-size: 13px; }
   .na { color: var(--muted); }
 
-  /* Footer */
-  .footer {
-    border-top: 1px solid var(--border); padding: 9px 16px; display: flex;
-    justify-content: space-between; align-items: center; color: var(--muted);
-    font-size: 12px; background: var(--bg-subtle);
-    margin: 0 16px 16px; border-radius: 0 0 10px 10px;
-    border-left: 1px solid var(--border); border-right: 1px solid var(--border);
-    border-bottom: 1px solid var(--border); border-top: none;
+  /* Analyst sentiment dashboard (replaces the old footer block) */
+  #analyst-dashboard {
+    margin: 16px 16px 16px; padding: 16px;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px;
   }
-  .footer .averages b { color: var(--text); font-weight: 700; }
+  .an-head {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+  }
+  .an-head .an-title { font-size: 14px; font-weight: 700; color: var(--text); }
+  .an-head .an-sub { font-size: 11.5px; color: var(--muted); }
+  .an-head .an-mode-note { margin-left: auto; font-size: 11.5px; color: var(--muted); position: relative; }
+  .an-head .an-mode-note b { color: var(--text); font-weight: 600; }
+  .an-mode-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    color: var(--text); font-weight: 600; font-size: 11.5px;
+    padding: 3px 10px; border-radius: 999px; cursor: pointer;
+    transition: border-color 0.12s ease, background 0.12s ease;
+    font-family: inherit;
+  }
+  .an-mode-btn:hover { border-color: var(--accent); background: var(--bg-subtle); }
+  .an-mode-btn .an-caret { font-size: 9px; opacity: 0.7; transition: transform 0.12s ease; }
+  .an-mode-btn.open .an-caret { transform: rotate(180deg); }
+  .an-mode-menu {
+    display: none; position: absolute; top: calc(100% + 6px); right: 0;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.22);
+    min-width: 160px; z-index: 1000; padding: 4px;
+  }
+  .an-mode-menu.show { display: block; }
+  .an-mode-opt {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 7px 10px; border-radius: 6px; cursor: pointer;
+    font-size: 12px; color: var(--text); user-select: none;
+  }
+  .an-mode-opt:hover { background: var(--bg-subtle); }
+  .an-mode-opt[data-selected="1"] { color: var(--accent); font-weight: 600; }
+  .an-mode-opt[data-selected="1"]::after { content: "✓"; color: var(--accent); margin-left: 8px; }
+  .an-grid {
+    display: grid; gap: 12px;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1.1fr);
+  }
+  @media (max-width: 1100px) { .an-grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 740px)  { .an-grid { grid-template-columns: 1fr; } }
+  .an-card {
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .an-card h4 {
+    margin: 0 0 10px; font-size: 11.5px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .an-card h4 .an-sub { color: var(--muted); font-size: 11px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+
+  /* Hero gauge (weighted rating) */
+  .an-rating-num {
+    font-size: 30px; font-weight: 700; color: var(--text); line-height: 1;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.5px;
+  }
+  .an-rating-key {
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+    margin-left: 8px; vertical-align: middle;
+  }
+  .an-rating-key.buy { background: rgba(34,197,94,0.15); color: #16a34a; }
+  .an-rating-key.strong-buy { background: rgba(21,128,61,0.20); color: #15803d; }
+  .an-rating-key.hold { background: rgba(234,179,8,0.18); color: #ca8a04; }
+  .an-rating-key.sell { background: rgba(249,115,22,0.18); color: #ea580c; }
+  .an-rating-key.strong-sell { background: rgba(220,38,38,0.20); color: #dc2626; }
+  .an-gauge {
+    width: 100%; height: 10px; border-radius: 99px; margin: 12px 0 4px;
+    background: linear-gradient(to right, #15803d 0%, #22c55e 25%, #eab308 50%, #f97316 75%, #dc2626 100%);
+    position: relative;
+  }
+  .an-gauge .needle {
+    position: absolute; top: -3px; width: 4px; height: 16px;
+    background: var(--text); border-radius: 2px; transform: translateX(-50%);
+    box-shadow: 0 0 0 2px var(--bg-subtle);
+  }
+  .an-gauge-labels {
+    display: flex; justify-content: space-between; font-size: 9.5px;
+    color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; margin-top: 4px;
+  }
+  .an-rating-meta { margin-top: 10px; font-size: 11.5px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+  .an-rating-meta b { color: var(--text); font-weight: 600; }
+
+  /* Distribution bar (Strong Buy / Buy / Hold / Sell / Strong Sell) */
+  .an-dist-bar {
+    display: flex; height: 22px; border-radius: 6px; overflow: hidden;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+  }
+  .an-dist-bar > div {
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 10.5px; font-weight: 700;
+    text-shadow: 0 1px 0 rgba(0,0,0,0.2); overflow: hidden;
+  }
+  .an-dist-bar .sb { background: #15803d; }
+  .an-dist-bar .b  { background: #22c55e; }
+  .an-dist-bar .h  { background: #eab308; color: #1f2328; text-shadow: none; }
+  .an-dist-bar .s  { background: #f97316; }
+  .an-dist-bar .ss { background: #dc2626; }
+  .an-dist-legend {
+    display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 10px;
+    font-size: 10.5px; color: var(--muted);
+  }
+  .an-dist-legend span { display: inline-flex; align-items: center; gap: 4px; }
+  .an-dist-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+
+  /* Upside hero card (weighted target upside) */
+  .an-upside-num {
+    font-size: 30px; font-weight: 700; line-height: 1;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.5px;
+  }
+  .an-upside-num.pos { color: var(--pos); }
+  .an-upside-num.neg { color: var(--neg); }
+  .an-upside-meta { margin-top: 8px; font-size: 11.5px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+  .an-upside-meta b { color: var(--text); font-weight: 600; }
+  .an-coverage-bar {
+    margin-top: 10px; height: 6px; border-radius: 99px; overflow: hidden;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    position: relative;
+  }
+  .an-coverage-bar .fill { height: 100%; background: var(--accent); }
+
+  /* Per-holding table */
+  .an-table-wrap { overflow-x: auto; }
+  .an-table {
+    width: 100%; border-collapse: collapse; font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .an-table th {
+    text-align: right; padding: 6px 8px; color: var(--muted); font-weight: 700;
+    border-bottom: 1px solid var(--border); white-space: nowrap;
+    text-transform: uppercase; font-size: 10px; letter-spacing: 0.4px;
+    cursor: pointer; user-select: none;
+  }
+  .an-table th:hover { color: var(--accent); }
+  .an-table th .arrow { color: var(--accent); margin-left: 3px; font-size: 9px; }
+  .an-table th:first-child, .an-table td:first-child { text-align: left; }
+  .an-table td {
+    padding: 5px 8px; border-bottom: 1px solid var(--border);
+    text-align: right; white-space: nowrap; color: var(--text);
+  }
+  .an-table tr:last-child td { border-bottom: none; }
+  .an-table td.sym { font-weight: 700; }
+  .an-table td .muted { color: var(--muted); font-size: 10.5px; margin-left: 4px; }
+  .an-table td.pos { color: var(--pos); font-weight: 600; }
+  .an-table td.neg { color: var(--neg); font-weight: 600; }
+  .an-table td .rk {
+    display: inline-block; padding: 1px 7px; border-radius: 999px;
+    font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  .an-table td .rk.buy { background: rgba(34,197,94,0.15); color: #16a34a; }
+  .an-table td .rk.strong-buy { background: rgba(21,128,61,0.20); color: #15803d; }
+  .an-table td .rk.hold { background: rgba(234,179,8,0.18); color: #ca8a04; }
+  .an-table td .rk.sell { background: rgba(249,115,22,0.18); color: #ea580c; }
+  .an-table td .rk.strong-sell { background: rgba(220,38,38,0.20); color: #dc2626; }
+  .an-table td .rk.none { background: var(--bg-subtle); color: var(--muted); }
+  .an-mini-dist {
+    display: inline-flex; height: 8px; border-radius: 3px; overflow: hidden;
+    background: var(--bg-canvas); border: 1px solid var(--border); width: 96px;
+  }
+  .an-mini-dist > div { height: 100%; }
+  .an-mini-dist .sb { background: #15803d; }
+  .an-mini-dist .b  { background: #22c55e; }
+  .an-mini-dist .h  { background: #eab308; }
+  .an-mini-dist .s  { background: #f97316; }
+  .an-mini-dist .ss { background: #dc2626; }
+
+  /* Target waterfall (mini) — used in the per-row visualization */
+  .an-target-bar {
+    position: relative; height: 18px; width: 160px;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 4px;
+    display: inline-block; vertical-align: middle;
+  }
+  .an-target-bar .range {
+    position: absolute; top: 6px; height: 6px; background: var(--accent-soft, rgba(47,129,247,0.15));
+    border-radius: 2px;
+  }
+  .an-target-bar .mark { position: absolute; top: 2px; width: 2px; height: 14px; transform: translateX(-1px); }
+  .an-target-bar .mark.current { background: var(--text); }
+  .an-target-bar .mark.target  { background: var(--accent); }
+  .an-target-bar .mark.low, .an-target-bar .mark.high { background: var(--muted); opacity: 0.6; width: 1.5px; }
+
+  /* Coverage footer chip */
+  .an-coverage-foot {
+    margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    flex-wrap: wrap; font-size: 11.5px; color: var(--muted);
+  }
+  .an-coverage-foot b { color: var(--text); font-weight: 600; }
+  .an-coverage-foot .credit { color: var(--muted); font-size: 11px; }
+  .an-not-covered {
+    color: var(--muted); font-size: 11px;
+  }
+  .an-not-covered b { color: var(--text); font-weight: 600; }
 
   /* ===== Detail modal ===== */
   .modal-bg {
@@ -2257,13 +3295,25 @@ INDEX_HTML = r"""<!doctype html>
     <div class="dropdown" id="sort-dropdown"></div>
   </div>
   <span class="spacer"></span>
-  <button class="info-btn" id="info-btn" title="How this works"><span class="info-icon-circle">i</span></button>
+  <span class="status" id="status">Idle</span>
+  <div class="fx-menu" id="fx-menu">
+    <button class="fx-btn" id="fx-btn" type="button" title="Portfolio denomination currency">
+      <span class="fx-btn-label" id="fx-btn-label">USD</span>
+      <span class="fx-btn-caret">▾</span>
+    </button>
+    <div class="fx-dropdown" id="fx-dropdown" role="listbox" aria-hidden="true"></div>
+    <div class="fx-hover" id="fx-hover" aria-hidden="true">
+      <div class="fx-hover-title" id="fx-hover-title"></div>
+      <svg class="fx-hover-svg" id="fx-hover-svg" viewBox="0 0 220 80" preserveAspectRatio="none"></svg>
+      <div class="fx-hover-foot" id="fx-hover-foot"></div>
+    </div>
+  </div>
   <button class="theme-switch" id="theme-switch" title="Toggle theme" aria-label="Toggle theme">
     <i class="ts-icon" id="ts-sun">&#9728;</i>
     <span class="ts-track" id="ts-track"><span class="ts-thumb"></span></span>
     <i class="ts-icon" id="ts-moon">&#9790;</i>
   </button>
-  <span class="status" id="status">Idle</span>
+  <button class="info-btn" id="info-btn" title="How this works"><span class="info-icon-circle">i</span></button>
 </div>
 <div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
 
@@ -2305,10 +3355,21 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <button data-p="5Y">5Y</button>
         <button data-p="MAX">Max</button>
       </div>
-      <div class="pf-overlay-toggles" id="pf-overlay-toggles">
-        <label><input type="checkbox" id="pf-show-spy" checked> SPY</label>
-        <label><input type="checkbox" id="pf-show-sec"> Sector mix</label>
-        <label><input type="checkbox" id="pf-show-dd" checked> Drawdown</label>
+      <div class="pf-overlay-toggles" id="pf-overlay-toggles" role="group" aria-label="Chart overlays">
+        <span class="pf-overlay-pill" id="pf-show-spy" data-on="1" role="switch" aria-checked="true" tabindex="0">
+          <span class="swatch spy"></span>SPY
+        </span>
+        <span class="pf-overlay-pill" id="pf-show-ndx" data-on="0" role="switch" aria-checked="false" tabindex="0">
+          <span class="swatch ndx"></span>NASDAQ
+          <span class="ovl-info" data-tip="NASDAQ-100 proxy via QQQ — the 100 largest non-financial Nasdaq listings. Useful as a tech-heavy benchmark next to SPY's broad-market read.">i</span>
+        </span>
+        <span class="pf-overlay-pill" id="pf-show-sec" data-on="0" role="switch" aria-checked="false" tabindex="0">
+          <span class="swatch sec"></span>Sector mix
+          <span class="ovl-info" data-tip="Sector mix is a synthetic benchmark: each portfolio holding is replaced by its sector ETF (XLK Technology, XLV Healthcare, XLF Financials, XLY Consumer Cyclical, XLP Consumer Defensive, XLC Communication, XLE Energy, XLI Industrials, XLB Materials, XLRE Real Estate, XLU Utilities). Weights match your active mode (equal / cap / custom). Compare your stock picks against the matching sector basket.">i</span>
+        </span>
+        <span class="pf-overlay-pill" id="pf-show-dd" data-on="1" role="switch" aria-checked="true" tabindex="0">
+          <span class="swatch dd"></span>Drawdown
+        </span>
       </div>
     </div>
     <div class="pf-analytics-body" id="pf-analytics-body">
@@ -2355,11 +3416,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   </table>
 </div>
 
-<div class="footer">
-  <span class="credit">📈 Local Portfolio Dashboard · yfinance · no API key</span>
-  <span class="averages" id="averages">Avg. P/S <b>—</b> &nbsp;&nbsp; P/E <b>—</b></span>
-  <span class="date" id="footer-date"></span>
-</div>
+<div id="analyst-dashboard" aria-label="Analyst sentiment dashboard"></div>
 
 <div class="info-bg" id="info-bg">
   <div class="info-modal">
@@ -2385,7 +3442,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
       </div>
       <div class="info-card">
         <div class="info-card-name">Price</div>
-        <div class="info-card-desc">Last available closing price in USD, as of the build/refresh time.</div>
+        <div class="info-card-desc">Last available closing price, converted to the selected display currency (see FX selector in the top bar).</div>
       </div>
       <div class="info-card">
         <div class="info-card-name">Market Cap</div>
@@ -2454,9 +3511,9 @@ const COLS = [
   { key: "name",        label: "Company",   w: 220, align: "left", sortable: true,
     render: (r) => escapeHtml(r.name || ""), td_cls: "name left" },
   { key: "price",       label: "Price",     w: 90,  align: "right", sortable: true,
-    render: (r) => fmtMoney(r.price) },
+    render: (r) => fmtMoney(r.price, r.currency) },
   { key: "market_cap",  label: "Market Cap",w: 86,  align: "right", sortable: true,
-    render: (r) => fmtCompactMoney(r.market_cap) },
+    render: (r) => fmtCompactMoney(r.market_cap, r.currency) },
   /* P/S: analyst rule-of-thumb — anchor full-orange at P/S = 10. n/a is also
      suspicious so we paint it the most saturated colour. */
   { key: "ps_ratio",    label: "P/S",       w: 56,  align: "right", sortable: true,
@@ -2497,7 +3554,7 @@ const COLS = [
 const COL_INFO = {
   symbol:        "Exchange ticker symbol (e.g. AAPL, NVDA, XLK).",
   name:          "Full company or fund name from Yahoo Finance.",
-  price:         "Last available closing price in USD, as of the build/refresh time.",
+  price:         "Last available closing price, converted to the selected display currency (see FX selector in the top bar).",
   market_cap:    "Total market value of all outstanding shares (Price × Shares Outstanding).",
   ps_ratio:      "Price-to-Sales: market cap ÷ trailing-12-month revenue. Heat anchors at P/S = 10; n/a is flagged.",
   pe_ratio:      "Price-to-Earnings: price ÷ trailing-12-month EPS. Heat anchors at P/E = 40; above 50 implies heavy growth pricing.",
@@ -2562,20 +3619,91 @@ function rgbMix(c1, c2, t) {
   return rgb(lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t));
 }
 
-function fmtMoney(v) {
-  if (v == null || !isFinite(v)) return na();
-  return "$" + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+/* ===========================================================================
+ * FX (denomination) module
+ * --------------------------------------------------------------------------- */
+const FX_SUPPORTED = ["USD","EUR","GBP","JPY","CHF","CAD","AUD","NZD","CNY","ZAR","MXN","SGD","HKD","INR"];
+const FX_NAMES = {
+  USD: "US Dollar",       EUR: "Euro",
+  GBP: "British Pound",   JPY: "Japanese Yen",
+  CHF: "Swiss Franc",     CAD: "Canadian Dollar",
+  AUD: "Australian Dollar", NZD: "New Zealand Dollar",
+  CNY: "Chinese Yuan",    ZAR: "South African Rand",
+  MXN: "Mexican Peso",    SGD: "Singapore Dollar",
+  HKD: "Hong Kong Dollar", INR: "Indian Rupee",
+};
+const FX_SYMBOL = {
+  USD: "$",   EUR: "€",   GBP: "£",   JPY: "¥",   CHF: "Fr",
+  CAD: "C$",  AUD: "A$",  NZD: "NZ$", CNY: "CN¥", ZAR: "R",
+  MXN: "Mex$", SGD: "S$", HKD: "HK$", INR: "₹",
+};
+/* Number of decimals to show for the displayed currency. JPY/HKD/CNY trade
+   in much larger nominal units, so .00 looks silly. */
+const FX_DECIMALS = { JPY: 0, HKD: 1, CNY: 2 };
+/* USD-based: rates[ccy] = how many `ccy` per 1 USD. Populated on load. */
+let FX_RATES = { USD: 1.0 };
+let FX_QUOTE = "USD";       // user-selected display currency
+let FX_INDEX_CACHE = {};    // { ccy: [[ts,val],...] }
+let FX_INDEX_INFLIGHT = {}; // { ccy: Promise }
+
+function fxLoadPref() {
+  try {
+    const saved = localStorage.getItem("fx_quote");
+    if (saved && FX_SUPPORTED.indexOf(saved) >= 0) FX_QUOTE = saved;
+  } catch (e) {}
 }
-function fmtCompactMoney(v) {
+
+async function fxLoadRates() {
+  try {
+    const r = await fetch("/api/fx-rates?base=USD");
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j && j.rates) FX_RATES = j.rates;
+  } catch (e) {}
+}
+
+/* Convert `amount` from `fromCcy` to the active display currency.
+   Handles Yahoo's pence/cents subunits (LSE → GBp, JSE → ZAc). */
+function fxConvert(amount, fromCcy) {
+  if (amount == null || !isFinite(amount)) return amount;
+  let from = fromCcy || "USD";
+  let scale = 1;
+  if (from === "GBp" || from === "GBX") { from = "GBP"; scale = 0.01; }
+  else if (from === "ZAc") { from = "ZAR"; scale = 0.01; }
+  from = String(from).toUpperCase();
+  const base = amount * scale;
+  const to = FX_QUOTE;
+  if (from === to) return base;
+  const rFrom = FX_RATES[from];   // from per USD
+  const rTo = FX_RATES[to];       // to per USD
+  if (!rFrom || !rTo) return base;  // graceful: no conversion data
+  return base * (rTo / rFrom);
+}
+
+function fxDecimals(ccy) {
+  const d = FX_DECIMALS[ccy || FX_QUOTE];
+  return d == null ? 2 : d;
+}
+
+function fmtMoney(v, ccy) {
+  if (v == null || !isFinite(v)) return na();
+  const converted = fxConvert(v, ccy);
+  const sym = FX_SYMBOL[FX_QUOTE] || (FX_QUOTE + " ");
+  const dec = fxDecimals(FX_QUOTE);
+  return sym + Number(converted).toLocaleString(undefined, {minimumFractionDigits: dec, maximumFractionDigits: dec});
+}
+function fmtCompactMoney(v, ccy) {
   if (v == null || !isFinite(v) || v === 0) return na();
-  const a = Math.abs(v);
+  const converted = fxConvert(v, ccy);
+  const sym = FX_SYMBOL[FX_QUOTE] || (FX_QUOTE + " ");
+  const a = Math.abs(converted);
   let unit, scaled;
-  if (a >= 1e12) { unit = "T"; scaled = v/1e12; }
-  else if (a >= 1e9) { unit = "B"; scaled = v/1e9; }
-  else if (a >= 1e6) { unit = "M"; scaled = v/1e6; }
-  else if (a >= 1e3) { unit = "K"; scaled = v/1e3; }
-  else { return "$" + v.toFixed(2); }
-  return "$" + scaled.toFixed(1) + unit;
+  if (a >= 1e12) { unit = "T"; scaled = converted/1e12; }
+  else if (a >= 1e9) { unit = "B"; scaled = converted/1e9; }
+  else if (a >= 1e6) { unit = "M"; scaled = converted/1e6; }
+  else if (a >= 1e3) { unit = "K"; scaled = converted/1e3; }
+  else { return sym + converted.toFixed(2); }
+  return sym + scaled.toFixed(1) + unit;
 }
 function fmt2(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed(2); }
 function fmtPctSigned(v) {
@@ -2803,7 +3931,6 @@ function render() {
   const tbody = $("#tbody"); tbody.innerHTML = "";
   if (!DATA.length) {
     tbody.innerHTML = `<tr><td colspan="${COLS.length}" style="padding:30px; text-align:center; color:var(--muted);">Press <b>Build Dashboard</b> above to load your portfolio.</td></tr>`;
-    $("#averages").innerHTML = "Avg. P/S <b>—</b> &nbsp;&nbsp; P/E <b>—</b>";
     return;
   }
   let rows = DATA.slice();
@@ -2844,11 +3971,6 @@ function render() {
     tr.onclick = () => openModal(r);
     tbody.appendChild(tr);
   }
-  const ps = rows.map(r => r.ps_ratio).filter(v => v != null && isFinite(v));
-  const pe = rows.map(r => r.pe_ratio).filter(v => v != null && isFinite(v));
-  const psAvg = ps.length ? (ps.reduce((a,b)=>a+b,0) / ps.length) : null;
-  const peAvg = pe.length ? (pe.reduce((a,b)=>a+b,0) / pe.length) : null;
-  $("#averages").innerHTML = `Avg. P/S <b>${psAvg != null ? psAvg.toFixed(2) : "—"}</b> &nbsp;&nbsp; P/E <b>${peAvg != null ? peAvg.toFixed(2) : "—"}</b>`;
 }
 
 /* ===========================================================================
@@ -2894,7 +4016,9 @@ function renderModalSkeleton() {
   const pc = r.pct_1d;
   const chgCls = (pc != null && pc >= 0) ? "pos" : "neg";
   const sign = (pc != null && pc >= 0) ? "▲" : "▼";
-  const change = (r.change_abs_1d != null) ? (r.change_abs_1d >= 0 ? "+" : "") + r.change_abs_1d.toFixed(2) : "—";
+  const change = (r.change_abs_1d != null)
+    ? (r.change_abs_1d >= 0 ? "+" : "−") + fmtMoney(Math.abs(r.change_abs_1d), r.currency)
+    : "—";
   $("#modal").innerHTML = `
     <div class="m-head">
       ${logoImg(r.symbol)}
@@ -2906,7 +4030,7 @@ function renderModalSkeleton() {
         </div>
       </div>
       <div class="m-price-block">
-        <div class="p-now">${fmtMoney(r.price)}</div>
+        <div class="p-now">${fmtMoney(r.price, r.currency)}</div>
         <div class="p-chg ${chgCls}">${sign} ${fmtPctSigned(pc)} <span style="opacity:0.7">(${change})</span></div>
       </div>
       <button class="m-close" onclick="closeModal()" title="Close">×</button>
@@ -3205,7 +4329,7 @@ function attachChartInteraction() {
     const dt = new Date(sp[0]);
     tt.innerHTML = `
       <div class="tt-date">${dt.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'})}</div>
-      <div class="tt-row"><span class="tt-label">Price</span><b>${fmtMoney(sp[1])}</b></div>
+      <div class="tt-row"><span class="tt-label">Price</span><b>${fmtMoney(sp[1], DETAIL.data && DETAIL.data.currency)}</b></div>
       <div class="tt-row"><span class="tt-label">${DETAIL.data.symbol}</span><b style="color:${stockPct>=0?'var(--pos)':'var(--neg)'}">${(stockPct>=0?'+':'')+stockPct.toFixed(2)}%</b></div>
       ${extra}
     `;
@@ -3291,19 +4415,19 @@ function renderSections() {
   const snap = [
     ["Volume", fmtCompactNum(d.day_volume)],
     ["Avg Volume", fmtCompactNum(d.avg_volume)],
-    ["52W High", fmtMoney(d.w52_high)],
-    ["52W Low", fmtMoney(d.w52_low)],
-    ["ATH", fmtMoney(d.ath)],
-    ["Market Cap", fmtCompactMoney(d.market_cap)],
+    ["52W High", fmtMoney(d.w52_high, d.currency)],
+    ["52W Low", fmtMoney(d.w52_low, d.currency)],
+    ["ATH", fmtMoney(d.ath, d.currency)],
+    ["Market Cap", fmtCompactMoney(d.market_cap, d.currency)],
     ["Shares Out", fmtCompactNum(d.shares)],
     ["Beta", fmt2(d.beta)],
   ];
 
   // ---- Valuation
   const val = [
-    ["Revenue (TTM)", fmtCompactMoney(d.total_revenue)],
+    ["Revenue (TTM)", fmtCompactMoney(d.total_revenue, d.currency)],
     ["Revenue Growth", fmtPctFrac(d.revenue_growth)],
-    ["Free Cash Flow", fmtCompactMoney(d.free_cashflow)],
+    ["Free Cash Flow", fmtCompactMoney(d.free_cashflow, d.currency)],
     ["FCF Yield", fmtPctFrac(fcfYield)],
     ["Fwd P/E", fmt2(d.forward_pe)],
     ["P/E (TTM)", fmt2(d.pe)],
@@ -3351,14 +4475,14 @@ function renderSections() {
       tbHtml = `
         <div class="m-target-bar">
           <div class="tb-track"></div>
-          <span class="tb-low">${fmtMoney(d.target_low)}</span>
+          <span class="tb-low">${fmtMoney(d.target_low, d.currency)}</span>
           <div class="tb-mark current" style="left:${pct(d.price).toFixed(1)}%" title="Current"></div>
           ${d.target_mean != null ? `<div class="tb-mark target" style="left:${pct(d.target_mean).toFixed(1)}%" title="Mean target"></div>` : ""}
-          <span class="tb-high">${fmtMoney(d.target_high)}</span>
+          <span class="tb-high">${fmtMoney(d.target_high, d.currency)}</span>
         </div>
         <div class="m-target-labels">
-          <span>Current <b>${fmtMoney(d.price)}</b></span>
-          <span>Mean target <b>${fmtMoney(d.target_mean)}</b>
+          <span>Current <b>${fmtMoney(d.price, d.currency)}</b></span>
+          <span>Mean target <b>${fmtMoney(d.target_mean, d.currency)}</b>
             ${upside != null ? `<span class="upside ${upside>=0?'pos':'neg'}">(${(upside>=0?'+':'')+upside.toFixed(1)}%)</span>` : ""}
           </span>
         </div>
@@ -3413,10 +4537,10 @@ function renderSections() {
 
   // ---- Fundamentals
   const funda = [
-    ["Revenue (TTM)", fmtCompactMoney(d.total_revenue)],
+    ["Revenue (TTM)", fmtCompactMoney(d.total_revenue, d.currency)],
     ["Revenue Growth", fmtPctFrac(d.revenue_growth)],
     ["Earnings Growth", fmtPctFrac(d.earnings_growth)],
-    ["Free Cash Flow", fmtCompactMoney(d.free_cashflow)],
+    ["Free Cash Flow", fmtCompactMoney(d.free_cashflow, d.currency)],
     ["ROA", fmtPctFrac(d.roa)],
     ["Current Ratio", fmt2(d.current_ratio)],
   ];
@@ -3426,7 +4550,7 @@ function renderSections() {
   if (d.dividend_yield != null || d.dividend_rate != null || d.ex_div_date) {
     const divItems = [
       ["Yield", fmtPctDirect(d.dividend_yield)],
-      ["Rate", fmtMoney(d.dividend_rate)],
+      ["Rate", fmtMoney(d.dividend_rate, d.currency)],
       ["Payout", fmtPctFrac(d.payout_ratio)],
       ["Ex-Div Date", d.ex_div_date || "—"],
     ];
@@ -3557,12 +4681,26 @@ let STATE = {
   customWeights: null,     // {symbol: fraction}, set after user applies the popup
   period: "1Y",
   showSpy: true,
+  showNdx: false,
   showSec: false,
   showDd: true,
   analytics: null,
   analyticsLoading: false,
-  analyticsByMode: {},   // {"<mode>|<period>": result}
+  // {tabName: {"<mode>|<period>|<ccy>": result}} — persisted per tab so
+  // switching back to a previously-visited tab paints from memory.
+  analyticsByTab: {},
 };
+
+function analyticsMapForTab(name) {
+  const key = name || AD_HOC_KEY;
+  let m = STATE.analyticsByTab[key];
+  if (!m) { m = {}; STATE.analyticsByTab[key] = m; }
+  return m;
+}
+function currentAnalyticsMap() { return analyticsMapForTab(STATE.activeView); }
+function invalidateAnalyticsForTab(name) {
+  delete STATE.analyticsByTab[name || AD_HOC_KEY];
+}
 let WATCHLISTS = {};        // name -> entries-string (saved watchlists)
 let VIEWS = {};             // name -> {entries, saved_at, row_count, stale}
 let LAST_VIEW = null;
@@ -3627,7 +4765,7 @@ async function build(opts) {
     await persistView(targetName, raw, DATA);
     STATE.customWeights = null;  // new build — drop stale custom weights
     if (STATE.mode === "custom") STATE.mode = "cap";
-    STATE.analyticsByMode = {};  // invalidate cache for new data
+    invalidateAnalyticsForTab(targetName);  // rebuild invalidates this tab only
     requestAnalytics();
   } catch (e) {
     toast("Error: " + e.message);
@@ -3673,6 +4811,76 @@ async function loadAllAtStartup() {
     STATE.activeView = null;
     renderEditorMeta();
   }
+  // Background warm-up — sequenced so we don't saturate yfinance with parallel
+  // requests. Portfolio warm-up first (one bulk download per tab is heavier
+  // and benefits more from being warm), then FX hover charts.
+  setTimeout(() => {
+    warmRecentTabs().then(() => {
+      setTimeout(() => preloadFxIndexes(), 1500);
+    });
+  }, 1200);
+}
+
+async function preloadFxIndexes() {
+  // Bias toward the most common reserve / display currencies so the first
+  // hover lands on a warm cache. The remaining ones are still loaded
+  // lazily on demand by fxFetchIndex().
+  const priority = ["USD","EUR","GBP","JPY","CHF","CAD","AUD"].filter(c => FX_SUPPORTED.indexOf(c) >= 0);
+  const rest = (FX_SUPPORTED || []).filter(c => priority.indexOf(c) < 0);
+  for (const batch of [priority, rest]) {
+    if (!batch.length) continue;
+    try {
+      const r = await fetch(`/api/fx-indexes-bulk?ccys=${encodeURIComponent(batch.join(","))}`);
+      if (!r.ok) continue;
+      const d = await r.json();
+      const indexes = d.indexes || {};
+      for (const c of Object.keys(indexes)) {
+        if (Array.isArray(indexes[c]) && indexes[c].length) FX_INDEX_CACHE[c] = indexes[c];
+      }
+    } catch (e) { /* best-effort */ }
+    // Brief gap before the second batch.
+    await new Promise(r => setTimeout(r, 800));
+  }
+}
+
+async function warmRecentTabs(maxN) {
+  const limit = (typeof maxN === "number" && maxN > 0) ? maxN : 3;
+  // Skip the currently active view (it's been rendered) and pick the most-recent others.
+  const others = Object.entries(VIEWS)
+    .filter(([n, v]) => n !== STATE.activeView && v && v.row_count > 0 && n !== AD_HOC_KEY)
+    .sort((a, b) => String(b[1].saved_at || "").localeCompare(String(a[1].saved_at || "")))
+    .slice(0, limit);
+  // Sequential — back-to-back analytics POSTs would compete for the same
+  // yfinance session and Yahoo would start returning empty close-price frames.
+  for (const [name, _meta] of others) {
+    try {
+      const r = await fetch(`/api/views/${encodeURIComponent(name)}`);
+      if (!r.ok) continue;
+      const d = await r.json();
+      const rows = (d.view && Array.isArray(d.view.rows)) ? d.view.rows : [];
+      if (!rows.length) continue;
+      const eq = equalWeightsOf(rows);
+      const cap = capWeightsOf(rows);
+      const wsets = {equal: eq, cap: cap};
+      const res = await fetch("/api/portfolio-analytics-multi", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({rows, weight_sets: wsets, period: STATE.period, display_ccy: FX_QUOTE}),
+      });
+      if (!res.ok) continue;
+      const dr = await res.json();
+      const results = dr.results || {};
+      const tabMap = analyticsMapForTab(name);
+      for (const k of Object.keys(results)) {
+        tabMap[analyticsCacheKey(k, STATE.period)] = results[k];
+      }
+      if (results.cap && !tabMap[analyticsCacheKey("custom", STATE.period)]) {
+        tabMap[analyticsCacheKey("custom", STATE.period)] = results.cap;
+      }
+      // Brief pause so we don't saturate Yahoo's rate limiter.
+      await new Promise(r => setTimeout(r, 500));
+    } catch (e) { /* skip this tab silently */ }
+  }
 }
 
 async function loadViews() {
@@ -3691,7 +4899,7 @@ async function activateTab(name, opts) {
   opts = opts || {};
   STATE.activeView = name;
   STATE.customWeights = null;
-  STATE.analyticsByMode = {};
+  // Keep STATE.analyticsByTab[*] across switches — re-visiting paints from memory.
   if (STATE.mode === "custom") STATE.mode = "cap";
   renderTabs();
   renderEditorMeta();
@@ -3986,22 +5194,9 @@ function computeWeights() {
   return Object.fromEntries(rows.map(r => [r.symbol, w]));
 }
 
-function capWeightsFromData() {
-  const rows = DATA.filter(r => r && r.symbol);
-  if (!rows.length) return {};
-  const caps = rows.map(r => Math.max(0, Number(r.market_cap) || 0));
-  const total = caps.reduce((a, b) => a + b, 0);
-  if (total > 0) return Object.fromEntries(rows.map((r, i) => [r.symbol, caps[i] / total]));
-  const w = 1 / rows.length;
-  return Object.fromEntries(rows.map(r => [r.symbol, w]));
-}
-function equalWeightsFromData() {
-  const rows = DATA.filter(r => r && r.symbol);
-  if (!rows.length) return {};
-  const w = 1 / rows.length;
-  return Object.fromEntries(rows.map(r => [r.symbol, w]));
-}
-function analyticsCacheKey(mode, period) { return mode + "|" + period; }
+function capWeightsFromData() { return capWeightsOf(DATA.filter(r => r && r.symbol)); }
+function equalWeightsFromData() { return equalWeightsOf(DATA.filter(r => r && r.symbol)); }
+function analyticsCacheKey(mode, period) { return mode + "|" + period + "|" + FX_QUOTE; }
 
 let _analyticsReqId = 0;
 async function requestAnalytics(opts) {
@@ -4014,9 +5209,10 @@ async function requestAnalytics(opts) {
   const period = STATE.period;
   const mode = STATE.mode;
   const key = analyticsCacheKey(mode, period);
+  const tabMap = currentAnalyticsMap();
 
   // Cache hit → instant.
-  const cached = STATE.analyticsByMode[key];
+  const cached = tabMap[key];
   if (cached && !opts.force) {
     STATE.analytics = cached;
     STATE.analyticsLoading = false;
@@ -4039,8 +5235,8 @@ async function requestAnalytics(opts) {
     const cw = STATE.customWeights || cap;
     wsets.custom = cw;
     // Piggyback: also (re)compute equal+cap if they aren't cached for this period.
-    if (!STATE.analyticsByMode[analyticsCacheKey("equal", period)]) wsets.equal = eq;
-    if (!STATE.analyticsByMode[analyticsCacheKey("cap", period)]) wsets.cap = cap;
+    if (!tabMap[analyticsCacheKey("equal", period)]) wsets.equal = eq;
+    if (!tabMap[analyticsCacheKey("cap", period)]) wsets.cap = cap;
   } else {
     wsets.equal = eq;
     wsets.cap = cap;
@@ -4050,7 +5246,7 @@ async function requestAnalytics(opts) {
     const r = await fetch("/api/portfolio-analytics-multi", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({rows: DATA, weight_sets: wsets, period}),
+      body: JSON.stringify({rows: DATA, weight_sets: wsets, period, display_ccy: FX_QUOTE}),
     });
     const d = await r.json();
     if (reqId !== _analyticsReqId) return;
@@ -4058,17 +5254,16 @@ async function requestAnalytics(opts) {
     if (d.error) throw new Error(d.error);
     const results = d.results || {};
     for (const k of Object.keys(results)) {
-      STATE.analyticsByMode[analyticsCacheKey(k, period)] = results[k];
+      tabMap[analyticsCacheKey(k, period)] = results[k];
     }
     // If custom wasn't explicitly computed, alias it to cap for this period
     // so switching to Custom… is instant on first open.
-    if (!STATE.analyticsByMode[analyticsCacheKey("custom", period)] &&
-        STATE.analyticsByMode[analyticsCacheKey("cap", period)] &&
+    if (!tabMap[analyticsCacheKey("custom", period)] &&
+        tabMap[analyticsCacheKey("cap", period)] &&
         !STATE.customWeights) {
-      STATE.analyticsByMode[analyticsCacheKey("custom", period)] =
-          STATE.analyticsByMode[analyticsCacheKey("cap", period)];
+      tabMap[analyticsCacheKey("custom", period)] = tabMap[analyticsCacheKey("cap", period)];
     }
-    STATE.analytics = STATE.analyticsByMode[key] || results[mode] || null;
+    STATE.analytics = tabMap[key] || results[mode] || null;
   } catch (e) {
     STATE.analytics = {error: e.message};
   } finally {
@@ -4081,6 +5276,7 @@ function renderAnalyticsBody() {
   const body = $("#pf-analytics-body");
   if (!DATA.length) {
     body.innerHTML = `<div class="pf-empty">Build the dashboard to compute portfolio analytics.</div>`;
+    renderAnalystDashboard({});
     return;
   }
   if (STATE.analyticsLoading && !STATE.analytics) {
@@ -4088,8 +5284,8 @@ function renderAnalyticsBody() {
     return;
   }
   const a = STATE.analytics;
-  if (!a) { body.innerHTML = `<div class="pf-empty">No analytics yet.</div>`; return; }
-  if (a.error) { body.innerHTML = `<div class="pf-empty" style="color:var(--neg)">Analytics error: ${escapeHtml(a.error)}</div>`; return; }
+  if (!a) { body.innerHTML = `<div class="pf-empty">No analytics yet.</div>`; renderAnalystDashboard({}); return; }
+  if (a.error) { body.innerHTML = `<div class="pf-empty" style="color:var(--neg)">Analytics error: ${escapeHtml(a.error)}</div>`; renderAnalystDashboard({}); return; }
 
   // Build cards.
   const banner = staleBannerHtml();
@@ -4097,12 +5293,12 @@ function renderAnalyticsBody() {
     ${banner}
     <div class="pf-grid">
       <div class="pf-card">
-        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${labelForMode(STATE.mode)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span></h4>
+        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${labelForMode(STATE.mode)} · ${escapeHtml(a.display_ccy || FX_QUOTE)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span></h4>
         <div class="pf-chart-wrap" id="pf-chart-host"></div>
         <div class="pf-chart-legend" id="pf-chart-legend"></div>
       </div>
       <div class="pf-card">
-        <h4>Risk &amp; return <span class="sub">vs SPY</span></h4>
+        <h4>Risk &amp; return <span class="sub">vs SPY · ${escapeHtml(a.display_ccy || FX_QUOTE)}</span></h4>
         ${renderStatsHtml(a)}
       </div>
       <div class="pf-card">
@@ -4122,12 +5318,14 @@ function renderAnalyticsBody() {
         ${renderBarsHtml(a.exposure && a.exposure.by_bucket)}
       </div>
       <div class="pf-card" style="grid-column: 1 / -1;">
-        <h4>Contribution to ${escapeHtml(STATE.period)} return</h4>
+        <h4>Contribution to ${escapeHtml(STATE.period)} return <span class="sub">${escapeHtml(a.display_ccy || FX_QUOTE)}</span></h4>
         ${renderContribHtml(a)}
       </div>
     </div>
   `;
   drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
+  renderStatTipsKatex();
+  renderAnalystDashboard(a);
 }
 
 function staleBannerHtml() {
@@ -4169,6 +5367,126 @@ function fmtCapBig(v) {
   return v.toFixed(0);
 }
 
+const METRIC_INFO = {
+  "Period return": {
+    formula: String.raw`R = \dfrac{V_T}{V_0} - 1`,
+    desc: "Total return of the portfolio over the chosen period, FX-adjusted to the display currency.",
+    range: "Compare to SPY in the same period. A positive read with low volatility is the cleanest win."
+  },
+  "Ann. return": {
+    formula: String.raw`R_{ann} = \left(\dfrac{V_T}{V_0}\right)^{\frac{1}{y}} - 1`,
+    desc: "Compound annual growth rate. Normalises returns across periods of different length so 3M, 1Y and 5Y are comparable.",
+    range: "Above 10% sustained is strong; above the risk-free rate (~5%) is the bar for active equity."
+  },
+  "Ann. vol": {
+    formula: String.raw`\sigma_{ann} = \sigma_{daily} \cdot \sqrt{252}`,
+    desc: "Annualised standard deviation of daily returns — the headline risk measure.",
+    range: "Equities cluster 15–25%. Below 12% is unusually smooth, above 35% is a high-octane book."
+  },
+  "Sharpe": {
+    formula: String.raw`S = \dfrac{\overline{R} - R_f}{\sigma}`,
+    desc: "Excess return per unit of total volatility. Risk-free rate treated as 0 here, so it’s a pure return/vol ratio.",
+    range: "0.5 mediocre · 1.0 good · 2.0 excellent · >3.0 suspect (curve-fit or short sample)."
+  },
+  "Sortino": {
+    formula: String.raw`S_o = \dfrac{\overline{R} - R_f}{\sigma_{down}}`,
+    desc: "Like Sharpe but penalises only downside volatility — closer to how an investor actually feels risk.",
+    range: "Usually higher than Sharpe. >1.0 is good, >2.0 is excellent. The Sortino/Sharpe gap reveals upside-skew."
+  },
+  "Max drawdown": {
+    formula: String.raw`\text{DD}_{max} = \min_{t}\!\left(\dfrac{V_t}{\max_{s\le t} V_s} - 1\right)`,
+    desc: "Worst peak-to-trough loss over the period. Drives the emotional pain of holding the strategy.",
+    range: "Equity portfolios routinely see −20 to −35% in bear markets. Above −50% suggests concentrated risk."
+  },
+  "Calmar": {
+    formula: String.raw`C = \dfrac{R_{ann}}{|\text{DD}_{max}|}`,
+    desc: "Annualised return divided by max drawdown — return per unit of worst-case pain.",
+    range: ">0.5 acceptable · >1.0 good · >2.0 exceptional. Penalises managers who run wild during crashes."
+  },
+  "Beta (SPY)": {
+    formula: String.raw`\beta = \dfrac{\mathrm{Cov}(r_p, r_m)}{\mathrm{Var}(r_m)}`,
+    desc: "Sensitivity to SPY moves. β=1 means it moves with the market; β=1.3 means 30% more responsive.",
+    range: "0.6–0.8 defensive · 0.9–1.1 market-like · >1.3 high-beta growth. Negative is rare and means inverse exposure."
+  },
+  "R² (SPY)": {
+    formula: String.raw`R^2 = \mathrm{Corr}(r_p, r_m)^2`,
+    desc: "Share of portfolio variance explained by SPY. Tells you whether beta is a meaningful description of behaviour.",
+    range: ">0.85 → portfolio is essentially SPY+leverage. <0.4 → diversification/idiosyncratic exposure. <0.1 → unrelated."
+  },
+  "Tracking err": {
+    formula: String.raw`\mathrm{TE} = \sqrt{252}\cdot\sigma\!\left(r_p - r_m\right)`,
+    desc: "Annualised standard deviation of the portfolio’s return *minus* SPY’s — how far you wander from the benchmark.",
+    range: "Index funds <2%. Active managers 4–8% typical. Concentrated stock picks 10–20%+. Pair with information ratio."
+  },
+  /* --- Valuation & analyst (weighted) --- */
+  "P/E (wtd)": {
+    formula: String.raw`PE_{port} = \dfrac{\sum_i w_i \cdot PE_i}{\sum_i w_i \;:\; PE_i \text{ defined}}`,
+    desc: "Portfolio-weighted trailing price-to-earnings. Names without an earnings figure (loss-makers, missing data) drop out of both numerator and denominator.",
+    range: "S&P 500 average sits around 20–25. Above 30 is growth-tilt; below 15 is value-tilt. Heavily skewed by megacaps when cap-weighted."
+  },
+  "P/S (wtd)": {
+    formula: String.raw`PS_{port} = \dfrac{\sum_i w_i \cdot PS_i}{\sum_i w_i \;:\; PS_i \text{ defined}}`,
+    desc: "Portfolio-weighted price-to-sales. Useful when earnings are noisy or negative — sales are more stable across the cycle.",
+    range: "Broad market ~2–3×. Tech / high-margin software often 8–15×. Above 20× is rare outside hyper-growth."
+  },
+  "EV/EBITDA (wtd)": {
+    formula: String.raw`\dfrac{EV_{port}}{EBITDA_{port}} = \sum_i w_i \cdot \dfrac{EV_i}{EBITDA_i}`,
+    desc: "Enterprise value divided by EBITDA — capital-structure-neutral valuation. Used heavily in cross-sector comparisons and LBO math.",
+    range: "Mature businesses 8–14×. Quality compounders 15–25×. Above 25× requires sustained growth to justify."
+  },
+  "Div yield (wtd)": {
+    formula: String.raw`y_{port} = \sum_i w_i \cdot y_i`,
+    desc: "Forward indicated dividend yield, weighted by portfolio share. Tax-unadjusted. Captures only cash dividends, not buybacks.",
+    range: "S&P 500 ~1.3–1.8%. Income-tilted books 3–5%. Above 6% often signals stress or capital return at the expense of growth."
+  },
+  "Market cap (wtd avg)": {
+    formula: String.raw`MC_{port} = \sum_i w_i \cdot MC_i`,
+    desc: "Portfolio-weighted average market capitalisation. Useful as a quick read on how mega-cap-heavy a book really is.",
+    range: "Equal-weighted S&P sits in the low tens of billions; cap-weighted is dragged into the hundreds of billions by the top 7 names."
+  },
+  "Analyst rating (1=SB, 5=SS)": {
+    formula: String.raw`R_{port} = \dfrac{\sum_i w_i \cdot R_i}{\sum_i w_i \;:\; R_i \text{ defined}}`,
+    desc: "Mean sell-side analyst rating across covered names. Yahoo's 1–5 scale: 1 Strong Buy → 5 Strong Sell.",
+    range: "Most large caps cluster 1.8–2.4 (Buy). Below 1.5 is unusually bullish; above 3.0 leans bearish."
+  },
+  "Weighted target upside": {
+    formula: String.raw`U_{port} = \sum_i w_i \cdot \left(\dfrac{TP_i}{P_i} - 1\right)`,
+    desc: "Sum of analysts' 12-month price targets vs current price, weighted by portfolio share. Computed in each holding's local currency before weighting.",
+    range: "Single-digit positive is typical. >20% upside often reflects beaten-down names or aggressive growth assumptions."
+  },
+  "Analysts covering (sum)": {
+    formula: String.raw`N = \sum_i n_i`,
+    desc: "Total count of unique analyst opinions across all covered holdings. A coverage-density gauge — high numbers mean the consensus is well-sampled.",
+    range: "Megacap names alone often have 30–50 analysts. A diverse 20-name book commonly clears 300+."
+  },
+  /* --- Concentration --- */
+  "Top-5 weight": {
+    formula: String.raw`T_5 = \sum_{i \in \text{top 5}} w_i`,
+    desc: "Combined weight of the five largest holdings. Direct gauge of concentration risk — how much of the portfolio rides on a handful of names.",
+    range: "Diversified funds 15–25%. Active concentrated books 40–60%. Above 70% means a few names dominate the P&L."
+  },
+  "Herfindahl (HHI)": {
+    formula: String.raw`H = \sum_i w_i^2`,
+    desc: "Sum of squared weights. The textbook measure of concentration — small when weight is spread out, approaches 1 when one name dominates.",
+    range: "An equal-weighted N-stock book has HHI = 1/N. <0.10 well-spread · 0.10–0.20 moderate · >0.25 concentrated."
+  },
+  "Effective # of names": {
+    formula: String.raw`N_{eff} = \dfrac{1}{H} = \dfrac{1}{\sum_i w_i^2}`,
+    desc: "Reciprocal of HHI. Reads as 'this portfolio behaves like N equally-weighted names.' Falls below the raw count whenever weights are uneven.",
+    range: "Equal-weight: N_eff equals the holding count. Cap-weighted megacap books often have N_eff of 3–6 even with 20+ holdings."
+  },
+  "Active holdings": {
+    formula: String.raw`|\{i : w_i > 0\}|`,
+    desc: "Number of positions with non-zero weight that have usable price history (i.e. survived the analytics download).",
+    range: "Anything below your input count means some symbols were dropped — see 'Dropped (no history)' for the list."
+  },
+  "Dropped (no history)": {
+    formula: String.raw`\text{symbols}\notin\text{price history}`,
+    desc: "Constituents that returned no usable price series for the chosen period (rate-limited fetch, new listings, delisted, or bad ticker).",
+    range: "Empty is ideal. If recurring, hit Build again — yfinance's rate-limiter sometimes drops a couple of symbols on the first pass."
+  },
+};
+
 function renderStatsHtml(a) {
   const s = a.stats || {};
   const sp = a.spy_stats || {};
@@ -4181,16 +5499,327 @@ function renderStatsHtml(a) {
     ["Sortino", fmtNumOr(s.sortino, 2), "", fmtNumOr(sp.sortino, 2)],
     ["Max drawdown", fmtPctSigned(s.max_dd), cls(s.max_dd), fmtPctSigned(sp.max_dd)],
     ["Calmar", fmtNumOr(s.calmar, 2), "", fmtNumOr(sp.calmar, 2)],
-    ["Beta (SPY)", fmtNumOr(s.beta_spy, 2), "", "—"],
-    ["R² (SPY)", fmtNumOr(s.r2_spy, 2), "", "—"],
-    ["Tracking err", fmtPctPlain(s.te_spy), "", "—"],
+    ["Beta (SPY)", fmtNumOr(s.beta_spy, 2), "", fmtNumOr(sp.beta_spy, 2)],
+    ["R² (SPY)", fmtNumOr(s.r2_spy, 2), "", fmtNumOr(sp.r2_spy, 2)],
+    ["Tracking err", fmtPctPlain(s.te_spy), "", fmtPctPlain(sp.te_spy)],
   ];
-  const html = rows.map(r => `
-    <div class="pf-stat-row" title="Portfolio vs SPY">
+  const html = rows.map(r => {
+    const info = METRIC_INFO[r[0]];
+    const dataAttr = info ? ` data-info="1" data-metric="${escapeHtml(r[0])}"` : "";
+    const tip = info ? `
+      <div class="pf-metric-tip" role="tooltip">
+        <div class="mt-name">${escapeHtml(r[0])}</div>
+        <div class="mt-formula">$$${info.formula}$$</div>
+        <div class="mt-desc">${escapeHtml(info.desc)}</div>
+        <div class="mt-range">${escapeHtml(info.range)}</div>
+      </div>` : "";
+    return `
+    <div class="pf-stat-row"${dataAttr} title="${info ? '' : 'Portfolio vs SPY'}">
       <span class="l">${r[0]}</span>
       <span class="v ${r[2]}">${r[1]} <span style="color:var(--muted); font-weight:400">/ ${r[3]}</span></span>
-    </div>`).join("");
+      ${tip}
+    </div>`;
+  }).join("");
   return `<div class="pf-stats">${html}</div>`;
+}
+
+/* ---------------------------- Analyst sentiment dashboard ---------------------------- */
+const _RATING_BUCKETS = [
+  { max: 1.5, key: "strong-buy",  label: "Strong Buy" },
+  { max: 2.5, key: "buy",         label: "Buy" },
+  { max: 3.5, key: "hold",        label: "Hold" },
+  { max: 4.5, key: "sell",        label: "Underperform" },
+  { max: Infinity, key: "strong-sell", label: "Sell" },
+];
+function ratingBucket(mr) {
+  if (mr == null || !isFinite(mr)) return null;
+  for (const b of _RATING_BUCKETS) if (mr <= b.max) return b;
+  return _RATING_BUCKETS[_RATING_BUCKETS.length - 1];
+}
+function recKeyToClass(k) {
+  if (!k) return "none";
+  k = String(k).toLowerCase().replace(/_/g, "-");
+  if (k === "strongbuy") return "strong-buy";
+  if (k === "strongsell" || k === "underperform") return "strong-sell";
+  return k;
+}
+function recKeyLabel(k) {
+  if (!k) return "—";
+  return String(k).replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+let _AN_SORT = { key: "weight", dir: -1 };
+function renderAnalystDashboard(a) {
+  const host = document.getElementById("analyst-dashboard");
+  if (!host) return;
+  const an = (a && a.analyst) || {};
+  const holdings = Array.isArray(an.holdings) ? an.holdings.slice() : [];
+  const notCovered = Array.isArray(an.not_covered) ? an.not_covered : [];
+  const active = an.active_count || 0;
+  const covered = an.covered_count || 0;
+  const coverageWeight = an.target_coverage_weight || 0;
+  const dist = an.distribution_pct;  // {strongBuy, buy, hold, sell, strongSell} as %
+  const wRating = an.mean_rating;
+  const wUpside = an.weighted_target_upside_pct;
+  const nAnalysts = an.n_analysts_total || 0;
+
+  // Empty-state placeholder
+  if (!holdings.length && !notCovered.length) {
+    host.innerHTML = `
+      <div class="an-head">
+        <span class="an-title">Analyst sentiment</span>
+        <span class="an-sub">Build a portfolio to see weighted analyst consensus, rating distribution and price-target upside.</span>
+      </div>
+      <div class="an-grid"><div class="an-card"><div style="color:var(--muted);font-size:12px;padding:6px 0">No analyst data yet.</div></div></div>
+      <div class="an-coverage-foot"><span class="credit">📈 Local Portfolio Dashboard · yfinance · no API key</span><span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span></div>
+    `;
+    return;
+  }
+
+  const bucket = ratingBucket(wRating);
+  const needlePct = wRating != null ? Math.max(0, Math.min(100, ((wRating - 1) / 4) * 100)) : 50;
+
+  const card1 = `
+    <div class="an-card">
+      <h4>Weighted rating <span class="an-sub">${escapeHtml(labelForMode(STATE.mode))}</span></h4>
+      <div>
+        <span class="an-rating-num">${wRating != null ? wRating.toFixed(2) : "—"}</span>
+        ${bucket ? `<span class="an-rating-key ${bucket.key}">${bucket.label}</span>` : ""}
+        <span style="color:var(--muted);font-size:11px;margin-left:6px;">/ 5</span>
+      </div>
+      <div class="an-gauge"><div class="needle" style="left:${needlePct.toFixed(1)}%"></div></div>
+      <div class="an-gauge-labels"><span>Strong Buy</span><span>Buy</span><span>Hold</span><span>Underperform</span><span>Sell</span></div>
+      <div class="an-rating-meta">
+        <span>Coverage <b>${covered}/${active}</b> positions${an.rating_coverage_weight != null ? ` · <b>${(an.rating_coverage_weight*100).toFixed(0)}%</b> of weight` : ""}</span>
+        <span>Total analyst opinions: <b>${nAnalysts}</b></span>
+      </div>
+    </div>`;
+
+  const card2 = (() => {
+    if (!dist) {
+      return `<div class="an-card"><h4>Rating distribution</h4>
+        <div style="color:var(--muted);font-size:12px;padding:6px 0">No distribution data — coverage names lack a recent recommendations row.</div></div>`;
+    }
+    const total = (dist.strongBuy || 0) + (dist.buy || 0) + (dist.hold || 0) + (dist.sell || 0) + (dist.strongSell || 0);
+    const norm = total > 0 ? total : 1;
+    const seg = (v) => Math.max(0, (v || 0) / norm * 100);
+    const lbl = (k) => seg(dist[k]) >= 6 ? Math.round(seg(dist[k])) + "%" : "";
+    return `
+    <div class="an-card">
+      <h4>Rating distribution <span class="an-sub">weighted</span></h4>
+      <div class="an-dist-bar">
+        <div class="sb" style="flex:${seg(dist.strongBuy).toFixed(2)}" title="Strong Buy ${seg(dist.strongBuy).toFixed(1)}%">${lbl("strongBuy")}</div>
+        <div class="b"  style="flex:${seg(dist.buy).toFixed(2)}"        title="Buy ${seg(dist.buy).toFixed(1)}%">${lbl("buy")}</div>
+        <div class="h"  style="flex:${seg(dist.hold).toFixed(2)}"       title="Hold ${seg(dist.hold).toFixed(1)}%">${lbl("hold")}</div>
+        <div class="s"  style="flex:${seg(dist.sell).toFixed(2)}"       title="Sell ${seg(dist.sell).toFixed(1)}%">${lbl("sell")}</div>
+        <div class="ss" style="flex:${seg(dist.strongSell).toFixed(2)}" title="Strong Sell ${seg(dist.strongSell).toFixed(1)}%">${lbl("strongSell")}</div>
+      </div>
+      <div class="an-dist-legend">
+        <span><i style="background:#15803d"></i>Strong Buy ${seg(dist.strongBuy).toFixed(1)}%</span>
+        <span><i style="background:#22c55e"></i>Buy ${seg(dist.buy).toFixed(1)}%</span>
+        <span><i style="background:#eab308"></i>Hold ${seg(dist.hold).toFixed(1)}%</span>
+        <span><i style="background:#f97316"></i>Sell ${seg(dist.sell).toFixed(1)}%</span>
+        <span><i style="background:#dc2626"></i>Strong Sell ${seg(dist.strongSell).toFixed(1)}%</span>
+      </div>
+    </div>`;
+  })();
+
+  const card3 = (() => {
+    const upCls = wUpside == null ? "" : (wUpside >= 0 ? "pos" : "neg");
+    const upSign = wUpside == null ? "" : (wUpside >= 0 ? "+" : "");
+    const covPct = an.target_coverage_weight != null ? (an.target_coverage_weight * 100) : 0;
+    return `
+    <div class="an-card">
+      <h4>Consensus price target upside <span class="an-sub">vs current</span></h4>
+      <div>
+        <span class="an-upside-num ${upCls}">${wUpside == null ? "—" : (upSign + wUpside.toFixed(2) + "%")}</span>
+        <span style="color:var(--muted);font-size:11px;margin-left:8px;">12-month consensus</span>
+      </div>
+      <div class="an-upside-meta">
+        <span>Computed in each position's local currency, then weighted by portfolio share.</span>
+        <span>Coverage: <b>${covPct.toFixed(0)}%</b> of portfolio weight has price-target data.</span>
+      </div>
+      <div class="an-coverage-bar" title="Share of portfolio weight with analyst price targets"><div class="fill" style="width:${covPct.toFixed(1)}%"></div></div>
+    </div>`;
+  })();
+
+  // Per-holding table
+  const sortKey = _AN_SORT.key, sortDir = _AN_SORT.dir;
+  holdings.sort((x, y) => {
+    let av = x[sortKey], bv = y[sortKey];
+    if (sortKey === "rec_key") { av = x.mean_rating; bv = y.mean_rating; }
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    if (typeof av === "number") return (av - bv) * sortDir;
+    return String(av).localeCompare(String(bv)) * sortDir;
+  });
+  const arrow = (k) => sortKey === k ? `<span class="arrow">${sortDir > 0 ? "▲" : "▼"}</span>` : "";
+  const fmtUp = (v) => v == null ? "—" : ((v >= 0 ? "+" : "") + v.toFixed(2) + "%");
+
+  const rowsHtml = holdings.map(h => {
+    const upCls = h.upside_pct == null ? "" : (h.upside_pct >= 0 ? "pos" : "neg");
+    const cls = recKeyToClass(h.rec_key || (ratingBucket(h.mean_rating) || {}).key);
+    const lbl = h.rec_key ? recKeyLabel(h.rec_key) : ((ratingBucket(h.mean_rating) || {}).label || "—");
+    let mini = "";
+    if (h.dist) {
+      const tot = (h.dist.strongBuy||0)+(h.dist.buy||0)+(h.dist.hold||0)+(h.dist.sell||0)+(h.dist.strongSell||0);
+      const s = (v) => tot > 0 ? (v || 0) / tot * 100 : 0;
+      mini = `<span class="an-mini-dist" title="SB ${h.dist.strongBuy||0} · B ${h.dist.buy||0} · H ${h.dist.hold||0} · S ${h.dist.sell||0} · SS ${h.dist.strongSell||0}">
+        <div class="sb" style="width:${s(h.dist.strongBuy).toFixed(2)}%"></div>
+        <div class="b"  style="width:${s(h.dist.buy).toFixed(2)}%"></div>
+        <div class="h"  style="width:${s(h.dist.hold).toFixed(2)}%"></div>
+        <div class="s"  style="width:${s(h.dist.sell).toFixed(2)}%"></div>
+        <div class="ss" style="width:${s(h.dist.strongSell).toFixed(2)}%"></div>
+      </span>`;
+    } else {
+      mini = `<span style="color:var(--muted);font-size:10.5px">—</span>`;
+    }
+    return `<tr>
+      <td class="sym">${escapeHtml(h.symbol)}<span class="muted">${escapeHtml((h.name || "").length > 22 ? h.name.slice(0, 22) + "…" : (h.name || ""))}</span></td>
+      <td>${(h.weight*100).toFixed(2)}%</td>
+      <td><span class="rk ${cls}">${escapeHtml(lbl)}</span></td>
+      <td>${h.mean_rating != null ? h.mean_rating.toFixed(2) : "—"}</td>
+      <td>${h.n_analysts != null ? h.n_analysts : "—"}</td>
+      <td>${h.price != null ? fmtMoney(h.price, h.currency) : "—"}</td>
+      <td>${h.target_mean != null ? fmtMoney(h.target_mean, h.currency) : "—"}</td>
+      <td class="${upCls}">${fmtUp(h.upside_pct)}</td>
+      <td>${mini}</td>
+    </tr>`;
+  }).join("");
+
+  const tableHtml = holdings.length ? `
+    <div class="an-card" style="grid-column: 1 / -1;">
+      <h4>Per-holding consensus <span class="an-sub">click a column to sort</span></h4>
+      <div class="an-table-wrap">
+        <table class="an-table" id="an-table">
+          <thead><tr>
+            <th data-k="symbol">Symbol${arrow("symbol")}</th>
+            <th data-k="weight">Weight${arrow("weight")}</th>
+            <th data-k="rec_key">Consensus${arrow("rec_key")}</th>
+            <th data-k="mean_rating">Rating${arrow("mean_rating")}</th>
+            <th data-k="n_analysts"># Analysts${arrow("n_analysts")}</th>
+            <th data-k="price">Price${arrow("price")}</th>
+            <th data-k="target_mean">Target (mean)${arrow("target_mean")}</th>
+            <th data-k="upside_pct">Upside${arrow("upside_pct")}</th>
+            <th>Distribution</th>
+          </tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+    </div>` : "";
+
+  const notCoveredHtml = notCovered.length ? (() => {
+    const totalW = notCovered.reduce((a, n) => a + (n.weight || 0), 0);
+    const names = notCovered.slice(0, 6).map(n => `${escapeHtml(n.symbol)}${n.weight ? ` (${(n.weight*100).toFixed(1)}%)` : ""}`).join(", ");
+    return `<span class="an-not-covered">${notCovered.length} position${notCovered.length>1?"s":""} without analyst coverage — <b>${(totalW*100).toFixed(1)}%</b> of weight: ${names}${notCovered.length > 6 ? "…" : ""}</span>`;
+  })() : "";
+
+  host.innerHTML = `
+    <div class="an-head">
+      <span class="an-title">Analyst sentiment</span>
+      <span class="an-sub">Portfolio-weighted analyst consensus from yfinance · positions in ${escapeHtml(a.display_ccy || FX_QUOTE)}.</span>
+      <span class="an-mode-note">Aggregated by
+        <button type="button" class="an-mode-btn" id="an-mode-btn" aria-haspopup="listbox" aria-expanded="false">
+          <span id="an-mode-label">${escapeHtml(labelForMode(STATE.mode))}</span>
+          <span class="an-caret">▾</span>
+        </button>
+        <div class="an-mode-menu" id="an-mode-menu" role="listbox" aria-label="Aggregation method">
+          <div class="an-mode-opt" data-mode="equal"  role="option" data-selected="${STATE.mode === 'equal' ? '1' : '0'}">Equal-weight</div>
+          <div class="an-mode-opt" data-mode="cap"    role="option" data-selected="${STATE.mode === 'cap' ? '1' : '0'}">Cap-weighted</div>
+          <div class="an-mode-opt" data-mode="custom" role="option" data-selected="${STATE.mode === 'custom' ? '1' : '0'}">Custom…</div>
+        </div>
+      </span>
+    </div>
+    <div class="an-grid">${card1}${card2}${card3}${tableHtml}</div>
+    <div class="an-coverage-foot">
+      <span class="credit">📈 Local Portfolio Dashboard · yfinance · no API key</span>
+      ${notCoveredHtml}
+      <span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span>
+    </div>
+  `;
+
+  // Wire up the aggregation-mode dropdown in the header.
+  const btn = document.getElementById("an-mode-btn");
+  const menu = document.getElementById("an-mode-menu");
+  if (btn && menu) {
+    const closeMenu = () => {
+      menu.classList.remove("show");
+      btn.classList.remove("open");
+      btn.setAttribute("aria-expanded", "false");
+      document.removeEventListener("mousedown", onOutside, true);
+      document.removeEventListener("keydown", onEsc, true);
+    };
+    function onOutside(e) {
+      if (e.target.closest("#an-mode-btn") || e.target.closest("#an-mode-menu")) return;
+      closeMenu();
+    }
+    function onEsc(e) { if (e.key === "Escape") closeMenu(); }
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const isOpen = menu.classList.contains("show");
+      if (isOpen) { closeMenu(); return; }
+      menu.classList.add("show");
+      btn.classList.add("open");
+      btn.setAttribute("aria-expanded", "true");
+      document.addEventListener("mousedown", onOutside, true);
+      document.addEventListener("keydown", onEsc, true);
+    });
+    menu.addEventListener("click", (e) => {
+      const opt = e.target.closest(".an-mode-opt");
+      if (!opt) return;
+      const mode = opt.dataset.mode;
+      closeMenu();
+      if (!mode) return;
+      if (mode === "custom") { openWeightsPopup(); return; }
+      if (mode === STATE.mode) return;
+      STATE.mode = mode;
+      try { updateModeButtons(); } catch (_) {}
+      requestAnalytics();
+    });
+  }
+
+  // Wire up column sorting on the per-holding table.
+  const tbl = document.getElementById("an-table");
+  if (tbl) {
+    tbl.querySelectorAll("th[data-k]").forEach(th => {
+      th.addEventListener("click", () => {
+        const k = th.dataset.k;
+        if (_AN_SORT.key === k) _AN_SORT.dir = -_AN_SORT.dir;
+        else { _AN_SORT.key = k; _AN_SORT.dir = (k === "symbol" ? 1 : -1); }
+        renderAnalystDashboard(STATE.analytics);
+      });
+    });
+  }
+}
+
+function renderStatTipsKatex() {
+  if (!window.renderMathInElement) return;
+  const root = document.getElementById("pf-analytics-body");
+  if (!root) return;
+  root.querySelectorAll(".pf-metric-tip").forEach(el => {
+    if (el.dataset.katex === "1") return;
+    try {
+      renderMathInElement(el, { delimiters: [{ left: "$$", right: "$$", display: true }], throwOnError: false });
+      el.dataset.katex = "1";
+    } catch (_) {}
+  });
+}
+
+function statRowHtml(label, value, valueCls) {
+  const info = METRIC_INFO[label];
+  const dataAttr = info ? ` data-info="1" data-metric="${escapeHtml(label)}"` : "";
+  const tip = info ? `
+    <div class="pf-metric-tip" role="tooltip">
+      <div class="mt-name">${escapeHtml(label)}</div>
+      <div class="mt-formula">$$${info.formula}$$</div>
+      <div class="mt-desc">${escapeHtml(info.desc)}</div>
+      <div class="mt-range">${escapeHtml(info.range)}</div>
+    </div>` : "";
+  return `<div class="pf-stat-row"${dataAttr}>
+    <span class="l">${label}</span>
+    <span class="v ${valueCls || ""}">${value}</span>
+    ${tip}
+  </div>`;
 }
 
 function renderValuationAnalystHtml(a) {
@@ -4203,12 +5832,10 @@ function renderValuationAnalystHtml(a) {
     ["Div yield (wtd)", w.div_yield == null ? "—" : fmtPctPlain(w.div_yield)],
     ["Market cap (wtd avg)", fmtCapBig(w.market_cap)],
     ["Analyst rating (1=SB, 5=SS)", fmtNumOr(an.mean_rating, 2)],
-    ["Weighted target upside", fmtPctSigned(an.weighted_target_upside_pct)],
+    ["Weighted target upside", fmtPctSigned(an.weighted_target_upside_pct), an.weighted_target_upside_pct == null ? "" : (an.weighted_target_upside_pct >= 0 ? "pos" : "neg")],
     ["Analysts covering (sum)", an.n_analysts_total != null ? an.n_analysts_total : "—"],
   ];
-  return `<div class="pf-stats">${rows.map(r => `
-    <div class="pf-stat-row"><span class="l">${r[0]}</span><span class="v">${r[1]}</span></div>
-  `).join("")}</div>`;
+  return `<div class="pf-stats">${rows.map(r => statRowHtml(r[0], r[1], r[2])).join("")}</div>`;
 }
 
 function renderConcentrationHtml(a) {
@@ -4220,9 +5847,7 @@ function renderConcentrationHtml(a) {
     ["Active holdings", (a.active_symbols || []).length],
     ["Dropped (no history)", (a.missing_symbols || []).join(", ") || "—"],
   ];
-  return `<div class="pf-stats">${rows.map(r => `
-    <div class="pf-stat-row"><span class="l">${r[0]}</span><span class="v">${r[1]}</span></div>
-  `).join("")}</div>`;
+  return `<div class="pf-stats">${rows.map(r => statRowHtml(r[0], r[1])).join("")}</div>`;
 }
 
 function renderBarsHtml(map) {
@@ -4257,6 +5882,7 @@ function drawPortfolioChart(a, hostEl, legendEl) {
   const port = series.portfolio || [];
   if (port.length < 2) { hostEl.innerHTML = `<div class="pf-empty">Not enough data to plot.</div>`; return; }
   const showSpy = STATE.showSpy && series.spy && series.spy.length;
+  const showNdx = STATE.showNdx && series.nasdaq && series.nasdaq.length;
   const showSec = STATE.showSec && series.sector_mix && series.sector_mix.length;
   const showDd  = STATE.showDd && series.drawdown && series.drawdown.length;
 
@@ -4267,6 +5893,7 @@ function drawPortfolioChart(a, hostEl, legendEl) {
   let lo = Infinity, hi = -Infinity;
   for (const p of port) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   if (showSpy) for (const p of series.spy) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  if (showNdx) for (const p of series.nasdaq) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   if (showSec) for (const p of series.sector_mix) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   const pad = (hi - lo) * 0.06 || 1;
   lo -= pad; hi += pad;
@@ -4290,13 +5917,22 @@ function drawPortfolioChart(a, hostEl, legendEl) {
     return d.toLocaleDateString(undefined, {year:"numeric"});
   };
   const accent = "var(--accent)";
-  const svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+  const svg = `<svg id="pf-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
     ${ticks.map(t => `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>`).join("")}
     ${ticks.map(t => `<text x="${padL-6}" y="${(t.y+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${t.v.toFixed(0)}</text>`).join("")}
     ${xt.map(t => `<text x="${t.x.toFixed(1)}" y="${(H-padB+12).toFixed(0)}" font-size="10" fill="var(--muted)" text-anchor="middle">${fmtT(t.t)}</text>`).join("")}
     ${showSec ? `<path d="${path(series.sector_mix)}" fill="none" stroke="#f59e0b" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
+    ${showNdx ? `<path d="${path(series.nasdaq)}" fill="none" stroke="#06b6d4" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
     ${showSpy ? `<path d="${path(series.spy)}" fill="none" stroke="#8b5cf6" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
     <path d="${path(port)}" fill="none" stroke="${accent}" stroke-width="2"/>
+    <rect class="pf-sel" id="pf-sel" x="0" y="${padT}" width="0" height="${H-padT-padB}" style="display:none"/>
+    <line class="pf-cross" id="pf-cv" x1="0" x2="0" y1="${padT}" y2="${H-padB}"/>
+    <line class="pf-cross" id="pf-ch" y1="0" y2="0" x1="${padL}" x2="${W-padR}"/>
+    <circle class="pf-dot" id="pf-dot" r="4" cx="0" cy="0"/>
+    ${showSpy ? `<circle class="pf-dot spy" id="pf-dot-spy" r="3.5" cx="0" cy="0"/>` : ""}
+    ${showNdx ? `<circle class="pf-dot ndx" id="pf-dot-ndx" r="3.5" cx="0" cy="0"/>` : ""}
+    ${showSec ? `<circle class="pf-dot sec" id="pf-dot-sec" r="3.5" cx="0" cy="0"/>` : ""}
+    <rect id="pf-overlay" x="${padL}" y="${padT}" width="${W-padL-padR}" height="${H-padT-padB}" fill="transparent" style="cursor:crosshair"/>
   </svg>`;
   let ddSvg = "";
   if (showDd) {
@@ -4319,13 +5955,199 @@ function drawPortfolioChart(a, hostEl, legendEl) {
       <text x="${padL-6}" y="${(yS2(0)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">0</text>
     </svg>`;
   }
-  hostEl.innerHTML = svg + ddSvg;
+  hostEl.innerHTML = svg + ddSvg + `<div class="pf-tt" id="pf-tt"></div>` + `<div class="pf-chart-info" id="pf-chart-info"></div>`;
   const legend = [];
   legend.push(`<span><i style="background:#2f81f7"></i> Portfolio</span>`);
   if (showSpy) legend.push(`<span><i style="background:#8b5cf6"></i> SPY</span>`);
+  if (showNdx) legend.push(`<span><i style="background:#06b6d4"></i> NASDAQ</span>`);
   if (showSec) legend.push(`<span><i style="background:#f59e0b"></i> Sector mix</span>`);
   if (showDd)  legend.push(`<span><i style="background:#f85149"></i> Drawdown</span>`);
   legendEl.innerHTML = legend.join("");
+
+  attachPortfolioChartInteraction({
+    W, H, padL, padR, padT, padB,
+    t0, t1, xScale, yScale,
+    port, spy: showSpy ? series.spy : null,
+    ndx: showNdx ? series.nasdaq : null,
+    sec: showSec ? series.sector_mix : null,
+    hostEl,
+  });
+}
+
+function attachPortfolioChartInteraction(g) {
+  const svg = document.getElementById("pf-svg");
+  const overlay = document.getElementById("pf-overlay");
+  if (!svg || !overlay) return;
+  const tt = document.getElementById("pf-tt");
+  const cv = document.getElementById("pf-cv");
+  const ch = document.getElementById("pf-ch");
+  const dot = document.getElementById("pf-dot");
+  const dotSpy = document.getElementById("pf-dot-spy");
+  const dotNdx = document.getElementById("pf-dot-ndx");
+  const dotSec = document.getElementById("pf-dot-sec");
+  const sel = document.getElementById("pf-sel");
+  const info = document.getElementById("pf-chart-info");
+  const wrap = g.hostEl;
+
+  const defaultInfo = () => {
+    const port = g.port;
+    if (!port.length) return "";
+    const pct = (port[port.length-1][1] / port[0][1] - 1) * 100;
+    const cls = pct >= 0 ? "pos" : "neg";
+    const parts = [
+      `<span><b class="${cls}">${(pct>=0?"+":"")+pct.toFixed(2)}%</b> · Portfolio</span>`,
+    ];
+    if (g.spy) {
+      const p = (g.spy[g.spy.length-1][1] / g.spy[0][1] - 1) * 100;
+      parts.push(`<span><b class="${p>=0?'pos':'neg'}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · SPY</span>`);
+    }
+    if (g.ndx) {
+      const p = (g.ndx[g.ndx.length-1][1] / g.ndx[0][1] - 1) * 100;
+      parts.push(`<span><b class="${p>=0?'pos':'neg'}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · NASDAQ</span>`);
+    }
+    if (g.sec) {
+      const p = (g.sec[g.sec.length-1][1] / g.sec[0][1] - 1) * 100;
+      parts.push(`<span><b class="${p>=0?'pos':'neg'}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · Sector mix</span>`);
+    }
+    parts.push(`<span class="selection-hint">drag on chart to measure a sub-period →</span>`);
+    return parts.join("");
+  };
+  info.innerHTML = defaultInfo();
+
+  const nearestIdx = (pts, t) => {
+    if (!pts || !pts.length) return -1;
+    let lo = 0, hi = pts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pts[mid][0] < t) lo = mid + 1; else hi = mid;
+    }
+    if (lo > 0 && Math.abs(pts[lo - 1][0] - t) < Math.abs(pts[lo][0] - t)) return lo - 1;
+    return lo;
+  };
+  const clientToSvgX = (clientX) => {
+    const r = svg.getBoundingClientRect();
+    return (clientX - r.left) * (g.W / r.width);
+  };
+  const pxToData = (px) => g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
+
+  let dragging = false, dragStartT = null;
+
+  overlay.addEventListener("mousemove", (e) => {
+    const svgX = clientToSvgX(e.clientX);
+    const t = pxToData(Math.max(g.padL, Math.min(g.W - g.padR, svgX)));
+    const i = nearestIdx(g.port, t);
+    if (i < 0) return;
+    const sp = g.port[i];
+    const x = g.xScale(sp[0]);
+    const y = g.yScale(sp[1]);
+    cv.setAttribute("x1", x); cv.setAttribute("x2", x); cv.style.opacity = 1;
+    ch.setAttribute("y1", y); ch.setAttribute("y2", y); ch.style.opacity = 1;
+    dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.style.opacity = 1;
+    const pct = (sp[1] / g.port[0][1] - 1) * 100;
+    let extra = "";
+    if (dotSpy && g.spy) {
+      const j = nearestIdx(g.spy, sp[0]);
+      if (j >= 0) {
+        const px = g.xScale(g.spy[j][0]); const py = g.yScale(g.spy[j][1]);
+        dotSpy.setAttribute("cx", px); dotSpy.setAttribute("cy", py); dotSpy.style.opacity = 1;
+        const sPct = (g.spy[j][1] / g.spy[0][1] - 1) * 100;
+        extra += `<div class="tt-row"><span>SPY</span><b class="${sPct>=0?'pos':'neg'}">${(sPct>=0?'+':'')+sPct.toFixed(2)}%</b></div>`;
+      }
+    }
+    if (dotNdx && g.ndx) {
+      const j = nearestIdx(g.ndx, sp[0]);
+      if (j >= 0) {
+        const px = g.xScale(g.ndx[j][0]); const py = g.yScale(g.ndx[j][1]);
+        dotNdx.setAttribute("cx", px); dotNdx.setAttribute("cy", py); dotNdx.style.opacity = 1;
+        const nPct = (g.ndx[j][1] / g.ndx[0][1] - 1) * 100;
+        extra += `<div class="tt-row"><span>NASDAQ</span><b class="${nPct>=0?'pos':'neg'}">${(nPct>=0?'+':'')+nPct.toFixed(2)}%</b></div>`;
+      }
+    }
+    if (dotSec && g.sec) {
+      const j = nearestIdx(g.sec, sp[0]);
+      if (j >= 0) {
+        const px = g.xScale(g.sec[j][0]); const py = g.yScale(g.sec[j][1]);
+        dotSec.setAttribute("cx", px); dotSec.setAttribute("cy", py); dotSec.style.opacity = 1;
+        const sPct = (g.sec[j][1] / g.sec[0][1] - 1) * 100;
+        extra += `<div class="tt-row"><span>Sector mix</span><b class="${sPct>=0?'pos':'neg'}">${(sPct>=0?'+':'')+sPct.toFixed(2)}%</b></div>`;
+      }
+    }
+    const dt = new Date(sp[0]);
+    tt.innerHTML = `
+      <div class="tt-date">${dt.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'})}</div>
+      <div class="tt-row"><span>Portfolio</span><b class="${pct>=0?'pos':'neg'}">${(pct>=0?'+':'')+pct.toFixed(2)}%</b></div>
+      ${extra}
+    `;
+    tt.classList.add("show");
+    const wrapRect = wrap.getBoundingClientRect();
+    const lx = e.clientX - wrapRect.left + 12;
+    const ly = e.clientY - wrapRect.top - 8;
+    const ttRect = tt.getBoundingClientRect();
+    const maxX = wrap.clientWidth - ttRect.width - 6;
+    tt.style.left = Math.min(lx, Math.max(6, maxX)) + "px";
+    tt.style.top = Math.max(6, ly) + "px";
+
+    if (dragging && dragStartT != null) {
+      const a = Math.min(dragStartT, sp[0]), b = Math.max(dragStartT, sp[0]);
+      const ax = g.xScale(a), bx = g.xScale(b);
+      sel.style.display = "";
+      sel.setAttribute("x", ax);
+      sel.setAttribute("width", Math.max(1, bx - ax));
+      const iA = nearestIdx(g.port, a), iB = nearestIdx(g.port, b);
+      if (iA >= 0 && iB >= 0 && iA !== iB) {
+        const va = g.port[iA][1], vb = g.port[iB][1];
+        const pPct = (vb/va - 1) * 100;
+        let drag = `<span><b class="${pPct>=0?'pos':'neg'}">${(pPct>=0?'+':'')+pPct.toFixed(2)}%</b> · Portfolio (selection)</span>`;
+        if (g.spy) {
+          const jA = nearestIdx(g.spy, a), jB = nearestIdx(g.spy, b);
+          if (jA >= 0 && jB >= 0 && jA !== jB) {
+            const sp2 = (g.spy[jB][1]/g.spy[jA][1] - 1) * 100;
+            drag += `<span><b class="${sp2>=0?'pos':'neg'}">${(sp2>=0?'+':'')+sp2.toFixed(2)}%</b> · SPY</span>`;
+          }
+        }
+        if (g.ndx) {
+          const jA = nearestIdx(g.ndx, a), jB = nearestIdx(g.ndx, b);
+          if (jA >= 0 && jB >= 0 && jA !== jB) {
+            const nx = (g.ndx[jB][1]/g.ndx[jA][1] - 1) * 100;
+            drag += `<span><b class="${nx>=0?'pos':'neg'}">${(nx>=0?'+':'')+nx.toFixed(2)}%</b> · NASDAQ</span>`;
+          }
+        }
+        if (g.sec) {
+          const jA = nearestIdx(g.sec, a), jB = nearestIdx(g.sec, b);
+          if (jA >= 0 && jB >= 0 && jA !== jB) {
+            const sc = (g.sec[jB][1]/g.sec[jA][1] - 1) * 100;
+            drag += `<span><b class="${sc>=0?'pos':'neg'}">${(sc>=0?'+':'')+sc.toFixed(2)}%</b> · Sector mix</span>`;
+          }
+        }
+        drag += `<span class="selection-hint">${new Date(g.port[iA][0]).toLocaleDateString()} → ${new Date(g.port[iB][0]).toLocaleDateString()}</span>`;
+        info.innerHTML = drag;
+      }
+    }
+  });
+  overlay.addEventListener("mouseleave", () => {
+    cv.style.opacity = 0; ch.style.opacity = 0; dot.style.opacity = 0;
+    if (dotSpy) dotSpy.style.opacity = 0;
+    if (dotNdx) dotNdx.style.opacity = 0;
+    if (dotSec) dotSec.style.opacity = 0;
+    tt.classList.remove("show");
+  });
+  overlay.addEventListener("mousedown", (e) => {
+    dragging = true;
+    const svgX = clientToSvgX(e.clientX);
+    dragStartT = pxToData(Math.max(g.padL, Math.min(g.W - g.padR, svgX)));
+    sel.style.display = "";
+    sel.setAttribute("x", g.xScale(dragStartT));
+    sel.setAttribute("width", 1);
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false; dragStartT = null;
+    // Keep selection visible briefly, then fade back to defaults
+    setTimeout(() => {
+      sel.style.display = "none";
+      info.innerHTML = defaultInfo();
+    }, 1800);
+  });
 }
 
 /* ===========================================================================
@@ -4338,6 +6160,11 @@ function capWeightsOf(rows) {
   const total = caps.reduce((a, b) => a + b, 0);
   if (total > 0) return Object.fromEntries(rows.map((r, i) => [r.symbol, caps[i] / total]));
   return Object.fromEntries(rows.map(r => [r.symbol, 1 / Math.max(1, rows.length)]));
+}
+function equalWeightsOf(rows) {
+  if (!rows.length) return {};
+  const w = 1 / rows.length;
+  return Object.fromEntries(rows.map(r => [r.symbol, w]));
 }
 
 function openWeightsPopup() {
@@ -4460,9 +6287,10 @@ function applyWeightsDraft() {
   STATE.customWeights = {};
   for (const r of WEIGHTS_DRAFT) STATE.customWeights[r.symbol] = r.weight / total;
   STATE.mode = "custom";
-  // Invalidate any cached custom result (weights changed).
-  for (const k of Object.keys(STATE.analyticsByMode)) {
-    if (k.startsWith("custom|")) delete STATE.analyticsByMode[k];
+  // Invalidate any cached custom result for the active tab (weights changed).
+  const tabMap = currentAnalyticsMap();
+  for (const k of Object.keys(tabMap)) {
+    if (k.startsWith("custom|")) delete tabMap[k];
   }
   updateModeButtons();
   closeWeightsPopup();
@@ -4552,9 +6380,31 @@ $("#pf-period-tabs").addEventListener("click", (e) => {
   updatePeriodButtons();
   requestAnalytics();
 });
-$("#pf-show-spy").addEventListener("change", (e) => { STATE.showSpy = e.target.checked; renderAnalyticsBody(); });
-$("#pf-show-sec").addEventListener("change", (e) => { STATE.showSec = e.target.checked; renderAnalyticsBody(); });
-$("#pf-show-dd").addEventListener("change", (e) => { STATE.showDd = e.target.checked; renderAnalyticsBody(); });
+function wireOverlayPill(id, stateKey) {
+  const el = $(id);
+  if (!el) return;
+  const toggle = () => {
+    STATE[stateKey] = !STATE[stateKey];
+    el.dataset.on = STATE[stateKey] ? "1" : "0";
+    el.setAttribute("aria-checked", STATE[stateKey] ? "true" : "false");
+    renderAnalyticsBody();
+  };
+  el.addEventListener("click", (e) => {
+    // Clicking the info icon shouldn't toggle the overlay.
+    if (e.target.closest(".ovl-info")) return;
+    toggle();
+  });
+  el.addEventListener("keydown", (e) => {
+    if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(); }
+  });
+  // Initial sync from STATE.
+  el.dataset.on = STATE[stateKey] ? "1" : "0";
+  el.setAttribute("aria-checked", STATE[stateKey] ? "true" : "false");
+}
+wireOverlayPill("#pf-show-spy", "showSpy");
+wireOverlayPill("#pf-show-ndx", "showNdx");
+wireOverlayPill("#pf-show-sec", "showSec");
+wireOverlayPill("#pf-show-dd", "showDd");
 
 /* --- Weights popup wiring --- */
 $("#pf-weights-bg").addEventListener("click", (e) => { if (e.target.id === "pf-weights-bg") closeWeightsPopup(); });
@@ -4565,8 +6415,171 @@ $("#pf-weights-reset").addEventListener("click", resetDraftToCap);
 $("#pf-weights-apply").addEventListener("click", applyWeightsDraft);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#pf-weights-bg").classList.contains("show")) closeWeightsPopup(); });
 
-$("#footer-date").textContent = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+/* ===========================================================================
+ * FX selector wiring (topbar dropdown + hover currency-index chart)
+ * --------------------------------------------------------------------------- */
+function fxLabelFor(ccy) {
+  const sym = FX_SYMBOL[ccy];
+  return sym ? `${ccy} ${sym}` : ccy;
+}
+function fxRenderDropdown() {
+  const dd = $("#fx-dropdown");
+  if (!dd) return;
+  dd.innerHTML = FX_SUPPORTED.map(ccy => `
+    <div class="fx-opt ${ccy === FX_QUOTE ? 'selected' : ''}" data-ccy="${ccy}" role="option">
+      <span class="fx-opt-code">${ccy} ${FX_SYMBOL[ccy] || ''}</span>
+      <span class="fx-opt-name">${FX_NAMES[ccy] || ''}</span>
+    </div>
+  `).join("");
+}
+function fxUpdateButton() {
+  const lbl = $("#fx-btn-label");
+  if (lbl) lbl.textContent = fxLabelFor(FX_QUOTE);
+}
+function fxOpen() {
+  fxRenderDropdown();
+  $("#fx-dropdown").classList.add("show");
+  $("#fx-btn").classList.add("open");
+}
+function fxClose() {
+  $("#fx-dropdown").classList.remove("show");
+  $("#fx-btn").classList.remove("open");
+  fxHoverHide();
+}
+function fxToggle() {
+  $("#fx-dropdown").classList.contains("show") ? fxClose() : fxOpen();
+}
+function fxSelect(ccy) {
+  if (!ccy || FX_SUPPORTED.indexOf(ccy) < 0) return;
+  const prev = FX_QUOTE;
+  FX_QUOTE = ccy;
+  try { localStorage.setItem("fx_quote", ccy); } catch (e) {}
+  fxUpdateButton();
+  fxRenderDropdown();
+  if (DATA && DATA.length) {
+    if (prev !== ccy) {
+      // Invalidate every tab's analytics — returns must be recomputed in the new currency.
+      STATE.analyticsByTab = {};
+      STATE.analytics = null;
+    }
+    render();
+    if (prev !== ccy && DATA.length) requestAnalytics();
+  }
+  if (DETAIL && DETAIL.data) {
+    const det = $("#modal");
+    if (det && det.classList && document.getElementById("modal-bg").classList.contains("show")) {
+      try { renderSections(); } catch (e) {}
+    }
+  }
+}
+
+/* --- hover currency-index chart --- */
+async function fxFetchIndex(ccy) {
+  if (FX_INDEX_CACHE[ccy]) return FX_INDEX_CACHE[ccy];
+  if (FX_INDEX_INFLIGHT[ccy]) return FX_INDEX_INFLIGHT[ccy];
+  const p = (async () => {
+    try {
+      const r = await fetch(`/api/fx-index?ccy=${encodeURIComponent(ccy)}`);
+      if (!r.ok) return [];
+      const j = await r.json();
+      const pts = Array.isArray(j.index) ? j.index : [];
+      FX_INDEX_CACHE[ccy] = pts;
+      return pts;
+    } catch (e) { return []; }
+    finally { delete FX_INDEX_INFLIGHT[ccy]; }
+  })();
+  FX_INDEX_INFLIGHT[ccy] = p;
+  return p;
+}
+function fxDrawHoverChart(pts) {
+  const svg = $("#fx-hover-svg");
+  if (!svg) return;
+  if (!pts || pts.length < 2) {
+    svg.innerHTML = `<text x="110" y="44" text-anchor="middle" fill="var(--muted)" font-size="11">no data</text>`;
+    return;
+  }
+  const w = 220, h = 80, padL = 4, padR = 4, padT = 6, padB = 12;
+  const xs = pts.map(p => p[0]);
+  const ys = pts.map(p => p[1]);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs);
+  const ymin = Math.min(...ys), ymax = Math.max(...ys);
+  const xrng = (xmax - xmin) || 1;
+  const yrng = (ymax - ymin) || 1;
+  const sx = t => padL + ((t - xmin) / xrng) * (w - padL - padR);
+  const sy = v => padT + (1 - (v - ymin) / yrng) * (h - padT - padB);
+  let d = "";
+  for (let i = 0; i < pts.length; i++) {
+    const x = sx(pts[i][0]).toFixed(1);
+    const y = sy(pts[i][1]).toFixed(1);
+    d += (i === 0 ? "M" : "L") + x + "," + y + " ";
+  }
+  const last = ys[ys.length - 1];
+  const first = ys[0];
+  const up = last >= first;
+  const stroke = up
+    ? getComputedStyle(document.documentElement).getPropertyValue("--pos").trim() || "#1f883d"
+    : getComputedStyle(document.documentElement).getPropertyValue("--neg").trim() || "#cf222e";
+  const baseY = sy(100).toFixed(1);
+  svg.innerHTML = `
+    <line x1="${padL}" x2="${w-padR}" y1="${baseY}" y2="${baseY}" stroke="var(--border)" stroke-dasharray="2 3" stroke-width="1"/>
+    <path d="${d}" fill="none" stroke="${stroke}" stroke-width="1.4"/>
+  `;
+}
+async function fxHoverShow(ccy, anchorEl) {
+  const box = $("#fx-hover");
+  if (!box) return;
+  $("#fx-hover-title").textContent = `${ccy} basket index (1Y)`;
+  $("#fx-hover-foot").textContent = "loading…";
+  fxDrawHoverChart([]);
+  box.classList.add("show");
+  // position next to dropdown (anchored to the right side of the topbar);
+  // CSS already places it with right:180px,top:36px.
+  const pts = await fxFetchIndex(ccy);
+  if (!box.classList.contains("show")) return;
+  fxDrawHoverChart(pts);
+  if (pts && pts.length >= 2) {
+    const ret = (pts[pts.length-1][1] / pts[0][1] - 1) * 100;
+    const cls = ret >= 0 ? "pos" : "neg";
+    const sign = ret >= 0 ? "+" : "";
+    $("#fx-hover-foot").innerHTML = `vs 6-major basket · 1Y <span class="${cls}">${sign}${ret.toFixed(2)}%</span>`;
+  } else {
+    $("#fx-hover-foot").textContent = "no data";
+  }
+}
+function fxHoverHide() {
+  const box = $("#fx-hover");
+  if (box) box.classList.remove("show");
+}
+
+function fxInit() {
+  fxLoadPref();
+  fxUpdateButton();
+  fxRenderDropdown();
+  fxLoadRates().then(() => { if (DATA && DATA.length) render(); });
+  const btn = $("#fx-btn");
+  if (btn) btn.addEventListener("click", (e) => { e.stopPropagation(); fxToggle(); });
+  const dd = $("#fx-dropdown");
+  if (dd) {
+    dd.addEventListener("click", (e) => {
+      const opt = e.target.closest(".fx-opt");
+      if (!opt) return;
+      fxSelect(opt.dataset.ccy);
+      fxClose();
+    });
+    dd.addEventListener("mouseover", (e) => {
+      const opt = e.target.closest(".fx-opt");
+      if (!opt) return;
+      fxHoverShow(opt.dataset.ccy, opt);
+    });
+    dd.addEventListener("mouseleave", fxHoverHide);
+  }
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#fx-menu")) fxClose();
+  });
+}
+
 setTheme(readTheme());
+fxInit();
 renderHeader();
 renderSortMenu();
 updateSortLabel();
@@ -4620,6 +6633,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            # The page is a one-shot SPA; always serve the latest copy so a
+            # `python dashboard.py` restart never gets shadowed by browser cache.
+            self.send_header("Cache-Control", "no-store, must-revalidate")
             self.end_headers()
             self.wfile.write(body)
             return
@@ -4638,6 +6654,45 @@ class Handler(BaseHTTPRequestHandler):
             name = unquote(name)
             view = load_view(name)
             self._send_json(200, {"view": view, "name": name})
+            return
+        if parsed.path == "/api/fx-rates":
+            from urllib.parse import parse_qs
+
+            q = parse_qs(parsed.query)
+            base = (q.get("base") or ["USD"])[0].strip().upper() or "USD"
+            try:
+                self._send_json(200, fx_rates(base))
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/fx-index":
+            from urllib.parse import parse_qs
+
+            q = parse_qs(parsed.query)
+            ccy = (q.get("ccy") or ["USD"])[0].strip().upper() or "USD"
+            period = (q.get("period") or ["1y"])[0].strip() or "1y"
+            try:
+                series = fx_index_history(ccy, period=period)
+                self._send_json(200, {"ccy": ccy, "period": period, "index": series})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/fx-indexes-bulk":
+            from urllib.parse import parse_qs
+
+            q = parse_qs(parsed.query)
+            period = (q.get("period") or ["1y"])[0].strip() or "1y"
+            ccys = [c.strip().upper() for c in (q.get("ccys") or [",".join(SUPPORTED_FX)])[0].split(",") if c.strip()]
+            ccys = [c for c in ccys if c in SUPPORTED_FX]
+            results: dict[str, list] = {}
+            # Sequential — yfinance rate-limits aggressive bulk pulls and we'd
+            # rather take a few seconds longer than return half-empty responses.
+            for c in ccys:
+                try:
+                    results[c] = fx_index_history(c, period) or []
+                except Exception:
+                    results[c] = []
+            self._send_json(200, {"period": period, "indexes": results})
             return
         if parsed.path == "/api/detail":
             from urllib.parse import parse_qs
@@ -4718,10 +6773,11 @@ class Handler(BaseHTTPRequestHandler):
                 rows = payload.get("rows") or []
                 weights = payload.get("weights") or {}
                 period = str(payload.get("period") or "1Y")
+                display_ccy = str(payload.get("display_ccy") or "USD").strip().upper()
                 if not isinstance(rows, list) or not isinstance(weights, dict):
                     self._send_json(400, {"error": "rows[] and weights{} required"})
                     return
-                result = analyze_portfolio(rows, weights, period)
+                result = analyze_portfolio(rows, weights, period, display_ccy=display_ccy)
                 self._send_json(200, result)
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
@@ -4734,10 +6790,11 @@ class Handler(BaseHTTPRequestHandler):
                 rows = payload.get("rows") or []
                 weight_sets = payload.get("weight_sets") or {}
                 period = str(payload.get("period") or "1Y")
+                display_ccy = str(payload.get("display_ccy") or "USD").strip().upper()
                 if not isinstance(rows, list) or not isinstance(weight_sets, dict) or not weight_sets:
                     self._send_json(400, {"error": "rows[] and weight_sets{name: weights} required"})
                     return
-                results = analyze_portfolios_multi(rows, weight_sets, period)
+                results = analyze_portfolios_multi(rows, weight_sets, period, display_ccy=display_ccy)
                 self._send_json(200, {"results": results} if "error" not in results else results)
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})

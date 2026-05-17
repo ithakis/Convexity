@@ -1,9 +1,10 @@
-(search) - add 'search' feature. Where with natural naguage one could search for companies which fit their criteria. 
+(Search) - add 'search' feature. Where with natural naguage one could search for companies which fit their criteria. 
  "Find me technology companies with blah blah blah'
  - This would require building a database, and then with AI going through the database.
     - When looking for a company one should have the option to add it to the existing portfolio or create a new porfolio.
+- This means that one should make a local database, which with AI searches the criteria.
 
-(news) - News Releases - Summary (this is a big project)
+(News) - News Releases - Summary (this is a big project)
     - When looking for a company, make a tab to show the new's.
         - This new's needs to have the top 5 biggest news. of the last 1-3 months. Now this is difficult to do, but the API should be able to find the biggest news. and also we should be able to use the price data to show how much the price of the stock changed.
         - Then bellow that it should be will the most important news in chronological order.
@@ -12,12 +13,28 @@
 
 (portfolio) - New Features:
     - Add the optioin to give by text the weights, essentially having copy pasted them from AI.
+    - Give explanations of all the metrics on mouse over.
+    - If I double click on the portfolio tab, it should hide the functionality to edit the constituents.
+    - Remove the 'Save Wishlist'
+    - make the columns better in the contribution by 3y returns.
+
+(New section at the bottom) - Analyst recommendations:
+    - Remove the current one
+    -> Aggregation of all the current analyst recommendations - A new dashboard to see for each member what are the analyst recommendations.
 
 
 (columns) - Ability to add / create new columns.
     - The current ones should stay the default. But there should be the option to add more, and also save views of columns.
 
 (all time high again distribution?) - Similar to my previous analysis on periodic investing ?
+
+
+---
+
+(DONE)(FX Features)
+    - Change the currencty which is denominated in
+
+(DONE)(European Stock Availability):
 
 ---
 
@@ -32,3 +49,59 @@ For, News from a company:
 
 Idea about connecting it with claude.
 - make it in a way which it shave is in a repo file, all the csv and the folder is very AI/agent friendly so one could use claude to to search for stocks and create portfolio, or use claude to see the portfolio (CSV and other members)
+
+---
+
+(Analysis) - New 'Analysis' Tab / future dashboard (this is a very big project)
+    - Add a new top-level 'Analysis' button/tab next to 'Portfolio'.
+    - This should be a whole new section, the same way that 'Portfolio' is its own tab.
+    - First step is to do this analysis at the company level, store those results, and only after that aggregate them at the portfolio level.
+    - The company-level analysis should also be available on demand when clicking into a company.
+        - Right now the company view is mostly about the 'past'. There should be another tab which is about the 'future'.
+        - This should be a highly advanced dashboard for that specific company.
+        - It should focus on 2 main things:
+            - how the fundamentals are expected to evolve, relative to peers in the sector and/or the S&P 500.
+            - what news have moved the company, and from those news what are the main momentum drivers behind the excess returns / idiosyncratic component.
+    - The analysis should collect and combine:
+        - analyst expectations / revisions.
+        - forward-looking fundamentals and estimates.
+        - news sentiment and the main themes / topics trending for the company.
+        - the biggest news in the recent months and how much the stock moved after them.
+        - peer / sector / market comparison so the company is judged in relative terms, not only in isolation.
+    - This should then produce a smart dashboard which shows how 'strong' each candidate is.
+        - Similar idea to the analyst tab, but much more complete.
+        - It should clearly show whether the strength is coming from news momentum, future fundamentals growth, revisions up, or some combination of those.
+    - After doing this for each company, aggregate everything at the portfolio level.
+        - When clicking 'Analysis', the user should get a very strong summary dashboard for all the companies in the portfolio.
+        - The goal is to identify the companies which have the strongest news momentum and/or future fundamentals growth potential.
+        - Then use that to make judgements on whether to remove, overweight, or underweight positions.
+    - Need to think carefully about storage / caching.
+        - Per-company analysis should be saved locally so it does not need to be recomputed every time.
+        - Portfolio analysis should be built on top of those stored company-level results.
+
+Raw description:
+```
+in the todo.txt I keep a note about things which I want to do, can you add at the bottom after a new '---' a section in the same whay and tone as the rest of the file, about the features we just discused?
+These features should be a new thing which the use clicks. a 'Analysis' Tab which collects all this things, for each of the companies in the portfolio, aggregates the data, and based on the data which you can collect about the epectations, sentiment about the company in the news, things which are trending on the news about the compnay, give you an dashboard in a smart way about how 'strong' each candidate is. the same way i do for the analyst tab.
+
+okay lets take a step back. first step is to do this at a company level. store those. Then do this in a portoflio base. When you click the 'Analysis' Button, which should be at the top next to the 'Portfolio' it should be a whole new thing like the 'Portfolio' tab is, which give you the dashboard with the aggregated info.
+However, the underlying analysis, for each company should be present 'on demand' for each company. This feature is so fundemental and important to an investor, which this dashboard, for each company could be its own tab. Essentially, now you have only one tab when you click on a company, which is about the 'past' sto you would want the other tab which is about the 'future' to be this highly advanced dashboard, which is the result of all those things and the investor gets a very detailed understanding about 2 things: 1. how the fundementals are expected to be relative to its peers in the sector or/and snp500, and what news have moved the company and from the news what is the most important momentum drivers driving the excess returns. (when I say excess returns, I mean the indiosycratic compoment of the company, each company has its own 'news momentum' that the answer i am trying to answer/ capture here.)
+After that you do this analysis for all the companies, I want to have a very powerful aggregation/summary for all the companies in the protfolio, to identify the ones which have strong 'news' or 'future fundumentals growth' potential. (like a revisits up in the fundumentals). So I can make judments based on if I should remove or over/under weights some of those companies.
+```
+
+
+---
+
+(App / Packaging) - Make it a proper desktop app + github repo
+    - Put the whole project in a github repo, with the app code, local data files / csv, and the structure being very AI / agent friendly.
+    - The app should still work as a local browser service, so one can use it from the browser directly and also use tools like Claude / Copilot / MCP against the local app.
+    - On top of that, build a standalone desktop app with an icon which you click and it opens the dashboard directly.
+        - In the background the engine could still be the local browser / localhost service.
+        - The standalone app would then just be a native wrapper around that local service.
+    - The installation needs to be very easy on both mac and windows.
+        - Ideally one-click install / open, without the user needing to know python.
+    - Need support for opening more than one window / screen at the same time.
+        - The windows should share the same background engine and same local data / state.
+    - Need to think about the right architecture for this.
+        - One option is to keep the current browser-first app and add a very thin desktop shell on top.
+        - This would likely be much easier than rebuilding the whole thing as a fully separate native app.
