@@ -666,3 +666,68 @@ _MPT_BUDGETS = {
 }
 ```
 Capped at 30 newest runs per portfolio. Cascades on view rename/delete.
+
+---
+
+## 13. CI / Quality gates
+
+### GitHub Actions (`.github/workflows/ci.yml`)
+
+Runs on every push to `main` or `claude/**` branches and on every PR to `main`.
+Three jobs (all non-blocking on CI for now; tighten when false-positive rate
+is measured):
+
+| Step | Tool | What it checks |
+|---|---|---|
+| Syntax check | `ast.parse` | Every `.py` file — catches grammar errors before server start |
+| Static analysis | `pyflakes` | `symbol_db.py`, `mpt.py`, `xlsx_export.py`, `build_symbol_db.py` — undefined names, unused imports |
+| Import smoke | `ast.parse` | `dashboard.py` parseable; `mpt.py` importable without full numba stack |
+
+`dashboard.py`'s pyflakes step is `|| true` (non-blocking) because the
+embedded HTML/JS strings generate false positives. Remove when a scoped
+ignore strategy is in place.
+
+**To tighten a check:** remove `|| true` from the relevant step in `ci.yml`
+and commit — the next push will enforce it.
+
+### Pre-commit hooks (`.claude/settings.json`)
+
+Two hooks fire on every `git commit` inside a Claude Code session:
+
+1. **Syntax check** (`command` hook, hard gate) — runs `python -c "import ast;
+   ast.parse(open(f).read())"` on every staged `.py` file. Exits non-zero
+   (blocks the commit) on any syntax error.
+
+2. **AI code review** (`agent` hook, Haiku model) — runs `git diff --cached`,
+   reviews for critical issues only (runtime exceptions, accidental secrets,
+   broken cross-references). Blocks on genuine problems; passes silently on
+   style/TODOs. Timeout 90 s.
+
+To **evolve** the pre-commit checks as the project grows:
+- Add new file types to the syntax-check step (e.g., `grep '\.js$'` for
+  external JS if the app ever gains a separate JS bundle).
+- Tighten the AI reviewer prompt in `.claude/settings.json` — e.g., add
+  "also check that any new API route has a matching DELETE handler" once that
+  pattern is established.
+- Wire pytest once tests exist: add a third command hook that runs
+  `python -m pytest tests/ -q` after the syntax gate.
+
+### Manual review before committing
+
+Run `/review` (or `/security-review`) at any point during a session to get a
+full structured review of all staged changes. This is separate from the
+pre-commit hook and can be used to catch architectural issues early.
+
+### Merging PRs without leaving Claude Code
+
+```bash
+# Squash-merge (recommended — keeps main history linear)
+gh pr merge <number> --squash --delete-branch
+
+# Auto-merge once CI passes
+gh pr merge <number> --squash --auto --delete-branch
+
+# Check PR status
+gh pr status
+gh pr checks <number>
+```

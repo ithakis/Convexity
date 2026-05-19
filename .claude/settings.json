@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit*)",
+            "statusMessage": "Pre-commit: syntax-checking staged .py files...",
+            "timeout": 30,
+            "command": "cmd=$(jq -r '.tool_input.command // \"\"'); if echo \"$cmd\" | grep -qE 'git[[:space:]]+commit'; then staged=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep '\\.py$' || true); if [ -n \"$staged\" ]; then echo \"Syntax-checking staged Python files: $staged\"; for f in $staged; do python -c \"import ast; ast.parse(open('$f').read())\" && echo \"  OK: $f\" || { echo \"  SYNTAX ERROR in $f — fix before committing.\"; exit 1; }; done; echo \"All staged .py files pass syntax check.\"; fi; fi"
+          },
+          {
+            "type": "agent",
+            "if": "Bash(git commit*)",
+            "statusMessage": "Pre-commit: reviewing staged diff for critical issues...",
+            "timeout": 90,
+            "model": "claude-haiku-4-5",
+            "prompt": "You are a strict but fast pre-commit reviewer for a Python/JS portfolio dashboard (single-file app: dashboard.py ~12k lines, mpt.py, xlsx_export.py, symbol_db.py).\n\nRun `git diff --cached` to see what is staged. Review it for CRITICAL issues ONLY:\n- Python/JS syntax errors that `ast.parse` would miss (eval strings, f-strings with unmatched braces, etc.)\n- Obvious runtime exceptions (NameError, AttributeError on None, off-by-one on mandatory array access)\n- Accidental secrets, API keys, or credentials left in code\n- A staged deletion of a function/route that is still called elsewhere in the same diff\n\nDo NOT block for: style, naming, missing tests, TODOs, minor inefficiencies, or anything that is a matter of preference.\n\nIf you find a genuine critical issue: output exactly one JSON line `{\"decision\": \"block\", \"reason\": \"<≤20 word description>\"}` and nothing else.\nIf the diff looks fine: output nothing and exit 0. Be fast and lenient."
+          }
+        ]
+      }
+    ]
+  }
+}
