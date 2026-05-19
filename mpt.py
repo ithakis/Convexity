@@ -598,7 +598,7 @@ def monte_carlo_cloud(mu: pd.Series, cov: pd.DataFrame, n_samples: int = 25_000,
                       anchor_weights: np.ndarray | None = None,
                       floor: float = 0.0,
                       frontier_weights: np.ndarray | None = None,
-                      perturbed_fraction: float = 0.6) -> np.ndarray:
+                      perturbed_fraction: float = 0.35) -> np.ndarray:
     """Hybrid sampler: perturbed-frontier + mixture-Dirichlet, long-only.
 
     Returns an ``(N, 3) float32`` ndarray of ``(vol, ret, sharpe)`` rows. ``N``
@@ -610,7 +610,9 @@ def monte_carlo_cloud(mu: pd.Series, cov: pd.DataFrame, n_samples: int = 25_000,
       - ``perturbed_fraction`` of ``n_samples`` come from
         ``_sample_perturbed(frontier_weights)`` — these hug the frontier curve.
       - The remaining samples come from the original Dirichlet mixture
-        (``_sample_batch``) — these preserve wide feasible-region coverage.
+        (``_sample_batch``) — these fill the diffuse feasible region away
+        from the frontier. Default 35/65 split is biased toward the wide
+        cloud so the lower-right (high-vol) region renders densely.
 
     If ``frontier_weights`` is None (or empty), the sampler degrades to the
     pure-Dirichlet behaviour — preserves caller back-compat.

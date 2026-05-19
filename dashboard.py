@@ -3930,7 +3930,7 @@ INDEX_HTML = r"""<!doctype html>
   .pf-mpt-info-bg { z-index: 95; }
   .pf-mpt-controls {
     --mpt-ctl-h: 32px;
-    display: grid; grid-template-columns: auto auto minmax(220px, 1fr) auto auto auto;
+    display: grid; grid-template-columns: auto auto minmax(220px, 0.55fr) auto minmax(220px, 0.45fr) auto;
     gap: 12px 14px; align-items: end;
     padding: 12px 18px; border-bottom: 1px solid var(--border);
     background: var(--bg-subtle);
@@ -3978,7 +3978,7 @@ INDEX_HTML = r"""<!doctype html>
   .pf-mpt-rf-wrap {
     position: relative; display: flex; align-items: center; gap: 6px;
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 7px;
-    padding: 3px 5px 3px 0; overflow: visible; min-width: 280px;
+    padding: 3px 5px 3px 0; overflow: visible; min-width: 240px;
   }
   .pf-mpt-rf-wrap:focus-within { border-color: var(--accent); }
   .pf-mpt-rf-wrap input[type="number"] {
@@ -4008,7 +4008,7 @@ INDEX_HTML = r"""<!doctype html>
   /* Rich hover card — multi-line, anchored to the cursor. */
   .pf-mpt-rf-spark-tip {
     position: absolute; pointer-events: none; opacity: 0;
-    transform: translate(-50%, calc(-100% - 10px));
+    transform: translate(-50%, 10px);
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 7px;
     padding: 8px 11px; font-size: 11.5px; color: var(--text);
     font-variant-numeric: tabular-nums; transition: opacity 0.1s;
@@ -4200,6 +4200,8 @@ INDEX_HTML = r"""<!doctype html>
   }
   .pf-mpt-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .pf-mpt-actions button:hover { filter: brightness(1.05); border-color: var(--accent); }
+  @keyframes mpt-apply-flash { 0%,100%{box-shadow:none} 30%{box-shadow:0 0 0 3px rgba(var(--accent-rgb,9,105,218),0.4)} }
+  .pf-mpt-apply-flash { animation: mpt-apply-flash 0.6s ease; }
   .pf-mpt-runs { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
   .pf-mpt-runs .pf-mpt-run-row {
     display: flex; justify-content: space-between; gap: 6px;
@@ -5132,7 +5134,8 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <h4>Weights</h4>
         <div class="pf-mpt-weights" id="pf-mpt-wlist"></div>
         <div class="pf-mpt-actions">
-          <button id="pf-mpt-save" class="primary">Save as Custom Weights</button>
+          <button id="pf-mpt-apply" class="primary">Apply to Portfolio</button>
+          <button id="pf-mpt-save">Save as Custom Weights</button>
         </div>
         <h4>Recent runs</h4>
         <div class="pf-mpt-runs" id="pf-mpt-runs"><span class="pf-mpt-status">No saved runs yet.</span></div>
@@ -10227,7 +10230,7 @@ function mptRenderChart() {
   if (!isFinite(sMin)) { sMin = 0; sMax = 1; }
   function sharpeColor(s) {
     const t = Math.max(0, Math.min(1, (s - sMin) / Math.max(1e-9, sMax - sMin)));
-    const stops = [[68,1,84],[33,144,141],[253,231,37]];
+    const stops = [[94,40,120],[33,144,141],[253,231,37]];
     const i = t * 2, j = Math.floor(i), f = i - j;
     const a = stops[j], b = stops[Math.min(2, j + 1)];
     return `rgb(${Math.round(a[0]+(b[0]-a[0])*f)},${Math.round(a[1]+(b[1]-a[1])*f)},${Math.round(a[2]+(b[2]-a[2])*f)})`;
@@ -10274,8 +10277,15 @@ function mptRenderChart() {
     MPT.selectedIdx = best;
     document.getElementById("pf-mpt-slider").value = String(best);
     MPT.hoverIdx = null;
+    mptHideFrontierTip();
     mptUpdateSelection();
     mptRenderSide();
+    // Flash the Apply button so the user knows the point is selected and ready.
+    const applyBtn = document.getElementById("pf-mpt-apply");
+    if (applyBtn) {
+      applyBtn.classList.add("pf-mpt-apply-flash");
+      setTimeout(() => applyBtn.classList.remove("pf-mpt-apply-flash"), 600);
+    }
   });
   fresh.addEventListener("mousemove", (ev) => {
     const idx = _hitFrontier(ev);
@@ -10414,9 +10424,9 @@ function drawCloud(ctx, cloud, proj, sharpeOf, sharpeColor) {
   ctx.beginPath();
   ctx.rect(pad.l, pad.t, cssW - pad.l - pad.r, cssH - pad.t - pad.b);
   ctx.clip();
-  ctx.globalAlpha = 0.55;
-  // Dot side ~1.4 CSS px; bumped slightly on hi-dpi so dots stay visible.
-  const r = Math.max(1.0, 1.4 * Math.min(dpr, 1.5));
+  ctx.globalAlpha = 0.85;
+  // Dot side ~1.7 CSS px; bumped slightly on hi-dpi so dots stay visible.
+  const r = Math.max(1.1, 1.7 * Math.min(dpr, 1.5));
   const step = cloud.length > 1_200_000 ? Math.ceil(cloud.length / 1_200_000) : 1;
   for (let i = 0; i < cloud.length; i += step) {
     const p = cloud[i];
@@ -10546,7 +10556,7 @@ function mptShowFrontierTip(ev, idx) {
   const top = Object.entries(p.weights || {})
     .filter(([_, w]) => w > 1e-4)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 3);
+    .slice(0, 5);
   let tip = document.getElementById("pf-mpt-frontier-tip");
   if (!tip) {
     tip = document.createElement("div");
@@ -10555,7 +10565,7 @@ function mptShowFrontierTip(ev, idx) {
     document.body.appendChild(tip);
   }
   tip.innerHTML = `
-    <div class="tip-title">Frontier point #${idx + 1} / ${d.frontier.length}</div>
+    <div class="tip-title">Frontier point #${idx + 1} / ${d.frontier.length} <span style="font-weight:400;color:var(--muted);font-size:10px">· click to select</span></div>
     <div class="tip-row"><span class="k">Return</span><span class="v">${(p.ret * 100).toFixed(2)}%</span></div>
     <div class="tip-row"><span class="k">Vol</span><span class="v">${(p.vol * 100).toFixed(2)}%</span></div>
     <div class="tip-row"><span class="k">Sharpe</span><span class="v">${isFinite(sharpe) ? sharpe.toFixed(3) : "—"}</span></div>
@@ -10618,6 +10628,27 @@ function mptRenderSide() {
       </div>
     `).join("");
   }
+}
+
+function mptApplyToPortfolio() {
+  const d = MPT.result; if (!d) return;
+  const sel = d.frontier[MPT.selectedIdx]; if (!sel) return;
+  const w = sel.weights || {};
+  if (!Object.keys(w).length) { toast("No weights at this frontier point."); return; }
+  // Invalidate any stale custom-mode analytics cache before switching.
+  const tabMap = currentAnalyticsMap();
+  for (const k of Object.keys(tabMap)) {
+    if (k.startsWith("custom|")) delete tabMap[k];
+  }
+  STATE.customWeights = {...w};
+  STATE.mode = "custom";
+  closeMptOverlay();
+  renderModeBar();
+  persistActivePreset();
+  requestAnalytics({force: true});
+  const pt = MPT.selectedIdx + 1;
+  const total = d.frontier.length;
+  toast(`Applied MPT point ${pt}/${total} — ${(sel.ret * 100).toFixed(1)}% ret, ${(sel.vol * 100).toFixed(1)}% vol.`);
 }
 
 function mptSaveAsPreset() {
@@ -10755,6 +10786,7 @@ $("#optimize").addEventListener("click", openMptOverlay);
 $("#pf-mpt-close").addEventListener("click", closeMptOverlay);
 $("#pf-mpt-bg").addEventListener("click", (e) => { if (e.target.id === "pf-mpt-bg") closeMptOverlay(); });
 $("#pf-mpt-run").addEventListener("click", mptRun);
+$("#pf-mpt-apply").addEventListener("click", mptApplyToPortfolio);
 $("#pf-mpt-save").addEventListener("click", mptSaveAsPreset);
 $("#pf-mpt-info")?.addEventListener("click", openMptInfo);
 $("#pf-mpt-info-close")?.addEventListener("click", closeMptInfo);
@@ -10929,7 +10961,7 @@ function _rfLookbackLabel(lb) {
       ${note}
     `;
     tip.style.left = px + "px";
-    tip.style.top = "0px";
+    tip.style.top = wrap.clientHeight + "px";
     tip.classList.add("show");
     // Move crosshair on the SVG (viewBox coords)
     const line = document.getElementById("rfs-cross-line");
