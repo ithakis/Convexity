@@ -12,11 +12,31 @@ cleanup() {
     rm -f "$PID_FILE"
 }
 
+stop_existing_dashboard() {
+    local existing_pid="$1"
+
+    if ! kill -0 "$existing_pid" 2>/dev/null; then
+        return 0
+    fi
+
+    echo "Stopping existing Portfolio Dashboard (PID $existing_pid)..."
+    kill "$existing_pid" 2>/dev/null || true
+
+    for _ in {1..50}; do
+        if ! kill -0 "$existing_pid" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    echo "Existing dashboard did not exit cleanly; forcing stop."
+    kill -9 "$existing_pid" 2>/dev/null || true
+}
+
 if [ -f "$PID_FILE" ]; then
     EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
-        echo "Portfolio Dashboard is already running (PID $EXISTING_PID)."
-        exit 0
+        stop_existing_dashboard "$EXISTING_PID"
     fi
     rm -f "$PID_FILE"
 fi

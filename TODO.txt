@@ -18,7 +18,7 @@
     - Remove the 'Save Wishlist'
     - make the columns better in the contribution by 3y returns.
 
-(New section at the bottom) - Analyst recommendations:
+(Done)(New section at the bottom) - Analyst recommendations:
     - Remove the current one
     -> Aggregation of all the current analyst recommendations - A new dashboard to see for each member what are the analyst recommendations.
 
@@ -105,3 +105,11 @@ After that you do this analysis for all the companies, I want to have a very pow
     - Need to think about the right architecture for this.
         - One option is to keep the current browser-first app and add a very thin desktop shell on top.
         - This would likely be much easier than rebuilding the whole thing as a fully separate native app.
+
+Todo:
+1. make the CLAUDE.md file, give it all the wisdom you have which you know, in this chat history and beyond.
+2. When I hover over the GBP currency I see 'no data', can you please fix this.
+3. on hover over the import button, I want you to give a short description about what the export does. (Mention what it contains and that it is imptimal to give the excel file to AI so one could conversate with the AI about the portfolios.) - To this point, i want to emphasize how important it is to save the risk and return statistics and the rest of the stuff which one sees when they click on the portfolio. in the excel, save the 1Year statistics and the 5Year statistics. Do not save the time series data, just the staticstics.
+4. I want short descriptions about all the stuff (Portfolio, Export, Refresh, Sort) On the hover mode, about what each of those things does.
+
+

@@ -47,6 +47,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+import mpt
+
 # ----------------------------- Rate-limit handling -------------------------
 # yfinance 1.0 ships its own curl_cffi-based session (with TLS fingerprinting
 # that dodges most of Yahoo's anti-bot filtering); passing a plain
@@ -186,12 +188,316 @@ def save_view(name: str, entries: str, rows: list, *, set_last: bool = True) -> 
     with _VIEWS_LOCK:
         raw = _read_views_raw()
         views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        # Preserve named weight presets + cached analyst panel across row refreshes
+        # — they're per-portfolio metadata, not derived from the row payload itself.
+        prior = views_map.get(clean_name) if isinstance(views_map.get(clean_name), dict) else None
+        if prior:
+            for k in ("weight_presets", "active_weight_preset", "analytics_cache"):
+                if k in prior:
+                    payload[k] = prior[k]
         views_map[clean_name] = payload
         raw["views"] = views_map
         if set_last:
             raw["last_view"] = clean_name
         _write_views_raw(raw)
     return payload
+
+
+# ----------------------------- Weight presets (per-portfolio) ---------------
+
+def _normalize_preset_weights(weights_in) -> dict[str, float]:
+    """Coerce a {symbol: number} dict to a clean float map, dropping non-numeric
+    entries. We DO NOT renormalise here — the frontend already shows the user
+    a sum indicator, and storing the unsanctioned sum lets us round-trip
+    'work-in-progress' presets faithfully."""
+    out: dict[str, float] = {}
+    if not isinstance(weights_in, dict):
+        return out
+    for sym, w in weights_in.items():
+        try:
+            out[str(sym).strip().upper()] = float(w)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def list_weight_presets(view_name: str) -> dict:
+    """Return {presets: [...], active: name|None} for the view, defensively
+    handling missing/legacy entries."""
+    entry = load_view(view_name) or {}
+    presets = entry.get("weight_presets")
+    if not isinstance(presets, list):
+        presets = []
+    return {"presets": presets, "active": entry.get("active_weight_preset")}
+
+
+def upsert_weight_preset(view_name: str, preset_name: str, weights: dict,
+                         *, rename_from: str | None = None,
+                         set_active: bool = True) -> dict:
+    """Create or update a named preset on the given view. If `rename_from` is
+    supplied and matches an existing preset, that preset is renamed in-place
+    (preserving order)."""
+    clean_view = (view_name or "").strip()
+    clean_name = (preset_name or "").strip()
+    if not clean_view:
+        raise ValueError("view name required")
+    if not clean_name:
+        raise ValueError("preset name required")
+    payload = {
+        "name": clean_name,
+        "weights": _normalize_preset_weights(weights),
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        entry = views_map.get(clean_view)
+        if not isinstance(entry, dict):
+            raise ValueError(f"view '{clean_view}' not found")
+        presets = entry.get("weight_presets")
+        if not isinstance(presets, list):
+            presets = []
+        # In-place replacement: prefer rename_from, fall back to name match
+        replaced = False
+        for i, p in enumerate(presets):
+            if not isinstance(p, dict):
+                continue
+            pname = (p.get("name") or "").strip()
+            if rename_from and pname == rename_from.strip():
+                presets[i] = payload
+                replaced = True
+                break
+            if not rename_from and pname == clean_name:
+                presets[i] = payload
+                replaced = True
+                break
+        if not replaced:
+            presets.append(payload)
+        entry["weight_presets"] = presets
+        if set_active:
+            entry["active_weight_preset"] = clean_name
+        views_map[clean_view] = entry
+        raw["views"] = views_map
+        _write_views_raw(raw)
+    return {"presets": presets, "active": entry.get("active_weight_preset")}
+
+
+def delete_weight_preset(view_name: str, preset_name: str) -> dict:
+    clean_view = (view_name or "").strip()
+    clean_name = (preset_name or "").strip()
+    if not clean_view or not clean_name:
+        return list_weight_presets(clean_view)
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        entry = views_map.get(clean_view)
+        if not isinstance(entry, dict):
+            return {"presets": [], "active": None}
+        presets = [p for p in (entry.get("weight_presets") or [])
+                   if isinstance(p, dict) and (p.get("name") or "").strip() != clean_name]
+        entry["weight_presets"] = presets
+        if (entry.get("active_weight_preset") or "").strip() == clean_name:
+            entry["active_weight_preset"] = None
+        views_map[clean_view] = entry
+        raw["views"] = views_map
+        _write_views_raw(raw)
+    return {"presets": presets, "active": entry.get("active_weight_preset")}
+
+
+def set_active_weight_preset(view_name: str, preset_name: str | None) -> dict:
+    clean_view = (view_name or "").strip()
+    if not clean_view:
+        return {"presets": [], "active": None}
+    clean_name = (preset_name or "").strip() or None
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        entry = views_map.get(clean_view)
+        if not isinstance(entry, dict):
+            return {"presets": [], "active": None}
+        entry["active_weight_preset"] = clean_name
+        views_map[clean_view] = entry
+        raw["views"] = views_map
+        _write_views_raw(raw)
+    return list_weight_presets(clean_view)
+
+
+# ----------------------------- Analytics cache (per-portfolio) --------------
+# Persists the *static* slices of the analytics payload (`analyst`, `exposure`,
+# `concentration`, `stats`, `spy_stats`, `nasdaq_stats`) inside the view JSON,
+# so reopening a saved portfolio paints the Rating Distribution panel from
+# disk instead of re-querying yfinance every time. Time-series fields are
+# deliberately excluded — they're large and only the live chart consumes them.
+
+_ANALYTICS_CACHE_MAX_PER_VIEW = 8
+
+
+def get_analytics_cache(view_name: str) -> dict:
+    """Return {key: payload} for the view. Empty dict if the view doesn't
+    exist or has no cache yet."""
+    entry = load_view(view_name) or {}
+    cache = entry.get("analytics_cache")
+    return cache if isinstance(cache, dict) else {}
+
+
+def upsert_analytics_cache(view_name: str, key: str, payload: dict) -> dict:
+    """Store one cache entry (overwriting any existing entry with the same key).
+    Caps total entries at _ANALYTICS_CACHE_MAX_PER_VIEW (LRU by saved_at)."""
+    clean_view = (view_name or "").strip()
+    clean_key = (key or "").strip()
+    if not clean_view or not clean_key:
+        return {}
+    record = {
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        entry = views_map.get(clean_view)
+        if not isinstance(entry, dict):
+            return {}
+        cache = entry.get("analytics_cache")
+        if not isinstance(cache, dict):
+            cache = {}
+        cache[clean_key] = record
+        # LRU cap: drop oldest entries by saved_at.
+        if len(cache) > _ANALYTICS_CACHE_MAX_PER_VIEW:
+            items = sorted(cache.items(),
+                           key=lambda kv: kv[1].get("saved_at", "") if isinstance(kv[1], dict) else "")
+            for old_key, _ in items[: len(cache) - _ANALYTICS_CACHE_MAX_PER_VIEW]:
+                cache.pop(old_key, None)
+        entry["analytics_cache"] = cache
+        views_map[clean_view] = entry
+        raw["views"] = views_map
+        _write_views_raw(raw)
+    return cache
+
+
+def clear_analytics_cache(view_name: str) -> None:
+    """Drop every cached analytics entry for the view. Called when the user
+    refreshes the portfolio so they get fresh analyst data on next open."""
+    clean_view = (view_name or "").strip()
+    if not clean_view:
+        return
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        entry = views_map.get(clean_view)
+        if not isinstance(entry, dict):
+            return
+        if "analytics_cache" in entry:
+            entry["analytics_cache"] = {}
+            views_map[clean_view] = entry
+            raw["views"] = views_map
+            _write_views_raw(raw)
+
+
+# ----------------------------- MPT run history ------------------------------
+
+_MPT_FILE = _repo_root() / ".portfolio_tracker_mpt.json"
+_MPT_LOCK = threading.Lock()
+
+
+def _read_mpt_raw() -> dict:
+    path = Path(_MPT_FILE)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_mpt_raw(raw: dict) -> None:
+    body = json.dumps(raw, default=_json_default, ensure_ascii=True, indent=2)
+    Path(_MPT_FILE).write_text(body + "\n", encoding="utf-8")
+
+
+def list_mpt_runs(view_name: str) -> list[dict]:
+    """Return MPT runs for a view (metadata only — strip heavy fields)."""
+    with _MPT_LOCK:
+        raw = _read_mpt_raw()
+    runs = (raw.get("runs") or {}).get(view_name) or []
+    meta: list[dict] = []
+    for r in runs:
+        if not isinstance(r, dict):
+            continue
+        meta.append({
+            "id": r.get("id"),
+            "params": r.get("params") or {},
+            "symbols": r.get("symbols") or [],
+            "saved_at": r.get("saved_at"),
+            "tangency": r.get("tangency"),
+        })
+    return meta
+
+
+def load_mpt_run(view_name: str, run_id: str) -> dict | None:
+    with _MPT_LOCK:
+        raw = _read_mpt_raw()
+    for r in (raw.get("runs") or {}).get(view_name) or []:
+        if isinstance(r, dict) and r.get("id") == run_id:
+            return r
+    return None
+
+
+def save_mpt_run(view_name: str, run: dict) -> dict:
+    """Persist an MPT run for a portfolio with aggressive eviction.
+
+    The dashboard auto-saves every successful Run Optimization click, so this
+    function churns the saved list to keep it relevant:
+      * Any prior run whose symbol set differs from the new run's symbols is
+        deleted (portfolio composition changed → old runs are no longer
+        meaningful for this portfolio).
+      * Any prior run whose risk-free rate differs from the new run's rf by
+        more than 1e-6 is deleted (rf is a continuous parameter with
+        effectively infinite combinations; the user can always regenerate).
+    After eviction the new payload is appended, dedup-by-id, and the list
+    is capped at 30 newest entries as a final ceiling.
+    """
+    clean_view = (view_name or "").strip()
+    if not clean_view:
+        raise ValueError("view name required")
+    rid = run.get("id") or ("run_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f"))
+    payload = {**run, "id": rid, "saved_at": datetime.now(timezone.utc).isoformat()}
+    new_symbols = set(payload.get("symbols") or [])
+    new_rf = float((payload.get("params") or {}).get("rf") or 0.0)
+    with _MPT_LOCK:
+        raw = _read_mpt_raw()
+        runs_map = raw.get("runs") if isinstance(raw.get("runs"), dict) else {}
+        runs = runs_map.get(clean_view) or []
+        # Eviction: drop runs from a different portfolio composition OR rf.
+        def _keep(r: dict) -> bool:
+            if not isinstance(r, dict):
+                return False
+            if r.get("id") == rid:
+                return False  # will be re-added below (replace-by-id)
+            old_syms = set(r.get("symbols") or [])
+            if old_syms != new_symbols:
+                return False
+            old_rf = float((r.get("params") or {}).get("rf") or 0.0)
+            if abs(old_rf - new_rf) > 1e-6:
+                return False
+            return True
+        kept = [r for r in runs if _keep(r)]
+        kept.append(payload)
+        kept.sort(key=lambda r: r.get("saved_at") or "", reverse=True)
+        runs_map[clean_view] = kept[:30]
+        raw["runs"] = runs_map
+        _write_mpt_raw(raw)
+    return payload
+
+
+def delete_mpt_run(view_name: str, run_id: str) -> None:
+    with _MPT_LOCK:
+        raw = _read_mpt_raw()
+        runs_map = raw.get("runs") if isinstance(raw.get("runs"), dict) else {}
+        runs = runs_map.get(view_name) or []
+        runs_map[view_name] = [r for r in runs if not (isinstance(r, dict) and r.get("id") == run_id)]
+        raw["runs"] = runs_map
+        _write_mpt_raw(raw)
 
 
 def mark_view_stale(name: str, entries: str) -> bool:
@@ -226,6 +532,36 @@ def set_last_view(name: str) -> None:
         _write_views_raw(raw)
 
 
+def rename_view(old: str, new: str) -> bool:
+    """Rename a view key from `old` to `new`. Updates last_view if it pointed
+    at `old`. Returns True if a rename actually happened."""
+    old_clean = (old or "").strip()
+    new_clean = (new or "").strip()
+    if not old_clean or not new_clean or old_clean == new_clean:
+        return False
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        if old_clean not in views_map:
+            return False
+        if new_clean in views_map:
+            raise ValueError(f"view '{new_clean}' already exists")
+        views_map[new_clean] = views_map.pop(old_clean)
+        raw["views"] = views_map
+        if raw.get("last_view") == old_clean:
+            raw["last_view"] = new_clean
+        _write_views_raw(raw)
+    # Cascade: MPT runs are keyed by view name; rename the bucket too.
+    with _MPT_LOCK:
+        raw_m = _read_mpt_raw()
+        runs_map = raw_m.get("runs") if isinstance(raw_m.get("runs"), dict) else {}
+        if old_clean in runs_map:
+            runs_map[new_clean] = runs_map.pop(old_clean)
+            raw_m["runs"] = runs_map
+            _write_mpt_raw(raw_m)
+    return True
+
+
 def delete_view(name: str) -> None:
     clean_name = (name or "").strip()
     with _VIEWS_LOCK:
@@ -236,6 +572,14 @@ def delete_view(name: str) -> None:
         if raw.get("last_view") == clean_name:
             raw["last_view"] = None
         _write_views_raw(raw)
+    # Cascade: drop any MPT runs associated with the deleted view.
+    with _MPT_LOCK:
+        raw_m = _read_mpt_raw()
+        runs_map = raw_m.get("runs") if isinstance(raw_m.get("runs"), dict) else {}
+        if clean_name in runs_map:
+            runs_map.pop(clean_name, None)
+            raw_m["runs"] = runs_map
+            _write_mpt_raw(raw_m)
 
 
 def load_watchlists() -> dict[str, str]:
@@ -290,6 +634,23 @@ def upsert_watchlist(name: str, entries: str) -> tuple[dict[str, str], bool]:
     return saved, entries_changed
 
 
+def rename_watchlist(old: str, new: str) -> dict[str, str]:
+    """Rename a watchlist key. Raises if the new name collides."""
+    old_clean = (old or "").strip()
+    new_clean = (new or "").strip()
+    if not old_clean or not new_clean:
+        raise ValueError("watchlist name required")
+    if old_clean == new_clean:
+        return load_watchlists()
+    watchlists = load_watchlists()
+    if old_clean not in watchlists:
+        raise ValueError(f"watchlist '{old_clean}' not found")
+    if new_clean in watchlists:
+        raise ValueError(f"watchlist '{new_clean}' already exists")
+    watchlists[new_clean] = watchlists.pop(old_clean)
+    return save_watchlists(watchlists)
+
+
 def delete_watchlist(name: str) -> dict[str, str]:
     clean_name = name.strip()
     watchlists = load_watchlists()
@@ -298,6 +659,112 @@ def delete_watchlist(name: str) -> dict[str, str]:
     if clean_name:
         delete_view(clean_name)
     return saved
+
+
+# ----------------------------- Column views (Pass D) -----------------------
+
+# Persistence for user-defined column views (which columns to show + their
+# order). Built-in presets live in the frontend (BUILTIN_VIEWS) and are
+# never written here; this file only stores user-created custom views and
+# the currently-active view name (global, applies to all portfolios).
+_COLUMN_VIEWS_FILE = _repo_root() / ".portfolio_tracker_column_views.json"
+_COLUMN_VIEWS_LOCK = threading.Lock()
+_BUILTIN_COLUMN_VIEW_ALIASES = {
+  "IB View": "Fundamentals",
+  "Trader View": "Momentum",
+}
+_BUILTIN_COLUMN_VIEW_NAMES = {"Default", "Fundamentals", "Momentum"}
+
+
+def _normalize_builtin_column_view_name(name: str) -> str:
+  clean = (name or "Default").strip() or "Default"
+  return _BUILTIN_COLUMN_VIEW_ALIASES.get(clean, clean)
+
+
+def _column_views_path() -> Path:
+    return Path(_COLUMN_VIEWS_FILE)
+
+
+def _read_column_views_raw() -> dict:
+    path = _column_views_path()
+    if not path.exists():
+        return {"custom_views": {}, "active_view": "Default"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"custom_views": {}, "active_view": "Default"}
+    if not isinstance(data, dict):
+        return {"custom_views": {}, "active_view": "Default"}
+    cv = data.get("custom_views") if isinstance(data.get("custom_views"), dict) else {}
+    active = _normalize_builtin_column_view_name(str(data.get("active_view") or "Default"))
+    cleaned: dict[str, dict] = {}
+    for name, entry in cv.items():
+        if not isinstance(entry, dict):
+            continue
+        cols = entry.get("columns")
+        if not isinstance(cols, list):
+            continue
+        clean_cols = [str(c) for c in cols if isinstance(c, (str, int))]
+        cleaned[str(name).strip()] = {
+            "columns": clean_cols,
+            "created_at": entry.get("created_at"),
+        }
+    return {"custom_views": cleaned, "active_view": active}
+
+
+def _write_column_views_raw(raw: dict) -> None:
+    body = json.dumps(raw, ensure_ascii=True, indent=2, sort_keys=True)
+    _column_views_path().write_text(body + "\n", encoding="utf-8")
+
+
+def load_column_views() -> dict:
+    with _COLUMN_VIEWS_LOCK:
+        return _read_column_views_raw()
+
+
+def upsert_column_view(name: str, columns: list) -> dict:
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("view name required")
+    if clean_name in _BUILTIN_COLUMN_VIEW_NAMES:
+        raise ValueError(f"'{clean_name}' is a built-in view and cannot be overwritten")
+    if not isinstance(columns, list) or not columns:
+        raise ValueError("columns must be a non-empty list")
+    clean_cols = [str(c) for c in columns if isinstance(c, (str, int))]
+    with _COLUMN_VIEWS_LOCK:
+        raw = _read_column_views_raw()
+        existing = raw["custom_views"].get(clean_name) or {}
+        raw["custom_views"][clean_name] = {
+            "columns": clean_cols,
+            "created_at": existing.get("created_at") or datetime.now(timezone.utc).isoformat(),
+        }
+        _write_column_views_raw(raw)
+        return raw
+
+
+def delete_column_view(name: str) -> dict:
+    clean_name = (name or "").strip()
+    if clean_name in _BUILTIN_COLUMN_VIEW_NAMES:
+        raise ValueError(f"'{clean_name}' is a built-in view and cannot be deleted")
+    with _COLUMN_VIEWS_LOCK:
+        raw = _read_column_views_raw()
+        raw["custom_views"].pop(clean_name, None)
+        # If the deleted view was active, fall back to Default.
+        if raw.get("active_view") == clean_name:
+            raw["active_view"] = "Default"
+        _write_column_views_raw(raw)
+        return raw
+
+
+def set_active_column_view(name: str) -> dict:
+    clean_name = _normalize_builtin_column_view_name(name)
+    with _COLUMN_VIEWS_LOCK:
+        raw = _read_column_views_raw()
+        if clean_name not in _BUILTIN_COLUMN_VIEW_NAMES and clean_name not in raw["custom_views"]:
+            raise ValueError(f"unknown view '{clean_name}'")
+        raw["active_view"] = clean_name
+        _write_column_views_raw(raw)
+        return raw
 
 
 # ----------------------------- Symbol resolution --------------------------
@@ -375,16 +842,9 @@ _EXCHANGE_SUFFIX: dict[str, str] = {
 _TAIL_OK = re.compile(r"[A-Z0-9.\-]+")
 
 
-def _normalize_exchange_prefix(entry: str) -> tuple[str, str] | None:
-    """Map prefixed forms (`XETRA.SAP`, `NASDAQ.MSFT`,
-    `Euronext Amsterdam.IMAE` …) into ``(symbol, suffix)``.
-
-    Returns ``None`` when the prefix is not recognised (caller falls through
-    to the existing ticker / search logic). ``suffix`` is the Yahoo suffix
-    appended to the tail (empty string for US listings)."""
-    if not entry or "." not in entry:
-        return None
-    head, _, tail = entry.partition(".")
+def _try_prefix_pair(head: str, tail: str) -> tuple[str, str] | None:
+    """Single-direction prefix lookup: head is the exchange/region token,
+    tail is the bare ticker. Returns ``(yf_symbol, suffix)`` or ``None``."""
     head_up = " ".join(head.strip().upper().split())   # collapse spaces
     tail_up = tail.strip().upper()
     if not head_up or not tail_up:
@@ -396,6 +856,35 @@ def _normalize_exchange_prefix(entry: str) -> tuple[str, str] | None:
     if not _TAIL_OK.fullmatch(tail_clean):
         return None
     return tail_clean + suffix, suffix
+
+
+def _normalize_exchange_prefix(entry: str) -> tuple[str, str] | None:
+    """Map prefixed forms into ``(symbol, suffix)``. Accepts BOTH orderings
+    so users can paste whichever feels natural:
+
+        XETRA.SAP   SAP.XETRA   DE.SAP   SAP.DE   EU.SAP   SAP.EU
+        NASDAQ.MSFT MSFT.NASDAQ
+        Euronext Amsterdam.IMAE   IMAE.Euronext Amsterdam
+
+    Forward (`prefix.ticker`) is tried first to preserve the original syntax;
+    reverse (`ticker.prefix`) is the fallback. Multi-word exchange names use
+    ``rpartition`` for the reverse split so `IMAE.Euronext Amsterdam` works.
+
+    Returns ``None`` when neither ordering matches a known prefix (caller
+    falls through to the existing ticker / fuzzy / search logic). ``suffix``
+    is the Yahoo suffix appended to the tail (empty string for US listings).
+    """
+    if not entry or "." not in entry:
+        return None
+    head, _, tail = entry.partition(".")
+    forward = _try_prefix_pair(head, tail)
+    if forward is not None:
+        return forward
+    # Reverse ordering: swap head/tail. Covers `SAP.XETRA`, `SAP.EU`,
+    # `MSFT.NASDAQ`, `IMAE.Euronext Amsterdam`, etc. For multi-dot inputs we
+    # still only swap once (the trailing token is the exchange) — anything
+    # weirder falls through to the ticker/fuzzy/search path.
+    return _try_prefix_pair(tail, head)
 
 
 def _looks_like_ticker(s: str) -> bool:
@@ -410,6 +899,28 @@ def _looks_like_ticker(s: str) -> bool:
 # Per-process cache: entry-string → final resolved Yahoo symbol. Keeps the
 # fast_info + yf.Search refinement cost a one-time hit per unique input.
 _RESOLVED_CACHE: dict[str, str] = {}
+
+
+def _symbol_db_lookup(entry: str, min_score: float = 72.0) -> str | None:
+    """Consult the local symbol database before round-tripping to the
+    upstream search. Returns a provider-format ticker on confident hit,
+    or ``None`` to let the caller fall through.
+
+    The DB module + the sqlite file are both OPTIONAL — if either is
+    missing the dashboard still works, just without the local fast-path.
+    Run ``python build_symbol_db.py`` once to populate it.
+    """
+    try:
+        import symbol_db
+    except ImportError:
+        return None
+    try:
+        hits = symbol_db.lookup(entry, min_score=min_score, limit=1)
+    except Exception:
+        return None
+    if not hits:
+        return None
+    return hits[0].ticker
 
 
 def _yf_symbol_has_data(sym: str) -> bool:
@@ -450,6 +961,29 @@ def _refine_via_search(tail: str, expected_suffix: str) -> str | None:
     return None
 
 
+def _normalize_google_colon(entry: str) -> str:
+    """Convert Google Finance-style ``EXCHANGE: TICKER`` (with or without
+    space after the colon) into the dot-separated form the prefix parser
+    already understands. Examples:
+
+        "BME: SAN"        -> "BME.SAN"
+        "NASDAQ: MSFT"    -> "NASDAQ.MSFT"
+        "BME:SAN"         -> "BME.SAN"
+        "NYSE: BRK.B"     -> "NYSE.BRK.B"   (preserves inner dots)
+
+    A colon inside a tail is unusual but safely passes through (we only
+    swap the FIRST colon). Returns the entry unchanged when no colon.
+    """
+    if ":" not in entry:
+        return entry
+    head, _, tail = entry.partition(":")
+    head = head.strip()
+    tail = tail.strip()
+    if not head or not tail:
+        return entry
+    return f"{head}.{tail}"
+
+
 def resolve_symbol(entry: str) -> str | None:
     entry = entry.strip()
     if not entry:
@@ -458,8 +992,13 @@ def resolve_symbol(entry: str) -> str | None:
     if cached:
         return cached
 
-    # Exchange-prefixed forms (XETRA.SAP, NASDAQ.MSFT, Euronext Paris.BNP, …).
-    mapped = _normalize_exchange_prefix(entry)
+    # Google Finance-style "EXCHANGE: TICKER" → normalise to "EXCHANGE.TICKER"
+    # so the prefix parser handles it. Keep the original `entry` as the cache
+    # key so the user gets the same answer next time they paste it.
+    normalised = _normalize_google_colon(entry)
+
+    # Exchange-prefixed forms (XETRA.SAP, NASDAQ.MSFT, BME.SAN, …).
+    mapped = _normalize_exchange_prefix(normalised)
     if mapped is not None:
         symbol, suffix = mapped
         # Literal mapping wins if Yahoo recognises it.
@@ -479,6 +1018,14 @@ def resolve_symbol(entry: str) -> str | None:
         upper = entry.upper()
         _RESOLVED_CACHE[entry] = upper
         return upper
+
+    # Local symbol DB lookup — instant, no network. Handles "microsoft",
+    # "DaVita", typos like "Microsft", etc. Only the high-confidence hit
+    # short-circuits; weaker matches let yf.Search take over.
+    local = _symbol_db_lookup(entry)
+    if local:
+        _RESOLVED_CACHE[entry] = local
+        return local
 
     try:
         search = yf.Search(entry, max_results=1, news_count=0)
@@ -521,6 +1068,56 @@ def _ytd_change(series: pd.Series) -> float | None:
     return float((last / prior.iloc[0] - 1.0) * 100.0)
 
 
+def _rsi(series: pd.Series, period: int = 14) -> float | None:
+  if series is None or len(series) < period + 1:
+    return None
+  delta = series.diff()
+  gains = delta.clip(lower=0)
+  losses = -delta.clip(upper=0)
+  avg_gain = gains.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+  avg_loss = losses.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+  last_gain = avg_gain.iloc[-1]
+  last_loss = avg_loss.iloc[-1]
+  if pd.isna(last_gain) or pd.isna(last_loss):
+    return None
+  if float(last_loss) == 0.0:
+    return 100.0
+  rs = float(last_gain / last_loss)
+  return float(100.0 - (100.0 / (1.0 + rs)))
+
+
+def _macd_hist_pct(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> float | None:
+  if series is None or len(series) < slow + signal:
+    return None
+  ema_fast = series.ewm(span=fast, adjust=False, min_periods=fast).mean()
+  ema_slow = series.ewm(span=slow, adjust=False, min_periods=slow).mean()
+  macd_line = ema_fast - ema_slow
+  signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+  hist = macd_line.iloc[-1] - signal_line.iloc[-1]
+  last = series.iloc[-1]
+  if pd.isna(hist) or pd.isna(last) or not last:
+    return None
+  return float(hist / last * 100.0)
+
+
+def _bollinger_pct_b(series: pd.Series, period: int = 20, width: float = 2.0) -> float | None:
+  if series is None or len(series) < period:
+    return None
+  window = series.tail(period)
+  mid = float(window.mean())
+  std = float(window.std(ddof=0))
+  if not math.isfinite(mid) or not math.isfinite(std):
+    return None
+  if std == 0.0:
+    return 0.5
+  upper = mid + width * std
+  lower = mid - width * std
+  band = upper - lower
+  if band == 0.0:
+    return None
+  return float((float(window.iloc[-1]) - lower) / band)
+
+
 def _safe_info(tk: yf.Ticker) -> dict:
     """Pull .info defensively. Yahoo sometimes returns None; we coalesce."""
     info: dict = {}
@@ -549,112 +1146,137 @@ def _safe_info(tk: yf.Ticker) -> dict:
 
 
 def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
-    out: dict = {"symbol": symbol}
-    last_err: str | None = None
-    for attempt in range(max_attempts):
-        try:
-            tk = yf.Ticker(symbol)
-            hist = tk.history(period="2y", auto_adjust=True, actions=False)
-            if hist is None or getattr(hist, "empty", True):
-                last_err = "no data"
-                time.sleep(0.7 + attempt * 1.2 + random.random() * 0.3)
-                continue
-            close = hist["Close"].dropna()
-            if close.empty:
-                last_err = "no data"
-                time.sleep(0.7 + attempt * 1.2)
-                continue
+  out: dict = {"symbol": symbol}
+  last_err: str | None = None
+  for attempt in range(max_attempts):
+    try:
+      tk = yf.Ticker(symbol)
+      hist = tk.history(period="2y", auto_adjust=True, actions=False)
+      if hist is None or getattr(hist, "empty", True):
+        last_err = "no data"
+        time.sleep(0.7 + attempt * 1.2 + random.random() * 0.3)
+        continue
+      close = hist["Close"].dropna()
+      if close.empty:
+        last_err = "no data"
+        time.sleep(0.7 + attempt * 1.2)
+        continue
 
-            last = float(close.iloc[-1])
-            prev_close = float(close.iloc[-2]) if len(close) >= 2 else last
-            out["price"] = last
-            out["change_abs_1d"] = last - prev_close
-            out["pct_1d"] = (last / prev_close - 1.0) * 100.0 if prev_close else None
-            out["pct_1w"] = _pct_change(close, 7)
-            out["pct_1m"] = _pct_change(close, 30)
-            out["pct_3m"] = _pct_change(close, 91)
-            out["pct_6m"] = _pct_change(close, 182)
-            out["pct_ytd"] = _ytd_change(close)
-            out["pct_1y"] = _pct_change(close, 365)
+      last = float(close.iloc[-1])
+      prev_close = float(close.iloc[-2]) if len(close) >= 2 else last
+      out["price"] = last
+      out["change_abs_1d"] = last - prev_close
+      out["pct_1d"] = (last / prev_close - 1.0) * 100.0 if prev_close else None
+      out["pct_1w"] = _pct_change(close, 7)
+      out["pct_1m"] = _pct_change(close, 30)
+      out["pct_3m"] = _pct_change(close, 91)
+      out["pct_6m"] = _pct_change(close, 182)
+      out["pct_ytd"] = _ytd_change(close)
+      out["pct_1y"] = _pct_change(close, 365)
 
-            last_year = close[close.index >= (close.index[-1] - pd.Timedelta(days=365))]
-            if not last_year.empty:
-                out["w52_high"] = float(last_year.max())
-                out["w52_low"] = float(last_year.min())
-            ath = float(close.max())
-            out["ath"] = ath
-            out["delta_ath"] = (last / ath - 1.0) * 100.0 if ath else None
+      last_year = close[close.index >= (close.index[-1] - pd.Timedelta(days=365))]
+      if not last_year.empty:
+        out["w52_high"] = float(last_year.max())
+        out["w52_low"] = float(last_year.min())
+      ath = float(close.max())
+      out["ath"] = ath
+      out["delta_ath"] = (last / ath - 1.0) * 100.0 if ath else None
 
-            out["sparkline"] = [float(x) for x in close.tail(252).to_list() if pd.notna(x)]
-            try:
-                out["volume"] = float(hist["Volume"].iloc[-1]) if "Volume" in hist else None
-            except Exception:
-                out["volume"] = None
+      out["sparkline"] = [float(x) for x in close.tail(252).to_list() if pd.notna(x)]
+      try:
+        out["volume"] = float(hist["Volume"].iloc[-1]) if "Volume" in hist else None
+      except Exception:
+        out["volume"] = None
 
-            for n in (20, 50, 200):
-                if len(close) >= n:
-                    sma_val = float(close.tail(n).mean())
-                    out[f"sma_{n}"] = sma_val
-                    out[f"above_sma_{n}"] = last > sma_val
-                else:
-                    out[f"sma_{n}"] = None
-                    out[f"above_sma_{n}"] = None
+      # Momentum / trading indicators derived from the same price series.
+      out["rsi_14"] = _rsi(close, 14)
+      out["macd_hist_pct"] = _macd_hist_pct(close)
+      out["bb_pct_b"] = _bollinger_pct_b(close)
 
-            if len(close) >= 22:
-                out["above_1m"] = last > float(close.iloc[-22])
-            elif len(close) >= 2:
-                out["above_1m"] = last > float(close.iloc[0])
-            else:
-                out["above_1m"] = None
+      for n in (20, 50, 200):
+        if len(close) >= n:
+          sma_val = float(close.tail(n).mean())
+          out[f"sma_{n}"] = sma_val
+          out[f"above_sma_{n}"] = last > sma_val
+        else:
+          out[f"sma_{n}"] = None
+          out[f"above_sma_{n}"] = None
 
-            # RS-rank histogram: 12 monthly samples of where price sat within
-            # its trailing-12-month range (0..1).
-            monthly = close.resample("ME").last().dropna().tail(12)
-            rs: list[float] = []
-            for ts in monthly.index:
-                window = close[(close.index <= ts) & (close.index >= ts - pd.Timedelta(days=365))]
-                if len(window) < 2:
-                    continue
-                lo, hi = float(window.min()), float(window.max())
-                v = float(monthly.loc[ts])
-                rs.append(0.0 if hi == lo else (v - lo) / (hi - lo))
-            out["rs_rank"] = rs
+      if len(close) >= 22:
+        out["above_1m"] = last > float(close.iloc[-22])
+      elif len(close) >= 2:
+        out["above_1m"] = last > float(close.iloc[0])
+      else:
+        out["above_1m"] = None
 
-            info = _safe_info(tk)
-            out["name"] = info.get("longName") or info.get("shortName") or symbol
-            out["market_cap"] = info.get("marketCap") or info.get("market_cap")
-            out["currency"] = info.get("currency") or "USD"
-            out["exchange"] = info.get("exchange") or info.get("fullExchangeName") or ""
-            out["sector"] = info.get("sector") or ""
-            out["industry"] = info.get("industry") or ""
-            out["quote_type"] = (info.get("quoteType") or "").upper()
-            out["website"] = info.get("website") or ""
+      # RS-rank histogram: 12 monthly samples of where price sat within
+      # its trailing-12-month range (0..1).
+      monthly = close.resample("ME").last().dropna().tail(12)
+      rs: list[float] = []
+      for ts in monthly.index:
+        window = close[(close.index <= ts) & (close.index >= ts - pd.Timedelta(days=365))]
+        if len(window) < 2:
+          continue
+        lo, hi = float(window.min()), float(window.max())
+        v = float(monthly.loc[ts])
+        rs.append(0.0 if hi == lo else (v - lo) / (hi - lo))
+      out["rs_rank"] = rs
 
-            ps = info.get("priceToSalesTrailing12Months")
-            try:
-                out["ps_ratio"] = float(ps) if ps not in (None, "") else None
-            except (TypeError, ValueError):
-                out["ps_ratio"] = None
-            pe = info.get("trailingPE") or info.get("forwardPE")
-            try:
-                out["pe_ratio"] = float(pe) if pe not in (None, "") and float(pe) > 0 else None
-            except (TypeError, ValueError):
-                out["pe_ratio"] = None
+      info = _safe_info(tk)
+      out["name"] = info.get("longName") or info.get("shortName") or symbol
+      out["market_cap"] = info.get("marketCap") or info.get("market_cap")
+      out["currency"] = info.get("currency") or "USD"
+      out["exchange"] = info.get("exchange") or info.get("fullExchangeName") or ""
+      out["sector"] = info.get("sector") or ""
+      out["industry"] = info.get("industry") or ""
+      out["quote_type"] = (info.get("quoteType") or "").upper()
+      out["website"] = info.get("website") or ""
 
-            return out  # success
+      ps = info.get("priceToSalesTrailing12Months")
+      try:
+        out["ps_ratio"] = float(ps) if ps not in (None, "") else None
+      except (TypeError, ValueError):
+        out["ps_ratio"] = None
+      pe = info.get("trailingPE") or info.get("forwardPE")
+      try:
+        out["pe_ratio"] = float(pe) if pe not in (None, "") and float(pe) > 0 else None
+      except (TypeError, ValueError):
+        out["pe_ratio"] = None
 
-        except Exception as exc:
-            msg = str(exc)
-            last_err = msg[:200] if msg else type(exc).__name__
-            # Heuristic: rate-limit type messages → sleep longer.
-            low = msg.lower()
-            if "rate" in low or "429" in low or "too many" in low:
-                time.sleep(2.0 + attempt * 2.0 + random.random() * 0.5)
-            else:
-                time.sleep(0.6 + attempt * 1.2 + random.random() * 0.4)
+      # Pass D — fundamentals & analyst columns. All sourced from the
+      # info dict that _safe_info() already returned; no extra calls.
+      out["forward_pe"] = _safe_num(info.get("forwardPE"))
+      out["peg"] = _safe_num(info.get("pegRatio") or info.get("trailingPegRatio"))
+      out["ev_ebitda"] = _safe_num(info.get("enterpriseToEbitda"))
+      out["ev_revenue"] = _safe_num(info.get("enterpriseToRevenue"))
+      out["beta"] = _safe_num(info.get("beta"))
+      out["dividend_yield"] = _normalize_dividend_yield(
+        info.get("dividendYield"),
+        price=last,
+        dividend_rate=info.get("dividendRate"),
+        trailing_yield=info.get("trailingAnnualDividendYield"),
+        trailing_rate=info.get("trailingAnnualDividendRate"),
+      )
+      out["operating_margin"] = _safe_num(info.get("operatingMargins"))
+      out["debt_equity"] = _safe_num(info.get("debtToEquity"))
+      out["current_ratio"] = _safe_num(info.get("currentRatio"))
+      out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
+      out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
 
-    out["error"] = last_err or "fetch failed"
-    return out
+      return out  # success
+
+    except Exception as exc:
+      msg = str(exc)
+      last_err = msg[:200] if msg else type(exc).__name__
+      # Heuristic: rate-limit type messages → sleep longer.
+      low = msg.lower()
+      if "rate" in low or "429" in low or "too many" in low:
+        time.sleep(2.0 + attempt * 2.0 + random.random() * 0.5)
+      else:
+        time.sleep(0.6 + attempt * 1.2 + random.random() * 0.4)
+
+  out["error"] = last_err or "fetch failed"
+  return out
 
 
 def _ordered_resolve(entries: list[str]) -> list[str]:
@@ -940,23 +1562,34 @@ def fx_index_history(base: str, period: str = "1y") -> list:
         )
     except Exception:
         df = None
-    # If bulk fails (rate-limited), retry sequentially as a last resort.
+    # If bulk fails (rate-limited), retry sequentially with a small jittered
+    # back-off between pairs — this is the path that gets hit on rapid hover
+    # bursts. A handful of paced calls is dramatically more reliable than one
+    # parallel volley that the upstream throttles.
     if df is None or df.empty:
         try:
             parts = {}
-            for s in syms:
-                try:
-                    h = yf.Ticker(s).history(period=download_period, auto_adjust=True, actions=False)
-                    if h is not None and not h.empty and "Close" in h.columns:
-                        parts[s] = h["Close"].dropna()
-                except Exception:
-                    continue
+            for i, s in enumerate(syms):
+                if i:
+                    time.sleep(0.15 + random.random() * 0.10)
+                for attempt in range(2):
+                    try:
+                        h = yf.Ticker(s).history(period=download_period, auto_adjust=True, actions=False)
+                        if h is not None and not h.empty and "Close" in h.columns:
+                            parts[s] = h["Close"].dropna()
+                            break
+                    except Exception:
+                        if attempt == 0:
+                            time.sleep(0.4 + random.random() * 0.3)
             if parts:
                 df = pd.concat({s: pd.DataFrame({"Close": v}) for s, v in parts.items()}, axis=1)
         except Exception:
             df = None
     if df is None or df.empty:
-        _FX_HIST_CACHE[key] = (time.time() - _FX_HIST_TTL + 60.0, [])
+        # Short negative cache (10s) — long enough to absorb a hover burst
+        # without re-firing the same failing batch, short enough that the
+        # next deliberate hover after a rate-limit window gets fresh data.
+        _FX_HIST_CACHE[key] = (time.time() - _FX_HIST_TTL + 10.0, [])
         return []
     series_list: list[pd.Series] = []
     if isinstance(df.columns, pd.MultiIndex):
@@ -1112,6 +1745,36 @@ def _safe_num(v) -> float | None:
         return None
 
 
+def _normalize_dividend_yield(
+  raw_yield,
+  *,
+  price=None,
+  dividend_rate=None,
+  trailing_yield=None,
+  trailing_rate=None,
+) -> float | None:
+  """Return dividend yield as a fraction (0.0315 = 3.15%).
+
+  Yahoo sometimes returns dividendYield as a fraction and sometimes as a
+  percent-like number. Prefer the explicit dividend-rate/price ratio when
+  available, then fall back to raw yield fields with percent-to-fraction
+  correction for values above 1.
+  """
+  px = _safe_num(price)
+  if px is not None and px > 0:
+    for rate_value in (dividend_rate, trailing_rate):
+      rate = _safe_num(rate_value)
+      if rate is not None and rate >= 0:
+        return float(rate / px)
+
+  for yield_value in (raw_yield, trailing_yield):
+    val = _safe_num(yield_value)
+    if val is None or val < 0:
+      continue
+    return float(val / 100.0) if val > 1.0 else float(val)
+  return None
+
+
 def _statement_values(df: pd.DataFrame | None, labels: list[str]) -> list[float]:
     if df is None or getattr(df, "empty", True):
         return []
@@ -1229,7 +1892,13 @@ def fetch_detail(symbol: str) -> dict:
     out["ev_revenue"] = _safe_num(info.get("enterpriseToRevenue"))
 
     out["beta"] = _safe_num(info.get("beta"))
-    out["dividend_yield"] = _safe_num(info.get("dividendYield"))
+    out["dividend_yield"] = _normalize_dividend_yield(
+      info.get("dividendYield"),
+      price=out.get("price") or info.get("currentPrice") or info.get("regularMarketPrice") or info.get("last_price"),
+      dividend_rate=info.get("dividendRate"),
+      trailing_yield=info.get("trailingAnnualDividendYield"),
+      trailing_rate=info.get("trailingAnnualDividendRate"),
+    )
     out["dividend_rate"] = _safe_num(info.get("dividendRate"))
     out["payout_ratio"] = _safe_num(info.get("payoutRatio"))
     ex_div = info.get("exDividendDate")
@@ -1635,6 +2304,7 @@ def _analyst_for(symbol: str) -> dict:
         info = _safe_info(tk)
     except Exception:
         tk = None  # type: ignore
+    price = _safe_num(info.get("currentPrice") or info.get("regularMarketPrice") or info.get("last_price"))
     out = {
         "mean_rating": _safe_num(info.get("recommendationMean")),
         "rec_key": (info.get("recommendationKey") or "").strip().lower() or None,
@@ -1643,9 +2313,15 @@ def _analyst_for(symbol: str) -> dict:
         "target_median": _safe_num(info.get("targetMedianPrice")),
         "target_low": _safe_num(info.get("targetLowPrice")),
         "target_high": _safe_num(info.get("targetHighPrice")),
-        "div_yield": _safe_num(info.get("dividendYield")),
+        "div_yield": _normalize_dividend_yield(
+            info.get("dividendYield"),
+            price=price,
+            dividend_rate=info.get("dividendRate"),
+            trailing_yield=info.get("trailingAnnualDividendYield"),
+            trailing_rate=info.get("trailingAnnualDividendRate"),
+        ),
         "ev_ebitda": _safe_num(info.get("enterpriseToEbitda")),
-        "price": _safe_num(info.get("currentPrice") or info.get("regularMarketPrice")),
+        "price": price,
         "currency": (info.get("financialCurrency") or info.get("currency") or "").upper() or None,
         "dist": None,  # populated below when recommendations are available
     }
@@ -1895,8 +2571,14 @@ def analyze_portfolios_multi(
 
         w_vec = pd.Series([weights[s] for s in active], index=active)
         port_ret = (daily_ret_active * w_vec).sum(axis=1)
-        port_val = (1.0 + port_ret).cumprod()
-        port_val = 100.0 * port_val / port_val.iloc[0] if not port_val.empty else port_val
+        if not port_ret.empty:
+          port_growth = (1.0 + port_ret).cumprod()
+          port_val = pd.concat([
+            pd.Series([1.0], index=[common_index[0]]),
+            port_growth,
+          ]) * 100.0
+        else:
+          port_val = pd.Series(dtype=float)
         drawdown = (port_val / port_val.cummax() - 1.0) * 100.0
 
         # Sector-mix blend.
@@ -1915,8 +2597,11 @@ def analyze_portfolios_multi(
                          if sec_w_total > 0 and etf in sec_ret_df.columns]
                 if parts:
                     sec_blend_ret = sum(parts)
-                    sec_blend = (1.0 + sec_blend_ret).cumprod()
-                    sec_blend = 100.0 * sec_blend / sec_blend.iloc[0]
+                    sec_blend_growth = (1.0 + sec_blend_ret).cumprod()
+                    sec_blend = pd.concat([
+                      pd.Series([1.0], index=[common_index[0]]),
+                      sec_blend_growth,
+                  ]) * 100.0
 
         pf_stats = _stats(port_ret, port_val)
 
@@ -2098,6 +2783,277 @@ def analyze_portfolios_multi(
     return results
 
 
+# ----------------------------- Efficient frontier (MPT) --------------------
+
+_MPT_LOOKBACK_YF = {"1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}
+_MPT_BUDGETS = {
+    # cloud = number of Monte-Carlo portfolio configurations to evaluate
+    # frontier = number of points sampled along the exact CLA frontier (cheap)
+    # label = shown in the budget dropdown; mentions configs + estimated wall-time
+    "fast":       {"cloud":    200_000, "frontier":  80, "label": "Fast — 200k configs (~1s)"},
+    "standard":   {"cloud":  1_000_000, "frontier": 200, "label": "Standard — 1M configs (~4s)"},
+    "thorough":   {"cloud":  3_500_000, "frontier": 400, "label": "Thorough — 3.5M configs (~14s)"},
+    "exhaustive": {"cloud": 15_000_000, "frontier": 800, "label": "Exhaustive — 15M configs (~60s)"},
+}
+
+# Per-currency proxy ticker for the historical risk-free series. USD has a real
+# yfinance ticker (^IRX — 13-week T-bill yield, quoted in %). Other currencies
+# fall back to ^IRX as a placeholder until a better source per ccy is wired up;
+# the source_note in the response makes the proxy explicit to the user.
+_RF_YF: dict[str, str] = {
+    "USD": "^IRX",
+    "EUR": "^IRX",
+    "GBP": "^IRX",
+    "JPY": "^IRX",
+    "CHF": "^IRX",
+    "AUD": "^IRX",
+    "CAD": "^IRX",
+}
+
+
+def _risk_free_history(ccy: str, lookback: str) -> dict:
+    """Return a historical short-rate series for ``ccy`` over ``lookback``.
+
+    Uses yfinance via the shared `_bulk_close` cache so repeated calls are
+    cheap. The output is intended to drive the "Auto" risk-free button in
+    the MPT overlay: a small sparkline plus a mean to pre-fill the input.
+    """
+    cc = (ccy or "USD").upper()
+    lb = (lookback or "3Y").upper()
+    if lb not in _MPT_LOOKBACK_YF:
+        lb = "3Y"
+    cache_key = f"rfhist|{cc}|{lb}"
+    hit = _cache_get(cache_key)
+    if hit is not None:
+        return hit
+
+    ticker = _RF_YF.get(cc, "^IRX")
+    period_yf = _MPT_LOOKBACK_YF[lb]
+    try:
+        df = _bulk_close([ticker], period_yf)
+    except Exception:
+        df = None
+    series: list[tuple[str, float]] = []
+    mean_pct = None
+    current_pct = None
+    if df is not None and not df.empty and ticker in df.columns:
+        col = df[ticker].dropna()
+        # ^IRX values are already in percent (e.g. 5.23 = 5.23%).
+        for ts, val in col.items():
+            try:
+                series.append((ts.strftime("%Y-%m-%d"), float(val)))
+            except Exception:
+                continue
+        if series:
+            vals = [v for _, v in series]
+            mean_pct = sum(vals) / len(vals)
+            current_pct = vals[-1]
+
+    note = (
+        f"{ticker} (US 13-week T-bill yield)" if cc == "USD"
+        else f"{ticker} proxy — no native yf series for {cc}; using US 13-week T-bill"
+    )
+    out = {
+        "ccy": cc,
+        "lookback": lb,
+        "ticker": ticker,
+        "series": series,
+        "mean_pct": mean_pct,
+        "current_pct": current_pct,
+        "source_note": note,
+    }
+    # 4 h TTL: the short-rate moves slowly and we don't want to hammer yf
+    # every time the user toggles "Auto".
+    _cache_put(cache_key, out, ttl=14400.0)
+    return out
+
+
+def compute_efficient_frontier(
+    rows: list[dict],
+    *,
+    lookback: str = "3Y",
+    frequency: str = "weekly",
+    display_ccy: str = "USD",
+    rf: float = 0.04,
+    budget: str = "standard",
+    current_weights: dict | None = None,
+    diversified: bool = False,
+) -> dict:
+    """Build the long-only efficient frontier for the supplied portfolio rows.
+
+    Reuses the dashboard's bulk price/FX pipeline so cached close history
+    benefits both analytics and MPT. Returns a JSON-friendly dict the
+    frontend can render directly into the overlay's SVG chart.
+    """
+    t_total = time.perf_counter()
+    lookback_u = (lookback or "3Y").upper()
+    if lookback_u not in _MPT_LOOKBACK_YF:
+        lookback_u = "3Y"
+    period_yf = _MPT_LOOKBACK_YF[lookback_u]
+    freq = (frequency or "weekly").lower()
+    if freq not in mpt.FREQ_PER_YEAR:
+        freq = "weekly"
+    cfg = _MPT_BUDGETS.get((budget or "standard").lower(), _MPT_BUDGETS["standard"])
+    display_ccy = _norm_ccy_for_fx(display_ccy or "USD")
+
+    rows = [r for r in (rows or []) if r and r.get("symbol")]
+    symbols = [str(r["symbol"]) for r in rows]
+    if len(symbols) < 2:
+        return {"error": "need at least 2 symbols with price history"}
+    by_sym = {r["symbol"]: r for r in rows}
+
+    # Fetch + FX-convert close history. We piggyback on _bulk_close's per-symbol
+    # cache so repeat runs with the same lookback are essentially free.
+    t_fetch = time.perf_counter()
+    closes = _bulk_close(symbols, period_yf)
+    if display_ccy != "USD":
+        closes = _apply_fx_to_closes(closes, by_sym, display_ccy, period_yf)
+    fetch_ms = int((time.perf_counter() - t_fetch) * 1000)
+
+    if closes is None or closes.empty:
+        return {"error": "no price history available", "fetch_ms": fetch_ms}
+
+    # Compute returns at the requested frequency, then drop assets with too
+    # little overlap (mpt.compute_returns handles the alignment).
+    returns = mpt.compute_returns(closes, freq)
+    if returns.shape[0] < 12 or returns.shape[1] < 2:
+        return {"error": f"insufficient overlapping data ({returns.shape[0]} obs, "
+                          f"{returns.shape[1]} assets)", "fetch_ms": fetch_ms}
+
+    active = list(returns.columns)
+    missing = [s for s in symbols if s not in active]
+
+    mu, cov = mpt.annualize(returns, freq)
+    cov_s = mpt.ledoit_wolf_shrink(cov, returns)
+
+    t_opt = time.perf_counter()
+    n_active = len(active)
+    # Diversified mode: enforce a per-asset minimum weight. Floor scales with
+    # portfolio size so it never exceeds 1/N (which would force equal-weight)
+    # but is meaningful (≥0.5%) even for large baskets.
+    if diversified and n_active >= 2:
+        floor = min(1.0 / n_active, max(0.005, 0.5 / n_active))
+    else:
+        floor = 0.0
+    if floor > 0:
+        turning = mpt.critical_line_with_floor(mu, cov_s, floor)
+    else:
+        turning = mpt.critical_line(mu, cov_s)
+    curve = mpt.frontier_curve(turning, mu, cov_s, n_samples=cfg["frontier"])
+    tangency = mpt.tangency_portfolio(curve, rf=rf)
+    # Use the explicit endpoints from the curve — frontier_curve now guarantees
+    # curve[0] is the exact min-vol corner and curve[-1] is the exact max-ret
+    # corner. That keeps the UI's white-circle anchors aligned with slider=0 /
+    # slider=N-1 to floating-point precision.
+    min_vol = curve[0] if curve else None
+    max_ret = curve[-1] if curve else None
+    # Inject anchor portfolios sampled along the CLA path so the MC cloud
+    # explicitly contains points on the frontier — visual proof that the
+    # rendered curve is achievable, and a self-check below to confirm it.
+    anchor_W = mpt.anchor_samples(turning, n_per_segment=4)
+    # Dense frontier samples used by the hybrid sampler to perturb portfolios
+    # that sit near the optimal frontier — keeps the MC cloud's upper edge
+    # hugging the curve instead of floating below the centroid mass.
+    pert_basis = mpt.anchor_samples(turning, n_per_segment=12)
+    cloud_arr = mpt.monte_carlo_cloud(
+        mu, cov_s, n_samples=cfg["cloud"], rf=rf, anchor_weights=anchor_W,
+        floor=floor, frontier_weights=pert_basis, perturbed_fraction=0.6,
+    )
+    n_samples_actual = int(cloud_arr.shape[0])
+    optimize_ms = int((time.perf_counter() - t_opt) * 1000)
+
+    # Self-check: round-trip 5 evenly spaced frontier points through
+    # portfolio_stats and confirm they match. Catches future drift between
+    # the curve generator and the renderer's expectations.
+    warnings: list[str] = []
+    if curve:
+        sample_idx = np.linspace(0, len(curve) - 1, 5, dtype=int)
+        max_delta = 0.0
+        for idx in sample_idx:
+            p = curve[int(idx)]
+            chk = mpt.portfolio_stats(p["weights"], mu, cov_s, rf=rf)
+            d = max(abs(chk["vol"] - p["vol"]), abs(chk["ret"] - p["ret"]))
+            if d > max_delta:
+                max_delta = d
+        if max_delta > 1e-9:
+            warnings.append(f"frontier self-check delta {max_delta:.2e} > 1e-9")
+
+    # Server-side subsample for JSON transit — full cloud_arr may be 15M
+    # rows but the UI only needs ~200k to look dense. RNG seeded so the
+    # subsample is deterministic for a given run.
+    CLOUD_TRANSIT_MAX = 200_000
+    if n_samples_actual > CLOUD_TRANSIT_MAX:
+        rng = np.random.default_rng(42)
+        keep = rng.choice(n_samples_actual, size=CLOUD_TRANSIT_MAX, replace=False)
+        # Always include the anchors at the tail
+        n_anchor = int(anchor_W.shape[0])
+        if n_anchor > 0:
+            anchor_idx = np.arange(n_samples_actual - n_anchor, n_samples_actual)
+            keep = np.unique(np.concatenate([keep, anchor_idx]))
+        cloud_arr = cloud_arr[keep]
+    # Emit as a plain Python list of [vol, ret, sharpe] for JSON serialization
+    cloud = cloud_arr.tolist()
+
+    # Anchor points — equal, cap, and current — projected into (vol, ret).
+    eq_w = {s: 1.0 / len(active) for s in active}
+    caps = {s: max(0.0, float(by_sym.get(s, {}).get("market_cap") or 0.0)) for s in active}
+    cap_total = sum(caps.values())
+    if cap_total > 0:
+        cap_w = {s: caps[s] / cap_total for s in active}
+    else:
+        cap_w = dict(eq_w)
+    cur_w_in = current_weights or {}
+    cur_total = sum(max(0.0, float(cur_w_in.get(s, 0.0))) for s in active)
+    cur_w = ({s: max(0.0, float(cur_w_in.get(s, 0.0))) / cur_total for s in active}
+             if cur_total > 0 else dict(eq_w))
+
+    def _anchor(w: dict) -> dict:
+        stats = mpt.portfolio_stats(w, mu, cov_s, rf=rf)
+        return {"vol": stats["vol"], "ret": stats["ret"], "sharpe": stats["sharpe"],
+                "weights": w}
+
+    return {
+        "symbols": active,
+        "missing": missing,
+        "frontier": curve,
+        "tangency": tangency,
+        "min_vol": min_vol,
+        "max_ret": max_ret,
+        "cloud": cloud,
+        "anchors": {
+            "equal": _anchor(eq_w),
+            "cap":   _anchor(cap_w),
+            "current": _anchor(cur_w),
+        },
+        "mu":  {s: float(mu[s])    for s in active},
+        "vol": {s: float(cov_s.iloc[i, i] ** 0.5) for i, s in enumerate(active)},
+        "params": {
+            "lookback": lookback_u,
+            "frequency": freq,
+            "display_ccy": display_ccy,
+            "rf": rf,
+            "budget": (budget or "standard").lower(),
+            "diversified": bool(diversified),
+            "floor": float(floor),
+        },
+        "meta": {
+            "n_obs": int(returns.shape[0]),
+            "n_assets": int(len(active)),
+            "n_samples_target": int(cfg["cloud"]),
+            "n_samples_actual": n_samples_actual,
+            "cloud_transit_rows": int(len(cloud)),
+            "n_anchor": int(anchor_W.shape[0]),
+            "sampler_mix": "25% sparse-k · 30% Dir(0.05) · 25% Dir(0.3) · 20% Dir(1.0)",
+            "fetch_ms": fetch_ms,
+            "optimize_ms": optimize_ms,
+            "total_ms": int((time.perf_counter() - t_total) * 1000),
+            "freq_label": freq,
+            "budget_label": cfg["label"],
+            "warnings": warnings,
+        },
+    }
+
+
 # ----------------------------- HTML payload --------------------------------
 
 INDEX_HTML = r"""<!doctype html>
@@ -2176,6 +3132,38 @@ INDEX_HTML = r"""<!doctype html>
   .topbar button:disabled { opacity: 0.55; cursor: progress; }
   .topbar .spacer { flex: 1; }
   .topbar .status { color: var(--muted); font-size: 12px; }
+  .topbar .status .status-name { color: var(--accent); font-weight: 700; font-size: 15px; letter-spacing: 0.1px; }
+  .topbar .status .status-meta { color: var(--muted); font-size: 12px; margin-left: 6px; }
+  .topbar .status .status-stale { color: var(--warn, #d97706); font-weight: 600; margin-left: 6px; }
+  /* Shared tooltip used by every [data-tip] in the app. One <div> at body
+     level; a small JS positioner picks above/below and clamps horizontally
+     so the tip never clips off the viewport. The pseudo-element pattern
+     this replaces could not be repositioned by JS, which is why tips
+     anchored near a screen edge used to disappear under the chrome. */
+  .app-tip {
+    position: fixed; z-index: 9000; pointer-events: none;
+    background: var(--bg-canvas); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 11px; font-size: 11.5px; font-weight: 500;
+    line-height: 1.5; text-align: left; white-space: normal;
+    overflow-wrap: anywhere; word-break: break-word;
+    max-width: min(320px, calc(100vw - 32px));
+    box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+    opacity: 0; transition: opacity 0.12s ease;
+    left: 0; top: 0;
+  }
+  .app-tip.show { opacity: 1; }
+  .app-tip .app-tip-arrow {
+    position: absolute; width: 10px; height: 10px;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    transform: rotate(45deg); pointer-events: none;
+  }
+  .app-tip[data-side="below"] .app-tip-arrow {
+    top: -6px; border-right: none; border-bottom: none;
+  }
+  .app-tip[data-side="above"] .app-tip-arrow {
+    bottom: -6px; border-left: none; border-top: none;
+  }
   /* Primary Portfolio button — accent fill, distinct call to action */
   .topbar button.portfolio-btn {
     background: var(--accent); color: #fff; border-color: var(--accent);
@@ -2184,7 +3172,6 @@ INDEX_HTML = r"""<!doctype html>
   }
   .topbar button.portfolio-btn:hover { filter: brightness(1.08); background: var(--accent); border-color: var(--accent); }
   .topbar button.portfolio-btn.active { box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.30); }
-  .topbar button.portfolio-btn .pf-icon { font-size: 13px; line-height: 1; }
   /* Danger style for delete buttons */
   .topbar button.danger, button.danger {
     color: var(--neg); border-color: rgba(248, 81, 73, 0.4);
@@ -2288,7 +3275,7 @@ INDEX_HTML = r"""<!doctype html>
   .info-bg.show { display: flex; }
   .info-modal {
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 14px;
-    width: min(680px, 96vw); max-height: 88vh; overflow-y: auto; color: var(--text);
+    width: min(860px, 96vw); max-height: 88vh; overflow-y: auto; color: var(--text);
   }
   .info-head {
     display: flex; justify-content: space-between; align-items: flex-start;
@@ -2311,16 +3298,29 @@ INDEX_HTML = r"""<!doctype html>
   .info-grid {
     display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 12px 22px 22px;
   }
-  @media (max-width: 500px) { .info-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) { .info-grid { grid-template-columns: 1fr; } }
   .info-card {
     background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 8px;
     padding: 11px 13px;
   }
+  .info-card.full { grid-column: 1 / -1; }
   .info-card-name {
     font-weight: 700; font-size: 12.5px; color: var(--text); margin-bottom: 5px;
   }
   .info-card-desc {
     font-size: 12px; color: var(--muted); line-height: 1.55;
+  }
+  .info-feature-list {
+    margin: 8px 0 0; padding-left: 18px;
+    color: var(--muted); font-size: 12px; line-height: 1.6;
+  }
+  .info-feature-list li + li { margin-top: 4px; }
+  .info-card-why {
+    margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
+    font-size: 11.5px; line-height: 1.55; color: var(--text);
+  }
+  .info-card-why .label {
+    color: var(--muted); font-weight: 600; margin-right: 6px;
   }
   .info-formula {
     margin-top: 7px; padding: 6px 10px;
@@ -2351,6 +3351,70 @@ INDEX_HTML = r"""<!doctype html>
     height: 100%; background: var(--accent);
     width: 0%; transition: width 0.25s ease-out;
     border-radius: 0 2px 2px 0;
+  }
+
+  /* ──────────────────────────────────────────────────────────────
+     Loading chip ("lc") — a small terminal-flavored indicator that
+     appears anywhere data is being fetched. Three moving parts:
+       1. Braille spinner (cycles ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) — the classic CLI vibe.
+       2. Optional shimmer bar — accent gradient swept left-to-right.
+       3. Optional meta counter — monospace tabular figure (e.g. 21·47).
+     Use lcShow(target, text, {bar, meta}) / lcHide(target).
+     ────────────────────────────────────────────────────────────── */
+  .lc {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 10.5px; letter-spacing: 0.02em; font-weight: 500;
+    color: var(--muted);
+    padding: 2px 9px 2px 8px; border-radius: 999px;
+    background: rgba(125, 125, 125, 0.06);
+    border: 1px solid var(--border);
+    white-space: nowrap; user-select: none;
+    vertical-align: middle;
+  }
+  .lc::before {
+    content: "⠋";
+    display: inline-block; width: 1ch;
+    color: var(--accent);
+    font-size: 12px; line-height: 1;
+    animation: lc-spin 0.9s steps(1) infinite;
+  }
+  .lc .lc-bar {
+    display: inline-block; width: 34px; height: 6px;
+    background: rgba(125, 125, 125, 0.16); border-radius: 2px;
+    overflow: hidden; position: relative;
+  }
+  .lc .lc-bar::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%);
+    transform: translateX(-100%);
+    animation: lc-shimmer 1.15s linear infinite;
+  }
+  .lc .lc-meta {
+    font-variant-numeric: tabular-nums;
+    color: var(--text); opacity: 0.78;
+    padding-left: 2px; border-left: 1px solid var(--border); margin-left: 1px;
+  }
+  .lc-block { display: flex; justify-content: center; align-items: center; padding: 22px 0; }
+  @keyframes lc-spin {
+    0%   { content: "⠋"; }
+    11%  { content: "⠙"; }
+    22%  { content: "⠹"; }
+    33%  { content: "⠸"; }
+    44%  { content: "⠼"; }
+    55%  { content: "⠴"; }
+    66%  { content: "⠦"; }
+    77%  { content: "⠧"; }
+    88%  { content: "⠇"; }
+    100% { content: "⠏"; }
+  }
+  @keyframes lc-shimmer {
+    from { transform: translateX(-100%); }
+    to   { transform: translateX(120%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .lc::before { animation: none; }
+    .lc .lc-bar::after { animation: none; opacity: 0.55; transform: translateX(0); }
   }
 
   /* Input panel */
@@ -2460,6 +3524,12 @@ INDEX_HTML = r"""<!doctype html>
   .pf-tab .pf-tab-label {
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;
   }
+  .pf-tab .pf-tab-rename-input {
+    background: var(--bg-canvas); color: var(--text);
+    border: 1px solid var(--accent); border-radius: 4px;
+    font: inherit; padding: 0 4px; min-width: 80px; max-width: 240px;
+    outline: none;
+  }
   .pf-tab .pf-tab-stale {
     display: inline-block; width: 6px; height: 6px; border-radius: 50%;
     background: var(--warn); flex-shrink: 0;
@@ -2489,8 +3559,6 @@ INDEX_HTML = r"""<!doctype html>
     display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px;
   }
   .pf-editor-head #pf-editor-title { font-weight: 600; font-size: 13px; color: var(--text); }
-  .pf-editor-meta { color: var(--muted); font-size: 11.5px; }
-  .pf-editor-meta .stale { color: var(--warn); font-weight: 600; }
 
   /* Analytics sub-window */
   .pf-analytics {
@@ -2521,6 +3589,42 @@ INDEX_HTML = r"""<!doctype html>
   .pf-mode-toggle button.active, .pf-period-tabs button.active {
     background: var(--accent); color: #fff;
   }
+  /* Preset pill bar — replaces the rigid 3-button mode toggle. Built/Cap pills
+     stay first; named presets follow; trailing + / ✎ controls open the
+     weights editor in new / edit mode. Overflow scrolls horizontally so a
+     long preset list doesn't push the period selector off-row. */
+  .pf-mode-bar {
+    display: inline-flex; align-items: center; gap: 4px;
+    max-width: min(680px, 60vw); overflow-x: auto; padding: 1px;
+    scrollbar-width: none;
+  }
+  .pf-mode-bar::-webkit-scrollbar { display: none; }
+  .pf-mode-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 10px; border-radius: 999px; cursor: pointer; user-select: none;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    color: var(--muted); font-size: 11.5px; font-weight: 600;
+    white-space: nowrap; transition: all 0.12s ease;
+  }
+  .pf-mode-pill:hover { color: var(--text); border-color: var(--accent); }
+  .pf-mode-pill.active {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .pf-mode-pill .pf-mode-edit {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px; margin-left: 2px; margin-right: -2px;
+    border-radius: 50%; font-size: 9px; opacity: 0.75;
+    background: rgba(255,255,255,0.18);
+  }
+  .pf-mode-pill .pf-mode-edit:hover { opacity: 1; }
+  .pf-mode-pill.preset { font-style: normal; }
+  .pf-mode-pill.icon {
+    padding: 4px 8px; font-size: 14px; line-height: 1; color: var(--muted);
+  }
+  .pf-mode-pill.icon:hover { color: var(--accent); }
+  .pf-mode-pill.dirty::after {
+    content: "•"; color: var(--warn); margin-left: 2px; font-size: 14px; line-height: 0.5;
+  }
   .pf-overlay-toggles {
     display: inline-flex; gap: 6px; margin-left: auto; flex-wrap: wrap;
     font-size: 11.5px;
@@ -2549,28 +3653,21 @@ INDEX_HTML = r"""<!doctype html>
   .pf-overlay-pill .ovl-info {
     display: inline-flex; align-items: center; justify-content: center;
     width: 13px; height: 13px; border-radius: 50%; border: 1px solid currentColor;
-    font-size: 9px; font-weight: 700; opacity: 0.55; cursor: help;
+    font-size: 9px; font-weight: 700; opacity: 0.55; cursor: default;
     font-family: -apple-system, "Segoe UI", sans-serif;
   }
   .pf-overlay-pill .ovl-info:hover { opacity: 1; }
-  .pf-overlay-pill [data-tip]::after {
-    content: attr(data-tip);
-    position: absolute; top: calc(100% + 8px); right: 0;
-    background: var(--bg-canvas); color: var(--text);
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px 11px; font-size: 11.5px; font-weight: 500;
-    line-height: 1.5; text-align: left; white-space: normal;
-    width: max-content; max-width: 280px;
-    box-shadow: 0 6px 18px rgba(0,0,0,0.22);
-    opacity: 0; pointer-events: none;
-    transition: opacity 0.12s ease 0.15s;
-    z-index: 1000;
-  }
-  .pf-overlay-pill [data-tip]:hover::after { opacity: 1; }
+  /* .pf-overlay-pill [data-tip] tooltips use the shared .app-tip system. */
 
   /* Risk & Return metric hover tooltips (LaTeX + explanation) */
   .pf-stat-row[data-info] { position: relative; }
-  .pf-stat-row[data-info] .l { cursor: help; }
+  .pf-stat-row[data-info] .l { cursor: default; }
+  .metric-tip-host[data-info] { position: relative; }
+  .metric-tip-host[data-info] .k {
+    cursor: default;
+    text-decoration: underline dotted rgba(125, 125, 125, 0.75);
+    text-underline-offset: 3px;
+  }
   .pf-metric-tip {
     position: absolute; left: 0; top: 24px; z-index: 1000;
     width: 340px; max-width: 92vw;
@@ -2582,6 +3679,7 @@ INDEX_HTML = r"""<!doctype html>
     display: none;
   }
   .pf-stat-row[data-info]:hover .pf-metric-tip { display: block; }
+  .metric-tip-host[data-info]:hover .pf-metric-tip { display: block; }
   .pf-metric-tip .mt-name { font-weight: 700; font-size: 12.5px; margin-bottom: 4px; }
   .pf-metric-tip .mt-formula { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin: 4px 0 6px; overflow-x: auto; }
   .pf-metric-tip .mt-formula .katex { font-size: 1.0em; }
@@ -2591,6 +3689,12 @@ INDEX_HTML = r"""<!doctype html>
   .pf-metric-tip .mt-range b { color: var(--text); font-weight: 600; }
   /* Right-side metric: anchor tooltip to the right edge so it doesn't clip */
   .pf-stats .pf-stat-row:nth-child(2n)[data-info] .pf-metric-tip { left: auto; right: 0; }
+  .m-kv .metric-tip-host .pf-metric-tip {
+    top: calc(100% + 8px);
+    width: min(320px, calc(100vw - 48px));
+    max-width: min(320px, calc(100vw - 48px));
+  }
+  .m-kv .metric-tip-host.tip-right .pf-metric-tip { left: auto; right: 0; }
 
   /* Portfolio chart interaction (brush + crosshair tooltip) */
   .pf-chart-wrap svg .pf-cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; pointer-events: none; }
@@ -2736,6 +3840,381 @@ INDEX_HTML = r"""<!doctype html>
     background: var(--accent); color: #fff; border-color: var(--accent);
   }
   .pf-weights-foot button.primary:hover { filter: brightness(1.08); }
+  .pf-weights-foot button.danger {
+    background: transparent; color: var(--neg); border-color: var(--neg);
+  }
+  .pf-weights-foot button.danger:hover { background: rgba(248, 81, 73, 0.10); }
+  .pf-name-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 14px 0; flex-wrap: wrap;
+  }
+  .pf-name-row input[type="text"] {
+    flex: 1; min-width: 140px;
+    padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg-subtle); color: var(--text);
+    font-size: 12px;
+  }
+  .pf-name-row input[type="text"]:focus { outline: none; border-color: var(--accent); }
+  .pf-name-row .pf-name-status {
+    color: var(--muted); font-size: 11px; font-style: italic;
+  }
+  /* Inline overlay used for "Save as…" — renders fixed at top-level so it
+     can appear over EITHER the weights modal or the MPT overlay. */
+  .pf-inline-prompt {
+    position: fixed; inset: 0; background: rgba(8,12,20,0.55);
+    display: none; align-items: center; justify-content: center; z-index: 200;
+    backdrop-filter: blur(2px);
+  }
+  .pf-weights-modal { position: relative; }
+  .pf-inline-prompt.show { display: flex; }
+  .pf-inline-prompt .pf-ip-box {
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; width: min(360px, 90%); display: flex; flex-direction: column; gap: 10px;
+    box-shadow: 0 14px 32px rgba(0,0,0,0.32);
+  }
+  .pf-inline-prompt .pf-ip-title { font-weight: 700; font-size: 13px; }
+  .pf-inline-prompt .pf-ip-desc {
+    font-size: 11.5px; color: var(--muted); line-height: 1.45; margin: -2px 0 2px;
+  }
+  .pf-inline-prompt input {
+    padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg-subtle); color: var(--text); font-size: 12.5px;
+  }
+  .pf-inline-prompt input:focus { outline: none; border-color: var(--accent); }
+  .pf-inline-prompt .pf-ip-foot { display: flex; justify-content: flex-end; gap: 8px; }
+  .pf-inline-prompt button {
+    height: 28px; padding: 0 12px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg-subtle); color: var(--text);
+    font-size: 12px; cursor: pointer;
+  }
+  .pf-inline-prompt button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .pf-inline-prompt .pf-ip-err { color: var(--neg); font-size: 11.5px; min-height: 14px; }
+
+  /* MPT overlay (Portfolio Optimization workspace) — sits above everything,
+     85% of viewport, backdrop blurs the dashboard so the user feels they're
+     "drilling deeper" into a dedicated quantitative tool. */
+  .pf-mpt-bg {
+    position: fixed; inset: 0; z-index: 90;
+    background: rgba(6, 10, 18, 0.55); backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    display: none; align-items: stretch; justify-content: center;
+    padding: 32px;
+  }
+  .pf-mpt-bg.show { display: flex; }
+  .pf-mpt-modal {
+    width: 92vw; max-width: 1480px; height: 88vh; max-height: 920px;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .pf-mpt-head {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 18px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--bg-subtle), var(--bg-canvas));
+  }
+  .pf-mpt-head .pf-mpt-title { font-weight: 700; font-size: 14.5px; }
+  .pf-mpt-head .pf-mpt-sub { color: var(--muted); font-size: 12px; }
+  .pf-mpt-head .spacer { flex: 1; }
+  .pf-mpt-close {
+    width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border);
+    background: var(--bg-canvas); cursor: pointer; color: var(--muted); font-size: 13px;
+  }
+  .pf-mpt-close:hover { color: var(--text); border-color: var(--accent); }
+  .pf-mpt-info-btn {
+    width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center;
+    justify-content: center; border-radius: 50%; border: 1px solid var(--border);
+    background: var(--bg-canvas); cursor: pointer; color: var(--muted);
+  }
+  .pf-mpt-info-btn:hover { color: var(--accent); border-color: var(--accent); }
+  /* About-MPT overlay needs to layer on top of pf-mpt-bg (z-index 90). */
+  .pf-mpt-info-bg { z-index: 95; }
+  .pf-mpt-controls {
+    --mpt-ctl-h: 32px;
+    display: grid; grid-template-columns: auto auto minmax(220px, 1fr) auto auto auto;
+    gap: 12px 14px; align-items: end;
+    padding: 12px 18px; border-bottom: 1px solid var(--border);
+    background: var(--bg-subtle);
+  }
+  @media (max-width: 980px) {
+    .pf-mpt-controls { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  }
+  .pf-mpt-ctl {
+    display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; min-width: 0;
+  }
+  .pf-mpt-ctl > label {
+    color: var(--muted); font-weight: 600; font-size: 10px; letter-spacing: 0.06em;
+    text-transform: uppercase; line-height: 14px;
+  }
+  /* Uniform-height controls strip: every interactive control in the bar uses
+     --mpt-ctl-h so the four columns line up perfectly regardless of content. */
+  .pf-mpt-ctl .seg,
+  .pf-mpt-ctl input[type="number"],
+  .pf-mpt-ctl .pf-mpt-select,
+  .pf-mpt-ctl .pf-mpt-rf-wrap,
+  .pf-mpt-run {
+    height: var(--mpt-ctl-h); box-sizing: border-box;
+  }
+  .pf-mpt-ctl .seg {
+    display: inline-flex; background: var(--bg-canvas); border: 1px solid var(--border);
+    border-radius: 7px; overflow: hidden;
+  }
+  .pf-mpt-ctl .seg button {
+    background: transparent; border: none; padding: 0 12px; font-size: 11.5px; color: var(--muted);
+    cursor: pointer; border-right: 1px solid var(--border); line-height: 1;
+  }
+  .pf-mpt-ctl .seg button:last-child { border-right: none; }
+  .pf-mpt-ctl .seg button:hover { color: var(--text); background: var(--bg-subtle); }
+  .pf-mpt-ctl .seg button.active { background: var(--accent); color: #fff; }
+  .pf-mpt-ctl input[type="number"] {
+    padding: 0 9px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-canvas); color: var(--text); font-size: 12px;
+    font-variant-numeric: tabular-nums; min-width: 0;
+  }
+  .pf-mpt-ctl input[type="number"]:focus { outline: none; border-color: var(--accent); }
+
+  /* Risk-free input + inline sparkline + Auto button in a single shell. The
+     sparkline gets its own horizontal lane between the number and the AUTO
+     pill so it reads as a proper inline mini-chart, not a fading underline. */
+  .pf-mpt-rf-wrap {
+    position: relative; display: flex; align-items: center; gap: 6px;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 7px;
+    padding: 3px 5px 3px 0; overflow: visible; min-width: 280px;
+  }
+  .pf-mpt-rf-wrap:focus-within { border-color: var(--accent); }
+  .pf-mpt-rf-wrap input[type="number"] {
+    width: 64px; flex: 0 0 auto; height: 100%; border: none; background: transparent;
+    border-radius: 0; padding: 0 4px 0 8px; font-variant-numeric: tabular-nums;
+  }
+  .pf-mpt-rf-wrap input[type="number"]:focus { outline: none; }
+  .pf-mpt-rf-spark-wrap {
+    position: relative; flex: 1 1 auto; min-width: 130px; height: 100%;
+    display: flex; align-items: center;
+    border-left: 1px solid var(--border); border-right: 1px solid var(--border);
+    padding: 0 6px; cursor: crosshair;
+  }
+  .pf-mpt-rf-spark {
+    width: 100%; height: 100%; display: block; opacity: 0; transition: opacity 0.18s;
+    cursor: crosshair;
+  }
+  .pf-mpt-rf-spark.show { opacity: 0.85; }
+  .pf-mpt-rf-spark .rfs-area { fill: var(--accent); opacity: 0.16; }
+  .pf-mpt-rf-spark .rfs-line { fill: none; stroke: var(--accent); stroke-width: 1.3;
+    stroke-linejoin: round; stroke-linecap: round; }
+  .pf-mpt-rf-spark .rfs-base { stroke: var(--muted); stroke-width: 0.6;
+    stroke-dasharray: 2 2; opacity: 0.45; }
+  .pf-mpt-rf-spark .rfs-dot  { fill: var(--accent); stroke: var(--bg-canvas); stroke-width: 0.7; }
+  .pf-mpt-rf-spark .rfs-cross  { stroke: var(--muted); stroke-width: 0.5; opacity: 0; }
+  .pf-mpt-rf-spark .rfs-cross.show { opacity: 0.7; }
+  /* Rich hover card — multi-line, anchored to the cursor. */
+  .pf-mpt-rf-spark-tip {
+    position: absolute; pointer-events: none; opacity: 0;
+    transform: translate(-50%, calc(-100% - 10px));
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 7px;
+    padding: 8px 11px; font-size: 11.5px; color: var(--text);
+    font-variant-numeric: tabular-nums; transition: opacity 0.1s;
+    box-shadow: 0 8px 22px rgba(0,0,0,0.35); z-index: 90;
+    min-width: 220px; max-width: 320px; line-height: 1.45; white-space: normal;
+  }
+  .pf-mpt-rf-spark-tip.show { opacity: 1; }
+  .pf-mpt-rf-spark-tip .tip-title { font-weight: 700; color: var(--text); margin-bottom: 2px; }
+  .pf-mpt-rf-spark-tip .tip-sub { color: var(--muted); font-size: 10.5px; margin-bottom: 6px; }
+  .pf-mpt-rf-spark-tip .tip-row { display: flex; justify-content: space-between; gap: 12px; }
+  .pf-mpt-rf-spark-tip .tip-row .k { color: var(--muted); }
+  .pf-mpt-rf-spark-tip .tip-row .v { font-weight: 600; }
+  .pf-mpt-rf-spark-tip .tip-note { color: var(--muted); font-size: 10.5px; margin-top: 6px;
+    padding-top: 5px; border-top: 1px dashed var(--border); }
+  .pf-mpt-rf-auto {
+    height: 22px; padding: 0 11px; border-radius: 5px; cursor: pointer;
+    background: var(--bg-subtle); border: 1px solid var(--border); color: var(--muted);
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    line-height: 1; flex-shrink: 0;
+  }
+  .pf-mpt-rf-auto:hover { color: var(--accent); border-color: var(--accent); }
+  .pf-mpt-rf-auto.busy { opacity: 0.55; cursor: progress; }
+  /* Inline info icon next to any control label (Risk-free, Allocation, …). */
+  .pf-mpt-ctl > label { display: flex; align-items: center; gap: 6px; }
+  .pf-mpt-rf-info {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 13px; height: 13px; border-radius: 50%; border: 1px solid var(--muted);
+    color: var(--muted); font-size: 9px; font-weight: 700; line-height: 1;
+    cursor: default; text-transform: none;
+  }
+  .pf-mpt-rf-info:hover { color: var(--accent); border-color: var(--accent); }
+  /* Floating tooltip for frontier hover — appended to <body> so it isn't
+     clipped by the overlay panel. */
+  .pf-mpt-frontier-tip {
+    position: fixed; pointer-events: none; opacity: 0; z-index: 200;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 7px;
+    padding: 8px 10px; font-size: 11.5px; color: var(--text);
+    box-shadow: 0 8px 22px rgba(0,0,0,0.4); min-width: 170px; max-width: 240px;
+    font-variant-numeric: tabular-nums; transition: opacity 0.08s;
+  }
+  .pf-mpt-frontier-tip.show { opacity: 1; }
+  .pf-mpt-frontier-tip .tip-title { font-weight: 700; margin-bottom: 4px; color: var(--text); }
+  .pf-mpt-frontier-tip .tip-sub { color: var(--muted); margin-top: 5px; padding-top: 4px;
+    border-top: 1px dashed var(--border); font-size: 10.5px; }
+  .pf-mpt-frontier-tip .tip-row { display: flex; justify-content: space-between; gap: 12px; line-height: 1.45; }
+  .pf-mpt-frontier-tip .tip-row .k { color: var(--muted); }
+  .pf-mpt-frontier-tip .tip-row .v { font-weight: 600; }
+  /* MPT overlay [data-tip] tooltips ride on the same shared .app-tip system
+     as the topbar. The unified JS positioner handles viewport clamping for
+     all of them — no per-overlay CSS overrides needed. */
+
+  /* Custom-themed select to replace the native <select>. Built from a div +
+     ul so the menu inherits the dashboard theme (border/colors/typography)
+     and stays visually consistent with the segmented controls. */
+  .pf-mpt-select {
+    position: relative; display: flex; align-items: center; gap: 6px;
+    padding: 0 8px 0 10px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-canvas); color: var(--text); font-size: 12px; cursor: pointer;
+    user-select: none; line-height: 1;
+  }
+  .pf-mpt-select:focus, .pf-mpt-select.open { outline: none; border-color: var(--accent); }
+  .pf-mpt-select-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pf-mpt-select-caret { color: var(--muted); font-size: 10px; transition: transform 0.15s; }
+  .pf-mpt-select.open .pf-mpt-select-caret { transform: rotate(180deg); }
+  .pf-mpt-select-menu {
+    position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 5;
+    margin: 0; padding: 4px; list-style: none;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 7px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.22); font-size: 12px;
+  }
+  .pf-mpt-select-menu[hidden] { display: none; }
+  .pf-mpt-select-menu li {
+    padding: 6px 10px; border-radius: 5px; cursor: pointer; color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .pf-mpt-select-menu li:hover { background: var(--bg-subtle); }
+  .pf-mpt-select-menu li[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+
+  .pf-mpt-run {
+    padding: 0 18px; border-radius: 8px;
+    background: var(--accent); color: #fff; border: 1px solid var(--accent);
+    font-weight: 700; font-size: 12.5px; cursor: pointer; line-height: 1;
+  }
+  .pf-mpt-run:hover { filter: brightness(1.08); }
+  .pf-mpt-run:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
+  .pf-mpt-body {
+    flex: 1; display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+    gap: 14px; padding: 14px 18px; overflow: hidden;
+  }
+  @media (max-width: 980px) { .pf-mpt-body { grid-template-columns: 1fr; } }
+  .pf-mpt-chartwrap {
+    display: flex; flex-direction: column; gap: 8px;
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px; overflow: hidden;
+  }
+  .pf-mpt-chart { position: relative; flex: 1; min-height: 320px; }
+  /* Two stacked canvases: base (axes + cloud + frontier) and overlay
+     (selection ring + hover ghost). Both share the same backing-store size
+     so nothing drifts. The overlay sits on top and is the only interactive
+     surface for click + mousemove hit-testing. */
+  .pf-mpt-cv {
+    position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+  }
+  .pf-mpt-cv-base { z-index: 1; pointer-events: none; }
+  .pf-mpt-cv-overlay { z-index: 2; cursor: crosshair; pointer-events: auto; }
+  .pf-mpt-chart .pf-mpt-status {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    z-index: 3; background: transparent;
+  }
+  .pf-mpt-chart .pf-mpt-status:empty { display: none; }
+
+  /* Deterministic progress bar shown while /api/efficient-frontier is in
+     flight. We know the expected duration from the budget, so the bar fills
+     over that window and a 100 ms snap-to-100% finishes it on response. */
+  .mpt-progress {
+    width: min(420px, 80%); display: flex; flex-direction: column; gap: 6px;
+    align-items: stretch; color: var(--muted); font-size: 11.5px;
+  }
+  .mpt-progress-track {
+    position: relative; height: 6px; border-radius: 4px;
+    background: var(--bg-subtle); border: 1px solid var(--border); overflow: hidden;
+  }
+  .mpt-progress-fill {
+    position: absolute; top: 0; bottom: 0; left: 0; width: 0%;
+    background: linear-gradient(90deg, var(--accent), rgba(9,105,218,0.45));
+    transition: width 0s linear;
+  }
+  .mpt-progress.done .mpt-progress-fill { transition: width 0.15s ease-out !important; }
+  .mpt-progress.fail .mpt-progress-fill { background: var(--neg); }
+  .mpt-progress-label {
+    display: flex; justify-content: space-between; gap: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .mpt-progress-text { color: var(--text); font-weight: 600; }
+  .mpt-progress-timer { color: var(--muted); }
+  .pf-mpt-chart .pf-mpt-tt {
+    position: absolute; pointer-events: none; z-index: 5;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 10px; font-size: 11.5px; line-height: 1.5;
+    box-shadow: 0 6px 16px rgba(0,0,0,0.22);
+    opacity: 0; transition: opacity 0.08s;
+  }
+  .pf-mpt-chart .pf-mpt-tt.show { opacity: 1; }
+  .pf-mpt-slider-row {
+    display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--muted);
+  }
+  .pf-mpt-slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
+  .pf-mpt-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); align-items: center; }
+  .pf-mpt-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+  .pf-mpt-legend .lg-dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle;
+  }
+  .pf-mpt-legend .lg-swatch {
+    display: inline-block; width: 14px; height: 12px; vertical-align: middle; flex-shrink: 0;
+  }
+  .pf-mpt-side {
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto;
+  }
+  .pf-mpt-side h4 {
+    margin: 0; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text);
+  }
+  .pf-mpt-kv {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; font-size: 12px;
+  }
+  .pf-mpt-kv .k { color: var(--muted); }
+  .pf-mpt-kv .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pf-mpt-kv .v.pos { color: var(--pos); }
+  .pf-mpt-kv .v.neg { color: var(--neg); }
+  .pf-mpt-weights {
+    display: flex; flex-direction: column; gap: 3px; font-size: 11.5px;
+    max-height: 280px; overflow-y: auto;
+  }
+  .pf-mpt-weights .pf-mpt-wrow {
+    display: grid; grid-template-columns: minmax(60px, 1fr) 4fr 48px; gap: 6px; align-items: center;
+  }
+  .pf-mpt-weights .pf-mpt-track {
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 3px; height: 8px; overflow: hidden;
+  }
+  .pf-mpt-weights .pf-mpt-fill {
+    height: 100%; background: var(--accent);
+  }
+  .pf-mpt-weights .pf-mpt-val { font-variant-numeric: tabular-nums; text-align: right; color: var(--muted); }
+  .pf-mpt-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pf-mpt-actions button {
+    flex: 1; min-width: 110px; height: 32px; padding: 0 12px; border-radius: 7px;
+    background: var(--bg-canvas); border: 1px solid var(--border); cursor: pointer; color: var(--text);
+    font-size: 12px; font-weight: 600;
+  }
+  .pf-mpt-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .pf-mpt-actions button:hover { filter: brightness(1.05); border-color: var(--accent); }
+  .pf-mpt-runs { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
+  .pf-mpt-runs .pf-mpt-run-row {
+    display: flex; justify-content: space-between; gap: 6px;
+    padding: 5px 7px; border-radius: 6px; cursor: pointer; border: 1px solid transparent;
+  }
+  .pf-mpt-runs .pf-mpt-run-row:hover { background: var(--bg-canvas); border-color: var(--border); }
+  .pf-mpt-runs .pf-mpt-run-row .meta { color: var(--muted); font-size: 11px; }
+  .pf-mpt-runs .pf-mpt-run-row .del {
+    border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px;
+  }
+  .pf-mpt-runs .pf-mpt-run-row .del:hover { color: var(--neg); }
+  .pf-mpt-status {
+    padding: 18px 12px; text-align: center; color: var(--muted); font-size: 12.5px;
+  }
+  .pf-mpt-error { padding: 12px; color: var(--neg); font-size: 12px; }
 
   /* Stale view banner inside the analytics body */
   .pf-stale-banner {
@@ -2750,28 +4229,142 @@ INDEX_HTML = r"""<!doctype html>
   }
   .pf-stale-banner button:hover { background: rgba(210, 153, 34, 0.18); }
 
-  /* Sort menu */
-  .sort-menu {
-    position: relative; display: inline-block;
+  /* Column-view switcher bar (Pass D) */
+  .cv-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 16px 0;
+    flex-wrap: wrap;
   }
-  .sort-menu .dropdown {
-    position: absolute; top: 34px; left: 0; z-index: 40;
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 8px;
+  .cv-seg {
+    display: inline-flex; align-items: center;
+    background: var(--bg-subtle); border: 1px solid var(--border);
+    border-radius: 8px; padding: 2px;
+  }
+  .cv-seg button {
+    background: transparent; border: 0; color: var(--text);
+    font-size: 12px; padding: 4px 10px; border-radius: 6px;
+    cursor: pointer; font-weight: 500;
+  }
+  .cv-seg button:hover { background: var(--bg-canvas); }
+  .cv-seg button.active {
+    background: var(--bg-canvas); color: var(--accent);
+    font-weight: 700; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  }
+  .cv-custom-wrap { position: relative; }
+  .cv-custom-btn {
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    color: var(--text); font-size: 12px; padding: 5px 10px;
+    border-radius: 7px; cursor: pointer; display: inline-flex;
+    align-items: center; gap: 6px;
+  }
+  .cv-custom-btn .cv-caret { color: var(--muted); font-size: 10px; }
+  .cv-custom-btn.active { color: var(--accent); font-weight: 600; }
+  .cv-custom-dropdown {
+    position: absolute; top: calc(100% + 4px); left: 0;
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    border-radius: 7px; padding: 4px; min-width: 180px;
     box-shadow: 0 6px 18px rgba(0,0,0,0.12);
-    min-width: 180px; padding: 4px 0; display: none;
+    z-index: 20; display: none;
   }
-  .sort-menu.open .dropdown { display: block; }
-  .sort-menu .dropdown button {
-    display: block; width: 100%; text-align: left; border: none; border-radius: 0;
-    background: transparent; padding: 6px 12px; font-size: 12.5px; color: var(--text);
-    cursor: pointer; height: auto;
+  .cv-custom-dropdown.open { display: block; }
+  .cv-custom-dropdown .cv-cv-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 8px; border-radius: 5px; cursor: pointer;
+    font-size: 12px; gap: 8px;
   }
-  .sort-menu .dropdown button:hover { background: var(--bg-subtle); }
-  .sort-menu .dropdown button.active { color: var(--accent); font-weight: 600; }
-  .sort-menu .dropdown .dir { float: right; color: var(--muted); }
+  .cv-custom-dropdown .cv-cv-row:hover { background: var(--bg-subtle); }
+  .cv-custom-dropdown .cv-cv-row.active { color: var(--accent); font-weight: 600; }
+  .cv-custom-dropdown .cv-cv-del {
+    background: transparent; border: 0; color: var(--muted);
+    cursor: pointer; padding: 0 4px; font-size: 14px; line-height: 1;
+  }
+  .cv-custom-dropdown .cv-cv-del:hover { color: var(--neg); }
+  .cv-custom-dropdown .cv-cv-empty {
+    padding: 6px 8px; color: var(--muted); font-size: 11px; font-style: italic;
+  }
+  .cv-customize {
+    background: transparent; border: 1px dashed var(--border);
+    color: var(--muted); font-size: 12px; padding: 5px 10px;
+    border-radius: 7px; cursor: pointer;
+  }
+  .cv-customize:hover { color: var(--text); border-color: var(--text); }
+  .cv-fit-toggle {
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    color: var(--muted); font-size: 12px; padding: 5px 10px;
+    border-radius: 7px; cursor: pointer; font-weight: 500;
+  }
+  .cv-fit-toggle:hover { color: var(--text); border-color: var(--text); }
+  .cv-fit-toggle.active {
+    color: var(--accent); border-color: var(--accent);
+    background: rgba(47, 129, 247, 0.08);
+  }
+  .cv-dirty {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(234, 179, 8, 0.12); border: 1px solid rgba(234, 179, 8, 0.4);
+    color: #92400e; padding: 3px 4px 3px 10px; border-radius: 7px;
+    font-size: 11px;
+  }
+  .cv-dirty[hidden] { display: none !important; }
+  [data-theme="dark"] .cv-dirty { color: #facc15; background: rgba(234,179,8,0.08); }
+  .cv-dirty button {
+    background: transparent; border: 1px solid currentColor;
+    color: inherit; font-size: 11px; padding: 2px 7px;
+    border-radius: 5px; cursor: pointer;
+  }
+  .cv-dirty button:hover { background: rgba(0,0,0,0.06); }
+
+  /* Header drag state */
+  table#tbl th.cv-th-drag { opacity: 0.4; }
+  table#tbl th.cv-th-over { box-shadow: inset 3px 0 0 var(--accent); }
+  table#tbl th[draggable="true"] { cursor: grab; }
+  table#tbl th[draggable="true"]:active { cursor: grabbing; }
+
+  /* Customize modal */
+  .cv-modal { width: min(560px, 92vw); max-height: 80vh; display: flex; flex-direction: column; }
+  .cv-modal h2 { margin: 0 0 6px; font-size: 16px; }
+  .cv-modal .cv-modal-sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .cv-list {
+    flex: 1 1 auto; overflow-y: auto;
+    list-style: none; margin: 0; padding: 0;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-canvas);
+  }
+  .cv-list li {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-bottom: 1px solid var(--border);
+    font-size: 13px; cursor: grab;
+  }
+  .cv-list li:last-child { border-bottom: 0; }
+  .cv-list li:active { cursor: grabbing; }
+  .cv-list li.cv-li-drag { opacity: 0.35; }
+  .cv-list li.cv-li-over { border-top: 2px solid var(--accent); }
+  .cv-list .cv-grip { color: var(--muted); font-size: 14px; cursor: grab; user-select: none; }
+  .cv-list .cv-li-label { flex: 1; }
+  .cv-list .cv-li-tag { color: var(--muted); font-size: 11px; }
+  .cv-modal-foot {
+    display: flex; gap: 8px; align-items: center;
+    margin-top: 12px; padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .cv-modal-foot .cv-name-input {
+    flex: 1; padding: 6px 8px; font-size: 13px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg-canvas); color: var(--text);
+  }
+  .cv-modal-foot .cv-spacer { flex: 1; }
+  .cv-modal-foot button {
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    color: var(--text); font-size: 12px; padding: 6px 12px;
+    border-radius: 6px; cursor: pointer;
+  }
+  .cv-modal-foot button.primary {
+    background: var(--accent); border-color: var(--accent); color: white;
+  }
+  .cv-modal-foot button:hover { filter: brightness(0.95); }
 
   /* Table */
-  .table-wrap { padding: 12px 16px 16px; }
+  .table-wrap { padding: 12px 16px 16px; overflow-x: auto; --table-scale: 1; }
+  .table-wrap.fit-columns { overflow-x: hidden; }
   table#tbl {
     width: 100%; border-collapse: separate; border-spacing: 0;
     font-variant-numeric: tabular-nums; font-size: 12px;
@@ -2779,12 +4372,16 @@ INDEX_HTML = r"""<!doctype html>
     border-radius: 10px; overflow: hidden;
     border: 1px solid var(--border);
   }
+  .table-wrap.fit-columns table#tbl { font-size: calc(12px * var(--table-scale)); }
   table#tbl th {
     background: var(--header-bg); color: var(--text); font-weight: 700;
     border: none; border-bottom: 1px solid var(--border);
     padding: 7px 8px; text-align: center;
     cursor: pointer; user-select: none; white-space: nowrap;
     position: relative;
+  }
+  .table-wrap.fit-columns table#tbl th {
+    padding: calc(7px * var(--table-scale)) calc(8px * var(--table-scale));
   }
   table#tbl th.no-sort { cursor: default; }
   table#tbl th:hover:not(.no-sort) { color: var(--accent); }
@@ -2793,6 +4390,10 @@ INDEX_HTML = r"""<!doctype html>
     text-align: right; white-space: nowrap; height: 26px;
     border-bottom: 1px solid var(--border);
   }
+  .table-wrap.fit-columns table#tbl td {
+    padding: calc(4px * var(--table-scale)) calc(7px * var(--table-scale));
+    height: calc(26px * var(--table-scale));
+  }
   table#tbl tbody tr:last-child td { border-bottom: none; }
   table#tbl td.left { text-align: left; }
   table#tbl td.center { text-align: center; }
@@ -2800,35 +4401,12 @@ INDEX_HTML = r"""<!doctype html>
   table#tbl tbody tr:hover td.alt-stripe { background: var(--hover); }
   table#tbl tbody tr:hover { cursor: pointer; }
   th .arrow { margin-left: 5px; color: var(--accent); font-size: 10px; }
+  .table-wrap.fit-columns th .arrow {
+    margin-left: calc(5px * var(--table-scale));
+    font-size: calc(10px * var(--table-scale));
+  }
 
-  /* Hover-tooltip on column headers — same visual style as the About modal cards */
-  table#tbl th[data-tip]::after {
-    content: attr(data-tip);
-    position: absolute; left: 50%; top: calc(100% + 8px);
-    transform: translateX(-50%);
-    background: var(--bg-canvas); color: var(--text);
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px 11px; font-size: 11.5px; font-weight: 500; font-style: normal;
-    font-family: -apple-system, "Segoe UI", sans-serif;
-    line-height: 1.5; text-align: left; white-space: normal;
-    width: max-content; max-width: 260px;
-    box-shadow: 0 6px 18px rgba(0,0,0,0.18);
-    opacity: 0; pointer-events: none;
-    transition: opacity 0.12s ease 0.15s;
-    z-index: 40;
-  }
-  table#tbl th[data-tip]::before {
-    content: ""; position: absolute; left: 50%; top: calc(100% + 2px);
-    transform: translateX(-50%);
-    border: 6px solid transparent; border-bottom-color: var(--border);
-    opacity: 0; pointer-events: none;
-    transition: opacity 0.12s ease 0.15s; z-index: 41;
-  }
-  table#tbl th[data-tip]:hover::after,
-  table#tbl th[data-tip]:hover::before { opacity: 1; }
-  /* Right-most columns: anchor tooltip to the right edge to avoid clipping */
-  table#tbl th[data-tip]:nth-last-child(-n+4)::after { left: auto; right: 0; transform: none; }
-  table#tbl th[data-tip]:nth-last-child(-n+4)::before { left: auto; right: 4px; transform: none; }
+  /* Column-header tooltips also ride the shared .app-tip system. */
 
   .logo {
     width: 18px; height: 18px; vertical-align: middle; border-radius: 4px;
@@ -2841,6 +4419,7 @@ INDEX_HTML = r"""<!doctype html>
   }
   td.sym { font-weight: 700; letter-spacing: 0.2px; }
   td.name { color: var(--text); max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+  .table-wrap.fit-columns td.name { max-width: calc(240px * var(--table-scale)); }
 
   /* Δ Highs bar */
   .bar-cell {
@@ -2855,9 +4434,30 @@ INDEX_HTML = r"""<!doctype html>
 
   svg.spark { width: 96px; height: 22px; vertical-align: middle; }
   svg.rs    { width: 86px; height: 22px; vertical-align: middle; }
+  .table-wrap.fit-columns svg.spark {
+    width: calc(96px * var(--table-scale)); height: calc(22px * var(--table-scale));
+  }
+  .table-wrap.fit-columns svg.rs {
+    width: calc(86px * var(--table-scale)); height: calc(22px * var(--table-scale));
+  }
+
+  .table-wrap.fit-columns .logo,
+  .table-wrap.fit-columns .logo-fallback {
+    width: calc(18px * var(--table-scale));
+    height: calc(18px * var(--table-scale));
+    font-size: calc(9px * var(--table-scale));
+  }
+
+  .table-wrap.fit-columns .bar-cell { height: calc(18px * var(--table-scale)); }
+  .table-wrap.fit-columns .bar-cell .bar-label {
+    line-height: calc(18px * var(--table-scale));
+    padding: 0 calc(6px * var(--table-scale));
+  }
 
   .tri-up   { color: var(--pos); font-size: 13px; }
   .tri-down { color: var(--neg); font-size: 13px; }
+  .table-wrap.fit-columns .tri-up,
+  .table-wrap.fit-columns .tri-down { font-size: calc(13px * var(--table-scale)); }
   .na { color: var(--muted); }
 
   /* Analyst sentiment dashboard (replaces the old footer block) */
@@ -3286,14 +4886,19 @@ INDEX_HTML = r"""<!doctype html>
 <body>
 
 <div class="topbar" id="topbar">
-  <button id="edit-btn" class="portfolio-btn"><span class="pf-icon">▦</span> Portfolio</button>
-  <button id="refresh">↻ Refresh</button>
-  <button id="export">⬇ CSV</button>
-  <button id="save">★ Save Watchlist</button>
-  <div class="sort-menu" id="sort-menu">
-    <button id="sort-btn">⇅ Sort: <span id="sort-label">% YTD ▼</span></button>
-    <div class="dropdown" id="sort-dropdown"></div>
-  </div>
+  <button id="edit-btn" class="portfolio-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
+  <button id="optimize" data-tip="Open the Portfolio Optimization workspace: compute the long-only efficient frontier from your current holdings (Markowitz CLA, Ledoit-Wolf shrinkage), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
+  <button id="refresh" data-tip="Pull fresh quotes from Yahoo Finance for the current portfolio and rebuild the derived metrics as rows stream back in.">↻ Refresh</button>
+  <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
+       per portfolio. Each sheet must include EVERY column the app can show for a
+       row (full column registry, not just the currently visible view) PLUS the
+       analyst recommendations and the portfolio analytics ratios shown in the
+       Portfolio tab, with static 1Y and 5Y portfolio statistics but no exported
+       time-series payloads. Intent: user feeds the file to an AI/chatbot for
+       agentic analysis and portfolio discussion. Future maintainers — when new
+       columns or analytics are added to the UI, extend the export accordingly so
+       this stays the "everything you see in the app" artifact. -->
+  <button id="export" data-tip="Create one Excel workbook with every saved portfolio, full holdings data, analyst fields, and static 1Y and 5Y portfolio statistics. Useful as structured input to an AI agent.">⬇ Export</button>
   <span class="spacer"></span>
   <span class="status" id="status">Idle</span>
   <div class="fx-menu" id="fx-menu">
@@ -3325,7 +4930,6 @@ INDEX_HTML = r"""<!doctype html>
   <div class="pf-editor">
     <div class="pf-editor-head">
       <span id="pf-editor-title">Constituents</span>
-      <span id="pf-editor-meta" class="pf-editor-meta"></span>
     </div>
     <textarea id="tickers" rows="2" placeholder="Paste tickers or company names — comma or newline separated.
 e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA, XLK, Trane, MSTR, COST, Apple, Microsoft"></textarea>
@@ -3335,17 +4939,19 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
       <span class="spacer"></span>
       <span class="status" id="editor-status">Paste your tickers and press Build (or Cmd/Ctrl + Enter).</span>
     </div>
+    <!-- Primary button (#build) and secondary (#save-as) swap labels/intent based on
+         whether a saved portfolio is currently open. See updatePrimaryButtonLabels(). -->
+
   </div>
 
   <!-- Analytics sub-window -->
   <div class="pf-analytics" id="pf-analytics">
     <div class="pf-analytics-head">
       <span class="pf-analytics-title">Portfolio analytics</span>
-      <div class="pf-mode-toggle" id="pf-mode-toggle">
-        <button data-mode="equal">Equal-weight</button>
-        <button data-mode="cap" class="active">Cap-weighted</button>
-        <button data-mode="custom">Custom…</button>
-      </div>
+      <!-- Mode bar: built-in pills (Equal, Cap) + any saved per-portfolio
+           weight presets. Trailing "+" opens the weights editor in new-preset
+           mode; the pencil on an active preset opens it for edit/delete. -->
+      <div class="pf-mode-bar" id="pf-mode-toggle" role="tablist" aria-label="Weighting"></div>
       <div class="pf-period-tabs" id="pf-period-tabs">
         <button data-p="3M">3M</button>
         <button data-p="6M">6M</button>
@@ -3361,7 +4967,6 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         </span>
         <span class="pf-overlay-pill" id="pf-show-ndx" data-on="0" role="switch" aria-checked="false" tabindex="0">
           <span class="swatch ndx"></span>NASDAQ
-          <span class="ovl-info" data-tip="NASDAQ-100 proxy via QQQ — the 100 largest non-financial Nasdaq listings. Useful as a tech-heavy benchmark next to SPY's broad-market read.">i</span>
         </span>
         <span class="pf-overlay-pill" id="pf-show-sec" data-on="0" role="switch" aria-checked="false" tabindex="0">
           <span class="swatch sec"></span>Sector mix
@@ -3390,23 +4995,302 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   </div>
 </div>
 
-<!-- Custom-weight popup -->
+<!-- Custom-weight popup. The name input + Save/Save-as/Delete row turns the
+     editor into a named-preset manager; Apply alone still works as the
+     legacy ad-hoc "custom" mode for one-off comparisons. -->
 <div class="pf-weights-bg" id="pf-weights-bg">
   <div class="pf-weights-modal">
     <div class="pf-weights-head">
-      <span class="pf-weights-title">Custom weights</span>
+      <span class="pf-weights-title" id="pf-weights-title">Custom weights</span>
       <div class="pf-weights-sum" id="pf-weights-sum">100.0%</div>
       <button id="pf-weights-equal" class="pf-weights-action" title="Set all to equal weight">Equal-weighted</button>
       <button id="pf-weights-reset" class="pf-weights-action" title="Reset to market-cap weights">Cap-weighted</button>
       <button id="pf-weights-close" class="pf-weights-action" title="Close">✕</button>
     </div>
-    <div class="pf-weights-hint">Slide or type to set weights. Lock pins a row; others auto-rebalance.</div>
+    <div class="pf-name-row">
+      <input id="pf-weights-name" type="text" placeholder="Preset name (e.g. Growth Tilt)" autocomplete="off" spellcheck="false"/>
+      <button id="pf-weights-save" class="pf-weights-action" title="Save as named preset">Save</button>
+      <button id="pf-weights-saveas" class="pf-weights-action" title="Save under a new name">Save as…</button>
+      <button id="pf-weights-delete" class="pf-weights-action" title="Delete this preset" style="display:none">Delete</button>
+      <span id="pf-weights-status" class="pf-name-status"></span>
+    </div>
+    <div class="pf-weights-hint">Slide or type to set weights. Lock pins a row; others auto-rebalance. Apply alone for an unsaved comparison, or name + Save to keep it.</div>
     <div class="pf-weights-body" id="pf-weights-body"></div>
     <div class="pf-weights-foot">
       <button id="pf-weights-apply" class="primary">Apply</button>
       <button id="pf-weights-cancel">Cancel</button>
     </div>
   </div>
+</div>
+
+<!-- Inline "save as" prompt — top-level overlay so it can appear over either
+     the weights modal or the MPT overlay. Uses the app's dark theme rather
+     than a native prompt() so the UI feels consistent. -->
+<div class="pf-inline-prompt" id="pf-name-prompt">
+  <div class="pf-ip-box">
+    <div class="pf-ip-title" id="pf-name-prompt-title">Save preset as…</div>
+    <div class="pf-ip-desc" id="pf-name-prompt-desc" style="display:none"></div>
+    <input id="pf-name-prompt-input" type="text" placeholder="Preset name" autocomplete="off" spellcheck="false"/>
+    <div class="pf-ip-err" id="pf-name-prompt-err"></div>
+    <div class="pf-ip-foot">
+      <button id="pf-name-prompt-cancel">Cancel</button>
+      <button id="pf-name-prompt-ok" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Portfolio Optimization (MPT) overlay. Computes the long-only efficient
+     frontier from the active portfolio, lets the user explore it with a
+     slider, and either save runs or apply the chosen weights as a preset. -->
+<div class="pf-mpt-bg" id="pf-mpt-bg" role="dialog" aria-modal="true" aria-labelledby="pf-mpt-title">
+  <div class="pf-mpt-modal">
+    <div class="pf-mpt-head">
+      <span class="pf-mpt-title" id="pf-mpt-title">Portfolio Optimization</span>
+      <span class="pf-mpt-sub" id="pf-mpt-sub">Markowitz long-only · Critical Line Algorithm</span>
+      <span class="spacer"></span>
+      <button id="pf-mpt-info" class="info-btn pf-mpt-info-btn" title="About Modern Portfolio Theory" type="button"><span class="info-icon-circle">i</span></button>
+      <button id="pf-mpt-close" class="pf-mpt-close" title="Close (Esc)">✕</button>
+    </div>
+    <div class="pf-mpt-controls" id="pf-mpt-controls">
+      <div class="pf-mpt-ctl">
+        <label>Lookback</label>
+        <div class="seg" id="pf-mpt-lookback">
+          <button data-v="1Y">1Y</button>
+          <button data-v="3Y" class="active">3Y</button>
+          <button data-v="5Y">5Y</button>
+          <button data-v="10Y">10Y</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl">
+        <label>Frequency</label>
+        <div class="seg" id="pf-mpt-freq">
+          <button data-v="daily">Daily</button>
+          <button data-v="weekly" class="active">Weekly</button>
+          <button data-v="monthly">Monthly</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl pf-mpt-ctl-rf">
+        <label>Risk-free (annual)<span class="pf-mpt-rf-info" data-tip="Annualized risk-free rate (in %) used as the baseline return in Sharpe and tangency calculations. Auto fills it from the short-rate proxy for the portfolio currency (e.g. ^IRX, US 13-week T-Bill), averaged over the selected lookback. The sparkline shows that proxy's history — hover for the time series.">i</span></label>
+        <div class="pf-mpt-rf-wrap">
+          <input id="pf-mpt-rf" type="number" min="0" max="20" step="0.05" value="4.50"/>
+          <div class="pf-mpt-rf-spark-wrap" id="pf-mpt-rf-spark-wrap">
+            <svg id="pf-mpt-rf-spark" class="pf-mpt-rf-spark" viewBox="0 0 200 36" preserveAspectRatio="none" aria-hidden="true"></svg>
+            <div class="pf-mpt-rf-spark-tip" id="pf-mpt-rf-spark-tip" role="tooltip"></div>
+          </div>
+          <button type="button" id="pf-mpt-rf-auto" class="pf-mpt-rf-auto" data-tip="Refill the input with the trailing-window mean of the short-rate proxy (e.g. ^IRX). Click to recompute after changing the lookback or currency.">Auto</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl pf-mpt-ctl-div">
+        <label>Allocation <span class="pf-mpt-rf-info" data-tip="Sparse: unconstrained long-only Markowitz — the optimiser is free to drop assets to 0%, often leaving most holdings at zero weight. Diversified: every asset receives at least a minimum weight (auto-scaled by portfolio size — about 0.5/N, never above 1/N) so the frontier keeps all constituents in the mix. Same math (Critical Line Algorithm via variable substitution), no extra solver.">i</span></label>
+        <div class="seg" id="pf-mpt-mode">
+          <button data-v="sparse" class="active">Sparse</button>
+          <button data-v="diversified">Diversified</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl">
+        <label>Compute budget</label>
+        <div class="pf-mpt-select" id="pf-mpt-budget" data-value="standard" tabindex="0" role="combobox" aria-expanded="false" aria-haspopup="listbox">
+          <span class="pf-mpt-select-label">Standard — 1M configs (~4s)</span>
+          <span class="pf-mpt-select-caret" aria-hidden="true">▾</span>
+          <ul class="pf-mpt-select-menu" role="listbox" hidden>
+            <li data-value="fast" role="option">Fast — 200k configs (~1s)</li>
+            <li data-value="standard" role="option" aria-selected="true">Standard — 1M configs (~4s)</li>
+            <li data-value="thorough" role="option">Thorough — 3.5M configs (~14s)</li>
+            <li data-value="exhaustive" role="option">Exhaustive — 15M configs (~60s)</li>
+          </ul>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl pf-mpt-ctl-run">
+        <label>&nbsp;</label>
+        <button class="pf-mpt-run" id="pf-mpt-run">Run optimization</button>
+      </div>
+    </div>
+    <div class="pf-mpt-body">
+      <div class="pf-mpt-chartwrap">
+        <div class="pf-mpt-chart" id="pf-mpt-chart">
+          <!-- Two-canvas chart: base layer carries axes + cloud + frontier line
+               + anchors (redrawn only when data/viewport changes); overlay
+               carries the selection ring + hover ghost (redrawn on cursor
+               input). Both canvases are sized through one shared helper so
+               the frontier line and Monte-Carlo cloud cannot drift. -->
+          <canvas id="pf-mpt-base" class="pf-mpt-cv pf-mpt-cv-base" aria-hidden="true"></canvas>
+          <canvas id="pf-mpt-overlay" class="pf-mpt-cv pf-mpt-cv-overlay" aria-hidden="true"></canvas>
+          <div class="pf-mpt-status" id="pf-mpt-status">Run the optimization to draw the efficient frontier.</div>
+        </div>
+        <div class="pf-mpt-slider-row">
+          <span>Min-vol</span>
+          <input type="range" id="pf-mpt-slider" min="0" max="100" value="50" disabled/>
+          <span>Max-return</span>
+        </div>
+        <div class="pf-mpt-legend" id="pf-mpt-legend"></div>
+      </div>
+      <div class="pf-mpt-side" id="pf-mpt-side">
+        <h4>Selected portfolio</h4>
+        <div class="pf-mpt-kv" id="pf-mpt-stats">
+          <span class="k">Run the optimization to see metrics.</span>
+        </div>
+        <h4>Weights</h4>
+        <div class="pf-mpt-weights" id="pf-mpt-wlist"></div>
+        <div class="pf-mpt-actions">
+          <button id="pf-mpt-save" class="primary">Save as Custom Weights</button>
+        </div>
+        <h4>Recent runs</h4>
+        <div class="pf-mpt-runs" id="pf-mpt-runs"><span class="pf-mpt-status">No saved runs yet.</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- About MPT modal — layered on top of the MPT overlay (z-index 95 vs 90).
+     Mirrors the main-page About modal (info-bg) for visual consistency;
+     re-uses the same .info-modal / .info-head / .info-card / .info-formula
+     classes so KaTeX auto-render works with zero new styling. -->
+<div class="info-bg pf-mpt-info-bg" id="pf-mpt-info-bg">
+  <div class="info-modal">
+    <div class="info-head">
+      <div>
+        <div class="info-head-title">Modern Portfolio Theory — Guide</div>
+        <div class="info-head-sub">Motivation, theory, limitations, and a worked example</div>
+      </div>
+      <button class="info-head-close" id="pf-mpt-info-close" type="button" title="Close (Esc)">&#215;</button>
+    </div>
+    <p class="info-intro">
+      Modern Portfolio Theory (MPT) — introduced by Harry Markowitz in 1952 — is the
+      mathematical foundation for trading off expected return against risk when
+      combining risky assets. This optimiser implements long-only, fully-invested,
+      mean-variance MPT with the Critical Line Algorithm (Markowitz, 1959).
+    </p>
+    <div class="info-grid">
+
+      <div class="info-card info-card-wide">
+        <div class="info-card-name">Motivation — the free-lunch intuition</div>
+        <div class="info-card-desc">
+          Most investors hold many assets because diversification reduces portfolio
+          volatility without proportionally reducing expected return — what Markowitz
+          called &ldquo;the only free lunch in finance&rdquo;. When two assets are imperfectly
+          correlated (ρ &lt; 1), the variance of their weighted sum is strictly less
+          than the weighted sum of their variances. Stacking many imperfectly
+          correlated bets therefore shifts the portfolio toward the upper-left of
+          the (volatility, return) plane: more return per unit of risk.
+        </div>
+        <div class="info-card-why">
+          The <b>efficient frontier</b> is the locus of portfolios that achieve the
+          maximum expected return for each given level of risk. Anything below the
+          frontier is dominated — you can always find another long-only portfolio
+          with the same risk but a higher expected return.
+        </div>
+      </div>
+
+      <div class="info-card info-card-wide">
+        <div class="info-card-name">Theory — the mean-variance optimisation</div>
+        <div class="info-card-desc">
+          Given an asset universe with annualised mean-return vector <b>μ</b> and
+          annualised covariance matrix <b>Σ</b>, a portfolio is a weight vector
+          <b>w</b> summing to one. Its expected return and variance are
+        </div>
+        <div class="info-formula">$$\mu_p = w^\top \mu \qquad \sigma_p^{\,2} = w^\top \Sigma\, w$$</div>
+        <div class="info-card-desc">
+          The Markowitz program seeks, for each target return <b>R⋆</b>, the
+          long-only portfolio that minimises variance subject to that target:
+        </div>
+        <div class="info-formula">$$\min_{w}\ w^\top \Sigma\, w \quad \text{s.t.}\quad w^\top \mu = R^\star,\ \ w^\top \mathbf{1} = 1,\ \ w \ge 0$$</div>
+        <div class="info-card-desc">
+          Sweeping <b>R⋆</b> traces the efficient frontier. The
+          <b>Critical Line Algorithm</b> (CLA) used here solves the entire
+          piecewise-linear frontier in one pass by tracking which assets are at
+          their lower bound versus &ldquo;free&rdquo;, jumping between turning points where the
+          active set changes. The <b>tangency portfolio</b> — the point on the
+          frontier maximising the Sharpe ratio — is
+        </div>
+        <div class="info-formula">$$w^{\mathrm{tan}} = \arg\max_{w \in \mathcal{F}}\ \frac{\mu_p - r_f}{\sigma_p}$$</div>
+        <div class="info-card-desc">
+          where <b>r<sub>f</sub></b> is the risk-free rate. Geometrically it is the
+          point at which a line from <b>(0, r<sub>f</sub>)</b> is tangent to the
+          frontier — the steepest reward-to-risk ratio achievable with risky assets.
+        </div>
+        <div class="info-card-why">
+          Sample covariance is noisy when the number of assets approaches the
+          number of observations. This module shrinks it toward a
+          constant-correlation target using the <b>Ledoit-Wolf</b> estimator with a
+          data-driven intensity α ∈ [0, 1]:
+        </div>
+        <div class="info-formula">$$\hat{\Sigma} = \alpha\, T + (1-\alpha)\, S$$</div>
+        <div class="info-card-desc">
+          where <b>S</b> is the sample covariance and <b>T</b> the
+          constant-correlation target. This stabilises the optimisation when the
+          frontier is highly sensitive to small changes in <b>Σ</b>.
+        </div>
+      </div>
+
+      <div class="info-card">
+        <div class="info-card-name">Limitations</div>
+        <div class="info-card-desc">
+          MPT&rsquo;s elegance hides several traps that matter in practice:
+        </div>
+        <ul class="info-feature-list">
+          <li><b>Estimation error in μ dominates.</b> Historical mean returns are noisy
+              forecasts; the optimiser amplifies that noise into extreme corner
+              portfolios (&ldquo;Markowitz error maximisation&rdquo;).</li>
+          <li><b>Covariance instability.</b> Sample Σ rotates with the lookback window;
+              the Ledoit-Wolf shrinkage applied here mitigates but does not
+              eliminate this.</li>
+          <li><b>Long-only.</b> No shorting, no leverage — many academic results
+              (efficient frontier as a hyperbola, two-fund separation) only hold
+              when shorts are allowed.</li>
+          <li><b>No transaction costs, taxes, or liquidity constraints.</b> The
+              optimiser will happily produce a 0.18% NVDA allocation; whether that
+              is sensible to trade is up to you.</li>
+          <li><b>Variance ≠ risk.</b> Mean-variance treats upside and downside
+              symmetrically. For asymmetric return distributions consider CVaR or
+              downside-deviation formulations.</li>
+          <li><b>Backward-looking.</b> The frontier reflects the chosen lookback
+              window; it is not a forecast.</li>
+        </ul>
+      </div>
+
+      <div class="info-card">
+        <div class="info-card-name">Example — closed-form two-asset case</div>
+        <div class="info-card-desc">
+          For two risky assets with volatilities <b>σ<sub>1</sub>, σ<sub>2</sub></b>
+          and correlation <b>ρ</b>, the minimum-variance long-only weight on asset 1 is
+        </div>
+        <div class="info-formula">$$w_1^\star = \frac{\sigma_2^{\,2} - \rho\,\sigma_1 \sigma_2}{\sigma_1^{\,2} + \sigma_2^{\,2} - 2\rho\,\sigma_1 \sigma_2}$$</div>
+        <div class="info-card-desc">
+          with <b>w<sub>2</sub><sup>⋆</sup> = 1 − w<sub>1</sub><sup>⋆</sup></b>
+          (clipped to [0, 1] for the long-only constraint).
+          For <b>σ<sub>1</sub></b> = 20%, <b>σ<sub>2</sub></b> = 30%, <b>ρ</b> = 0.2,
+          this gives <b>w<sub>1</sub><sup>⋆</sup></b> ≈ 0.78 and a portfolio volatility
+          of about 18.4% — strictly below either asset&rsquo;s standalone volatility.
+          The free lunch in one line of algebra.
+        </div>
+        <div class="info-card-why">
+          The <b>n</b>-asset generalisation requires no new ideas: the same KKT
+          conditions yield a piecewise-linear path in weight space, which the CLA
+          enumerates corner by corner.
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Pass D — column-view switcher bar.
+     Lets the user pick between built-in presets (Default / Fundamentals / Momentum),
+     View), select a saved custom view, or open the Customize modal to
+     create one. The active view drives renderHeader/renderSortMenu/render
+     via getActiveColumns(). Drag-and-drop on the live <th> elements also
+     mutates the active view (with a "modified" pill when reordering on a
+     built-in preset). -->
+<div class="cv-bar" id="cv-bar">
+  <div class="cv-seg" id="cv-builtins" role="tablist" aria-label="Column view"></div>
+  <div class="cv-custom-wrap" id="cv-custom-wrap"></div>
+  <button class="cv-fit-toggle" id="cv-fit-toggle" type="button" data-tip="Shrink column widths, chart cells, and table text just enough to keep the active view on screen." aria-pressed="false">Fit to screen</button>
+  <button class="cv-customize" id="cv-customize" type="button" title="Pick which columns to show">Customize…</button>
+  <span class="cv-dirty" id="cv-dirty" hidden>
+    <span class="cv-dirty-label">Modified</span>
+    <button class="cv-dirty-save" id="cv-dirty-save" type="button">Save as new view</button>
+    <button class="cv-dirty-reset" id="cv-dirty-reset" type="button">Reset</button>
+  </span>
 </div>
 
 <div class="table-wrap">
@@ -3416,22 +5300,136 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   </table>
 </div>
 
+<!-- Pass D — Customize Columns modal. Populated by openColumnPicker().
+     Lists every registry column with a checkbox + drag handle (HTML5 DnD).
+     "Save as new view" prompts for a name; "Update <name>" overwrites the
+     active custom view. Built-ins are read-only here. -->
+<div class="modal-bg" id="cv-modal-bg" hidden><div class="modal cv-modal" id="cv-modal" role="dialog" aria-modal="true" aria-label="Customize columns"></div></div>
+
 <div id="analyst-dashboard" aria-label="Analyst sentiment dashboard"></div>
 
 <div class="info-bg" id="info-bg">
   <div class="info-modal">
     <div class="info-head">
       <div>
-        <div class="info-head-title">Portfolio Tracker — Column Guide</div>
-        <div class="info-head-sub">What each column measures and how it is calculated</div>
+        <div class="info-head-title">Portfolio Tracker — Guide</div>
+        <div class="info-head-sub">Feature library, workflow, and column formulas</div>
       </div>
       <button class="info-head-close" onclick="closeInfo()">&#215;</button>
     </div>
     <p class="info-intro">
       Data is fetched live from Yahoo Finance via yfinance. Each row is one security. Click any row for a
-      detail view. Use <b>⇅ Sort</b> to reorder by any metric. Colors are heatmaps — hover a cell to see raw values.
+      detail view. Use <b>⇅ Sort</b> to reorder by any visible metric. Colors are heatmaps, and most controls in the top bar and column bar explain themselves on hover.
     </p>
     <div class="info-grid">
+      <div class="info-card full">
+        <div class="info-card-name">Workflow</div>
+        <div class="info-card-desc">Open <b>Portfolio</b> to manage saved tabs and constituents. Build or update the table, then move across analytics, FX denomination, column views, the analyst dashboard, and the row detail modal without losing the underlying portfolio state.</div>
+        <ul class="info-feature-list">
+          <li>Use saved tabs as named portfolio workspaces with cached rows, stale markers, last-view restore, and inline rename.</li>
+          <li>Build or refresh once, then inspect the same holdings through the table, analytics, sentiment, FX, and detail layers.</li>
+          <li>Switch weighting modes and time windows to see how the same portfolio behaves under different assumptions.</li>
+          <li>Export the whole saved state to Excel when you want a portable research artifact.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Why it matters:</span>This app is designed to move from idea capture to ranking, risk review, analyst context, and export without making you rebuild the portfolio in separate tools.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Portfolio Workspace</div>
+        <div class="info-card-desc">Saved portfolio tabs hold constituents, cached rows, and analytics context. Tabs can be renamed inline and carry stale state when the saved view no longer matches live data.</div>
+        <ul class="info-feature-list">
+          <li>Saved tabs and an ad hoc current tab.</li>
+          <li>Inline rename, delete, and restore-last-view behavior.</li>
+          <li>Cached row payloads so previously built views reopen instantly.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>it turns the dashboard into a persistent research workspace instead of a one-shot ticker paste box.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Build &amp; Refresh</div>
+        <div class="info-card-desc">Dashboard builds stream row-by-row, so price, momentum, valuation, and technical fields appear progressively instead of waiting for the full portfolio to finish.</div>
+        <ul class="info-feature-list">
+          <li>Streaming quote build and update path.</li>
+          <li>Per-row error states when Yahoo has no usable data.</li>
+          <li>Smart primary action that flips between Build Dashboard and Update Portfolio.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>you get fast feedback on large portfolios and can spot broken symbols without blocking the whole run.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Portfolio Analytics</div>
+        <div class="info-card-desc">The analytics panel turns the holdings table into a portfolio object with benchmark-relative risk and return math.</div>
+        <ul class="info-feature-list">
+          <li>Equal-weight, cap-weighted, and custom-weight modes.</li>
+          <li>3M, 6M, YTD, 1Y, 3Y, 5Y, and Max windows.</li>
+          <li>SPY, NASDAQ, sector-mix, and drawdown overlays.</li>
+          <li>Risk &amp; Return, weighted valuation, exposure, concentration, and contribution blocks.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>you can judge whether an idea is attractive as a portfolio, not just as a collection of individually interesting names.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Analyst Sentiment</div>
+        <div class="info-card-desc">A separate dashboard aggregates sell-side coverage across the active holdings.</div>
+        <ul class="info-feature-list">
+          <li>Weighted consensus rating on the 1 to 5 Yahoo scale.</li>
+          <li>Coverage-weighted target upside.</li>
+          <li>Recommendation distribution and per-holding consensus table.</li>
+          <li>Coverage gaps so you can see what part of the book analysts do not cover.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>it separates market-implied valuation from street expectations and shows where your book is consensus or contrarian.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">FX &amp; Denomination</div>
+        <div class="info-card-desc">The display currency selector converts prices, portfolio values, and analytics into a consistent denomination while keeping the original quote context available.</div>
+        <ul class="info-feature-list">
+          <li>Spot FX conversion across the supported major currencies.</li>
+          <li>Hoverable 1Y synthetic currency basket index for context.</li>
+          <li>FX-adjusted portfolio analytics in the chosen display currency.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>it keeps return comparisons honest when the portfolio mixes USD, EUR, GBP, JPY, CHF, or CAD exposures.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Column Views &amp; Sorting</div>
+        <div class="info-card-desc">The table is no longer a single fixed layout. You can switch the lens instead of forcing every idea through one preset.</div>
+        <ul class="info-feature-list">
+          <li>Built-in presets for Default, Fundamentals, and Momentum.</li>
+          <li>Custom column views saved separately from portfolios.</li>
+          <li>Drag-to-reorder headers and a dirty-state indicator for modified presets.</li>
+          <li>Fit to screen compaction and a Sort menu keyed to the active visible columns.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>screen real estate becomes a deliberate ranking tool, so you can pivot from momentum review to quality review without rebuilding data.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Row Detail Modal</div>
+        <div class="info-card-desc">Clicking a row opens the heavy research view for one security.</div>
+        <ul class="info-feature-list">
+          <li>1M to Max chart windows with benchmark and volume overlays.</li>
+          <li>Snapshot, valuation, profitability, fundamentals, dividend, profile, and news sections.</li>
+          <li>Analyst targets, consensus trend, and benchmark-relative performance.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>the table stays fast, while the modal becomes the deep-dive layer for understanding what is driving a single name.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Excel Export</div>
+        <div class="info-card-desc">Export produces one workbook across every saved portfolio, not just the active tab.</div>
+        <ul class="info-feature-list">
+          <li>Overview sheet plus one sheet per saved portfolio.</li>
+          <li>Holdings data, analyst fields, exposure, concentration, and portfolio analytics blocks.</li>
+          <li>Designed as a portable input artifact for spreadsheet work or AI-assisted review.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>it gives you a complete offline snapshot of what the app can already see, without re-querying everything manually.</div>
+      </div>
+      <div class="info-card full">
+        <div class="info-card-name">Column Families Beyond The Default View</div>
+        <div class="info-card-desc">The app exposes more than the original default table. Optional columns already available today include:</div>
+        <ul class="info-feature-list">
+          <li>Momentum and technical fields: % 1W, % 1M, % 3M, % 6M, RSI 14, MACD %, Bollinger %B, 20SMA, 50SMA, and 200SMA.</li>
+          <li>Fundamental and balance-sheet fields: Sector, Industry, Beta, Forward P/E, PEG, EV/Revenue, EV/EBITDA, Operating Margin, D/E, Current Ratio, and Dividend Yield.</li>
+          <li>Range and analyst fields: 52W High, 52W Low, Analyst Rating, and Target Δ.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>you can choose whether the table is a momentum board, a fundamentals screen, a risk dashboard, or an analyst-consensus monitor.</div>
+      </div>
+      <div class="info-card full">
+        <div class="info-card-name">Core Column Reference</div>
+        <div class="info-card-desc">The cards below cover the columns in the default view plus several optional metrics that matter when you switch presets.</div>
+      </div>
       <div class="info-card">
         <div class="info-card-name">Ticker</div>
         <div class="info-card-desc">Exchange symbol used to identify the security (e.g. AAPL, NVDA, XLK). Company names are resolved automatically.</div>
@@ -3476,9 +5474,9 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
           <span class="formula-note">P&#8320; = close 365 calendar days ago</span></div>
       </div>
       <div class="info-card">
-        <div class="info-card-name">&#916; Highs &mdash; Distance from ATH</div>
-        <div class="info-card-desc">How far the current price sits below its all-time high over the available history. 0% means the stock is at an all-time high. The bar grows as the drawdown deepens; full bar = 50% below ATH.</div>
-        <div class="info-formula">$$\Delta\text{ATH} = \left(\dfrac{P}{P_{\text{ATH}}} - 1\right) \times 100$$</div>
+        <div class="info-card-name">&#916; Highs &mdash; Distance from 2Y High</div>
+        <div class="info-card-desc">How far the current price sits below the highest close in the table's fast-path history window (currently 2 years). 0% means the stock is at that 2Y high. The detail modal still shows a full-history ATH separately.</div>
+        <div class="info-formula">$$\Delta\text{2YH} = \left(\dfrac{P}{P_{\text{2Y High}}} - 1\right) \times 100$$</div>
       </div>
       <div class="info-card">
         <div class="info-card-name">RS Rank 1M &mdash; Relative Strength</div>
@@ -3489,6 +5487,26 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <div class="info-card-name">20 / 50 / 200 SMA</div>
         <div class="info-card-desc">Simple Moving Average flags. &#9650; = price is above the SMA (bullish momentum). &#9660; = price is below (bearish). The three periods correspond to roughly 1 month, 1 quarter, and 1 year of trading days.</div>
         <div class="info-formula">$$\text{SMA}_n = \dfrac{1}{n}\sum_{i=1}^{n} P_i$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Forward P/E</div>
+        <div class="info-card-desc">Price divided by consensus forward earnings. It tells you what multiple the market is paying on the next year rather than the trailing year.</div>
+        <div class="info-formula">$$\text{Forward P/E} = \dfrac{P}{\text{EPS}_{\text{NTM}}}$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">EV/EBITDA</div>
+        <div class="info-card-desc">Enterprise-value multiple that normalises for capital structure. Useful when debt loads differ materially across peers.</div>
+        <div class="info-formula">$$\text{EV/EBITDA} = \dfrac{\text{Enterprise Value}}{\text{EBITDA}}$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Analyst Rating</div>
+        <div class="info-card-desc">Mean sell-side recommendation on Yahoo's 1 to 5 scale, where 1 is Strong Buy and 5 is Sell.</div>
+        <div class="info-formula">$$R = \dfrac{\sum_{j=1}^{N} r_j}{N},\quad 1=\text{Strong Buy},\; 5=\text{Sell}$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Target Δ</div>
+        <div class="info-card-desc">Distance from the current price to the mean analyst target price. Positive values imply upside to consensus fair value.</div>
+        <div class="info-formula">$$\Delta_{target} = \left(\dfrac{TP_{mean}}{P} - 1\right) \times 100$$</div>
       </div>
     </div>
   </div>
@@ -3532,7 +5550,7 @@ const COLS = [
   { key: "pct_1y",      label: "% 1Y",      w: 78,  align: "right", sortable: true,
     heat: { kind: "div", anchor: 100 },
     render: (r) => fmtPctSigned(r.pct_1y) },
-  /* Δ Highs: percent below all-time high. 0% = at high, -50% = halved.
+  /* Δ Highs: percent below the fast-path 2Y high. 0% = at high, -50% = halved.
      Anchor full-red at -50%. */
   { key: "delta_ath",   label: "Δ Highs",   w: 110, align: "right", sortable: true,
     render: (r) => deltaBar(r.delta_ath) },
@@ -3547,12 +5565,91 @@ const COLS = [
   { key: "above_sma_200", label: "200SMA",  w: 50,  align: "center", sortable: true,
     render: (r) => triangle(r.above_sma_200),
     sortValue: (r) => r.above_sma_200 === null ? null : (r.above_sma_200 ? 1 : 0) },
+
+  /* Pass D — optional columns (not in Default preset; surfaced via Fundamentals,
+     Momentum, or the custom-column picker). */
+  { key: "pct_1w",        label: "% 1W",    w: 78,  align: "right", sortable: true,
+    heat: { kind: "div", anchor: 20 },
+    render: (r) => fmtPctSigned(r.pct_1w) },
+  { key: "pct_1m",        label: "% 1M",    w: 78,  align: "right", sortable: true,
+    heat: { kind: "div", anchor: 30 },
+    render: (r) => fmtPctSigned(r.pct_1m) },
+  { key: "pct_3m",        label: "% 3M",    w: 78,  align: "right", sortable: true,
+    heat: { kind: "div", anchor: 50 },
+    render: (r) => fmtPctSigned(r.pct_3m) },
+  { key: "pct_6m",        label: "% 6M",    w: 78,  align: "right", sortable: true,
+    heat: { kind: "div", anchor: 75 },
+    render: (r) => fmtPctSigned(r.pct_6m) },
+  { key: "rsi_14",        label: "RSI 14",  w: 64,  align: "right", sortable: true,
+    render: (r) => fmt2(r.rsi_14) },
+  { key: "macd_hist_pct", label: "MACD %",  w: 72,  align: "right", sortable: true,
+    heat: { kind: "div", anchor: 2 },
+    render: (r) => fmtPctSigned(r.macd_hist_pct) },
+  { key: "bb_pct_b",      label: "%B",      w: 54,  align: "right", sortable: true,
+    render: (r) => fmt2(r.bb_pct_b) },
+  { key: "beta",          label: "Beta",    w: 58,  align: "right", sortable: true,
+    render: (r) => fmt2(r.beta) },
+  { key: "sector",        label: "Sector",  w: 130, align: "left",  sortable: true,
+    render: (r) => escapeHtml(r.sector || ""), td_cls: "left" },
+  { key: "industry",      label: "Industry",w: 160, align: "left",  sortable: true,
+    render: (r) => escapeHtml(r.industry || ""), td_cls: "left" },
+  /* Forward P/E and EV/EBITDA — lower = cheaper. n/a (no analyst coverage)
+     is painted saturated to flag the absence. */
+  { key: "forward_pe",    label: "Fwd P/E", w: 64,  align: "right", sortable: true,
+    heat: { kind: "yo", clipMin: 0, clipMax: 30, naMax: true },
+    render: (r) => fmt2(r.forward_pe) },
+  { key: "peg",           label: "PEG",     w: 58,  align: "right", sortable: true,
+    heat: { kind: "yo", clipMin: 0, clipMax: 3, naMax: true },
+    render: (r) => fmt2(r.peg) },
+  { key: "ev_revenue",    label: "EV/Rev",  w: 68,  align: "right", sortable: true,
+    heat: { kind: "yo", clipMin: 0, clipMax: 10, naMax: true },
+    render: (r) => fmt2(r.ev_revenue) },
+  { key: "ev_ebitda",     label: "EV/EBITDA", w: 78, align: "right", sortable: true,
+    heat: { kind: "yo", clipMin: 0, clipMax: 20, naMax: true },
+    render: (r) => fmt2(r.ev_ebitda) },
+  { key: "operating_margin", label: "Op Mgn", w: 68, align: "right", sortable: true,
+    heat: { kind: "yo", clipMin: 0, clipMax: 0.4, invert: true, naMax: true },
+    render: (r) => fmtPctDirect(r.operating_margin) },
+  { key: "debt_equity",   label: "D/E",     w: 56,  align: "right", sortable: true,
+    heat: { kind: "yo", clipMin: 0, clipMax: 250, naMax: true },
+    render: (r) => fmt2(r.debt_equity) },
+  { key: "current_ratio", label: "Curr Ratio", w: 78, align: "right", sortable: true,
+    heat: { kind: "yo", clipMin: 0.5, clipMax: 3, invert: true, naMax: true },
+    render: (r) => fmt2(r.current_ratio) },
+  { key: "dividend_yield", label: "Div Yield", w: 78, align: "right", sortable: true,
+    heat: { kind: "yo", clipMin: 0, clipMax: 0.06, invert: true, naMax: true },
+    render: (r) => fmtPctDirect(r.dividend_yield) },
+  /* Analyst recommendation mean: 1 = Strong Buy → 5 = Sell. Lower is
+     more bullish, so the ramp paints high ratings (sell side) orange. */
+  { key: "analyst_rating",label: "Rating",  w: 64,  align: "right", sortable: true,
+    heat: { kind: "yo", clipMin: 1, clipMax: 5, naMax: true },
+    render: (r) => fmt2(r.recommendation_mean),
+    sortValue: (r) => r.recommendation_mean },
+  /* Target upside derived client-side from analyst mean target and last price. */
+  { key: "target_upside_pct", label: "Target Δ", w: 86, align: "right", sortable: true,
+    heat: { kind: "div", anchor: 30 },
+    render: (r) => {
+      const t = r.target_mean_price, p = r.price;
+      if (t == null || p == null || !isFinite(t) || !isFinite(p) || p <= 0) return fmtPctSigned(null);
+      return fmtPctSigned((t / p - 1) * 100);
+    },
+    sortValue: (r) => {
+      const t = r.target_mean_price, p = r.price;
+      if (t == null || p == null || !isFinite(t) || !isFinite(p) || p <= 0) return null;
+      return (t / p - 1) * 100;
+    }
+  },
+  { key: "w52_high",      label: "52W High",w: 90,  align: "right", sortable: true,
+    render: (r) => fmtMoney(r.w52_high, r.currency) },
+  { key: "w52_low",       label: "52W Low", w: 90,  align: "right", sortable: true,
+    render: (r) => fmtMoney(r.w52_low, r.currency) },
 ];
 
 /* Short hover descriptions for the column-header info icons.
    Long-form versions with formulas live in the About / Column Guide modal. */
 const COL_INFO = {
   symbol:        "Exchange ticker symbol (e.g. AAPL, NVDA, XLK).",
+  logo:          "Brand logo for the company or fund (resolved from Yahoo's website field). Purely visual — no data column behind it.",
   name:          "Full company or fund name from Yahoo Finance.",
   price:         "Last available closing price, converted to the selected display currency (see FX selector in the top bar).",
   market_cap:    "Total market value of all outstanding shares (Price × Shares Outstanding).",
@@ -3561,15 +5658,99 @@ const COL_INFO = {
   pct_ytd:       "Return from the first trading day of the current calendar year to today.",
   spark:         "Sparkline of the last 252 trading days. Green if 1Y return is positive, red otherwise.",
   pct_1y:        "Total price return over the last 365 calendar days.",
-  delta_ath:     "Distance from all-time high. 0% = at ATH; full bar = 50% below ATH.",
+  delta_ath:     "Distance from the highest close in the table row's 2-year history window. 0% = at that high; full bar = 50% below it.",
   rs_rank:       "Relative Strength: 12 monthly bars showing where each month's close ranked within its trailing-12-month price range.",
   above_sma_20:  "20-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 month of trading days.",
   above_sma_50:  "50-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 quarter of trading days.",
   above_sma_200: "200-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 year of trading days.",
+  pct_1w:        "Total price return over the last 7 calendar days.",
+  pct_1m:        "Total price return over the last 30 calendar days.",
+  pct_3m:        "Total price return over the last 91 calendar days.",
+  pct_6m:        "Total price return over the last 182 calendar days.",
+  rsi_14:        "14-day Relative Strength Index. Below 30 is oversold, above 70 is overbought.",
+  macd_hist_pct: "MACD histogram as a percent of price. Positive means MACD is above its signal line; negative means momentum is fading.",
+  bb_pct_b:      "Bollinger %B. 0 = lower band, 0.5 = middle band, 1 = upper band. Above 1 or below 0 means price is outside the bands.",
+  beta:          "Yahoo-reported beta versus the market. Around 1 moves with the market; above 1 is more volatile.",
+  sector:        "GICS sector (e.g. Technology, Energy) reported by Yahoo Finance.",
+  industry:      "GICS sub-industry — narrower than sector.",
+  forward_pe:    "Forward Price/Earnings: price ÷ consensus next-12-month EPS. Heat anchors at 30; n/a is flagged.",
+  peg:           "PEG ratio: P/E divided by expected earnings growth. Lower can mean cheaper growth, though very low values can also reflect weak forecasts.",
+  ev_revenue:    "Enterprise Value ÷ Revenue. Useful when earnings are noisy or negative; lower usually means cheaper on sales.",
+  ev_ebitda:     "Enterprise Value ÷ EBITDA. Cap-structure-neutral valuation multiple. Heat anchors at 20.",
+  operating_margin: "Operating margin as a percent of revenue. Higher means more profit retained after core operating costs.",
+  debt_equity:   "Debt-to-equity ratio. Higher means more leverage relative to shareholder equity.",
+  current_ratio: "Current assets divided by current liabilities. Above 1 usually signals better short-term liquidity.",
+  dividend_yield: "Annual cash dividend divided by price. Higher yields can support total return but may also reflect risk.",
+  analyst_rating:"Mean analyst recommendation, 1 (Strong Buy) → 5 (Sell). Lower is more bullish.",
+  target_upside_pct: "Distance from current price to mean analyst price target, signed (positive = upside).",
+  w52_high:      "Highest closing price over the trailing 52 weeks.",
+  w52_low:       "Lowest closing price over the trailing 52 weeks.",
 };
 
 let DATA = [];
 let SORT = { key: "pct_ytd", dir: -1 };
+
+/* ===========================================================================
+ * Column views (Pass D)
+ * ---------------------------------------------------------------------------
+ * COLS is the registry of every available column. BUILTIN_VIEWS holds the
+ * three immutable presets — ordered key lists drawn from COLS. STATE owns
+ * the active selection (activeViewName, customViews, activeColumnOverride),
+ * but all rendering goes through getActiveColumns() so consumers never
+ * need to know whether a view is built-in, custom, or a dirty in-memory
+ * override.
+ *
+ * To add a new column: append a registry entry to COLS above (with key,
+ * label, render, optional heat/align/sortable/sortValue), add a COL_INFO
+ * tooltip, and — if it belongs in a preset — add its key to BUILTIN_VIEWS
+ * here. The registry is the single source of truth; no other code path
+ * should hardcode column keys outside that table.
+ * --------------------------------------------------------------------------- */
+const BUILTIN_VIEW_ALIASES = {
+  "IB View": "Fundamentals",
+  "Trader View": "Momentum",
+};
+const BUILTIN_VIEWS = {
+  "Default":      ["logo","symbol","name","price","market_cap","ps_ratio","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200"],
+  "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield"],
+  "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200"],
+};
+const BUILTIN_ORDER = ["Default", "Fundamentals", "Momentum"];
+const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
+const DESC_DEFAULT_KEYS = new Set(["pct_ytd","pct_1y","pct_1w","pct_1m","pct_3m","pct_6m","delta_ath","market_cap","price","target_upside_pct"]);
+
+function normalizeBuiltinViewName(name) {
+  return BUILTIN_VIEW_ALIASES[name] || name;
+}
+
+function getActiveViewKeys() {
+  if (typeof STATE !== "undefined" && STATE && Array.isArray(STATE.activeColumnOverride)) {
+    return STATE.activeColumnOverride;
+  }
+  const name = normalizeBuiltinViewName((typeof STATE !== "undefined" && STATE && STATE.activeViewName) || "Default");
+  if (BUILTIN_VIEWS[name]) return BUILTIN_VIEWS[name];
+  const cv = (typeof STATE !== "undefined" && STATE && STATE.customViews) || {};
+  if (cv[name] && Array.isArray(cv[name].columns)) return cv[name].columns;
+  return BUILTIN_VIEWS["Default"];
+}
+function getActiveColumns() {
+  return getActiveViewKeys().map(k => COLS_BY_KEY[k]).filter(Boolean);
+}
+function defaultSortDirFor(key) {
+  return DESC_DEFAULT_KEYS.has(key) ? -1 : 1;
+}
+function ensureSortKey() {
+  /* If active view doesn't include the current sort column, fall back to
+     a sensible default (pct_ytd if visible, else first sortable). */
+  const active = getActiveColumns();
+  const stillThere = active.find(c => c.key === SORT.key && c.sortable);
+  if (stillThere) return;
+  const ytd = active.find(c => c.key === "pct_ytd" && c.sortable);
+  if (ytd) { SORT.key = "pct_ytd"; SORT.dir = -1; return; }
+  const firstSortable = active.find(c => c.sortable);
+  SORT.key = firstSortable ? firstSortable.key : null;
+  SORT.dir = SORT.key ? defaultSortDirFor(SORT.key) : -1;
+}
 
 /* ===========================================================================
  * Theme
@@ -3586,6 +5767,16 @@ function readTheme() {
   const saved = localStorage.getItem("theme");
   if (saved === "dark" || saved === "light") return saved;
   return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function readFitColumnsPreference() {
+  try { return localStorage.getItem("fit_columns") === "1"; }
+  catch (e) { return false; }
+}
+
+function persistFitColumnsPreference(on) {
+  try { localStorage.setItem("fit_columns", on ? "1" : "0"); }
+  catch (e) {}
 }
 
 /* Heat-map endpoint colors per theme. */
@@ -3614,9 +5805,250 @@ function escapeHtml(s) {
 }
 function lerp(a, b, t) { return a + (b - a) * t; }
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+
+/* ---------------------------------------------------------------------------
+ * Unified tooltip positioner — single helper used by every hover-tip in the
+ * app. Replaces the per-system CSS pseudo-element pattern that could not be
+ * repositioned by JS and routinely clipped off the viewport.
+ *
+ * placeTip(tipEl, anchorRect, opts)
+ *   - anchorRect:  {left, top, right, bottom, width, height} in CSS pixels
+ *                  (a DOMRect, or anything quacking like one)
+ *   - opts.preferred: "below" (default) | "above"
+ *   - opts.offset:    distance from anchor edge to tip edge (default 8)
+ *   - opts.gap:       minimum margin to keep from viewport edge (default 8)
+ *   - opts.allowFlip: switch to the other side if the preferred overflows (default true)
+ * The tip is set to position:fixed with left/top in CSS pixels. The chosen
+ * side is written to data-side on the tip so an arrow indicator (if any)
+ * can react via CSS.
+ * --------------------------------------------------------------------------- */
+function placeTip(tipEl, anchorRect, opts = {}) {
+  if (!tipEl) return "below";
+  const preferred = opts.preferred || "below";
+  const offset = opts.offset == null ? 8 : opts.offset;
+  const gap = opts.gap == null ? 8 : opts.gap;
+  const allowFlip = opts.allowFlip !== false;
+  // Make the tip measurable without flashing it in the wrong place — render
+  // hidden first, measure, then move + reveal.
+  const prevVis = tipEl.style.visibility;
+  tipEl.style.visibility = "hidden";
+  tipEl.style.left = "0px";
+  tipEl.style.top = "0px";
+  // Force a clean measurement.
+  const rect = tipEl.getBoundingClientRect();
+  const tw = rect.width, th = rect.height;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // Anchor center for horizontal placement.
+  const cx = anchorRect.left + (anchorRect.width || 0) / 2;
+  let side = preferred;
+  let top;
+  if (side === "below") {
+    top = anchorRect.bottom + offset;
+    if (allowFlip && top + th > vh - gap) {
+      const tryAbove = anchorRect.top - offset - th;
+      if (tryAbove >= gap) { side = "above"; top = tryAbove; }
+    }
+  } else {
+    top = anchorRect.top - offset - th;
+    if (allowFlip && top < gap) {
+      const tryBelow = anchorRect.bottom + offset;
+      if (tryBelow + th <= vh - gap) { side = "below"; top = tryBelow; }
+    }
+  }
+  // Final vertical clamp (when neither side fits cleanly, prefer the
+  // preferred side and clamp into the viewport).
+  top = Math.max(gap, Math.min(vh - gap - th, top));
+  // Horizontal: center on the anchor, then clamp to viewport.
+  let left = cx - tw / 2;
+  left = Math.max(gap, Math.min(vw - gap - tw, left));
+  tipEl.style.left = left + "px";
+  tipEl.style.top = top + "px";
+  tipEl.setAttribute("data-side", side);
+  // Arrow position (if the tip uses one) — point at the anchor center.
+  const arrow = tipEl.querySelector(".app-tip-arrow");
+  if (arrow) {
+    const ax = Math.max(8, Math.min(tw - 8, cx - left));
+    arrow.style.left = (ax - 5) + "px";
+  }
+  tipEl.style.visibility = prevVis || "";
+  return side;
+}
+
+/* ---------------------------------------------------------------------------
+ * Shared [data-tip] tooltip: one <div> at body level, populated and
+ * positioned on hover by the delegated handler below. Works for every
+ * [data-tip] in the DOM (topbar, column-view bar, MPT controls, overlay
+ * pills, table headers, …).
+ * --------------------------------------------------------------------------- */
+const _APP_TIP = (() => {
+  let el = null, currentTarget = null;
+  function ensure() {
+    if (el && document.body.contains(el)) return el;
+    el = document.createElement("div");
+    el.className = "app-tip";
+    el.setAttribute("role", "tooltip");
+    const arrow = document.createElement("div");
+    arrow.className = "app-tip-arrow";
+    el.appendChild(arrow);
+    const body = document.createElement("div");
+    body.className = "app-tip-body";
+    el.appendChild(body);
+    document.body.appendChild(el);
+    return el;
+  }
+  function show(target) {
+    const text = target.getAttribute && target.getAttribute("data-tip");
+    if (!text) return;
+    const tip = ensure();
+    currentTarget = target;
+    tip.querySelector(".app-tip-body").textContent = text;
+    const r = target.getBoundingClientRect();
+    // Default to below (matches the legacy CSS placement).
+    placeTip(tip, r, {preferred: "below", offset: 8, gap: 8});
+    tip.classList.add("show");
+  }
+  function hide(target) {
+    // Only hide if we're hiding from the same element we showed for, so
+    // back-to-back hovers don't fight each other.
+    if (target && currentTarget && target !== currentTarget) return;
+    if (el) el.classList.remove("show");
+    currentTarget = null;
+  }
+  return {show, hide, ensure};
+})();
+
+document.addEventListener("mouseover", (ev) => {
+  const t = ev.target.closest && ev.target.closest("[data-tip]");
+  if (!t) return;
+  // Skip if the element opted out (e.g. an editor input).
+  if (t.getAttribute("data-tip-off") === "1") return;
+  _APP_TIP.show(t);
+}, true);
+document.addEventListener("mouseout", (ev) => {
+  const t = ev.target.closest && ev.target.closest("[data-tip]");
+  if (!t) return;
+  // Don't hide if cursor moved into a descendant.
+  const next = ev.relatedTarget;
+  if (next && t.contains(next)) return;
+  _APP_TIP.hide(t);
+}, true);
+document.addEventListener("scroll", () => _APP_TIP.hide(), true);
+window.addEventListener("resize", () => _APP_TIP.hide());
+// Dismiss tooltip on any user click — pseudo-element ::after tooltips used
+// to disappear naturally because the clicked element lost :hover; with a
+// detached shared tip we need to hide it explicitly when the user takes any
+// real action (e.g. opening a modal that covers the trigger).
+document.addEventListener("mousedown", () => _APP_TIP.hide(), true);
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") _APP_TIP.hide();
+}, true);
+
+/* ---------------------------------------------------------------------------
+ * .pf-metric-tip is a richer hover popover (LaTeX + description). Keep its
+ * existing CSS-driven show/hide but route position through placeTip so it
+ * stops clipping near viewport edges.
+ * --------------------------------------------------------------------------- */
+document.addEventListener("mouseenter", (ev) => {
+  const t = ev.target && ev.target.nodeType === 1 && ev.target.closest
+    ? ev.target.closest("[data-info]") : null;
+  if (!t) return;
+  const tip = t.querySelector(":scope > .pf-metric-tip, :scope .pf-metric-tip");
+  if (!tip) return;
+  // Render into fixed positioning so it can escape clipping ancestors and
+  // get clamped by placeTip. Remember the original inline styles so we can
+  // restore them on leave (avoids permanent style mutations).
+  if (!tip.dataset._origPos) {
+    tip.dataset._origPos = tip.style.position || "";
+    tip.dataset._origLeft = tip.style.left || "";
+    tip.dataset._origTop = tip.style.top || "";
+    tip.dataset._origRight = tip.style.right || "";
+  }
+  tip.style.position = "fixed";
+  tip.style.right = "auto";
+  // Force display so it can be measured; CSS :hover rule will also keep it shown.
+  const prevDisplay = tip.style.display;
+  tip.style.display = "block";
+  const r = t.getBoundingClientRect();
+  placeTip(tip, r, {preferred: "below", offset: 8, gap: 10});
+  // Restore inline display so the CSS :hover rule keeps owning visibility.
+  tip.style.display = prevDisplay || "";
+}, true);
+document.addEventListener("mouseleave", (ev) => {
+  const t = ev.target && ev.target.nodeType === 1 && ev.target.closest
+    ? ev.target.closest("[data-info]") : null;
+  if (!t) return;
+  const tip = t.querySelector(":scope > .pf-metric-tip, :scope .pf-metric-tip");
+  if (!tip) return;
+  // Restore original inline styles so the CSS-positioned rule reapplies on
+  // the next hover if placeTip isn't reached (e.g. tip rendered after the
+  // hover already started).
+  if (tip.dataset._origPos != null) {
+    tip.style.position = tip.dataset._origPos;
+    tip.style.left = tip.dataset._origLeft;
+    tip.style.top = tip.dataset._origTop;
+    tip.style.right = tip.dataset._origRight;
+    delete tip.dataset._origPos; delete tip.dataset._origLeft;
+    delete tip.dataset._origTop; delete tip.dataset._origRight;
+  }
+}, true);
+
+function fitScaleForColumns(columns = getActiveColumns()) {
+  if (!STATE.fitColumns) return 1;
+  const wrap = document.querySelector(".table-wrap");
+  if (!wrap || !columns.length) return 1;
+  const available = Math.max(320, wrap.clientWidth - 4);
+  const required = columns.reduce((sum, c) => sum + Math.max(56, c.w || 80), 0);
+  if (!required) return 1;
+  return clamp(available / required, 0.58, 1);
+}
+
+function applyTableFitMode(columns = getActiveColumns()) {
+  const wrap = document.querySelector(".table-wrap");
+  if (!wrap) return 1;
+  const scale = fitScaleForColumns(columns);
+  wrap.classList.toggle("fit-columns", !!STATE.fitColumns);
+  wrap.style.setProperty("--table-scale", scale.toFixed(3));
+  return scale;
+}
+
+function toggleFitColumns() {
+  STATE.fitColumns = !STATE.fitColumns;
+  persistFitColumnsPreference(STATE.fitColumns);
+  render();
+}
 function rgb(r, g, b) { return `rgb(${r|0},${g|0},${b|0})`; }
 function rgbMix(c1, c2, t) {
   return rgb(lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t));
+}
+
+/* ───────────────────────────── Loading chip ─────────────────────────────
+ * lcHtml(text, opts)  → returns chip markup (use inside renderers)
+ * lcShow(target, text, opts) → mounts/updates a chip inside `target`
+ * lcHide(target) → removes the chip
+ * opts: { bar: bool, meta: string }
+ * --------------------------------------------------------------------- */
+function lcHtml(text, opts) {
+  opts = opts || {};
+  const bar = opts.bar ? `<span class="lc-bar"></span>` : "";
+  const meta = (opts.meta || opts.meta === 0) ? `<span class="lc-meta">${escapeHtml(opts.meta)}</span>` : "";
+  const txt = text ? `<span class="lc-text">${escapeHtml(text)}</span>` : "";
+  return `<span class="lc">${bar}${txt}${meta}</span>`;
+}
+function _lcTarget(t) { return typeof t === "string" ? document.querySelector(t) : t; }
+function lcShow(target, text, opts) {
+  const el = _lcTarget(target); if (!el) return;
+  let anchor = el.querySelector(":scope > .lc-anchor");
+  if (!anchor) {
+    anchor = document.createElement("span");
+    anchor.className = "lc-anchor";
+    el.appendChild(anchor);
+  }
+  anchor.innerHTML = lcHtml(text, opts);
+}
+function lcHide(target) {
+  const el = _lcTarget(target); if (!el) return;
+  const anchor = el.querySelector(":scope > .lc-anchor");
+  if (anchor) anchor.remove();
 }
 
 /* ===========================================================================
@@ -3645,6 +6077,8 @@ let FX_RATES = { USD: 1.0 };
 let FX_QUOTE = "USD";       // user-selected display currency
 let FX_INDEX_CACHE = {};    // { ccy: [[ts,val],...] }
 let FX_INDEX_INFLIGHT = {}; // { ccy: Promise }
+let FX_HOVER_REQ_ID = 0;
+let FX_HOVER_CCY = null;
 
 function fxLoadPref() {
   try {
@@ -3849,7 +6283,9 @@ function cellStyleHeat(col, value, theme) {
   const h = col.heat;
   if (!h) return "";
   if (h.kind === "yo") {
-    /* Fixed-ceiling orange ramp. n/a → max if h.naMax. */
+    /* Fixed-ceiling orange ramp. n/a → max if h.naMax.
+       h.invert flips the ramp so lower values get more saturated colour
+       (used for analyst-rating, where 1 = strong buy, 5 = sell). */
     let t;
     if (value == null || !isFinite(value)) {
       if (!h.naMax) return "";
@@ -3857,6 +6293,7 @@ function cellStyleHeat(col, value, theme) {
     } else {
       const lo = h.clipMin, hi = h.clipMax;
       t = (hi === lo) ? 0.5 : clamp((value - lo) / (hi - lo), 0, 1);
+      if (h.invert) t = 1 - t;
     }
     return `background:${colorYO(t, theme)};`;
   }
@@ -3870,45 +6307,425 @@ function cellStyleHeat(col, value, theme) {
 }
 
 /* ===========================================================================
- * Sort menu
+ * Column-view bar, customize modal, and header drag-and-drop (Pass D)
+ * ---------------------------------------------------------------------------
+ * UI surface: a slim row above the table with built-in preset chips,
+ * a "+ Custom" dropdown listing user-saved views, and a Customize button
+ * that opens the modal. STATE.activeViewName drives which set of column
+ * keys getActiveColumns() returns; activeColumnOverride holds the live
+ * in-memory order when the user is dragging a built-in preset (the
+ * yellow "Modified" pill exposes Save-as-new and Reset actions).
  * --------------------------------------------------------------------------- */
-function renderSortMenu() {
-  const dd = $("#sort-dropdown"); dd.innerHTML = "";
-  for (const c of COLS) {
-    if (!c.sortable) continue;
+
+const CV_CUSTOM_KEY = "__cv_custom__";
+
+function isBuiltinView(name) { return Object.prototype.hasOwnProperty.call(BUILTIN_VIEWS, normalizeBuiltinViewName(name)); }
+
+function sameColumnKeys(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function syncBuiltinDirtyState(keys) {
+  if (!isBuiltinView(STATE.activeViewName)) {
+    STATE.activeColumnOverride = null;
+    STATE.viewDirty = false;
+    return;
+  }
+  const baseKeys = BUILTIN_VIEWS[normalizeBuiltinViewName(STATE.activeViewName)] || [];
+  if (sameColumnKeys(keys, baseKeys)) {
+    STATE.activeColumnOverride = null;
+    STATE.viewDirty = false;
+    return;
+  }
+  STATE.activeColumnOverride = keys.slice();
+  STATE.viewDirty = true;
+}
+
+function currentActiveKeys() {
+  /* Returns the live list of keys for the active view (override wins). */
+  if (Array.isArray(STATE.activeColumnOverride)) return STATE.activeColumnOverride.slice();
+  if (isBuiltinView(STATE.activeViewName)) return BUILTIN_VIEWS[normalizeBuiltinViewName(STATE.activeViewName)].slice();
+  const cv = STATE.customViews[STATE.activeViewName];
+  return cv && Array.isArray(cv.columns) ? cv.columns.slice() : BUILTIN_VIEWS["Default"].slice();
+}
+
+async function loadColumnViews() {
+  try {
+    const r = await fetch("/api/column-views");
+    if (!r.ok) return;
+    const j = await r.json();
+    STATE.customViews = j.custom || {};
+    const desired = normalizeBuiltinViewName(j.active || "Default");
+    if (isBuiltinView(desired) || STATE.customViews[desired]) {
+      STATE.activeViewName = desired;
+    } else {
+      STATE.activeViewName = "Default";
+    }
+    STATE.activeColumnOverride = null;
+    STATE.viewDirty = false;
+    render();
+  } catch (e) { /* persistence is best-effort */ }
+}
+
+async function persistActiveView(name) {
+  try {
+    await fetch("/api/column-views/active", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name}),
+    });
+  } catch (e) { /* best-effort */ }
+}
+
+let _cvSaveTimer = null;
+function debouncedSaveCustom(name, columns) {
+  clearTimeout(_cvSaveTimer);
+  _cvSaveTimer = setTimeout(async () => {
+    try {
+      const r = await fetch("/api/column-views", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name, columns}),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        STATE.customViews = j.custom || STATE.customViews;
+      }
+    } catch (e) {}
+  }, 250);
+}
+
+function setActiveView(name, {persist = true} = {}) {
+  name = normalizeBuiltinViewName(name);
+  if (!isBuiltinView(name) && !STATE.customViews[name]) return;
+  STATE.activeViewName = name;
+  STATE.activeColumnOverride = null;
+  STATE.viewDirty = false;
+  render();
+  if (persist) persistActiveView(name);
+}
+
+function renderColumnViewBar() {
+  const seg = document.getElementById("cv-builtins");
+  if (!seg) return;
+  seg.innerHTML = "";
+  const activeName = normalizeBuiltinViewName(STATE.activeViewName || "Default");
+  for (const name of BUILTIN_ORDER) {
     const b = document.createElement("button");
-    const isActive = SORT.key === c.key;
-    if (isActive) b.classList.add("active");
-    const dir = isActive ? (SORT.dir > 0 ? " ▲" : " ▼") : "";
-    b.innerHTML = `${c.label || c.key}<span class="dir">${dir}</span>`;
-    b.onclick = () => {
-      if (SORT.key === c.key) SORT.dir *= -1;
-      else { SORT.key = c.key; SORT.dir = ["pct_ytd", "pct_1y", "delta_ath", "market_cap", "price"].includes(c.key) ? -1 : 1; }
-      $("#sort-menu").classList.remove("open");
-      render();
-    };
-    dd.appendChild(b);
+    b.type = "button";
+    b.textContent = name;
+    b.setAttribute("role", "tab");
+    if (name === activeName) b.classList.add("active");
+    b.onclick = () => setActiveView(name);
+    seg.appendChild(b);
+  }
+  /* Custom-view dropdown */
+  const wrap = document.getElementById("cv-custom-wrap");
+  wrap.innerHTML = "";
+  const customNames = Object.keys(STATE.customViews || {}).sort();
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "cv-custom-btn";
+  const isCustomActive = !isBuiltinView(activeName);
+  if (isCustomActive) btn.classList.add("active");
+  btn.innerHTML = `<span>${isCustomActive ? escapeHtml(activeName) : "Custom"}</span><span class="cv-caret">▾</span>`;
+  const dd = document.createElement("div");
+  dd.className = "cv-custom-dropdown";
+  if (!customNames.length) {
+    const e = document.createElement("div");
+    e.className = "cv-cv-empty";
+    e.textContent = "No saved views yet.";
+    dd.appendChild(e);
+  } else {
+    for (const name of customNames) {
+      const row = document.createElement("div");
+      row.className = "cv-cv-row" + (name === activeName ? " active" : "");
+      const lbl = document.createElement("span");
+      lbl.textContent = name;
+      lbl.style.flex = "1";
+      lbl.onclick = () => { dd.classList.remove("open"); setActiveView(name); };
+      const del = document.createElement("button");
+      del.className = "cv-cv-del"; del.type = "button"; del.textContent = "×";
+      del.title = "Delete view";
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete view "${name}"?`)) return;
+        try {
+          const r = await fetch(`/api/column-views/${encodeURIComponent(name)}`, {method: "DELETE"});
+          if (r.ok) {
+            const j = await r.json();
+            STATE.customViews = j.custom || {};
+            if (STATE.activeViewName === name) STATE.activeViewName = j.active || "Default";
+            render();
+          }
+        } catch (err) {}
+      };
+      row.appendChild(lbl); row.appendChild(del);
+      dd.appendChild(row);
+    }
+  }
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    dd.classList.toggle("open");
+  };
+  document.addEventListener("click", () => dd.classList.remove("open"), {once: true});
+  wrap.appendChild(btn); wrap.appendChild(dd);
+  /* Dirty pill */
+  const dirty = document.getElementById("cv-dirty");
+  if (dirty) dirty.hidden = !STATE.viewDirty;
+  const fitBtn = document.getElementById("cv-fit-toggle");
+  if (fitBtn) {
+    fitBtn.classList.toggle("active", !!STATE.fitColumns);
+    fitBtn.setAttribute("aria-pressed", STATE.fitColumns ? "true" : "false");
   }
 }
-function updateSortLabel() {
-  const c = COLS.find(c => c.key === SORT.key);
-  $("#sort-label").textContent = (c ? c.label : SORT.key) + " " + (SORT.dir > 0 ? "▲" : "▼");
+
+function resetViewOverride() {
+  STATE.activeColumnOverride = null;
+  STATE.viewDirty = false;
+  render();
 }
+
+async function promptAndSaveCurrentAsNew() {
+  const suggested = isBuiltinView(STATE.activeViewName)
+    ? `${STATE.activeViewName} (custom)` : `${STATE.activeViewName} copy`;
+  const name = (prompt("Save current column layout as:", suggested) || "").trim();
+  if (!name) return;
+  if (isBuiltinView(name)) { alert(`"${name}" is a built-in name; pick another.`); return; }
+  const columns = currentActiveKeys();
+  try {
+    const r = await fetch("/api/column-views", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, columns}),
+    });
+    if (!r.ok) { const j = await r.json().catch(()=>({})); alert(j.error || "Save failed."); return; }
+    const j = await r.json();
+    STATE.customViews = j.custom || STATE.customViews;
+    STATE.activeColumnOverride = null;
+    STATE.viewDirty = false;
+    setActiveView(name);
+  } catch (e) { alert("Save failed."); }
+}
+
+/* ----- Customize modal ----- */
+let CV_MODAL_STATE = null;  // {selected: Set<key>, order: string[]}
+
+function openColumnPicker() {
+  const bg = document.getElementById("cv-modal-bg");
+  const modal = document.getElementById("cv-modal");
+  if (!bg || !modal) return;
+  const activeKeys = currentActiveKeys();
+  const activeSet = new Set(activeKeys);
+  /* Build a working order: active keys first (in current order), then
+     remaining registry keys appended at the end. */
+  const remaining = COLS.map(c => c.key).filter(k => !activeSet.has(k));
+  CV_MODAL_STATE = {
+    selected: new Set(activeKeys),
+    order: activeKeys.concat(remaining),
+  };
+  const editingActiveCustom = !isBuiltinView(STATE.activeViewName) && STATE.customViews[STATE.activeViewName];
+  modal.innerHTML = `
+    <h2>Customize Columns</h2>
+    <div class="cv-modal-sub">Toggle which columns appear and drag to reorder. ${editingActiveCustom ? `Editing <b>${escapeHtml(STATE.activeViewName)}</b>.` : "Save as a new view when you're done."}</div>
+    <ul class="cv-list" id="cv-modal-list"></ul>
+    <div class="cv-modal-foot">
+      <input type="text" class="cv-name-input" id="cv-name-input" placeholder="${editingActiveCustom ? "New name (optional)" : "View name"}" value="${editingActiveCustom ? "" : ""}" />
+      <button id="cv-modal-cancel">Cancel</button>
+      ${editingActiveCustom ? `<button id="cv-modal-update" class="primary">Update "${escapeHtml(STATE.activeViewName)}"</button>` : ""}
+      <button id="cv-modal-save" class="primary">${editingActiveCustom ? "Save as new" : "Save view"}</button>
+    </div>
+  `;
+  renderColumnPickerList();
+  bg.hidden = false;
+  bg.classList.add("show");
+  document.getElementById("cv-modal-cancel").onclick = closeColumnPicker;
+  bg.onclick = (e) => { if (e.target === bg) closeColumnPicker(); };
+  document.getElementById("cv-modal-save").onclick = () => saveColumnPicker({asNew: true});
+  const upd = document.getElementById("cv-modal-update");
+  if (upd) upd.onclick = () => saveColumnPicker({asNew: false});
+}
+
+function closeColumnPicker() {
+  const bg = document.getElementById("cv-modal-bg");
+  if (bg) {
+    bg.classList.remove("show");
+    bg.hidden = true;
+  }
+  CV_MODAL_STATE = null;
+}
+
+function renderColumnPickerList() {
+  const ul = document.getElementById("cv-modal-list");
+  if (!ul || !CV_MODAL_STATE) return;
+  ul.innerHTML = "";
+  for (const key of CV_MODAL_STATE.order) {
+    const c = COLS_BY_KEY[key];
+    if (!c) continue;
+    const li = document.createElement("li");
+    li.draggable = true;
+    li.dataset.key = key;
+    const grip = document.createElement("span"); grip.className = "cv-grip"; grip.textContent = "⋮⋮";
+    const cb = document.createElement("input"); cb.type = "checkbox";
+    cb.checked = CV_MODAL_STATE.selected.has(key);
+    cb.onchange = () => {
+      if (cb.checked) CV_MODAL_STATE.selected.add(key);
+      else CV_MODAL_STATE.selected.delete(key);
+    };
+    const lbl = document.createElement("span"); lbl.className = "cv-li-label";
+    lbl.textContent = c.label || key;
+    const tag = document.createElement("span"); tag.className = "cv-li-tag";
+    tag.textContent = key;
+    li.appendChild(grip); li.appendChild(cb); li.appendChild(lbl); li.appendChild(tag);
+    /* DnD */
+    li.addEventListener("dragstart", (ev) => {
+      li.classList.add("cv-li-drag");
+      ev.dataTransfer.setData("text/plain", key);
+      ev.dataTransfer.effectAllowed = "move";
+    });
+    li.addEventListener("dragend", () => li.classList.remove("cv-li-drag"));
+    li.addEventListener("dragover", (ev) => { ev.preventDefault(); li.classList.add("cv-li-over"); });
+    li.addEventListener("dragleave", () => li.classList.remove("cv-li-over"));
+    li.addEventListener("drop", (ev) => {
+      ev.preventDefault();
+      li.classList.remove("cv-li-over");
+      const fromKey = ev.dataTransfer.getData("text/plain");
+      if (!fromKey || fromKey === key) return;
+      const arr = CV_MODAL_STATE.order;
+      const fromIdx = arr.indexOf(fromKey);
+      const toIdx = arr.indexOf(key);
+      if (fromIdx < 0 || toIdx < 0) return;
+      arr.splice(fromIdx, 1);
+      arr.splice(toIdx, 0, fromKey);
+      renderColumnPickerList();
+    });
+    ul.appendChild(li);
+  }
+}
+
+async function saveColumnPicker({asNew}) {
+  if (!CV_MODAL_STATE) return;
+  const cols = CV_MODAL_STATE.order.filter(k => CV_MODAL_STATE.selected.has(k));
+  if (!cols.length) { alert("Select at least one column."); return; }
+  if (!cols.includes("symbol")) {
+    if (!confirm("This view doesn't include the Ticker column. Save anyway?")) return;
+  }
+  let name;
+  const inputVal = (document.getElementById("cv-name-input").value || "").trim();
+  if (asNew) {
+    name = inputVal;
+    if (!name) { alert("Enter a name for the new view."); return; }
+    if (isBuiltinView(name)) { alert(`"${name}" is a built-in name; pick another.`); return; }
+  } else {
+    name = STATE.activeViewName;
+  }
+  try {
+    const r = await fetch("/api/column-views", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, columns: cols}),
+    });
+    if (!r.ok) { const j = await r.json().catch(()=>({})); alert(j.error || "Save failed."); return; }
+    const j = await r.json();
+    STATE.customViews = j.custom || STATE.customViews;
+    closeColumnPicker();
+    setActiveView(name);
+  } catch (e) { alert("Save failed."); }
+}
+
+function wireColumnViewBar() {
+  const cb = document.getElementById("cv-customize");
+  if (cb && !cb._wired) { cb.onclick = openColumnPicker; cb._wired = true; }
+  const fit = document.getElementById("cv-fit-toggle");
+  if (fit && !fit._wired) { fit.onclick = toggleFitColumns; fit._wired = true; }
+  const ds = document.getElementById("cv-dirty-save");
+  if (ds && !ds._wired) { ds.onclick = promptAndSaveCurrentAsNew; ds._wired = true; }
+  const dr = document.getElementById("cv-dirty-reset");
+  if (dr && !dr._wired) { dr.onclick = resetViewOverride; dr._wired = true; }
+}
+
+/* ----- Header drag-and-drop reordering ----- */
+function wireHeaderDnD(tr) {
+  const ths = Array.from(tr.querySelectorAll("th"));
+  for (const th of ths) {
+    th.draggable = true;
+    th.addEventListener("dragstart", (ev) => {
+      th._dragStartX = ev.clientX;
+      th.classList.add("cv-th-drag");
+      ev.dataTransfer.setData("text/plain", th.dataset.colKey);
+      ev.dataTransfer.effectAllowed = "move";
+    });
+    th.addEventListener("dragend", () => {
+      th.classList.remove("cv-th-drag");
+      /* Suppress the click that fires when a drag ends on the same th. */
+      th._suppressClick = true;
+      setTimeout(() => { th._suppressClick = false; }, 0);
+    });
+    th.addEventListener("dragover", (ev) => {
+      ev.preventDefault();
+      th.classList.add("cv-th-over");
+    });
+    th.addEventListener("dragleave", () => th.classList.remove("cv-th-over"));
+    th.addEventListener("drop", (ev) => {
+      ev.preventDefault();
+      th.classList.remove("cv-th-over");
+      const fromKey = ev.dataTransfer.getData("text/plain");
+      const toKey = th.dataset.colKey;
+      if (!fromKey || !toKey || fromKey === toKey) return;
+      reorderActiveColumns(fromKey, toKey);
+    });
+  }
+}
+
+function reorderActiveColumns(fromKey, toKey) {
+  const cur = currentActiveKeys();
+  const fromIdx = cur.indexOf(fromKey);
+  const toIdx = cur.indexOf(toKey);
+  if (fromIdx < 0 || toIdx < 0) return;
+  cur.splice(fromIdx, 1);
+  cur.splice(toIdx, 0, fromKey);
+  if (isBuiltinView(STATE.activeViewName)) {
+    syncBuiltinDirtyState(cur);
+    render();
+  } else {
+    /* Custom view: persist new order immediately. */
+    if (STATE.customViews[STATE.activeViewName]) {
+      STATE.customViews[STATE.activeViewName].columns = cur;
+    }
+    STATE.activeColumnOverride = null;
+    STATE.viewDirty = false;
+    render();
+    debouncedSaveCustom(STATE.activeViewName, cur);
+  }
+}
+
+
+/* Sort menu removed — column-header click handles sorting. */
 
 /* ===========================================================================
  * Render
  * --------------------------------------------------------------------------- */
-function renderHeader() {
+function renderHeader(scale = 1) {
   const tr = $("#thead"); tr.innerHTML = "";
-  for (const c of COLS) {
+  const cols = getActiveColumns();
+  for (const c of cols) {
     const th = document.createElement("th");
     th.textContent = c.label || "";
-    th.style.minWidth = c.w + "px";
+    const width = Math.round((c.w || 80) * scale);
+    th.style.minWidth = width + "px";
+    th.style.width = width + "px";
+    th.dataset.colKey = c.key;
     if (!c.sortable) th.classList.add("no-sort");
     if (c.sortable) {
-      th.onclick = () => {
+      th.onclick = (ev) => {
+        /* Suppress click that fires at the end of a drag-reorder gesture. */
+        if (th._suppressClick) { th._suppressClick = false; return; }
         if (SORT.key === c.key) SORT.dir *= -1;
-        else { SORT.key = c.key; SORT.dir = ["pct_ytd", "pct_1y", "delta_ath", "market_cap", "price"].includes(c.key) ? -1 : 1; }
+        else { SORT.key = c.key; SORT.dir = defaultSortDirFor(c.key); }
         render();
       };
       if (SORT.key === c.key) {
@@ -3922,20 +6739,23 @@ function renderHeader() {
     }
     tr.appendChild(th);
   }
+  if (typeof wireHeaderDnD === "function") wireHeaderDnD(tr);
 }
 
 function render() {
-  renderHeader();
-  renderSortMenu();
-  updateSortLabel();
+  ensureSortKey();
+  const cols = getActiveColumns();
+  const scale = applyTableFitMode(cols);
+  renderHeader(scale);
+  if (typeof renderColumnViewBar === "function") renderColumnViewBar();
   const tbody = $("#tbody"); tbody.innerHTML = "";
   if (!DATA.length) {
-    tbody.innerHTML = `<tr><td colspan="${COLS.length}" style="padding:30px; text-align:center; color:var(--muted);">Press <b>Build Dashboard</b> above to load your portfolio.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${cols.length}" style="padding:30px; text-align:center; color:var(--muted);">Press <b>Build Dashboard</b> above to load your portfolio.</td></tr>`;
     return;
   }
   let rows = DATA.slice();
   if (SORT.key) {
-    const col = COLS.find(c => c.key === SORT.key);
+    const col = COLS_BY_KEY[SORT.key];
     const getter = col && col.sortValue ? col.sortValue : (r) => r[SORT.key];
     rows.sort((a, b) => {
       const av = getter(a), bv = getter(b);
@@ -3949,7 +6769,7 @@ function render() {
   const theme = getTheme();
   for (const r of rows) {
     const tr = document.createElement("tr");
-    for (const c of COLS) {
+    for (const c of cols) {
       const td = document.createElement("td");
       if (c.align === "left") td.classList.add("left");
       else if (c.align === "center") td.classList.add("center");
@@ -4046,7 +6866,7 @@ function renderModalSkeleton() {
         <button class="m-toolbar-btn active" id="m-toggle-vol" title="Toggle volume bars">Volume</button>
       </div>
       <div class="m-chart" id="m-chart">
-        <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:12.5px;">Loading detailed data…</div>
+        <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">${lcHtml("fetching detail", {bar: true})}</div>
       </div>
       <div class="m-range-info" id="m-range-info" style="display:none;"></div>
     </div>
@@ -4404,6 +7224,134 @@ function pctCell(v) {
   const cls = v >= 0 ? "pos" : "neg";
   return `<td class="${cls}">${(v>=0?"+":"")+v.toFixed(2)}%</td>`;
 }
+const DETAIL_METRIC_INFO = {
+  "Volume": {
+    formula: String.raw`\text{shares traded today}`,
+    desc: "Total shares traded in the latest session. It is a liquidity read, not a valuation signal.",
+    range: "Compare it with Avg Volume. A large spike often means news, earnings, rebalancing, or stress."
+  },
+  "Avg Volume": {
+    formula: String.raw`\overline{V} = \dfrac{1}{n}\sum_{t=1}^{n} V_t`,
+    desc: "Average daily trading volume over Yahoo's lookback window, used as the baseline liquidity reference.",
+    range: "If current volume is far above this level, participation is unusual and the move may be more informative."
+  },
+  "52W High": {
+    formula: String.raw`\max(P_t),\; t \in \text{last 52 weeks}`,
+    desc: "Highest price reached in the trailing 52-week window.",
+    range: "Names near the high are often in strong trends; deep gaps below it indicate a prior drawdown."
+  },
+  "52W Low": {
+    formula: String.raw`\min(P_t),\; t \in \text{last 52 weeks}`,
+    desc: "Lowest price reached in the trailing 52-week window.",
+    range: "Useful for judging whether a stock is still washed out or already recovering from its low."
+  },
+  "ATH": {
+    formula: String.raw`\max(P_t),\; t \in \text{available history}`,
+    desc: "Highest price in the full available price history, not just the trailing year.",
+    range: "The gap between spot and ATH is a quick read on how much prior optimism has been unwound."
+  },
+  "Market Cap": {
+    formula: String.raw`MC = P \times \text{Shares Outstanding}`,
+    desc: "Total equity value of the company at the current price.",
+    range: "Useful for sizing the business and understanding whether you are buying a mega-cap, mid-cap, or micro-cap risk profile."
+  },
+  "Shares Out": {
+    formula: String.raw`\text{issued shares currently outstanding}`,
+    desc: "Number of shares currently outstanding. It moves with buybacks, issuance, stock-based comp, and corporate actions.",
+    range: "Shrinking share counts support per-share growth; rising counts can dilute existing holders."
+  },
+  "Beta": {
+    formula: String.raw`\beta = \dfrac{\mathrm{Cov}(r_i, r_m)}{\mathrm{Var}(r_m)}`,
+    desc: "Yahoo-reported market beta. It estimates how sensitively the stock tends to move versus the market benchmark.",
+    range: "Around 1 behaves like the market. Below 1 is more defensive; above 1.3 is usually high-beta growth or cyclicality."
+  },
+  "Revenue (TTM)": {
+    formula: String.raw`\text{sales over the trailing 12 months}`,
+    desc: "Trailing-12-month revenue. This is the current annualised top-line scale of the business.",
+    range: "Best used with growth and margin metrics. Sales alone say nothing about quality or profitability."
+  },
+  "Revenue Growth": {
+    formula: String.raw`g = \dfrac{\text{Revenue}_{TTM} - \text{Revenue}_{prior}}{\text{Revenue}_{prior}}`,
+    desc: "Year-over-year revenue growth rate.",
+    range: "Mid-single digits is mature; teens are healthy; 30%+ usually implies high-growth expectations and tougher comps ahead."
+  },
+  "Free Cash Flow": {
+    formula: String.raw`FCF = CFO - CapEx`,
+    desc: "Cash left after operating cash flow covers capital expenditures. It is the cleanest internal funding source for buybacks, dividends, and debt paydown.",
+    range: "Positive and rising is a quality signal. Negative FCF can be fine in investment-heavy businesses, but it raises the financing burden."
+  },
+  "FCF Yield": {
+    formula: String.raw`FCF\ Yield = \dfrac{FCF}{\text{Market Cap}}`,
+    desc: "Free cash flow scaled by equity value. It is the cash-flow analogue of an earnings yield.",
+    range: "Low single digits is common for quality growth. High single digits can mean cheap cash generation or market skepticism."
+  },
+  "Fwd P/E": {
+    formula: String.raw`\text{Fwd P/E} = \dfrac{P}{\text{EPS}_{NTM}}`,
+    desc: "Price divided by consensus next-12-month earnings per share.",
+    range: "Lower than trailing P/E can indicate expected earnings growth; higher can mean analysts see an earnings dip ahead."
+  },
+  "P/E (TTM)": {
+    formula: String.raw`P/E = \dfrac{P}{\text{EPS}_{TTM}}`,
+    desc: "Trailing price-to-earnings multiple using the last 12 months of earnings.",
+    range: "Broad-market quality names often live in the high teens to mid-20s. Very high multiples imply strong growth expectations."
+  },
+  "EV/EBITDA": {
+    formula: String.raw`\dfrac{EV}{EBITDA}`,
+    desc: "Enterprise value divided by EBITDA. It compares the total business value to an operating cash-earnings proxy.",
+    range: "Useful across peers with different debt loads. Higher values usually mean better growth, higher quality, or richer pricing."
+  },
+  "EV/Revenue": {
+    formula: String.raw`\dfrac{EV}{Revenue}`,
+    desc: "Enterprise value divided by revenue. Often more informative than earnings multiples when margins are still immature.",
+    range: "Best used for software, platforms, and cyclical turnarounds where earnings are temporarily noisy."
+  },
+  "Operating Mgn": {
+    formula: String.raw`\text{Operating Margin} = \dfrac{\text{Operating Income}}{Revenue}`,
+    desc: "Share of revenue left after core operating costs, before interest and taxes.",
+    range: "Higher usually means stronger business quality, pricing power, or scale. Compare within the same industry, not across all sectors."
+  },
+  "Gross Margin": {
+    formula: String.raw`\text{Gross Margin} = \dfrac{Revenue - COGS}{Revenue}`,
+    desc: "Share of revenue left after direct production or delivery costs.",
+    range: "High gross margins often signal pricing power or software-like economics, but they need operating discipline to turn into profits."
+  },
+  "Profit Margin": {
+    formula: String.raw`\text{Profit Margin} = \dfrac{\text{Net Income}}{Revenue}`,
+    desc: "Net income as a share of revenue after all expenses.",
+    range: "A compact measure of business efficiency, but it can swing with tax effects, interest costs, and one-off items."
+  },
+  "ROE": {
+    formula: String.raw`ROE = \dfrac{\text{Net Income}}{\text{Shareholders' Equity}}`,
+    desc: "Return on equity measures how efficiently management converts book equity into earnings.",
+    range: "Higher is usually better, but leverage can inflate ROE, so read it together with D/E."
+  },
+  "D/E": {
+    formula: String.raw`D/E = \dfrac{\text{Total Debt}}{\text{Shareholders' Equity}}`,
+    desc: "Debt-to-equity ratio. It shows how much leverage sits on top of the equity base.",
+    range: "Low values imply balance-sheet flexibility. High values can amplify returns in good times and pain in bad times."
+  },
+};
+function metricTipHtml(label, info) {
+  if (!info) return "";
+  return `
+    <div class="pf-metric-tip" role="tooltip">
+      <div class="mt-name">${escapeHtml(label)}</div>
+      <div class="mt-formula">$$${info.formula}$$</div>
+      <div class="mt-desc">${escapeHtml(info.desc)}</div>
+      <div class="mt-range">${escapeHtml(info.range)}</div>
+    </div>`;
+}
+function detailMetricCellHtml(item, idx) {
+  const label = Array.isArray(item) ? item[0] : item.label;
+  const value = Array.isArray(item) ? item[1] : item.value;
+  const info = (Array.isArray(item) ? null : item.info) || DETAIL_METRIC_INFO[label];
+  const dataAttr = info ? ` data-info="1" data-metric="${escapeHtml(label)}"` : "";
+  const sideCls = idx % 2 ? " tip-right" : "";
+  return `<div class="metric-tip-host${sideCls}"${dataAttr}><div class="k">${label}</div><div class="v">${value}</div>${metricTipHtml(label, info)}</div>`;
+}
+function renderDetailMetricGrid(items) {
+  return `<div class="m-kv">${items.map((item, idx) => detailMetricCellHtml(item, idx)).join("")}</div>`;
+}
 function renderSections() {
   const d = DETAIL.data;
   const sec = $("#m-sections");
@@ -4593,11 +7541,11 @@ function renderSections() {
   sec.innerHTML = `
     <div class="m-sec">
       <h3>Snapshot</h3>
-      <div class="m-kv">${snap.map(([k,v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join("")}</div>
+      ${renderDetailMetricGrid(snap)}
     </div>
     <div class="m-sec">
       <h3>Valuation &amp; Profitability</h3>
-      <div class="m-kv">${val.map(([k,v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join("")}</div>
+      ${renderDetailMetricGrid(val)}
     </div>
     <div class="m-sec full">
       <h3>Performance vs Benchmarks
@@ -4630,6 +7578,7 @@ function renderSections() {
     ${newsHtml}
     ${aboutHtml}
   `;
+  renderStatTipsKatex("#m-sections");
 }
 
 function fmtCompactNum(v) {
@@ -4677,7 +7626,7 @@ function hideProgress() {
 const AD_HOC_KEY = "__current__";
 let STATE = {
   activeView: null,        // current view name (or AD_HOC_KEY for ad-hoc input, or null = none yet)
-  mode: "cap",             // "equal" | "cap" | "custom"
+  mode: "cap",             // "equal" | "cap" | "custom" | "preset:<name>"
   customWeights: null,     // {symbol: fraction}, set after user applies the popup
   period: "1Y",
   showSpy: true,
@@ -4689,7 +7638,111 @@ let STATE = {
   // {tabName: {"<mode>|<period>|<ccy>": result}} — persisted per tab so
   // switching back to a previously-visited tab paints from memory.
   analyticsByTab: {},
+  // Named weight presets for the active portfolio. Loaded from the server
+  // each time the active tab changes; saved/edited via the weights popup.
+  weightPresets: [],       // [{name, weights, saved_at}]
+  // Pass D — column views. activeViewName is global (one selection
+  // across all portfolios). customViews mirrors the server's
+  // .portfolio_tracker_column_views.json. activeColumnOverride is set
+  // when the user drags headers on a built-in view (transient until
+  // saved/reset).
+  activeViewName: "Default",
+  customViews: {},
+  activeColumnOverride: null,
+  viewDirty: false,
+  fitColumns: readFitColumnsPreference(),
 };
+
+/* ===========================================================================
+ * Weight-mode helpers (Equal / Cap / named presets / ad-hoc custom)
+ * --------------------------------------------------------------------------- */
+function presetByName(name) {
+  if (!name || !STATE.weightPresets) return null;
+  return STATE.weightPresets.find(p => p && p.name === name) || null;
+}
+function activePresetName() {
+  if (typeof STATE.mode !== "string") return null;
+  return STATE.mode.startsWith("preset:") ? STATE.mode.slice(7) : null;
+}
+function modeId(name) { return "preset:" + name; }
+function weightsForMode(mode) {
+  // Returns a {symbol: fraction} dict appropriate for `mode`, normalised over
+  // the currently-loaded DATA symbols. Falls back to cap-weight on unknown modes.
+  const rows = DATA.filter(r => r && r.symbol);
+  if (mode === "equal") return equalWeightsOf(rows);
+  if (mode === "cap")   return capWeightsOf(rows);
+  if (mode === "custom") return STATE.customWeights || capWeightsOf(rows);
+  if (typeof mode === "string" && mode.startsWith("preset:")) {
+    const p = presetByName(mode.slice(7));
+    if (!p) return capWeightsOf(rows);
+    // Project preset weights onto current symbols and renormalise. Missing
+    // symbols silently default to 0.
+    const out = {}; let total = 0;
+    for (const r of rows) { const w = Math.max(0, Number(p.weights[r.symbol] || 0)); out[r.symbol] = w; total += w; }
+    if (total <= 0) return capWeightsOf(rows);
+    for (const k of Object.keys(out)) out[k] /= total;
+    return out;
+  }
+  return capWeightsOf(rows);
+}
+async function loadPresetsForView(name) {
+  // Anonymous / unsaved tabs don't have presets — keep the list empty.
+  if (!name || name === AD_HOC_KEY) {
+    STATE.weightPresets = [];
+    return;
+  }
+  try {
+    const r = await fetch(`/api/weight-presets?view=${encodeURIComponent(name)}`);
+    const d = await r.json();
+    STATE.weightPresets = Array.isArray(d.presets) ? d.presets : [];
+    // Honor the server-side active selection on initial load so the user's
+    // last choice is restored across sessions. We only apply it if the
+    // current mode is the safe default ("cap").
+    if (d.active && STATE.mode === "cap" && presetByName(d.active)) {
+      STATE.mode = modeId(d.active);
+    }
+  } catch (_) {
+    STATE.weightPresets = [];
+  }
+}
+async function persistActivePreset() {
+  // Tell the server which preset (or none) is currently active for the
+  // active view so it can be restored next launch.
+  const view = STATE.activeView;
+  if (!view || view === AD_HOC_KEY) return;
+  const name = activePresetName();
+  try {
+    await fetch("/api/weight-presets/active", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({view, name}),
+    });
+  } catch (_) {}
+}
+async function savePresetServer(name, weights, opts) {
+  opts = opts || {};
+  const view = STATE.activeView;
+  if (!view || view === AD_HOC_KEY) throw new Error("Save the portfolio first.");
+  const body = {view, name, weights, set_active: opts.setActive !== false};
+  if (opts.renameFrom) body.rename_from = opts.renameFrom;
+  const r = await fetch("/api/weight-presets", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || "save failed");
+  STATE.weightPresets = Array.isArray(d.presets) ? d.presets : STATE.weightPresets;
+  return d;
+}
+async function deletePresetServer(name) {
+  const view = STATE.activeView;
+  if (!view || view === AD_HOC_KEY) return;
+  const url = `/api/weight-presets?view=${encodeURIComponent(view)}&name=${encodeURIComponent(name)}`;
+  const r = await fetch(url, {method: "DELETE"});
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || "delete failed");
+  STATE.weightPresets = Array.isArray(d.presets) ? d.presets : [];
+}
 
 function analyticsMapForTab(name) {
   const key = name || AD_HOC_KEY;
@@ -4700,6 +7753,55 @@ function analyticsMapForTab(name) {
 function currentAnalyticsMap() { return analyticsMapForTab(STATE.activeView); }
 function invalidateAnalyticsForTab(name) {
   delete STATE.analyticsByTab[name || AD_HOC_KEY];
+  // Cascade to the disk cache so the analyst panel doesn't paint stale
+  // numbers after a quotes refresh. Fire-and-forget — a network blip here
+  // only means we keep showing the old cached payload, which is fine.
+  if (name && name !== AD_HOC_KEY) {
+    fetch(`/api/analytics-cache?view=${encodeURIComponent(name)}`, {method: "DELETE"}).catch(() => {});
+  }
+}
+
+// Pull persisted analytics off disk and seed the in-memory map for this tab.
+// Called once on tab activation (same place we load the weight presets), so
+// reopening a saved portfolio paints the Rating Distribution from cache —
+// no spinner, no yfinance round-trip.
+async function loadAnalyticsCacheForView(name) {
+  if (!name || name === AD_HOC_KEY) return;
+  try {
+    const r = await fetch(`/api/analytics-cache?view=${encodeURIComponent(name)}`);
+    const d = await r.json();
+    const cache = d && d.cache;
+    if (!cache || typeof cache !== "object") return;
+    const tabMap = analyticsMapForTab(name);
+    for (const k of Object.keys(cache)) {
+      const rec = cache[k];
+      if (rec && rec.payload && !tabMap[k]) tabMap[k] = rec.payload;
+    }
+  } catch (_) { /* ignore — fall back to in-memory + fresh fetch */ }
+}
+
+// Slim a full analytics payload to the static fields worth persisting.
+// `series` is large and only used by the live time-series chart, which is
+// always re-fetched on demand — no point storing it on disk.
+function _slimAnalyticsForCache(a) {
+  if (!a || typeof a !== "object" || a.error) return null;
+  const out = {};
+  const keep = ["period", "display_ccy", "weights_applied", "active_symbols",
+                "missing_symbols", "stats", "spy_stats", "nasdaq_stats",
+                "weighted", "contribution", "analyst", "exposure",
+                "concentration", "warnings"];
+  for (const k of keep) if (k in a) out[k] = a[k];
+  return out;
+}
+
+function persistAnalyticsToCache(viewName, key, payload) {
+  if (!viewName || viewName === AD_HOC_KEY || !key) return;
+  const slim = _slimAnalyticsForCache(payload);
+  if (!slim) return;
+  fetch("/api/analytics-cache", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({view: viewName, key, payload: slim}),
+  }).catch(() => {});
 }
 let WATCHLISTS = {};        // name -> entries-string (saved watchlists)
 let VIEWS = {};             // name -> {entries, saved_at, row_count, stale}
@@ -4714,7 +7816,7 @@ async function build(opts) {
   if (!raw) { toast("Enter at least one ticker or company name."); return; }
   const entries = entriesArr(raw);
   $("#build").disabled = true; $("#refresh").disabled = true;
-  $("#status").textContent = `Fetching ${entries.length} symbol${entries.length>1?"s":""}…`;
+  $("#status").innerHTML = lcHtml("resolving symbols", {bar: true, meta: `0·${entries.length}`});
   showProgress(2);
   DATA = [];
   render();
@@ -4753,19 +7855,26 @@ async function build(opts) {
           DATA.push(msg.row);
           render();
           showProgress((done / Math.max(1, total)) * 100);
-          $("#status").textContent = `Loaded ${done}/${total}…`;
+          $("#status").innerHTML = lcHtml("streaming quotes", {bar: true, meta: `${done}·${total}`});
         } else if (msg.type === "done") {
           showProgress(100);
         }
       }
     }
-    $("#status").textContent = `Loaded ${DATA.length} symbol${DATA.length>1?"s":""} · updated ${new Date().toLocaleTimeString()}`;
+    {
+      const _nm = STATE.activeView || AD_HOC_KEY;
+      $("#status").innerHTML = `<span class="status-name">${escapeHtml(viewLabel(_nm))}</span><span class="status-meta">updated ${escapeHtml(new Date().toLocaleTimeString())}</span>`;
+    }
     // Persist this build as a view under the active tab name (or ad-hoc).
     const targetName = STATE.activeView || AD_HOC_KEY;
     await persistView(targetName, raw, DATA);
     STATE.customWeights = null;  // new build — drop stale custom weights
     if (STATE.mode === "custom") STATE.mode = "cap";
+    // Refresh per-portfolio presets — a brand-new build may have just
+    // promoted the ad-hoc tab into a real named view.
+    await loadPresetsForView(targetName);
     invalidateAnalyticsForTab(targetName);  // rebuild invalidates this tab only
+    renderModeBar();
     requestAnalytics();
   } catch (e) {
     toast("Error: " + e.message);
@@ -4801,7 +7910,10 @@ async function persistView(name, entries, rows) {
 }
 
 async function loadAllAtStartup() {
-  await Promise.all([loadWatchlists(), loadViews()]);
+  $("#status").innerHTML = lcHtml("indexing portfolios", {bar: true});
+  await Promise.all([loadWatchlists(), loadViews(), loadColumnViews()]);
+  $("#status").textContent = "Idle";
+  wireColumnViewBar();
   renderTabs();
   // Restore the last open view if any.
   if (LAST_VIEW && VIEWS[LAST_VIEW]) {
@@ -4901,6 +8013,16 @@ async function activateTab(name, opts) {
   STATE.customWeights = null;
   // Keep STATE.analyticsByTab[*] across switches — re-visiting paints from memory.
   if (STATE.mode === "custom") STATE.mode = "cap";
+  // Switching tabs swaps the per-portfolio preset list. loadPresetsForView
+  // may also restore the active preset (only if the current mode is the safe
+  // default "cap"), so the user's last selection persists across sessions.
+  await loadPresetsForView(name);
+  // Seed the in-memory analytics map from disk so reopening a portfolio
+  // hydrates the Rating Distribution panel without re-fetching from
+  // yfinance. requestAnalytics() will still kick off in the cached-rows
+  // branch below, but its cache-hit path will take the disk seed.
+  await loadAnalyticsCacheForView(name);
+  renderModeBar();
   renderTabs();
   renderEditorMeta();
   // Set the textarea to the watchlist entries (or stored view entries if ad-hoc).
@@ -4916,8 +8038,11 @@ async function activateTab(name, opts) {
       if (rows.length) {
         DATA = rows;
         render();
+        // DATA just landed — refresh the mode bar so the [+] pill appears
+        // and the active preset paints with the correct active state.
+        renderModeBar();
         const savedAt = view.saved_at ? relTime(view.saved_at) : "previously";
-        $("#status").textContent = `${viewLabel(name)} · cached ${savedAt}${view.stale ? " · stale" : ""}`;
+        $("#status").innerHTML = `<span class="status-name">${escapeHtml(viewLabel(name))}</span><span class="status-meta">cached ${escapeHtml(savedAt)}</span>${view.stale ? `<span class="status-stale">stale</span>` : ""}`;
         if (view.stale) {
           // Auto-refresh per user policy.
           if (!opts.silent) toast(`Constituents changed — refreshing ${viewLabel(name)}…`);
@@ -4933,7 +8058,7 @@ async function activateTab(name, opts) {
   // No cached rows yet — clear the table, prompt user.
   DATA = []; render();
   $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Press <b>Build Dashboard</b> to load this portfolio.</div>`;
-  $("#status").textContent = viewLabel(name);
+  $("#status").innerHTML = `<span class="status-name">${escapeHtml(viewLabel(name))}</span>`;
   await fetch("/api/last-view", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({name})});
 }
 
@@ -4960,15 +8085,24 @@ function renderTabs() {
     const view = VIEWS[name];
     const staleDot = view && view.stale ? `<span class="pf-tab-stale" title="Constituents changed — refresh to update"></span>` : "";
     const closeBtn = `<span class="pf-tab-close" title="Delete">✕</span>`;
-    tab.innerHTML = `${staleDot}<span class="pf-tab-label">${escapeHtml(viewLabel(name))}</span>${closeBtn}`;
+    tab.innerHTML = `${staleDot}<span class="pf-tab-label" title="Double-click to rename">${escapeHtml(viewLabel(name))}</span>${closeBtn}`;
     tab.addEventListener("click", (e) => {
       if (e.target.closest(".pf-tab-close")) return;
+      if (e.target.closest(".pf-tab-rename-input")) return;
       activateTab(name);
     });
     tab.querySelector(".pf-tab-close").addEventListener("click", async (e) => {
       e.stopPropagation();
       await deletePortfolio(name);
     });
+    // Double-click the label → inline rename (saved portfolios only, not ad-hoc).
+    if (name !== AD_HOC_KEY) {
+      tab.querySelector(".pf-tab-label").addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        beginTabRename(tab, name);
+      });
+    }
     wrap.appendChild(tab);
   }
 
@@ -4980,20 +8114,64 @@ function renderTabs() {
   wrap.appendChild(add);
 }
 
-function renderEditorMeta() {
-  const name = STATE.activeView;
-  const meta = $("#pf-editor-meta");
-  if (!name) { meta.innerHTML = ""; return; }
-  const view = VIEWS[name];
-  const parts = [];
-  if (name === AD_HOC_KEY) parts.push("Unsaved portfolio");
-  else parts.push(`Portfolio: <b>${escapeHtml(name)}</b>`);
-  if (view) {
-    parts.push(`${view.row_count} rows`);
-    if (view.saved_at) parts.push(`cached ${relTime(view.saved_at)}`);
-    if (view.stale) parts.push(`<span class="stale">stale — will auto-refresh</span>`);
+function beginTabRename(tab, oldName) {
+  const labelEl = tab.querySelector(".pf-tab-label");
+  if (!labelEl || tab.querySelector(".pf-tab-rename-input")) return;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "pf-tab-rename-input";
+  input.value = oldName;
+  input.spellcheck = false;
+  input.size = Math.max(8, oldName.length + 2);
+  labelEl.style.display = "none";
+  labelEl.insertAdjacentElement("afterend", input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = async (commit) => {
+    if (done) return; done = true;
+    const next = input.value.trim();
+    input.remove();
+    labelEl.style.display = "";
+    if (!commit || !next || next === oldName) return;
+    await renamePortfolio(oldName, next);
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("dblclick", (e) => e.stopPropagation());
+}
+
+async function renamePortfolio(oldName, newName) {
+  try {
+    const r = await fetch("/api/portfolio/rename", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({old: oldName, new: newName}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Rename failed.");
+    // Update local maps so the UI reflects the new key without a full reload.
+    WATCHLISTS = d.watchlists || WATCHLISTS;
+    if (VIEWS[oldName]) { VIEWS[newName] = VIEWS[oldName]; delete VIEWS[oldName]; }
+    if (STATE.analyticsByTab && STATE.analyticsByTab[oldName]) {
+      STATE.analyticsByTab[newName] = STATE.analyticsByTab[oldName];
+      delete STATE.analyticsByTab[oldName];
+    }
+    if (STATE.activeView === oldName) STATE.activeView = newName;
+    renderTabs(); renderEditorMeta();
+    toast(`Renamed to "${newName}".`);
+  } catch (err) {
+    toast(err.message || "Rename failed.");
   }
-  meta.innerHTML = parts.join(" · ");
+}
+
+function renderEditorMeta() {
+  // Meta line was removed — name lives in the topbar status now.
+  if (typeof updatePrimaryButtonLabels === "function") updatePrimaryButtonLabels();
 }
 
 async function createNewTab() {
@@ -5143,21 +8321,52 @@ async function loadWatchlists() {
   }
 }
 
-function exportCsv() {
-  if (!DATA.length) { toast("Nothing to export."); return; }
-  const cols = ["symbol","name","price","market_cap","ps_ratio","pe_ratio","pct_ytd","pct_1y","delta_ath","above_1m","above_sma_20","above_sma_50","above_sma_200","w52_low","w52_high","sector","industry"];
-  const lines = [cols.join(",")];
-  for (const r of DATA) {
-    lines.push(cols.map(k => {
-      const v = r[k]; if (v == null) return "";
-      const s = String(v).replace(/"/g,'""'); return /[,"\n]/.test(s) ? `"${s}"` : s;
-    }).join(","));
+/**
+ * Export every saved portfolio to an .xlsx (one sheet per portfolio).
+ * Server-side build — fetches analyst recs in parallel + computes the
+ * analytics block from cached rows, so the download is "everything you
+ * can see in the app." See xlsx_export.py and the inline comment by the
+ * topbar Export button for the maintenance contract.
+ *
+ * UX: this can take a few seconds (the analyst-rec fetch is the slow
+ * piece). We swap the button label for a loading chip while the request
+ * is in flight, then restore it.
+ */
+async function exportXlsx() {
+  const btn = $("#export");
+  if (!btn) return;
+  const origHtml = btn.innerHTML;
+  const origDisabled = btn.disabled;
+  btn.disabled = true;
+  btn.innerHTML = lcHtml("exporting", {bar: true});
+  try {
+    const r = await fetch("/api/export-xlsx");
+    if (!r.ok) {
+      let msg = "Export failed (HTTP " + r.status + ").";
+      try { const j = await r.json(); if (j && j.error) msg = j.error; } catch {}
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    // Pull the filename out of Content-Disposition (server picks the timestamp).
+    let fname = "portfolio_tracker_export.xlsx";
+    const cd = r.headers.get("content-disposition") || "";
+    const m = cd.match(/filename="?([^";]+)"?/i);
+    if (m) fname = m[1];
+    const a = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    a.href = url;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(`Exported ${fname}`);
+  } catch (err) {
+    toast(err.message || "Export failed.");
+  } finally {
+    btn.innerHTML = origHtml;
+    btn.disabled = origDisabled;
   }
-  const blob = new Blob([lines.join("\n")], {type:"text/csv"});
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "portfolio_" + new Date().toISOString().slice(0,10) + ".csv";
-  a.click(); URL.revokeObjectURL(a.href);
 }
 
 /* ===========================================================================
@@ -5224,23 +8433,20 @@ async function requestAnalytics(opts) {
   STATE.analyticsLoading = true;
   renderAnalyticsBody();
 
-  // Build the weight_sets we'll request. For equal/cap, also pre-compute the
-  // sibling mode (free piggyback on the same backend call). For custom we
-  // only request the custom set — but the first time custom is opened it's
-  // the same as cap, so we can serve it from cache instantly.
-  const cap = capWeightsFromData();
-  const eq = equalWeightsFromData();
+  // Build the weight_sets we'll request. Always include the *active* mode;
+  // also opportunistically include any other modes we don't already have
+  // cached for this period (the backend shares the slow yfinance + analyst
+  // fetches across every weight set in a single call). The set name we send
+  // matches the mode id so analyticsCacheKey lines up server↔client.
   const wsets = {};
-  if (mode === "custom") {
-    const cw = STATE.customWeights || cap;
-    wsets.custom = cw;
-    // Piggyback: also (re)compute equal+cap if they aren't cached for this period.
-    if (!tabMap[analyticsCacheKey("equal", period)]) wsets.equal = eq;
-    if (!tabMap[analyticsCacheKey("cap", period)]) wsets.cap = cap;
-  } else {
-    wsets.equal = eq;
-    wsets.cap = cap;
+  function maybeRequest(modeKey) {
+    if (!tabMap[analyticsCacheKey(modeKey, period)]) {
+      wsets[modeKey] = weightsForMode(modeKey);
+    }
   }
+  wsets[mode] = weightsForMode(mode);
+  maybeRequest("equal");
+  maybeRequest("cap");
 
   try {
     const r = await fetch("/api/portfolio-analytics-multi", {
@@ -5254,14 +8460,10 @@ async function requestAnalytics(opts) {
     if (d.error) throw new Error(d.error);
     const results = d.results || {};
     for (const k of Object.keys(results)) {
-      tabMap[analyticsCacheKey(k, period)] = results[k];
-    }
-    // If custom wasn't explicitly computed, alias it to cap for this period
-    // so switching to Custom… is instant on first open.
-    if (!tabMap[analyticsCacheKey("custom", period)] &&
-        tabMap[analyticsCacheKey("cap", period)] &&
-        !STATE.customWeights) {
-      tabMap[analyticsCacheKey("custom", period)] = tabMap[analyticsCacheKey("cap", period)];
+      const cacheK = analyticsCacheKey(k, period);
+      tabMap[cacheK] = results[k];
+      // Mirror to disk so the next reload hydrates the panel instantly.
+      persistAnalyticsToCache(STATE.activeView, cacheK, results[k]);
     }
     STATE.analytics = tabMap[key] || results[mode] || null;
   } catch (e) {
@@ -5280,7 +8482,8 @@ function renderAnalyticsBody() {
     return;
   }
   if (STATE.analyticsLoading && !STATE.analytics) {
-    body.innerHTML = `<div class="pf-empty">Computing analytics…</div>`;
+    body.innerHTML = `<div class="pf-empty lc-block">${lcHtml("computing analytics", {bar: true})}</div>`;
+    renderAnalystDashboard(quickAnalystPreview() || {});
     return;
   }
   const a = STATE.analytics;
@@ -5337,7 +8540,9 @@ function staleBannerHtml() {
 
 function labelForMode(m) {
   if (m === "equal") return "Equal-weight";
-  if (m === "custom") return "Custom-weight";
+  if (m === "custom") return "Custom";
+  if (m === "cap") return "Cap-weighted";
+  if (typeof m === "string" && m.startsWith("preset:")) return m.slice(7);
   return "Cap-weighted";
 }
 
@@ -5430,13 +8635,13 @@ const METRIC_INFO = {
     range: "Broad market ~2–3×. Tech / high-margin software often 8–15×. Above 20× is rare outside hyper-growth."
   },
   "EV/EBITDA (wtd)": {
-    formula: String.raw`\dfrac{EV_{port}}{EBITDA_{port}} = \sum_i w_i \cdot \dfrac{EV_i}{EBITDA_i}`,
-    desc: "Enterprise value divided by EBITDA — capital-structure-neutral valuation. Used heavily in cross-sector comparisons and LBO math.",
+    formula: String.raw`\dfrac{\sum_i w_i \cdot (EV/EBITDA)_i}{\sum_i w_i \;:\; EV/EBITDA_i \text{ defined}}`,
+    desc: "Portfolio-weighted average EV/EBITDA across covered names. This is a weighted average of constituent multiples, not a reconstructed aggregate enterprise-value-to-aggregate-EBITDA ratio.",
     range: "Mature businesses 8–14×. Quality compounders 15–25×. Above 25× requires sustained growth to justify."
   },
   "Div yield (wtd)": {
-    formula: String.raw`y_{port} = \sum_i w_i \cdot y_i`,
-    desc: "Forward indicated dividend yield, weighted by portfolio share. Tax-unadjusted. Captures only cash dividends, not buybacks.",
+    formula: String.raw`y_{port} = \dfrac{\sum_i w_i \cdot y_i}{\sum_i w_i \;:\; y_i \text{ defined}}`,
+    desc: "Forward indicated dividend yield across covered names, weighted by portfolio share. Names without a usable dividend figure drop out of both numerator and denominator. Tax-unadjusted and cash-dividend-only.",
     range: "S&P 500 ~1.3–1.8%. Income-tilted books 3–5%. Above 6% often signals stress or capital return at the expense of growth."
   },
   "Market cap (wtd avg)": {
@@ -5450,8 +8655,8 @@ const METRIC_INFO = {
     range: "Most large caps cluster 1.8–2.4 (Buy). Below 1.5 is unusually bullish; above 3.0 leans bearish."
   },
   "Weighted target upside": {
-    formula: String.raw`U_{port} = \sum_i w_i \cdot \left(\dfrac{TP_i}{P_i} - 1\right)`,
-    desc: "Sum of analysts' 12-month price targets vs current price, weighted by portfolio share. Computed in each holding's local currency before weighting.",
+    formula: String.raw`U_{port} = \dfrac{\sum_i w_i \cdot \left(\dfrac{TP_i}{P_i} - 1\right)}{\sum_i w_i \;:\; TP_i, P_i \text{ defined}}`,
+    desc: "Coverage-weighted average of analysts' 12-month price-target upside versus current price. Computed in each holding's local currency before weighting; uncovered names drop out of the denominator.",
     range: "Single-digit positive is typical. >20% upside often reflects beaten-down names or aggressive growth assumptions."
   },
   "Analysts covering (sum)": {
@@ -5506,13 +8711,7 @@ function renderStatsHtml(a) {
   const html = rows.map(r => {
     const info = METRIC_INFO[r[0]];
     const dataAttr = info ? ` data-info="1" data-metric="${escapeHtml(r[0])}"` : "";
-    const tip = info ? `
-      <div class="pf-metric-tip" role="tooltip">
-        <div class="mt-name">${escapeHtml(r[0])}</div>
-        <div class="mt-formula">$$${info.formula}$$</div>
-        <div class="mt-desc">${escapeHtml(info.desc)}</div>
-        <div class="mt-range">${escapeHtml(info.range)}</div>
-      </div>` : "";
+    const tip = metricTipHtml(r[0], info);
     return `
     <div class="pf-stat-row"${dataAttr} title="${info ? '' : 'Portfolio vs SPY'}">
       <span class="l">${r[0]}</span>
@@ -5547,6 +8746,67 @@ function recKeyLabel(k) {
   if (!k) return "—";
   return String(k).replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
 }
+function quickAnalystPreview() {
+  const rows = (DATA || []).filter(r => r && r.symbol);
+  if (!rows.length) return null;
+  const weights = weightsForMode(STATE.mode);
+  let ratingNum = 0, ratingW = 0, upsideNum = 0, upsideW = 0;
+  const holdings = [];
+  const notCovered = [];
+  for (const row of rows) {
+    const symbol = row.symbol;
+    const weight = Number(weights[symbol] || 0);
+    const meanRating = row.recommendation_mean;
+    const price = row.price;
+    const targetMean = row.target_mean_price;
+    const upside = (targetMean != null && price != null && isFinite(targetMean) && isFinite(price) && price > 0)
+      ? ((targetMean / price - 1) * 100)
+      : null;
+    if (meanRating != null && isFinite(meanRating)) {
+      ratingNum += meanRating * weight;
+      ratingW += weight;
+    }
+    if (upside != null && isFinite(upside)) {
+      upsideNum += upside * weight;
+      upsideW += weight;
+    }
+    const hasCoverage = (meanRating != null && isFinite(meanRating)) || (upside != null && isFinite(upside));
+    const payload = {
+      symbol,
+      name: row.name || symbol,
+      currency: row.currency || FX_QUOTE,
+      weight,
+      price,
+      target_mean: targetMean,
+      target_median: null,
+      target_low: null,
+      target_high: null,
+      upside_pct: upside,
+      mean_rating: meanRating,
+      rec_key: null,
+      n_analysts: null,
+      dist: null,
+    };
+    if (hasCoverage) holdings.push(payload);
+    else notCovered.push({symbol, name: row.name || symbol, weight});
+  }
+  holdings.sort((a, b) => (b.weight || 0) - (a.weight || 0) || String(a.symbol).localeCompare(String(b.symbol)));
+  return {
+    display_ccy: FX_QUOTE,
+    analyst: {
+      mean_rating: ratingW > 0 ? (ratingNum / ratingW) : null,
+      rating_coverage_weight: ratingW,
+      weighted_target_upside_pct: upsideW > 0 ? (upsideNum / upsideW) : null,
+      target_coverage_weight: upsideW,
+      n_analysts_total: null,
+      distribution_pct: null,
+      holdings,
+      not_covered: notCovered,
+      covered_count: holdings.length,
+      active_count: rows.length,
+    },
+  };
+}
 let _AN_SORT = { key: "weight", dir: -1 };
 function renderAnalystDashboard(a) {
   const host = document.getElementById("analyst-dashboard");
@@ -5561,6 +8821,18 @@ function renderAnalystDashboard(a) {
   const wRating = an.mean_rating;
   const wUpside = an.weighted_target_upside_pct;
   const nAnalysts = an.n_analysts_total || 0;
+
+  if (STATE.analyticsLoading && !holdings.length && !notCovered.length) {
+    host.innerHTML = `
+      <div class="an-head">
+        <span class="an-title">Analyst sentiment</span>
+        <span class="an-sub">Portfolio-weighted analyst consensus from yfinance.</span>
+      </div>
+      <div class="an-grid"><div class="an-card"><div class="lc-block">${lcHtml("loading analyst sentiment", {bar: true})}</div></div></div>
+      <div class="an-coverage-foot"><span class="credit">📈 Local Portfolio Dashboard · yfinance · no API key</span><span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span></div>
+    `;
+    return;
+  }
 
   // Empty-state placeholder
   if (!holdings.length && !notCovered.length) {
@@ -5717,7 +8989,7 @@ function renderAnalystDashboard(a) {
   host.innerHTML = `
     <div class="an-head">
       <span class="an-title">Analyst sentiment</span>
-      <span class="an-sub">Portfolio-weighted analyst consensus from yfinance · positions in ${escapeHtml(a.display_ccy || FX_QUOTE)}.</span>
+      <span class="an-sub">Portfolio-weighted analyst consensus from yfinance · positions in ${escapeHtml(a.display_ccy || FX_QUOTE)}.${STATE.analyticsLoading ? ` ${lcHtml("refreshing", {bar: true})}` : ""}</span>
       <span class="an-mode-note">Aggregated by
         <button type="button" class="an-mode-btn" id="an-mode-btn" aria-haspopup="listbox" aria-expanded="false">
           <span id="an-mode-label">${escapeHtml(labelForMode(STATE.mode))}</span>
@@ -5726,7 +8998,8 @@ function renderAnalystDashboard(a) {
         <div class="an-mode-menu" id="an-mode-menu" role="listbox" aria-label="Aggregation method">
           <div class="an-mode-opt" data-mode="equal"  role="option" data-selected="${STATE.mode === 'equal' ? '1' : '0'}">Equal-weight</div>
           <div class="an-mode-opt" data-mode="cap"    role="option" data-selected="${STATE.mode === 'cap' ? '1' : '0'}">Cap-weighted</div>
-          <div class="an-mode-opt" data-mode="custom" role="option" data-selected="${STATE.mode === 'custom' ? '1' : '0'}">Custom…</div>
+          ${(STATE.weightPresets || []).map(p => `<div class="an-mode-opt" data-mode="${escapeHtml(modeId(p.name))}" role="option" data-selected="${STATE.mode === modeId(p.name) ? '1' : '0'}">${escapeHtml(p.name)}</div>`).join("")}
+          ${STATE.mode === 'custom' ? `<div class="an-mode-opt" data-mode="custom" role="option" data-selected="1">Custom (unsaved)</div>` : ""}
         </div>
       </span>
     </div>
@@ -5770,11 +9043,8 @@ function renderAnalystDashboard(a) {
       const mode = opt.dataset.mode;
       closeMenu();
       if (!mode) return;
-      if (mode === "custom") { openWeightsPopup(); return; }
-      if (mode === STATE.mode) return;
-      STATE.mode = mode;
-      try { updateModeButtons(); } catch (_) {}
-      requestAnalytics();
+      if (mode === "custom" && STATE.mode !== "custom") { openWeightsPopup({intent: "adhoc"}); return; }
+      selectMode(mode);
     });
   }
 
@@ -5792,9 +9062,11 @@ function renderAnalystDashboard(a) {
   }
 }
 
-function renderStatTipsKatex() {
+function renderStatTipsKatex(rootOrSelector = "#pf-analytics-body") {
   if (!window.renderMathInElement) return;
-  const root = document.getElementById("pf-analytics-body");
+  const root = typeof rootOrSelector === "string"
+    ? document.querySelector(rootOrSelector)
+    : rootOrSelector;
   if (!root) return;
   root.querySelectorAll(".pf-metric-tip").forEach(el => {
     if (el.dataset.katex === "1") return;
@@ -5808,13 +9080,7 @@ function renderStatTipsKatex() {
 function statRowHtml(label, value, valueCls) {
   const info = METRIC_INFO[label];
   const dataAttr = info ? ` data-info="1" data-metric="${escapeHtml(label)}"` : "";
-  const tip = info ? `
-    <div class="pf-metric-tip" role="tooltip">
-      <div class="mt-name">${escapeHtml(label)}</div>
-      <div class="mt-formula">$$${info.formula}$$</div>
-      <div class="mt-desc">${escapeHtml(info.desc)}</div>
-      <div class="mt-range">${escapeHtml(info.range)}</div>
-    </div>` : "";
+  const tip = metricTipHtml(label, info);
   return `<div class="pf-stat-row"${dataAttr}>
     <span class="l">${label}</span>
     <span class="v ${valueCls || ""}">${value}</span>
@@ -5829,7 +9095,7 @@ function renderValuationAnalystHtml(a) {
     ["P/E (wtd)", fmtNumOr(w.pe, 2)],
     ["P/S (wtd)", fmtNumOr(w.ps, 2)],
     ["EV/EBITDA (wtd)", fmtNumOr(w.ev_ebitda, 2)],
-    ["Div yield (wtd)", w.div_yield == null ? "—" : fmtPctPlain(w.div_yield)],
+    ["Div yield (wtd)", w.div_yield == null ? "—" : fmtPctFrac(w.div_yield)],
     ["Market cap (wtd avg)", fmtCapBig(w.market_cap)],
     ["Analyst rating (1=SB, 5=SS)", fmtNumOr(an.mean_rating, 2)],
     ["Weighted target upside", fmtPctSigned(an.weighted_target_upside_pct), an.weighted_target_upside_pct == null ? "" : (an.weighted_target_upside_pct >= 0 ? "pos" : "neg")],
@@ -6167,24 +9433,62 @@ function equalWeightsOf(rows) {
   return Object.fromEntries(rows.map(r => [r.symbol, w]));
 }
 
-function openWeightsPopup() {
+// Tracks what the modal is currently editing: "adhoc" (ad-hoc custom, no save),
+// "new" (saving a brand-new preset), or "edit" (editing an existing one).
+// `editingName` is the original name of the preset under edit so we can rename.
+let WEIGHTS_INTENT = "adhoc";
+let WEIGHTS_EDITING_NAME = null;
+
+function openWeightsPopup(opts) {
   if (!DATA.length) return toast("Build a portfolio first.");
-  // Initialize draft from saved custom weights if present, otherwise from cap-weighted
-  // (per spec: the custom slider starts from cap-weighted).
+  opts = opts || {};
   const rows = DATA.filter(r => r && r.symbol);
-  const init = STATE.customWeights || capWeightsOf(rows);
+  // Seed the draft from the most appropriate source:
+  //   intent=edit → the preset's saved weights
+  //   intent=new  → current resolved mode weights (capture what user sees)
+  //   intent=adhoc (default) → existing customWeights or active mode
+  let init;
+  if (opts.intent === "edit" && opts.presetName) {
+    const p = presetByName(opts.presetName);
+    init = (p && p.weights) ? p.weights : weightsForMode(STATE.mode);
+    WEIGHTS_INTENT = "edit"; WEIGHTS_EDITING_NAME = opts.presetName;
+  } else if (opts.intent === "new") {
+    init = weightsForMode(STATE.mode);
+    WEIGHTS_INTENT = "new"; WEIGHTS_EDITING_NAME = null;
+  } else {
+    init = STATE.customWeights || weightsForMode(STATE.mode);
+    WEIGHTS_INTENT = "adhoc"; WEIGHTS_EDITING_NAME = null;
+  }
   WEIGHTS_DRAFT = rows.map(r => ({
     symbol: r.symbol,
     name: r.name || r.symbol,
     weight: Number(init[r.symbol] || 0),
     locked: false,
   }));
+  // Wire UI to reflect intent (title, prefilled name, delete-button visibility).
+  const titleEl = document.getElementById("pf-weights-title");
+  const nameEl = document.getElementById("pf-weights-name");
+  const delBtn = document.getElementById("pf-weights-delete");
+  const statusEl = document.getElementById("pf-weights-status");
+  const saved = STATE.activeView && STATE.activeView !== AD_HOC_KEY;
+  if (titleEl) titleEl.textContent =
+      WEIGHTS_INTENT === "edit" ? `Edit preset · ${opts.presetName}` :
+      WEIGHTS_INTENT === "new"  ? "New weight preset" :
+                                  "Custom weights";
+  if (nameEl) nameEl.value = WEIGHTS_INTENT === "edit" ? opts.presetName : "";
+  if (delBtn) delBtn.style.display = WEIGHTS_INTENT === "edit" ? "" : "none";
+  if (statusEl) statusEl.textContent = saved ? "" : "Save the portfolio to enable named presets.";
+  // Disable save buttons when there's no active saved portfolio to attach to.
+  ["pf-weights-save", "pf-weights-saveas"].forEach(id => {
+    const b = document.getElementById(id); if (b) b.disabled = !saved;
+  });
   renderWeightsRows();
   $("#pf-weights-bg").classList.add("show");
 }
 
 function closeWeightsPopup() {
   $("#pf-weights-bg").classList.remove("show");
+  hideInlinePrompt();
 }
 
 function renderWeightsRows() {
@@ -6280,25 +9584,203 @@ function resetDraftToCap() {
   renderWeightsRows();
 }
 
-function applyWeightsDraft() {
-  // Always renormalize before applying so the backend gets a sum-to-1 vector.
+function _normalizedDraft() {
   const total = WEIGHTS_DRAFT.reduce((a, r) => a + r.weight, 0);
-  if (total <= 0) { toast("Weights must sum to a positive value."); return; }
-  STATE.customWeights = {};
-  for (const r of WEIGHTS_DRAFT) STATE.customWeights[r.symbol] = r.weight / total;
+  if (total <= 0) return null;
+  const out = {};
+  for (const r of WEIGHTS_DRAFT) out[r.symbol] = r.weight / total;
+  return out;
+}
+
+function applyWeightsDraft() {
+  // Apply alone (no Save) = legacy ad-hoc "custom" path. Updates STATE.mode to
+  // "custom" and stores the normalized vector. Saved presets use savePresetClick
+  // / saveAsPresetClick instead, which also call selectMode("preset:<name>").
+  const w = _normalizedDraft();
+  if (!w) { toast("Weights must sum to a positive value."); return; }
+  STATE.customWeights = w;
   STATE.mode = "custom";
-  // Invalidate any cached custom result for the active tab (weights changed).
   const tabMap = currentAnalyticsMap();
   for (const k of Object.keys(tabMap)) {
     if (k.startsWith("custom|")) delete tabMap[k];
   }
-  updateModeButtons();
   closeWeightsPopup();
+  renderModeBar();
+  persistActivePreset();
   requestAnalytics({force: true});
 }
 
-function updateModeButtons() {
-  $$("#pf-mode-toggle button").forEach(b => b.classList.toggle("active", b.dataset.mode === STATE.mode));
+function _invalidateModeCache(mode) {
+  // Drop any cached analytics for a specific mode across all periods so the
+  // next request hits the backend with the updated weights.
+  const tabMap = currentAnalyticsMap();
+  for (const k of Object.keys(tabMap)) {
+    if (k.startsWith(mode + "|")) delete tabMap[k];
+  }
+}
+
+async function savePresetClick() {
+  // "Save" — if intent=edit, update in place (rename if name field changed);
+  // otherwise treat as Save-as so the user is forced to name it.
+  const nameInput = document.getElementById("pf-weights-name");
+  const name = (nameInput && nameInput.value || "").trim();
+  if (!name) { saveAsPresetClick(); return; }
+  const w = _normalizedDraft();
+  if (!w) return toast("Weights must sum to a positive value.");
+  try {
+    const renameFrom = WEIGHTS_INTENT === "edit" && WEIGHTS_EDITING_NAME && WEIGHTS_EDITING_NAME !== name
+                        ? WEIGHTS_EDITING_NAME : null;
+    await savePresetServer(name, w, {renameFrom, setActive: true});
+    _invalidateModeCache(modeId(name));
+    if (renameFrom) _invalidateModeCache(modeId(renameFrom));
+    STATE.mode = modeId(name);
+    STATE.customWeights = null;
+    closeWeightsPopup();
+    renderModeBar();
+    persistActivePreset();
+    requestAnalytics({force: true});
+    toast(`Preset "${name}" saved.`);
+  } catch (e) {
+    toast("Save failed: " + (e.message || e));
+  }
+}
+
+function saveAsPresetClick() {
+  const existing = (STATE.weightPresets || []).map(p => p.name);
+  showInlinePrompt({
+    title: "Save preset as…",
+    initial: "",
+    placeholder: "e.g. Growth Tilt",
+    validate(name) {
+      if (!name) return "Name required.";
+      if (existing.includes(name)) return `"${name}" already exists. Pick a different name.`;
+      return null;
+    },
+    onOk: async (name) => {
+      const w = _normalizedDraft();
+      if (!w) return toast("Weights must sum to a positive value.");
+      try {
+        await savePresetServer(name, w, {setActive: true});
+        STATE.mode = modeId(name);
+        STATE.customWeights = null;
+        _invalidateModeCache(modeId(name));
+        closeWeightsPopup();
+        renderModeBar();
+        persistActivePreset();
+        requestAnalytics({force: true});
+        toast(`Preset "${name}" saved.`);
+      } catch (e) {
+        toast("Save failed: " + (e.message || e));
+      }
+    },
+  });
+}
+
+async function deletePresetClick() {
+  if (WEIGHTS_INTENT !== "edit" || !WEIGHTS_EDITING_NAME) return;
+  const name = WEIGHTS_EDITING_NAME;
+  try {
+    await deletePresetServer(name);
+    if (STATE.mode === modeId(name)) STATE.mode = "cap";
+    _invalidateModeCache(modeId(name));
+    closeWeightsPopup();
+    renderModeBar();
+    persistActivePreset();
+    requestAnalytics({force: true});
+    toast(`Preset "${name}" deleted.`);
+  } catch (e) {
+    toast("Delete failed: " + (e.message || e));
+  }
+}
+
+/* Inline name prompt — used by Save-as (and by MPT "Save as preset"). Keeps
+   us off the native prompt() so the UI stays consistent. */
+let _ipState = null;
+function showInlinePrompt(opts) {
+  _ipState = opts || {};
+  const host = document.getElementById("pf-name-prompt");
+  const titleEl = document.getElementById("pf-name-prompt-title");
+  const descEl = document.getElementById("pf-name-prompt-desc");
+  const input = document.getElementById("pf-name-prompt-input");
+  const err = document.getElementById("pf-name-prompt-err");
+  if (!host || !input) return;
+  if (titleEl) titleEl.textContent = _ipState.title || "Name";
+  if (descEl) {
+    const desc = _ipState.description || "";
+    if (desc) { descEl.textContent = desc; descEl.style.display = ""; }
+    else { descEl.textContent = ""; descEl.style.display = "none"; }
+  }
+  input.placeholder = _ipState.placeholder || "";
+  input.value = _ipState.initial || "";
+  if (err) err.textContent = "";
+  host.classList.add("show");
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+function hideInlinePrompt() {
+  const host = document.getElementById("pf-name-prompt");
+  if (host) host.classList.remove("show");
+  _ipState = null;
+}
+function _ipSubmit() {
+  if (!_ipState) return;
+  const input = document.getElementById("pf-name-prompt-input");
+  const err = document.getElementById("pf-name-prompt-err");
+  const v = (input.value || "").trim();
+  const msg = _ipState.validate ? _ipState.validate(v) : null;
+  if (msg) { if (err) err.textContent = msg; return; }
+  const onOk = _ipState.onOk;
+  hideInlinePrompt();
+  if (onOk) onOk(v);
+}
+
+function updateModeButtons() { renderModeBar(); }
+
+function renderModeBar() {
+  // Rebuilds the pill bar: Equal, Cap, each saved preset, then [+] (and [✎]
+  // when a preset is currently active so the user can jump straight to edit).
+  const host = document.getElementById("pf-mode-toggle");
+  if (!host) return;
+  const active = STATE.mode;
+  const pills = [];
+  function pill(mode, label, extra) {
+    const cls = "pf-mode-pill" + (active === mode ? " active" : "") + (extra ? " " + extra : "");
+    return `<span class="${cls}" role="tab" data-mode="${escapeHtml(mode)}" tabindex="0">${escapeHtml(label)}</span>`;
+  }
+  pills.push(pill("equal", "Equal"));
+  pills.push(pill("cap", "Cap"));
+  for (const p of (STATE.weightPresets || [])) {
+    if (!p || !p.name) continue;
+    pills.push(pill(modeId(p.name), p.name, "preset"));
+  }
+  // Trailing controls (only meaningful for saved portfolios)
+  const canAdd = !!STATE.activeView && STATE.activeView !== AD_HOC_KEY && DATA.length > 0;
+  if (canAdd) {
+    pills.push(`<span class="pf-mode-pill icon" id="pf-mode-add" title="New preset from current weights">＋</span>`);
+  }
+  const activeName = activePresetName();
+  if (activeName) {
+    pills.push(`<span class="pf-mode-pill icon" id="pf-mode-edit" title="Edit '${escapeHtml(activeName)}'">✎</span>`);
+  }
+  host.innerHTML = pills.join("");
+  host.querySelectorAll(".pf-mode-pill[data-mode]").forEach(el => {
+    el.addEventListener("click", () => selectMode(el.dataset.mode));
+    el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMode(el.dataset.mode); }});
+  });
+  const addBtn = document.getElementById("pf-mode-add");
+  if (addBtn) addBtn.onclick = () => openWeightsPopup({intent: "new"});
+  const editBtn = document.getElementById("pf-mode-edit");
+  if (editBtn) editBtn.onclick = () => openWeightsPopup({intent: "edit", presetName: activeName});
+}
+
+function selectMode(mode) {
+  if (!mode || mode === STATE.mode) return;
+  STATE.mode = mode;
+  // Drop ad-hoc custom weights when switching away from "custom" — preset modes
+  // resolve through STATE.weightPresets, not customWeights.
+  if (mode !== "custom") STATE.customWeights = null;
+  renderModeBar();
+  persistActivePreset();
+  requestAnalytics();
 }
 function updatePeriodButtons() {
   $$("#pf-period-tabs button").forEach(b => b.classList.toggle("active", b.dataset.p === STATE.period));
@@ -6326,14 +9808,73 @@ function openInfo() {
 function closeInfo() { $("#info-bg").classList.remove("show"); }
 $("#info-bg").addEventListener("click", (e) => { if (e.target.id === "info-bg") closeInfo(); });
 
+// About-MPT modal — layered on top of the MPT overlay (z-index 95 vs 90).
+// Mirrors openInfo()/closeInfo() so KaTeX renders math the same way.
+let _mptKatexRendered = false;
+function openMptInfo() {
+  const bg = document.getElementById("pf-mpt-info-bg");
+  if (!bg) return;
+  bg.classList.add("show");
+  if (!_mptKatexRendered && window.renderMathInElement) {
+    renderMathInElement(bg, {
+      delimiters: [{ left: "$$", right: "$$", display: true }],
+      throwOnError: false,
+    });
+    _mptKatexRendered = true;
+  }
+}
+function closeMptInfo() {
+  const bg = document.getElementById("pf-mpt-info-bg");
+  if (bg) bg.classList.remove("show");
+}
+
 /* ===========================================================================
  * Wire up
  * --------------------------------------------------------------------------- */
-$("#build").onclick = () => build({keepPanelOpen: true});
+// Primary button mode: "build" when no saved portfolio is loaded, "update" when one is.
+// In "update" mode, #build becomes "Update Portfolio" (saves entries + refreshes), and
+// #save-as becomes "Save as New Portfolio".
+function primaryButtonMode() {
+  const name = STATE.activeView;
+  const namedLoaded = name && name !== AD_HOC_KEY;
+  return namedLoaded ? "update" : "build";
+}
+function updatePrimaryButtonLabels() {
+  const mode = primaryButtonMode();
+  const buildBtn = $("#build");
+  const saveAsBtn = $("#save-as");
+  if (!buildBtn || !saveAsBtn) return;
+  if (mode === "update") {
+    buildBtn.textContent = "Update Portfolio";
+    saveAsBtn.textContent = "Save as New Portfolio";
+  } else {
+    buildBtn.textContent = "Build Dashboard";
+    saveAsBtn.textContent = "＋ Save as new";
+  }
+}
+function runPrimary() {
+  if (primaryButtonMode() === "update") {
+    // saveWatchlist persists current entries and auto-rebuilds if they changed.
+    // If they didn't change, fall back to a plain refresh so the button always "does something".
+    const name = STATE.activeView;
+    const savedView = name && VIEWS[name];
+    const currentEntries = $("#tickers").value.trim();
+    const savedEntries = (savedView && savedView.entries || "").trim();
+    if (currentEntries && currentEntries !== savedEntries) {
+      saveWatchlist();
+    } else {
+      build({keepPanelOpen: true});
+    }
+  } else {
+    build({keepPanelOpen: true});
+  }
+}
+$("#build").onclick = runPrimary;
 $("#refresh").onclick = () => build({keepPanelOpen: $("#input-panel").classList.contains("hidden") ? false : true});
-$("#save").onclick = saveWatchlist;
 $("#save-as").onclick = saveAsNewWatchlist;
-$("#export").onclick = exportCsv;
+$("#export").onclick = exportXlsx;
+// Keep labels in sync whenever the active view or the textarea changes.
+$("#tickers").addEventListener("input", updatePrimaryButtonLabels);
 $("#edit-btn").onclick = () => {
   const panel = $("#input-panel");
   const willOpen = panel.classList.contains("hidden");
@@ -6348,19 +9889,14 @@ $("#edit-btn").onclick = () => {
 };
 $("#info-btn").onclick = openInfo;
 $("#theme-switch").onclick = () => setTheme(getTheme() === "dark" ? "light" : "dark");
-$("#sort-btn").onclick = (e) => {
-  e.stopPropagation();
-  $("#sort-menu").classList.toggle("open");
-  renderSortMenu();
-};
-document.addEventListener("click", (e) => {
-  if (!e.target.closest("#sort-menu")) $("#sort-menu").classList.remove("open");
-});
 $("#tickers").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); build({keepPanelOpen: true}); }
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runPrimary(); }
 });
 window.addEventListener("scroll", () => {
   $("#topbar").classList.toggle("scrolled", window.scrollY > 4);
+});
+window.addEventListener("resize", () => {
+  if (STATE.fitColumns) render();
 });
 
 /* --- Analytics controls --- */
@@ -6413,7 +9949,1018 @@ $("#pf-weights-cancel").addEventListener("click", closeWeightsPopup);
 $("#pf-weights-equal").addEventListener("click", resetDraftToEqual);
 $("#pf-weights-reset").addEventListener("click", resetDraftToCap);
 $("#pf-weights-apply").addEventListener("click", applyWeightsDraft);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#pf-weights-bg").classList.contains("show")) closeWeightsPopup(); });
+$("#pf-weights-save").addEventListener("click", savePresetClick);
+$("#pf-weights-saveas").addEventListener("click", saveAsPresetClick);
+$("#pf-weights-delete").addEventListener("click", deletePresetClick);
+$("#pf-name-prompt-ok").addEventListener("click", _ipSubmit);
+$("#pf-name-prompt-cancel").addEventListener("click", hideInlinePrompt);
+$("#pf-name-prompt-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); _ipSubmit(); }
+  else if (e.key === "Escape") { e.preventDefault(); hideInlinePrompt(); }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const ip = document.getElementById("pf-name-prompt");
+  if (ip && ip.classList.contains("show")) { hideInlinePrompt(); return; }
+  if ($("#pf-weights-bg").classList.contains("show")) closeWeightsPopup();
+});
+// Initial paint — empty until DATA is built but renders the [+] / Equal/Cap baseline.
+renderModeBar();
+
+/* ===========================================================================
+ * MPT — Portfolio Optimization overlay
+ * --------------------------------------------------------------------------
+ * The Optimize button opens a full-screen workspace that computes the
+ * long-only efficient frontier from the active portfolio, lets the user pick
+ * a point along it with a slider, and apply / save the resulting weights as
+ * a named preset. Math lives in mpt.py (Critical Line Algorithm); this code
+ * just drives the UI and renders the inline SVG chart.
+ * --------------------------------------------------------------------------- */
+const MPT = {
+  result: null,        // latest /api/efficient-frontier response
+  selectedIdx: 0,      // index into result.frontier for the slider marker
+  hoverIdx: null,      // index of point under cursor (cloud or frontier)
+  view: null,          // portfolio name this run is bound to
+  runs: [],            // saved runs metadata for the active view
+  busy: false,
+};
+
+function openMptOverlay() {
+  if (!DATA.length) return toast("Build a portfolio first.");
+  if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
+    // Ad-hoc tabs still get to optimize, but the runs sidebar + save flows
+    // need a named view to attach to. We surface this with a status line.
+    document.getElementById("pf-mpt-sub").textContent =
+      "Save the portfolio first to keep runs / presets.";
+  } else {
+    document.getElementById("pf-mpt-sub").textContent =
+      "Markowitz long-only · Critical Line Algorithm · " + STATE.activeView;
+  }
+  MPT.view = STATE.activeView;
+  document.getElementById("pf-mpt-bg").classList.add("show");
+  // Lock body scroll while the overlay is open so the page underneath
+  // can't move. Inner sidebar still scrolls via its own overflow-y.
+  document.body.dataset.mptPrevOverflow = document.body.style.overflow || "";
+  document.body.style.overflow = "hidden";
+  mptLoadRuns();
+}
+function closeMptOverlay() {
+  document.getElementById("pf-mpt-bg").classList.remove("show");
+  document.body.style.overflow = document.body.dataset.mptPrevOverflow || "";
+  delete document.body.dataset.mptPrevOverflow;
+  // Cancel any in-flight progress animation so a half-filled bar doesn't
+  // linger if the user reopens the overlay before the next run.
+  mptProgressStop();
+}
+
+// Budget label table — also drives the deterministic progress bar duration
+// (#9) and the legend metadata strip.
+const MPT_BUDGET_LABEL = {
+  fast: "Fast (~2s)",
+  standard: "Standard (~5s)",
+  thorough: "Thorough (~15s)",
+  exhaustive: "Exhaustive (~60s)",
+};
+const MPT_BUDGET_SECONDS = { fast: 2, standard: 5, thorough: 15, exhaustive: 60 };
+
+function mptSetBudget(value) {
+  const root = document.getElementById("pf-mpt-budget");
+  if (!root) return;
+  const v = MPT_BUDGET_LABEL[value] ? value : "standard";
+  root.dataset.value = v;
+  const label = root.querySelector(".pf-mpt-select-label");
+  if (label) label.textContent = MPT_BUDGET_LABEL[v];
+  root.querySelectorAll(".pf-mpt-select-menu li").forEach(li => {
+    li.setAttribute("aria-selected", li.dataset.value === v ? "true" : "false");
+  });
+}
+
+function mptGetParams() {
+  const lookback = document.querySelector("#pf-mpt-lookback .active")?.dataset.v || "3Y";
+  const frequency = document.querySelector("#pf-mpt-freq .active")?.dataset.v || "weekly";
+  const rf = (Number(document.getElementById("pf-mpt-rf").value) || 0) / 100;
+  const budget = document.getElementById("pf-mpt-budget").dataset.value || "standard";
+  const mode = document.querySelector("#pf-mpt-mode .active")?.dataset.v || "sparse";
+  const diversified = mode === "diversified";
+  return {lookback, frequency, rf, budget, diversified};
+}
+
+/* --- Deterministic progress bar --- */
+let _mptProgressTimer = null;
+function mptProgressStart(budget) {
+  const chart = document.getElementById("pf-mpt-chart");
+  const status = document.getElementById("pf-mpt-status");
+  if (!chart || !status) return;
+  const dur = MPT_BUDGET_SECONDS[budget] || 5;
+  status.innerHTML = `
+    <div class="mpt-progress" id="mpt-progress">
+      <div class="mpt-progress-track"><div class="mpt-progress-fill"></div></div>
+      <div class="mpt-progress-label">
+        <span class="mpt-progress-text">Optimizing portfolio…</span>
+        <span class="mpt-progress-timer">0.0s / ~${dur}s</span>
+      </div>
+    </div>`;
+  const root = status.querySelector("#mpt-progress");
+  const fill = root.querySelector(".mpt-progress-fill");
+  const timer = root.querySelector(".mpt-progress-timer");
+  const text = root.querySelector(".mpt-progress-text");
+  // Force layout, then start the CSS width transition over the budget window.
+  void fill.offsetWidth;
+  fill.style.transition = `width ${dur}s linear`;
+  fill.style.width = "100%";
+  const start = performance.now();
+  _mptProgressTimer = setInterval(() => {
+    const elapsed = (performance.now() - start) / 1000;
+    if (elapsed >= dur) {
+      text.textContent = "Finalizing…";
+      timer.textContent = `${elapsed.toFixed(1)}s / ~${dur}s`;
+    } else {
+      timer.textContent = `${elapsed.toFixed(1)}s / ~${dur}s`;
+    }
+  }, 100);
+}
+function mptProgressStop(state) {
+  if (_mptProgressTimer) { clearInterval(_mptProgressTimer); _mptProgressTimer = null; }
+  if (state === "done" || state === "fail") {
+    const root = document.querySelector("#mpt-progress");
+    if (root) {
+      root.classList.add(state);
+      const fill = root.querySelector(".mpt-progress-fill");
+      if (fill) fill.style.width = "100%";
+    }
+  }
+}
+
+async function mptRun() {
+  if (!DATA.length) return;
+  const btn = document.getElementById("pf-mpt-run");
+  const status = document.getElementById("pf-mpt-status");
+  // Clear any previous frame so the cloud/frontier disappear during compute.
+  mptClearChart();
+  const params = mptGetParams();
+  mptProgressStart(params.budget);
+  btn.disabled = true; MPT.busy = true;
+  try {
+    const r = await fetch("/api/efficient-frontier", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        rows: DATA, display_ccy: FX_QUOTE,
+        ...params,
+        current_weights: weightsForMode(STATE.mode),
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
+    MPT.result = d;
+    // Default selection = tangency (max Sharpe), if available, else mid-frontier
+    if (d.tangency) {
+      let best = 0, bestSh = -Infinity;
+      d.frontier.forEach((p, i) => {
+        const sh = p.vol > 1e-9 ? (p.ret - params.rf) / p.vol : -Infinity;
+        if (sh > bestSh) { bestSh = sh; best = i; }
+      });
+      MPT.selectedIdx = best;
+    } else {
+      MPT.selectedIdx = Math.floor(d.frontier.length / 2);
+    }
+    document.getElementById("pf-mpt-slider").disabled = false;
+    document.getElementById("pf-mpt-slider").max = String(Math.max(0, d.frontier.length - 1));
+    document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
+    mptProgressStop("done");
+    if (status) status.innerHTML = "";
+    mptRender();
+    // Auto-save the run. Server-side eviction (mpt save_mpt_run) drops any
+    // stale runs whose portfolio composition or risk-free rate differs from
+    // this one, keeping the Recent-runs list relevant without UI prompts.
+    mptSaveRun({silent: true}).catch(() => {});
+  } catch (e) {
+    mptProgressStop("fail");
+    if (status) {
+      status.innerHTML = `<div class="pf-mpt-error">Optimization failed: ${escapeHtml(e.message || String(e))}</div>`;
+    }
+  } finally {
+    btn.disabled = false; MPT.busy = false;
+  }
+}
+
+function mptClearChart() {
+  const base = document.getElementById("pf-mpt-base");
+  if (base) { const ctx = base.getContext("2d"); ctx && ctx.clearRect(0, 0, base.width, base.height); }
+  const ov = document.getElementById("pf-mpt-overlay");
+  if (ov) { const ctx = ov.getContext("2d"); ctx && ctx.clearRect(0, 0, ov.width, ov.height); }
+  const leg = document.getElementById("pf-mpt-legend"); if (leg) leg.innerHTML = "";
+}
+
+function mptRender() {
+  const d = MPT.result; if (!d) return;
+  mptRenderChart();
+  mptRenderSide();
+}
+
+// MPT._proj is the shared projection used by every chart draw call and the
+// hit-test. Single source of truth — both canvases agree on every coord by
+// construction, eliminating the SVG/canvas drift the old 3-layer chart had.
+function mptCurrentScale() { return MPT._proj; }
+
+// Resize both canvases identically through one helper so their backing
+// stores cannot drift apart. CSS controls the *display* size (inset:0 +
+// width/height:100%); we touch ONLY the backing store. Setting inline
+// width/height previously left the canvas stuck at its first measurement
+// even when the modal reflowed, causing axis labels to render below the
+// chart's visual box.
+function mptSizeCanvases(host) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const rect = host.getBoundingClientRect();
+  const cssW = Math.max(360, Math.floor(rect.width));
+  const cssH = Math.max(280, Math.floor(rect.height));
+  const W = Math.floor(cssW * dpr), H = Math.floor(cssH * dpr);
+  for (const id of ["pf-mpt-base", "pf-mpt-overlay"]) {
+    const cv = document.getElementById(id);
+    if (!cv) continue;
+    cv.width = W; cv.height = H;
+  }
+  return {cssW, cssH, dpr};
+}
+
+// Tick generation — nice rounding by powers of 10.
+function mptTicks(lo, hi, n) {
+  const span = hi - lo; if (span <= 0) return [lo];
+  const step0 = Math.pow(10, Math.floor(Math.log10(span / n)));
+  const norm = span / (n * step0);
+  const step = step0 * (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1);
+  const start = Math.ceil(lo / step) * step;
+  const out = []; for (let v = start; v <= hi + 1e-9; v += step) out.push(v);
+  return out;
+}
+
+function mptRenderChart() {
+  const d = MPT.result; if (!d) return;
+  const host = document.getElementById("pf-mpt-chart");
+  // Atomic size for both canvases.
+  const {cssW, cssH, dpr} = mptSizeCanvases(host);
+  const pad = {l: 56, r: 18, t: 18, b: 38};
+
+  // Domain from cloud + frontier + anchors.
+  let xMax = 0, xMin = Infinity, yMax = -Infinity, yMin = Infinity;
+  const consume = (v, r) => { if (v < xMin) xMin = v; if (v > xMax) xMax = v; if (r < yMin) yMin = r; if (r > yMax) yMax = r; };
+  (d.cloud || []).forEach(p => consume(p[0], p[1]));
+  (d.frontier || []).forEach(p => consume(p.vol, p.ret));
+  Object.values(d.anchors || {}).forEach(a => a && consume(a.vol, a.ret));
+  if (!isFinite(xMin)) { xMin = 0; xMax = 0.3; yMin = 0; yMax = 0.2; }
+  const params = mptGetParams();
+  yMin = Math.min(yMin, params.rf);
+  const dx = (xMax - xMin) * 0.06 || 0.01;
+  const dy = (yMax - yMin) * 0.08 || 0.01;
+  xMin = Math.max(0, xMin - dx); xMax += dx; yMin -= dy; yMax += dy;
+
+  // Projection in CSS pixels (toPx); fromPx for hit-testing.
+  const xToPx = v => pad.l + (v - xMin) / (xMax - xMin) * (cssW - pad.l - pad.r);
+  const yToPx = r => cssH - pad.b - (r - yMin) / (yMax - yMin) * (cssH - pad.t - pad.b);
+  const proj = {xMin, xMax, yMin, yMax, pad, cssW, cssH, dpr,
+                X: xToPx, Y: yToPx, toPx: (v, r) => [xToPx(v), yToPx(r)]};
+  MPT._proj = proj;
+
+  // Sharpe-by-color setup.
+  const sharpeOf = p => (p[0] > 1e-9 ? (p[1] - params.rf) / p[0] : 0);
+  let sMin = Infinity, sMax = -Infinity;
+  (d.cloud || []).forEach(p => { const s = sharpeOf(p); if (s < sMin) sMin = s; if (s > sMax) sMax = s; });
+  if (!isFinite(sMin)) { sMin = 0; sMax = 1; }
+  function sharpeColor(s) {
+    const t = Math.max(0, Math.min(1, (s - sMin) / Math.max(1e-9, sMax - sMin)));
+    const stops = [[68,1,84],[33,144,141],[253,231,37]];
+    const i = t * 2, j = Math.floor(i), f = i - j;
+    const a = stops[j], b = stops[Math.min(2, j + 1)];
+    return `rgb(${Math.round(a[0]+(b[0]-a[0])*f)},${Math.round(a[1]+(b[1]-a[1])*f)},${Math.round(a[2]+(b[2]-a[2])*f)})`;
+  }
+
+  // --- Base canvas: axes + cloud + frontier + anchors + tangency line ---
+  const baseCv = document.getElementById("pf-mpt-base");
+  const ctx = baseCv.getContext("2d");
+  // Reset transform to identity, then scale so every subsequent call is in
+  // CSS pixels — the same units as the projection.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  drawAxes(ctx, proj, d, params);
+  drawCloud(ctx, d.cloud || [], proj, sharpeOf, sharpeColor);
+  drawFrontierAndAnchors(ctx, d, proj, params);
+
+  // --- Overlay canvas: selection + hover ghost ---
+  drawOverlay();
+
+  // --- Wire interaction on the overlay canvas (top of stack) ---
+  const ov = document.getElementById("pf-mpt-overlay");
+  // Replace listeners by cloning so we never stack handlers on re-render.
+  const fresh = ov.cloneNode(false);
+  ov.parentNode.replaceChild(fresh, ov);
+  function _hitFrontier(ev) {
+    const r = fresh.getBoundingClientRect();
+    if (!r.width || !r.height) return -1;
+    // Convert client coords to CSS pixels inside the canvas — same units
+    // the projection uses.
+    const px = (ev.clientX - r.left) * (cssW / r.width);
+    const py = (ev.clientY - r.top) * (cssH / r.height);
+    let best = 0, bestD = Infinity;
+    d.frontier.forEach((p, i) => {
+      const dxp = xToPx(p.vol) - px, dyp = yToPx(p.ret) - py;
+      const dd = dxp * dxp + dyp * dyp;
+      if (dd < bestD) { bestD = dd; best = i; }
+    });
+    return best;
+  }
+  fresh.addEventListener("click", (ev) => {
+    const best = _hitFrontier(ev);
+    if (best < 0) return;
+    MPT.selectedIdx = best;
+    document.getElementById("pf-mpt-slider").value = String(best);
+    MPT.hoverIdx = null;
+    mptUpdateSelection();
+    mptRenderSide();
+  });
+  fresh.addEventListener("mousemove", (ev) => {
+    const idx = _hitFrontier(ev);
+    if (idx < 0) return;
+    MPT.hoverIdx = idx;
+    mptUpdateSelection();
+    mptShowFrontierTip(ev, idx);
+  });
+  fresh.addEventListener("mouseleave", () => {
+    MPT.hoverIdx = null;
+    mptUpdateSelection();
+    mptHideFrontierTip();
+  });
+
+  // --- Legend with marker-shaped swatches ---
+  const legend = document.getElementById("pf-mpt-legend");
+  legend.innerHTML = `
+    <span>${legendSwatch("frontier")}Efficient frontier</span>
+    <span>${legendSwatch("tangency")}Tangency (max Sharpe)</span>
+    <span>${legendSwatch("equal")}Equal-weight</span>
+    <span>${legendSwatch("cap")}Cap-weight</span>
+    <span>${legendSwatch("current")}Current</span>
+    <span>${legendSwatch("selected")}Selected</span>
+    <span style="margin-left:auto">${(d.meta?.n_samples_actual || (d.cloud || []).length).toLocaleString()} Monte-Carlo portfolios · ${d.meta?.n_obs || "?"} ${d.params?.frequency || "?"} obs · ${d.meta?.total_ms || "?"}ms</span>
+  `;
+}
+
+function legendSwatch(kind) {
+  const c = 'class="lg-swatch"';
+  switch (kind) {
+    case "frontier":
+      return `<svg ${c} viewBox="0 0 14 12"><path d="M1 9 Q7 1 13 4" fill="none" stroke="var(--accent)" stroke-width="2.2"/></svg>`;
+    case "tangency":
+      return `<svg ${c} viewBox="0 0 14 12"><polygon points="${star(7,6,5,2.4,5)}" fill="#fbbf24" stroke="#7c2d12" stroke-width="0.6"/></svg>`;
+    case "equal":
+      return `<svg ${c} viewBox="0 0 14 12"><polygon points="7,1 12,6 7,11 2,6" fill="#8b5cf6"/></svg>`;
+    case "cap":
+      return `<svg ${c} viewBox="0 0 14 12"><polygon points="7,1 12,11 2,11" fill="#06b6d4"/></svg>`;
+    case "current":
+      return `<svg ${c} viewBox="0 0 14 12"><path d="M2 2 L12 10 M12 2 L2 10" stroke="#f59e0b" stroke-width="2.2"/></svg>`;
+    case "selected":
+      return `<svg ${c} viewBox="0 0 14 12"><circle cx="7" cy="6" r="4.5" fill="none" stroke="var(--accent)" stroke-width="1.8"/><circle cx="7" cy="6" r="1.6" fill="var(--accent)"/></svg>`;
+    default:
+      return `<span class="lg-dot" style="background:var(--muted)"></span>`;
+  }
+}
+
+// CSS-variable color resolver: canvas can't read `var(--accent)` directly,
+// so look it up against :root once and cache for the current render.
+function _mptCssColor(name, fallback) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch (_e) { return fallback; }
+}
+
+function drawAxes(ctx, proj, d, params) {
+  const {pad, cssW, cssH, xMin, xMax, yMin, yMax, X, Y} = proj;
+  const accent = _mptCssColor("--accent", "#0969da");
+  const border = _mptCssColor("--border", "#d0d7de");
+  const muted  = _mptCssColor("--muted",  "#6e7781");
+  const bgCv   = _mptCssColor("--bg-canvas", "#ffffff");
+
+  // Plot box background (subtle) + border.
+  ctx.fillStyle = bgCv;
+  ctx.globalAlpha = 0.04;
+  ctx.fillRect(pad.l, pad.t, cssW - pad.l - pad.r, cssH - pad.t - pad.b);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = border; ctx.lineWidth = 1;
+  ctx.strokeRect(pad.l + 0.5, pad.t + 0.5, cssW - pad.l - pad.r - 1, cssH - pad.t - pad.b - 1);
+
+  const xt = mptTicks(xMin, xMax, 5);
+  const yt = mptTicks(yMin, yMax, 5);
+  const fmtPct = v => (v * 100).toFixed(v < 0.1 ? 1 : 0) + "%";
+
+  ctx.save();
+  ctx.strokeStyle = border; ctx.globalAlpha = 0.45;
+  ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+  for (const v of xt) {
+    const x = Math.round(X(v)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, cssH - pad.b); ctx.stroke();
+  }
+  for (const v of yt) {
+    const y = Math.round(Y(v)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(cssW - pad.r, y); ctx.stroke();
+  }
+  ctx.restore();
+
+  ctx.fillStyle = muted;
+  ctx.font = "10px ui-sans-serif, -apple-system, system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  for (const v of xt) ctx.fillText(fmtPct(v), X(v), cssH - pad.b + 14);
+  ctx.textAlign = "end";
+  for (const v of yt) ctx.fillText(fmtPct(v), pad.l - 6, Y(v));
+
+  // Axis titles.
+  ctx.font = "11px ui-sans-serif, -apple-system, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("Volatility (annualized)", (cssW - pad.r + pad.l) / 2, cssH - 6);
+  ctx.save();
+  ctx.translate(14, (cssH - pad.b + pad.t) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText("Return (annualized)", 0, 0);
+  ctx.restore();
+
+  // Tangency dashed line from rf marker → tangency, extended past it.
+  if (d.tangency) {
+    const tx = X(d.tangency.vol), ty = Y(d.tangency.ret);
+    const rfX = X(0), rfY = Y(params.rf);
+    const dxp = tx - rfX, dyp = ty - rfY;
+    const k = 1.6;
+    const ex = rfX + dxp * k, ey = rfY + dyp * k;
+    ctx.save();
+    ctx.strokeStyle = accent; ctx.lineWidth = 1.2;
+    ctx.setLineDash([5, 4]); ctx.globalAlpha = 0.85;
+    ctx.beginPath(); ctx.moveTo(rfX, rfY); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = accent; ctx.globalAlpha = 0.8;
+    ctx.beginPath(); ctx.arc(rfX, rfY, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = accent;
+    ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
+    ctx.font = "10px ui-sans-serif, -apple-system, system-ui, sans-serif";
+    ctx.fillText(`rf ${(params.rf * 100).toFixed(2)}%`, rfX + 8, rfY - 6);
+  }
+}
+
+// Cloud paint on the base canvas — single fillRect per point. The caller
+// already set ctx transform so we're in CSS pixels; no manual dpr math.
+function drawCloud(ctx, cloud, proj, sharpeOf, sharpeColor) {
+  if (!cloud || !cloud.length) return;
+  const {X, Y, pad, cssW, cssH, dpr} = proj;
+  ctx.save();
+  // Clip to the plot box so cloud dots never escape onto the axes.
+  ctx.beginPath();
+  ctx.rect(pad.l, pad.t, cssW - pad.l - pad.r, cssH - pad.t - pad.b);
+  ctx.clip();
+  ctx.globalAlpha = 0.55;
+  // Dot side ~1.4 CSS px; bumped slightly on hi-dpi so dots stay visible.
+  const r = Math.max(1.0, 1.4 * Math.min(dpr, 1.5));
+  const step = cloud.length > 1_200_000 ? Math.ceil(cloud.length / 1_200_000) : 1;
+  for (let i = 0; i < cloud.length; i += step) {
+    const p = cloud[i];
+    const x = X(p[0]), y = Y(p[1]);
+    ctx.fillStyle = sharpeColor(sharpeOf(p));
+    ctx.fillRect(x - r * 0.5, y - r * 0.5, r, r);
+  }
+  ctx.restore();
+}
+
+function drawFrontierAndAnchors(ctx, d, proj, params) {
+  const {X, Y} = proj;
+  const accent = _mptCssColor("--accent", "#0969da");
+  if (d.frontier && d.frontier.length) {
+    ctx.save();
+    ctx.strokeStyle = accent; ctx.lineWidth = 2.2;
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.beginPath();
+    d.frontier.forEach((p, i) => {
+      const x = X(p.vol), y = Y(p.ret);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+  if (d.min_vol) drawMarker(ctx, "endpoint", X(d.min_vol.vol), Y(d.min_vol.ret));
+  if (d.max_ret) drawMarker(ctx, "endpoint", X(d.max_ret.vol), Y(d.max_ret.ret));
+  const an = d.anchors || {};
+  if (an.equal)   drawMarker(ctx, "equal",   X(an.equal.vol),   Y(an.equal.ret));
+  if (an.cap)     drawMarker(ctx, "cap",     X(an.cap.vol),     Y(an.cap.ret));
+  if (an.current) drawMarker(ctx, "current", X(an.current.vol), Y(an.current.ret));
+  if (d.tangency) drawMarker(ctx, "tangency", X(d.tangency.vol), Y(d.tangency.ret));
+}
+
+function drawMarker(ctx, kind, x, y) {
+  ctx.save();
+  switch (kind) {
+    case "endpoint":
+      ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.stroke();
+      break;
+    case "equal":
+      ctx.fillStyle = "#8b5cf6"; ctx.globalAlpha = 0.95;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 6); ctx.lineTo(x + 6, y); ctx.lineTo(x, y + 6); ctx.lineTo(x - 6, y); ctx.closePath();
+      ctx.fill();
+      break;
+    case "cap":
+      ctx.fillStyle = "#06b6d4"; ctx.globalAlpha = 0.95;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 6); ctx.lineTo(x + 6, y + 5); ctx.lineTo(x - 6, y + 5); ctx.closePath();
+      ctx.fill();
+      break;
+    case "current":
+      ctx.strokeStyle = "#f59e0b"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5);
+      ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5); ctx.stroke();
+      break;
+    case "tangency": {
+      const R = 8, r = 4, n = 5;
+      ctx.fillStyle = "#fbbf24"; ctx.strokeStyle = "#7c2d12"; ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      for (let i = 0; i < 2 * n; i++) {
+        const ang = -Math.PI / 2 + i * Math.PI / n;
+        const rad = i % 2 === 0 ? R : r;
+        const px = x + rad * Math.cos(ang), py = y + rad * Math.sin(ang);
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      break;
+    }
+  }
+  ctx.restore();
+}
+
+// Paint just the overlay canvas (selection ring + hover ghost). Cheap —
+// called on slider input and on mousemove; the base canvas is untouched.
+function drawOverlay() {
+  const d = MPT.result; if (!d) return;
+  const proj = MPT._proj; if (!proj) return;
+  const cv = document.getElementById("pf-mpt-overlay");
+  if (!cv) return;
+  const {cssW, cssH, dpr, X, Y} = proj;
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  const accent = _mptCssColor("--accent", "#0969da");
+
+  // Hover ghost (only when it isn't the same point as the selection).
+  if (MPT.hoverIdx != null && MPT.hoverIdx !== MPT.selectedIdx) {
+    const hp = d.frontier[MPT.hoverIdx];
+    if (hp) {
+      const hx = X(hp.vol), hy = Y(hp.ret);
+      ctx.save();
+      ctx.strokeStyle = accent; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.6;
+      ctx.beginPath(); ctx.arc(hx, hy, 6, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = accent; ctx.globalAlpha = 0.8;
+      ctx.beginPath(); ctx.arc(hx, hy, 2.2, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+  }
+  // Selection ring.
+  const sel = d.frontier[MPT.selectedIdx];
+  if (sel) {
+    const x = X(sel.vol), y = Y(sel.ret);
+    ctx.save();
+    ctx.strokeStyle = accent; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = accent;
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// Public name preserved so existing slider/click handlers keep working.
+function mptUpdateSelection() { drawOverlay(); }
+
+// Floating tooltip anchored to the cursor while hovering the chart. Shows
+// (vol, ret, sharpe) of the nearest frontier point plus its top-3 weights.
+// Positioning routes through the unified placeTip() so it never clips off
+// the viewport.
+function mptShowFrontierTip(ev, idx) {
+  const d = MPT.result; if (!d) return;
+  const p = d.frontier[idx]; if (!p) return;
+  const params = mptGetParams();
+  const sharpe = p.vol > 1e-9 ? (p.ret - params.rf) / p.vol : NaN;
+  const top = Object.entries(p.weights || {})
+    .filter(([_, w]) => w > 1e-4)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3);
+  let tip = document.getElementById("pf-mpt-frontier-tip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "pf-mpt-frontier-tip";
+    tip.className = "pf-mpt-frontier-tip";
+    document.body.appendChild(tip);
+  }
+  tip.innerHTML = `
+    <div class="tip-title">Frontier point #${idx + 1} / ${d.frontier.length}</div>
+    <div class="tip-row"><span class="k">Return</span><span class="v">${(p.ret * 100).toFixed(2)}%</span></div>
+    <div class="tip-row"><span class="k">Vol</span><span class="v">${(p.vol * 100).toFixed(2)}%</span></div>
+    <div class="tip-row"><span class="k">Sharpe</span><span class="v">${isFinite(sharpe) ? sharpe.toFixed(3) : "—"}</span></div>
+    ${top.length ? `<div class="tip-sub">Top weights</div>` + top.map(([s, w]) =>
+      `<div class="tip-row"><span class="k">${escapeHtml(s)}</span><span class="v">${(w * 100).toFixed(1)}%</span></div>`
+    ).join("") : ""}
+  `;
+  tip.classList.add("show");
+  // Anchor on the cursor and let placeTip pick a side / clamp to viewport.
+  if (typeof placeTip === "function") {
+    placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
+                   width: 0, height: 0}, {preferred: "above", offset: 14, gap: 8});
+  } else {
+    tip.style.left = (ev.clientX + 14) + "px";
+    tip.style.top = (ev.clientY + 14) + "px";
+  }
+}
+function mptHideFrontierTip() {
+  const tip = document.getElementById("pf-mpt-frontier-tip");
+  if (tip) tip.classList.remove("show");
+}
+
+function star(cx, cy, R, r, n) {
+  // Render a star polygon centered at (cx, cy)
+  const pts = [];
+  for (let i = 0; i < 2 * n; i++) {
+    const ang = -Math.PI / 2 + i * Math.PI / n;
+    const rad = i % 2 === 0 ? R : r;
+    pts.push(`${(cx + rad * Math.cos(ang)).toFixed(1)},${(cy + rad * Math.sin(ang)).toFixed(1)}`);
+  }
+  return pts.join(" ");
+}
+
+function mptRenderSide() {
+  const d = MPT.result; if (!d) return;
+  const sel = d.frontier[MPT.selectedIdx]; if (!sel) return;
+  const params = mptGetParams();
+  const sharpe = sel.vol > 1e-9 ? (sel.ret - params.rf) / sel.vol : NaN;
+  const stats = document.getElementById("pf-mpt-stats");
+  stats.innerHTML = `
+    <span class="k">Annualised return</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
+    <span class="k">Annualised vol</span><span class="v">${(sel.vol * 100).toFixed(2)}%</span>
+    <span class="k">Sharpe (rf ${(params.rf*100).toFixed(2)}%)</span><span class="v ${sharpe >= 0 ? "pos" : "neg"}">${isFinite(sharpe) ? sharpe.toFixed(3) : "—"}</span>
+    <span class="k">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
+  `;
+  // Weights bars (sorted descending; zero-weight rows hidden for clarity)
+  const wlist = document.getElementById("pf-mpt-wlist");
+  const ws = Object.entries(sel.weights || {})
+    .filter(([_, w]) => w > 1e-4)
+    .sort((a, b) => b[1] - a[1]);
+  if (!ws.length) {
+    wlist.innerHTML = `<span class="pf-mpt-status">No weights at this point.</span>`;
+  } else {
+    const maxW = ws[0][1];
+    wlist.innerHTML = ws.map(([sym, w]) => `
+      <div class="pf-mpt-wrow">
+        <span title="${escapeHtml(sym)}">${escapeHtml(sym)}</span>
+        <div class="pf-mpt-track"><div class="pf-mpt-fill" style="width:${(w/maxW*100).toFixed(1)}%"></div></div>
+        <span class="pf-mpt-val">${(w * 100).toFixed(2)}%</span>
+      </div>
+    `).join("");
+  }
+}
+
+function mptSaveAsPreset() {
+  const d = MPT.result; if (!d) return;
+  const sel = d.frontier[MPT.selectedIdx]; if (!sel) return;
+  if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
+    return toast("Save the portfolio first to keep custom weights.");
+  }
+  const existing = (STATE.weightPresets || []).map(p => p.name);
+  const suggested = `MPT ${d.params.lookback} ${d.params.frequency}`;
+  showInlinePrompt({
+    title: "Save as Custom Weights",
+    description:
+      "Saves the currently selected portfolio (the point on the efficient frontier under the slider) as a named Custom-Weights configuration under this portfolio. " +
+      "Switch between custom configurations from the mode bar to compare strategies side-by-side against Equal-weight and Cap-weight.",
+    initial: suggested,
+    placeholder: "e.g. Tangency 3Y Weekly",
+    validate(name) {
+      if (!name) return "Name required.";
+      if (existing.includes(name)) return `"${name}" already exists.`;
+      return null;
+    },
+    onOk: async (name) => {
+      try {
+        await savePresetServer(name, sel.weights, {setActive: true});
+        STATE.mode = modeId(name);
+        STATE.customWeights = null;
+        closeMptOverlay();
+        renderModeBar();
+        persistActivePreset();
+        requestAnalytics({force: true});
+        toast(`Custom weights "${name}" saved.`);
+      } catch (e) { toast("Save failed: " + (e.message || e)); }
+    },
+  });
+}
+
+async function mptSaveRun({silent} = {silent: false}) {
+  const d = MPT.result; if (!d) return;
+  if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
+    if (!silent) toast("Save the portfolio first.");
+    return;
+  }
+  try {
+    // Strip the (heavy) cloud before persisting; it can be re-sampled cheaply.
+    const compact = {
+      params: d.params, symbols: d.symbols, missing: d.missing,
+      frontier: d.frontier, tangency: d.tangency,
+      min_vol: d.min_vol, max_ret: d.max_ret, anchors: d.anchors,
+      meta: d.meta,
+    };
+    const r = await fetch("/api/mpt-runs", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({view: STATE.activeView, run: compact}),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "save failed");
+    await mptLoadRuns();
+    if (!silent) toast("Run saved.");
+  } catch (e) { if (!silent) toast("Save failed: " + (e.message || e)); }
+}
+
+async function mptLoadRuns() {
+  const host = document.getElementById("pf-mpt-runs");
+  if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
+    host.innerHTML = `<span class="pf-mpt-status">Saved runs are per-portfolio.</span>`;
+    MPT.runs = []; return;
+  }
+  try {
+    const r = await fetch(`/api/mpt-runs?view=${encodeURIComponent(STATE.activeView)}`);
+    const j = await r.json();
+    MPT.runs = j.runs || [];
+  } catch (_) { MPT.runs = []; }
+  if (!MPT.runs.length) {
+    host.innerHTML = `<span class="pf-mpt-status">No saved runs yet.</span>`;
+    return;
+  }
+  host.innerHTML = MPT.runs.map(r => {
+    const p = r.params || {};
+    const t = r.tangency || {};
+    return `<div class="pf-mpt-run-row" data-id="${escapeHtml(r.id)}">
+      <div style="flex:1">
+        <div><b>${escapeHtml(p.lookback || "")} ${escapeHtml(p.frequency || "")}</b> · ${(p.display_ccy || "USD")}</div>
+        <div class="meta">${escapeHtml(r.saved_at || "").slice(0, 16).replace("T", " ")} · tangent Sharpe ${t.sharpe != null ? Number(t.sharpe).toFixed(2) : "—"}</div>
+      </div>
+      <button class="del" title="Delete">✕</button>
+    </div>`;
+  }).join("");
+  host.querySelectorAll(".pf-mpt-run-row").forEach(row => {
+    const id = row.dataset.id;
+    row.addEventListener("click", (e) => {
+      if (e.target.classList.contains("del")) return;
+      mptLoadRun(id);
+    });
+    row.querySelector(".del").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await fetch(`/api/mpt-runs/${encodeURIComponent(id)}?view=${encodeURIComponent(STATE.activeView)}`, {method: "DELETE"});
+        mptLoadRuns();
+      } catch (_) {}
+    });
+  });
+}
+
+async function mptLoadRun(id) {
+  try {
+    const r = await fetch(`/api/mpt-runs/${encodeURIComponent(id)}?view=${encodeURIComponent(STATE.activeView)}`);
+    const j = await r.json();
+    if (!r.ok || !j.run) throw new Error(j.error || "not found");
+    // Saved runs are persisted without the cloud — show an empty cloud so
+    // the chart still renders.
+    MPT.result = {...j.run, cloud: j.run.cloud || []};
+    // Reflect run params in controls
+    if (j.run.params) {
+      const p = j.run.params;
+      document.querySelectorAll("#pf-mpt-lookback button").forEach(b => b.classList.toggle("active", b.dataset.v === p.lookback));
+      document.querySelectorAll("#pf-mpt-freq button").forEach(b => b.classList.toggle("active", b.dataset.v === p.frequency));
+      if (p.rf != null) document.getElementById("pf-mpt-rf").value = (p.rf * 100).toFixed(2);
+      if (p.budget) mptSetBudget(p.budget);
+      const savedMode = p.diversified ? "diversified" : "sparse";
+      document.querySelectorAll("#pf-mpt-mode button").forEach(b => b.classList.toggle("active", b.dataset.v === savedMode));
+    }
+    MPT.selectedIdx = Math.floor((MPT.result.frontier || []).length / 2);
+    document.getElementById("pf-mpt-slider").max = String(Math.max(0, (MPT.result.frontier || []).length - 1));
+    document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
+    document.getElementById("pf-mpt-slider").disabled = false;
+    mptRender();
+  } catch (e) {
+    toast("Load failed: " + (e.message || e));
+  }
+}
+
+/* --- MPT overlay wiring --- */
+$("#optimize").addEventListener("click", openMptOverlay);
+$("#pf-mpt-close").addEventListener("click", closeMptOverlay);
+$("#pf-mpt-bg").addEventListener("click", (e) => { if (e.target.id === "pf-mpt-bg") closeMptOverlay(); });
+$("#pf-mpt-run").addEventListener("click", mptRun);
+$("#pf-mpt-save").addEventListener("click", mptSaveAsPreset);
+$("#pf-mpt-info")?.addEventListener("click", openMptInfo);
+$("#pf-mpt-info-close")?.addEventListener("click", closeMptInfo);
+$("#pf-mpt-info-bg")?.addEventListener("click", (e) => { if (e.target.id === "pf-mpt-info-bg") closeMptInfo(); });
+
+// Slider — coalesce rapid input events through requestAnimationFrame so we
+// repaint the dynamic marker + sidebar at display rate, never more. The
+// static cloud/frontier layers are NOT touched here, so this stays fast
+// even with 1M cloud points.
+let _mptSliderFrame = 0;
+$("#pf-mpt-slider").addEventListener("input", (e) => {
+  MPT.selectedIdx = Number(e.target.value) || 0;
+  MPT.hoverIdx = null;
+  if (_mptSliderFrame) return;
+  _mptSliderFrame = requestAnimationFrame(() => {
+    _mptSliderFrame = 0;
+    mptUpdateSelection();
+    mptRenderSide();
+  });
+});
+
+// Segmented-control click handlers (lookback + frequency)
+document.querySelectorAll("#pf-mpt-lookback button").forEach(b => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll("#pf-mpt-lookback button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+  });
+});
+document.querySelectorAll("#pf-mpt-freq button").forEach(b => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll("#pf-mpt-freq button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+  });
+});
+document.querySelectorAll("#pf-mpt-mode button").forEach(b => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll("#pf-mpt-mode button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+  });
+});
+
+// --- Custom Compute Budget dropdown ---
+(function wireMptBudget() {
+  const root = document.getElementById("pf-mpt-budget");
+  if (!root) return;
+  const menu = root.querySelector(".pf-mpt-select-menu");
+  const open = () => { menu.hidden = false; root.classList.add("open"); root.setAttribute("aria-expanded", "true"); };
+  const close = () => { menu.hidden = true; root.classList.remove("open"); root.setAttribute("aria-expanded", "false"); };
+  root.addEventListener("click", (e) => {
+    if (e.target.tagName === "LI") {
+      mptSetBudget(e.target.dataset.value);
+      close();
+      return;
+    }
+    menu.hidden ? open() : close();
+  });
+  root.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); menu.hidden ? open() : close(); }
+    else if (e.key === "Escape") { close(); }
+  });
+  document.addEventListener("click", (e) => {
+    if (!root.contains(e.target)) close();
+  });
+})();
+
+// --- Risk-free "Auto" pill + inline sparkline ---
+// Holds the most-recent fetched series so the hover crosshair can re-derive
+// per-pixel data without refetching.
+const _RF_SPARK = { series: null, meta: null, lookback: null };
+async function mptFetchRfAuto({silent} = {silent: false}) {
+  const btn = document.getElementById("pf-mpt-rf-auto");
+  const input = document.getElementById("pf-mpt-rf");
+  const spark = document.getElementById("pf-mpt-rf-spark");
+  if (!btn || !input || !spark) return;
+  const lookback = document.querySelector("#pf-mpt-lookback .active")?.dataset.v || "3Y";
+  btn.classList.add("busy");
+  try {
+    const r = await fetch(`/api/risk-free-history?ccy=${encodeURIComponent(FX_QUOTE)}&lookback=${encodeURIComponent(lookback)}`);
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ("HTTP " + r.status));
+    if (j.mean_pct != null && isFinite(j.mean_pct)) {
+      input.value = Number(j.mean_pct).toFixed(2);
+    }
+    const series = (j.series || []).filter(p => isFinite(p[1]));
+    if (series.length >= 2) {
+      _RF_SPARK.series = series; _RF_SPARK.meta = j; _RF_SPARK.lookback = lookback;
+      mptDrawRfSpark();
+      // Tooltip content is rendered live by the hover handler from _RF_SPARK.
+    } else {
+      _RF_SPARK.series = null; _RF_SPARK.meta = null;
+      spark.classList.remove("show");
+      spark.innerHTML = "";
+    }
+    if (!silent && j.mean_pct == null) toast("No risk-free data available for " + FX_QUOTE + ".");
+  } catch (e) {
+    if (!silent) toast("Risk-free fetch failed: " + (e.message || e));
+  } finally {
+    btn.classList.remove("busy");
+  }
+}
+
+// Draws the polished sparkline: filled area + line + dashed mean baseline +
+// latest-value dot. The numeric label lives in the input + hover tooltip.
+function mptDrawRfSpark() {
+  const spark = document.getElementById("pf-mpt-rf-spark");
+  if (!spark || !_RF_SPARK.series) return;
+  const series = _RF_SPARK.series;
+  const meta = _RF_SPARK.meta || {};
+  const vals = series.map(p => p[1]);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const span = Math.max(1e-9, hi - lo);
+  // viewBox = 200 x 36, with 3px top/bottom padding and a tiny right margin
+  // for the latest-value dot — no in-SVG percent label anymore.
+  const W = 200, H = 36, padY = 3, padR = 4;
+  const usableW = W - padR - 2;
+  const usableH = H - 2 * padY;
+  const xs = series.map((_, i) => 2 + (i / (series.length - 1)) * usableW);
+  const ys = series.map(p => H - padY - ((p[1] - lo) / span) * usableH);
+  const linePts = xs.map((x, i) => `${x.toFixed(2)},${ys[i].toFixed(2)}`).join(" ");
+  const areaPts = `${xs[0].toFixed(2)},${(H - padY).toFixed(2)} ${linePts} ${xs[xs.length-1].toFixed(2)},${(H - padY).toFixed(2)}`;
+  const mean = meta.mean_pct != null ? meta.mean_pct : (vals.reduce((a, b) => a + b, 0) / vals.length);
+  const meanY = H - padY - ((mean - lo) / span) * usableH;
+  const lastX = xs[xs.length - 1], lastY = ys[ys.length - 1];
+  spark.innerHTML = `
+    <polygon class="rfs-area" points="${areaPts}"/>
+    <line class="rfs-base" x1="2" y1="${meanY.toFixed(2)}" x2="${(W - padR).toFixed(2)}" y2="${meanY.toFixed(2)}"/>
+    <polyline class="rfs-line" points="${linePts}"/>
+    <line class="rfs-cross" id="rfs-cross-line" x1="0" y1="${padY}" x2="0" y2="${H - padY}"/>
+    <circle class="rfs-dot" cx="${lastX.toFixed(2)}" cy="${lastY.toFixed(2)}" r="2.4"/>
+  `;
+  spark.classList.add("show");
+}
+
+function _rfLookbackLabel(lb) {
+  if (!lb) return "lookback";
+  const m = String(lb).match(/^(\d+)\s*Y/i);
+  return m ? `${m[1]} Y` : String(lb);
+}
+
+// Hover crosshair + rich card. The card matches the data-tip aesthetic but
+// supports multi-line content and follows the cursor.
+(function wireRfSparkHover() {
+  const wrap = document.getElementById("pf-mpt-rf-spark-wrap");
+  const spark = document.getElementById("pf-mpt-rf-spark");
+  const tip = document.getElementById("pf-mpt-rf-spark-tip");
+  if (!wrap || !spark || !tip) return;
+  wrap.addEventListener("mousemove", (e) => {
+    if (!_RF_SPARK.series || _RF_SPARK.series.length < 2) return;
+    const series = _RF_SPARK.series;
+    const meta = _RF_SPARK.meta || {};
+    const rect = wrap.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const frac = Math.max(0, Math.min(1, px / rect.width));
+    const idx = Math.round(frac * (series.length - 1));
+    const pt = series[idx];
+    const date = (pt[0] || "").slice(0, 10);
+    const val = Number(pt[1]);
+    const vals = series.map(p => p[1]);
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    const mean = meta.mean_pct != null ? meta.mean_pct : (vals.reduce((a, b) => a + b, 0) / vals.length);
+    const cur = meta.current_pct != null ? meta.current_pct : vals[vals.length - 1];
+    const ticker = meta.ticker || "rf";
+    const lbLabel = _rfLookbackLabel(_RF_SPARK.lookback);
+    const note = meta.source_note ? `<div class="tip-note">${escapeHtml(meta.source_note)}</div>` : "";
+    tip.innerHTML = `
+      <div class="tip-title">${escapeHtml(ticker)} · risk-free proxy</div>
+      <div class="tip-sub">Annualized yield used as the Sharpe / tangency baseline.</div>
+      <div class="tip-row"><span class="k">Hover ${escapeHtml(date)}</span><span class="v">${val.toFixed(2)}%</span></div>
+      <div class="tip-row"><span class="k">Current</span><span class="v">${cur != null ? cur.toFixed(2) + "%" : "—"}</span></div>
+      <div class="tip-row"><span class="k">Mean (${escapeHtml(lbLabel)})</span><span class="v">${mean != null ? mean.toFixed(2) + "%" : "—"}</span></div>
+      <div class="tip-row"><span class="k">Range</span><span class="v">${lo.toFixed(2)} – ${hi.toFixed(2)}%</span></div>
+      ${note}
+    `;
+    tip.style.left = px + "px";
+    tip.style.top = "0px";
+    tip.classList.add("show");
+    // Move crosshair on the SVG (viewBox coords)
+    const line = document.getElementById("rfs-cross-line");
+    if (line) {
+      const W = 200, padR = 4;
+      const x = 2 + frac * (W - padR - 2);
+      line.setAttribute("x1", x.toFixed(2));
+      line.setAttribute("x2", x.toFixed(2));
+      line.classList.add("show");
+    }
+  });
+  wrap.addEventListener("mouseleave", () => {
+    tip.classList.remove("show");
+    const line = document.getElementById("rfs-cross-line");
+    if (line) line.classList.remove("show");
+  });
+})();
+
+document.getElementById("pf-mpt-rf-auto")?.addEventListener("click", () => mptFetchRfAuto({silent: false}));
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  // About-MPT modal takes precedence (it sits on top of the MPT overlay)
+  const infoBg = document.getElementById("pf-mpt-info-bg");
+  if (infoBg && infoBg.classList.contains("show")) { closeMptInfo(); return; }
+  if (document.getElementById("pf-mpt-bg").classList.contains("show")) closeMptOverlay();
+});
+// Re-draw chart on window resize while overlay is open.
+window.addEventListener("resize", () => {
+  if (document.getElementById("pf-mpt-bg").classList.contains("show") && MPT.result) mptRender();
+});
 
 /* ===========================================================================
  * FX selector wiring (topbar dropdown + hover currency-index chart)
@@ -6473,17 +11020,32 @@ function fxSelect(ccy) {
   }
 }
 
-/* --- hover currency-index chart --- */
+/* --- hover currency-index chart ---
+ *
+ * Cache discipline: ONLY cache non-empty results. An empty array means the
+ * upstream call failed (likely yfinance rate-limit on the basket pairs).
+ * Caching `[]` made the "no data" message stick on every subsequent hover
+ * even after the rate-limit window passed — so we now keep failures
+ * uncached and retry on the next hover. Inflight-dedup still prevents
+ * burst-fetching when the user wiggles the cursor. */
 async function fxFetchIndex(ccy) {
-  if (FX_INDEX_CACHE[ccy]) return FX_INDEX_CACHE[ccy];
+  if (FX_INDEX_CACHE[ccy] && FX_INDEX_CACHE[ccy].length >= 2) {
+    return FX_INDEX_CACHE[ccy];
+  }
   if (FX_INDEX_INFLIGHT[ccy]) return FX_INDEX_INFLIGHT[ccy];
   const p = (async () => {
     try {
-      const r = await fetch(`/api/fx-index?ccy=${encodeURIComponent(ccy)}`);
-      if (!r.ok) return [];
-      const j = await r.json();
-      const pts = Array.isArray(j.index) ? j.index : [];
-      FX_INDEX_CACHE[ccy] = pts;
+      let pts = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const r = await fetch(`/api/fx-index?ccy=${encodeURIComponent(ccy)}`);
+        if (!r.ok) continue;
+        const j = await r.json();
+        pts = Array.isArray(j.index) ? j.index : [];
+        if (pts.length >= 2) break;
+      }
+      // Cache only real data; transient failures (empty) stay uncached so
+      // the next hover re-attempts the fetch.
+      if (pts.length >= 2) FX_INDEX_CACHE[ccy] = pts;
       return pts;
     } catch (e) { return []; }
     finally { delete FX_INDEX_INFLIGHT[ccy]; }
@@ -6528,14 +11090,18 @@ function fxDrawHoverChart(pts) {
 async function fxHoverShow(ccy, anchorEl) {
   const box = $("#fx-hover");
   if (!box) return;
+  if (FX_HOVER_CCY === ccy && box.classList.contains("show")) return;
+  const reqId = ++FX_HOVER_REQ_ID;
+  FX_HOVER_CCY = ccy;
   $("#fx-hover-title").textContent = `${ccy} basket index (1Y)`;
-  $("#fx-hover-foot").textContent = "loading…";
-  fxDrawHoverChart([]);
+  $("#fx-hover-foot").innerHTML = lcHtml("fetching index", {bar: true});
+  const svg = $("#fx-hover-svg");
+  if (svg) svg.innerHTML = "";
   box.classList.add("show");
   // position next to dropdown (anchored to the right side of the topbar);
   // CSS already places it with right:180px,top:36px.
   const pts = await fxFetchIndex(ccy);
-  if (!box.classList.contains("show")) return;
+  if (!box.classList.contains("show") || reqId !== FX_HOVER_REQ_ID || FX_HOVER_CCY !== ccy) return;
   fxDrawHoverChart(pts);
   if (pts && pts.length >= 2) {
     const ret = (pts[pts.length-1][1] / pts[0][1] - 1) * 100;
@@ -6548,6 +11114,8 @@ async function fxHoverShow(ccy, anchorEl) {
 }
 function fxHoverHide() {
   const box = $("#fx-hover");
+  FX_HOVER_REQ_ID += 1;
+  FX_HOVER_CCY = null;
   if (box) box.classList.remove("show");
 }
 
@@ -6581,8 +11149,6 @@ function fxInit() {
 setTheme(readTheme());
 fxInit();
 renderHeader();
-renderSortMenu();
-updateSortLabel();
 loadAllAtStartup();
 </script>
 
@@ -6648,6 +11214,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/views":
             self._send_json(200, list_views())
             return
+        if parsed.path == "/api/column-views":
+            raw = load_column_views()
+            self._send_json(200, {
+            "builtins": ["Default", "Fundamentals", "Momentum"],
+                "custom": raw.get("custom_views") or {},
+                "active": raw.get("active_view") or "Default",
+            })
+            return
         if parsed.path.startswith("/api/views/"):
             name = parsed.path[len("/api/views/"):]
             from urllib.parse import unquote
@@ -6708,6 +11282,87 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
+        if parsed.path == "/api/mpt-runs":
+            from urllib.parse import parse_qs
+            q = parse_qs(parsed.query)
+            view = (q.get("view") or [""])[0].strip()
+            self._send_json(200, {"runs": list_mpt_runs(view)})
+            return
+        if parsed.path == "/api/risk-free-history":
+            from urllib.parse import parse_qs
+            q = parse_qs(parsed.query)
+            ccy = (q.get("ccy") or ["USD"])[0].strip() or "USD"
+            lb = (q.get("lookback") or ["3Y"])[0].strip() or "3Y"
+            try:
+                self._send_json(200, _risk_free_history(ccy, lb))
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path.startswith("/api/mpt-runs/"):
+            from urllib.parse import parse_qs, unquote
+            rid = unquote(parsed.path[len("/api/mpt-runs/"):])
+            view = (parse_qs(parsed.query).get("view") or [""])[0].strip()
+            run = load_mpt_run(view, rid)
+            if not run:
+                self._send_json(404, {"error": "run not found"})
+                return
+            self._send_json(200, {"run": run})
+            return
+        if parsed.path == "/api/weight-presets":
+            from urllib.parse import parse_qs
+            view = (parse_qs(parsed.query).get("view") or [""])[0].strip()
+            self._send_json(200, list_weight_presets(view))
+            return
+        if parsed.path == "/api/analytics-cache":
+            from urllib.parse import parse_qs
+            view = (parse_qs(parsed.query).get("view") or [""])[0].strip()
+            self._send_json(200, {"cache": get_analytics_cache(view)})
+            return
+        if parsed.path == "/api/export-xlsx":
+            # Build a multi-sheet workbook from every saved portfolio on disk.
+            # See xlsx_export.py for the per-sheet contract — keep it in sync
+            # with the Export-button comment in the topbar HTML when extending.
+            try:
+                import xlsx_export
+            except ImportError as exc:
+                self._send_json(
+                    500,
+                    {"error": f"openpyxl not installed: {exc}. Run: pip install openpyxl"},
+                )
+                return
+            try:
+                # Load every view with rows. list_views() returns metadata
+                # only; we re-read each view to grab the rows payload.
+                meta = list_views().get("views") or {}
+                full: dict[str, dict] = {}
+                for name in meta:
+                    if not name or name == _CURRENT_KEY:
+                        continue
+                    full[name] = load_view(name)
+                if not full:
+                    self._send_json(404, {"error": "no saved portfolios to export"})
+                    return
+                blob = xlsx_export.build_workbook(
+                    full,
+                    analytics_runner=analyze_portfolios_multi,
+                    period="1Y",
+                    display_ccy="USD",
+                )
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                fname = f"portfolio_tracker_export_{stamp}.xlsx"
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+                self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+                self.send_header("Content-Length", str(len(blob)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(blob)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -6739,6 +11394,36 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": str(exc)})
             return
 
+        if parsed.path == "/api/column-views":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                raw = upsert_column_view(
+                    str(payload.get("name") or ""),
+                    payload.get("columns") or [],
+                )
+                self._send_json(200, {
+                    "custom": raw.get("custom_views") or {},
+                    "active": raw.get("active_view") or "Default",
+                })
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/column-views/active":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                raw = set_active_column_view(str(payload.get("name") or ""))
+                self._send_json(200, {"active": raw.get("active_view")})
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
         if parsed.path.startswith("/api/views/"):
             from urllib.parse import unquote
             name = unquote(parsed.path[len("/api/views/"):])
@@ -6752,6 +11437,33 @@ class Handler(BaseHTTPRequestHandler):
                 set_last_arg = payload.get("set_last", True)
                 saved = save_view(name, entries, rows, set_last=bool(set_last_arg))
                 self._send_json(200, {"name": name, "view": saved})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/portfolio/rename":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                old = str(payload.get("old") or "").strip()
+                new = str(payload.get("new") or "").strip()
+                if not old or not new:
+                    self._send_json(400, {"error": "old and new names required"})
+                    return
+                if old == new:
+                    self._send_json(200, {"ok": True, "watchlists": load_watchlists()})
+                    return
+                # Rename watchlist first (it validates collisions); then view payload.
+                wls = rename_watchlist(old, new)
+                try:
+                    rename_view(old, new)
+                except ValueError:
+                    # View-side collision: roll back the watchlist rename.
+                    rename_watchlist(new, old)
+                    raise
+                self._send_json(200, {"ok": True, "watchlists": wls})
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
@@ -6796,6 +11508,90 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 results = analyze_portfolios_multi(rows, weight_sets, period, display_ccy=display_ccy)
                 self._send_json(200, {"results": results} if "error" not in results else results)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/efficient-frontier":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                rows = payload.get("rows") or []
+                if not isinstance(rows, list) or not rows:
+                    self._send_json(400, {"error": "rows[] required"})
+                    return
+                result = compute_efficient_frontier(
+                    rows,
+                    lookback=str(payload.get("lookback") or "3Y"),
+                    frequency=str(payload.get("frequency") or "weekly"),
+                    display_ccy=str(payload.get("display_ccy") or "USD"),
+                    rf=float(payload.get("rf") or 0.04),
+                    budget=str(payload.get("budget") or "standard"),
+                    current_weights=payload.get("current_weights") or {},
+                    diversified=bool(payload.get("diversified") or False),
+                )
+                self._send_json(200, result)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/mpt-runs":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                view = str(payload.get("view") or "").strip()
+                run = payload.get("run") or {}
+                if not view or not isinstance(run, dict):
+                    self._send_json(400, {"error": "view and run{} required"})
+                    return
+                saved = save_mpt_run(view, run)
+                self._send_json(200, {"run": saved})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/weight-presets":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                view = str(payload.get("view") or "").strip()
+                name = str(payload.get("name") or "").strip()
+                weights = payload.get("weights") or {}
+                rename_from = payload.get("rename_from")
+                set_active = bool(payload.get("set_active", True))
+                out = upsert_weight_preset(
+                    view, name, weights,
+                    rename_from=(str(rename_from).strip() if rename_from else None),
+                    set_active=set_active,
+                )
+                self._send_json(200, out)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/weight-presets/active":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                view = str(payload.get("view") or "").strip()
+                name = payload.get("name")
+                out = set_active_weight_preset(view, (str(name) if name is not None else None))
+                self._send_json(200, out)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/analytics-cache":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                view = str(payload.get("view") or "").strip()
+                key = str(payload.get("key") or "").strip()
+                body = payload.get("payload") or {}
+                out = upsert_analytics_cache(view, key, body)
+                self._send_json(200, {"cache": out})
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
@@ -6859,6 +11655,50 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 delete_view(name)
                 self._send_json(200, {"ok": True})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path.startswith("/api/mpt-runs/"):
+            from urllib.parse import parse_qs, unquote
+            rid = unquote(parsed.path[len("/api/mpt-runs/"):])
+            view = (parse_qs(parsed.query).get("view") or [""])[0].strip()
+            try:
+                delete_mpt_run(view, rid)
+                self._send_json(200, {"ok": True})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/weight-presets":
+            from urllib.parse import parse_qs
+            q = parse_qs(parsed.query)
+            view = (q.get("view") or [""])[0].strip()
+            name = (q.get("name") or [""])[0].strip()
+            try:
+                out = delete_weight_preset(view, name)
+                self._send_json(200, out)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/analytics-cache":
+            from urllib.parse import parse_qs
+            view = (parse_qs(parsed.query).get("view") or [""])[0].strip()
+            try:
+                clear_analytics_cache(view)
+                self._send_json(200, {"ok": True})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path.startswith("/api/column-views/"):
+            from urllib.parse import unquote
+            name = unquote(parsed.path[len("/api/column-views/"):])
+            try:
+                raw = delete_column_view(name)
+                self._send_json(200, {
+                    "custom": raw.get("custom_views") or {},
+                    "active": raw.get("active_view") or "Default",
+                })
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
