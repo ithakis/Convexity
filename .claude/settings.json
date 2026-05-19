@@ -12,6 +12,13 @@
             "command": "cmd=$(jq -r '.tool_input.command // \"\"'); if echo \"$cmd\" | grep -qE 'git[[:space:]]+commit'; then staged=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep '\\.py$' || true); if [ -n \"$staged\" ]; then echo \"Syntax-checking staged Python files: $staged\"; for f in $staged; do python -c \"import ast; ast.parse(open('$f').read())\" && echo \"  OK: $f\" || { echo \"  SYNTAX ERROR in $f — fix before committing.\"; exit 1; }; done; echo \"All staged .py files pass syntax check.\"; fi; fi"
           },
           {
+            "type": "command",
+            "if": "Bash(git commit*)",
+            "statusMessage": "Pre-commit: running metrics test suite...",
+            "timeout": 60,
+            "command": "cmd=$(jq -r '.tool_input.command // \"\"'); if echo \"$cmd\" | grep -qE 'git[[:space:]]+commit'; then PYTHON=$( (command -v ~/miniforge3/envs/QF12/bin/python || command -v python3 || command -v python) 2>/dev/null | head -1); $PYTHON -m pytest tests/ -q --tb=short 2>&1 && echo \"Tests passed.\" || { echo \"TEST FAILURE — fix before committing.\"; exit 1; }; fi"
+          },
+          {
             "type": "agent",
             "if": "Bash(git commit*)",
             "statusMessage": "Pre-commit: reviewing staged diff for critical issues...",

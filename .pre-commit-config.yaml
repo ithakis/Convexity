@@ -1,0 +1,38 @@
+# pre-commit hooks for the Portfolio Tracker.
+#
+# Install once:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Run manually against all files:
+#   pre-commit run --all-files
+#
+# These hooks mirror the CI checks in .github/workflows/ci.yml so failures
+# are caught locally before pushing.
+
+repos:
+  # -------------------------------------------------------------------------
+  # 1. Python syntax check — hard gate, fast (~0.5s for whole repo)
+  # -------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: python-syntax-check
+        name: Python syntax check (ast.parse)
+        language: script
+        entry: scripts/check_syntax.py
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+  # -------------------------------------------------------------------------
+  # 2. pytest — metrics unit tests
+  # -------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: pytest-metrics
+        name: Metrics unit tests (pytest tests/)
+        language: system
+        entry: ~/miniforge3/envs/QF12/bin/python -m pytest tests/ -q --tb=short
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]

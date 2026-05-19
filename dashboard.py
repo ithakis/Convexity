@@ -2508,8 +2508,11 @@ def analyze_portfolios_multi(
         ann_return = float((val.iloc[-1] / val.iloc[0]) ** (1.0 / years) - 1.0) * 100.0
         ann_vol = float(ret.std() * math.sqrt(252)) * 100.0
         sharpe = float((ret.mean() * 252) / (ret.std() * math.sqrt(252))) if ret.std() else None
-        downside = ret[ret < 0].std()
-        sortino = float((ret.mean() * 252) / (downside * math.sqrt(252))) if downside and downside > 0 else None
+        # Standard semi-deviation: sqrt(mean(min(r_i, 0)²)) over ALL N periods.
+        # Using ret[ret<0].std() divides by N_neg-1 and subtracts mean_neg
+        # instead of 0, which overstates Sortino by 20-60%. (Sortino & Price 1994)
+        downside = math.sqrt((ret.clip(upper=0) ** 2).mean())
+        sortino = float((ret.mean() * 252) / (downside * math.sqrt(252))) if downside > 0 else None
         run_mx = val.cummax()
         max_dd = float((val / run_mx - 1.0).min() * 100.0)
         calmar = (ann_return / abs(max_dd)) if max_dd < 0 else None

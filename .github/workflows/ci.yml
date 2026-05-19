@@ -61,3 +61,23 @@ jobs:
         run: |
           python -c "import ast; ast.parse(open('dashboard.py').read()); print('dashboard.py: parseable')"
           python -c "import mpt" 2>&1 | grep -v "numba\|llvmlite\|NumbaPendingDeprecation" || true
+
+  test:
+    name: Metrics unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        # Install the full project requirements so mpt.py (which hard-imports
+        # numba at the module level) and dashboard.py (yfinance) are importable.
+        run: pip install pytest -r requirements.txt
+
+      - name: Run pytest
+        run: pytest tests/ -v --tb=short
