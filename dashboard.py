@@ -1150,6 +1150,57 @@ def _safe_info(tk: yf.Ticker) -> dict:
     return info
 
 
+def _earnings_surprise_yf(tk: yf.Ticker, symbol: str) -> list[dict] | None:
+    """Up to 8 quarters of EPS surprise from yfinance, most-recent first.
+
+    The bar column renders 8 slots, but Finnhub's free /stock/earnings is
+    hard-capped at 4 quarters regardless of the requested limit. yfinance's
+    earnings-date table reliably carries 8+ reported quarters from a single
+    consensus-estimate snapshot, so we source the whole series from one
+    provider here. Mixing Finnhub's recent 4 with yfinance's older 4
+    produced a visible discontinuity in the chart because the two providers
+    snapshot the consensus estimate at different times (same actual EPS,
+    different estimate => different surprise %). No API key required.
+
+    Shape matches the legacy Finnhub payload — {period, actual, estimate,
+    surprise_pct} with surprise_pct = (actual - estimate)/abs(estimate)*100,
+    None when the estimate is missing or 0. Cached for the analytics TTL
+    since it only moves on earnings day.
+    """
+    cache_key = f"eps_surprise|{symbol}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached.get("v")
+    try:
+        df = tk.get_earnings_dates(limit=24)
+    except Exception:
+        return None  # transient — don't cache, retry next build
+    if df is None or getattr(df, "empty", True):
+        return None
+    out: list[dict] = []
+    try:
+        for ts, row in df.iterrows():  # yfinance returns newest-first
+            actual = _safe_num(row.get("Reported EPS"))
+            if actual is None:
+                continue  # future / not-yet-reported quarter
+            estimate = _safe_num(row.get("EPS Estimate"))
+            if estimate in (None, 0):
+                surprise_pct = None
+            else:
+                surprise_pct = (actual - estimate) / abs(estimate) * 100.0
+            period = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
+            out.append({"period": period, "actual": actual,
+                        "estimate": estimate, "surprise_pct": surprise_pct})
+            if len(out) >= 8:
+                break
+    except Exception:
+        return None
+    if not out:
+        return None
+    _cache_put(cache_key, {"v": out}, _CACHE_TTL_ANALYTICS)
+    return out
+
+
 # ----------------------------- Per-symbol fetch ---------------------------
 
 
@@ -1271,15 +1322,18 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
       out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
       out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
 
+      # EPS surprise comes from yfinance (8 quarters, single estimate basis,
+      # no API key) — see _earnings_surprise_yf for why we don't use Finnhub
+      # here. TTL-cached so the cold-build cost is one extra call per symbol.
+      out["earnings_surprise"] = _earnings_surprise_yf(tk, symbol)
+
       # Finnhub supplemental enrichment. All calls TTL-cached; degrade to
       # None if key absent. Each call is try/excepted inside the adapter,
       # so one failing endpoint never breaks the row.
       if _fh is not None:
-        out["earnings_surprise"] = _fh.get_earnings_surprise(symbol)
         out["insider_mspr"]      = _fh.get_insider_sentiment(symbol)
         out["rec_trend_fh"]      = _fh.get_recommendation_trend(symbol)
       else:
-        out["earnings_surprise"] = None
         out["insider_mspr"]      = None
         out["rec_trend_fh"]      = None
 
@@ -5653,7 +5707,7 @@ const COLS = [
     sortValue: (r) => {
       const arr = r.earnings_surprise;
       if (!arr || !arr.length) return null;
-      const vals = arr.slice(0,4).map(x => x.surprise_pct).filter(x => x != null);
+      const vals = arr.slice(0,8).map(x => x.surprise_pct).filter(x => x != null);
       return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
     },
     render: (r) => epsSurpriseBars(r.earnings_surprise) },
@@ -5767,7 +5821,7 @@ const COL_INFO = {
   pct_1y:        "Total price return over the last 365 calendar days.",
   delta_ath:     "Distance from the highest close in the table row's 2-year history window. 0% = at that high; full bar = 50% below it.",
   rs_rank:       "Relative Strength: 12 monthly bars showing where each month's close ranked within its trailing-12-month price range.",
-  earnings_surprise: "EPS Surprise history: 8 quarters, most-recent right. Green bar = beat, red = miss. Height = magnitude (capped ±10%). Requires FINNHUB_API_KEY. Powered by Finnhub.",
+  earnings_surprise: "EPS Surprise history: up to 8 quarters, most-recent right. Green bar = beat, red = miss. Height = magnitude (capped ±10%). Source: Yahoo Finance.",
   rec_trend_fh:      "Recommendation Trend Δ6M: change in analyst consensus score over the last 6 months. Score = (2×Strong Buy + Buy − Sell − 2×Strong Sell) / total. Requires FINNHUB_API_KEY.",
   insider_mspr:      "MSPR — Monthly Share Purchase Ratio. Finnhub aggregates Form 4 filings into a single score: +100 = all insiders buying, −100 = all selling. Positive = net insider buying signal. Requires FINNHUB_API_KEY.",
   above_sma_20:  "20-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 month of trading days.",

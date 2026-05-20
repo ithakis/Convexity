@@ -171,12 +171,26 @@ fall back to the raw yield fields with a `> 1 => divide by 100` fixup.
 UI formatters and analytics should assume the normalized fractional
 value, not re-detect units downstream.
 
+**EPS surprise (`_earnings_surprise_yf`, yfinance):** `fetch_one`'s
+`earnings_surprise` row field (8-quarter EPS surprise list, most-recent
+first, shape `{period, actual, estimate, surprise_pct}`) comes from
+yfinance's `get_earnings_dates`, NOT Finnhub. Finnhub's free
+`/stock/earnings` is hard-capped at 4 quarters regardless of the `limit`
+param, but the bar column renders 8 slots. yfinance reliably carries 8+
+reported quarters from a single consensus-estimate snapshot, so we source
+the whole series from one provider — mixing Finnhub's recent 4 with
+yfinance's older 4 produced a visible discontinuity (same actual EPS,
+different estimate snapshot => different surprise %). No API key needed;
+cached for the analytics TTL (1800s), so cold build = one extra yfinance
+call/symbol, warm build = zero. `finnhub_adapter.get_earnings_surprise`
+still exists but is no longer wired into `fetch_one`.
+
 **Finnhub supplemental columns (`finnhub_adapter.py`):** `fetch_one`
-adds three optional row fields — `earnings_surprise` (8-quarter EPS
-surprise list), `insider_mspr` (Form-4 Monthly Share Purchase Ratio),
-and `rec_trend_fh` (6-month analyst recommendation trend). They come
-from the Finnhub free API via the module-level `import finnhub_adapter
-as _fh` (line ~50). The key is resolved by `_load_api_key()`:
+adds two optional row fields — `insider_mspr` (Form-4 Monthly Share
+Purchase Ratio) and `rec_trend_fh` (6-month analyst recommendation
+trend). They come from the Finnhub free API via the module-level
+`import finnhub_adapter as _fh` (line ~50). The key is resolved by
+`_load_api_key()`:
 `FINNHUB_API_KEY` env var first, then a strictly-local `.finnhub_key`
 file sitting next to the module (one line, the raw key). When neither is
 present, `_fh` returns `None` for every call and the three fields are
@@ -193,11 +207,11 @@ if you run the app from a different directory (e.g. after this branch
 merges to main), drop the same `.finnhub_key` beside `dashboard.py`
 there too, or export `FINNHUB_API_KEY`. The adapter is stdlib-only (`urllib.request`), self-caches with
 TTLs (3600/1800/3600s), and each call is individually try/excepted so a
-failing endpoint never breaks a row. Cold build = up to 3 calls/symbol
+failing endpoint never breaks a row. Cold build = up to 2 calls/symbol
 (within Finnhub's 60/min free budget at 5 workers); warm build = zero.
 Non-US tickers return empty data silently; only HTTP 429 logs one line.
-The columns are `EPS Surp.` (Momentum preset), `Rec Δ6M` and `MSPR`
-(Fundamentals preset).
+The columns are `Rec Δ6M` and `MSPR` (Fundamentals preset). The third
+Finnhub-style column, `EPS Surp.`, is now yfinance-sourced (see above).
 
 ### Analytics (`/api/portfolio-analytics-multi`)
 `analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
