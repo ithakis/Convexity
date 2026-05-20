@@ -49,6 +49,14 @@ import yfinance as yf
 
 import mpt
 
+# Optional Finnhub supplemental source. If the module is missing, _fh is
+# None. If it imports but FINNHUB_API_KEY is unset, _fh is non-None and its
+# functions all return None. Either way the columns render "—".
+try:
+    import finnhub_adapter as _fh
+except ImportError:
+    _fh = None
+
 # ----------------------------- Rate-limit handling -------------------------
 # yfinance 1.0 ships its own curl_cffi-based session (with TLS fingerprinting
 # that dodges most of Yahoo's anti-bot filtering); passing a plain
@@ -1262,6 +1270,18 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
       out["current_ratio"] = _safe_num(info.get("currentRatio"))
       out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
       out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
+
+      # Finnhub supplemental enrichment. All calls TTL-cached; degrade to
+      # None if key absent. Each call is try/excepted inside the adapter,
+      # so one failing endpoint never breaks the row.
+      if _fh is not None:
+        out["earnings_surprise"] = _fh.get_earnings_surprise(symbol)
+        out["insider_mspr"]      = _fh.get_insider_sentiment(symbol)
+        out["rec_trend_fh"]      = _fh.get_recommendation_trend(symbol)
+      else:
+        out["earnings_surprise"] = None
+        out["insider_mspr"]      = None
+        out["rec_trend_fh"]      = None
 
       return out  # success
 
@@ -2965,6 +2985,15 @@ def compute_efficient_frontier(
     n_samples_actual = int(cloud_arr.shape[0])
     optimize_ms = int((time.perf_counter() - t_opt) * 1000)
 
+    # ---- CVaR frontier: minimum-CVaR portfolio at α = 99, 98, ..., 50.
+    # Slider runs 99 → 50 (strict-tail on the left), so we emit confidence
+    # levels in descending order to keep slider index 0 = CVaR99.
+    t_cvar = time.perf_counter()
+    cvar_alphas = [a / 100.0 for a in range(99, 49, -1)]
+    cvar_frontier = mpt.cvar_curve(returns, cvar_alphas, mu, cov_s,
+                                   rf=rf, floor=floor)
+    cvar_ms = int((time.perf_counter() - t_cvar) * 1000)
+
     # Self-check: round-trip 5 evenly spaced frontier points through
     # portfolio_stats and confirm they match. Catches future drift between
     # the curve generator and the renderer's expectations.
@@ -3019,6 +3048,7 @@ def compute_efficient_frontier(
         "symbols": active,
         "missing": missing,
         "frontier": curve,
+        "cvar_frontier": cvar_frontier,
         "tangency": tangency,
         "min_vol": min_vol,
         "max_ret": max_ret,
@@ -3049,6 +3079,8 @@ def compute_efficient_frontier(
             "sampler_mix": "25% sparse-k · 30% Dir(0.05) · 25% Dir(0.3) · 20% Dir(1.0)",
             "fetch_ms": fetch_ms,
             "optimize_ms": optimize_ms,
+            "cvar_ms": cvar_ms,
+            "n_cvar": int(len(cvar_frontier)),
             "total_ms": int((time.perf_counter() - t_total) * 1000),
             "freq_label": freq,
             "budget_label": cfg["label"],
@@ -4159,8 +4191,33 @@ INDEX_HTML = r"""<!doctype html>
     display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--muted);
   }
   .pf-mpt-slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
+  .pf-mpt-slider-row.cvar input[type="range"] { accent-color: #ea580c; }
+  /* The row whose curve is currently being dragged gets a subtle highlight. */
+  .pf-mpt-slider-row.active-line .pf-mpt-slider-label { text-shadow: 0 0 6px var(--accent); }
+  .pf-mpt-slider-row.cvar.active-line .pf-mpt-slider-label { text-shadow: 0 0 6px #ea580c; }
+  .pf-mpt-slider-row .pf-mpt-slider-label {
+    min-width: 88px; font-weight: 600; color: var(--text);
+  }
+  .pf-mpt-slider-row.cvar .pf-mpt-slider-label { color: #ea580c; }
+  .pf-mpt-slider-row .pf-mpt-slider-readout {
+    min-width: 72px; text-align: right; font-variant-numeric: tabular-nums;
+    color: var(--muted);
+  }
   .pf-mpt-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); align-items: center; }
-  .pf-mpt-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+  .pf-mpt-legend > span {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 6px; border-radius: 5px; border: 1px solid transparent;
+    cursor: pointer; user-select: none;
+    transition: background-color 0.12s, border-color 0.12s;
+  }
+  .pf-mpt-legend > span[data-legend]:hover {
+    background: var(--bg-subtle); border-color: var(--border);
+  }
+  .pf-mpt-legend > span.active {
+    background: var(--bg-subtle); border-color: var(--accent);
+  }
+  .pf-mpt-legend > span.no-click { cursor: default; }
+  .pf-mpt-legend > span.no-click:hover { background: transparent; border-color: transparent; }
   .pf-mpt-legend .lg-dot {
     display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle;
   }
@@ -5122,10 +5179,19 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
           <canvas id="pf-mpt-overlay" class="pf-mpt-cv pf-mpt-cv-overlay" aria-hidden="true"></canvas>
           <div class="pf-mpt-status" id="pf-mpt-status">Run the optimization to draw the efficient frontier.</div>
         </div>
-        <div class="pf-mpt-slider-row">
+        <div class="pf-mpt-slider-row" data-line="frontier">
+          <span class="pf-mpt-slider-label">Frontier</span>
           <span>Min-vol</span>
           <input type="range" id="pf-mpt-slider" min="0" max="100" value="50" disabled/>
           <span>Max-return</span>
+          <span class="pf-mpt-slider-readout" id="pf-mpt-slider-readout">—</span>
+        </div>
+        <div class="pf-mpt-slider-row cvar" data-line="cvar">
+          <span class="pf-mpt-slider-label">CVaR</span>
+          <span>99%</span>
+          <input type="range" id="pf-mpt-cvar-slider" min="0" max="49" value="0" disabled/>
+          <span>50%</span>
+          <span class="pf-mpt-slider-readout" id="pf-mpt-cvar-readout">—</span>
         </div>
         <div class="pf-mpt-legend" id="pf-mpt-legend"></div>
       </div>
@@ -5213,6 +5279,21 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
           where <b>r<sub>f</sub></b> is the risk-free rate. Geometrically it is the
           point at which a line from <b>(0, r<sub>f</sub>)</b> is tangent to the
           frontier — the steepest reward-to-risk ratio achievable with risky assets.
+        </div>
+        <div class="info-card-desc">
+          The dashed orange curve overlays a separate family of optima: the
+          <b>minimum-CVaR</b> portfolios. For confidence level α∈[0.5, 0.99],
+          <b>CVaR<sub>α</sub></b> (expected shortfall, ES<sub>α</sub>) is the
+          expected loss conditional on being in the worst (1−α) tail of the
+          empirical return distribution. Each point is solved as a
+          <b>Rockafellar-Uryasev</b> linear program:
+        </div>
+        <div class="info-formula">$$\min_{w,\zeta,u}\ \zeta + \frac{1}{(1-\alpha)T} \sum_{t} u_t \quad \text{s.t.}\quad u_t \ge -R_t^\top w - \zeta,\ \ u_t \ge 0,\ \ w^\top \mathbf{1} = 1,\ \ w \ge L$$</div>
+        <div class="info-card-desc">
+          At the optimum, <b>ζ⋆ = VaR<sub>α</sub></b> and the objective equals
+          <b>CVaR<sub>α</sub></b>. The slider scans α from 99% (strict tail) down
+          to 50%; lower α weighs broader downside in the objective and typically
+          accepts a tighter portfolio with less concentration.
         </div>
         <div class="info-card-why">
           Sample covariance is noisy when the number of assets approaches the
@@ -5562,6 +5643,14 @@ const COLS = [
     render: (r) => deltaBar(r.delta_ath) },
   { key: "rs_rank",     label: "RS Rank 1M",w: 92,  align: "center", sortable: false,
     render: (r) => rsBars(r.rs_rank) },
+  { key: "earnings_surprise", label: "EPS Surp.", w: 80, align: "center", sortable: true,
+    sortValue: (r) => {
+      const arr = r.earnings_surprise;
+      if (!arr || !arr.length) return null;
+      const vals = arr.slice(0,4).map(x => x.surprise_pct).filter(x => x != null);
+      return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
+    },
+    render: (r) => epsSurpriseBars(r.earnings_surprise) },
   { key: "above_sma_20",  label: "20SMA",   w: 46,  align: "center", sortable: true,
     render: (r) => triangle(r.above_sma_20),
     sortValue: (r) => r.above_sma_20 === null ? null : (r.above_sma_20 ? 1 : 0) },
@@ -5631,6 +5720,12 @@ const COLS = [
     heat: { kind: "yo", clipMin: 1, clipMax: 5, naMax: true },
     render: (r) => fmt2(r.recommendation_mean),
     sortValue: (r) => r.recommendation_mean },
+  { key: "rec_trend_fh", label: "Rec Δ6M", w: 72, align: "center", sortable: true,
+    sortValue: (r) => recTrendScore(r.rec_trend_fh),
+    render: (r) => recTrendCell(r.rec_trend_fh) },
+  { key: "insider_mspr", label: "MSPR", w: 62, align: "center", sortable: true,
+    sortValue: (r) => r.insider_mspr?.mspr ?? null,
+    render: (r) => msprBadge(r.insider_mspr) },
   /* Target upside derived client-side from analyst mean target and last price. */
   { key: "target_upside_pct", label: "Target Δ", w: 86, align: "right", sortable: true,
     heat: { kind: "div", anchor: 30 },
@@ -5666,6 +5761,9 @@ const COL_INFO = {
   pct_1y:        "Total price return over the last 365 calendar days.",
   delta_ath:     "Distance from the highest close in the table row's 2-year history window. 0% = at that high; full bar = 50% below it.",
   rs_rank:       "Relative Strength: 12 monthly bars showing where each month's close ranked within its trailing-12-month price range.",
+  earnings_surprise: "EPS Surprise history: 8 quarters, most-recent right. Green bar = beat, red = miss. Height = magnitude (capped ±10%). Requires FINNHUB_API_KEY. Powered by Finnhub.",
+  rec_trend_fh:      "Recommendation Trend Δ6M: change in analyst consensus score over the last 6 months. Score = (2×Strong Buy + Buy − Sell − 2×Strong Sell) / total. Requires FINNHUB_API_KEY.",
+  insider_mspr:      "MSPR — Monthly Share Purchase Ratio. Finnhub aggregates Form 4 filings into a single score: +100 = all insiders buying, −100 = all selling. Positive = net insider buying signal. Requires FINNHUB_API_KEY.",
   above_sma_20:  "20-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 month of trading days.",
   above_sma_50:  "50-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 quarter of trading days.",
   above_sma_200: "200-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 year of trading days.",
@@ -5718,8 +5816,8 @@ const BUILTIN_VIEW_ALIASES = {
 };
 const BUILTIN_VIEWS = {
   "Default":      ["logo","symbol","name","price","market_cap","ps_ratio","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200"],
-  "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield"],
-  "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200"],
+  "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield","rec_trend_fh","insider_mspr"],
+  "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","earnings_surprise","above_sma_20","above_sma_50","above_sma_200"],
 };
 const BUILTIN_ORDER = ["Default", "Fundamentals", "Momentum"];
 const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
@@ -6280,6 +6378,101 @@ function deltaBar(v) {
     <div class="bar" style="width:${width.toFixed(1)}%; background:${bg}"></div>
     <span class="bar-label" style="color:${txt}">${label}</span>
   </div>`;
+}
+
+/* ===========================================================================
+ * Finnhub-powered cells (EPS surprise, recommendation trend, insider MSPR).
+ * All three degrade to na() when the row field is null (no FINNHUB_API_KEY
+ * or non-US ticker with empty data).
+ * --------------------------------------------------------------------------- */
+
+/* "YYYY-MM-DD" → "Q3 2024" for the EPS-surprise tooltip. */
+function fhQuarter(period) {
+  if (!period) return "?";
+  const parts = String(period).split("-");
+  const y = parts[0] || "?";
+  const m = parseInt(parts[1], 10);
+  const q = isFinite(m) ? Math.ceil(m / 3) : "?";
+  return "Q" + q + " " + y;
+}
+
+/* 8 diverging bars anchored at a midline: beats grow down (green), misses
+   grow up (red). arr is most-recent first; we render oldest→newest L→R and
+   pad missing quarters on the left. */
+function epsSurpriseBars(arr) {
+  if (!arr || !arr.length) return na();
+  if (arr.every(e => !e || e.surprise_pct == null)) return na();
+  const W = 80, H = 18, mid = 9, gap = 1, n = 8;
+  const bw = (W - (n - 1) * gap) / n;
+  const slots = arr.slice(0, n).reverse();          // oldest..newest
+  while (slots.length < n) slots.unshift(null);      // left-pad to 8
+  let svg = "";
+  for (let i = 0; i < n; i++) {
+    const e = slots[i];
+    const x = (i * (bw + gap)).toFixed(2);
+    if (!e) {
+      svg += `<rect x="${x}" y="${(mid - 0.5).toFixed(2)}" width="${bw.toFixed(2)}" height="1" fill="var(--muted)" opacity="0.45"/>`;
+      continue;
+    }
+    const p = e.surprise_pct;
+    if (p == null || p === 0) {
+      svg += `<rect x="${x}" y="${(mid - 1).toFixed(2)}" width="${bw.toFixed(2)}" height="2" fill="var(--muted)"/>`;
+      continue;
+    }
+    const bh = Math.max(2, Math.min(Math.abs(p), 10) / 10 * 14);
+    const y = p > 0 ? mid : mid - bh;                // beat down, miss up
+    const color = p > 0 ? "var(--pos)" : "var(--neg)";
+    svg += `<rect x="${x}" y="${y.toFixed(2)}" width="${bw.toFixed(2)}" height="${bh.toFixed(2)}" fill="${color}" rx="0.5"/>`;
+  }
+  const tip = arr.slice(0, n).map(e => {
+    const v = e.surprise_pct == null ? "n/a" : (e.surprise_pct > 0 ? "+" : "") + e.surprise_pct.toFixed(1) + "%";
+    return `${fhQuarter(e.period)}: ${v}`;
+  }).join("  ");
+  return `<span data-tip="${tip}"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="vertical-align:middle">${svg}</svg></span>`;
+}
+
+/* Insider Monthly Share Purchase Ratio badge. */
+function msprBadge(o) {
+  if (!o || o.mspr == null) return na();
+  const v = o.mspr;
+  const color = v > 5 ? "var(--pos)" : (v < -5 ? "var(--neg)" : "var(--muted)");
+  const label = (v >= 0 ? "+" : "") + v.toFixed(1);
+  const tip = `MSPR ${label} — Monthly Share Purchase Ratio. +100 = all insiders buying, −100 = all selling. ${o.month}/${o.year}`;
+  return `<span style="color:${color}" data-tip="${tip}">${label}</span>`;
+}
+
+/* Per-month analyst consensus score; null if no votes that month. */
+function fhConsensus(m) {
+  if (!m) return null;
+  const total = (m.strongBuy || 0) + (m.buy || 0) + (m.hold || 0) + (m.sell || 0) + (m.strongSell || 0);
+  if (!total) return null;
+  return (2 * (m.strongBuy || 0) + (m.buy || 0) - (m.sell || 0) - 2 * (m.strongSell || 0)) / total;
+}
+
+/* Δ between newest and oldest monthly consensus score; number or null. */
+function recTrendScore(arr) {
+  if (!arr || arr.length < 2) return null;
+  const newest = fhConsensus(arr[0]);
+  const oldest = fhConsensus(arr[arr.length - 1]);
+  if (newest == null || oldest == null) return null;
+  return newest - oldest;
+}
+
+function recTrendCell(arr) {
+  if (!arr || arr.length < 2) return na();
+  const newest = fhConsensus(arr[0]);
+  const oldest = fhConsensus(arr[arr.length - 1]);
+  if (newest == null || oldest == null) return na();
+  const delta = newest - oldest;
+  const n = arr.length;
+  let glyph, color;
+  if (delta > 0.02) { glyph = "▲"; color = "var(--pos)"; }
+  else if (delta < -0.02) { glyph = "▼"; color = "var(--neg)"; }
+  else { glyph = "—"; color = "var(--muted)"; }
+  const sign = delta > 0 ? "+" : (delta < 0 ? "−" : "");
+  const label = `${glyph} ${sign}${Math.abs(delta).toFixed(2)}`;
+  const tip = `Analyst consensus trend over ${n} months. Score = (2×SB+B−S−2×SS)/total. Current: ${newest.toFixed(2)}, ${n}M ago: ${oldest.toFixed(2)}, Δ = ${delta.toFixed(2)}`;
+  return `<span style="color:${color}" data-tip="${tip}">${label}</span>`;
 }
 
 /* ===========================================================================
@@ -9985,7 +10178,12 @@ renderModeBar();
 const MPT = {
   result: null,        // latest /api/efficient-frontier response
   selectedIdx: 0,      // index into result.frontier for the slider marker
+  cvarIdx: 0,          // index into result.cvar_frontier for the CVaR slider
   hoverIdx: null,      // index of point under cursor (cloud or frontier)
+  activeLine: "frontier", // which curve drives sidebar/apply: "frontier" | "cvar"
+  pulseUntil: 0,       // performance.now() time at which the current pulse ends
+  pulseKind: null,     // legend key being pulsed (frontier|cvar|tangency|equal|cap|current)
+  pulseRaf: 0,         // rAF id for the active pulse animation loop
   view: null,          // portfolio name this run is bound to
   runs: [],            // saved runs metadata for the active view
   busy: false,
@@ -10132,6 +10330,21 @@ async function mptRun() {
     document.getElementById("pf-mpt-slider").disabled = false;
     document.getElementById("pf-mpt-slider").max = String(Math.max(0, d.frontier.length - 1));
     document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
+    // CVaR slider: index 0 = strictest tail (CVaR99), index N-1 = CVaR50.
+    // Default selection = midpoint of the curve so neither extreme dominates.
+    const cv = d.cvar_frontier || [];
+    const cvarSlider = document.getElementById("pf-mpt-cvar-slider");
+    if (cv.length) {
+      MPT.cvarIdx = Math.floor(cv.length / 2);
+      cvarSlider.disabled = false;
+      cvarSlider.max = String(Math.max(0, cv.length - 1));
+      cvarSlider.value = String(MPT.cvarIdx);
+    } else {
+      MPT.cvarIdx = 0;
+      cvarSlider.disabled = true;
+      cvarSlider.value = "0";
+    }
+    MPT.activeLine = "frontier";
     mptProgressStop("done");
     if (status) status.innerHTML = "";
     mptRender();
@@ -10211,6 +10424,7 @@ function mptRenderChart() {
   const consume = (v, r) => { if (v < xMin) xMin = v; if (v > xMax) xMax = v; if (r < yMin) yMin = r; if (r > yMax) yMax = r; };
   (d.cloud || []).forEach(p => consume(p[0], p[1]));
   (d.frontier || []).forEach(p => consume(p.vol, p.ret));
+  (d.cvar_frontier || []).forEach(p => consume(p.vol, p.ret));
   Object.values(d.anchors || {}).forEach(a => a && consume(a.vol, a.ret));
   if (!isFinite(xMin)) { xMin = 0; xMax = 0.3; yMin = 0; yMax = 0.2; }
   const params = mptGetParams();
@@ -10259,26 +10473,38 @@ function mptRenderChart() {
   // Replace listeners by cloning so we never stack handlers on re-render.
   const fresh = ov.cloneNode(false);
   ov.parentNode.replaceChild(fresh, ov);
-  function _hitFrontier(ev) {
+  // Hit-test against BOTH the MV frontier and the CVaR curve. Returns
+  // {line, idx} for the nearest point; line drives which slider moves.
+  function _hitPoint(ev) {
     const r = fresh.getBoundingClientRect();
-    if (!r.width || !r.height) return -1;
-    // Convert client coords to CSS pixels inside the canvas — same units
-    // the projection uses.
+    if (!r.width || !r.height) return null;
     const px = (ev.clientX - r.left) * (cssW / r.width);
     const py = (ev.clientY - r.top) * (cssH / r.height);
-    let best = 0, bestD = Infinity;
-    d.frontier.forEach((p, i) => {
+    let bestLine = "frontier", best = 0, bestD = Infinity;
+    (d.frontier || []).forEach((p, i) => {
       const dxp = xToPx(p.vol) - px, dyp = yToPx(p.ret) - py;
       const dd = dxp * dxp + dyp * dyp;
-      if (dd < bestD) { bestD = dd; best = i; }
+      if (dd < bestD) { bestD = dd; best = i; bestLine = "frontier"; }
     });
-    return best;
+    (d.cvar_frontier || []).forEach((p, i) => {
+      const dxp = xToPx(p.vol) - px, dyp = yToPx(p.ret) - py;
+      const dd = dxp * dxp + dyp * dyp;
+      if (dd < bestD) { bestD = dd; best = i; bestLine = "cvar"; }
+    });
+    return {line: bestLine, idx: best};
   }
   fresh.addEventListener("click", (ev) => {
-    const best = _hitFrontier(ev);
-    if (best < 0) return;
-    MPT.selectedIdx = best;
-    document.getElementById("pf-mpt-slider").value = String(best);
+    const hit = _hitPoint(ev);
+    if (!hit) return;
+    if (hit.line === "cvar") {
+      MPT.cvarIdx = hit.idx;
+      MPT.activeLine = "cvar";
+      document.getElementById("pf-mpt-cvar-slider").value = String(hit.idx);
+    } else {
+      MPT.selectedIdx = hit.idx;
+      MPT.activeLine = "frontier";
+      document.getElementById("pf-mpt-slider").value = String(hit.idx);
+    }
     MPT.hoverIdx = null;
     mptHideFrontierTip();
     mptUpdateSelection();
@@ -10291,11 +10517,16 @@ function mptRenderChart() {
     }
   });
   fresh.addEventListener("mousemove", (ev) => {
-    const idx = _hitFrontier(ev);
-    if (idx < 0) return;
-    MPT.hoverIdx = idx;
+    const hit = _hitPoint(ev);
+    if (!hit || hit.line !== "frontier") {
+      MPT.hoverIdx = null;
+      mptUpdateSelection();
+      mptHideFrontierTip();
+      return;
+    }
+    MPT.hoverIdx = hit.idx;
     mptUpdateSelection();
-    mptShowFrontierTip(ev, idx);
+    mptShowFrontierTip(ev, hit.idx);
   });
   fresh.addEventListener("mouseleave", () => {
     MPT.hoverIdx = null;
@@ -10303,17 +10534,73 @@ function mptRenderChart() {
     mptHideFrontierTip();
   });
 
-  // --- Legend with marker-shaped swatches ---
+  // --- Legend with marker-shaped swatches. Each entry is clickable — see
+  //     mptLegendClick below for the kind → action mapping. ---
   const legend = document.getElementById("pf-mpt-legend");
+  const hasCvar = (d.cvar_frontier || []).length > 0;
   legend.innerHTML = `
-    <span>${legendSwatch("frontier")}Efficient frontier</span>
-    <span>${legendSwatch("tangency")}Tangency (max Sharpe)</span>
-    <span>${legendSwatch("equal")}Equal-weight</span>
-    <span>${legendSwatch("cap")}Cap-weight</span>
-    <span>${legendSwatch("current")}Current</span>
-    <span>${legendSwatch("selected")}Selected</span>
-    <span style="margin-left:auto">${(d.meta?.n_samples_actual || (d.cloud || []).length).toLocaleString()} Monte-Carlo portfolios · ${d.meta?.n_obs || "?"} ${d.params?.frequency || "?"} obs · ${d.meta?.total_ms || "?"}ms</span>
+    <span data-legend="frontier" title="Click to switch to the efficient-frontier slider and highlight the line.">${legendSwatch("frontier")}Efficient frontier</span>
+    ${hasCvar ? `<span data-legend="cvar" title="Click to switch to the CVaR slider and highlight the curve.">${legendSwatch("cvar")}CVaR-optimal (α=99↔50)</span>` : ""}
+    <span data-legend="tangency" title="Click to jump to the tangency portfolio.">${legendSwatch("tangency")}Tangency (max Sharpe)</span>
+    <span data-legend="equal" title="Click to jump to the equal-weight portfolio on the frontier.">${legendSwatch("equal")}Equal-weight</span>
+    <span data-legend="cap" title="Click to jump to the cap-weight portfolio on the frontier.">${legendSwatch("cap")}Cap-weight</span>
+    <span data-legend="current" title="Click to jump to the current portfolio on the frontier.">${legendSwatch("current")}Current</span>
+    <span class="no-click">${legendSwatch("selected")}Selected</span>
+    <span class="no-click" style="margin-left:auto">${(d.meta?.n_samples_actual || (d.cloud || []).length).toLocaleString()} Monte-Carlo portfolios · ${d.meta?.n_obs || "?"} ${d.params?.frequency || "?"} obs · ${d.meta?.total_ms || "?"}ms</span>
   `;
+  legend.querySelectorAll("span[data-legend]").forEach(el => {
+    el.addEventListener("click", () => mptLegendClick(el.dataset.legend));
+  });
+}
+
+// Snap the MV-frontier slider to the index nearest (vol, ret) — used by
+// the legend's anchor entries so clicking "Equal-weight" jumps the
+// frontier marker to the closest feasible point on the curve.
+function _nearestFrontierIdx(vol, ret) {
+  const d = MPT.result; if (!d || !(d.frontier || []).length) return 0;
+  let best = 0, bestD = Infinity;
+  d.frontier.forEach((p, i) => {
+    const dvx = (p.vol - vol), dvy = (p.ret - ret);
+    const dd = dvx * dvx + dvy * dvy;
+    if (dd < bestD) { bestD = dd; best = i; }
+  });
+  return best;
+}
+
+// Legend click handler — kind → (select point + pulse). For the two line
+// entries we switch activeLine; for anchor markers we snap the MV-frontier
+// slider to the closest point on the curve.
+function mptLegendClick(kind) {
+  const d = MPT.result; if (!d) return;
+  switch (kind) {
+    case "frontier":
+      MPT.activeLine = "frontier";
+      break;
+    case "cvar":
+      if ((d.cvar_frontier || []).length) MPT.activeLine = "cvar";
+      break;
+    case "tangency":
+      if (d.tangency) {
+        MPT.selectedIdx = _nearestFrontierIdx(d.tangency.vol, d.tangency.ret);
+        MPT.activeLine = "frontier";
+        document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
+      }
+      break;
+    case "equal":
+    case "cap":
+    case "current": {
+      const a = (d.anchors || {})[kind];
+      if (a) {
+        MPT.selectedIdx = _nearestFrontierIdx(a.vol, a.ret);
+        MPT.activeLine = "frontier";
+        document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
+      }
+      break;
+    }
+  }
+  mptPulse(kind);
+  mptUpdateSelection();
+  mptRenderSide();
 }
 
 function legendSwatch(kind) {
@@ -10321,6 +10608,8 @@ function legendSwatch(kind) {
   switch (kind) {
     case "frontier":
       return `<svg ${c} viewBox="0 0 14 12"><path d="M1 9 Q7 1 13 4" fill="none" stroke="var(--accent)" stroke-width="2.2"/></svg>`;
+    case "cvar":
+      return `<svg ${c} viewBox="0 0 14 12"><path d="M1 9 Q7 1 13 4" fill="none" stroke="#ea580c" stroke-width="2" stroke-dasharray="3 2"/></svg>`;
     case "tangency":
       return `<svg ${c} viewBox="0 0 14 12"><polygon points="${star(7,6,5,2.4,5)}" fill="#fbbf24" stroke="#7c2d12" stroke-width="0.6"/></svg>`;
     case "equal":
@@ -10443,12 +10732,28 @@ function drawCloud(ctx, cloud, proj, sharpeOf, sharpeColor) {
 function drawFrontierAndAnchors(ctx, d, proj, params) {
   const {X, Y} = proj;
   const accent = _mptCssColor("--accent", "#0969da");
+  const cvarColor = "#ea580c";
   if (d.frontier && d.frontier.length) {
     ctx.save();
     ctx.strokeStyle = accent; ctx.lineWidth = 2.2;
     ctx.lineJoin = "round"; ctx.lineCap = "round";
     ctx.beginPath();
     d.frontier.forEach((p, i) => {
+      const x = X(p.vol), y = Y(p.ret);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+  // CVaR curve: dashed orange polyline distinct from the MV frontier so the
+  // two families of optima don't blur together.
+  if (d.cvar_frontier && d.cvar_frontier.length) {
+    ctx.save();
+    ctx.strokeStyle = cvarColor; ctx.lineWidth = 2.0;
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    d.cvar_frontier.forEach((p, i) => {
       const x = X(p.vol), y = Y(p.ret);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
@@ -10505,8 +10810,9 @@ function drawMarker(ctx, kind, x, y) {
   ctx.restore();
 }
 
-// Paint just the overlay canvas (selection ring + hover ghost). Cheap —
-// called on slider input and on mousemove; the base canvas is untouched.
+// Paint just the overlay canvas (selection ring + hover ghost + pulse).
+// Cheap — called on slider input, mousemove, and the pulse animation loop;
+// the base canvas is untouched.
 function drawOverlay() {
   const d = MPT.result; if (!d) return;
   const proj = MPT._proj; if (!proj) return;
@@ -10517,6 +10823,7 @@ function drawOverlay() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
   const accent = _mptCssColor("--accent", "#0969da");
+  const cvarColor = "#ea580c";
 
   // Hover ghost (only when it isn't the same point as the selection).
   if (MPT.hoverIdx != null && MPT.hoverIdx !== MPT.selectedIdx) {
@@ -10531,17 +10838,102 @@ function drawOverlay() {
       ctx.restore();
     }
   }
-  // Selection ring.
-  const sel = d.frontier[MPT.selectedIdx];
+
+  // Inactive (muted) ring on the curve that ISN'T currently driving the
+  // sidebar — keeps both sliders' positions visible at a glance.
+  const inactiveIsCvar = MPT.activeLine !== "cvar";
+  const cv_arr = d.cvar_frontier || [];
+  const muted = inactiveIsCvar ? cv_arr[MPT.cvarIdx] : d.frontier[MPT.selectedIdx];
+  if (muted) {
+    const mx = X(muted.vol), my = Y(muted.ret);
+    const mcol = inactiveIsCvar ? cvarColor : accent;
+    ctx.save();
+    ctx.strokeStyle = mcol; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.55;
+    ctx.beginPath(); ctx.arc(mx, my, 7, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  // Active selection ring on the currently-driven curve.
+  const activeIsCvar = MPT.activeLine === "cvar";
+  const sel = activeIsCvar ? cv_arr[MPT.cvarIdx] : d.frontier[MPT.selectedIdx];
   if (sel) {
     const x = X(sel.vol), y = Y(sel.ret);
+    const col = activeIsCvar ? cvarColor : accent;
     ctx.save();
-    ctx.strokeStyle = accent; ctx.lineWidth = 2.5;
+    ctx.strokeStyle = col; ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke();
-    ctx.fillStyle = accent;
+    ctx.fillStyle = col;
     ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
+
+  // Pulse layer: fades over the pulse window.
+  drawPulse(ctx, d, proj, accent, cvarColor);
+}
+
+// Pulse animation — fades a highlight ring (or thicker line stroke for the
+// frontier/cvar entries) over a 700 ms window. Uses MPT.pulseUntil + MPT.pulseKind.
+function drawPulse(ctx, d, proj, accent, cvarColor) {
+  const now = performance.now();
+  if (!MPT.pulseKind || now >= MPT.pulseUntil) return;
+  const PULSE_MS = 700;
+  const t = Math.max(0, Math.min(1, (MPT.pulseUntil - now) / PULSE_MS));
+  // Ease-out: alpha fades 0.85 → 0; radius grows 6 → 22.
+  const alpha = 0.85 * t;
+  const radius = 6 + (1 - t) * 16;
+  const {X, Y} = proj;
+  const kind = MPT.pulseKind;
+
+  const ringAt = (vol, ret, color) => {
+    if (vol == null || ret == null) return;
+    ctx.save();
+    ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.globalAlpha = alpha;
+    ctx.beginPath(); ctx.arc(X(vol), Y(ret), radius, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  };
+  const lineWith = (pts, color, lw) => {
+    if (!pts || !pts.length) return;
+    ctx.save();
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.globalAlpha = alpha;
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.beginPath();
+    pts.forEach((p, i) => { const x = X(p.vol), y = Y(p.ret); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  switch (kind) {
+    case "frontier":
+      lineWith(d.frontier, accent, 5);
+      break;
+    case "cvar":
+      lineWith(d.cvar_frontier, cvarColor, 5);
+      break;
+    case "tangency":
+      if (d.tangency) ringAt(d.tangency.vol, d.tangency.ret, "#fbbf24");
+      break;
+    case "equal":
+      if (d.anchors?.equal) ringAt(d.anchors.equal.vol, d.anchors.equal.ret, "#8b5cf6");
+      break;
+    case "cap":
+      if (d.anchors?.cap) ringAt(d.anchors.cap.vol, d.anchors.cap.ret, "#06b6d4");
+      break;
+    case "current":
+      if (d.anchors?.current) ringAt(d.anchors.current.vol, d.anchors.current.ret, "#f59e0b");
+      break;
+  }
+
+  // Keep the animation running while the pulse hasn't expired.
+  if (MPT.pulseRaf) cancelAnimationFrame(MPT.pulseRaf);
+  MPT.pulseRaf = requestAnimationFrame(() => { MPT.pulseRaf = 0; drawOverlay(); });
+}
+
+// Trigger a pulse on the named legend entry. Called by the legend click
+// handler (and by chart clicks if we want visual reinforcement).
+function mptPulse(kind) {
+  MPT.pulseKind = kind;
+  MPT.pulseUntil = performance.now() + 700;
+  drawOverlay();
 }
 
 // Public name preserved so existing slider/click handlers keep working.
@@ -10602,16 +10994,53 @@ function star(cx, cy, R, r, n) {
   return pts.join(" ");
 }
 
+// Pull the currently-selected portfolio (frontier or CVaR curve) — single
+// source of truth for the sidebar, apply button, and save flow.
+function mptActiveSel() {
+  const d = MPT.result; if (!d) return null;
+  if (MPT.activeLine === "cvar") {
+    const cv = d.cvar_frontier || [];
+    return cv[MPT.cvarIdx] || null;
+  }
+  return (d.frontier || [])[MPT.selectedIdx] || null;
+}
+
 function mptRenderSide() {
   const d = MPT.result; if (!d) return;
-  const sel = d.frontier[MPT.selectedIdx]; if (!sel) return;
+  const sel = mptActiveSel(); if (!sel) return;
   const params = mptGetParams();
   const sharpe = sel.vol > 1e-9 ? (sel.ret - params.rf) / sel.vol : NaN;
   const stats = document.getElementById("pf-mpt-stats");
+  const isCvar = MPT.activeLine === "cvar";
+  // Sidebar readouts under each slider track current selection along its curve.
+  const sliderReadout = document.getElementById("pf-mpt-slider-readout");
+  if (sliderReadout) {
+    const fp = (d.frontier || [])[MPT.selectedIdx];
+    sliderReadout.textContent = fp
+      ? `${(fp.ret * 100).toFixed(1)}% / ${(fp.vol * 100).toFixed(1)}%`
+      : "—";
+  }
+  const cvarReadout = document.getElementById("pf-mpt-cvar-readout");
+  if (cvarReadout) {
+    const cv = (d.cvar_frontier || [])[MPT.cvarIdx];
+    cvarReadout.textContent = cv ? `α=${Math.round(cv.conf * 100)}%` : "—";
+  }
+  // Stats block. CVaR/VaR are returned in per-period units (matches the
+  // returns frequency used for optimisation). Multiply by 100 for %.
+  let extraRows = "";
+  if (isCvar && sel.cvar != null) {
+    const freq = d.params?.frequency || "weekly";
+    const conf = Math.round((sel.conf || 0) * 100);
+    extraRows = `
+      <span class="k">CVaR (α=${conf}%, ${freq})</span><span class="v neg">${(sel.cvar * 100).toFixed(2)}%</span>
+      <span class="k">VaR (α=${conf}%, ${freq})</span><span class="v neg">${(sel.var * 100).toFixed(2)}%</span>`;
+  }
   stats.innerHTML = `
+    <span class="k">Source</span><span class="v">${isCvar ? "Min-CVaR" : "Efficient frontier"}</span>
     <span class="k">Annualised return</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
     <span class="k">Annualised vol</span><span class="v">${(sel.vol * 100).toFixed(2)}%</span>
     <span class="k">Sharpe (rf ${(params.rf*100).toFixed(2)}%)</span><span class="v ${sharpe >= 0 ? "pos" : "neg"}">${isFinite(sharpe) ? sharpe.toFixed(3) : "—"}</span>
+    ${extraRows}
     <span class="k">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
   `;
   // Weights bars (sorted descending; zero-weight rows hidden for clarity)
@@ -10631,13 +11060,17 @@ function mptRenderSide() {
       </div>
     `).join("");
   }
+  // Slider-row highlighting follows activeLine.
+  document.querySelectorAll(".pf-mpt-slider-row").forEach(r => {
+    r.classList.toggle("active-line", r.dataset.line === MPT.activeLine);
+  });
 }
 
 function mptApplyToPortfolio() {
   const d = MPT.result; if (!d) return;
-  const sel = d.frontier[MPT.selectedIdx]; if (!sel) return;
+  const sel = mptActiveSel(); if (!sel) return;
   const w = sel.weights || {};
-  if (!Object.keys(w).length) { toast("No weights at this frontier point."); return; }
+  if (!Object.keys(w).length) { toast("No weights at this point."); return; }
   // Invalidate any stale custom-mode analytics cache before switching.
   const tabMap = currentAnalyticsMap();
   for (const k of Object.keys(tabMap)) {
@@ -10649,19 +11082,26 @@ function mptApplyToPortfolio() {
   renderModeBar();
   persistActivePreset();
   requestAnalytics({force: true});
-  const pt = MPT.selectedIdx + 1;
-  const total = d.frontier.length;
-  toast(`Applied MPT point ${pt}/${total} — ${(sel.ret * 100).toFixed(1)}% ret, ${(sel.vol * 100).toFixed(1)}% vol.`);
+  if (MPT.activeLine === "cvar") {
+    const conf = Math.round((sel.conf || 0) * 100);
+    toast(`Applied min-CVaR α=${conf}% — ${(sel.ret * 100).toFixed(1)}% ret, ${(sel.vol * 100).toFixed(1)}% vol.`);
+  } else {
+    const pt = MPT.selectedIdx + 1;
+    const total = (d.frontier || []).length;
+    toast(`Applied MPT point ${pt}/${total} — ${(sel.ret * 100).toFixed(1)}% ret, ${(sel.vol * 100).toFixed(1)}% vol.`);
+  }
 }
 
 function mptSaveAsPreset() {
   const d = MPT.result; if (!d) return;
-  const sel = d.frontier[MPT.selectedIdx]; if (!sel) return;
+  const sel = mptActiveSel(); if (!sel) return;
   if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
     return toast("Save the portfolio first to keep custom weights.");
   }
   const existing = (STATE.weightPresets || []).map(p => p.name);
-  const suggested = `MPT ${d.params.lookback} ${d.params.frequency}`;
+  const suggested = MPT.activeLine === "cvar"
+    ? `CVaR α=${Math.round((sel.conf || 0) * 100)}% ${d.params.lookback} ${d.params.frequency}`
+    : `MPT ${d.params.lookback} ${d.params.frequency}`;
   showInlinePrompt({
     title: "Save as Custom Weights",
     description:
@@ -10699,7 +11139,8 @@ async function mptSaveRun({silent} = {silent: false}) {
     // Strip the (heavy) cloud before persisting; it can be re-sampled cheaply.
     const compact = {
       params: d.params, symbols: d.symbols, missing: d.missing,
-      frontier: d.frontier, tangency: d.tangency,
+      frontier: d.frontier, cvar_frontier: d.cvar_frontier || [],
+      tangency: d.tangency,
       min_vol: d.min_vol, max_ret: d.max_ret, anchors: d.anchors,
       meta: d.meta,
     };
@@ -10778,6 +11219,21 @@ async function mptLoadRun(id) {
     document.getElementById("pf-mpt-slider").max = String(Math.max(0, (MPT.result.frontier || []).length - 1));
     document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
     document.getElementById("pf-mpt-slider").disabled = false;
+    // CVaR slider — pre-existing saved runs (before this feature) won't have
+    // cvar_frontier, so disable the slider gracefully in that case.
+    const cv = MPT.result.cvar_frontier || [];
+    const cvarSlider = document.getElementById("pf-mpt-cvar-slider");
+    if (cv.length) {
+      MPT.cvarIdx = Math.floor(cv.length / 2);
+      cvarSlider.max = String(Math.max(0, cv.length - 1));
+      cvarSlider.value = String(MPT.cvarIdx);
+      cvarSlider.disabled = false;
+    } else {
+      MPT.cvarIdx = 0;
+      cvarSlider.value = "0";
+      cvarSlider.disabled = true;
+    }
+    MPT.activeLine = "frontier";
     mptRender();
   } catch (e) {
     toast("Load failed: " + (e.message || e));
@@ -10802,10 +11258,23 @@ $("#pf-mpt-info-bg")?.addEventListener("click", (e) => { if (e.target.id === "pf
 let _mptSliderFrame = 0;
 $("#pf-mpt-slider").addEventListener("input", (e) => {
   MPT.selectedIdx = Number(e.target.value) || 0;
+  MPT.activeLine = "frontier";
   MPT.hoverIdx = null;
   if (_mptSliderFrame) return;
   _mptSliderFrame = requestAnimationFrame(() => {
     _mptSliderFrame = 0;
+    mptUpdateSelection();
+    mptRenderSide();
+  });
+});
+let _mptCvarSliderFrame = 0;
+$("#pf-mpt-cvar-slider").addEventListener("input", (e) => {
+  MPT.cvarIdx = Number(e.target.value) || 0;
+  MPT.activeLine = "cvar";
+  MPT.hoverIdx = null;
+  if (_mptCvarSliderFrame) return;
+  _mptCvarSliderFrame = requestAnimationFrame(() => {
+    _mptCvarSliderFrame = 0;
     mptUpdateSelection();
     mptRenderSide();
   });

@@ -18,6 +18,11 @@ env/
 ENV/
 .env
 
+# Local secrets — strictly local, never committed (Finnhub API key, etc.)
+.finnhub_key
+.env.local
+*.secret
+
 # Conda
 .conda/
 

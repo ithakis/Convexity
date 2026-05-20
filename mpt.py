@@ -1,9 +1,14 @@
 """
 mpt.py — Modern Portfolio Theory primitives for the Portfolio Tracker.
 
-Long-only, fully-invested (sum=1) mean-variance optimization. Pure NumPy / Pandas
-so the dashboard stays dependency-light. Designed for ~5–60 assets and a
-10–20 s wall budget per call (data fetch dominates; the math here is <100 ms).
+Long-only, fully-invested (sum=1) mean-variance optimization, plus a
+minimum-CVaR frontier. The mean-variance core (CLA, Ledoit-Wolf, Monte-Carlo
+cloud) is NumPy/Pandas with numba JIT. The CVaR path adds SciPy: the
+Rockafellar-Uryasev formulation is a linear program solved with SciPy's
+HiGHS backend (scipy.optimize.linprog) over sparse scenario matrices
+(scipy.sparse), which keeps it fast for the hundreds-of-scenarios case.
+Designed for ~5–60 assets and a 10–20 s wall budget per call (data fetch
+dominates; the math here is <100 ms).
 
 Public surface (kept minimal — see HTTP handler in dashboard.py):
     compute_returns(closes_df, freq)        -> returns_df
@@ -30,6 +35,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 from numba import njit, prange
+from scipy.optimize import linprog
+from scipy.sparse import csr_matrix, eye as speye, hstack as sphstack
 
 
 FREQ_PER_YEAR = {"daily": 252, "weekly": 52, "monthly": 12}
@@ -721,6 +728,158 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Single-portfolio stats
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Minimum-CVaR optimization (Rockafellar–Uryasev LP)
+# ---------------------------------------------------------------------------
+#
+# For confidence level α ∈ (0, 1), the min-CVaR portfolio at α minimises the
+# expected loss conditional on the loss being in the worst (1-α) quantile.
+# Rockafellar & Uryasev (2000) showed this can be cast as a linear program
+# over the joint variables (w, ζ, u):
+#
+#     variables : w ∈ R^N (weights),
+#                 ζ ∈ R   (the VaR — sign convention: loss = -portfolio return),
+#                 u ∈ R^T_+ (slack per scenario)
+#     minimise  : ζ + 1/((1-α) T) · Σ_t u_t
+#     s.t.      : u_t ≥ -R_t · w - ζ          (scenario inequality)
+#                 u_t ≥ 0                      (non-negative slack)
+#                 Σ w = 1                      (fully invested)
+#                 lower ≤ w_i ≤ 1              (long-only with optional floor)
+#
+# At the optimum, ζ* = VaR_α and the objective equals CVaR_α. T scenarios
+# are the rows of ``returns`` (the same per-period returns used elsewhere
+# in this module). Solved with scipy's HiGHS backend.
+
+def _cvar_lp(returns_arr: np.ndarray, alpha: float, lower: float = 0.0
+             ) -> tuple[np.ndarray, float, float] | None:
+    """Solve the Rockafellar-Uryasev LP for one confidence level α.
+
+    Returns ``(w, var, cvar)`` where ``var`` is ζ* (the LP's VaR variable in
+    return-space; positive means a loss) and ``cvar`` is the optimum
+    objective. Returns ``None`` on solver failure.
+    """
+    R = np.asarray(returns_arr, dtype=float)
+    T, N = R.shape
+    if T < 2 or N < 1:
+        return None
+    if not (0.0 < alpha < 1.0):
+        return None
+    tail = (1.0 - alpha) * T
+    if tail <= 0:
+        return None
+
+    # Decision variable order: [w (N), ζ (1), u (T)]
+    n_vars = N + 1 + T
+    c = np.zeros(n_vars)
+    c[N] = 1.0
+    c[N + 1:] = 1.0 / tail
+
+    # Inequality A_ub x ≤ b_ub for u_t ≥ -R_t·w - ζ  ⇔  -R_t·w - ζ - u_t ≤ 0
+    # Use sparse blocks; dense versions blow up for T > 500.
+    neg_R = csr_matrix(-R)
+    neg_one_col = csr_matrix(-np.ones((T, 1)))
+    neg_eye_T = -speye(T, format="csr")
+    A_ub = sphstack([neg_R, neg_one_col, neg_eye_T], format="csr")
+    b_ub = np.zeros(T)
+
+    # Equality Σ w = 1
+    A_eq = csr_matrix(
+        (np.ones(N), (np.zeros(N, dtype=int), np.arange(N))),
+        shape=(1, n_vars),
+    )
+    b_eq = np.array([1.0])
+
+    # Bounds: w_i ∈ [lower, 1]; ζ free; u_t ≥ 0.
+    bounds = ([(lower, 1.0)] * N
+              + [(None, None)]
+              + [(0.0, None)] * T)
+
+    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+                  bounds=bounds, method="highs")
+    if not res.success:
+        return None
+    x = res.x
+    w = np.clip(x[:N], lower, 1.0)
+    # The LP equality already pins Σw = 1; clipping only removes sub-tolerance
+    # drift. Renormalise to absorb that drift ONLY when there is no active
+    # floor — dividing by the sum can push a weight back below `lower` and
+    # break the long-only floor, so with a floor we leave the clipped vector
+    # as-is (it already sums to 1 to ~1e-12).
+    if lower <= 0.0:
+        s = float(w.sum())
+        if s > 1e-12:
+            w = w / s
+    var = float(x[N])
+    cvar = float(res.fun)
+    return w, var, cvar
+
+
+def min_cvar_portfolio(returns: pd.DataFrame, alpha: float,
+                       floor: float = 0.0) -> dict | None:
+    """Long-only min-CVaR portfolio at confidence level α.
+
+    Returns ``{weights: {sym: w}, cvar, var}`` (CVaR and VaR are in
+    per-period return units, sign convention: positive = loss). Returns
+    ``None`` on solver failure.
+    """
+    if returns is None or returns.empty:
+        return None
+    symbols = list(returns.columns)
+    res = _cvar_lp(returns.values, float(alpha), lower=max(0.0, float(floor)))
+    if res is None:
+        return None
+    w, var, cvar = res
+    return {"weights": {s: float(w[i]) for i, s in enumerate(symbols)},
+            "cvar": cvar, "var": var}
+
+
+def cvar_curve(returns: pd.DataFrame, alphas: Iterable[float],
+               mu: pd.Series, cov: pd.DataFrame, rf: float = 0.0,
+               floor: float = 0.0) -> list[dict]:
+    """Build a curve of min-CVaR portfolios across confidence levels.
+
+    For each α in ``alphas`` we solve the Rockafellar-Uryasev LP and project
+    the resulting weight vector into the same (vol, ret) coordinate system
+    used by the MV frontier — that lets the dashboard render the two
+    curves on a shared chart. Output is one dict per α with keys
+    ``conf, ret, vol, sharpe, cvar, var, weights``.
+
+    Order follows the input ``alphas``; the dashboard passes them in
+    descending order (99 → 50) so slider index 0 = strict tail.
+    """
+    if returns is None or returns.empty:
+        return []
+    symbols = list(returns.columns)
+    # Align mu/cov to the returns' column order so the (vol, ret) projection
+    # below uses consistent indexing with the LP solution.
+    mu_aln = mu.reindex(symbols).values.astype(float)
+    cov_aln = cov.reindex(index=symbols, columns=symbols).values.astype(float)
+    R = returns.values.astype(float)
+    lower = max(0.0, float(floor))
+
+    out: list[dict] = []
+    for a in alphas:
+        af = float(a)
+        if not (0.0 < af < 1.0):
+            continue
+        res = _cvar_lp(R, af, lower=lower)
+        if res is None:
+            continue
+        w, var, cvar = res
+        r, v = _stats(w, mu_aln, cov_aln)
+        sharpe = (r - rf) / v if v > 1e-12 else float("nan")
+        out.append({
+            "conf": af,
+            "ret": float(r),
+            "vol": float(v),
+            "sharpe": float(sharpe) if math.isfinite(sharpe) else None,
+            "cvar": float(cvar),
+            "var": float(var),
+            "weights": {s: float(w[i]) for i, s in enumerate(symbols)},
+        })
+    return out
+
 
 def portfolio_stats(weights: dict[str, float], mu: pd.Series, cov: pd.DataFrame,
                     rf: float = 0.0) -> dict:

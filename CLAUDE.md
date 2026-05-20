@@ -31,6 +31,7 @@ sub-decision.
 ├── build_symbol_db.py          ← CLI to (re)build symbol_db.sqlite from public sources
 ├── xlsx_export.py              ← One-sheet-per-portfolio Excel export
 ├── mpt.py                      ← Modern Portfolio Theory primitives (CLA, Ledoit-Wolf, MC cloud)
+├── finnhub_adapter.py          ← Optional Finnhub supplemental columns (EPS surprise, MSPR, rec trend)
 ├── Launch Dashboard.command    ← macOS launcher (activates QF12 conda env, restarts cleanly)
 ├── requirements.txt
 ├── README.md
@@ -169,6 +170,34 @@ shared guardrail. Prefer `dividendRate / price` when available, then
 fall back to the raw yield fields with a `> 1 => divide by 100` fixup.
 UI formatters and analytics should assume the normalized fractional
 value, not re-detect units downstream.
+
+**Finnhub supplemental columns (`finnhub_adapter.py`):** `fetch_one`
+adds three optional row fields — `earnings_surprise` (8-quarter EPS
+surprise list), `insider_mspr` (Form-4 Monthly Share Purchase Ratio),
+and `rec_trend_fh` (6-month analyst recommendation trend). They come
+from the Finnhub free API via the module-level `import finnhub_adapter
+as _fh` (line ~50). The key is resolved by `_load_api_key()`:
+`FINNHUB_API_KEY` env var first, then a strictly-local `.finnhub_key`
+file sitting next to the module (one line, the raw key). When neither is
+present, `_fh` returns `None` for every call and the three fields are
+written as `None`, so the columns render `—` and the server log stays
+clean.
+
+**Key stays local — never commit it.** `.finnhub_key` (plus `.env.local`
+and `*.secret`) is gitignored, and a pre-commit guard at
+`.claude/hooks/check-secrets.sh` (wired as the first PreToolUse hook in
+`.claude/settings.json`) blocks any `git commit` that either stages one
+of those files or leaks the key value into the staged diff. The file is
+gitignored, so it does NOT travel between checkouts/worktrees via git —
+if you run the app from a different directory (e.g. after this branch
+merges to main), drop the same `.finnhub_key` beside `dashboard.py`
+there too, or export `FINNHUB_API_KEY`. The adapter is stdlib-only (`urllib.request`), self-caches with
+TTLs (3600/1800/3600s), and each call is individually try/excepted so a
+failing endpoint never breaks a row. Cold build = up to 3 calls/symbol
+(within Finnhub's 60/min free budget at 5 workers); warm build = zero.
+Non-US tickers return empty data silently; only HTTP 429 logs one line.
+The columns are `EPS Surp.` (Momentum preset), `Rec Δ6M` and `MSPR`
+(Fundamentals preset).
 
 ### Analytics (`/api/portfolio-analytics-multi`)
 `analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
