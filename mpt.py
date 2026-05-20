@@ -1,9 +1,14 @@
 """
 mpt.py — Modern Portfolio Theory primitives for the Portfolio Tracker.
 
-Long-only, fully-invested (sum=1) mean-variance optimization. Pure NumPy / Pandas
-so the dashboard stays dependency-light. Designed for ~5–60 assets and a
-10–20 s wall budget per call (data fetch dominates; the math here is <100 ms).
+Long-only, fully-invested (sum=1) mean-variance optimization, plus a
+minimum-CVaR frontier. The mean-variance core (CLA, Ledoit-Wolf, Monte-Carlo
+cloud) is NumPy/Pandas with numba JIT. The CVaR path adds SciPy: the
+Rockafellar-Uryasev formulation is a linear program solved with SciPy's
+HiGHS backend (scipy.optimize.linprog) over sparse scenario matrices
+(scipy.sparse), which keeps it fast for the hundreds-of-scenarios case.
+Designed for ~5–60 assets and a 10–20 s wall budget per call (data fetch
+dominates; the math here is <100 ms).
 
 Public surface (kept minimal — see HTTP handler in dashboard.py):
     compute_returns(closes_df, freq)        -> returns_df
@@ -31,7 +36,7 @@ import numpy as np
 import pandas as pd
 from numba import njit, prange
 from scipy.optimize import linprog
-from scipy.sparse import csr_matrix, eye as speye, hstack as sphstack, vstack as spvstack
+from scipy.sparse import csr_matrix, eye as speye, hstack as sphstack
 
 
 FREQ_PER_YEAR = {"daily": 252, "weekly": 52, "monthly": 12}
@@ -796,10 +801,15 @@ def _cvar_lp(returns_arr: np.ndarray, alpha: float, lower: float = 0.0
         return None
     x = res.x
     w = np.clip(x[:N], lower, 1.0)
-    # Renormalise tiny floating drift so Σ w = 1 to machine precision.
-    s = float(w.sum())
-    if s > 1e-12:
-        w = w / s
+    # The LP equality already pins Σw = 1; clipping only removes sub-tolerance
+    # drift. Renormalise to absorb that drift ONLY when there is no active
+    # floor — dividing by the sum can push a weight back below `lower` and
+    # break the long-only floor, so with a floor we leave the clipped vector
+    # as-is (it already sums to 1 to ~1e-12).
+    if lower <= 0.0:
+        s = float(w.sum())
+        if s > 1e-12:
+            w = w / s
     var = float(x[N])
     cvar = float(res.fun)
     return w, var, cvar

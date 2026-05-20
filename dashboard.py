@@ -49,8 +49,9 @@ import yfinance as yf
 
 import mpt
 
-# Optional Finnhub supplemental source. Absent module or unset
-# FINNHUB_API_KEY → _fh is None / its fns return None, columns render "—".
+# Optional Finnhub supplemental source. If the module is missing, _fh is
+# None. If it imports but FINNHUB_API_KEY is unset, _fh is non-None and its
+# functions all return None. Either way the columns render "—".
 try:
     import finnhub_adapter as _fh
 except ImportError:
@@ -4191,6 +4192,9 @@ INDEX_HTML = r"""<!doctype html>
   }
   .pf-mpt-slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
   .pf-mpt-slider-row.cvar input[type="range"] { accent-color: #ea580c; }
+  /* The row whose curve is currently being dragged gets a subtle highlight. */
+  .pf-mpt-slider-row.active-line .pf-mpt-slider-label { text-shadow: 0 0 6px var(--accent); }
+  .pf-mpt-slider-row.cvar.active-line .pf-mpt-slider-label { text-shadow: 0 0 6px #ea580c; }
   .pf-mpt-slider-row .pf-mpt-slider-label {
     min-width: 88px; font-weight: 600; color: var(--text);
   }
@@ -5721,7 +5725,7 @@ const COLS = [
     render: (r) => recTrendCell(r.rec_trend_fh) },
   { key: "insider_mspr", label: "MSPR", w: 62, align: "center", sortable: true,
     sortValue: (r) => r.insider_mspr?.mspr ?? null,
-    render: (r) => msrpBadge(r.insider_mspr) },
+    render: (r) => msprBadge(r.insider_mspr) },
   /* Target upside derived client-side from analyst mean target and last price. */
   { key: "target_upside_pct", label: "Target Δ", w: 86, align: "right", sortable: true,
     heat: { kind: "div", anchor: 30 },
@@ -6428,7 +6432,7 @@ function epsSurpriseBars(arr) {
 }
 
 /* Insider Monthly Share Purchase Ratio badge. */
-function msrpBadge(o) {
+function msprBadge(o) {
   if (!o || o.mspr == null) return na();
   const v = o.mspr;
   const color = v > 5 ? "var(--pos)" : (v < -5 ? "var(--neg)" : "var(--muted)");

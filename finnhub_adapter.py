@@ -59,6 +59,14 @@ _BASE_URL = "https://finnhub.io/api/v1/"
 # TTL cache mirroring dashboard.py's (timestamp, ttl, val) tuple shape.
 _FH_CACHE: dict[str, tuple[float, float, Any]] = {}
 
+# Negative-cache sentinel. A genuine empty / no-coverage response (e.g. a
+# non-US ticker Finnhub doesn't cover) is cached as _MISS so repeated builds
+# don't re-hit the API for it — that's what keeps warm builds at zero calls.
+# Transient failures (network error, non-200, 429) are NOT cached, so they
+# get retried on the next build.
+_MISS = object()
+_NEG_TTL = 1800.0
+
 
 def _fh_get(key: str):
     hit = _FH_CACHE.get(key)
@@ -123,11 +131,16 @@ def get_earnings_surprise(symbol: str) -> list[dict] | None:
         return None
     cache_key = f"earnings|{symbol}"
     cached = _fh_get(cache_key)
+    if cached is _MISS:
+        return None
     if cached is not None:
         return cached
     try:
         raw = _fh_call("stock/earnings", {"symbol": symbol, "limit": 8}, symbol)
-        if not raw or not isinstance(raw, list):
+        if raw is None:
+            return None  # transient failure — don't cache, retry next build
+        if not isinstance(raw, list):
+            _fh_put(cache_key, _MISS, _NEG_TTL)
             return None
         out: list[dict] = []
         for e in raw[:8]:
@@ -144,6 +157,7 @@ def get_earnings_surprise(symbol: str) -> list[dict] | None:
                 "surprise_pct": surprise_pct,
             })
         if not out:
+            _fh_put(cache_key, _MISS, _NEG_TTL)  # genuine no-coverage
             return None
         _fh_put(cache_key, out, 3600.0)
         return out
@@ -161,6 +175,8 @@ def get_insider_sentiment(symbol: str) -> dict | None:
         return None
     cache_key = f"insider|{symbol}"
     cached = _fh_get(cache_key)
+    if cached is _MISS:
+        return None
     if cached is not None:
         return cached
     try:
@@ -172,10 +188,14 @@ def get_insider_sentiment(symbol: str) -> dict | None:
             {"symbol": symbol, "from": frm, "to": to},
             symbol,
         )
-        if not raw or not isinstance(raw, dict):
+        if raw is None:
+            return None  # transient failure — don't cache, retry next build
+        if not isinstance(raw, dict):
+            _fh_put(cache_key, _MISS, _NEG_TTL)
             return None
         data = raw.get("data") or []
         if not data:
+            _fh_put(cache_key, _MISS, _NEG_TTL)  # genuine no-coverage
             return None
         latest = max(data, key=lambda d: (d.get("year", 0), d.get("month", 0)))
         out = {
@@ -200,14 +220,20 @@ def get_recommendation_trend(symbol: str) -> list[dict] | None:
         return None
     cache_key = f"rec|{symbol}"
     cached = _fh_get(cache_key)
+    if cached is _MISS:
+        return None
     if cached is not None:
         return cached
     try:
         raw = _fh_call("stock/recommendation", {"symbol": symbol}, symbol)
-        if not raw or not isinstance(raw, list):
+        if raw is None:
+            return None  # transient failure — don't cache, retry next build
+        if not isinstance(raw, list):
+            _fh_put(cache_key, _MISS, _NEG_TTL)
             return None
         out = raw[:6]
         if not out:
+            _fh_put(cache_key, _MISS, _NEG_TTL)  # genuine no-coverage
             return None
         _fh_put(cache_key, out, 3600.0)
         return out

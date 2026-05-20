@@ -664,3 +664,87 @@ def test_ledoit_wolf_output_positive_semidefinite():
     cov_shrunk = mpt.ledoit_wolf_shrink(cov_raw, returns=rets)
     eigvals = np.linalg.eigvalsh(cov_shrunk.values)
     assert np.all(eigvals >= -1e-10), f"Negative eigenvalue: {eigvals.min()}"
+
+
+# ===========================================================================
+# 14. Minimum-CVaR frontier (Rockafellar-Uryasev LP, mpt.py:_cvar_lp etc.)
+# ===========================================================================
+
+def _toy_returns(seed=0, T=120, n=4):
+    """Reproducible per-period returns with distinct per-asset mean/vol so the
+    min-CVaR optimum is non-degenerate."""
+    rng = np.random.default_rng(seed)
+    means = np.array([0.001, 0.0008, 0.0012, 0.0005])[:n]
+    vols = np.array([0.02, 0.015, 0.03, 0.01])[:n]
+    x = rng.standard_normal((T, n)) * vols + means
+    return pd.DataFrame(x, columns=[f"A{i}" for i in range(n)])
+
+
+def test_cvar_lp_feasibility_no_floor():
+    """Σw = 1 and 0 ≤ w_i ≤ 1 with no floor. Source: mpt.py:_cvar_lp."""
+    R = _toy_returns().values
+    res = mpt._cvar_lp(R, alpha=0.95, lower=0.0)
+    assert res is not None
+    w, var, cvar = res
+    assert abs(w.sum() - 1.0) < 1e-6
+    assert (w >= -1e-9).all() and (w <= 1.0 + 1e-9).all()
+
+
+def test_cvar_lp_respects_floor():
+    """With a floor active, every weight ≥ floor and Σw = 1 (the no-renorm
+    path must not push a weight below the floor). Source: mpt.py:_cvar_lp."""
+    R = _toy_returns(n=4).values
+    floor = 0.1
+    res = mpt._cvar_lp(R, alpha=0.95, lower=floor)
+    assert res is not None
+    w, var, cvar = res
+    assert abs(w.sum() - 1.0) < 1e-6
+    assert (w >= floor - 1e-9).all(), f"weight below floor: {w.min()}"
+
+
+def test_cvar_lp_invalid_inputs_return_none():
+    """Guard rails: too few scenarios / out-of-range alpha → None.
+    Source: mpt.py:_cvar_lp."""
+    R = _toy_returns().values
+    assert mpt._cvar_lp(R[:1], alpha=0.95) is None   # T < 2
+    assert mpt._cvar_lp(R, alpha=0.0) is None         # alpha not in (0,1)
+    assert mpt._cvar_lp(R, alpha=1.0) is None
+
+
+def test_min_cvar_portfolio_weights_sum_to_one():
+    """min_cvar_portfolio returns normalized weights keyed by symbol."""
+    rets = _toy_returns()
+    out = mpt.min_cvar_portfolio(rets, alpha=0.95)
+    assert out is not None
+    assert abs(sum(out["weights"].values()) - 1.0) < 1e-6
+    assert set(out["weights"].keys()) == set(rets.columns)
+
+
+def test_min_cvar_portfolio_empty_returns_none():
+    """Empty input is handled, not crashed. Source: mpt.py:min_cvar_portfolio."""
+    assert mpt.min_cvar_portfolio(pd.DataFrame(), alpha=0.95) is None
+
+
+def test_cvar_curve_monotonic_in_alpha():
+    """min-CVaR is non-decreasing in α: CVaR_α(w) is α-monotone for fixed w,
+    and the min over w of α-monotone functions stays α-monotone.
+    Source: mpt.py:cvar_curve."""
+    rets = _toy_returns(seed=3, T=200)
+    mu, cov = mpt.annualize(rets, freq="daily")
+    alphas = [0.5, 0.7, 0.9, 0.95, 0.99]
+    curve = mpt.cvar_curve(rets, alphas, mu, cov, rf=0.0)
+    assert len(curve) == len(alphas)
+    cvars = [c["cvar"] for c in curve]
+    for a, b in zip(cvars, cvars[1:]):
+        assert b >= a - 1e-7, f"CVaR not non-decreasing in alpha: {cvars}"
+    for c in curve:
+        assert abs(sum(c["weights"].values()) - 1.0) < 1e-6
+
+
+def test_cvar_curve_skips_invalid_alpha():
+    """Out-of-range alphas are skipped rather than erroring.
+    Source: mpt.py:cvar_curve."""
+    rets = _toy_returns()
+    mu, cov = mpt.annualize(rets, freq="daily")
+    curve = mpt.cvar_curve(rets, [0.95, 1.5, -0.2], mu, cov)
+    assert len(curve) == 1  # only 0.95 is valid

@@ -8,8 +8,16 @@
 # branch or any future one.
 set -euo pipefail
 
-cmd="$(jq -r '.tool_input.command // ""' 2>/dev/null || echo "")"
-echo "$cmd" | grep -qE 'git[[:space:]]+commit' || exit 0
+# Decide whether this invocation is a git commit. Fail CLOSED: if jq is
+# missing or the payload can't be parsed, we cannot read the command, so we
+# still run the secret checks rather than silently skipping them. (The hook
+# is also gated to `git commit` by .claude/settings.json's `if` clause.)
+if command -v jq >/dev/null 2>&1; then
+  cmd="$(jq -r '.tool_input.command // ""' 2>/dev/null || echo "")"
+  if [ -n "$cmd" ] && ! echo "$cmd" | grep -qE 'git[[:space:]]+commit'; then
+    exit 0  # parsed a command and it is clearly not a commit — nothing to guard
+  fi
+fi
 
 # 1) Never let a local-secret file enter the index.
 staged="$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)"
