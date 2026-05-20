@@ -5815,9 +5815,9 @@ const BUILTIN_VIEW_ALIASES = {
   "Trader View": "Momentum",
 };
 const BUILTIN_VIEWS = {
-  "Default":      ["logo","symbol","name","price","market_cap","ps_ratio","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200"],
-  "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield","rec_trend_fh","insider_mspr"],
-  "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","earnings_surprise","above_sma_20","above_sma_50","above_sma_200"],
+  "Default":      ["logo","symbol","name","price","market_cap","ps_ratio","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200","earnings_surprise","rec_trend_fh","insider_mspr"],
+  "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield","earnings_surprise","rec_trend_fh","insider_mspr"],
+  "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","earnings_surprise","rec_trend_fh","insider_mspr","above_sma_20","above_sma_50","above_sma_200"],
 };
 const BUILTIN_ORDER = ["Default", "Fundamentals", "Momentum"];
 const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
