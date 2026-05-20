@@ -4434,7 +4434,13 @@ INDEX_HTML = r"""<!doctype html>
     border-radius: 10px; overflow: hidden;
     border: 1px solid var(--border);
   }
-  .table-wrap.fit-columns table#tbl { font-size: calc(12px * var(--table-scale)); }
+  .table-wrap.fit-columns table#tbl {
+    font-size: calc(12px * var(--table-scale));
+    /* In fit mode the table takes its scaled-column width (not 100%) and
+       centers, so the user sees symmetric empty space on both sides when the
+       columns are narrower than the viewport. */
+    width: auto; margin-left: auto; margin-right: auto;
+  }
   table#tbl th {
     background: var(--header-bg); color: var(--text); font-weight: 700;
     border: none; border-bottom: 1px solid var(--border);
@@ -4480,7 +4486,7 @@ INDEX_HTML = r"""<!doctype html>
     align-items: center; justify-content: center; vertical-align: middle;
   }
   td.sym { font-weight: 700; letter-spacing: 0.2px; }
-  td.name { color: var(--text); max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+  td.name { color: var(--text); max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
   .table-wrap.fit-columns td.name { max-width: calc(240px * var(--table-scale)); }
 
   /* Δ Highs bar */
@@ -5613,7 +5619,7 @@ const COLS = [
     render: (r) => logoImg(r.symbol) },
   { key: "symbol",      label: "Ticker",    w: 64,  align: "left", sortable: true,
     render: (r) => `<span>${r.symbol}</span>`, td_cls: "sym left" },
-  { key: "name",        label: "Company",   w: 220, align: "left", sortable: true,
+  { key: "name",        label: "Company",   w: 160, align: "left", sortable: true,
     render: (r) => escapeHtml(r.name || ""), td_cls: "name left" },
   { key: "price",       label: "Price",     w: 90,  align: "right", sortable: true,
     render: (r) => fmtMoney(r.price, r.currency) },
@@ -5815,7 +5821,7 @@ const BUILTIN_VIEW_ALIASES = {
   "Trader View": "Momentum",
 };
 const BUILTIN_VIEWS = {
-  "Default":      ["logo","symbol","name","price","market_cap","ps_ratio","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200","earnings_surprise","rec_trend_fh","insider_mspr"],
+  "Default":      ["logo","symbol","name","price","market_cap","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200","earnings_surprise","rec_trend_fh","insider_mspr"],
   "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield","earnings_surprise","rec_trend_fh","insider_mspr"],
   "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","earnings_surprise","rec_trend_fh","insider_mspr","above_sma_20","above_sma_50","above_sma_200"],
 };

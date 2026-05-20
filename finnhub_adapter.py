@@ -170,6 +170,13 @@ def get_insider_sentiment(symbol: str) -> dict | None:
 
     Return ``{mspr, change, year, month}`` for the entry with the highest
     (year, month). ``None`` if no data (e.g. non-US ticker).
+
+    The query window is intentionally wide (5 years). Finnhub's free-tier
+    insider-sentiment feed lags 1-2 years for many names — a trailing
+    12-month window returns *zero* rows for them even though history exists,
+    which used to blank the MSPR column. We pull the wide window in the same
+    single call (zero extra API cost) and select the newest available month;
+    the UI tooltip surfaces its month/year so a stale reading is visible.
     """
     if not FINNHUB_API_KEY:
         return None
@@ -181,7 +188,7 @@ def get_insider_sentiment(symbol: str) -> dict | None:
         return cached
     try:
         today = datetime.now(timezone.utc).date()
-        frm = (today - timedelta(days=365)).isoformat()
+        frm = (today - timedelta(days=5 * 365)).isoformat()
         to = today.isoformat()
         raw = _fh_call(
             "stock/insider-sentiment",
