@@ -72,4 +72,11 @@ fi
 python dashboard.py &
 DASHBOARD_PID=$!
 echo "$DASHBOARD_PID" > "$PID_FILE"
+
+# Wait for server to bind and extract the actual port (handles TIME_WAIT fallthrough)
+sleep 2
+PORT=$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -i python | grep -oE '127.0.0.1:[0-9]+' | head -1 | cut -d: -f2)
+PORT=${PORT:-8765}  # fallback to default if lsof fails
+open -a "Google Chrome" "http://127.0.0.1:$PORT/"
+
 wait "$DASHBOARD_PID"
