@@ -49,6 +49,13 @@ import yfinance as yf
 
 import mpt
 
+# Optional Finnhub supplemental source. Absent module or unset
+# FINNHUB_API_KEY → _fh is None / its fns return None, columns render "—".
+try:
+    import finnhub_adapter as _fh
+except ImportError:
+    _fh = None
+
 # ----------------------------- Rate-limit handling -------------------------
 # yfinance 1.0 ships its own curl_cffi-based session (with TLS fingerprinting
 # that dodges most of Yahoo's anti-bot filtering); passing a plain
@@ -1262,6 +1269,18 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
       out["current_ratio"] = _safe_num(info.get("currentRatio"))
       out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
       out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
+
+      # Finnhub supplemental enrichment. All calls TTL-cached; degrade to
+      # None if key absent. Each call is try/excepted inside the adapter,
+      # so one failing endpoint never breaks the row.
+      if _fh is not None:
+        out["earnings_surprise"] = _fh.get_earnings_surprise(symbol)
+        out["insider_mspr"]      = _fh.get_insider_sentiment(symbol)
+        out["rec_trend_fh"]      = _fh.get_recommendation_trend(symbol)
+      else:
+        out["earnings_surprise"] = None
+        out["insider_mspr"]      = None
+        out["rec_trend_fh"]      = None
 
       return out  # success
 
@@ -5620,6 +5639,14 @@ const COLS = [
     render: (r) => deltaBar(r.delta_ath) },
   { key: "rs_rank",     label: "RS Rank 1M",w: 92,  align: "center", sortable: false,
     render: (r) => rsBars(r.rs_rank) },
+  { key: "earnings_surprise", label: "EPS Surp.", w: 80, align: "center", sortable: true,
+    sortValue: (r) => {
+      const arr = r.earnings_surprise;
+      if (!arr || !arr.length) return null;
+      const vals = arr.slice(0,4).map(x => x.surprise_pct).filter(x => x != null);
+      return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
+    },
+    render: (r) => epsSurpriseBars(r.earnings_surprise) },
   { key: "above_sma_20",  label: "20SMA",   w: 46,  align: "center", sortable: true,
     render: (r) => triangle(r.above_sma_20),
     sortValue: (r) => r.above_sma_20 === null ? null : (r.above_sma_20 ? 1 : 0) },
@@ -5689,6 +5716,12 @@ const COLS = [
     heat: { kind: "yo", clipMin: 1, clipMax: 5, naMax: true },
     render: (r) => fmt2(r.recommendation_mean),
     sortValue: (r) => r.recommendation_mean },
+  { key: "rec_trend_fh", label: "Rec Δ6M", w: 72, align: "center", sortable: true,
+    sortValue: (r) => recTrendScore(r.rec_trend_fh),
+    render: (r) => recTrendCell(r.rec_trend_fh) },
+  { key: "insider_mspr", label: "MSPR", w: 62, align: "center", sortable: true,
+    sortValue: (r) => r.insider_mspr?.mspr ?? null,
+    render: (r) => msrpBadge(r.insider_mspr) },
   /* Target upside derived client-side from analyst mean target and last price. */
   { key: "target_upside_pct", label: "Target Δ", w: 86, align: "right", sortable: true,
     heat: { kind: "div", anchor: 30 },
@@ -5724,6 +5757,9 @@ const COL_INFO = {
   pct_1y:        "Total price return over the last 365 calendar days.",
   delta_ath:     "Distance from the highest close in the table row's 2-year history window. 0% = at that high; full bar = 50% below it.",
   rs_rank:       "Relative Strength: 12 monthly bars showing where each month's close ranked within its trailing-12-month price range.",
+  earnings_surprise: "EPS Surprise history: 8 quarters, most-recent right. Green bar = beat, red = miss. Height = magnitude (capped ±10%). Requires FINNHUB_API_KEY. Powered by Finnhub.",
+  rec_trend_fh:      "Recommendation Trend Δ6M: change in analyst consensus score over the last 6 months. Score = (2×Strong Buy + Buy − Sell − 2×Strong Sell) / total. Requires FINNHUB_API_KEY.",
+  insider_mspr:      "MSPR — Monthly Share Purchase Ratio. Finnhub aggregates Form 4 filings into a single score: +100 = all insiders buying, −100 = all selling. Positive = net insider buying signal. Requires FINNHUB_API_KEY.",
   above_sma_20:  "20-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 month of trading days.",
   above_sma_50:  "50-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 quarter of trading days.",
   above_sma_200: "200-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 year of trading days.",
@@ -5776,8 +5812,8 @@ const BUILTIN_VIEW_ALIASES = {
 };
 const BUILTIN_VIEWS = {
   "Default":      ["logo","symbol","name","price","market_cap","ps_ratio","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200"],
-  "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield"],
-  "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200"],
+  "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield","rec_trend_fh","insider_mspr"],
+  "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","earnings_surprise","above_sma_20","above_sma_50","above_sma_200"],
 };
 const BUILTIN_ORDER = ["Default", "Fundamentals", "Momentum"];
 const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
@@ -6338,6 +6374,101 @@ function deltaBar(v) {
     <div class="bar" style="width:${width.toFixed(1)}%; background:${bg}"></div>
     <span class="bar-label" style="color:${txt}">${label}</span>
   </div>`;
+}
+
+/* ===========================================================================
+ * Finnhub-powered cells (EPS surprise, recommendation trend, insider MSPR).
+ * All three degrade to na() when the row field is null (no FINNHUB_API_KEY
+ * or non-US ticker with empty data).
+ * --------------------------------------------------------------------------- */
+
+/* "YYYY-MM-DD" → "Q3 2024" for the EPS-surprise tooltip. */
+function fhQuarter(period) {
+  if (!period) return "?";
+  const parts = String(period).split("-");
+  const y = parts[0] || "?";
+  const m = parseInt(parts[1], 10);
+  const q = isFinite(m) ? Math.ceil(m / 3) : "?";
+  return "Q" + q + " " + y;
+}
+
+/* 8 diverging bars anchored at a midline: beats grow down (green), misses
+   grow up (red). arr is most-recent first; we render oldest→newest L→R and
+   pad missing quarters on the left. */
+function epsSurpriseBars(arr) {
+  if (!arr || !arr.length) return na();
+  if (arr.every(e => !e || e.surprise_pct == null)) return na();
+  const W = 80, H = 18, mid = 9, gap = 1, n = 8;
+  const bw = (W - (n - 1) * gap) / n;
+  const slots = arr.slice(0, n).reverse();          // oldest..newest
+  while (slots.length < n) slots.unshift(null);      // left-pad to 8
+  let svg = "";
+  for (let i = 0; i < n; i++) {
+    const e = slots[i];
+    const x = (i * (bw + gap)).toFixed(2);
+    if (!e) {
+      svg += `<rect x="${x}" y="${(mid - 0.5).toFixed(2)}" width="${bw.toFixed(2)}" height="1" fill="var(--muted)" opacity="0.45"/>`;
+      continue;
+    }
+    const p = e.surprise_pct;
+    if (p == null || p === 0) {
+      svg += `<rect x="${x}" y="${(mid - 1).toFixed(2)}" width="${bw.toFixed(2)}" height="2" fill="var(--muted)"/>`;
+      continue;
+    }
+    const bh = Math.max(2, Math.min(Math.abs(p), 10) / 10 * 14);
+    const y = p > 0 ? mid : mid - bh;                // beat down, miss up
+    const color = p > 0 ? "var(--pos)" : "var(--neg)";
+    svg += `<rect x="${x}" y="${y.toFixed(2)}" width="${bw.toFixed(2)}" height="${bh.toFixed(2)}" fill="${color}" rx="0.5"/>`;
+  }
+  const tip = arr.slice(0, n).map(e => {
+    const v = e.surprise_pct == null ? "n/a" : (e.surprise_pct > 0 ? "+" : "") + e.surprise_pct.toFixed(1) + "%";
+    return `${fhQuarter(e.period)}: ${v}`;
+  }).join("  ");
+  return `<span data-tip="${tip}"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="vertical-align:middle">${svg}</svg></span>`;
+}
+
+/* Insider Monthly Share Purchase Ratio badge. */
+function msrpBadge(o) {
+  if (!o || o.mspr == null) return na();
+  const v = o.mspr;
+  const color = v > 5 ? "var(--pos)" : (v < -5 ? "var(--neg)" : "var(--muted)");
+  const label = (v >= 0 ? "+" : "") + v.toFixed(1);
+  const tip = `MSPR ${label} — Monthly Share Purchase Ratio. +100 = all insiders buying, −100 = all selling. ${o.month}/${o.year}`;
+  return `<span style="color:${color}" data-tip="${tip}">${label}</span>`;
+}
+
+/* Per-month analyst consensus score; null if no votes that month. */
+function fhConsensus(m) {
+  if (!m) return null;
+  const total = (m.strongBuy || 0) + (m.buy || 0) + (m.hold || 0) + (m.sell || 0) + (m.strongSell || 0);
+  if (!total) return null;
+  return (2 * (m.strongBuy || 0) + (m.buy || 0) - (m.sell || 0) - 2 * (m.strongSell || 0)) / total;
+}
+
+/* Δ between newest and oldest monthly consensus score; number or null. */
+function recTrendScore(arr) {
+  if (!arr || arr.length < 2) return null;
+  const newest = fhConsensus(arr[0]);
+  const oldest = fhConsensus(arr[arr.length - 1]);
+  if (newest == null || oldest == null) return null;
+  return newest - oldest;
+}
+
+function recTrendCell(arr) {
+  if (!arr || arr.length < 2) return na();
+  const newest = fhConsensus(arr[0]);
+  const oldest = fhConsensus(arr[arr.length - 1]);
+  if (newest == null || oldest == null) return na();
+  const delta = newest - oldest;
+  const n = arr.length;
+  let glyph, color;
+  if (delta > 0.02) { glyph = "▲"; color = "var(--pos)"; }
+  else if (delta < -0.02) { glyph = "▼"; color = "var(--neg)"; }
+  else { glyph = "—"; color = "var(--muted)"; }
+  const sign = delta > 0 ? "+" : (delta < 0 ? "−" : "");
+  const label = `${glyph} ${sign}${Math.abs(delta).toFixed(2)}`;
+  const tip = `Analyst consensus trend over ${n} months. Score = (2×SB+B−S−2×SS)/total. Current: ${newest.toFixed(2)}, ${n}M ago: ${oldest.toFixed(2)}, Δ = ${delta.toFixed(2)}`;
+  return `<span style="color:${color}" data-tip="${tip}">${label}</span>`;
 }
 
 /* ===========================================================================

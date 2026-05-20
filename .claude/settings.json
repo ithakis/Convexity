@@ -7,6 +7,13 @@
           {
             "type": "command",
             "if": "Bash(git commit*)",
+            "statusMessage": "Pre-commit: scanning for leaked local secrets...",
+            "timeout": 30,
+            "command": "bash .claude/hooks/check-secrets.sh"
+          },
+          {
+            "type": "command",
+            "if": "Bash(git commit*)",
             "statusMessage": "Pre-commit: syntax-checking staged .py files...",
             "timeout": 30,
             "command": "cmd=$(jq -r '.tool_input.command // \"\"'); if echo \"$cmd\" | grep -qE 'git[[:space:]]+commit'; then staged=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep '\\.py$' || true); if [ -n \"$staged\" ]; then echo \"Syntax-checking staged Python files: $staged\"; for f in $staged; do python -c \"import ast; ast.parse(open('$f').read())\" && echo \"  OK: $f\" || { echo \"  SYNTAX ERROR in $f — fix before committing.\"; exit 1; }; done; echo \"All staged .py files pass syntax check.\"; fi; fi"
