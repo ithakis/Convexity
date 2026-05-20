@@ -38,6 +38,21 @@ except Exception:
 warnings.simplefilter("ignore", DeprecationWarning)
 warnings.simplefilter("ignore", FutureWarning)
 
+# Pandas 4 / Python 3.12 reset the filter chain on import, so the simplefilter
+# calls above are not reliable for third-party code.  Monkey-patch showwarning
+# instead: any warning whose source file lives inside site-packages (yfinance,
+# pandas internals) is silently dropped before it reaches the terminal.
+_orig_showwarning = warnings.showwarning
+
+
+def _showwarning_filter(message, category, filename, lineno, file=None, line=None):
+    if "site-packages" in str(filename):
+        return
+    _orig_showwarning(message, category, filename, lineno, file, line)
+
+
+warnings.showwarning = _showwarning_filter
+
 import logging
 from pathlib import Path
 
@@ -1321,11 +1336,45 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
       out["current_ratio"] = _safe_num(info.get("currentRatio"))
       out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
       out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
+      out["rec_key"] = (info.get("recommendationKey") or "").strip().lower() or None
+      out["n_analysts"] = _safe_num(info.get("numberOfAnalystOpinions"))
 
       # EPS surprise comes from yfinance (8 quarters, single estimate basis,
       # no API key) — see _earnings_surprise_yf for why we don't use Finnhub
       # here. TTL-cached so the cold-build cost is one extra call per symbol.
       out["earnings_surprise"] = _earnings_surprise_yf(tk, symbol)
+
+      # Rating distribution (most recent month of tk.recommendations).
+      # Saved with the row so the analyst panel renders from cache.
+      rating_dist = None
+      try:
+          recs = tk.recommendations
+          if recs is not None and not recs.empty:
+              rec_row = recs.iloc[0]
+              # Column names are case-sensitive and vary by yfinance version;
+              # build a lowercase key map so we match regardless of casing.
+              row_lower = {str(k).lower(): v for k, v in rec_row.items()}
+              def _rd_int(key):
+                  v = row_lower.get(key, 0)
+                  # NaN is truthy in Python — must guard explicitly.
+                  if v is None or (isinstance(v, float) and math.isnan(v)):
+                      return 0
+                  try:
+                      return int(v)
+                  except (TypeError, ValueError):
+                      return 0
+              d = {
+                  "strongBuy":  _rd_int("strongbuy"),
+                  "buy":        _rd_int("buy"),
+                  "hold":       _rd_int("hold"),
+                  "sell":       _rd_int("sell"),
+                  "strongSell": _rd_int("strongsell"),
+              }
+              if any(d.values()):
+                  rating_dist = d
+      except Exception:
+          pass
+      out["rating_dist"] = rating_dist
 
       # Finnhub supplemental enrichment. All calls TTL-cached; degrade to
       # None if key absent. Each call is try/excepted inside the adapter,
@@ -6456,9 +6505,9 @@ function fhQuarter(period) {
   return "Q" + q + " " + y;
 }
 
-/* 8 diverging bars anchored at a midline: beats grow down (green), misses
-   grow up (red). arr is most-recent first; we render oldest→newest L→R and
-   pad missing quarters on the left. */
+/* 8 diverging bars anchored at a midline: beats grow up (green), misses
+   grow down (red). arr is most-recent first; we render oldest→newest L→R
+   and pad missing quarters on the left. */
 function epsSurpriseBars(arr) {
   if (!arr || !arr.length) return na();
   if (arr.every(e => !e || e.surprise_pct == null)) return na();
@@ -6480,7 +6529,7 @@ function epsSurpriseBars(arr) {
       continue;
     }
     const bh = Math.max(2, Math.min(Math.abs(p), 10) / 10 * 14);
-    const y = p > 0 ? mid : mid - bh;                // beat down, miss up
+    const y = p > 0 ? mid - bh : mid;                // beat up, miss down
     const color = p > 0 ? "var(--pos)" : "var(--neg)";
     svg += `<rect x="${x}" y="${y.toFixed(2)}" width="${bw.toFixed(2)}" height="${bh.toFixed(2)}" fill="${color}" rx="0.5"/>`;
   }
@@ -8302,9 +8351,9 @@ async function activateTab(name, opts) {
         renderModeBar();
         const savedAt = view.saved_at ? relTime(view.saved_at) : "previously";
         $("#status").innerHTML = `<span class="status-name">${escapeHtml(viewLabel(name))}</span><span class="status-meta">cached ${escapeHtml(savedAt)}</span>${view.stale ? `<span class="status-stale">stale</span>` : ""}`;
-        if (view.stale) {
-          // Auto-refresh per user policy.
-          if (!opts.silent) toast(`Constituents changed — refreshing ${viewLabel(name)}…`);
+        const needsColumnRefresh = DATA.length > 0 && DATA.some(r => r && !r.error && r.rating_dist === undefined);
+        if (view.stale || needsColumnRefresh) {
+          if (!opts.silent) toast(view.stale ? `Constituents changed — refreshing ${viewLabel(name)}…` : `Refreshing ${viewLabel(name)} — new data columns available…`);
           await build({keepPanelOpen: true});
         } else {
           requestAnalytics();
@@ -9010,6 +9059,9 @@ function quickAnalystPreview() {
   if (!rows.length) return null;
   const weights = weightsForMode(STATE.mode);
   let ratingNum = 0, ratingW = 0, upsideNum = 0, upsideW = 0;
+  let nAnalystsTotal = 0;
+  const distSum = {strongBuy: 0, buy: 0, hold: 0, sell: 0, strongSell: 0};
+  let distW = 0;
   const holdings = [];
   const notCovered = [];
   for (const row of rows) {
@@ -9029,6 +9081,15 @@ function quickAnalystPreview() {
       upsideNum += upside * weight;
       upsideW += weight;
     }
+    if (row.n_analysts != null && isFinite(row.n_analysts)) nAnalystsTotal += Math.trunc(Number(row.n_analysts));
+    const rowDist = row.rating_dist || null;
+    if (rowDist && typeof rowDist === "object") {
+      const totVotes = (rowDist.strongBuy||0) + (rowDist.buy||0) + (rowDist.hold||0) + (rowDist.sell||0) + (rowDist.strongSell||0);
+      if (totVotes > 0) {
+        for (const k of Object.keys(distSum)) distSum[k] += (rowDist[k] || 0) * weight;
+        distW += weight;
+      }
+    }
     const hasCoverage = (meanRating != null && isFinite(meanRating)) || (upside != null && isFinite(upside));
     const payload = {
       symbol,
@@ -9042,12 +9103,20 @@ function quickAnalystPreview() {
       target_high: null,
       upside_pct: upside,
       mean_rating: meanRating,
-      rec_key: null,
-      n_analysts: null,
-      dist: null,
+      rec_key: row.rec_key || null,
+      n_analysts: row.n_analysts != null ? row.n_analysts : null,
+      dist: rowDist,
     };
     if (hasCoverage) holdings.push(payload);
     else notCovered.push({symbol, name: row.name || symbol, weight});
+  }
+  let distributionPct = null;
+  if (distW > 0) {
+    const distTotalW = Object.values(distSum).reduce((a, b) => a + b, 0);
+    if (distTotalW > 0) {
+      distributionPct = {};
+      for (const k of Object.keys(distSum)) distributionPct[k] = (distSum[k] / distTotalW) * 100;
+    }
   }
   holdings.sort((a, b) => (b.weight || 0) - (a.weight || 0) || String(a.symbol).localeCompare(String(b.symbol)));
   return {
@@ -9057,8 +9126,8 @@ function quickAnalystPreview() {
       rating_coverage_weight: ratingW,
       weighted_target_upside_pct: upsideW > 0 ? (upsideNum / upsideW) : null,
       target_coverage_weight: upsideW,
-      n_analysts_total: null,
-      distribution_pct: null,
+      n_analysts_total: nAnalystsTotal || null,
+      distribution_pct: distributionPct,
       holdings,
       not_covered: notCovered,
       covered_count: holdings.length,
