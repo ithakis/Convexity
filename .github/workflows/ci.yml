@@ -47,20 +47,15 @@ jobs:
           "
 
       # Pyflakes catches undefined names, unused imports, etc.
-      # Only run on the core modules (dashboard.py is huge; keep scope tight).
-      - name: Pyflakes on core modules
+      - name: Pyflakes on package modules
         run: |
-          python -m pyflakes symbol_db.py mpt.py xlsx_export.py build_symbol_db.py 2>&1 || true
-          # Non-blocking for now — dashboard.py has embedded HTML strings that
-          # confuse static analysis. Graduate to blocking once false-positive
-          # rate is measured. Remove the `|| true` when ready.
+          python -m pyflakes portfolio_tracker/cache.py portfolio_tracker/helpers.py portfolio_tracker/persistence.py portfolio_tracker/resolver.py portfolio_tracker/fx.py portfolio_tracker/fetcher.py portfolio_tracker/analytics.py portfolio_tracker/frontier.py portfolio_tracker/symbol_db.py portfolio_tracker/mpt.py portfolio_tracker/xlsx_export.py build_symbol_db.py 2>&1 || true
 
       # Verify the server module is importable (no top-level import errors).
-      # Uses a stub for heavy optional deps so this stays fast on CI.
-      - name: Import smoke-test (non-yfinance modules)
+      - name: Import smoke-test
         run: |
-          python -c "import ast; ast.parse(open('dashboard.py').read()); print('dashboard.py: parseable')"
-          python -c "import mpt" 2>&1 | grep -v "numba\|llvmlite\|NumbaPendingDeprecation" || true
+          python -c "import ast; ast.parse(open('dashboard.py').read()); print('dashboard.py shim: parseable')"
+          python -c "from portfolio_tracker import mpt" 2>&1 | grep -v "numba\|llvmlite\|NumbaPendingDeprecation" || true
 
   test:
     name: Metrics unit tests
@@ -75,8 +70,6 @@ jobs:
           python-version: "3.11"
 
       - name: Install test dependencies
-        # Install the full project requirements so mpt.py (which hard-imports
-        # numba at the module level) and dashboard.py (yfinance) are importable.
         run: pip install pytest -r requirements.txt
 
       - name: Run pytest

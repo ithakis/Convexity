@@ -36,15 +36,15 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 # Import mpt directly (pure numpy/pandas, no server deps).
-import mpt
+from portfolio_tracker import mpt
 
-# Import _normalize_dividend_yield from dashboard.py (module-level function,
+# Import _normalize_dividend_yield from the package (module-level function,
 # importable once requirements.txt deps are installed). If the import fails
 # (e.g. missing yfinance/numba on a stripped env) skip all dashboard tests
 # explicitly — do NOT silently fall back to a local copy, which would make
-# tests pass even when dashboard.py is broken or has diverged.
+# tests pass even when the package is broken or has diverged.
 try:
-    from dashboard import _normalize_dividend_yield  # noqa: E402
+    from portfolio_tracker.helpers import _normalize_dividend_yield  # noqa: E402
     _DASHBOARD_IMPORT_ERROR = None
 except Exception as _exc:
     _DASHBOARD_IMPORT_ERROR = str(_exc)

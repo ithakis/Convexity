@@ -30,7 +30,7 @@ except ImportError:
     sys.stderr.write("error: the 'requests' package is required (pip install requests)\n")
     sys.exit(2)
 
-import symbol_db as sdb
+from portfolio_tracker import symbol_db as sdb
 
 
 def main() -> int:

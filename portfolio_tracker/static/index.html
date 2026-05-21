@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<title>Portfolio Tracker</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="topbar" id="topbar">
+  <button id="edit-btn" class="portfolio-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
+  <button id="optimize" data-tip="Open the Portfolio Optimization workspace: compute the long-only efficient frontier from your current holdings (Markowitz CLA, Ledoit-Wolf shrinkage), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
+  <button id="refresh" data-tip="Pull fresh quotes from Yahoo Finance for the current portfolio and rebuild the derived metrics as rows stream back in.">↻ Refresh</button>
+  <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
+       per portfolio. Each sheet must include EVERY column the app can show for a
+       row (full column registry, not just the currently visible view) PLUS the
+       analyst recommendations and the portfolio analytics ratios shown in the
+       Portfolio tab, with static 1Y and 5Y portfolio statistics but no exported
+       time-series payloads. Intent: user feeds the file to an AI/chatbot for
+       agentic analysis and portfolio discussion. Future maintainers — when new
+       columns or analytics are added to the UI, extend the export accordingly so
+       this stays the "everything you see in the app" artifact. -->
+  <button id="export" data-tip="Create one Excel workbook with every saved portfolio, full holdings data, analyst fields, and static 1Y and 5Y portfolio statistics. Useful as structured input to an AI agent.">⬇ Export</button>
+  <span class="spacer"></span>
+  <span class="status" id="status">Idle</span>
+  <div class="fx-menu" id="fx-menu">
+    <button class="fx-btn" id="fx-btn" type="button" title="Portfolio denomination currency">
+      <span class="fx-btn-label" id="fx-btn-label">USD</span>
+      <span class="fx-btn-caret">▾</span>
+    </button>
+    <div class="fx-dropdown" id="fx-dropdown" role="listbox" aria-hidden="true"></div>
+    <div class="fx-hover" id="fx-hover" aria-hidden="true">
+      <div class="fx-hover-title" id="fx-hover-title"></div>
+      <svg class="fx-hover-svg" id="fx-hover-svg" viewBox="0 0 220 80" preserveAspectRatio="none"></svg>
+      <div class="fx-hover-foot" id="fx-hover-foot"></div>
+    </div>
+  </div>
+  <button class="theme-switch" id="theme-switch" title="Toggle theme" aria-label="Toggle theme">
+    <i class="ts-icon" id="ts-sun">&#9728;</i>
+    <span class="ts-track" id="ts-track"><span class="ts-thumb"></span></span>
+    <i class="ts-icon" id="ts-moon">&#9790;</i>
+  </button>
+  <button class="info-btn" id="info-btn" title="How this works"><span class="info-icon-circle">i</span></button>
+</div>
+<div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
+
+<div id="input-panel" class="hidden">
+  <!-- Browser-style tab strip of saved portfolios -->
+  <div class="pf-tabs" id="pf-tabs" role="tablist"></div>
+
+  <!-- Constituents editor -->
+  <div class="pf-editor">
+    <div class="pf-editor-head">
+      <span id="pf-editor-title">Constituents</span>
+    </div>
+    <textarea id="tickers" rows="2" placeholder="Paste tickers or company names — comma or newline separated.
+e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA, XLK, Trane, MSTR, COST, Apple, Microsoft"></textarea>
+    <div class="panel-row">
+      <button id="build" class="primary">Build Dashboard</button>
+      <button id="save-as" class="ghost">＋ Save as new</button>
+      <span class="spacer"></span>
+      <span class="status" id="editor-status">Paste your tickers and press Build (or Cmd/Ctrl + Enter).</span>
+    </div>
+    <!-- Primary button (#build) and secondary (#save-as) swap labels/intent based on
+         whether a saved portfolio is currently open. See updatePrimaryButtonLabels(). -->
+
+  </div>
+
+  <!-- Analytics sub-window -->
+  <div class="pf-analytics" id="pf-analytics">
+    <div class="pf-analytics-head">
+      <span class="pf-analytics-title">Portfolio analytics</span>
+      <!-- Mode bar: built-in pills (Equal, Cap) + any saved per-portfolio
+           weight presets. Trailing "+" opens the weights editor in new-preset
+           mode; the pencil on an active preset opens it for edit/delete. -->
+      <div class="pf-mode-bar" id="pf-mode-toggle" role="tablist" aria-label="Weighting"></div>
+      <div class="pf-period-tabs" id="pf-period-tabs">
+        <button data-p="3M">3M</button>
+        <button data-p="6M">6M</button>
+        <button data-p="YTD">YTD</button>
+        <button data-p="1Y" class="active">1Y</button>
+        <button data-p="3Y">3Y</button>
+        <button data-p="5Y">5Y</button>
+        <button data-p="MAX">Max</button>
+      </div>
+      <div class="pf-overlay-toggles" id="pf-overlay-toggles" role="group" aria-label="Chart overlays">
+        <span class="pf-overlay-pill" id="pf-show-spy" data-on="1" role="switch" aria-checked="true" tabindex="0">
+          <span class="swatch spy"></span>SPY
+        </span>
+        <span class="pf-overlay-pill" id="pf-show-ndx" data-on="0" role="switch" aria-checked="false" tabindex="0">
+          <span class="swatch ndx"></span>NASDAQ
+        </span>
+        <span class="pf-overlay-pill" id="pf-show-sec" data-on="0" role="switch" aria-checked="false" tabindex="0">
+          <span class="swatch sec"></span>Sector mix
+          <span class="ovl-info" data-tip="Sector mix is a synthetic benchmark: each portfolio holding is replaced by its sector ETF (XLK Technology, XLV Healthcare, XLF Financials, XLY Consumer Cyclical, XLP Consumer Defensive, XLC Communication, XLE Energy, XLI Industrials, XLB Materials, XLRE Real Estate, XLU Utilities). Weights match your active mode (equal / cap / custom). Compare your stock picks against the matching sector basket.">i</span>
+        </span>
+        <span class="pf-overlay-pill" id="pf-show-dd" data-on="1" role="switch" aria-checked="true" tabindex="0">
+          <span class="swatch dd"></span>Drawdown
+        </span>
+      </div>
+    </div>
+    <div class="pf-analytics-body" id="pf-analytics-body">
+      <div class="pf-empty" id="pf-empty">Build the dashboard to compute portfolio analytics.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete-portfolio confirmation modal -->
+<div class="confirm-bg" id="confirm-bg">
+  <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="confirm-head" id="confirm-title">Delete portfolio?</div>
+    <div class="confirm-body" id="confirm-body">This portfolio and its cached results will be removed.</div>
+    <div class="confirm-foot">
+      <button id="confirm-cancel" type="button">Cancel</button>
+      <button id="confirm-ok" class="danger" type="button">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Custom-weight popup. The name input + Save/Save-as/Delete row turns the
+     editor into a named-preset manager; Apply alone still works as the
+     legacy ad-hoc "custom" mode for one-off comparisons. -->
+<div class="pf-weights-bg" id="pf-weights-bg">
+  <div class="pf-weights-modal">
+    <div class="pf-weights-head">
+      <span class="pf-weights-title" id="pf-weights-title">Custom weights</span>
+      <div class="pf-weights-sum" id="pf-weights-sum">100.0%</div>
+      <button id="pf-weights-equal" class="pf-weights-action" title="Set all to equal weight">Equal-weighted</button>
+      <button id="pf-weights-reset" class="pf-weights-action" title="Reset to market-cap weights">Cap-weighted</button>
+      <button id="pf-weights-close" class="pf-weights-action" title="Close">✕</button>
+    </div>
+    <div class="pf-name-row">
+      <input id="pf-weights-name" type="text" placeholder="Preset name (e.g. Growth Tilt)" autocomplete="off" spellcheck="false"/>
+      <button id="pf-weights-save" class="pf-weights-action" title="Save as named preset">Save</button>
+      <button id="pf-weights-saveas" class="pf-weights-action" title="Save under a new name">Save as…</button>
+      <button id="pf-weights-delete" class="pf-weights-action" title="Delete this preset" style="display:none">Delete</button>
+      <span id="pf-weights-status" class="pf-name-status"></span>
+    </div>
+    <div class="pf-weights-hint">Slide or type to set weights. Lock pins a row; others auto-rebalance. Apply alone for an unsaved comparison, or name + Save to keep it.</div>
+    <div class="pf-weights-body" id="pf-weights-body"></div>
+    <div class="pf-weights-foot">
+      <button id="pf-weights-apply" class="primary">Apply</button>
+      <button id="pf-weights-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Inline "save as" prompt — top-level overlay so it can appear over either
+     the weights modal or the MPT overlay. Uses the app's dark theme rather
+     than a native prompt() so the UI feels consistent. -->
+<div class="pf-inline-prompt" id="pf-name-prompt">
+  <div class="pf-ip-box">
+    <div class="pf-ip-title" id="pf-name-prompt-title">Save preset as…</div>
+    <div class="pf-ip-desc" id="pf-name-prompt-desc" style="display:none"></div>
+    <input id="pf-name-prompt-input" type="text" placeholder="Preset name" autocomplete="off" spellcheck="false"/>
+    <div class="pf-ip-err" id="pf-name-prompt-err"></div>
+    <div class="pf-ip-foot">
+      <button id="pf-name-prompt-cancel">Cancel</button>
+      <button id="pf-name-prompt-ok" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Portfolio Optimization (MPT) overlay. Computes the long-only efficient
+     frontier from the active portfolio, lets the user explore it with a
+     slider, and either save runs or apply the chosen weights as a preset. -->
+<div class="pf-mpt-bg" id="pf-mpt-bg" role="dialog" aria-modal="true" aria-labelledby="pf-mpt-title">
+  <div class="pf-mpt-modal">
+    <div class="pf-mpt-head">
+      <span class="pf-mpt-title" id="pf-mpt-title">Portfolio Optimization</span>
+      <span class="pf-mpt-sub" id="pf-mpt-sub">Markowitz long-only · Critical Line Algorithm</span>
+      <span class="spacer"></span>
+      <button id="pf-mpt-info" class="info-btn pf-mpt-info-btn" title="About Modern Portfolio Theory" type="button"><span class="info-icon-circle">i</span></button>
+      <button id="pf-mpt-close" class="pf-mpt-close" title="Close (Esc)">✕</button>
+    </div>
+    <div class="pf-mpt-controls" id="pf-mpt-controls">
+      <div class="pf-mpt-ctl">
+        <label>Lookback</label>
+        <div class="seg" id="pf-mpt-lookback">
+          <button data-v="1Y">1Y</button>
+          <button data-v="3Y" class="active">3Y</button>
+          <button data-v="5Y">5Y</button>
+          <button data-v="10Y">10Y</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl">
+        <label>Frequency</label>
+        <div class="seg" id="pf-mpt-freq">
+          <button data-v="daily">Daily</button>
+          <button data-v="weekly" class="active">Weekly</button>
+          <button data-v="monthly">Monthly</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl pf-mpt-ctl-rf">
+        <label>Risk-free (annual)<span class="pf-mpt-rf-info" data-tip="Annualized risk-free rate (in %) used as the baseline return in Sharpe and tangency calculations. Auto fills it from the short-rate proxy for the portfolio currency (e.g. ^IRX, US 13-week T-Bill), averaged over the selected lookback. The sparkline shows that proxy's history — hover for the time series.">i</span></label>
+        <div class="pf-mpt-rf-wrap">
+          <input id="pf-mpt-rf" type="number" min="0" max="20" step="0.05" value="4.50"/>
+          <div class="pf-mpt-rf-spark-wrap" id="pf-mpt-rf-spark-wrap">
+            <svg id="pf-mpt-rf-spark" class="pf-mpt-rf-spark" viewBox="0 0 200 36" preserveAspectRatio="none" aria-hidden="true"></svg>
+            <div class="pf-mpt-rf-spark-tip" id="pf-mpt-rf-spark-tip" role="tooltip"></div>
+          </div>
+          <button type="button" id="pf-mpt-rf-auto" class="pf-mpt-rf-auto" data-tip="Refill the input with the trailing-window mean of the short-rate proxy (e.g. ^IRX). Click to recompute after changing the lookback or currency.">Auto</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl pf-mpt-ctl-div">
+        <label>Allocation <span class="pf-mpt-rf-info" data-tip="Sparse: unconstrained long-only Markowitz — the optimiser is free to drop assets to 0%, often leaving most holdings at zero weight. Diversified: every asset receives at least a minimum weight (auto-scaled by portfolio size — about 0.5/N, never above 1/N) so the frontier keeps all constituents in the mix. Same math (Critical Line Algorithm via variable substitution), no extra solver.">i</span></label>
+        <div class="seg" id="pf-mpt-mode">
+          <button data-v="sparse" class="active">Sparse</button>
+          <button data-v="diversified">Diversified</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl">
+        <label>Compute budget</label>
+        <div class="pf-mpt-select" id="pf-mpt-budget" data-value="standard" tabindex="0" role="combobox" aria-expanded="false" aria-haspopup="listbox">
+          <span class="pf-mpt-select-label">Standard — 1M configs (~4s)</span>
+          <span class="pf-mpt-select-caret" aria-hidden="true">▾</span>
+          <ul class="pf-mpt-select-menu" role="listbox" hidden>
+            <li data-value="fast" role="option">Fast — 200k configs (~1s)</li>
+            <li data-value="standard" role="option" aria-selected="true">Standard — 1M configs (~4s)</li>
+            <li data-value="thorough" role="option">Thorough — 3.5M configs (~14s)</li>
+            <li data-value="exhaustive" role="option">Exhaustive — 15M configs (~60s)</li>
+          </ul>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl pf-mpt-ctl-run">
+        <label>&nbsp;</label>
+        <button class="pf-mpt-run" id="pf-mpt-run">Run optimization</button>
+      </div>
+    </div>
+    <div class="pf-mpt-body">
+      <div class="pf-mpt-chartwrap">
+        <div class="pf-mpt-chart" id="pf-mpt-chart">
+          <!-- Two-canvas chart: base layer carries axes + cloud + frontier line
+               + anchors (redrawn only when data/viewport changes); overlay
+               carries the selection ring + hover ghost (redrawn on cursor
+               input). Both canvases are sized through one shared helper so
+               the frontier line and Monte-Carlo cloud cannot drift. -->
+          <canvas id="pf-mpt-base" class="pf-mpt-cv pf-mpt-cv-base" aria-hidden="true"></canvas>
+          <canvas id="pf-mpt-overlay" class="pf-mpt-cv pf-mpt-cv-overlay" aria-hidden="true"></canvas>
+          <div class="pf-mpt-status" id="pf-mpt-status">Run the optimization to draw the efficient frontier.</div>
+        </div>
+        <div class="pf-mpt-slider-row" data-line="frontier">
+          <span class="pf-mpt-slider-label">Frontier</span>
+          <span>Min-vol</span>
+          <input type="range" id="pf-mpt-slider" min="0" max="100" value="50" disabled/>
+          <span>Max-return</span>
+          <span class="pf-mpt-slider-readout" id="pf-mpt-slider-readout">—</span>
+        </div>
+        <div class="pf-mpt-slider-row cvar" data-line="cvar">
+          <span class="pf-mpt-slider-label">CVaR</span>
+          <span>99%</span>
+          <input type="range" id="pf-mpt-cvar-slider" min="0" max="49" value="0" disabled/>
+          <span>50%</span>
+          <span class="pf-mpt-slider-readout" id="pf-mpt-cvar-readout">—</span>
+        </div>
+        <div class="pf-mpt-legend" id="pf-mpt-legend"></div>
+      </div>
+      <div class="pf-mpt-side" id="pf-mpt-side">
+        <h4>Selected portfolio</h4>
+        <div class="pf-mpt-kv" id="pf-mpt-stats">
+          <span class="k">Run the optimization to see metrics.</span>
+        </div>
+        <h4>Weights</h4>
+        <div class="pf-mpt-weights" id="pf-mpt-wlist"></div>
+        <div class="pf-mpt-actions">
+          <button id="pf-mpt-apply" class="primary">Apply to Portfolio</button>
+          <button id="pf-mpt-save">Save as Custom Weights</button>
+        </div>
+        <h4>Recent runs</h4>
+        <div class="pf-mpt-runs" id="pf-mpt-runs"><span class="pf-mpt-status">No saved runs yet.</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- About MPT modal — layered on top of the MPT overlay (z-index 95 vs 90).
+     Mirrors the main-page About modal (info-bg) for visual consistency;
+     re-uses the same .info-modal / .info-head / .info-card / .info-formula
+     classes so KaTeX auto-render works with zero new styling. -->
+<div class="info-bg pf-mpt-info-bg" id="pf-mpt-info-bg">
+  <div class="info-modal">
+    <div class="info-head">
+      <div>
+        <div class="info-head-title">Modern Portfolio Theory — Guide</div>
+        <div class="info-head-sub">Motivation, theory, limitations, and a worked example</div>
+      </div>
+      <button class="info-head-close" id="pf-mpt-info-close" type="button" title="Close (Esc)">&#215;</button>
+    </div>
+    <p class="info-intro">
+      Modern Portfolio Theory (MPT) — introduced by Harry Markowitz in 1952 — is the
+      mathematical foundation for trading off expected return against risk when
+      combining risky assets. This optimiser implements long-only, fully-invested,
+      mean-variance MPT with the Critical Line Algorithm (Markowitz, 1959).
+    </p>
+    <div class="info-grid">
+
+      <div class="info-card info-card-wide">
+        <div class="info-card-name">Motivation — the free-lunch intuition</div>
+        <div class="info-card-desc">
+          Most investors hold many assets because diversification reduces portfolio
+          volatility without proportionally reducing expected return — what Markowitz
+          called &ldquo;the only free lunch in finance&rdquo;. When two assets are imperfectly
+          correlated (ρ &lt; 1), the variance of their weighted sum is strictly less
+          than the weighted sum of their variances. Stacking many imperfectly
+          correlated bets therefore shifts the portfolio toward the upper-left of
+          the (volatility, return) plane: more return per unit of risk.
+        </div>
+        <div class="info-card-why">
+          The <b>efficient frontier</b> is the locus of portfolios that achieve the
+          maximum expected return for each given level of risk. Anything below the
+          frontier is dominated — you can always find another long-only portfolio
+          with the same risk but a higher expected return.
+        </div>
+      </div>
+
+      <div class="info-card info-card-wide">
+        <div class="info-card-name">Theory — the mean-variance optimisation</div>
+        <div class="info-card-desc">
+          Given an asset universe with annualised mean-return vector <b>μ</b> and
+          annualised covariance matrix <b>Σ</b>, a portfolio is a weight vector
+          <b>w</b> summing to one. Its expected return and variance are
+        </div>
+        <div class="info-formula">$$\mu_p = w^\top \mu \qquad \sigma_p^{\,2} = w^\top \Sigma\, w$$</div>
+        <div class="info-card-desc">
+          The Markowitz program seeks, for each target return <b>R⋆</b>, the
+          long-only portfolio that minimises variance subject to that target:
+        </div>
+        <div class="info-formula">$$\min_{w}\ w^\top \Sigma\, w \quad \text{s.t.}\quad w^\top \mu = R^\star,\ \ w^\top \mathbf{1} = 1,\ \ w \ge 0$$</div>
+        <div class="info-card-desc">
+          Sweeping <b>R⋆</b> traces the efficient frontier. The
+          <b>Critical Line Algorithm</b> (CLA) used here solves the entire
+          piecewise-linear frontier in one pass by tracking which assets are at
+          their lower bound versus &ldquo;free&rdquo;, jumping between turning points where the
+          active set changes. The <b>tangency portfolio</b> — the point on the
+          frontier maximising the Sharpe ratio — is
+        </div>
+        <div class="info-formula">$$w^{\mathrm{tan}} = \arg\max_{w \in \mathcal{F}}\ \frac{\mu_p - r_f}{\sigma_p}$$</div>
+        <div class="info-card-desc">
+          where <b>r<sub>f</sub></b> is the risk-free rate. Geometrically it is the
+          point at which a line from <b>(0, r<sub>f</sub>)</b> is tangent to the
+          frontier — the steepest reward-to-risk ratio achievable with risky assets.
+        </div>
+        <div class="info-card-desc">
+          The dashed orange curve overlays a separate family of optima: the
+          <b>minimum-CVaR</b> portfolios. For confidence level α∈[0.5, 0.99],
+          <b>CVaR<sub>α</sub></b> (expected shortfall, ES<sub>α</sub>) is the
+          expected loss conditional on being in the worst (1−α) tail of the
+          empirical return distribution. Each point is solved as a
+          <b>Rockafellar-Uryasev</b> linear program:
+        </div>
+        <div class="info-formula">$$\min_{w,\zeta,u}\ \zeta + \frac{1}{(1-\alpha)T} \sum_{t} u_t \quad \text{s.t.}\quad u_t \ge -R_t^\top w - \zeta,\ \ u_t \ge 0,\ \ w^\top \mathbf{1} = 1,\ \ w \ge L$$</div>
+        <div class="info-card-desc">
+          At the optimum, <b>ζ⋆ = VaR<sub>α</sub></b> and the objective equals
+          <b>CVaR<sub>α</sub></b>. The slider scans α from 99% (strict tail) down
+          to 50%; lower α weighs broader downside in the objective and typically
+          accepts a tighter portfolio with less concentration.
+        </div>
+        <div class="info-card-why">
+          Sample covariance is noisy when the number of assets approaches the
+          number of observations. This module shrinks it toward a
+          constant-correlation target using the <b>Ledoit-Wolf</b> estimator with a
+          data-driven intensity α ∈ [0, 1]:
+        </div>
+        <div class="info-formula">$$\hat{\Sigma} = \alpha\, T + (1-\alpha)\, S$$</div>
+        <div class="info-card-desc">
+          where <b>S</b> is the sample covariance and <b>T</b> the
+          constant-correlation target. This stabilises the optimisation when the
+          frontier is highly sensitive to small changes in <b>Σ</b>.
+        </div>
+      </div>
+
+      <div class="info-card">
+        <div class="info-card-name">Limitations</div>
+        <div class="info-card-desc">
+          MPT&rsquo;s elegance hides several traps that matter in practice:
+        </div>
+        <ul class="info-feature-list">
+          <li><b>Estimation error in μ dominates.</b> Historical mean returns are noisy
+              forecasts; the optimiser amplifies that noise into extreme corner
+              portfolios (&ldquo;Markowitz error maximisation&rdquo;).</li>
+          <li><b>Covariance instability.</b> Sample Σ rotates with the lookback window;
+              the Ledoit-Wolf shrinkage applied here mitigates but does not
+              eliminate this.</li>
+          <li><b>Long-only.</b> No shorting, no leverage — many academic results
+              (efficient frontier as a hyperbola, two-fund separation) only hold
+              when shorts are allowed.</li>
+          <li><b>No transaction costs, taxes, or liquidity constraints.</b> The
+              optimiser will happily produce a 0.18% NVDA allocation; whether that
+              is sensible to trade is up to you.</li>
+          <li><b>Variance ≠ risk.</b> Mean-variance treats upside and downside
+              symmetrically. For asymmetric return distributions consider CVaR or
+              downside-deviation formulations.</li>
+          <li><b>Backward-looking.</b> The frontier reflects the chosen lookback
+              window; it is not a forecast.</li>
+        </ul>
+      </div>
+
+      <div class="info-card">
+        <div class="info-card-name">Example — closed-form two-asset case</div>
+        <div class="info-card-desc">
+          For two risky assets with volatilities <b>σ<sub>1</sub>, σ<sub>2</sub></b>
+          and correlation <b>ρ</b>, the minimum-variance long-only weight on asset 1 is
+        </div>
+        <div class="info-formula">$$w_1^\star = \frac{\sigma_2^{\,2} - \rho\,\sigma_1 \sigma_2}{\sigma_1^{\,2} + \sigma_2^{\,2} - 2\rho\,\sigma_1 \sigma_2}$$</div>
+        <div class="info-card-desc">
+          with <b>w<sub>2</sub><sup>⋆</sup> = 1 − w<sub>1</sub><sup>⋆</sup></b>
+          (clipped to [0, 1] for the long-only constraint).
+          For <b>σ<sub>1</sub></b> = 20%, <b>σ<sub>2</sub></b> = 30%, <b>ρ</b> = 0.2,
+          this gives <b>w<sub>1</sub><sup>⋆</sup></b> ≈ 0.78 and a portfolio volatility
+          of about 18.4% — strictly below either asset&rsquo;s standalone volatility.
+          The free lunch in one line of algebra.
+        </div>
+        <div class="info-card-why">
+          The <b>n</b>-asset generalisation requires no new ideas: the same KKT
+          conditions yield a piecewise-linear path in weight space, which the CLA
+          enumerates corner by corner.
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Pass D — column-view switcher bar.
+     Lets the user pick between built-in presets (Default / Fundamentals / Momentum),
+     View), select a saved custom view, or open the Customize modal to
+     create one. The active view drives renderHeader/renderSortMenu/render
+     via getActiveColumns(). Drag-and-drop on the live <th> elements also
+     mutates the active view (with a "modified" pill when reordering on a
+     built-in preset). -->
+<div class="cv-bar" id="cv-bar">
+  <div class="cv-seg" id="cv-builtins" role="tablist" aria-label="Column view"></div>
+  <div class="cv-custom-wrap" id="cv-custom-wrap"></div>
+  <button class="cv-fit-toggle" id="cv-fit-toggle" type="button" data-tip="Shrink column widths, chart cells, and table text just enough to keep the active view on screen." aria-pressed="false">Fit to screen</button>
+  <button class="cv-customize" id="cv-customize" type="button" title="Pick which columns to show">Customize…</button>
+  <span class="cv-dirty" id="cv-dirty" hidden>
+    <span class="cv-dirty-label">Modified</span>
+    <button class="cv-dirty-save" id="cv-dirty-save" type="button">Save as new view</button>
+    <button class="cv-dirty-reset" id="cv-dirty-reset" type="button">Reset</button>
+  </span>
+</div>
+
+<div class="table-wrap">
+  <table id="tbl">
+    <thead><tr id="thead"></tr></thead>
+    <tbody id="tbody"><tr><td colspan="16" style="padding:30px; text-align:center; color:var(--muted);">Press <b>Build Dashboard</b> above to load your portfolio.</td></tr></tbody>
+  </table>
+</div>
+
+<!-- Pass D — Customize Columns modal. Populated by openColumnPicker().
+     Lists every registry column with a checkbox + drag handle (HTML5 DnD).
+     "Save as new view" prompts for a name; "Update <name>" overwrites the
+     active custom view. Built-ins are read-only here. -->
+<div class="modal-bg" id="cv-modal-bg" hidden><div class="modal cv-modal" id="cv-modal" role="dialog" aria-modal="true" aria-label="Customize columns"></div></div>
+
+<div id="analyst-dashboard" aria-label="Analyst sentiment dashboard"></div>
+
+<div class="info-bg" id="info-bg">
+  <div class="info-modal">
+    <div class="info-head">
+      <div>
+        <div class="info-head-title">Portfolio Tracker — Guide</div>
+        <div class="info-head-sub">Feature library, workflow, and column formulas</div>
+      </div>
+      <button class="info-head-close" onclick="closeInfo()">&#215;</button>
+    </div>
+    <p class="info-intro">
+      Data is fetched live from Yahoo Finance via yfinance. Each row is one security. Click any row for a
+      detail view. Use <b>⇅ Sort</b> to reorder by any visible metric. Colors are heatmaps, and most controls in the top bar and column bar explain themselves on hover.
+    </p>
+    <div class="info-grid">
+      <div class="info-card full">
+        <div class="info-card-name">Workflow</div>
+        <div class="info-card-desc">Open <b>Portfolio</b> to manage saved tabs and constituents. Build or update the table, then move across analytics, FX denomination, column views, the analyst dashboard, and the row detail modal without losing the underlying portfolio state.</div>
+        <ul class="info-feature-list">
+          <li>Use saved tabs as named portfolio workspaces with cached rows, stale markers, last-view restore, and inline rename.</li>
+          <li>Build or refresh once, then inspect the same holdings through the table, analytics, sentiment, FX, and detail layers.</li>
+          <li>Switch weighting modes and time windows to see how the same portfolio behaves under different assumptions.</li>
+          <li>Export the whole saved state to Excel when you want a portable research artifact.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Why it matters:</span>This app is designed to move from idea capture to ranking, risk review, analyst context, and export without making you rebuild the portfolio in separate tools.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Portfolio Workspace</div>
+        <div class="info-card-desc">Saved portfolio tabs hold constituents, cached rows, and analytics context. Tabs can be renamed inline and carry stale state when the saved view no longer matches live data.</div>
+        <ul class="info-feature-list">
+          <li>Saved tabs and an ad hoc current tab.</li>
+          <li>Inline rename, delete, and restore-last-view behavior.</li>
+          <li>Cached row payloads so previously built views reopen instantly.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>it turns the dashboard into a persistent research workspace instead of a one-shot ticker paste box.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Build &amp; Refresh</div>
+        <div class="info-card-desc">Dashboard builds stream row-by-row, so price, momentum, valuation, and technical fields appear progressively instead of waiting for the full portfolio to finish.</div>
+        <ul class="info-feature-list">
+          <li>Streaming quote build and update path.</li>
+          <li>Per-row error states when Yahoo has no usable data.</li>
+          <li>Smart primary action that flips between Build Dashboard and Update Portfolio.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>you get fast feedback on large portfolios and can spot broken symbols without blocking the whole run.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Portfolio Analytics</div>
+        <div class="info-card-desc">The analytics panel turns the holdings table into a portfolio object with benchmark-relative risk and return math.</div>
+        <ul class="info-feature-list">
+          <li>Equal-weight, cap-weighted, and custom-weight modes.</li>
+          <li>3M, 6M, YTD, 1Y, 3Y, 5Y, and Max windows.</li>
+          <li>SPY, NASDAQ, sector-mix, and drawdown overlays.</li>
+          <li>Risk &amp; Return, weighted valuation, exposure, concentration, and contribution blocks.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>you can judge whether an idea is attractive as a portfolio, not just as a collection of individually interesting names.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Analyst Sentiment</div>
+        <div class="info-card-desc">A separate dashboard aggregates sell-side coverage across the active holdings.</div>
+        <ul class="info-feature-list">
+          <li>Weighted consensus rating on the 1 to 5 Yahoo scale.</li>
+          <li>Coverage-weighted target upside.</li>
+          <li>Recommendation distribution and per-holding consensus table.</li>
+          <li>Coverage gaps so you can see what part of the book analysts do not cover.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>it separates market-implied valuation from street expectations and shows where your book is consensus or contrarian.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">FX &amp; Denomination</div>
+        <div class="info-card-desc">The display currency selector converts prices, portfolio values, and analytics into a consistent denomination while keeping the original quote context available.</div>
+        <ul class="info-feature-list">
+          <li>Spot FX conversion across the supported major currencies.</li>
+          <li>Hoverable 1Y synthetic currency basket index for context.</li>
+          <li>FX-adjusted portfolio analytics in the chosen display currency.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>it keeps return comparisons honest when the portfolio mixes USD, EUR, GBP, JPY, CHF, or CAD exposures.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Column Views &amp; Sorting</div>
+        <div class="info-card-desc">The table is no longer a single fixed layout. You can switch the lens instead of forcing every idea through one preset.</div>
+        <ul class="info-feature-list">
+          <li>Built-in presets for Default, Fundamentals, and Momentum.</li>
+          <li>Custom column views saved separately from portfolios.</li>
+          <li>Drag-to-reorder headers and a dirty-state indicator for modified presets.</li>
+          <li>Fit to screen compaction and a Sort menu keyed to the active visible columns.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>screen real estate becomes a deliberate ranking tool, so you can pivot from momentum review to quality review without rebuilding data.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Row Detail Modal</div>
+        <div class="info-card-desc">Clicking a row opens the heavy research view for one security.</div>
+        <ul class="info-feature-list">
+          <li>1M to Max chart windows with benchmark and volume overlays.</li>
+          <li>Snapshot, valuation, profitability, fundamentals, dividend, profile, and news sections.</li>
+          <li>Analyst targets, consensus trend, and benchmark-relative performance.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>the table stays fast, while the modal becomes the deep-dive layer for understanding what is driving a single name.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Excel Export</div>
+        <div class="info-card-desc">Export produces one workbook across every saved portfolio, not just the active tab.</div>
+        <ul class="info-feature-list">
+          <li>Overview sheet plus one sheet per saved portfolio.</li>
+          <li>Holdings data, analyst fields, exposure, concentration, and portfolio analytics blocks.</li>
+          <li>Designed as a portable input artifact for spreadsheet work or AI-assisted review.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>it gives you a complete offline snapshot of what the app can already see, without re-querying everything manually.</div>
+      </div>
+      <div class="info-card full">
+        <div class="info-card-name">Column Families Beyond The Default View</div>
+        <div class="info-card-desc">The app exposes more than the original default table. Optional columns already available today include:</div>
+        <ul class="info-feature-list">
+          <li>Momentum and technical fields: % 1W, % 1M, % 3M, % 6M, RSI 14, MACD %, Bollinger %B, 20SMA, 50SMA, and 200SMA.</li>
+          <li>Fundamental and balance-sheet fields: Sector, Industry, Beta, Forward P/E, PEG, EV/Revenue, EV/EBITDA, Operating Margin, D/E, Current Ratio, and Dividend Yield.</li>
+          <li>Range and analyst fields: 52W High, 52W Low, Analyst Rating, and Target Δ.</li>
+        </ul>
+        <div class="info-card-why"><span class="label">Useful because:</span>you can choose whether the table is a momentum board, a fundamentals screen, a risk dashboard, or an analyst-consensus monitor.</div>
+      </div>
+      <div class="info-card full">
+        <div class="info-card-name">Core Column Reference</div>
+        <div class="info-card-desc">The cards below cover the columns in the default view plus several optional metrics that matter when you switch presets.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Ticker</div>
+        <div class="info-card-desc">Exchange symbol used to identify the security (e.g. AAPL, NVDA, XLK). Company names are resolved automatically.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Company</div>
+        <div class="info-card-desc">Full legal name of the company or fund as reported by Yahoo Finance.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Price</div>
+        <div class="info-card-desc">Last available closing price, converted to the selected display currency (see FX selector in the top bar).</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Market Cap</div>
+        <div class="info-card-desc">Total market value of all outstanding shares.</div>
+        <div class="info-formula">$$\text{Market Cap} = P \times \text{Shares Outstanding}$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">P/S &mdash; Price-to-Sales</div>
+        <div class="info-card-desc">How much investors pay per dollar of trailing-12-month revenue. Useful for companies with zero or negative earnings. Heat anchors at P/S = 10 (expensive); n/a is also flagged.</div>
+        <div class="info-formula">$$P/S = \dfrac{\text{Market Cap}}{\text{TTM Revenue}}$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">P/E &mdash; Price-to-Earnings</div>
+        <div class="info-card-desc">Most widely-used valuation multiple. Heat anchors at P/E = 40; values above 50 imply heavy growth expectations being priced in.</div>
+        <div class="info-formula">$$P/E = \dfrac{P}{\text{EPS}_{\text{TTM}}}$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">% YTD</div>
+        <div class="info-card-desc">Return from the first trading day of the current calendar year to today. Green = positive, red = negative, white = flat.</div>
+        <div class="info-formula">$$\text{YTD} = \left(\dfrac{P_1}{P_0} - 1\right) \times 100$$
+          <span class="formula-note">P&#8320; = first close of the calendar year</span></div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Chart 1Y</div>
+        <div class="info-card-desc">Sparkline of the last 252 trading days' closing prices. Line is green if the 1-year return is positive, red otherwise. Click the row for a full-size chart.</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">% 1Y</div>
+        <div class="info-card-desc">Total price return over the last 365 calendar days. Same diverging color scale as % YTD.</div>
+        <div class="info-formula">$$\text{1Y} = \left(\dfrac{P_1}{P_0} - 1\right) \times 100$$
+          <span class="formula-note">P&#8320; = close 365 calendar days ago</span></div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">&#916; Highs &mdash; Distance from 2Y High</div>
+        <div class="info-card-desc">How far the current price sits below the highest close in the table's fast-path history window (currently 2 years). 0% means the stock is at that 2Y high. The detail modal still shows a full-history ATH separately.</div>
+        <div class="info-formula">$$\Delta\text{2YH} = \left(\dfrac{P}{P_{\text{2Y High}}} - 1\right) \times 100$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">RS Rank 1M &mdash; Relative Strength</div>
+        <div class="info-card-desc">Histogram of 12 monthly bars. Each bar's height shows where that month's closing price ranked within the stock's own trailing 12-month price range. Taller, brighter green = stronger relative position.</div>
+        <div class="info-formula">$$\text{RS} = \dfrac{P_{m} - \text{Low}_{12m}}{\text{High}_{12m} - \text{Low}_{12m}} \;\in\; [0,\,1]$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">20 / 50 / 200 SMA</div>
+        <div class="info-card-desc">Simple Moving Average flags. &#9650; = price is above the SMA (bullish momentum). &#9660; = price is below (bearish). The three periods correspond to roughly 1 month, 1 quarter, and 1 year of trading days.</div>
+        <div class="info-formula">$$\text{SMA}_n = \dfrac{1}{n}\sum_{i=1}^{n} P_i$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Forward P/E</div>
+        <div class="info-card-desc">Price divided by consensus forward earnings. It tells you what multiple the market is paying on the next year rather than the trailing year.</div>
+        <div class="info-formula">$$\text{Forward P/E} = \dfrac{P}{\text{EPS}_{\text{NTM}}}$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">EV/EBITDA</div>
+        <div class="info-card-desc">Enterprise-value multiple that normalises for capital structure. Useful when debt loads differ materially across peers.</div>
+        <div class="info-formula">$$\text{EV/EBITDA} = \dfrac{\text{Enterprise Value}}{\text{EBITDA}}$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Analyst Rating</div>
+        <div class="info-card-desc">Mean sell-side recommendation on Yahoo's 1 to 5 scale, where 1 is Strong Buy and 5 is Sell.</div>
+        <div class="info-formula">$$R = \dfrac{\sum_{j=1}^{N} r_j}{N},\quad 1=\text{Strong Buy},\; 5=\text{Sell}$$</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-name">Target Δ</div>
+        <div class="info-card-desc">Distance from the current price to the mean analyst target price. Positive values imply upside to consensus fair value.</div>
+        <div class="info-formula">$$\Delta_{target} = \left(\dfrac{TP_{mean}}{P} - 1\right) \times 100$$</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-bg"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"></div>
+
+<script src="/static/app.js"></script>
+
+</body>
+</html>
