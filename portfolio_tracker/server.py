@@ -9,7 +9,7 @@ import mimetypes
 import socket
 import threading
 import warnings
-import webbrowser
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -616,7 +616,9 @@ def main() -> None:
     print(f"  Portfolio Tracker running at {url}")
     print("  Press Ctrl+C to stop.")
     print("=" * 60)
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    threading.Timer(0.8, lambda: subprocess.run(
+        ["open", "-a", "Google Chrome", url], check=False
+    )).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
