@@ -4,11 +4,11 @@
  * Column definitions
  * --------------------------------------------------------------------------- */
 const COLS = [
-  { key: "logo",        label: "",          w: 26,  align: "center", sortable: false,
+  { key: "logo",        label: "",          w: 22,  align: "center", sortable: false,
     render: (r) => logoImg(r.symbol) },
-  { key: "symbol",      label: "Ticker",    w: 64,  align: "left", sortable: true,
+  { key: "symbol",      label: "Ticker",    w: 58,  align: "left", sortable: true,
     render: (r) => `<span>${r.symbol}</span>`, td_cls: "sym left" },
-  { key: "name",        label: "Company",   w: 160, align: "left", sortable: true,
+  { key: "name",        label: "Company",   w: 148, align: "left", sortable: true,
     render: (r) => escapeHtml(r.name || ""), td_cls: "name left" },
   { key: "price",       label: "Price",     w: 90,  align: "right", sortable: true,
     render: (r) => fmtMoney(r.price, r.currency) },
@@ -139,6 +139,9 @@ const COLS = [
     render: (r) => fmtMoney(r.w52_high, r.currency) },
   { key: "w52_low",       label: "52W Low", w: 90,  align: "right", sortable: true,
     render: (r) => fmtMoney(r.w52_low, r.currency) },
+  { key: "news_sentiment", label: "NS", w: 36, align: "center", sortable: true,
+    sortValue: (r) => r.news_sentiment?.score ?? null,
+    render: (r) => nsDot(r.news_sentiment) },
 ];
 
 /* Short hover descriptions for the column-header info icons.
@@ -184,6 +187,7 @@ const COL_INFO = {
   target_upside_pct: "Distance from current price to mean analyst price target, signed (positive = upside).",
   w52_high:      "Highest closing price over the trailing 52 weeks.",
   w52_low:       "Lowest closing price over the trailing 52 weeks.",
+  news_sentiment: "AI-assessed news sentiment (last 7 days). Dot: green = bullish, gray = neutral, red = bearish. Hover for summary. Powered by Finnhub news + OpenRouter AI.",
 };
 
 let DATA = [];
@@ -210,9 +214,9 @@ const BUILTIN_VIEW_ALIASES = {
   "Trader View": "Momentum",
 };
 const BUILTIN_VIEWS = {
-  "Default":      ["logo","symbol","name","price","market_cap","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200","earnings_surprise","rec_trend_fh","insider_mspr"],
+  "Default":      ["logo","symbol","name","price","market_cap","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200","earnings_surprise","rec_trend_fh","insider_mspr","news_sentiment"],
   "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield","earnings_surprise","rec_trend_fh","insider_mspr"],
-  "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","earnings_surprise","rec_trend_fh","insider_mspr","above_sma_20","above_sma_50","above_sma_200"],
+  "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","earnings_surprise","rec_trend_fh","insider_mspr","above_sma_20","above_sma_50","above_sma_200","news_sentiment"],
 };
 const BUILTIN_ORDER = ["Default", "Fundamentals", "Momentum"];
 const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
@@ -834,6 +838,29 @@ function msprBadge(o) {
   const label = (v >= 0 ? "+" : "") + v.toFixed(1);
   const tip = `MSPR ${label} — Monthly Share Purchase Ratio. +100 = all insiders buying, −100 = all selling. ${o.month}/${o.year}`;
   return `<span style="color:${color}" data-tip="${tip}">${label}</span>`;
+}
+
+const NS_COLORS = {
+  very_bullish: "#22c55e",
+  bullish:      "#86efac",
+  neutral:      "#94a3b8",
+  bearish:      "#fca5a5",
+  very_bearish: "#ef4444",
+};
+const NS_LABELS = {
+  very_bullish: "Very Bullish",
+  bullish:      "Bullish",
+  neutral:      "Neutral",
+  bearish:      "Bearish",
+  very_bearish: "Very Bearish",
+};
+
+function nsDot(ns) {
+  if (!ns || !ns.tier) return `<span class="ns-dot ns-empty" data-tip="News sentiment not yet loaded"></span>`;
+  const color = NS_COLORS[ns.tier] || NS_COLORS.neutral;
+  const label = NS_LABELS[ns.tier] || "Neutral";
+  const tip = `${label} (${ns.score >= 0 ? "+" : ""}${ns.score.toFixed(2)}) — ${ns.summary || ""}`;
+  return `<span class="ns-dot" style="background:${color}" data-tip="${escapeHtml(tip)}"></span>`;
 }
 
 /* Per-month analyst consensus score; null if no votes that month. */
@@ -2470,6 +2497,8 @@ async function build(opts) {
     invalidateAnalyticsForTab(targetName);  // rebuild invalidates this tab only
     renderModeBar();
     requestAnalytics();
+    // Background sentiment warm-up — fills NS dots ~10-15s after build.
+    setTimeout(() => warmNewsSentiment(), 2000);
   } catch (e) {
     toast("Error: " + e.message);
     $("#status").textContent = "Error.";
@@ -2525,6 +2554,17 @@ async function loadAllAtStartup() {
       setTimeout(() => preloadFxIndexes(), 1500);
     });
   }, 1200);
+}
+
+async function warmNewsSentiment() {
+  const symbols = DATA.map(r => r.symbol).filter(Boolean);
+  if (!symbols.length) return;
+  try {
+    const resp = await fetch(`/api/news-sentiment?symbols=${encodeURIComponent(symbols.join(","))}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    patchRowSentiment(data.sentiment || {});
+  } catch {}
 }
 
 async function preloadFxIndexes() {
@@ -4512,6 +4552,163 @@ window.addEventListener("scroll", () => {
 window.addEventListener("resize", () => {
   if (STATE.fitColumns) render();
 });
+
+/* --- News & Sentiment panel --- */
+$("#news-btn").onclick = () => {
+  const panel = $("#news-panel");
+  const willOpen = panel.classList.contains("hidden");
+  if (willOpen) {
+    $("#input-panel").classList.add("hidden");
+    $("#edit-btn").classList.remove("active");
+  }
+  panel.classList.toggle("hidden");
+  $("#news-btn").classList.toggle("active", willOpen);
+  if (willOpen) loadNewsSentiment();
+};
+$("#ns-refresh").onclick = () => refreshNewsSentiment();
+
+async function loadNewsSentiment() {
+  const body = $("#ns-market-body");
+  const pBody = $("#ns-portfolio-body");
+  const indBody = $("#ns-indices-body");
+  const updated = $("#ns-updated");
+  body.innerHTML = '<div class="ns-loading">Loading market sentiment...</div>';
+  pBody.innerHTML = '<div class="ns-loading">Loading constituent sentiment...</div>';
+  indBody.innerHTML = '<div class="ns-loading">Analyzing portfolio news...</div>';
+
+  const symbols = DATA.map(r => r.symbol).filter(Boolean);
+  const mktP = fetch("/api/news-market").then(r => r.json());
+  const pfP = symbols.length
+    ? fetch(`/api/news-sentiment?symbols=${encodeURIComponent(symbols.join(","))}`).then(r => r.json())
+    : Promise.resolve(null);
+  const [mktRes, pfRes] = await Promise.allSettled([mktP, pfP]);
+
+  if (mktRes.status === "fulfilled") renderMarketSentiment(mktRes.value);
+  else body.innerHTML = '<div class="ns-panel-empty">Failed to load market sentiment.</div>';
+
+  if (!symbols.length) {
+    pBody.innerHTML = '<div class="ns-panel-empty">Build the dashboard first to see per-stock sentiment.</div>';
+    return;
+  }
+  if (pfRes.status === "fulfilled" && pfRes.value) {
+    const sentiment = pfRes.value.sentiment || {};
+    renderPortfolioSentiment(sentiment, symbols);
+    updated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    patchRowSentiment(sentiment);
+  } else {
+    pBody.innerHTML = '<div class="ns-panel-empty">Failed to load portfolio sentiment.</div>';
+    indBody.innerHTML = '<div class="ns-panel-empty">Failed.</div>';
+  }
+}
+
+async function refreshNewsSentiment() {
+  const btn = $("#ns-refresh");
+  btn.disabled = true;
+  btn.textContent = "Refreshing...";
+  const symbols = DATA.map(r => r.symbol).filter(Boolean);
+
+  try {
+    const resp = await fetch("/api/news-refresh", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({symbols}),
+    });
+    const data = await resp.json();
+    renderMarketSentiment({sentiment: data.market, articles: null, status: null});
+    renderPortfolioSentiment(data.portfolio || {}, symbols);
+    patchRowSentiment(data.portfolio || {});
+    $("#ns-updated").textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    $("#ns-market-body").innerHTML = '<div class="ns-panel-empty">Refresh failed.</div>';
+  }
+  btn.disabled = false;
+  btn.textContent = "↻ Refresh";
+}
+
+function renderMarketSentiment(mkt) {
+  const body = $("#ns-market-body");
+  const s = mkt.sentiment;
+  if (!s) {
+    body.innerHTML = '<div class="ns-panel-empty">No market sentiment available. Check API keys.</div>';
+    return;
+  }
+  const tierLabel = NS_LABELS[s.tier] || "Neutral";
+  const tierCls = NS_COLORS[s.tier] ? s.tier : "neutral";
+  body.innerHTML = `
+    <div class="ns-market-summary">${escapeHtml(s.summary)}</div>
+    <span class="ns-tier-badge ${tierCls}">${escapeHtml(tierLabel)}</span>
+    <span class="ns-score">${s.score >= 0 ? "+" : ""}${s.score.toFixed(2)} | ${s.article_count || 0} articles</span>
+  `;
+}
+
+function renderPortfolioSentiment(sentiment, symbols) {
+  const indBody = $("#ns-indices-body");
+  const pBody = $("#ns-portfolio-body");
+
+  const tiers = {very_bullish: 0, bullish: 0, neutral: 0, bearish: 0, very_bearish: 0};
+  let counted = 0;
+  for (const sym of symbols) {
+    const s = sentiment[sym];
+    if (s && s.tier && tiers[s.tier] !== undefined) { tiers[s.tier]++; counted++; }
+  }
+
+  if (counted) {
+    const parts = [];
+    for (const [tier, count] of Object.entries(tiers)) {
+      if (count > 0) {
+        const pct = (count / counted * 100).toFixed(0);
+        const label = NS_LABELS[tier] || tier;
+        const color = NS_COLORS[tier] || "#94a3b8";
+        parts.push(`<span style="color:${color};font-weight:600">${pct}%</span> ${label}`);
+      }
+    }
+    indBody.innerHTML = `
+      <div style="font-size:12px;line-height:1.8">${parts.join(" &middot; ")}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">${counted} of ${symbols.length} stocks assessed</div>
+    `;
+  } else {
+    indBody.innerHTML = '<div class="ns-panel-empty">No sentiment data available.</div>';
+  }
+
+  const dataBySymbol = new Map(DATA.map(d => [d.symbol, d]));
+  const rows = symbols.map(sym => {
+    const r = dataBySymbol.get(sym) || {};
+    const s = sentiment[sym];
+    return {sym, name: r.name || "", price: r.price, pct: r.pct_1d, currency: r.currency, s};
+  });
+
+  let html = `<table class="ns-table">
+    <thead><tr>
+      <th>Ticker</th><th>Company</th><th class="r">Price</th><th class="r">% 1D</th>
+      <th class="c">NS</th><th>Sentiment</th><th>Summary</th>
+    </tr></thead><tbody>`;
+  for (const {sym, name, price, pct, currency, s} of rows) {
+    const tierLabel = s ? (NS_LABELS[s.tier] || s.tier) : "—";
+    const tierColor = s ? (NS_COLORS[s.tier] || "#94a3b8") : "var(--muted)";
+    const dot = s ? nsDot(s) : nsDot(null);
+    const summary = s ? escapeHtml(s.summary || "") : "—";
+    const pctHtml = pct != null ? fmtPctSigned(pct) : "—";
+    html += `<tr>
+      <td class="sym">${sym}</td>
+      <td class="name">${escapeHtml(name)}</td>
+      <td class="r">${price != null ? fmtMoney(price, currency) : "—"}</td>
+      <td class="r">${pctHtml}</td>
+      <td class="c">${dot}</td>
+      <td style="color:${tierColor};font-weight:600;font-size:11px">${tierLabel}</td>
+      <td class="summary">${summary}</td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  pBody.innerHTML = html;
+}
+
+function patchRowSentiment(sentiment) {
+  for (const row of DATA) {
+    const s = sentiment[row.symbol];
+    if (s) row.news_sentiment = s;
+  }
+  render();
+}
 
 /* --- Analytics controls --- */
 $("#pf-mode-toggle").addEventListener("click", (e) => {

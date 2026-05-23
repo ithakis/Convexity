@@ -21,20 +21,31 @@ fi
 
 # 1) Never let a local-secret file enter the index.
 staged="$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)"
-if echo "$staged" | grep -qE '(^|/)\.finnhub_key$|(^|/)\.env\.local$|\.secret$'; then
-  echo "BLOCKED: a strictly-local secret file is staged (.finnhub_key / .env.local / *.secret)."
+if echo "$staged" | grep -qE '(^|/)\.finnhub_key$|(^|/)\.openrouter_key$|(^|/)\.env\.local$|\.secret$'; then
+  echo "BLOCKED: a strictly-local secret file is staged (.finnhub_key / .openrouter_key / .env.local / *.secret)."
   echo "Unstage it before committing:  git restore --staged <file>"
   exit 1
 fi
 
-# 2) Never let the key VALUE leak into any staged diff (even pasted elsewhere).
+# 2) Never let any key VALUE leak into any staged diff (even pasted elsewhere).
 root="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+staged_diff="$(git diff --cached -U0 2>/dev/null || true)"
 for kf in "$root/.finnhub_key" ".finnhub_key"; do
   [ -f "$kf" ] || continue
   key="$(tr -d '[:space:]' < "$kf")"
-  if [ -n "$key" ] && git diff --cached -U0 2>/dev/null | grep -Fq "$key"; then
+  if [ -n "$key" ] && echo "$staged_diff" | grep -Fq -- "$key"; then
     echo "BLOCKED: the Finnhub API key value was found in the staged diff."
     echo "Remove the literal key before committing (use the env var or .finnhub_key file)."
+    exit 1
+  fi
+  break
+done
+for kf in "$root/.openrouter_key" ".openrouter_key"; do
+  [ -f "$kf" ] || continue
+  key="$(tr -d '[:space:]' < "$kf")"
+  if [ -n "$key" ] && echo "$staged_diff" | grep -Fq -- "$key"; then
+    echo "BLOCKED: the OpenRouter API key value was found in the staged diff."
+    echo "Remove the literal key before committing (use the env var or .openrouter_key file)."
     exit 1
   fi
   break

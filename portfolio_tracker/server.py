@@ -48,6 +48,11 @@ from portfolio_tracker.frontier import (
 )
 from portfolio_tracker.fx import fx_index_history, fx_rates
 from portfolio_tracker.helpers import SUPPORTED_FX, _json_default, _safe_json
+
+try:
+    from portfolio_tracker import news_sentiment as _ns
+except ImportError:
+    _ns = None
 from portfolio_tracker.persistence import (
     _CURRENT_KEY,
     clear_analytics_cache,
@@ -227,6 +232,52 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/analytics-cache":
             view = (parse_qs(parsed.query).get("view") or [""])[0].strip()
             self._send_json(200, {"cache": get_analytics_cache(view)})
+            return
+        if parsed.path == "/api/news-sentiment":
+            if _ns is None:
+                self._send_json(503, {"error": "news_sentiment module not available"})
+                return
+            q = parse_qs(parsed.query)
+            symbols = [s.strip().upper() for s in (q.get("symbols") or [""])[0].split(",") if s.strip()]
+            if not symbols:
+                self._send_json(400, {"error": "symbols required"})
+                return
+            try:
+                result = _ns.get_portfolio_sentiment(symbols)
+                self._send_json(200, {"sentiment": result, "status": _ns.status()})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/news-market":
+            if _ns is None:
+                self._send_json(503, {"error": "news_sentiment module not available"})
+                return
+            try:
+                result = _ns.get_market_sentiment()
+                articles = _ns.fetch_market_news()
+                self._send_json(200, {
+                    "sentiment": result,
+                    "articles": articles,
+                    "status": _ns.status(),
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/news-articles":
+            if _ns is None:
+                self._send_json(503, {"error": "news_sentiment module not available"})
+                return
+            q = parse_qs(parsed.query)
+            sym = (q.get("symbol") or [""])[0].strip().upper()
+            if not sym:
+                self._send_json(400, {"error": "symbol required"})
+                return
+            try:
+                sentiment = _ns.get_news_sentiment(sym)
+                articles = _ns.fetch_company_news(sym)
+                self._send_json(200, {"symbol": sym, "articles": articles, "sentiment": sentiment})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
             return
         if parsed.path == "/api/export-xlsx":
             try:
@@ -486,6 +537,20 @@ class Handler(BaseHTTPRequestHandler):
                 body = payload.get("payload") or {}
                 out = upsert_analytics_cache(view, key, body)
                 self._send_json(200, {"cache": out})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/news-refresh":
+            if _ns is None:
+                self._send_json(503, {"error": "news_sentiment module not available"})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                symbols = [str(s).strip().upper() for s in (payload.get("symbols") or []) if s]
+                result = _ns.refresh_sentiment(symbols)
+                self._send_json(200, result)
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return

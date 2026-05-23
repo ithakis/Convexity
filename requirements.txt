@@ -18,3 +18,7 @@ rapidfuzz>=3.0.0
 # Optional — reserved for the Excel export (Pass B, not yet wired). Listed
 # here so first-time installs are ready when that lands.
 openpyxl>=3.1.0
+# Required — OpenAI-compatible SDK used to call OpenRouter for AI-powered
+# news sentiment analysis (news_sentiment.py). The free nvidia/nemotron
+# model provides structured sentiment scoring without cost.
+openai>=1.0.0

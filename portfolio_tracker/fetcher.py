@@ -33,6 +33,11 @@ try:
 except ImportError:
     _fh = None
 
+try:
+    from portfolio_tracker import news_sentiment as _ns
+except ImportError:
+    _ns = None
+
 
 _SECTOR_ETF = {
     "Technology": "XLK",
@@ -259,6 +264,9 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             else:
                 out["insider_mspr"] = None
                 out["rec_trend_fh"] = None
+
+            # Cache-only read — never triggers a fetch from the hot path.
+            out["news_sentiment"] = _ns.get_cached_sentiment(symbol) if _ns else None
 
             return out
 

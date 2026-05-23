@@ -18,8 +18,9 @@ env/
 ENV/
 .env
 
-# Local secrets — strictly local, never committed (Finnhub API key, etc.)
+# Local secrets — strictly local, never committed (API keys, etc.)
 .finnhub_key
+.openrouter_key
 .env.local
 *.secret
 

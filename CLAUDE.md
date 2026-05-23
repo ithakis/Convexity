@@ -11,8 +11,10 @@ new system or change an established pattern.
 
 Single-user, local-only portfolio dashboard. Runs as a Python HTTP server
 on `127.0.0.1:8765`, opens itself in the user's browser. No accounts, no
-network calls except to yfinance (Yahoo Finance), no build step. The
-entire frontend is one embedded HTML string in `dashboard.py`.
+network calls except to yfinance (Yahoo Finance), Finnhub (news), and
+OpenRouter (AI sentiment), no build step. The app is split into a
+`portfolio_tracker/` package with `server.py`, `fetcher.py`,
+`news_sentiment.py`, and static assets in `portfolio_tracker/static/`.
 
 User profile: quantitative-finance background, power user, runs the app
 locally on macOS, expects complete autonomous delivery on requests, fast
@@ -32,6 +34,15 @@ sub-decision.
 ├── xlsx_export.py              ← One-sheet-per-portfolio Excel export
 ├── mpt.py                      ← Modern Portfolio Theory primitives (CLA, Ledoit-Wolf, MC cloud)
 ├── finnhub_adapter.py          ← Optional Finnhub supplemental columns (EPS surprise, MSPR, rec trend)
+├── portfolio_tracker/          ← Main package (server, fetcher, news, static assets)
+│   ├── __init__.py
+│   ├── server.py               ← HTTP server + route handlers
+│   ├── fetcher.py              ← fetch_one() per-symbol row builder
+│   ├── news_sentiment.py       ← Finnhub news + OpenRouter AI sentiment engine
+│   └── static/
+│       ├── index.html          ← Main HTML template
+│       ├── app.js              ← All frontend JS (state, columns, rendering, panels)
+│       └── style.css           ← CSS (themes, layout, components)
 ├── Launch Dashboard.command    ← macOS launcher (activates QF12 conda env, restarts cleanly)
 ├── requirements.txt
 ├── README.md
@@ -44,7 +55,9 @@ sub-decision.
 ├── .portfolio_tracker_views.json     ← Per-portfolio cached rows + metadata + weight presets (gitignored)
 ├── .portfolio_tracker_watchlists.json ← Per-portfolio entries strings (gitignored)
 ├── .portfolio_tracker_mpt.json       ← Saved MPT efficient-frontier runs per portfolio (gitignored)
-└── .portfolio_tracker_session.json   ← Legacy single-session file (auto-migrated, gone after first run)
+├── .portfolio_tracker_session.json   ← Legacy single-session file (auto-migrated, gone after first run)
+├── .finnhub_key                      ← Finnhub API key (gitignored, never committed)
+└── .openrouter_key                   ← OpenRouter API key (gitignored, never committed)
 ```
 
 `__pycache__/` and `*.sqlite` are gitignored. Don't add gitignore entries
@@ -213,6 +226,28 @@ Non-US tickers return empty data silently; only HTTP 429 logs one line.
 The columns are `Rec Δ6M` and `MSPR` (Fundamentals preset). The third
 Finnhub-style column, `EPS Surp.`, is now yfinance-sourced (see above).
 
+**News & Sentiment (`portfolio_tracker/news_sentiment.py`):** Fetches
+per-ticker and market-wide news from Finnhub's free API (`/company-news`,
+`/news`), then scores each batch through the nvidia/nemotron model on
+OpenRouter to produce a 5-tier sentiment signal (very_bullish → very_bearish).
+Key architecture:
+- API keys loaded via `_load_key()` — checks env vars first, then
+  `.finnhub_key` / `.openrouter_key` files next to the module or in the
+  parent directory. Same security model as `finnhub_adapter`.
+- Cache: `_NEWS_CACHE` + `_SENTIMENT_CACHE` with `_CACHE_LOCK`, TTL 3600s,
+  negative cache 1800s. Transient failures NOT cached.
+- Circuit breaker: `_rate_limit_until` trips for 65s on any 429 to stop
+  concurrent workers from spamming a rate-limited endpoint.
+- `get_cached_sentiment(symbol)` — O(1) cache-only read, safe for `fetch_one`
+  hot path (never triggers API calls during streaming build).
+- `get_portfolio_sentiment(symbols)` — ThreadPoolExecutor(3) batch.
+- Graceful degradation: no Finnhub key → no news; no OpenRouter key → news
+  but no sentiment; all functions return None, UI shows hollow dots/dashes.
+- The NS column (10px colored dot) appears in Default and Momentum views,
+  NOT in Fundamentals. Background warm-up runs 2s after build completes.
+- The News tab (topbar button, mutual exclusion with Portfolio panel) shows
+  market overview sentiment + per-stock constituent breakdown with AI summaries.
+
 ### Analytics (`/api/portfolio-analytics-multi`)
 `analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
 Returns either `{set_name: analytics_dict | {"error": ...}}` OR
@@ -295,6 +330,12 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/weight-presets?view=…`     — `{presets: [...], active: name|null}` for a portfolio
 - `/api/mpt-runs?view=…`           — saved MPT runs (metadata only) for a portfolio
 - `/api/mpt-runs/<id>?view=…`      — full saved MPT run payload
+- `/api/news-sentiment?symbols=…`  — batch per-ticker AI sentiment
+- `/api/news-market`               — market-wide sentiment + articles
+- `/api/news-articles?symbol=…`    — per-ticker articles + sentiment detail
+
+**POST (also)**
+- `/api/news-refresh`              — `{symbols: [...]}` — force cache bust + re-analyze
 
 ---
 
@@ -564,11 +605,11 @@ See `PASS_D_PROMPT.md`. The big spec piece still pending:
 
 ### Open items from user's TODO.txt
 - Natural-language search for companies (would build on `symbol_db.py`)
-- News + sentiment view per company
 - Per-metric tooltips on hover (more analytics now have these; extend further)
 - Improvements to the "contribution by 3y returns" table
 
 ### Done / archived (don't redo)
+- News & Sentiment — Finnhub news + OpenRouter AI sentiment, NS column, News tab
 - ★ Save Watchlist button removal
 - CSV → Excel export (Pass B)
 - FX hover stale-cache fix

@@ -24,6 +24,7 @@
        columns or analytics are added to the UI, extend the export accordingly so
        this stays the "everything you see in the app" artifact. -->
   <button id="export" data-tip="Create one Excel workbook with every saved portfolio, full holdings data, analyst fields, and static 1Y and 5Y portfolio statistics. Useful as structured input to an AI agent.">⬇ Export</button>
+  <button id="news-btn" data-tip="Open the News &amp; Sentiment dashboard: AI-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
   <span class="spacer"></span>
   <span class="status" id="status">Idle</span>
   <div class="fx-menu" id="fx-menu">
@@ -105,6 +106,33 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
     <div class="pf-analytics-body" id="pf-analytics-body">
       <div class="pf-empty" id="pf-empty">Build the dashboard to compute portfolio analytics.</div>
     </div>
+  </div>
+</div>
+
+<!-- News & Sentiment panel -->
+<div id="news-panel" class="hidden">
+  <div class="ns-head">
+    <h3 class="ns-title">Market &amp; Portfolio Sentiment</h3>
+    <button id="ns-refresh" class="ns-refresh-btn" data-tip="Force-refresh all news and re-run sentiment analysis.">&#8635; Refresh</button>
+    <span class="ns-updated" id="ns-updated"></span>
+  </div>
+  <div class="ns-grid" id="ns-grid">
+    <div class="ns-card ns-market" id="ns-market-card">
+      <h4>Market Overview</h4>
+      <div class="ns-market-body" id="ns-market-body">
+        <div class="ns-empty">Click Refresh or build the dashboard to load market sentiment.</div>
+      </div>
+    </div>
+    <div class="ns-card ns-indices" id="ns-indices-card">
+      <h4>Portfolio Sentiment</h4>
+      <div class="ns-indices-body" id="ns-indices-body">
+        <div class="ns-empty">No sentiment data yet.</div>
+      </div>
+    </div>
+  </div>
+  <div class="ns-portfolio" id="ns-portfolio">
+    <h4>Constituent Breakdown</h4>
+    <div class="ns-portfolio-body" id="ns-portfolio-body"></div>
   </div>
 </div>
 
