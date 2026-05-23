@@ -502,7 +502,42 @@ function fitScaleForColumns(columns = getActiveColumns()) {
   const available = Math.max(320, wrap.clientWidth - 4);
   const required = columns.reduce((sum, c) => sum + Math.max(56, c.w || 80), 0);
   if (!required) return 1;
-  return clamp(available / required, 0.58, 1);
+  return clamp(available / required, 0.45, 1);
+}
+
+// Pass 2 — after the scaled DOM has painted, measure the table's actual
+// scrollWidth and, if it still overflows the wrap, apply a CSS transform
+// to guarantee zero horizontal overflow. The font/padding pass keeps text
+// crisp at normal scales; the transform only kicks in as a last resort.
+function applyTableTransformFit() {
+  const wrap = document.querySelector(".table-wrap");
+  const table = document.getElementById("tbl");
+  if (!wrap || !table) return;
+  if (!STATE.fitColumns) {
+    table.style.transform = "";
+    table.style.transformOrigin = "";
+    table.style.width = "";
+    wrap.style.height = "";
+    return;
+  }
+  // Reset any prior transform before measuring so scrollWidth is the
+  // intrinsic post-scaling width, not a post-transform width.
+  table.style.transform = "";
+  table.style.width = "";
+  wrap.style.height = "";
+  const need = table.scrollWidth;
+  const have = wrap.clientWidth;
+  if (need > have + 0.5) {
+    const extra = have / need;
+    // Expand the pre-transform table so the post-transform render fills
+    // the wrap edge-to-edge. clientHeight needs to shrink with the
+    // transform too, otherwise the wrap reserves the pre-scale height.
+    table.style.transformOrigin = "top left";
+    table.style.transform = `scale(${extra.toFixed(4)})`;
+    table.style.width = `${(100 / extra).toFixed(3)}%`;
+    const postHeight = table.getBoundingClientRect().height;
+    if (postHeight > 0) wrap.style.height = `${Math.ceil(postHeight + 4)}px`;
+  }
 }
 
 function applyTableFitMode(columns = getActiveColumns()) {
@@ -511,6 +546,13 @@ function applyTableFitMode(columns = getActiveColumns()) {
   const scale = fitScaleForColumns(columns);
   wrap.classList.toggle("fit-columns", !!STATE.fitColumns);
   wrap.style.setProperty("--table-scale", scale.toFixed(3));
+  // Schedule the post-layout measurement after the browser has applied
+  // the new --table-scale variable. rAF is enough; double-rAF guards
+  // against fonts/images settling on a second tick.
+  requestAnimationFrame(() => {
+    applyTableTransformFit();
+    requestAnimationFrame(applyTableTransformFit);
+  });
   return scale;
 }
 
@@ -4532,6 +4574,11 @@ $("#tickers").addEventListener("input", updatePrimaryButtonLabels);
 $("#edit-btn").onclick = () => {
   const panel = $("#input-panel");
   const willOpen = panel.classList.contains("hidden");
+  if (willOpen) {
+    // Mutual exclusion with the News panel — opening Portfolio closes News.
+    $("#news-panel").classList.add("hidden");
+    $("#news-btn").classList.remove("active");
+  }
   panel.classList.toggle("hidden");
   $("#edit-btn").classList.toggle("active", willOpen);
   if (willOpen) {
@@ -4592,7 +4639,7 @@ async function loadNewsSentiment() {
   }
   if (pfRes.status === "fulfilled" && pfRes.value) {
     const sentiment = pfRes.value.sentiment || {};
-    renderPortfolioSentiment(sentiment, symbols);
+    renderPortfolioSentiment(sentiment, symbols, pfRes.value.status);
     updated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
     patchRowSentiment(sentiment);
   } else {
@@ -4614,8 +4661,8 @@ async function refreshNewsSentiment() {
       body: JSON.stringify({symbols}),
     });
     const data = await resp.json();
-    renderMarketSentiment({sentiment: data.market, articles: null, status: null});
-    renderPortfolioSentiment(data.portfolio || {}, symbols);
+    renderMarketSentiment({sentiment: data.market, articles: null, status: data.status});
+    renderPortfolioSentiment(data.portfolio || {}, symbols, data.status);
     patchRowSentiment(data.portfolio || {});
     $("#ns-updated").textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
   } catch (e) {
@@ -4625,11 +4672,19 @@ async function refreshNewsSentiment() {
   btn.textContent = "↻ Refresh";
 }
 
+function nsKeyDiagnostic(status) {
+  if (!status) return "Check API keys.";
+  if (!status.finnhub_key) return "Finnhub key missing — add .finnhub_key beside dashboard.py.";
+  if (!status.openrouter_key) return "OpenRouter key missing — add .openrouter_key beside dashboard.py.";
+  return "Rate-limited or temporarily unavailable — try again in ~60s.";
+}
+
 function renderMarketSentiment(mkt) {
   const body = $("#ns-market-body");
   const s = mkt.sentiment;
   if (!s) {
-    body.innerHTML = '<div class="ns-panel-empty">No market sentiment available. Check API keys.</div>';
+    const msg = nsKeyDiagnostic(mkt && mkt.status);
+    body.innerHTML = `<div class="ns-panel-empty">No market sentiment available. ${escapeHtml(msg)}</div>`;
     return;
   }
   const tierLabel = NS_LABELS[s.tier] || "Neutral";
@@ -4641,7 +4696,7 @@ function renderMarketSentiment(mkt) {
   `;
 }
 
-function renderPortfolioSentiment(sentiment, symbols) {
+function renderPortfolioSentiment(sentiment, symbols, status) {
   const indBody = $("#ns-indices-body");
   const pBody = $("#ns-portfolio-body");
 
@@ -4662,12 +4717,14 @@ function renderPortfolioSentiment(sentiment, symbols) {
         parts.push(`<span style="color:${color};font-weight:600">${pct}%</span> ${label}`);
       }
     }
+    const total = (status && typeof status.total === "number") ? status.total : symbols.length;
     indBody.innerHTML = `
       <div style="font-size:12px;line-height:1.8">${parts.join(" &middot; ")}</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:4px">${counted} of ${symbols.length} stocks assessed</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">${counted} of ${total} stocks assessed</div>
     `;
   } else {
-    indBody.innerHTML = '<div class="ns-panel-empty">No sentiment data available.</div>';
+    const msg = nsKeyDiagnostic(status);
+    indBody.innerHTML = `<div class="ns-panel-empty">No sentiment data available. ${escapeHtml(msg)}</div>`;
   }
 
   const dataBySymbol = new Map(DATA.map(d => [d.symbol, d]));

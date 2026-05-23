@@ -4,6 +4,15 @@ Fetches per-ticker and market-wide news from Finnhub's free API, then
 scores each batch through the nvidia/nemotron model on OpenRouter to
 produce a 5-tier sentiment signal (very_bullish → very_bearish).
 
+Caches are disk-backed (`.portfolio_tracker_news.json`) so news/sentiment
+survives app restarts. Refresh is user-driven only — the on-disk cache is
+treated as effectively permanent (30-day TTL) and only `bust_cache()` or
+`refresh_sentiment()` re-fetches.
+
+Both Finnhub and OpenRouter calls flow through a token-bucket rate
+limiter (rolling 60s window). On 429 the call sleeps and retries up to
+3 times instead of returning None silently.
+
 Degrades cleanly:
 - No Finnhub key → no news fetched, all functions return None.
 - No OpenRouter key → news fetched but sentiment is None (raw articles
@@ -21,10 +30,13 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from portfolio_tracker.helpers import _repo_root
 
 # ---------------------------------------------------------------------------
 # API key loading — mirrors finnhub_adapter._load_api_key()
@@ -57,8 +69,12 @@ _SENTIMENT_CACHE: dict[str, tuple[float, float, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 _MISS = object()
 
-_NEWS_TTL = 3600.0
-_SENTIMENT_TTL = 3600.0
+# Effectively-permanent in-memory TTLs so a single long-running session
+# never silently re-fetches behind the user's back. Refresh is explicit
+# only — see `refresh_sentiment`. Negative cache stays short so transient
+# failures don't poison the cache.
+_NEWS_TTL = 30 * 86400.0
+_SENTIMENT_TTL = 30 * 86400.0
 _NEG_TTL = 1800.0
 
 
@@ -77,6 +93,94 @@ def _cache_get(cache: dict, key: str) -> Any:
 def _cache_put(cache: dict, key: str, val: Any, ttl: float) -> None:
     with _CACHE_LOCK:
         cache[key] = (time.time(), ttl, val)
+    # Persist asynchronously so a burst of puts during refresh coalesces
+    # into a single write.
+    _schedule_persist()
+
+
+# ---------------------------------------------------------------------------
+# Disk persistence — `.portfolio_tracker_news.json`
+# ---------------------------------------------------------------------------
+
+_PERSIST_FILE = _repo_root() / ".portfolio_tracker_news.json"
+_PERSIST_LOCK = threading.Lock()
+_persist_timer: threading.Timer | None = None
+_PERSIST_DEBOUNCE_S = 1.0
+
+
+def _schedule_persist() -> None:
+    """Debounce disk writes so a burst of cache puts becomes one write."""
+    global _persist_timer
+    with _PERSIST_LOCK:
+        if _persist_timer is not None:
+            _persist_timer.cancel()
+        _persist_timer = threading.Timer(_PERSIST_DEBOUNCE_S, _save_persisted_caches)
+        _persist_timer.daemon = True
+        _persist_timer.start()
+
+
+def _save_persisted_caches() -> None:
+    """Serialize positive cache entries to disk. _MISS sentinels are skipped."""
+    try:
+        with _CACHE_LOCK:
+            news_out: dict[str, dict] = {}
+            for k, (ts, ttl, val) in _NEWS_CACHE.items():
+                if val is _MISS:
+                    continue
+                news_out[k] = {"saved_at": ts, "ttl": ttl, "value": val}
+            sent_out: dict[str, dict] = {}
+            for k, (ts, ttl, val) in _SENTIMENT_CACHE.items():
+                if val is _MISS:
+                    continue
+                sent_out[k] = {"saved_at": ts, "ttl": ttl, "value": val}
+        body = json.dumps({
+            "version": 1,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "news": news_out,
+            "sentiment": sent_out,
+        }, ensure_ascii=True, indent=2)
+        with _PERSIST_LOCK:
+            _PERSIST_FILE.write_text(body + "\n", encoding="utf-8")
+    except Exception as exc:
+        print(f"[news] failed to persist caches: {exc}", file=sys.stderr)
+
+
+def _load_persisted_caches() -> None:
+    """Rehydrate caches from disk at import time. Resets timestamps to now so
+    persisted entries get a fresh in-session lifetime — refresh remains
+    user-driven."""
+    if not _PERSIST_FILE.exists():
+        return
+    try:
+        data = json.loads(_PERSIST_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[news] failed to load persisted caches: {exc}", file=sys.stderr)
+        return
+    if not isinstance(data, dict):
+        return
+    now = time.time()
+    loaded_news = 0
+    loaded_sent = 0
+    with _CACHE_LOCK:
+        for k, entry in (data.get("news") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            val = entry.get("value")
+            if val is None:
+                continue
+            _NEWS_CACHE[k] = (now, _NEWS_TTL, val)
+            loaded_news += 1
+        for k, entry in (data.get("sentiment") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            val = entry.get("value")
+            if val is None:
+                continue
+            _SENTIMENT_CACHE[k] = (now, _SENTIMENT_TTL, val)
+            loaded_sent += 1
+    if loaded_news or loaded_sent:
+        print(f"[news] rehydrated {loaded_news} news + {loaded_sent} sentiment entries from disk",
+              file=sys.stderr)
 
 
 def bust_cache() -> None:
@@ -84,39 +188,100 @@ def bust_cache() -> None:
     with _CACHE_LOCK:
         _NEWS_CACHE.clear()
         _SENTIMENT_CACHE.clear()
+    try:
+        with _PERSIST_LOCK:
+            if _PERSIST_FILE.exists():
+                _PERSIST_FILE.unlink()
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Token-bucket rate limiter — rolling 60s window
+# ---------------------------------------------------------------------------
+
+class _RateLimiter:
+    """Sleeps (not fails) when at the per-minute budget. On 429 the caller
+    invokes `penalize()` to backfill the window so subsequent calls wait."""
+
+    def __init__(self, max_per_min: int, name: str):
+        self.max = max_per_min
+        self.name = name
+        self._calls: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.time()
+                while self._calls and now - self._calls[0] > 60.0:
+                    self._calls.popleft()
+                if len(self._calls) < self.max:
+                    self._calls.append(now)
+                    return
+                wait = 60.0 - (now - self._calls[0]) + 0.05
+            time.sleep(min(max(wait, 0.05), 5.0))
+
+    def penalize(self) -> None:
+        """Backfill the rolling window so further acquires block ~60s."""
+        with self._lock:
+            t = time.time()
+            slots = self.max - len(self._calls)
+            for _ in range(max(slots, 0)):
+                self._calls.append(t)
+
+
+_FH_LIMITER = _RateLimiter(max_per_min=55, name="finnhub")
+_OR_LIMITER = _RateLimiter(max_per_min=15, name="openrouter")
 
 
 # ---------------------------------------------------------------------------
 # Finnhub news fetching
 # ---------------------------------------------------------------------------
 
-_fh_rate_limit_until = 0.0
+_RATE_LIMIT_BACKOFF_S = 65
+_RETRY_SLEEP_S = 5.0
+_MAX_RETRIES = 3
+
+_rate_limit_lock = threading.Lock()
+_fh_rate_limit_until = 0.0  # last-resort circuit breaker after repeated 429s
 
 
 def _fh_call(path: str, params: dict[str, Any]) -> Any | None:
     global _fh_rate_limit_until
     if not FINNHUB_API_KEY:
         return None
+    # Last-resort circuit breaker: if we keep getting 429s even after the
+    # rolling limiter, pause everything for 65s.
     with _rate_limit_lock:
         if time.time() < _fh_rate_limit_until:
             return None
     query = dict(params)
     query["token"] = FINNHUB_API_KEY
     url = _FINNHUB_BASE + path + "?" + urllib.parse.urlencode(query)
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "PortfolioTracker/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status != 200:
-                return None
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 429:
-            with _rate_limit_lock:
-                _fh_rate_limit_until = time.time() + _RATE_LIMIT_BACKOFF_S
-            print(f"[news] Finnhub rate limited — pausing for {_RATE_LIMIT_BACKOFF_S}s", file=sys.stderr)
-        return None
-    except Exception:
-        return None
+    req = urllib.request.Request(url, headers={"User-Agent": "PortfolioTracker/1.0"})
+
+    for attempt in range(_MAX_RETRIES):
+        _FH_LIMITER.acquire()
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status != 200:
+                    return None
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                _FH_LIMITER.penalize()
+                print(f"[news] Finnhub 429 (attempt {attempt+1}/{_MAX_RETRIES}) — "
+                      f"sleeping {_RETRY_SLEEP_S}s", file=sys.stderr)
+                time.sleep(_RETRY_SLEEP_S)
+                if attempt == _MAX_RETRIES - 1:
+                    with _rate_limit_lock:
+                        _fh_rate_limit_until = time.time() + _RATE_LIMIT_BACKOFF_S
+                continue
+            return None
+        except Exception:
+            return None
+    return None
 
 
 def fetch_company_news(symbol: str, days: int = 7) -> list[dict] | None:
@@ -224,11 +389,9 @@ Focus on monetary policy surprises, economic data vs consensus, geopolitical ris
 
 _MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
 _OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-_RATE_LIMIT_BACKOFF_S = 65
 
-# Circuit breaker: skip API calls when rate-limited
-_rate_limit_until = 0.0
-_rate_limit_lock = threading.Lock()
+# Last-resort circuit breaker after repeated 429s
+_or_rate_limit_until = 0.0
 
 # Lazy-initialized OpenAI client (reused across calls)
 try:
@@ -251,18 +414,18 @@ def _get_client() -> Any:
         return _openrouter_client
 
 
-def _openrouter_call(system_prompt: str, user_content: str, retries: int = 2) -> dict | None:
-    """Call OpenRouter with the given prompts. Returns parsed JSON or None.
+def _openrouter_call(system_prompt: str, user_content: str) -> dict | None:
+    """Call OpenRouter with rolling-window rate limiting + 429 retry.
 
     Tries with reasoning enabled first; falls back to reasoning disabled
     if the model returns empty content (happens with longer prompts on
-    the free tier). Stops immediately when rate-limited.
+    the free tier).
     """
-    global _rate_limit_until
+    global _or_rate_limit_until
     if not OPENROUTER_API_KEY:
         return None
     with _rate_limit_lock:
-        if time.time() < _rate_limit_until:
+        if time.time() < _or_rate_limit_until:
             return None
     client = _get_client()
     if client is None:
@@ -271,39 +434,51 @@ def _openrouter_call(system_prompt: str, user_content: str, retries: int = 2) ->
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
-    for attempt in range(retries):
-        try:
-            kwargs: dict[str, Any] = dict(
-                model=_MODEL,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=2048,
-            )
-            if attempt == 0:
-                kwargs["extra_body"] = {"reasoning": {"enabled": True}}
-            response = client.chat.completions.create(**kwargs)
-            text = response.choices[0].message.content
-            if text is None or not text.strip():
-                continue
-            text = text.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1]
-                if text.endswith("```"):
-                    text = text[:-3]
+
+    # Two "shapes" — first with reasoning, then without if the first
+    # returns empty content. Each shape gets up to _MAX_RETRIES on 429.
+    shapes = [
+        {"extra_body": {"reasoning": {"enabled": True}}},
+        {},
+    ]
+    for shape_idx, extra_kwargs in enumerate(shapes):
+        for attempt in range(_MAX_RETRIES):
+            _OR_LIMITER.acquire()
+            try:
+                response = client.chat.completions.create(
+                    model=_MODEL,
+                    messages=messages,
+                    temperature=0.1,
+                    max_tokens=2048,
+                    **extra_kwargs,
+                )
+                text = response.choices[0].message.content
+                if text is None or not text.strip():
+                    break  # try next shape
                 text = text.strip()
-            return json.loads(text)
-        except json.JSONDecodeError:
-            print(f"[news] AI returned non-JSON response (attempt {attempt+1})", file=sys.stderr)
-            continue
-        except Exception as exc:
-            exc_str = str(exc)
-            if "429" in exc_str or "Rate limit" in exc_str:
-                with _rate_limit_lock:
-                    _rate_limit_until = time.time() + _RATE_LIMIT_BACKOFF_S
-                print(f"[news] OpenRouter rate limited — pausing for {_RATE_LIMIT_BACKOFF_S}s", file=sys.stderr)
-            else:
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[-1]
+                    if text.endswith("```"):
+                        text = text[:-3]
+                    text = text.strip()
+                return json.loads(text)
+            except json.JSONDecodeError:
+                print(f"[news] AI returned non-JSON response (shape {shape_idx+1}, attempt {attempt+1})",
+                      file=sys.stderr)
+                break
+            except Exception as exc:
+                exc_str = str(exc)
+                if "429" in exc_str or "rate limit" in exc_str.lower():
+                    _OR_LIMITER.penalize()
+                    print(f"[news] OpenRouter 429 (shape {shape_idx+1}, attempt {attempt+1}/{_MAX_RETRIES}) — "
+                          f"sleeping {_RETRY_SLEEP_S}s", file=sys.stderr)
+                    time.sleep(_RETRY_SLEEP_S)
+                    if attempt == _MAX_RETRIES - 1 and shape_idx == len(shapes) - 1:
+                        with _rate_limit_lock:
+                            _or_rate_limit_until = time.time() + _RATE_LIMIT_BACKOFF_S
+                    continue
                 print(f"[news] OpenRouter call failed: {exc}", file=sys.stderr)
-            return None
+                return None
     return None
 
 
@@ -438,12 +613,12 @@ def get_market_sentiment() -> dict | None:
 
 
 def get_portfolio_sentiment(symbols: list[str]) -> dict:
-    """Batch sentiment for all portfolio tickers. Thread-pooled (3 workers).
+    """Batch sentiment for all portfolio tickers. Thread-pooled (2 workers).
 
     Returns {symbol: sentiment_dict_or_None}.
     """
     results: dict[str, dict | None] = {}
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(get_news_sentiment, sym): sym for sym in symbols}
         for future in as_completed(futures):
             sym = futures[future]
@@ -455,11 +630,27 @@ def get_portfolio_sentiment(symbols: list[str]) -> dict:
 
 
 def refresh_sentiment(symbols: list[str]) -> dict:
-    """Force-refresh: bust caches, re-fetch news, re-analyze all."""
+    """Force-refresh: bust caches, re-fetch news, re-analyze all.
+
+    Returns {market, portfolio, status} where status surfaces enough
+    diagnostic info for the UI to show a precise message instead of a
+    generic 'check API keys' fallback.
+    """
     bust_cache()
-    result = {"market": get_market_sentiment()}
-    result["portfolio"] = get_portfolio_sentiment(symbols)
-    return result
+    market = get_market_sentiment()
+    portfolio = get_portfolio_sentiment(symbols)
+    fetched = sum(1 for v in portfolio.values() if v)
+    return {
+        "market": market,
+        "portfolio": portfolio,
+        "status": {
+            "finnhub_key": bool(FINNHUB_API_KEY),
+            "openrouter_key": bool(OPENROUTER_API_KEY),
+            "market_ok": market is not None,
+            "fetched": fetched,
+            "total": len(symbols),
+        },
+    }
 
 
 def status() -> dict:
@@ -470,3 +661,10 @@ def status() -> dict:
         "news_cache_size": len(_NEWS_CACHE),
         "sentiment_cache_size": len(_SENTIMENT_CACHE),
     }
+
+
+# ---------------------------------------------------------------------------
+# Module import — load persisted caches once
+# ---------------------------------------------------------------------------
+
+_load_persisted_caches()

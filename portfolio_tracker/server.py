@@ -157,6 +157,25 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/views/"):
             name = unquote(parsed.path[len("/api/views/"):])
             view = load_view(name)
+            # Backfill news_sentiment on row payloads from the rehydrated
+            # in-memory cache. Views saved before sentiment was fetched
+            # carry news_sentiment: None on disk; pulling from the disk-
+            # backed news cache lets the NS column render on launch
+            # without forcing the user to open the News tab first.
+            if _ns is not None and isinstance(view, dict):
+                rows = view.get("rows")
+                if isinstance(rows, list):
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        if row.get("news_sentiment"):
+                            continue
+                        sym = str(row.get("symbol") or "").strip().upper()
+                        if not sym:
+                            continue
+                        cached = _ns.get_cached_sentiment(sym)
+                        if cached:
+                            row["news_sentiment"] = cached
             self._send_json(200, {"view": view, "name": name})
             return
         if parsed.path == "/api/fx-rates":

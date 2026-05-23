@@ -24,6 +24,9 @@ ENV/
 .env.local
 *.secret
 
+# Runtime caches — disk-backed news/sentiment cache, regenerated at runtime
+.portfolio_tracker_news.json
+
 # Conda
 .conda/
 
