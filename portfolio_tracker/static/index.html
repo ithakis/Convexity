@@ -12,6 +12,7 @@
 
 <div class="topbar" id="topbar">
   <button id="edit-btn" class="portfolio-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
+  <button id="news-btn" data-tip="Open the News &amp; Sentiment dashboard: AI-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
   <button id="optimize" data-tip="Open the Portfolio Optimization workspace: compute the long-only efficient frontier from your current holdings (Markowitz CLA, Ledoit-Wolf shrinkage), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
   <button id="refresh" data-tip="Pull fresh quotes from Yahoo Finance for the current portfolio and rebuild the derived metrics as rows stream back in.">↻ Refresh</button>
   <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
@@ -24,7 +25,6 @@
        columns or analytics are added to the UI, extend the export accordingly so
        this stays the "everything you see in the app" artifact. -->
   <button id="export" data-tip="Create one Excel workbook with every saved portfolio, full holdings data, analyst fields, and static 1Y and 5Y portfolio statistics. Useful as structured input to an AI agent.">⬇ Export</button>
-  <button id="news-btn" data-tip="Open the News &amp; Sentiment dashboard: AI-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
   <span class="spacer"></span>
   <span class="status" id="status">Idle</span>
   <div class="fx-menu" id="fx-menu">
