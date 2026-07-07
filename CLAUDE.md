@@ -10,11 +10,13 @@ new system or change an established pattern.
 ## 1. What this app is
 
 Single-user, local-only portfolio dashboard. Runs as a Python HTTP server
-on `127.0.0.1:8765`, opens itself in the user's browser. No accounts, no
-network calls except to yfinance (Yahoo Finance), Finnhub (news), and
-OpenRouter (AI sentiment), no build step. The app is split into a
-`portfolio_tracker/` package with `server.py`, `fetcher.py`,
-`news_sentiment.py`, and static assets in `portfolio_tracker/static/`.
+on `127.0.0.1:8765`, opens itself in the user's browser (or a native
+PySide6 window — §14). No accounts, no network calls except to yfinance
+(Yahoo Finance), Finnhub (news), and NVIDIA NIM (AI sentiment), no build
+step. Almost all logic lives in the `portfolio_tracker/` package, split
+into focused modules (server, fetcher, analytics, fx, persistence, etc. —
+see the table below); `dashboard.py` at the repo root is a thin
+backward-compat shim (`python dashboard.py` still works).
 
 User profile: quantitative-finance background, power user, runs the app
 locally on macOS, expects complete autonomous delivery on requests, fast
@@ -28,40 +30,70 @@ sub-decision.
 
 ```
 .
-├── dashboard.py                ← ~9000 lines. Server + embedded frontend. THE app.
-├── symbol_db.py                ← Local fuzzy ticker DB (provider-agnostic schema)
-├── build_symbol_db.py          ← CLI to (re)build symbol_db.sqlite from public sources
-├── xlsx_export.py              ← One-sheet-per-portfolio Excel export
-├── mpt.py                      ← Modern Portfolio Theory primitives (CLA, Ledoit-Wolf, MC cloud)
-├── finnhub_adapter.py          ← Optional Finnhub supplemental columns (EPS surprise, MSPR, rec trend)
-├── portfolio_tracker/          ← Main package (server, fetcher, news, static assets)
+├── dashboard.py                 ← Backward-compat shim: `python dashboard.py` → portfolio_tracker.server.main()
+├── build_symbol_db.py           ← CLI to (re)build symbol_db.sqlite from public sources
+├── portfolio_tracker/           ← The package. Everything below is imported by server.py or desktop.py.
 │   ├── __init__.py
-│   ├── server.py               ← HTTP server + route handlers
-│   ├── fetcher.py              ← fetch_one() per-symbol row builder
-│   ├── news_sentiment.py       ← Finnhub news + OpenRouter AI sentiment engine
+│   ├── __main__.py              ← `python -m portfolio_tracker` entry point
+│   ├── server.py                ← HTTP server, route handlers, start_server()/shutdown_server() — §4, §14
+│   ├── fetcher.py                ← fetch_one() per-symbol row builder — §4
+│   ├── analytics.py             ← analyze_portfolios_multi(), bulk close, analyst blocks — §4
+│   ├── fx.py                    ← FX spot rates, basket index history, currency conversion — §4
+│   ├── frontier.py              ← Efficient-frontier orchestrator (wraps mpt.py) — §12
+│   ├── mpt.py                   ← Modern Portfolio Theory primitives (CLA, Ledoit-Wolf, MC cloud) — §12
+│   ├── persistence.py           ← JSON CRUD for views/watchlists/presets/MPT runs/column views — §4
+│   ├── cache.py                 ← Process-global TTL cache dicts shared across modules
+│   ├── resolver.py              ← resolve_symbol() pipeline (fuzzy input → Yahoo ticker) — §4
+│   ├── symbol_db.py             ← Local fuzzy ticker DB (provider-agnostic schema) — §6
+│   ├── helpers.py                ← Shared small utilities (dividend-yield normalisation, etc.)
+│   ├── xlsx_export.py           ← One-sheet-per-portfolio Excel export — §7
+│   ├── finnhub_adapter.py       ← Optional Finnhub supplemental columns (MSPR, rec trend) — §4
+│   ├── news_sentiment.py        ← Finnhub news + NVIDIA NIM AI sentiment engine — §4
+│   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
-│       ├── index.html          ← Main HTML template
-│       ├── app.js              ← All frontend JS (state, columns, rendering, panels)
-│       └── style.css           ← CSS (themes, layout, components)
-├── Launch Dashboard.command    ← macOS launcher (activates QF12 conda env, restarts cleanly)
+│       ├── index.html           ← Main HTML template
+│       ├── app.js                ← All frontend JS (state, columns, rendering, panels) — §5
+│       └── style.css             ← CSS (themes, layout, components) — §8
+├── tests/                        ← pytest suite (test_metrics.py, test_news_sentiment.py)
+├── docs/                         ← Reference/audit notes not needed to run the app day-to-day
+├── scripts/                      ← Misc dev scripts (e.g. check_syntax.py)
+├── Launch Dashboard.command      ← macOS launcher (activates QF12 conda env, restarts cleanly)
 ├── requirements.txt
+├── environment.yml               ← conda/mamba env spec for the desktop app (`pt`) — §14
+├── install.sh / install.ps1      ← Desktop app bootstrap (macOS/Linux / Windows) — §14
+├── update.sh / update.ps1        ← `git pull` + env sync for an existing desktop-app checkout — §14
 ├── README.md
-├── TODO.txt                    ← User's product wishlist (read for context, don't edit)
-├── COLUMN_CUSTOMIZATION_PROMPT.md ← Original Pass D spec from the user
-├── PASS_D_PROMPT.md            ← Fresh self-contained Pass D prompt (use this for a clean handoff)
-├── CLAUDE.md                   ← This file
-├── icon.png
-├── symbol_db.sqlite            ← Built from `python build_symbol_db.py` (gitignored, *.sqlite)
-├── .portfolio_tracker_views.json     ← Per-portfolio cached rows + metadata + weight presets (gitignored)
+├── TODO.txt                      ← User's product wishlist (read for context, don't edit)
+├── CLAUDE.md                     ← This file
+├── LICENSE
+├── icon.png                      ← Source icon (512×512 RGBA, transparent glyph) — §14
+├── icon.icns / icon.ico          ← Generated by install.sh / install.ps1 (gitignored)
+├── symbol_db.sqlite              ← Built from `python build_symbol_db.py` (gitignored, *.sqlite)
+├── .portfolio_tracker_views.json      ← Per-portfolio cached rows + metadata + weight presets (gitignored)
 ├── .portfolio_tracker_watchlists.json ← Per-portfolio entries strings (gitignored)
-├── .portfolio_tracker_mpt.json       ← Saved MPT efficient-frontier runs per portfolio (gitignored)
-├── .portfolio_tracker_session.json   ← Legacy single-session file (auto-migrated, gone after first run)
-├── .finnhub_key                      ← Finnhub API key (gitignored, never committed)
-└── .openrouter_key                   ← OpenRouter API key (gitignored, never committed)
+├── .portfolio_tracker_mpt.json         ← Saved MPT efficient-frontier runs per portfolio (gitignored)
+├── .portfolio_tracker_column_views.json ← Custom column-view definitions (gitignored)
+├── .finnhub_key                       ← Finnhub API key (gitignored, never committed)
+├── .openrouter_key                    ← Legacy OpenRouter key (superseded by .nvidia_key, still gitignored)
+└── .nvidia_key                        ← NVIDIA NIM API key (gitignored, never committed)
 ```
 
-`__pycache__/` and `*.sqlite` are gitignored. Don't add gitignore entries
-for the JSON state files — they're already covered.
+`__pycache__/`, `*.sqlite`, and all `.portfolio_tracker_*.json` runtime
+state files are gitignored — a fresh clone starts with an empty dashboard,
+not a previous owner's holdings. These files used to be tracked in git by
+mistake; if you ever see one show up as "modified" in `git status` after
+just running the app locally, that's expected — it's real runtime state,
+not something to commit.
+
+**Residual risk — git history is not scrubbed.** Untracking these files
+(`git rm --cached` + the gitignore entries above) only stops *future*
+commits from including them. Past commits in this repo's history still
+contain real holdings/watchlist/MPT-run data from before the fix. Do not
+treat "gitignored now" as "safe to make this repo public" — that requires
+a separate, deliberate history rewrite (e.g. `git filter-repo`) run and
+force-pushed by the repo owner first. If you're an agent about to flip
+repo visibility to public or add an external collaborator, stop and flag
+this instead of assuming it's already handled.
 
 ---
 
@@ -96,7 +128,7 @@ for the JSON state files — they're already covered.
 
 ---
 
-## 4. Backend (dashboard.py — server side)
+## 4. Backend (`portfolio_tracker/` package — server side)
 
 ### Caching layers (in order of speed)
 - **`_CACHE`** — generic TTL cache, default 300s, 1800s for analytics.
@@ -125,7 +157,7 @@ Renaming a portfolio touches BOTH files (`rename_watchlist` +
 `rename_view`) — see `/api/portfolio/rename` handler. Failure on the
 view side rolls back the watchlist rename.
 
-### Symbol resolution pipeline (`resolve_symbol`, line ~559)
+### Symbol resolution pipeline (`resolver.resolve_symbol`, ~line 164)
 Tries each layer in order, short-circuiting on first hit:
 
 1. **`_RESOLVED_CACHE`** — instant (already resolved this session).
@@ -170,9 +202,9 @@ ps_ratio, pe_ratio,
 error  (only on failure)
 ```
 
-Adding a new field: extend `fetch_one`, add to the column registry (Pass
-D will introduce one — for now, edit `COLS` in `dashboard.py` line
-~3506), and `xlsx_export.py`'s `HOLDINGS_PRIMARY_COLS` auto-picks up
+Adding a new field: extend `fetch_one` (`portfolio_tracker/fetcher.py`), add
+it to the column registry (`COLS` in `portfolio_tracker/static/app.js`,
+line ~6), and `xlsx_export.py`'s `HOLDINGS_PRIMARY_COLS` auto-picks up
 extras through the "extras pass" mechanism.
 
 **Dividend-yield contract:** normalise Yahoo dividend yields to a
@@ -201,11 +233,18 @@ still exists but is no longer wired into `fetch_one`.
 **Finnhub supplemental columns (`finnhub_adapter.py`):** `fetch_one`
 adds two optional row fields — `insider_mspr` (Form-4 Monthly Share
 Purchase Ratio) and `rec_trend_fh` (6-month analyst recommendation
-trend). They come from the Finnhub free API via the module-level
-`import finnhub_adapter as _fh` (line ~50). The key is resolved by
+trend). They come from the Finnhub free API via
+`from portfolio_tracker import finnhub_adapter as _fh` in `fetcher.py`
+(line ~32). The key is resolved by
 `_load_api_key()`:
-`FINNHUB_API_KEY` env var first, then a strictly-local `.finnhub_key`
-file sitting next to the module (one line, the raw key). When neither is
+`FINNHUB_API_KEY` env var first, then a `.finnhub_key` file found by
+**walking up** from the module directory (one line, the raw key). Walking
+up matters: the key lives at the repo root, not inside `portfolio_tracker/`,
+and in a worktree run the package sits several levels below the checkout —
+this mirrors `news_sentiment._load_key`. (Previously `_load_api_key` only
+checked the module's own directory, so it never found the repo-root key and
+the `Rec Δ6M` / `MSPR` columns silently rendered `—` even with a valid key
+present.) When neither env var nor file is
 present, `_fh` returns `None` for every call and the three fields are
 written as `None`, so the columns render `—` and the server log stays
 clean.
@@ -228,20 +267,33 @@ Finnhub-style column, `EPS Surp.`, is now yfinance-sourced (see above).
 
 **News & Sentiment (`portfolio_tracker/news_sentiment.py`):** Fetches
 per-ticker and market-wide news from Finnhub's free API (`/company-news`,
-`/news`), then scores each batch through the nvidia/nemotron model on
-OpenRouter to produce a 5-tier sentiment signal (very_bullish → very_bearish).
+`/news`), then scores each batch through `nvidia/nvidia-nemotron-nano-9b-v2`
+via NVIDIA's NIM endpoint (`integrate.api.nvidia.com`) to produce a 5-tier
+sentiment signal (very_bullish → very_bearish).
 Key architecture:
+- **Model gotcha:** the original `nvidia/llama-3.1-nemotron-nano-8b-v1` is
+  still in the NIM catalog but no longer actually served — chat completions
+  against it hang forever (verified: no response in 90s). Switched to
+  `nvidia-nemotron-nano-9b-v2` (0.79s). That model is a *hybrid reasoning*
+  model: on a complex prompt it spends the whole `max_tokens` budget on an
+  internal `<think>` pass and returns `content=None`, so `_nvidia_call`
+  prepends the **`/no_think`** control token to the system prompt to force a
+  direct JSON answer (`detailed thinking off` / `chat_template_kwargs` do
+  NOT work for this model — only the control token does). The OpenAI client
+  is built with `timeout=30s, max_retries=0` so a hung/deprecated model can
+  never block a warm-up worker for the SDK's 600s default.
 - API keys loaded via `_load_key()` — checks env vars first, then
-  `.finnhub_key` / `.openrouter_key` files next to the module or in the
+  `.finnhub_key` / `.nvidia_key` files next to the module or in the
   parent directory. Same security model as `finnhub_adapter`.
-- Cache: `_NEWS_CACHE` + `_SENTIMENT_CACHE` with `_CACHE_LOCK`, TTL 3600s,
-  negative cache 1800s. Transient failures NOT cached.
-- Circuit breaker: `_rate_limit_until` trips for 65s on any 429 to stop
-  concurrent workers from spamming a rate-limited endpoint.
+- Cache: `_NEWS_CACHE` + `_SENTIMENT_CACHE` with `_CACHE_LOCK`, 30-day TTL,
+  negative cache 1800s. Transient failures NOT cached. Disk-backed via
+  `.portfolio_tracker_news.json` — survives restarts; user-driven refresh only.
+- Token-bucket rate limiter: `_NV_LIMITER` (60/min), sleeps instead of
+  returning None. On 429: penalise + retry up to 3 times with 5s sleep.
 - `get_cached_sentiment(symbol)` — O(1) cache-only read, safe for `fetch_one`
   hot path (never triggers API calls during streaming build).
-- `get_portfolio_sentiment(symbols)` — ThreadPoolExecutor(3) batch.
-- Graceful degradation: no Finnhub key → no news; no OpenRouter key → news
+- `get_portfolio_sentiment(symbols)` — ThreadPoolExecutor(2) batch.
+- Graceful degradation: no Finnhub key → no news; no NVIDIA key → news
   but no sentiment; all functions return None, UI shows hollow dots/dashes.
 - The NS column (10px colored dot) appears in Default and Momentum views,
   NOT in Fundamentals. Background warm-up runs 2s after build completes.
@@ -290,9 +342,9 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
   results (`length >= 2`). Empty arrays are NEVER cached — fixes the
   old "no data sticks forever" bug.
 
-### HTTP routes (Handler at line ~7000)
+### HTTP routes (`Handler` in `server.py`, ~line 92)
 **GET**
-- `/`                              — INDEX_HTML
+- `/`                              — serves `static/index.html`
 - `/api/views`                     — list of saved views (metadata only)
 - `/api/views/<name>`              — full view payload (rows included)
 - `/api/watchlists`                — `{name: entries_string}` map
@@ -339,11 +391,11 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 
 ---
 
-## 5. Frontend (dashboard.py — embedded `INDEX_HTML`)
+## 5. Frontend (`portfolio_tracker/static/`)
 
-Single template literal starting around line ~2200, ending ~5500.
-No frameworks, no build step. KaTeX is the only external dependency
-(loaded from CDN, used only for column-guide formulas).
+Real static files served by `server.py` — `index.html`, `app.js`,
+`style.css`. No frameworks, no build step. KaTeX is the only external
+dependency (loaded from CDN, used only for column-guide formulas).
 
 ### State (`STATE`, `DATA`, `VIEWS`, `WATCHLISTS`)
 - `DATA` — currently-rendered rows
@@ -406,7 +458,8 @@ columns).
   ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ via CSS keyframes on `content`. Optional shimmer bar +
   tabular-numerics counter (e.g. `21·47`). Used in: streaming status,
   startup, analytics empty state, modal detail load, FX hover load,
-  Excel export button. CSS at line ~2395, JS at line ~3740.
+  Excel export button. CSS in `style.css` (~line 313), JS helpers
+  (`lcHtml`/`lcShow`/`lcHide`) in `app.js` (~line 591).
 - **Export → Excel** (`exportXlsx`): client just hits
   `/api/export-xlsx`; server handles everything. Button shows the
   loading chip during the ~40s cold-cache export. The maintenance
@@ -484,7 +537,7 @@ Good targets when expanding coverage:
 - Wikipedia constituent lists for index members
 
 ### Wiring
-`dashboard.py:_symbol_db_lookup()` is the bridge. Both `symbol_db.py`
+`resolver._symbol_db_lookup()` is the bridge. Both `symbol_db.py`
 and `symbol_db.sqlite` are OPTIONAL — if either is missing, the dashboard
 still works, the lookup just gracefully returns `None` and the existing
 `yf.Search` fallback runs.
@@ -493,13 +546,14 @@ still works, the lookup just gracefully returns `None` and the existing
 
 ## 7. `xlsx_export.py`
 
-### Design contract (mirror in dashboard.py too)
+### Design contract (mirror in app.js too)
 **"Everything you can see in the app, in one file."** Each saved
 portfolio → one sheet. When new columns / analytics / fields land in the
 dashboard, extend `xlsx_export.py` so the export stays comprehensive.
 
 Two places have the contract documented; keep them in sync:
-1. Inline HTML comment next to the topbar `#export` button (dashboard.py)
+1. Inline HTML comment next to the topbar `#export` button
+   (`portfolio_tracker/static/app.js`)
 2. Module docstring at the top of `xlsx_export.py`
 
 ### Per-sheet structure
@@ -549,9 +603,13 @@ Two places have the contract documented; keep them in sync:
 ## 9. Conventions
 
 ### Code style
-- **Single-file ethos** — dashboard.py is intentionally monolithic.
-  Only split out into a module when the new code is genuinely
-  independent (symbol_db, xlsx_export). Don't fragment for its own sake.
+- **Modular by concern** — the backend lives in `portfolio_tracker/` as
+  one module per concern (server, fetcher, analytics, fx, persistence,
+  resolver, cache, mpt, frontier, xlsx_export, finnhub_adapter,
+  news_sentiment, symbol_db, desktop). Put new logic in the module it
+  belongs to; only add a new module when the code is genuinely a new
+  concern. Don't fragment further for its own sake — e.g. `fetch_one`'s
+  helpers stay in `fetcher.py`, not split one-function-per-file.
 - **Top-of-block docstrings** that explain WHY, not WHAT. The user
   reads them; they're part of the deliverable.
 - **Comments around tricky behaviour** — every non-obvious gate or
@@ -562,9 +620,11 @@ Two places have the contract documented; keep them in sync:
   "could this end up in the per-row hot loop?"
 
 ### Workflow
-- After non-trivial edits: `python -c "import ast; ast.parse(open('dashboard.py').read())"` to syntax-check.
+- After non-trivial edits: `python -c "import ast; ast.parse(open(f).read())"`
+  on every changed `.py` file (or run `scripts/check_syntax.py`).
 - After backend edits that change behaviour: restart the server.
-  `pkill -f "python.*dashboard.py"; <conda-python> dashboard.py &`.
+  `pkill -f "python.*dashboard.py"; <conda-python> dashboard.py &`
+  (the shim launches the real package, so the process name is unchanged).
 - Validate via `curl` against the actual endpoint when possible —
   faster than asking the user to refresh.
 - Use `Bash`'s `run_in_background=true` for the dashboard process;
@@ -592,24 +652,13 @@ Two places have the contract documented; keep them in sync:
 
 ## 10. Open work + design intent for upcoming passes
 
-### Pass D — Column views (NEXT)
-See `PASS_D_PROMPT.md`. The big spec piece still pending:
-- Refactor `COLS` into a registry + active-selection model
-- Add ~12 curated optional columns (% 1W/1M/3M/6M, Sector, Industry,
-  Fwd P/E, EV/EBITDA, Analyst Rating, Target Upside, 52W High/Low)
-- Three built-in presets: Default, IB View, Trader View
-- Custom-preset save/load/delete with separate JSON file
-  (`.portfolio_tracker_column_views.json`)
-- Sort menu and `xlsx_export.py` HOLDINGS_PRIMARY_COLS should reflect
-  the active view's columns at point of use
-
 ### Open items from user's TODO.txt
 - Natural-language search for companies (would build on `symbol_db.py`)
 - Per-metric tooltips on hover (more analytics now have these; extend further)
 - Improvements to the "contribution by 3y returns" table
 
 ### Done / archived (don't redo)
-- News & Sentiment — Finnhub news + OpenRouter AI sentiment, NS column, News tab
+- News & Sentiment — Finnhub news + NVIDIA NIM AI sentiment, NS column, News tab, disk-backed cache, rate limiter
 - ★ Save Watchlist button removal
 - CSV → Excel export (Pass B)
 - FX hover stale-cache fix
@@ -618,44 +667,46 @@ See `PASS_D_PROMPT.md`. The big spec piece still pending:
 - Loading chip system
 - Square icon removal from Portfolio button
 - NASDAQ blurb removal
+- Desktop app (PySide6 + QtWebEngine) — see §14
+- Pass D — column-view registry (`COLS`/`COLS_BY_KEY`/`BUILTIN_VIEWS`), custom
+  presets via `.portfolio_tracker_column_views.json`, Default/Fundamentals/
+  Momentum built-ins
 
 ---
 
-## 11. Quick reference — current line landmarks in dashboard.py
+## 11. Quick reference — current line landmarks
 
-(Approximate. Use `grep -n` to confirm before editing.)
+The frontend (HTML/CSS/JS) is embedded in `portfolio_tracker/static/`, not
+in `dashboard.py` (that file is now an 11-line backward-compat shim — see
+§1/§2). Landmarks below are within `portfolio_tracker/static/app.js` unless
+noted otherwise. (Approximate. Use `grep -n` to confirm before editing.)
 
-| What | Where |
-|---|---|
-| Cache helpers | ~59–80 |
-| Views/watchlists persistence | ~88–340 |
-| Exchange prefix table + parser | ~344–460 |
-| Google-colon normaliser | ~536 |
-| `resolve_symbol` pipeline | ~559 |
-| `fetch_one` (per-symbol row) | ~670 |
-| FX layer (rates, history, basket index) | ~821–1000 |
-| Analytics (`analyze_portfolios_multi`) | ~1815 |
-| `fetch_detail` (modal payload) | ~1278 |
-| Embedded HTML/CSS/JS begins | ~2200 |
-| Loading-chip CSS | ~2395 |
-| Topbar HTML | ~3290 |
-| Loading-chip JS helpers | ~3740 |
-| Modal skeleton | ~4162 |
-| Build / stream wiring | ~4859 |
-| Tab rendering + rename | ~4992–5290 |
-| `exportXlsx` | ~5451 |
-| Analytics request / render | ~5510 |
-| FX hover cache + draw | ~6730–6810 |
-| HTTP Handler (GET/POST/DELETE) | ~8500+ |
-| `_pick_port` + `main()` | end of file |
-| Weight-preset persistence | ~200–340 |
-| MPT runs persistence | ~340–400 |
-| `compute_efficient_frontier` | ~2690 |
-| MPT overlay HTML | ~4790 |
-| Mode pill bar (`renderModeBar`) | ~8970 |
-| Weights popup + save/save-as/delete | ~8870–9050 |
-| Inline name prompt | top-level overlay, JS ~9070 |
-| MPT overlay JS (chart + slider + sidebar) | ~9260 |
+| What | File | Where |
+|---|---|---|
+| Process-global cache dicts | `cache.py` | ~14–16 |
+| Views/weight-presets persistence | `persistence.py` | `save_view` ~109, `save_mpt_run` ~501 |
+| Watchlists persistence | `persistence.py` | `load_watchlists` ~379 |
+| Google-colon normaliser | `resolver.py` | `_normalize_google_colon` ~153 |
+| `resolve_symbol` pipeline | `resolver.py` | ~164 |
+| `fetch_one` (per-symbol row) | `fetcher.py` | ~117 |
+| `fetch_detail` (modal payload) | `fetcher.py` | ~398 |
+| FX layer (spot rates, basket index) | `fx.py` | `fx_rates` ~139, `fx_index_history` ~198 |
+| Analytics (`analyze_portfolios_multi`) | `analytics.py` | ~214 |
+| `compute_efficient_frontier` | `frontier.py` | ~72 |
+| HTTP `Handler` (GET/POST/DELETE) | `server.py` | ~92 |
+| `_pick_port` | `server.py` | ~689 |
+| `main()` (browser-mode entry) | `server.py` | ~739 |
+| Topbar HTML | `static/index.html` | ~13 |
+| Loading-chip CSS (`.lc-*`, spinner keyframes) | `static/style.css` | ~313–332 |
+| Tab rendering + rename | `static/app.js` | `renderTabs` ~2768, `beginTabRename` ~2814 |
+| `exportXlsx` | `static/app.js` | ~3032 |
+| Analytics request / render | `static/app.js` | `requestAnalytics` ~3108 |
+| Mode pill bar (`renderModeBar`) | `static/app.js` | ~4454 |
+| `runPrimary` (Build/Update button router) | `static/app.js` | ~4571 |
+
+Use `grep -n "<symbol>" portfolio_tracker/*.py portfolio_tracker/static/*.{js,html,css}`
+to relocate anything not listed above — the package is small enough that
+this is faster than trusting a stale line table.
 
 ---
 
@@ -663,7 +714,8 @@ See `PASS_D_PROMPT.md`. The big spec piece still pending:
 
 Standalone module so the dashboard stays dependency-light and the math is
 testable in isolation. Implements **long-only, sum=1 Markowitz** with a
-clean public surface used by `compute_efficient_frontier` in dashboard.py.
+clean public surface used by `compute_efficient_frontier` in
+`portfolio_tracker/frontier.py`.
 
 ### Public API
 
@@ -692,7 +744,7 @@ mpt.portfolio_stats(weights, mu, cov, rf=0) -> {ret, vol, sharpe}
   concentrations (α=0.3 and α=1.0) so the cloud fills the feasible set
   uniformly rather than clustering at the centroid.
 
-### `_PERIOD_YF` mapping for MPT lookbacks (in dashboard.py)
+### `_PERIOD_YF` mapping for MPT lookbacks (in `frontier.py`)
 ```python
 _MPT_LOOKBACK_YF = {"1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}
 _MPT_BUDGETS = {
@@ -716,9 +768,9 @@ _MPT_BUDGETS = {
 - Monte-Carlo at "Standard" (25k): ~400 ms.
 - End-to-end warm: <1 s. Cold "Standard": <8 s. "Thorough": <20 s.
 
-### Reuse from dashboard.py
-- `_bulk_close()` — price history with the same yfinance cache analytics uses.
-- `_apply_fx_to_closes()` — currency normalisation when `display_ccy != "USD"`.
+### Reuse from analytics.py / fx.py
+- `analytics._bulk_close()` — price history with the same yfinance cache analytics uses.
+- `fx._apply_fx_to_closes()` — currency normalisation when `display_ccy != "USD"`.
 - `_PERIOD_YF` neighbour — kept separately as `_MPT_LOOKBACK_YF` because
   MPT only supports a subset of analytics periods.
 
@@ -757,19 +809,40 @@ Capped at 30 newest runs per portfolio. Cascades on view rename/delete.
 
 ### GitHub Actions (`.github/workflows/ci.yml`)
 
-Runs on every push to `main` or `claude/**` branches and on every PR to `main`.
-Three jobs (all non-blocking on CI for now; tighten when false-positive rate
-is measured):
+Runs on every push to `main` or `claude/**` branches and on every PR to
+`main`. Six jobs, all fast (each well under a couple of minutes) — the
+first two gate the rest (`needs: [lint, test]`), so a trivial syntax error
+fails in seconds instead of waiting on the platform-specific jobs first:
 
-| Step | Tool | What it checks |
+| Job | Runner | What it proves |
 |---|---|---|
-| Syntax check | `ast.parse` | Every `.py` file — catches grammar errors before server start |
-| Static analysis | `pyflakes` | `symbol_db.py`, `mpt.py`, `xlsx_export.py`, `build_symbol_db.py` — undefined names, unused imports |
-| Import smoke | `ast.parse` | `dashboard.py` parseable; `mpt.py` importable without full numba stack |
+| `lint` | ubuntu | Every `.py` parses (`scripts/check_syntax.py`); `pyflakes` on all `portfolio_tracker/*.py` + `build_symbol_db.py` + `scripts/*.py` (non-blocking); `dashboard.py`/`mpt.py` importable; `install.ps1`/`update.ps1` parse via PowerShell Core's own `Parser.ParseFile` |
+| `test` | ubuntu | `pytest tests/` — the metrics/news-sentiment unit suite |
+| `server-smoke` | ubuntu | Real HTTP requests against a real running server (`scripts/smoke_test_server.py`) — `/`, `/api/watchlists`, `/api/views`, `/static/*` must return real 200s with real bodies. This is the answer to "is the app actually working," not just "does it import." |
+| `desktop-import-smoke` | ubuntu | `portfolio_tracker.desktop` imports cleanly under a real (headless, `QT_QPA_PLATFORM=offscreen`) `QApplication` — catches PySide6/QtWebEngine API breakage the plain lint job can't see, since lint never installs PySide6. Needs a handful of system graphics libraries (`libegl1`, `libgl1`, etc.) installed via `apt-get` first — the bare runner has none, not even for the offscreen platform plugin |
+| `macos-icon-smoke` | **macos-latest** | Runs the exact `sips`/`iconutil` commands `install.sh` uses against the real `icon.png` and confirms a non-empty `.icns` comes out |
+| `windows-icon-and-shortcut-smoke` | **windows-latest** | Runs the exact Pillow call `install.ps1` uses to build `icon.ico`, then creates and re-reads a real shortcut via `WScript.Shell` COM (the exact API `New-AppShortcut` uses) against a dummy target, verifying `TargetPath`/`Arguments` round-trip correctly |
 
-`dashboard.py`'s pyflakes step is `|| true` (non-blocking) because the
-embedded HTML/JS strings generate false positives. Remove when a scoped
-ignore strategy is in place.
+**Deliberately not covered by CI**: a full end-to-end `install.sh`/
+`install.ps1` run (Miniforge silent bootstrap + a full conda-forge solve of
+`environment.yml`). An earlier version of this workflow did run the whole
+installer on every push — cut after it turned out to cost 10-15 minutes per
+platform per push while mostly re-testing conda-forge's own solver rather
+than this repo's code. The two `*-smoke` jobs above target specifically the
+parts that are actually unique to this repo, otherwise untestable anywhere
+except real Windows/macOS, and fast: `sips`/`iconutil`, Pillow's `.ico`
+writer, and — the standout — `WScript.Shell`, a Windows Script Host COM API
+with zero equivalent on macOS/Linux, not even under PowerShell Core. If you
+need to verify the full installer end-to-end again (e.g. after a
+`environment.yml` dependency change), run `install.sh`/`install.ps1` with a
+throwaway `-EnvName`/`-AppName` locally or via a manually-triggered run —
+see the "Verify the install.sh fix by actually running the full installer
+locally" pattern from this file's own commit history for the exact steps
+(throwaway env/app name, verify artifacts, clean up after).
+
+`pyflakes` stays `|| true` (non-blocking) — tighten by removing that once
+the false-positive rate on the wider `portfolio_tracker/*.py` glob has been
+measured over a few weeks.
 
 **To tighten a check:** remove `|| true` from the relevant step in `ci.yml`
 and commit — the next push will enforce it.
@@ -815,3 +888,327 @@ gh pr merge <number> --squash --auto --delete-branch
 gh pr status
 gh pr checks <number>
 ```
+
+---
+
+## 14. Desktop app (PySide6 + QtWebEngine)
+
+### Why this exists
+
+Browser mode (`python dashboard.py`) depends on Google Chrome being
+installed (`server.py`'s `main()` hard-codes `open -a "Google Chrome"`) — on
+a machine with no Chrome, that fails and the user is stuck. The desktop app
+wraps the *identical* HTTP server in a native window instead, using
+QtWebEngine (which bundles its own Chromium — same rendering engine as
+Chrome, so nothing about the frontend's behavior changes). Browser mode is
+untouched and remains the documented fallback; this is purely additive.
+
+**Why single-process, not Electron-style sidecar:** the HTTP server runs on
+a background thread inside the same Python process as the Qt event loop
+(see `start_server()` below). No subprocess, no IPC, no second language
+runtime.
+
+**Why source + conda env, not a packaged installer:** this is
+personal/friends-and-family distribution. `install.sh` / `install.ps1` are
+the "build step" — they create a dedicated conda env (`pt`), generate the
+icon, and drop a launcher (`.app` on macOS, Start Menu/Desktop shortcuts on
+Windows). No PyInstaller, no code signing, no release pipeline. Updates are
+`git pull` + env sync (`update.sh` / `update.ps1`) — see §3's existing
+gotchas for why the app itself never touches the running server process
+across restarts (there is none; the server lives and dies with the app).
+
+### The `start_server()` / `shutdown_server()` seam (`portfolio_tracker/server.py`)
+
+`main()` (browser mode) and `desktop.py` (app mode) both need the same
+port-pick + `ThreadingHTTPServer` construction but manage their own
+lifecycle, so that piece is factored into two small functions:
+
+- **`start_server() -> (server, port)`** — picks a port via the existing
+  `_pick_port()`, constructs `ThreadingHTTPServer`, sets
+  `server.daemon_threads = True`, and runs `serve_forever()` on a daemon
+  background thread. Returns immediately (non-blocking) — this is the key
+  change from the original code, where `serve_forever()` ran inline on the
+  main thread. `daemon_threads = True` matters: `socketserver.ThreadingMixIn`
+  defaults per-connection handler threads to **non-daemon**, which — without
+  this — can block process exit on a stuck/long-lived connection (e.g. an
+  open NDJSON stream) even after `shutdown()` + `server_close()`.
+- **`shutdown_server(server)`** — `server.shutdown()`, `server.server_close()`,
+  flush stdout, then **`os._exit(0)`**. The `os._exit()` is deliberate and
+  non-obvious: `fetch_one`/analytics/`news_sentiment` all use module-level
+  `concurrent.futures.ThreadPoolExecutor` pools, and `ThreadPoolExecutor`
+  registers an **atexit hook that joins any in-flight work** before a normal
+  interpreter shutdown can complete — verified directly (see "Gotchas
+  discovered" below) that this can stall process exit for as long as the
+  slowest pending network call takes. The existing browser-mode launcher
+  (`Launch Dashboard.command`) never hit this because it always kills the
+  process outright (SIGTERM's default disposition is an unclean, instant
+  stop — no handler installed catches it, so it's no different from
+  SIGKILL here); `os._exit()` gives the same guarantee from *inside* the
+  process, which the desktop app needs since its quit path is triggered by
+  Qt (`aboutToQuit`), not an external signal. The OS reclaims the socket and
+  any WebEngine helper process either way (verified: an abruptly-killed
+  parent's `QtWebEngineProcess` self-terminates within a few seconds via
+  Chromium's own parent-death detection — this is normal, not a hang).
+  `main()` (browser mode) calls `shutdown_server()` from its
+  `finally:` block; `desktop.py` connects it to `app.aboutToQuit`.
+
+`main()` itself now blocks on an interruptible `while True: time.sleep(1.0)`
+loop instead of calling `serve_forever()` directly, since that call moved
+into `start_server()` — Ctrl+C behavior is unchanged.
+
+### `portfolio_tracker/desktop.py`
+
+Run via `python -m portfolio_tracker.desktop` (what the installed launcher
+actually invokes). Single file, ~160 lines:
+
+- **Splash contract**: shown immediately via `QSplashScreen` (icon +
+  "Portfolio Tracker" + "Made by Alexander Tsoskounoglou 2026", colors
+  matching the dashboard's own dark theme — `#0d1117`/`#e6edf3`/`#7d8590`
+  from `style.css`). A `QElapsedTimer` starts the moment it's shown. The
+  main window is revealed on `max(0, 5000ms - elapsed)` after the
+  `QWebEngineView`'s `loadFinished` fires, via `reveal()` (guarded by a
+  `nonlocal` flag so it only runs once). A 20s **safety timer** also calls
+  `reveal()` unconditionally, so a stalled/failed page load can never trap
+  the user on the splash forever.
+- **External-link routing** (`_ExternalLinkPage`, a `QWebEnginePage`
+  subclass): the dashboard has exactly two `target="_blank"` links —
+  company website (`app.js` detail modal) and news article links (`app.js`
+  news section) — both plain anchors, no `window.open()` calls. Chromium
+  routes these through **either** `acceptNavigationRequest` (in-place
+  navigation attempts) **or** `createWindow` (real new-window/tab
+  requests), depending on how the click is dispatched, so both are
+  overridden: `acceptNavigationRequest` blocks (`return False`) and hands
+  off to `QDesktopServices.openUrl()` for any `NavigationTypeLinkClicked`
+  whose host isn't our own loopback server; `createWindow` returns a
+  throwaway `QWebEnginePage` whose first `urlChanged` triggers
+  `QDesktopServices.openUrl()` then `deleteLater()` — no in-app popup
+  window is ever shown. Verified directly against both code paths with
+  `QDesktopServices.openUrl` mocked (not just by clicking through the UI).
+- **Icon**: `icon.png` resolved as `Path(__file__).resolve().parent.parent
+  / "icon.png"` (repo root), set on both `QApplication` (dock/taskbar) and
+  the window. Both call sites guard on `.exists()` — the app never crashes
+  if the icon is missing, it just runs iconless.
+- **Shutdown**: `app.aboutToQuit.connect(lambda: shutdown_server(server))`.
+  Verified via three independent paths: `app.quit()`, `window.close()`
+  (which reaches `aboutToQuit` because Qt's `quitOnLastWindowClosed`
+  defaults to `True`), and clicking the real close button through the
+  Accessibility API — all three cleanly free the port immediately, even
+  with an NDJSON stream actively in flight.
+
+### PySide6 channel: pip, not conda-forge
+
+`environment.yml` puts `PySide6` in the `pip:` section, not as a
+conda-forge package. This was a **validated choice, not a guess**:
+conda-forge's `pyside6` build has historically had platform gaps in
+`QtWebEngine` availability; on this machine (macOS 26.2, arm64) `pip
+install PySide6` produced a working `QtWebEngineWidgets`/`QtWebEngineCore`
+on the first try (verified via `from PySide6.QtWebEngineWidgets import
+QWebEngineView`), so the pip path was kept. `yfinance`/`openai` are pip too
+(same requirements.txt versions), since they track upstream releases faster
+than conda-forge's build queue. The rest of the scientific stack
+(numpy/pandas/scipy/numba) stays on conda-forge — cross-checked that numba's
+JIT actually compiles against the resulting numpy version (it does; numba
+lagging numpy compatibility is a real, recurring risk worth re-checking
+whenever `environment.yml` is regenerated).
+
+### Icon generation
+
+- **macOS** (`install.sh`): `sips -z` renders 16/32/128/256/512 (+@2x) PNGs
+  from the unmodified transparent `icon.png` into a `.iconset`, then
+  `iconutil -c icns` compiles `icon.icns`. Both tools are macOS built-ins —
+  no third-party dependency. Regenerated only if `icon.png` is newer than
+  the existing `icon.icns`.
+  **Non-obvious**: `mktemp`'s printed path must be used directly — appending
+  a suffix after the fact (e.g. `TMP=$(mktemp -t x).sh`) creates a *second*,
+  different path and leaves the original mktemp-created file/dir behind as
+  an orphaned empty temp file on every run (reproduced directly: an earlier
+  version of this script did exactly that for both the flattened-icon PNG
+  and the `.iconset` dir). Fix used throughout `install.sh`: `mktemp -d`
+  once, then place a properly-named file/dir *inside* that owned directory,
+  and `rm -rf` the whole directory afterward — never append a suffix to the
+  raw `mktemp` path.
+  **A second, sharper-edged instance of the same mistake**: the Miniforge
+  installer download (same file, §14's Miniforge bootstrap) hit this too,
+  but as a hard failure rather than just an orphaned file — the downloaded
+  `.sh` installer script itself checks `echo "$0" | grep '\.sh$'` and
+  refuses to run at all if its own invocation path doesn't end in `.sh`
+  (exits with "Please run using bash/dash/sh/zsh, but not . or source." —
+  a red herring message that has nothing to do with how it's actually being
+  invoked). A bare `mktemp -t miniforge-installer` doesn't produce a
+  `.sh`-suffixed name, so this silently broke the entire "no conda found"
+  auto-install branch. Caught by a CI run that (briefly) exercised the full
+  installer end-to-end on a real `macos-latest` runner with no pre-existing
+  conda — exactly the condition needed to trigger this branch, which no
+  amount of local review on a machine that already has conda installed
+  could ever catch. That full-installer CI job was cut afterward for being
+  slow (see §13's "deliberately not covered by CI"); if `install.sh`'s
+  Miniforge bootstrap changes again, re-verify it locally with a throwaway
+  `ENV_NAME` on a machine with no `~/miniforge3`, or temporarily point
+  `ENV_NAME`/a fresh `$HOME` at a clean sandbox. Same fix pattern used here
+  as the icon case above: `mktemp -d`, then a real `installer.sh` filename
+  inside it.
+- **Windows** (`install.ps1`): Pillow (already a conda-forge dependency in
+  `environment.yml`, listed there specifically for this) saves a
+  multi-resolution `.ico` directly — `Image.open(icon.png).save(icon.ico,
+  sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])`. Verified
+  for real (not just syntax-checked) by running this exact call in the `pt`
+  env on macOS and confirming `file` reports a valid multi-icon Windows
+  resource — the logic is OS-agnostic Python, only the shell wrapper around
+  it is Windows-specific.
+
+### Env name and install scripts
+
+Dedicated conda env name is **`pt`** (not `QF12`/`EP11` — those stay
+untouched; `install.sh`/`install.ps1` never write to an existing env unless
+its name is literally `pt`). `install.sh`/`install.ps1` are idempotent:
+re-running detects the existing env (`conda env list` parsing on macOS,
+directory-existence check on Windows — both valid, just independently
+chosen) and does `env update --prune` instead of `env create`; the `.app`
+bundle / shortcuts are unconditionally removed and recreated each run so a
+moved repo or renamed app never leaves a stale launcher behind.
+
+`ENV_NAME`/`APP_NAME` (`install.sh`) and `-EnvName`/`-AppName` (`install.ps1`)
+are overridable via env var / parameter — undocumented to end users, but
+this is exactly how both scripts were validated end-to-end (throwaway names
+→ full fresh-env-create + `.app` launch + clean shutdown, all verified
+before ever touching the real `pt` env / `/Applications` entry).
+
+### Gotchas discovered during implementation
+
+- **`ThreadingHTTPServer.daemon_threads` defaults to `False`.** Without
+  `start_server()` setting it `True`, a per-connection handler thread stuck
+  on a long-lived request can block process exit indefinitely even after
+  `shutdown()` + `server_close()` — reproduced directly with an in-flight
+  `/api/quotes-stream` request still open at shutdown time.
+- **`concurrent.futures.ThreadPoolExecutor` registers an atexit hook that
+  joins pending work.** This is why `shutdown_server()` calls `os._exit(0)`
+  instead of letting the interpreter exit normally — reproduced in
+  isolation (a bare `ThreadPoolExecutor` with one pending future blocks
+  process exit for the full task duration; `os._exit(0)` bypasses it
+  cleanly, confirmed the OS still reclaims the socket).
+- **PowerShell's `$ErrorActionPreference = "Stop"` does not catch a
+  non-zero exit code from a native command** (`.bat`/`.exe` invoked via
+  `&`) the way bash's `set -e` does — reproduced directly (`& false`
+  followed by more `Write-Host` calls executes them anyway, script exits
+  0). `install.ps1`/`update.ps1` define an `Assert-Success` helper and call
+  it after every `mamba env create/update`, the Miniforge installer
+  (`Start-Process -PassThru`, checking `.ExitCode`), the icon-generation
+  Python call, and `git pull` in `update.ps1` — otherwise a failed env
+  update would silently fall through to building shortcuts against a
+  broken/incomplete env.
+- **Miniforge's GitHub release publishes both `Darwin` and `MacOSX` (and
+  both `Linux` and the same for Windows) asset name variants** — either
+  `uname -s` output or the traditional installer naming works for the
+  download URL; `install.sh` explicitly maps `Darwin → MacOSX` for
+  clarity/traditional-naming rather than relying on the alias, but confirmed
+  (via a live `HEAD` request) that both resolve to the same file.
+- **Blank window when launched from the .app bundle (ROOT-CAUSED & FIXED —
+  `--single-process`).** The single most important desktop-app gotcha. When
+  launched from the installed `.app` via LaunchServices (Finder / Dock /
+  Spotlight / `open -a`), QtWebEngine's default **multi-process** Chromium
+  cannot establish its Mojo IPC channel to the helper (network / renderer)
+  processes. The browser process logs
+  `mojo/core/channel_mac.cc ... mach_msg receive: (ipc/rcv) msg too large
+  (0x10004004)`, every network request — including the initial
+  `http://127.0.0.1:<port>/` page load — fails, `QWebEngineView.loadFinished`
+  fires **`ok=False`**, and the window comes up **blank white**. This is what
+  the earlier "intermittent invisible window / `Compositor returned null
+  texture`" observation actually was: not a GPU/display quirk, but a failed
+  page load rendering as blank. Root cause: a LaunchServices-launched process
+  gets a **different Mach bootstrap namespace** than a shell child, so the
+  Chromium helpers can't check back in. Verified exhaustively:
+  - Terminal/shell launch of the *same* module → `ok=True`, renders. Bundle
+    launch → `ok=False` **every time** (8/8), blank.
+  - `urllib` (and `curl`) reach the server fine and the readiness probe gets
+    a 200 — it is specifically Chromium's multi-process networking that
+    breaks, not the server.
+  - `--no-sandbox`, `--in-process-gpu`, `--disable-gpu` do **not** help
+    (still `ok=False`). `--use-gl=swiftshader` crashes (SIGABRT — not
+    available in this build). **Only `--single-process` fixes it** — it
+    collapses renderer/network/GPU into the main process so there are no
+    child processes to do Mach IPC with. Confirmed 8/8 bundle launches render
+    and are fully interactive with it set.
+  `desktop.py:_configure_chromium()` sets
+  `QTWEBENGINE_CHROMIUM_FLAGS=--single-process` **before** `QApplication` is
+  constructed (Qt reads it at web-engine init). Safe here: single-user,
+  single-origin, fully-local content (external links are handed to the real
+  browser), so the single-process downsides — no site isolation, a renderer
+  crash takes the one window with it — don't apply. **Do not remove this
+  flag.** If a future agent sees a blank window, check `loadFinished ok=` and
+  the `channel_mac.cc mach_msg` line in `~/Library/Logs/PortfolioTracker.log`
+  / Chromium stderr before touching anything else.
+- **Two robustness layers back up the flag** (in `desktop.py`): a **server
+  readiness probe** in the boot worker (`urllib` GETs `/` until HTTP 200
+  before the URL is handed to the view — kills the start_server-vs-first-
+  request race that also produced `ok=False`), and a **load-retry** on
+  `loadFinished(ok=False)` (up to 4 `view.reload()` attempts) with the
+  min-splash / safety timer as the final backstop. Belt, braces, and a
+  second belt — the app must open 100% of the time.
+- **Dock icon before/after-launch mismatch (FIXED).** The old code called
+  `app.setWindowIcon(QIcon("icon.png"))` unconditionally; on a bundle launch
+  that *replaces* the Dock's bundle-`.icns` rendition (which gets macOS's
+  standard rounded-tile treatment) with a raw PNG rendered differently — so
+  the icon visibly changed the moment the app launched. Fix: `desktop.py`
+  only calls `setWindowIcon` when **not** launched from the bundle (detected
+  via `os.environ["__CFBundleIdentifier"] == BUNDLE_ID`); inside the bundle
+  the `.icns` is left to win everywhere, so before/after are identical. The
+  `.icns` is generated from `icon.png` by `install.sh` and matches it pixel-
+  for-pixel (verified).
+- **Startup speed / splash.** The splash (branded pixmap + a live **accent
+  progress bar + braille spinner + percent**, mirroring the in-app
+  `.progress-bar` / `.lc` loading-chip assets) is shown *before* the heavy
+  import thread starts — starting the import first makes its GIL-heavy work
+  contend with the main thread and visibly delays the splash. Two backend
+  imports were made **lazy** to get `import portfolio_tracker.server` off the
+  startup path from ~6s down to ~1–3s (warm): `openai` (deferred into
+  `news_sentiment._get_client()`, ~1.2s — AI sentiment is on-demand) and
+  `portfolio_tracker.frontier`/`mpt`/`numba` (deferred to its two call sites
+  in `server.py`, ~1.7s — the Optimize/MPT feature is on-demand). `pandas` +
+  `yfinance` (~2.5s) stay eager since the first data render needs them. Net:
+  the whole import now finishes inside the 5s minimum-splash window, so the
+  perceived launch time is the intended 5s floor, not import time. The 5s is
+  a **minimum** visible duration (so the credit line is readable); a slower
+  boot keeps the splash up longer, and a 20s safety timer + boot-still-running
+  re-arm guarantees the splash never traps the user.
+
+### Windows verification status
+
+`install.ps1` / `update.ps1` were originally written blind (this repo was
+built on macOS) and syntax-checked only via PowerShell Core installed
+through Homebrew — that caught one real bug (the NSIS `/D=` quoting issue
+below) but couldn't exercise `conda.bat`, `WScript.Shell` COM shortcuts, or
+the Miniforge silent-install flow, none of which exist on macOS.
+
+**CI now covers the two genuinely Windows-only mechanisms, cheaply and on
+every push.** `.github/workflows/ci.yml`'s `windows-icon-and-shortcut-smoke`
+job runs on a real `windows-latest` GitHub Actions runner: the same Pillow
+call `install.ps1` uses to build `icon.ico`, and — the more important one —
+real `WScript.Shell` COM shortcut creation (the exact API `New-AppShortcut`
+uses) against a dummy target, then re-reads the `.lnk` and asserts
+`TargetPath`/`Arguments` round-tripped correctly. `WScript.Shell` has no
+equivalent on macOS/Linux, not even under PowerShell Core, so this is
+strictly new coverage, not something local review could ever provide.
+
+An earlier version of this CI job went further — ran `install.ps1`
+completely end-to-end, including a real Miniforge NSIS silent install and a
+full `mamba env create` against `environment.yml` — and that version is
+genuinely what caught the NSIS `/D=` quoting bug (a `-ArgumentList` array
+was letting PowerShell auto-quote the install path, which NSIS's `/D=` flag
+requires to be unquoted). That full-installer job was cut afterward: it
+cost 10-15 minutes per push and, once the one real bug it found was fixed,
+was mostly re-verifying conda-forge's own solver rather than this repo's
+code — see §13's "deliberately not covered by CI" for the reasoning and how
+to re-run the full installer manually if `environment.yml` changes
+significantly.
+
+**Still genuinely unverified** (would need a real end-user machine, not a
+disposable Actions runner, and isn't worth the CI cost to chase): whether
+`pythonw.exe` truly produces a windowless launch when double-clicked;
+first-launch Windows Defender/SmartScreen prompts for the unsigned app; the
+Miniforge auto-install branch on a machine where a *different* conda
+distribution is already installed under a non-standard path; and the NSIS
+`/D=` fix specifically on an account with a space in the username (GitHub's
+Windows runner account is `runneradmin` — no space — so even the old
+full-installer CI job never actually exercised the exact condition the fix
+targets; the fix is reasoned-correct from NSIS's documented behavior, not
+empirically re-confirmed under CI).

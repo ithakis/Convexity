@@ -21,11 +21,20 @@ ENV/
 # Local secrets — strictly local, never committed (API keys, etc.)
 .finnhub_key
 .openrouter_key
+.nvidia_key
 .env.local
 *.secret
 
-# Runtime caches — disk-backed news/sentiment cache, regenerated at runtime
+# Runtime state — per-machine data (holdings, watchlists, caches, saved runs).
+# Regenerated at runtime; never meant to ship in the repo (a fresh clone
+# should start with an empty dashboard, not the previous owner's portfolio).
 .portfolio_tracker_news.json
+.portfolio_tracker_views.json
+.portfolio_tracker_watchlists.json
+.portfolio_tracker_mpt.json
+.portfolio_tracker_column_views.json
+.portfolio_tracker_session.json
+.dashboard.pid
 
 # Conda
 .conda/
@@ -49,6 +58,12 @@ Icon
 .project
 .pydevproject
 
+# Claude Code — local/session-specific, not shared across machines
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+.pytest_cache/
+
 # Logs & temp
 *.log
 *.tmp
@@ -58,6 +73,12 @@ Icon
 # yfinance / requests cache
 .cache/
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Desktop app icons — regenerated from icon.png by install.sh / install.ps1
+icon.icns
+icon.ico
 
 # Jupyter (if notebooks ever added)
 .ipynb_checkpoints/

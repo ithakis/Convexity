@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,31 @@ def _repo_root() -> Path:
         if (parent / ".git").exists():
             return parent
     return current.parent
+
+
+def _load_local_secret(env_var: str, filename: str) -> str:
+    """Resolve a secret: env var first, then a strictly-local file.
+
+    Order: ``env_var`` first, then ``filename`` found by walking upward from
+    this module's directory (NOT via ``_repo_root()`` — a worktree run needs
+    the key from the worktree checkout itself, which ``_repo_root()``'s
+    ``.git``-boundary search would skip past). Shared by finnhub_adapter.py
+    and news_sentiment.py so both modules resolve secrets identically instead
+    of maintaining two independently-drifting copies of this walk-up loop.
+    """
+    env = os.environ.get(env_var, "").strip()
+    if env:
+        return env
+    search = Path(__file__).resolve().parent
+    for _ in range(6):
+        try:
+            p = search / filename
+            if p.is_file():
+                return p.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+        search = search.parent
+    return ""
 
 
 # ----------------------------- FX constants ---------------------------------

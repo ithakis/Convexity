@@ -273,8 +273,14 @@ function readTheme() {
 }
 
 function readFitColumnsPreference() {
-  try { return localStorage.getItem("fit_columns") === "1"; }
-  catch (e) { return false; }
+  // Default ON: the table must fit the viewport out of the box on any monitor.
+  // Only an explicit user opt-out ("0") turns it off (restoring horizontal
+  // scroll); an unset preference means the user has never toggled it → fit.
+  try {
+    const v = localStorage.getItem("fit_columns");
+    return v === null ? true : v === "1";
+  }
+  catch (e) { return true; }
 }
 
 function persistFitColumnsPreference(on) {
@@ -495,14 +501,24 @@ document.addEventListener("mouseleave", (ev) => {
   }
 }, true);
 
+// The wrap's clientWidth INCLUDES its horizontal padding, but the table is
+// laid out inside that padding — so the true space available to the table is
+// clientWidth minus padding-left/right. Ignoring it (the old bug) left the
+// table overflowing by ~padding-left px, clipping the rightmost column.
+function tableContentWidth(wrap) {
+  const cs = getComputedStyle(wrap);
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  return wrap.clientWidth - padX;
+}
+
 function fitScaleForColumns(columns = getActiveColumns()) {
   if (!STATE.fitColumns) return 1;
   const wrap = document.querySelector(".table-wrap");
   if (!wrap || !columns.length) return 1;
-  const available = Math.max(320, wrap.clientWidth - 4);
+  const available = Math.max(320, tableContentWidth(wrap) - 4);
   const required = columns.reduce((sum, c) => sum + Math.max(56, c.w || 80), 0);
   if (!required) return 1;
-  return clamp(available / required, 0.45, 1);
+  return clamp(available / required, 0.4, 1);
 }
 
 // Pass 2 — after the scaled DOM has painted, measure the table's actual
@@ -526,7 +542,7 @@ function applyTableTransformFit() {
   table.style.width = "";
   wrap.style.height = "";
   const need = table.scrollWidth;
-  const have = wrap.clientWidth;
+  const have = tableContentWidth(wrap);   // exclude wrap padding — see fitScaleForColumns
   if (need > have + 0.5) {
     const extra = have / need;
     // Expand the pre-transform table so the post-transform render fills
@@ -2724,6 +2740,11 @@ async function activateTab(name, opts) {
           if (!opts.silent) toast(view.stale ? `Constituents changed — refreshing ${viewLabel(name)}…` : `Refreshing ${viewLabel(name)} — new data columns available…`);
           await build({keepPanelOpen: true});
         } else {
+          // Saved rows do not carry forward every transient news field, but the
+          // backend news cache now survives restarts. Rehydrate NS dots from the
+          // cache as soon as a portfolio tab is reopened so the user does not
+          // need to manually refresh or open the News panel first.
+          warmNewsSentiment();
           requestAnalytics();
         }
         await fetch("/api/last-view", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({name})});
@@ -3525,7 +3546,7 @@ function renderAnalystDashboard(a) {
         <span class="an-sub">Portfolio-weighted analyst consensus from yfinance.</span>
       </div>
       <div class="an-grid"><div class="an-card"><div class="lc-block">${lcHtml("loading analyst sentiment", {bar: true})}</div></div></div>
-      <div class="an-coverage-foot"><span class="credit">📈 Local Portfolio Dashboard · yfinance · no API key</span><span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span></div>
+      <div class="an-coverage-foot"><span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span></div>
     `;
     return;
   }
@@ -3538,7 +3559,7 @@ function renderAnalystDashboard(a) {
         <span class="an-sub">Build a portfolio to see weighted analyst consensus, rating distribution and price-target upside.</span>
       </div>
       <div class="an-grid"><div class="an-card"><div style="color:var(--muted);font-size:12px;padding:6px 0">No analyst data yet.</div></div></div>
-      <div class="an-coverage-foot"><span class="credit">📈 Local Portfolio Dashboard · yfinance · no API key</span><span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span></div>
+      <div class="an-coverage-foot"><span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span></div>
     `;
     return;
   }
@@ -3701,8 +3722,7 @@ function renderAnalystDashboard(a) {
     </div>
     <div class="an-grid">${card1}${card2}${card3}${tableHtml}</div>
     <div class="an-coverage-foot">
-      <span class="credit">📈 Local Portfolio Dashboard · yfinance · no API key</span>
-      ${notCoveredHtml}
+            ${notCoveredHtml}
       <span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span>
     </div>
   `;
@@ -4618,7 +4638,6 @@ async function loadNewsSentiment() {
   const body = $("#ns-market-body");
   const pBody = $("#ns-portfolio-body");
   const indBody = $("#ns-indices-body");
-  const updated = $("#ns-updated");
   body.innerHTML = '<div class="ns-loading">Loading market sentiment...</div>';
   pBody.innerHTML = '<div class="ns-loading">Loading constituent sentiment...</div>';
   indBody.innerHTML = '<div class="ns-loading">Analyzing portfolio news...</div>';
@@ -4634,15 +4653,17 @@ async function loadNewsSentiment() {
   else body.innerHTML = '<div class="ns-panel-empty">Failed to load market sentiment.</div>';
 
   if (!symbols.length) {
+    setNewsUpdatedLabel(mktRes.status === "fulfilled" ? mktRes.value.sentiment : null, null);
     pBody.innerHTML = '<div class="ns-panel-empty">Build the dashboard first to see per-stock sentiment.</div>';
     return;
   }
   if (pfRes.status === "fulfilled" && pfRes.value) {
     const sentiment = pfRes.value.sentiment || {};
     renderPortfolioSentiment(sentiment, symbols, pfRes.value.status);
-    updated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    setNewsUpdatedLabel(mktRes.status === "fulfilled" ? mktRes.value.sentiment : null, sentiment);
     patchRowSentiment(sentiment);
   } else {
+    setNewsUpdatedLabel(mktRes.status === "fulfilled" ? mktRes.value.sentiment : null, null);
     pBody.innerHTML = '<div class="ns-panel-empty">Failed to load portfolio sentiment.</div>';
     indBody.innerHTML = '<div class="ns-panel-empty">Failed.</div>';
   }
@@ -4664,7 +4685,7 @@ async function refreshNewsSentiment() {
     renderMarketSentiment({sentiment: data.market, articles: null, status: data.status});
     renderPortfolioSentiment(data.portfolio || {}, symbols, data.status);
     patchRowSentiment(data.portfolio || {});
-    $("#ns-updated").textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
+    setNewsUpdatedLabel(data.market, data.portfolio || {});
   } catch (e) {
     $("#ns-market-body").innerHTML = '<div class="ns-panel-empty">Refresh failed.</div>';
   }
@@ -4672,10 +4693,45 @@ async function refreshNewsSentiment() {
   btn.textContent = "↻ Refresh";
 }
 
+function latestNewsAssessment(marketSentiment, portfolioSentiment) {
+  const stamps = [];
+  if (marketSentiment && marketSentiment.assessed_at) stamps.push(marketSentiment.assessed_at);
+  if (portfolioSentiment) {
+    for (const value of Object.values(portfolioSentiment)) {
+      if (value && value.assessed_at) stamps.push(value.assessed_at);
+    }
+  }
+  if (!stamps.length) return null;
+  stamps.sort();
+  return stamps[stamps.length - 1];
+}
+
+function setNewsUpdatedLabel(marketSentiment, portfolioSentiment) {
+  const updated = $("#ns-updated");
+  if (!updated) return;
+  const stamp = latestNewsAssessment(marketSentiment, portfolioSentiment);
+  if (!stamp) {
+    updated.textContent = "";
+    return;
+  }
+  const dt = new Date(stamp);
+  updated.textContent = `As of ${dt.toLocaleString()}`;
+}
+
 function nsKeyDiagnostic(status) {
   if (!status) return "Check API keys.";
   if (!status.finnhub_key) return "Finnhub key missing — add .finnhub_key beside dashboard.py.";
-  if (!status.openrouter_key) return "OpenRouter key missing — add .openrouter_key beside dashboard.py.";
+  if (!status.nvidia_key) return "NVIDIA key missing — add .nvidia_key beside dashboard.py.";
+  if (status.finnhub_backoff_s > 0) {
+    const used = status.finnhub_calls_used ?? "?";
+    const limit = status.finnhub_calls_limit ?? "?";
+    return `Finnhub rate-limited — ${used}/${limit} calls used, retry in ~${status.finnhub_backoff_s}s.`;
+  }
+  if (status.nvidia_backoff_s > 0) {
+    const used = status.nvidia_calls_used ?? "?";
+    const limit = status.nvidia_calls_limit ?? "?";
+    return `NVIDIA rate-limited — ${used}/${limit} calls used, retry in ~${status.nvidia_backoff_s}s.`;
+  }
   return "Rate-limited or temporarily unavailable — try again in ~60s.";
 }
 

@@ -21,8 +21,8 @@ fi
 
 # 1) Never let a local-secret file enter the index.
 staged="$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)"
-if echo "$staged" | grep -qE '(^|/)\.finnhub_key$|(^|/)\.openrouter_key$|(^|/)\.env\.local$|\.secret$'; then
-  echo "BLOCKED: a strictly-local secret file is staged (.finnhub_key / .openrouter_key / .env.local / *.secret)."
+if echo "$staged" | grep -qE '(^|/)\.finnhub_key$|(^|/)\.openrouter_key$|(^|/)\.nvidia_key$|(^|/)\.env\.local$|\.secret$'; then
+  echo "BLOCKED: a strictly-local secret file is staged (.finnhub_key / .openrouter_key / .nvidia_key / .env.local / *.secret)."
   echo "Unstage it before committing:  git restore --staged <file>"
   exit 1
 fi
@@ -46,6 +46,16 @@ for kf in "$root/.openrouter_key" ".openrouter_key"; do
   if [ -n "$key" ] && echo "$staged_diff" | grep -Fq -- "$key"; then
     echo "BLOCKED: the OpenRouter API key value was found in the staged diff."
     echo "Remove the literal key before committing (use the env var or .openrouter_key file)."
+    exit 1
+  fi
+  break
+done
+for kf in "$root/.nvidia_key" ".nvidia_key"; do
+  [ -f "$kf" ] || continue
+  key="$(tr -d '[:space:]' < "$kf")"
+  if [ -n "$key" ] && echo "$staged_diff" | grep -Fq -- "$key"; then
+    echo "BLOCKED: the NVIDIA API key value was found in the staged diff."
+    echo "Remove the literal key before committing (use the env var or .nvidia_key file)."
     exit 1
   fi
   break

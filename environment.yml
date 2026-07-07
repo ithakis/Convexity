@@ -1,0 +1,39 @@
+# Conda/mamba environment for the Portfolio Tracker desktop app.
+#
+# Create:  mamba env create -f environment.yml   (or `conda env create ...`)
+# Update:  mamba env update -f environment.yml --prune
+#
+# Split rationale: the binary-heavy scientific stack (numpy/pandas/scipy/numba)
+# is far more reliable as conda-forge binaries than pip wheels on macOS arm64
+# (numba in particular needs a matching llvmlite build; conda-forge solves
+# that dependency graph for us). PySide6, yfinance, and openai are pinned to
+# pip instead:
+#   - PySide6: conda-forge's `pyside6` package has historically had gaps in
+#     QtWebEngine availability on some platforms (missing QtWebEngineCore /
+#     QtWebEngineWidgets, or webengine binaries not shipped at all for a given
+#     platform/arch combo). The PyPI wheel reliably bundles a working
+#     QtWebEngine (Chromium) on macOS arm64/x86_64 and Windows x86_64.
+#     Verified on this machine (macOS 26.2, arm64): `pip install PySide6` in
+#     this env imports `PySide6.QtWebEngineWidgets` cleanly.
+#   - yfinance / openai: move fast upstream; pip tracks new releases sooner
+#     than conda-forge's build queue.
+name: pt
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas>=2.0.0
+  - numpy>=1.24.0
+  - scipy>=1.10.0
+  - numba>=0.65
+  - requests>=2.28.0
+  - rapidfuzz>=3.0.0
+  - openpyxl>=3.1.0
+  - lxml              # required by yfinance.get_earnings_dates (pd.read_html) — EPS Surp. column
+  - pillow            # used by install.ps1 to generate icon.ico on Windows
+  - pytest
+  - pip
+  - pip:
+      - PySide6>=6.7
+      - yfinance>=1.0.0
+      - openai>=1.0.0

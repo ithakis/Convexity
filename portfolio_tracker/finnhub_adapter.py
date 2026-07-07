@@ -23,37 +23,23 @@ return empty data are silent (that's expected, not an error).
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
+from portfolio_tracker.helpers import _load_local_secret
 
-def _load_api_key() -> str:
-    """Resolve the Finnhub key: env var first, then a strictly-local file.
-
-    Order: ``FINNHUB_API_KEY`` env var → ``.finnhub_key`` sitting next to
-    this module. That file is gitignored and a pre-commit guard blocks it
-    from ever being staged, so the secret stays local across commits.
-    """
-    env = os.environ.get("FINNHUB_API_KEY", "").strip()
-    if env:
-        return env
-    try:
-        key_file = Path(__file__).resolve().parent / ".finnhub_key"
-        if key_file.is_file():
-            return key_file.read_text(encoding="utf-8").strip()
-    except Exception:
-        pass
-    return ""
-
-
-FINNHUB_API_KEY = _load_api_key()
+# Key resolution (env var, then a strictly-local ``.finnhub_key`` found by
+# walking upward from this module's directory) lives in
+# helpers._load_local_secret — shared with news_sentiment.py so both modules
+# resolve secrets identically instead of maintaining two copies of the same
+# walk-up loop. That file is gitignored and a pre-commit guard blocks it from
+# ever being staged, so the secret stays local across commits.
+FINNHUB_API_KEY = _load_local_secret("FINNHUB_API_KEY", ".finnhub_key")
 _BASE_URL = "https://finnhub.io/api/v1/"
 
 # TTL cache mirroring dashboard.py's (timestamp, ttl, val) tuple shape.

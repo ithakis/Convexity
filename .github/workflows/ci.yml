@@ -28,34 +28,40 @@ jobs:
       # Hard gate: AST parse every Python file. Catches syntax errors that
       # would crash the server on startup. No interpreter quirks — pure grammar.
       - name: Python syntax check (all .py files)
-        run: |
-          python -c "
-          import ast, sys, pathlib, os
-          errors = []
-          for p in pathlib.Path('.').rglob('*.py'):
-            if any(part.startswith('.') for part in p.parts):
-              continue  # skip .venv, __pycache__, etc.
-            try:
-              ast.parse(p.read_text(encoding='utf-8'))
-            except SyntaxError as e:
-              errors.append(f'{p}:{e.lineno}: {e.msg}')
-          if errors:
-            print('Syntax errors found:')
-            for e in errors: print(' ', e)
-            sys.exit(1)
-          print(f'Syntax OK — checked {len(list(pathlib.Path(\".\").rglob(\"*.py\")))} files')
-          "
+        run: python scripts/check_syntax.py
 
       # Pyflakes catches undefined names, unused imports, etc.
       - name: Pyflakes on package modules
         run: |
-          python -m pyflakes portfolio_tracker/cache.py portfolio_tracker/helpers.py portfolio_tracker/persistence.py portfolio_tracker/resolver.py portfolio_tracker/fx.py portfolio_tracker/fetcher.py portfolio_tracker/analytics.py portfolio_tracker/frontier.py portfolio_tracker/symbol_db.py portfolio_tracker/mpt.py portfolio_tracker/xlsx_export.py build_symbol_db.py 2>&1 || true
+          python -m pyflakes portfolio_tracker/*.py build_symbol_db.py scripts/*.py 2>&1 || true
 
       # Verify the server module is importable (no top-level import errors).
       - name: Import smoke-test
         run: |
           python -c "import ast; ast.parse(open('dashboard.py').read()); print('dashboard.py shim: parseable')"
           python -c "from portfolio_tracker import mpt" 2>&1 | grep -v "numba\|llvmlite\|NumbaPendingDeprecation" || true
+
+      # install.ps1/update.ps1 are a file type this project didn't have
+      # before (Windows bootstrap scripts) — CLAUDE.md's own convention says
+      # new file types must be added to the syntax-check step, so PowerShell
+      # Core (pwsh, preinstalled on ubuntu-latest runners) parses them here.
+      - name: PowerShell syntax check (install.ps1, update.ps1)
+        shell: pwsh
+        run: |
+          $files = "install.ps1", "update.ps1"
+          $failed = $false
+          foreach ($f in $files) {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$null, [ref]$errs) | Out-Null
+            if ($errs.Count -gt 0) {
+              Write-Host "PARSE ERRORS in $f`:" -ForegroundColor Red
+              $errs | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+              $failed = $true
+            } else {
+              Write-Host "$f OK"
+            }
+          }
+          if ($failed) { exit 1 }
 
   test:
     name: Metrics unit tests
@@ -74,3 +80,177 @@ jobs:
 
       - name: Run pytest
         run: pytest tests/ -v --tb=short
+
+  server-smoke:
+    name: Server smoke test (real HTTP requests, not just imports)
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Actually starts the HTTP server (same start_server() the browser and
+      # desktop apps use) and hits real routes — proves the app boots and
+      # serves, not just that the files parse. See scripts/smoke_test_server.py.
+      - name: Start server and hit real routes
+        run: python scripts/smoke_test_server.py
+
+  desktop-import-smoke:
+    name: Desktop app import (PySide6 + QtWebEngine, headless)
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (+ PySide6)
+        run: pip install -r requirements.txt PySide6
+
+      # The bare ubuntu-latest runner has no GPU/graphics stack at all — not
+      # even libEGL, which Qt6 needs to construct a QApplication regardless
+      # of platform plugin (offscreen still initializes the GL abstraction
+      # layer). Without these, `QApplication([])` itself fails with
+      # "ImportError: libEGL.so.1: cannot open shared object file" before
+      # portfolio_tracker.desktop is ever imported. Xvfb is NOT needed here
+      # (that's for the X11 platform plugin; offscreen avoids that entirely)
+      # — only the underlying graphics libraries Qt dlopens.
+      - name: Install system Qt runtime libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libopengl0 libxkbcommon0 \
+            libnss3 libnspr4 libxcomposite1 libxdamage1 libxrandr2 \
+            libxtst6 libxss1 libgbm1
+          # libasound2 was renamed libasound2t64 in the Ubuntu 24.04 time_t
+          # transition — package name depends on the runner's Ubuntu version,
+          # so try both instead of hardcoding one and risking the whole
+          # install step failing atomically on an unknown package name.
+          sudo apt-get install -y --no-install-recommends libasound2t64 \
+            || sudo apt-get install -y --no-install-recommends libasound2 \
+            || true
+
+      # Qt's "offscreen" platform plugin lets a QApplication (and therefore
+      # everything portfolio_tracker.desktop wires up at import time) be
+      # constructed with no real display — no Xvfb needed. This catches
+      # import-time breakage in desktop.py (bad PySide6 API usage, missing
+      # QtWebEngine sub-modules) that the plain lint job can't, since lint
+      # never actually installs PySide6.
+      - name: Import portfolio_tracker.desktop under an offscreen QApplication
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -c "
+          from PySide6.QtWidgets import QApplication
+          app = QApplication([])
+          import portfolio_tracker.desktop
+          print('desktop module import OK under offscreen QApplication')
+          "
+
+  macos-icon-smoke:
+    name: "macOS icon generation (sips + iconutil, the exact install.sh commands)"
+    runs-on: macos-latest
+    needs: [lint, test]
+
+    # Deliberately does NOT run the full install.sh (that means downloading
+    # and silently installing an entire Miniforge distribution + solving a
+    # full scientific-stack conda env — 10-15 minutes and mostly re-testing
+    # conda-forge's own solver, not this repo's code). sips/iconutil are
+    # macOS built-ins, so this runs in seconds and still exercises the one
+    # part of icon generation that's actually specific to this repo.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate icon.icns with sips + iconutil (same commands as install.sh)
+        run: |
+          set -euo pipefail
+          ICONSET_TMPDIR="$(mktemp -d -t icontest.XXXXXX)"
+          ICONSET_DIR="$ICONSET_TMPDIR/icon.iconset"
+          mkdir -p "$ICONSET_DIR"
+          for size in 16 32 128 256 512; do
+            sips -z "$size" "$size" icon.png --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+            double=$((size * 2))
+            sips -z "$double" "$double" icon.png --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$ICONSET_DIR" -o /tmp/icon_test.icns
+          test -s /tmp/icon_test.icns || { echo "icon.icns not generated or empty"; exit 1; }
+          rm -rf "$ICONSET_TMPDIR" /tmp/icon_test.icns
+          echo "macOS icon generation OK"
+
+  windows-icon-and-shortcut-smoke:
+    name: "Windows icon + shortcut creation (Pillow + WScript.Shell, real APIs)"
+    runs-on: windows-latest
+    needs: [lint, test]
+
+    # Deliberately does NOT run the full install.ps1 (that means a silent
+    # Miniforge/NSIS install + a full conda env solve — 10-15 minutes,
+    # mostly re-testing conda-forge's solver rather than this repo's code).
+    # What's actually unique to this repo and otherwise has zero test
+    # coverage anywhere except a real Windows machine: the Pillow icon.ico
+    # call and, especially, WScript.Shell COM shortcut creation — a Windows
+    # Script Host API with no equivalent on macOS/Linux, not even under
+    # PowerShell Core. Both run in well under a minute here.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Pillow
+        run: pip install pillow
+
+      - name: Generate icon.ico with Pillow (same call as install.ps1)
+        shell: pwsh
+        run: |
+          python -c "from PIL import Image; Image.open('icon.png').save('icon.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+          if (-not (Test-Path "icon.ico")) { throw "icon.ico not generated" }
+          if ((Get-Item "icon.ico").Length -eq 0) { throw "icon.ico is empty" }
+          Write-Host "icon.ico generation OK"
+
+      # The real WScript.Shell COM API, the actual New-AppShortcut logic
+      # from install.ps1, against a dummy target file (no conda env needed
+      # to prove the shortcut mechanics work).
+      - name: Create and verify a shortcut via WScript.Shell (same API as install.ps1)
+        shell: pwsh
+        run: |
+          # Deliberately NOT under $env:TEMP: GitHub's windows-latest runner
+          # sets TEMP to an 8.3 short-path form (e.g. "RUNNER~1" instead of
+          # "runneradmin"), and neither Resolve-Path nor Get-Item expand a
+          # short name back to its long form — so a path built from $env:TEMP
+          # can never string-equal what WScript.Shell reads back (it returns
+          # the long form), no matter how it's normalized afterward. Building
+          # the dummy target under the checked-out repo's own working
+          # directory (never 8.3-shortened by the runner) sidesteps this
+          # entirely rather than trying to out-clever short/long path forms.
+          $dummyTarget = Join-Path (Get-Location).Path "pt_ci_dummy_target.exe"
+          Copy-Item "$env:WINDIR\System32\notepad.exe" $dummyTarget -ErrorAction SilentlyContinue
+          if (-not (Test-Path $dummyTarget)) { Set-Content -Path $dummyTarget -Value "dummy" }
+          $lnkPath = Join-Path (Get-Location).Path "pt_ci_test_shortcut.lnk"
+          $WshShell = New-Object -ComObject WScript.Shell
+          $Shortcut = $WshShell.CreateShortcut($lnkPath)
+          $Shortcut.TargetPath = $dummyTarget
+          $Shortcut.Arguments = "-m portfolio_tracker.desktop"
+          $Shortcut.WorkingDirectory = (Get-Location).Path
+          $Shortcut.IconLocation = (Resolve-Path "icon.ico").Path
+          $Shortcut.Save()
+          if (-not (Test-Path $lnkPath)) { throw "shortcut was not created" }
+          $verify = $WshShell.CreateShortcut($lnkPath)
+          if (-not (Test-Path $verify.TargetPath)) { throw "TargetPath does not exist: $($verify.TargetPath)" }
+          if ($verify.TargetPath -ne $dummyTarget) { throw "TargetPath mismatch: $($verify.TargetPath) (expected $dummyTarget)" }
+          if ($verify.Arguments -notmatch "portfolio_tracker\.desktop") { throw "Arguments mismatch: $($verify.Arguments)" }
+          Write-Host "WScript.Shell shortcut creation OK: $($verify.TargetPath) $($verify.Arguments)"
+          Remove-Item -Force $dummyTarget, $lnkPath -ErrorAction SilentlyContinue

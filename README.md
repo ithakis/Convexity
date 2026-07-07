@@ -33,6 +33,33 @@ Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny st
 
 ## Quick start
 
+### Desktop app (recommended)
+
+Runs the same dashboard in a native window (PySide6 + QtWebEngine) instead of
+a browser tab — no Chrome dependency, custom dock/window icon, branded splash
+screen.
+
+```bash
+# macOS / Linux — one-time setup (installs Miniforge if needed, creates the
+# `pt` conda env, builds a Portfolio Tracker.app launcher + Desktop shortcut)
+./install.sh
+
+# Windows — same idea, creates Start Menu + Desktop shortcuts
+# (written to mirror install.sh; see CLAUDE.md for what's untested)
+.\install.ps1
+```
+
+After that, launch **Portfolio Tracker** from Launchpad/Spotlight/Start Menu
+or your Desktop shortcut like any other app. To pick up new commits later:
+
+```bash
+./update.sh      # macOS/Linux
+.\update.ps1      # Windows
+```
+
+The browser-mode entry points below (`dashboard.py`, `Launch Dashboard.command`)
+keep working exactly as before — the desktop app is purely additive.
+
 ### Option A — double-click (macOS)
 
 Double-click **`Launch Dashboard.command`** in Finder.  

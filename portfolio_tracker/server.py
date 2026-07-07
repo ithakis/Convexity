@@ -6,8 +6,11 @@ import json
 import logging
 import math
 import mimetypes
+import os
 import socket
+import sys
 import threading
+import time
 import warnings
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,10 +45,10 @@ from portfolio_tracker.analytics import (
     analyze_portfolios_multi,
 )
 from portfolio_tracker.fetcher import fetch_detail, fetch_one, fetch_portfolio
-from portfolio_tracker.frontier import (
-    _risk_free_history,
-    compute_efficient_frontier,
-)
+# NB: portfolio_tracker.frontier (and its numba/mpt dependency, ~1.7s to
+# import) is imported lazily at its two call sites below — the MPT/Optimize
+# feature is on-demand, so keeping it off the module-load path shaves that
+# cost off desktop-app startup. See the _configure_chromium note in desktop.py.
 from portfolio_tracker.fx import fx_index_history, fx_rates
 from portfolio_tracker.helpers import SUPPORTED_FX, _json_default, _safe_json
 
@@ -231,6 +234,7 @@ class Handler(BaseHTTPRequestHandler):
             ccy = (q.get("ccy") or ["USD"])[0].strip() or "USD"
             lb = (q.get("lookback") or ["3Y"])[0].strip() or "3Y"
             try:
+                from portfolio_tracker.frontier import _risk_free_history
                 self._send_json(200, _risk_free_history(ccy, lb))
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
@@ -484,6 +488,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(rows, list) or not rows:
                     self._send_json(400, {"error": "rows[] required"})
                     return
+                from portfolio_tracker.frontier import compute_efficient_frontier
                 result = compute_efficient_frontier(
                     rows,
                     lookback=str(payload.get("lookback") or "3Y"),
@@ -692,9 +697,47 @@ def _pick_port(preferred: int = 8765) -> int:
     return preferred
 
 
-def main() -> None:
+def start_server() -> tuple[ThreadingHTTPServer, int]:
+    """Bind the dashboard server on a free loopback port and begin serving on
+    a daemon background thread. Returns (server, port). Callers should stop
+    it via shutdown_server() — shared by browser-mode main() and the desktop
+    app (portfolio_tracker/desktop.py), which both need the same port-pick +
+    construction but manage their own lifecycle.
+    """
     port = _pick_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # Per-connection handler threads (socketserver.ThreadingMixIn) default to
+    # non-daemon, which blocks process exit on a stuck/long-lived connection
+    # (e.g. an open NDJSON stream) even after shutdown()+server_close(). Mark
+    # them daemon so a graceful quit can never hang the process.
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, name="pt-httpd", daemon=True).start()
+    return server, port
+
+
+def shutdown_server(server: ThreadingHTTPServer) -> None:
+    """Stop the server and force-terminate the process immediately.
+
+    fetch_one/analytics/news_sentiment all use module-level
+    concurrent.futures.ThreadPoolExecutor pools for yfinance/NIM calls;
+    ThreadPoolExecutor registers an atexit hook that joins any in-flight work
+    before a normal interpreter shutdown can complete, which can stall
+    process exit for as long as the slowest pending network call takes. The
+    existing browser-mode launcher (Launch Dashboard.command) already avoids
+    this by killing the process outright (SIGTERM's default disposition is
+    an unclean, instant stop — no different from SIGKILL here, since nothing
+    catches it); os._exit() gives the same guarantee from inside the process
+    itself so a desktop-app quit can never hang. The OS reclaims the socket
+    and threads either way.
+    """
+    server.shutdown()
+    server.server_close()
+    sys.stdout.flush()
+    os._exit(0)
+
+
+def main() -> None:
+    server, port = start_server()
     url = f"http://localhost:{port}/"
     print("=" * 60)
     print(f"  Portfolio Tracker running at {url}")
@@ -704,7 +747,19 @@ def main() -> None:
         ["open", "-a", "Google Chrome", url], check=False
     )).start()
     try:
-        server.serve_forever()
+        # serve_forever() now runs on a background thread (see start_server);
+        # block the main thread on an interruptible sleep so Ctrl+C still
+        # works the same as when serve_forever() ran here directly.
+        while True:
+            time.sleep(1.0)
     except KeyboardInterrupt:
         print("\nShutting down...")
+        shutdown_server(server)  # os._exit(0) — deliberate fast/clean exit
+    except Exception:
+        # An unexpected exception (not a normal Ctrl+C) should still surface
+        # its traceback and a non-zero exit code — os._exit(0) would swallow
+        # both, silently masking a crash from anything checking the exit
+        # status. Close the server without force-killing the interpreter.
         server.shutdown()
+        server.server_close()
+        raise
