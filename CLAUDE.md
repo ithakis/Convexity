@@ -965,7 +965,7 @@ actually invokes). Single file, ~160 lines:
   "Portfolio _App" + "Made by Alexander Tsoskounoglou 2026 · v{version}", colors
   matching the dashboard's own dark theme — `#0d1117`/`#e6edf3`/`#7d8590`
   from `style.css`). A `QElapsedTimer` starts the moment it's shown. The
-  main window is revealed on `max(0, 5000ms - elapsed)` after the
+  main window is revealed on `max(0, 7000ms - elapsed)` after the
   `QWebEngineView`'s `loadFinished` fires, via `reveal()` (guarded by a
   `nonlocal` flag so it only runs once). A 20s **safety timer** also calls
   `reveal()` unconditionally, so a stalled/failed page load can never trap
@@ -1165,9 +1165,10 @@ before ever touching the real `pt` env / `/Applications` entry).
   `portfolio_tracker.frontier`/`mpt`/`numba` (deferred to its two call sites
   in `server.py`, ~1.7s — the Optimize/MPT feature is on-demand). `pandas` +
   `yfinance` (~2.5s) stay eager since the first data render needs them. Net:
-  the whole import now finishes inside the 5s minimum-splash window, so the
-  perceived launch time is the intended 5s floor, not import time. The 5s is
-  a **minimum** visible duration (so the credit line is readable); a slower
+  the whole import now finishes inside the 7s minimum-splash window, so the
+  perceived launch time is the intended 7s floor, not import time. The 7s is
+  a **minimum** visible duration (deliberately longer than the boot itself
+  needs, so there's always a moment to watch it); a slower
   boot keeps the splash up longer, and a 20s safety timer + boot-still-running
   re-arm guarantees the splash never traps the user.
 

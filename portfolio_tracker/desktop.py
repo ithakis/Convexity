@@ -15,9 +15,11 @@ Startup is staged so the splash appears as fast as possible:
              ~2.5s+) + start_server() run on a background thread so the
              splash stays responsive and animated the whole time
     load     QWebEngineView.loadProgress drives the top of the bar
-    reveal   at max(5s, actually ready) — 5s is the MINIMUM visible time so
-             the credit line is readable; a slow boot keeps the splash up
-             longer, and a 20s safety timer reveals unconditionally
+    reveal   at max(7s, actually ready) — 7s is the MINIMUM visible time
+             (deliberately longer than the ~3s the boot itself needs, so
+             there's always a moment to actually watch it); a slow boot
+             keeps the splash up longer, and a 20s safety timer reveals
+             unconditionally
 
 Run via: python -m portfolio_tracker.desktop
 """
@@ -48,7 +50,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ICON_PNG = _REPO_ROOT / "icon.png"
 _ICON_ICNS = _REPO_ROOT / "icon.icns"
 _BUNDLE_ID = "com.ithakis.portfoliotracker"
-_MIN_SPLASH_MS = 5000
+_MIN_SPLASH_MS = 7000
 _SPLASH_SAFETY_MS = 20000
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
@@ -122,7 +124,7 @@ def _build_splash_pixmap(dpr: float) -> QPixmap:
     painter.drawText(QRect(0, 208, width, 40), Qt.AlignmentFlag.AlignCenter, "Portfolio _App")
 
     sub_font = QFont()
-    sub_font.setPointSize(11)
+    sub_font.setPointSize(14)
     painter.setFont(sub_font)
     painter.setPen(QColor(_MUTED))
     painter.drawText(
@@ -357,7 +359,7 @@ def main() -> None:
     # Start the heavy import ONLY now that the splash is painted — kicking it
     # off earlier makes its GIL-heavy import contend with the main thread and
     # visibly delays the splash from appearing. The import (~2.5s) still
-    # finishes well inside the 5s minimum-splash window, so nothing is lost.
+    # finishes well inside the 7s minimum-splash window, so nothing is lost.
     elapsed = QElapsedTimer()
     elapsed.start()
     splash.set_stage("Loading market data engine", 0.55)
@@ -392,9 +394,9 @@ def main() -> None:
         if state["reveal_scheduled"]:
             return
         state["reveal_scheduled"] = True
-        # 5s is the MINIMUM the splash stays up (so the credit line is
-        # readable); if the app is ready sooner we still wait it out, if it
-        # takes longer the splash stays until it's ready.
+        # 7s is the MINIMUM the splash stays up (so there's always a moment
+        # to actually watch it); if the app is ready sooner we still wait it
+        # out, if it takes longer the splash stays until it's ready.
         remaining = max(0, _MIN_SPLASH_MS - elapsed.elapsed())
         log.info("ready — revealing in %dms (min-splash rule)", remaining)
         QTimer.singleShot(remaining, reveal)
