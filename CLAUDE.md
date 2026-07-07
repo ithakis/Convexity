@@ -1218,7 +1218,7 @@ empirically re-confirmed under CI).
 ## 15. Version tracking
 
 Single source of truth: `__version__` in `portfolio_tracker/__init__.py`
-(currently `1.4.1`). Scheme is `1.X.Y` — X bumps on a major new
+(currently `1.4.2`). Scheme is `1.X.Y` — X bumps on a major new
 feature/release, Y bumps on smaller polish/fixes in between. `CHANGELOG.md`
 maps every version to the PR(s) it came from.
 

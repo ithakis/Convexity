@@ -5,9 +5,12 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
-## 1.4.1 — 2026-07-07
-Add this version tracker (startup banner, desktop splash/title, and app
-footer now show the running version).
+## 1.4.2 — 2026-07-07
+Add a version tracker (startup banner, desktop splash/title, and app
+footer now show the running version) and rename the app to
+"Portfolio _App" everywhere — installer defaults (so future installs on
+any computer pick it up automatically), window title, splash, dock/taskbar
+name, browser tab, footer, and Excel export header.
 
 ## 1.4.0 — 2026-07-07 (PR #21)
 Desktop app (PySide6 + QtWebEngine), install/update scripts, CI hardening
