@@ -5,6 +5,18 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.4.3 — 2026-07-08
+Fundamentals columns (P/S, P/E, Fwd P/E, PEG, EV/Rev, EV/EBITDA, Op Mgn, D/E,
+Curr Ratio, Div Yield) now shade blue instead of orange, scaled dynamically
+against what's actually on screen instead of a fixed clip range, with a
+per-column Off/Percentile/Min-Max mode (percentile-clipped Min-Max is the
+default, fixing single-outlier columns washing out the rest of the ramp).
+`20SMA`/`50SMA`/`200SMA` columns relabeled to `20MA`/`50MA`/`200MA` and
+narrowed, freeing width for the rest of the table under "Fit to screen".
+Customize Columns modal rebuilt: fixed a CSS specificity bug that stretched
+it to 1120px with no padding, added per-column descriptions and the new
+color-mode controls, and grouped the ~40-column list into labeled sections.
+
 ## 1.4.2 — 2026-07-07
 Add a version tracker (startup banner, desktop splash/title, and app
 footer now show the running version) and rename the app to

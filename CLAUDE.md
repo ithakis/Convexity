@@ -1218,7 +1218,7 @@ empirically re-confirmed under CI).
 ## 15. Version tracking
 
 Single source of truth: `__version__` in `portfolio_tracker/__init__.py`
-(currently `1.4.2`). Scheme is `1.X.Y` — X bumps on a major new
+(currently `1.4.3`). Scheme is `1.X.Y` — X bumps on a major new
 feature/release, Y bumps on smaller polish/fixes in between. `CHANGELOG.md`
 maps every version to the PR(s) it came from.
 
@@ -1233,3 +1233,11 @@ maps every version to the PR(s) it came from.
 **When bumping:** update `__version__`, add a line to `CHANGELOG.md`. No
 other files need touching — the banner/footer/splash all read the same
 constant (browser mode via `/api/health`, desktop mode via direct import).
+
+**Reasoning before a bump (standing policy — do not skip):** before touching
+`__version__`, reason out loud in the response to the user about whether the
+change actually warrants a version increment at all, and if so whether it's
+a major (X, new feature) or minor (Y, polish/fix) bump per the scheme above
+— then ask the user to confirm before changing the file. Never bump silently,
+even for changes that look small; the user wants to make this call
+explicitly every time, not have it inferred.

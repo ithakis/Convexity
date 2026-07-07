@@ -14,14 +14,14 @@ const COLS = [
     render: (r) => fmtMoney(r.price, r.currency) },
   { key: "market_cap",  label: "Market Cap",w: 86,  align: "right", sortable: true,
     render: (r) => fmtCompactMoney(r.market_cap, r.currency) },
-  /* P/S: analyst rule-of-thumb — anchor full-orange at P/S = 10. n/a is also
-     suspicious so we paint it the most saturated colour. */
+  /* P/S: dynamic blue ramp — cheapest P/S currently on screen is most blue,
+     priciest is neutral. n/a renders with no background. */
   { key: "ps_ratio",    label: "P/S",       w: 56,  align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0, clipMax: 10, naMax: true },
+    heat: { kind: "yo_dyn", favor: "low" },
     render: (r) => fmt2(r.ps_ratio) },
-  /* P/E: anchor full-orange at P/E = 40 (anything above is growth/speculative). */
+  /* P/E: dynamic blue ramp — cheapest P/E currently on screen is most blue. */
   { key: "pe_ratio",    label: "P/E",       w: 56,  align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0, clipMax: 40, naMax: true },
+    heat: { kind: "yo_dyn", favor: "low" },
     render: (r) => fmt2(r.pe_ratio) },
   { key: "pct_ytd",     label: "% YTD",     w: 78,  align: "right", sortable: true,
     heat: { kind: "div", anchor: 100 },
@@ -46,13 +46,13 @@ const COLS = [
       return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
     },
     render: (r) => epsSurpriseBars(r.earnings_surprise) },
-  { key: "above_sma_20",  label: "20SMA",   w: 46,  align: "center", sortable: true,
+  { key: "above_sma_20",  label: "20MA",    w: 38,  align: "center", sortable: true,
     render: (r) => triangle(r.above_sma_20),
     sortValue: (r) => r.above_sma_20 === null ? null : (r.above_sma_20 ? 1 : 0) },
-  { key: "above_sma_50",  label: "50SMA",   w: 46,  align: "center", sortable: true,
+  { key: "above_sma_50",  label: "50MA",    w: 38,  align: "center", sortable: true,
     render: (r) => triangle(r.above_sma_50),
     sortValue: (r) => r.above_sma_50 === null ? null : (r.above_sma_50 ? 1 : 0) },
-  { key: "above_sma_200", label: "200SMA",  w: 50,  align: "center", sortable: true,
+  { key: "above_sma_200", label: "200MA",   w: 40,  align: "center", sortable: true,
     render: (r) => triangle(r.above_sma_200),
     sortValue: (r) => r.above_sma_200 === null ? null : (r.above_sma_200 ? 1 : 0) },
 
@@ -83,31 +83,33 @@ const COLS = [
     render: (r) => escapeHtml(r.sector || ""), td_cls: "left" },
   { key: "industry",      label: "Industry",w: 160, align: "left",  sortable: true,
     render: (r) => escapeHtml(r.industry || ""), td_cls: "left" },
-  /* Forward P/E and EV/EBITDA — lower = cheaper. n/a (no analyst coverage)
-     is painted saturated to flag the absence. */
+  /* Fwd P/E, PEG, EV/Rev, EV/EBITDA, D/E: dynamic blue ramp, favor low (cheaper /
+     less levered currently on screen = most blue). Op Mgn, Curr Ratio, Div Yield:
+     favor high (more profitable / more liquid / more income = most blue). n/a
+     always renders with no background. */
   { key: "forward_pe",    label: "Fwd P/E", w: 64,  align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0, clipMax: 30, naMax: true },
+    heat: { kind: "yo_dyn", favor: "low" },
     render: (r) => fmt2(r.forward_pe) },
   { key: "peg",           label: "PEG",     w: 58,  align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0, clipMax: 3, naMax: true },
+    heat: { kind: "yo_dyn", favor: "low" },
     render: (r) => fmt2(r.peg) },
   { key: "ev_revenue",    label: "EV/Rev",  w: 68,  align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0, clipMax: 10, naMax: true },
+    heat: { kind: "yo_dyn", favor: "low" },
     render: (r) => fmt2(r.ev_revenue) },
   { key: "ev_ebitda",     label: "EV/EBITDA", w: 78, align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0, clipMax: 20, naMax: true },
+    heat: { kind: "yo_dyn", favor: "low" },
     render: (r) => fmt2(r.ev_ebitda) },
   { key: "operating_margin", label: "Op Mgn", w: 68, align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0, clipMax: 0.4, invert: true, naMax: true },
+    heat: { kind: "yo_dyn", favor: "high" },
     render: (r) => fmtPctDirect(r.operating_margin) },
   { key: "debt_equity",   label: "D/E",     w: 56,  align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0, clipMax: 250, naMax: true },
+    heat: { kind: "yo_dyn", favor: "low" },
     render: (r) => fmt2(r.debt_equity) },
   { key: "current_ratio", label: "Curr Ratio", w: 78, align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0.5, clipMax: 3, invert: true, naMax: true },
+    heat: { kind: "yo_dyn", favor: "high" },
     render: (r) => fmt2(r.current_ratio) },
   { key: "dividend_yield", label: "Div Yield", w: 78, align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 0, clipMax: 0.06, invert: true, naMax: true },
+    heat: { kind: "yo_dyn", favor: "high" },
     render: (r) => fmtPctDirect(r.dividend_yield) },
   /* Analyst recommendation mean: 1 = Strong Buy → 5 = Sell. Lower is
      more bullish, so the ramp paints high ratings (sell side) orange. */
@@ -152,8 +154,8 @@ const COL_INFO = {
   name:          "Full company or fund name from Yahoo Finance.",
   price:         "Last available closing price, converted to the selected display currency (see FX selector in the top bar).",
   market_cap:    "Total market value of all outstanding shares (Price × Shares Outstanding).",
-  ps_ratio:      "Price-to-Sales: market cap ÷ trailing-12-month revenue. Heat anchors at P/S = 10; n/a is flagged.",
-  pe_ratio:      "Price-to-Earnings: price ÷ trailing-12-month EPS. Heat anchors at P/E = 40; above 50 implies heavy growth pricing.",
+  ps_ratio:      "Price-to-Sales: market cap ÷ trailing-12-month revenue. Lower is generally cheaper.",
+  pe_ratio:      "Price-to-Earnings: price ÷ trailing-12-month EPS. Lower is generally cheaper; above 50 implies heavy growth pricing.",
   pct_ytd:       "Return from the first trading day of the current calendar year to today.",
   spark:         "Sparkline of the last 252 trading days. Green if 1Y return is positive, red otherwise.",
   pct_1y:        "Total price return over the last 365 calendar days.",
@@ -175,10 +177,10 @@ const COL_INFO = {
   beta:          "Yahoo-reported beta versus the market. Around 1 moves with the market; above 1 is more volatile.",
   sector:        "GICS sector (e.g. Technology, Energy) reported by Yahoo Finance.",
   industry:      "GICS sub-industry — narrower than sector.",
-  forward_pe:    "Forward Price/Earnings: price ÷ consensus next-12-month EPS. Heat anchors at 30; n/a is flagged.",
+  forward_pe:    "Forward Price/Earnings: price ÷ consensus next-12-month EPS. Lower is generally cheaper.",
   peg:           "PEG ratio: P/E divided by expected earnings growth. Lower can mean cheaper growth, though very low values can also reflect weak forecasts.",
   ev_revenue:    "Enterprise Value ÷ Revenue. Useful when earnings are noisy or negative; lower usually means cheaper on sales.",
-  ev_ebitda:     "Enterprise Value ÷ EBITDA. Cap-structure-neutral valuation multiple. Heat anchors at 20.",
+  ev_ebitda:     "Enterprise Value ÷ EBITDA. Cap-structure-neutral valuation multiple.",
   operating_margin: "Operating margin as a percent of revenue. Higher means more profit retained after core operating costs.",
   debt_equity:   "Debt-to-equity ratio. Higher means more leverage relative to shareholder equity.",
   current_ratio: "Current assets divided by current liabilities. Above 1 usually signals better short-term liquidity.",
@@ -189,6 +191,72 @@ const COL_INFO = {
   w52_low:       "Lowest closing price over the trailing 52 weeks.",
   news_sentiment: "AI-assessed news sentiment (last 7 days). Dot: green = bullish, gray = neutral, red = bearish. Hover for summary. Powered by Finnhub news + OpenRouter AI.",
 };
+
+/* Short (~40-55 char) inline descriptions for the Customize Columns modal —
+   distinct from COL_INFO's full hover-tooltip text used elsewhere. */
+const COL_INFO_SHORT = {
+  symbol: "Exchange ticker symbol",
+  logo: "Company/fund logo",
+  name: "Full company or fund name",
+  price: "Last price, in display currency",
+  market_cap: "Price × shares outstanding",
+  ps_ratio: "Price ÷ trailing sales",
+  pe_ratio: "Price ÷ trailing EPS",
+  pct_ytd: "Return since Jan 1",
+  spark: "252-day price sparkline",
+  pct_1y: "Total return, last 365 days",
+  delta_ath: "% below 2Y high",
+  rs_rank: "12-month relative strength",
+  earnings_surprise: "EPS beat/miss, last 8 quarters",
+  rec_trend_fh: "Analyst consensus Δ, 6 months",
+  insider_mspr: "Insider buy/sell ratio (Form 4)",
+  above_sma_20: "Price vs. 20-day average",
+  above_sma_50: "Price vs. 50-day average",
+  above_sma_200: "Price vs. 200-day average",
+  pct_1w: "Return, last 7 days",
+  pct_1m: "Return, last 30 days",
+  pct_3m: "Return, last 91 days",
+  pct_6m: "Return, last 182 days",
+  rsi_14: "14-day Relative Strength Index",
+  macd_hist_pct: "MACD histogram, % of price",
+  bb_pct_b: "Position within Bollinger Bands",
+  beta: "Volatility vs. the market",
+  sector: "GICS sector",
+  industry: "GICS sub-industry",
+  forward_pe: "Price ÷ forward EPS estimate",
+  peg: "P/E ÷ expected earnings growth",
+  ev_revenue: "Enterprise value ÷ revenue",
+  ev_ebitda: "Enterprise value ÷ EBITDA",
+  operating_margin: "Operating profit ÷ revenue",
+  debt_equity: "Leverage vs. equity",
+  current_ratio: "Current assets ÷ liabilities",
+  dividend_yield: "Annual dividend ÷ price",
+  analyst_rating: "Mean analyst rating, 1–5",
+  target_upside_pct: "Upside to mean price target",
+  w52_high: "Highest close, trailing 52 weeks",
+  w52_low: "Lowest close, trailing 52 weeks",
+  news_sentiment: "AI-assessed news sentiment",
+};
+
+/* Category grouping for the Customize Columns modal — purely a display
+   grouping, has no effect on rendering order in the actual table. */
+const COL_GROUP = {
+  logo: "Core", symbol: "Core", name: "Core", price: "Core", market_cap: "Core",
+  sector: "Core", industry: "Core",
+  ps_ratio: "Valuation", pe_ratio: "Valuation", forward_pe: "Valuation",
+  peg: "Valuation", ev_revenue: "Valuation", ev_ebitda: "Valuation",
+  operating_margin: "Profitability & Leverage", debt_equity: "Profitability & Leverage",
+  current_ratio: "Profitability & Leverage", dividend_yield: "Profitability & Leverage",
+  pct_ytd: "Returns", pct_1y: "Returns", pct_1w: "Returns", pct_1m: "Returns",
+  pct_3m: "Returns", pct_6m: "Returns", target_upside_pct: "Returns",
+  spark: "Technical & Momentum", delta_ath: "Technical & Momentum", rs_rank: "Technical & Momentum",
+  above_sma_20: "Technical & Momentum", above_sma_50: "Technical & Momentum", above_sma_200: "Technical & Momentum",
+  rsi_14: "Technical & Momentum", macd_hist_pct: "Technical & Momentum", bb_pct_b: "Technical & Momentum",
+  beta: "Technical & Momentum", w52_high: "Technical & Momentum", w52_low: "Technical & Momentum",
+  analyst_rating: "Analyst & Sentiment", earnings_surprise: "Analyst & Sentiment",
+  rec_trend_fh: "Analyst & Sentiment", insider_mspr: "Analyst & Sentiment", news_sentiment: "Analyst & Sentiment",
+};
+const COL_GROUP_ORDER = ["Core", "Valuation", "Profitability & Leverage", "Returns", "Technical & Momentum", "Analyst & Sentiment"];
 
 let DATA = [];
 let SORT = { key: "pct_ytd", dir: -1 };
@@ -288,6 +356,32 @@ function persistFitColumnsPreference(on) {
   catch (e) {}
 }
 
+/* Per-column heat-coloring mode, global across all views/tabs (like
+   fit_columns/fx_quote above) — not tied to any saved column view. */
+function readHeatPrefs() {
+  try {
+    const raw = localStorage.getItem("heat_prefs");
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) { return {}; }
+}
+function persistHeatPrefs(prefs) {
+  try { localStorage.setItem("heat_prefs", JSON.stringify(prefs)); } catch (e) {}
+}
+function getHeatMode(key) {
+  const col = COLS_BY_KEY[key];
+  if (!col || !col.heat) return null;
+  const prefs = STATE.heatPrefs || {};
+  if (col.heat.kind === "yo_dyn") return prefs[key] || "minmax";
+  if (col.heat.kind === "div") return prefs[key] === "off" ? "off" : "on";
+  return null; // "yo" (analyst_rating) — uncontrolled, always legacy-on
+}
+function setHeatMode(key, mode) {
+  STATE.heatPrefs = STATE.heatPrefs || {};
+  STATE.heatPrefs[key] = mode;
+  persistHeatPrefs(STATE.heatPrefs);
+  render();
+}
+
 /* Heat-map endpoint colors per theme. */
 const THEME_COLORS = {
   light: {
@@ -295,12 +389,14 @@ const THEME_COLORS = {
     pos:  [31, 136, 61],     /* #1f883d  github success.emphasis */
     neg:  [207, 34, 46],     /* #cf222e  github danger.emphasis  */
     warn: [249, 115, 22],    /* #f97316  vivid orange (Tailwind orange-500) */
+    blue: [37, 99, 235],     /* #2563eb  Tailwind blue-600 */
   },
   dark: {
     bg:   [13, 17, 23],      /* #0d1117 */
     pos:  [63, 185, 80],     /* #3fb950 */
     neg:  [248, 81, 73],     /* #f85149 */
     warn: [251, 146, 60],    /* #fb923c  orange-400, lighter on dark bg */
+    blue: [96, 165, 250],    /* #60a5fa  Tailwind blue-400, lighter on dark bg */
   },
 };
 
@@ -314,6 +410,22 @@ function escapeHtml(s) {
 }
 function lerp(a, b, t) { return a + (b - a) * t; }
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+/* sortedArr must be ascending. Linear-interpolation percentile (numpy default). */
+function percentileOf(sortedArr, p) {
+  if (!sortedArr.length) return null;
+  if (sortedArr.length === 1) return sortedArr[0];
+  const idx = p * (sortedArr.length - 1);
+  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  if (lo === hi) return sortedArr[lo];
+  return sortedArr[lo] + (sortedArr[hi] - sortedArr[lo]) * (idx - lo);
+}
+/* Mid-rank percentile of `value` within sortedArr (ascending), ties averaged. */
+function percentileRankOf(sortedArr, value) {
+  if (sortedArr.length < 2) return null;
+  let below = 0, equal = 0;
+  for (const v of sortedArr) { if (v < value) below++; else if (v === value) equal++; }
+  return (below + (equal - 1) / 2) / (sortedArr.length - 1);
+}
 
 /* ---------------------------------------------------------------------------
  * Unified tooltip positioner — single helper used by every hover-tip in the
@@ -516,7 +628,12 @@ function fitScaleForColumns(columns = getActiveColumns()) {
   const wrap = document.querySelector(".table-wrap");
   if (!wrap || !columns.length) return 1;
   const available = Math.max(320, tableContentWidth(wrap) - 4);
-  const required = columns.reduce((sum, c) => sum + Math.max(56, c.w || 80), 0);
+  /* Floor at 36px, not 56px: 56 absorbed the narrow SMA-flag columns entirely
+     (46/46/50 all floored to 56), so shrinking their labels/widths had no
+     effect on the computed scale. 36 matches news_sentiment (the narrowest
+     non-SMA/non-logo column), so it only relaxes the floor for the columns
+     intentionally narrowed here, not for anything else. */
+  const required = columns.reduce((sum, c) => sum + Math.max(36, c.w || 80), 0);
   if (!required) return 1;
   return clamp(available / required, 0.4, 1);
 }
@@ -722,6 +839,12 @@ function colorYO(t, theme) {
   const C = THEME_COLORS[theme];
   /* Use ~92% of the way to warn at full saturation so text stays readable. */
   return rgbMix(C.bg, C.warn, t * 0.92);
+}
+function colorBlue(t, theme) {
+  /* background → blue.  Same mix ratio as colorYO for consistent readability. */
+  t = clamp(t, 0, 1);
+  const C = THEME_COLORS[theme];
+  return rgbMix(C.bg, C.blue, t * 0.92);
 }
 function colorDiverging(t, theme) {
   /* t in [-1, 1]; 0 → background (white in light, near-black in dark). */
@@ -958,7 +1081,7 @@ function recTrendCell(arr) {
 /* ===========================================================================
  * Heat-map cell styles
  * --------------------------------------------------------------------------- */
-function cellStyleHeat(col, value, theme) {
+function cellStyleHeat(col, value, theme, ctx) {
   const h = col.heat;
   if (!h) return "";
   if (h.kind === "yo") {
@@ -975,6 +1098,27 @@ function cellStyleHeat(col, value, theme) {
       if (h.invert) t = 1 - t;
     }
     return `background:${colorYO(t, theme)};`;
+  }
+  if (h.kind === "yo_dyn") {
+    /* Dynamic per-column, per-render blue ramp: the most business-favorable
+       value currently on screen (per h.favor) is most blue, least-favorable
+       is neutral. n/a always renders neutral. ctx carries the active color
+       mode ("minmax" = percentile-clipped 10th/90th, or "percentile" = pure
+       rank), computed once per render — never a hardcoded clip constant, and
+       never derailed by a single outlier the way a raw min/max would be. */
+    if (value == null || !isFinite(value)) return "";
+    if (!ctx) return "";
+    let t;
+    if (ctx.mode === "percentile") {
+      t = percentileRankOf(ctx.sorted, value);
+      if (t == null) return "";
+    } else {
+      const { lo, hi } = ctx;
+      if (lo == null || hi == null) return "";
+      t = (hi === lo) ? 0 : clamp((value - lo) / (hi - lo), 0, 1);
+    }
+    if (h.favor === "low") t = 1 - t;
+    return `background:${colorBlue(t, theme)};`;
   }
   if (h.kind === "div") {
     if (value == null || !isFinite(value)) return "";
@@ -1201,16 +1345,31 @@ function openColumnPicker() {
   const activeKeys = currentActiveKeys();
   const activeSet = new Set(activeKeys);
   /* Build a working order: active keys first (in current order), then
-     remaining registry keys appended at the end. */
+     remaining registry keys appended at the end — then stable-sort the whole
+     thing by category (COL_GROUP_ORDER) so the modal's section headers are
+     contiguous rather than repeating/interleaved. This does change the
+     column order that a bare "Save"/"Update" (with no manual reordering)
+     would persist, from the view's original order to a group-bucketed one —
+     an accepted, intentional side effect (grouped columns read better in the
+     table too), not an oversight. */
   const remaining = COLS.map(c => c.key).filter(k => !activeSet.has(k));
+  const combined = activeKeys.concat(remaining);
+  const groupRank = (k) => {
+    const idx = COL_GROUP_ORDER.indexOf(COL_GROUP[k]);
+    return idx === -1 ? COL_GROUP_ORDER.length : idx;
+  };
+  const order = combined
+    .map((k, i) => ({ k, i }))
+    .sort((a, b) => (groupRank(a.k) - groupRank(b.k)) || (a.i - b.i))
+    .map(x => x.k);
   CV_MODAL_STATE = {
     selected: new Set(activeKeys),
-    order: activeKeys.concat(remaining),
+    order,
   };
   const editingActiveCustom = !isBuiltinView(STATE.activeViewName) && STATE.customViews[STATE.activeViewName];
   modal.innerHTML = `
     <h2>Customize Columns</h2>
-    <div class="cv-modal-sub">Toggle which columns appear and drag to reorder. ${editingActiveCustom ? `Editing <b>${escapeHtml(STATE.activeViewName)}</b>.` : "Save as a new view when you're done."}</div>
+    <div class="cv-modal-sub">Toggle which columns appear and drag to reorder. Color-coding controls apply immediately. ${editingActiveCustom ? `Editing <b>${escapeHtml(STATE.activeViewName)}</b>.` : "Save as a new view when you're done."}</div>
     <ul class="cv-list" id="cv-modal-list"></ul>
     <div class="cv-modal-foot">
       <input type="text" class="cv-name-input" id="cv-name-input" placeholder="${editingActiveCustom ? "New name (optional)" : "View name"}" value="${editingActiveCustom ? "" : ""}" />
@@ -1238,13 +1397,61 @@ function closeColumnPicker() {
   CV_MODAL_STATE = null;
 }
 
+function buildHeatControl(key) {
+  const c = COLS_BY_KEY[key];
+  if (!c || !c.heat || c.heat.kind === "yo") return null; // no control: no-heat columns + analyst_rating
+  if (c.heat.kind === "div") {
+    const sw = document.createElement("button");
+    sw.type = "button";
+    const mode = getHeatMode(key);
+    sw.className = "cv-switch" + (mode === "on" ? " on" : "");
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", mode === "on" ? "true" : "false");
+    sw.setAttribute("aria-label", "Color coding");
+    sw.onclick = () => {
+      const next = getHeatMode(key) === "on" ? "off" : "on";
+      setHeatMode(key, next);
+      sw.classList.toggle("on", next === "on");
+      sw.setAttribute("aria-checked", next === "on" ? "true" : "false");
+    };
+    return sw;
+  }
+  if (c.heat.kind === "yo_dyn") {
+    const seg = document.createElement("span"); seg.className = "cv-seg";
+    const current = getHeatMode(key);
+    for (const [val, label] of [["off", "Off"], ["percentile", "Percentile"], ["minmax", "Min-Max"]]) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "cv-seg-btn" + (current === val ? " active" : "");
+      btn.textContent = label;
+      btn.onclick = () => {
+        setHeatMode(key, val);
+        for (const sib of seg.children) sib.classList.remove("active");
+        btn.classList.add("active");
+      };
+      seg.appendChild(btn);
+    }
+    return seg;
+  }
+  return null;
+}
+
 function renderColumnPickerList() {
   const ul = document.getElementById("cv-modal-list");
   if (!ul || !CV_MODAL_STATE) return;
   ul.innerHTML = "";
+  let lastGroup = null;
   for (const key of CV_MODAL_STATE.order) {
     const c = COLS_BY_KEY[key];
     if (!c) continue;
+    const group = COL_GROUP[key] || "Other";
+    if (group !== lastGroup) {
+      const hdr = document.createElement("li");
+      hdr.className = "cv-group-header";
+      hdr.textContent = group;
+      ul.appendChild(hdr);
+      lastGroup = group;
+    }
     const li = document.createElement("li");
     li.draggable = true;
     li.dataset.key = key;
@@ -1257,9 +1464,14 @@ function renderColumnPickerList() {
     };
     const lbl = document.createElement("span"); lbl.className = "cv-li-label";
     lbl.textContent = c.label || key;
-    const tag = document.createElement("span"); tag.className = "cv-li-tag";
-    tag.textContent = key;
-    li.appendChild(grip); li.appendChild(cb); li.appendChild(lbl); li.appendChild(tag);
+    const desc = document.createElement("span"); desc.className = "cv-li-desc";
+    desc.textContent = COL_INFO_SHORT[key] || "";
+    const spacer = document.createElement("span"); spacer.className = "cv-li-spacer";
+    const slot = document.createElement("span"); slot.className = "cv-li-ctrl-slot";
+    const ctrl = buildHeatControl(key);
+    if (ctrl) slot.appendChild(ctrl);
+    li.appendChild(grip); li.appendChild(cb); li.appendChild(lbl); li.appendChild(desc);
+    li.appendChild(spacer); li.appendChild(slot);
     /* DnD */
     li.addEventListener("dragstart", (ev) => {
       li.classList.add("cv-li-drag");
@@ -1446,6 +1658,28 @@ function render() {
     });
   }
   const theme = getTheme();
+  /* Per-column heat context, computed once per render across the live rows
+     currently being shown — NOT a fixed clip range, so the ramp always
+     reflects what's actually on screen right now. Mode ("off" / "percentile"
+     / "minmax") comes from the user's per-column preference (getHeatMode);
+     ctx === null means "don't color this column at all" (Off, or a "div"
+     column the user switched off), which the per-cell loop below skips. */
+  const heatCtx = {};
+  for (const c of cols) {
+    if (!c.heat) continue;
+    const mode = getHeatMode(c.key);
+    if (mode === "off") { heatCtx[c.key] = null; continue; }
+    if (c.heat.kind === "yo_dyn") {
+      const vals = rows.map(r => r[c.key]).filter(v => v != null && isFinite(v));
+      if (vals.length < 2) { heatCtx[c.key] = null; continue; }
+      const sorted = vals.slice().sort((a, b) => a - b);
+      heatCtx[c.key] = (mode === "percentile")
+        ? { mode: "percentile", sorted }
+        : { mode: "minmax", lo: percentileOf(sorted, 0.1), hi: percentileOf(sorted, 0.9) };
+    } else {
+      heatCtx[c.key] = {}; // "div" (on) or "yo" (analyst_rating, uncontrolled) — proceed as-is
+    }
+  }
   for (const r of rows) {
     const tr = document.createElement("tr");
     for (const c of cols) {
@@ -1454,10 +1688,11 @@ function render() {
       else if (c.align === "center") td.classList.add("center");
       if (c.td_cls) td.className = c.td_cls;
       let styles = "";
-      if (c.heat) styles += cellStyleHeat(c, r[c.key], theme);
+      const ctx = c.heat ? heatCtx[c.key] : undefined;
+      if (c.heat && ctx !== null) styles += cellStyleHeat(c, r[c.key], theme, ctx);
       if (c.bg)   styles += c.bg(r);
       /* Mark cells that should follow the alt-row stripe (no heat / no custom bg). */
-      if (!c.heat && !c.bg) td.classList.add("alt-stripe");
+      if ((!c.heat || ctx === null) && !c.bg) td.classList.add("alt-stripe");
       if (styles) td.style.cssText = styles;
       if (r.error && c.key !== "symbol" && c.key !== "name" && c.key !== "logo") {
         td.innerHTML = c.key === "price"
@@ -2330,6 +2565,7 @@ let STATE = {
   activeColumnOverride: null,
   viewDirty: false,
   fitColumns: readFitColumnsPreference(),
+  heatPrefs: readHeatPrefs(),
 };
 
 /* ===========================================================================
