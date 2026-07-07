@@ -6375,7 +6375,16 @@ function fxInit() {
   });
 }
 
+function loadAppVersion() {
+  const el = $("#app-footer");
+  if (!el) return;
+  fetch("/api/health").then(r => r.json()).then(d => {
+    if (d && d.version) el.textContent = `Portfolio Tracker v${d.version}`;
+  }).catch(() => {});
+}
+
 setTheme(readTheme());
 fxInit();
 renderHeader();
 loadAllAtStartup();
+loadAppVersion();

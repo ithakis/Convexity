@@ -39,6 +39,7 @@ def _showwarning_filter(message, category, filename, lineno, file=None, line=Non
 warnings.showwarning = _showwarning_filter
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
+from portfolio_tracker import __version__
 from portfolio_tracker.analytics import (
     _bulk_close,
     analyze_portfolio,
@@ -141,7 +142,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if parsed.path == "/api/health":
-            self._send_json(200, {"ok": True, "ts": datetime.now(timezone.utc).isoformat()})
+            self._send_json(200, {"ok": True, "ts": datetime.now(timezone.utc).isoformat(), "version": __version__})
             return
         if parsed.path == "/api/watchlists":
             self._send_json(200, {"watchlists": load_watchlists()})
@@ -740,7 +741,7 @@ def main() -> None:
     server, port = start_server()
     url = f"http://localhost:{port}/"
     print("=" * 60)
-    print(f"  Portfolio Tracker running at {url}")
+    print(f"  Portfolio Tracker v{__version__} running at {url}")
     print("  Press Ctrl+C to stop.")
     print("=" * 60)
     threading.Timer(0.8, lambda: subprocess.run(

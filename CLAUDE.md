@@ -1212,3 +1212,24 @@ Windows runner account is `runneradmin` — no space — so even the old
 full-installer CI job never actually exercised the exact condition the fix
 targets; the fix is reasoned-correct from NSIS's documented behavior, not
 empirically re-confirmed under CI).
+
+---
+
+## 15. Version tracking
+
+Single source of truth: `__version__` in `portfolio_tracker/__init__.py`
+(currently `1.4.1`). Scheme is `1.X.Y` — X bumps on a major new
+feature/release, Y bumps on smaller polish/fixes in between. `CHANGELOG.md`
+maps every version to the PR(s) it came from.
+
+**Where it's surfaced:**
+- Terminal startup banner (`portfolio_tracker/server.py`'s `main()`).
+- `GET /api/health` → `{"ok", "ts", "version"}` — the frontend's source.
+- Bottom-right footer in the web UI (`#app-footer` in `index.html`,
+  populated by `loadAppVersion()` in `app.js`, styled in `style.css`).
+- Desktop app splash subtitle and main window title
+  (`portfolio_tracker/desktop.py`).
+
+**When bumping:** update `__version__`, add a line to `CHANGELOG.md`. No
+other files need touching — the banner/footer/splash all read the same
+constant (browser mode via `/api/health`, desktop mode via direct import).

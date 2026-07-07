@@ -1927,3 +1927,9 @@
     z-index: 100; box-shadow: 0 4px 14px rgba(0,0,0,0.10); color: var(--text);
   }
   .toast.show { opacity: 1; }
+
+  .app-footer {
+    position: fixed; bottom: 6px; right: 10px; z-index: 5;
+    color: var(--muted); font-size: 10.5px; letter-spacing: 0.2px;
+    opacity: 0.55; pointer-events: none; user-select: none;
+  }
