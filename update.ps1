@@ -1,4 +1,4 @@
-# Update an existing Portfolio Tracker checkout: pull latest source, then
+# Update an existing Portfolio _App checkout: pull latest source, then
 # sync the `pt` conda env to environment.yml. Run install.ps1 first if
 # you've never set up the env/shortcuts on this machine.
 #
@@ -54,4 +54,4 @@ Write-Host "==> Updating '$EnvName' env..."
 Assert-Success "env update"
 
 Write-Host ""
-Write-Host "==> Done. Relaunch Portfolio Tracker to pick up the update."
+Write-Host "==> Done. Relaunch Portfolio _App to pick up the update."

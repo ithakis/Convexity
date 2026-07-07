@@ -741,7 +741,7 @@ def main() -> None:
     server, port = start_server()
     url = f"http://localhost:{port}/"
     print("=" * 60)
-    print(f"  Portfolio Tracker v{__version__} running at {url}")
+    print(f"  Portfolio _App v{__version__} running at {url}")
     print("  Press Ctrl+C to stop.")
     print("=" * 60)
     threading.Timer(0.8, lambda: subprocess.run(

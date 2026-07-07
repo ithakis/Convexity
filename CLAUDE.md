@@ -962,7 +962,7 @@ Run via `python -m portfolio_tracker.desktop` (what the installed launcher
 actually invokes). Single file, ~160 lines:
 
 - **Splash contract**: shown immediately via `QSplashScreen` (icon +
-  "Portfolio Tracker" + "Made by Alexander Tsoskounoglou 2026", colors
+  "Portfolio _App" + "Made by Alexander Tsoskounoglou 2026 · v{version}", colors
   matching the dashboard's own dark theme — `#0d1117`/`#e6edf3`/`#7d8590`
   from `style.css`). A `QElapsedTimer` starts the moment it's shown. The
   main window is revealed on `max(0, 5000ms - elapsed)` after the

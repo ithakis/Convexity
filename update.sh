@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update an existing Portfolio Tracker checkout: pull latest source, then
+# Update an existing Portfolio _App checkout: pull latest source, then
 # sync the `pt` conda env to environment.yml. Run install.sh first if you've
 # never set up the env/app launcher on this machine.
 set -euo pipefail
@@ -36,4 +36,4 @@ echo "==> Updating '$ENV_NAME' env..."
 "$SOLVER" env update -n "$ENV_NAME" -f environment.yml --prune
 
 echo ""
-echo "==> Done. Relaunch Portfolio Tracker to pick up the update."
+echo "==> Done. Relaunch Portfolio _App to pick up the update."

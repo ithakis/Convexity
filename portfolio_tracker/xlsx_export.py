@@ -323,7 +323,7 @@ def _metric_periods(primary_period: str) -> list[str]:
 def _write_overview(wb: Workbook, summaries: list[dict], metric_periods: list[str]) -> None:
     ws = wb.active
     ws.title = "Overview"
-    ws["A1"] = "Portfolio Tracker — Export"
+    ws["A1"] = "Portfolio _App — Export"
     ws["A1"].font = _TITLE_FONT
     ws["A2"] = f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}"
     ws["A2"].font = Font(italic=True, color="6B7280")

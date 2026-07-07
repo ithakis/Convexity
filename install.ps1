@@ -1,4 +1,4 @@
-# Bootstrap the Portfolio Tracker desktop app on Windows: install Miniforge
+# Bootstrap the Portfolio _App desktop app on Windows: install Miniforge
 # if missing, create/update the `pt` conda env, generate the app icon, and
 # create Start Menu + Desktop shortcuts. Safe to re-run — every step is
 # idempotent.
@@ -12,7 +12,7 @@
 
 param(
     [string]$EnvName = "pt",
-    [string]$AppName = "Portfolio Tracker"
+    [string]$AppName = "Portfolio _App"
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,7 +33,7 @@ function Assert-Success {
 $RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoDir
 
-Write-Host "==> Portfolio Tracker desktop app installer"
+Write-Host "==> Portfolio _App desktop app installer"
 Write-Host "    repo:    $RepoDir"
 Write-Host "    env:     $EnvName"
 Write-Host "    app:     $AppName"

@@ -1,4 +1,4 @@
-# Portfolio Tracker
+# Portfolio _App
 
 A fast, single-file local web dashboard for monitoring a stock portfolio — no API keys, no cloud accounts, no data leaving your machine.
 
@@ -41,7 +41,7 @@ screen.
 
 ```bash
 # macOS / Linux — one-time setup (installs Miniforge if needed, creates the
-# `pt` conda env, builds a Portfolio Tracker.app launcher + Desktop shortcut)
+# `pt` conda env, builds a Portfolio _App.app launcher + Desktop shortcut)
 ./install.sh
 
 # Windows — same idea, creates Start Menu + Desktop shortcuts
@@ -49,7 +49,7 @@ screen.
 .\install.ps1
 ```
 
-After that, launch **Portfolio Tracker** from Launchpad/Spotlight/Start Menu
+After that, launch **Portfolio _App** from Launchpad/Spotlight/Start Menu
 or your Desktop shortcut like any other app. To pick up new commits later:
 
 ```bash
