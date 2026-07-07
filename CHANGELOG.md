@@ -5,6 +5,19 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.4.4 — 2026-07-08
+Fixed a race condition in the "Fit to screen" table layout that could pin
+the holdings table's wrapper a few pixels shorter than its actual content
+(most likely during a fast streaming build, where `render()` fires once per
+incoming row and an older, superseded async height measurement could land
+after a newer one). Any shortfall turned the table into its own vertically
+scrollable region — a "scroll trapped inside the table" experience distinct
+from scrolling the page, so the table and the analyst-sentiment section
+below it could end up scrolling independently instead of as one page.
+Fixed with a render-generation guard (only the latest measurement pass ever
+applies) plus a self-correcting height check (the wrapper can never end up
+shorter than its content).
+
 ## 1.4.3 — 2026-07-08
 Fundamentals columns (P/S, P/E, Fwd P/E, PEG, EV/Rev, EV/EBITDA, Op Mgn, D/E,
 Curr Ratio, Div Yield) now shade blue instead of orange, scaled dynamically

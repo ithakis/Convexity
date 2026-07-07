@@ -670,9 +670,28 @@ function applyTableTransformFit() {
     table.style.width = `${(100 / extra).toFixed(3)}%`;
     const postHeight = table.getBoundingClientRect().height;
     if (postHeight > 0) wrap.style.height = `${Math.ceil(postHeight + 4)}px`;
+    // Self-correct: the measurement above can occasionally land a few
+    // pixels short of the table's true rendered height (e.g. a stale
+    // rAF from an earlier render() resolving after a newer one during a
+    // streaming build). Any shortfall turns .table-wrap into its own
+    // vertically-scrollable region — a "scroll trapped inside the
+    // table" bug distinct from the page's normal scroll. The wrap must
+    // NEVER be shorter than its content, so widen it to match if so.
+    if (wrap.scrollHeight > wrap.clientHeight) {
+      wrap.style.height = `${wrap.scrollHeight}px`;
+    }
   }
 }
 
+// Renders during a streaming build call render() (and therefore this
+// function) once per incoming row, each scheduling its own async
+// double-rAF re-measurement below. Without a generation guard, an older
+// render's rAF pair can resolve after a newer one and clobber the wrap's
+// height with a stale (too-short) measurement — see applyTableTransformFit's
+// self-correction comment for what that breaks. Bumping _fitGen per call and
+// having each scheduled pass bail out once superseded makes only the latest
+// render's measurement ever take effect.
+let _fitGen = 0;
 function applyTableFitMode(columns = getActiveColumns()) {
   const wrap = document.querySelector(".table-wrap");
   if (!wrap) return 1;
@@ -682,9 +701,14 @@ function applyTableFitMode(columns = getActiveColumns()) {
   // Schedule the post-layout measurement after the browser has applied
   // the new --table-scale variable. rAF is enough; double-rAF guards
   // against fonts/images settling on a second tick.
+  const myGen = ++_fitGen;
   requestAnimationFrame(() => {
+    if (myGen !== _fitGen) return;
     applyTableTransformFit();
-    requestAnimationFrame(applyTableTransformFit);
+    requestAnimationFrame(() => {
+      if (myGen !== _fitGen) return;
+      applyTableTransformFit();
+    });
   });
   return scale;
 }
