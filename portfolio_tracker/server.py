@@ -78,6 +78,7 @@ from portfolio_tracker.persistence import (
     save_mpt_run,
     save_view,
     set_active_column_view,
+    set_builtin_view_heat,
     set_active_weight_preset,
     set_last_view,
     upsert_analytics_cache,
@@ -155,6 +156,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "builtins": ["Default", "Fundamentals", "Momentum"],
                 "custom": raw.get("custom_views") or {},
+                "builtin_overrides": raw.get("builtin_overrides") or {},
                 "active": raw.get("active_view") or "Default",
             })
             return
@@ -373,9 +375,34 @@ class Handler(BaseHTTPRequestHandler):
                 raw = upsert_column_view(
                     str(payload.get("name") or ""),
                     payload.get("columns") or [],
+                    payload.get("heat"),
                 )
                 self._send_json(200, {
                     "custom": raw.get("custom_views") or {},
+                    "builtin_overrides": raw.get("builtin_overrides") or {},
+                    "active": raw.get("active_view") or "Default",
+                })
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/column-views/builtin-heat":
+            # Live per-column color-mode toggle on a built-in view. Kept
+            # separate from the full upsert above so a heat-only change never
+            # freezes the view's columns to a factory-equal override.
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                raw = set_builtin_view_heat(
+                    str(payload.get("name") or ""),
+                    str(payload.get("key") or ""),
+                    str(payload.get("mode") or ""),
+                )
+                self._send_json(200, {
+                    "custom": raw.get("custom_views") or {},
+                    "builtin_overrides": raw.get("builtin_overrides") or {},
                     "active": raw.get("active_view") or "Default",
                 })
             except ValueError as exc:
@@ -668,6 +695,7 @@ class Handler(BaseHTTPRequestHandler):
                 raw = delete_column_view(name)
                 self._send_json(200, {
                     "custom": raw.get("custom_views") or {},
+                    "builtin_overrides": raw.get("builtin_overrides") or {},
                     "active": raw.get("active_view") or "Default",
                 })
             except ValueError as exc:

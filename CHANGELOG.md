@@ -5,6 +5,24 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.4.5 — 2026-07-08
+The three built-in views (Default, Fundamentals, Momentum) are now editable in
+place, just like custom views — reorder/add/remove columns and change per-column
+color-coding, all persisted per view, with a "Reset to default" pill that
+restores the factory layout. Color-coding type (Off/Percentile/Min-Max) is no
+longer a single global setting shared across every view; it's now a property of
+each view, so a column can be shaded one way in one view and another elsewhere.
+As the first use of this, EV/EBITDA now defaults to **percentile** coloring in
+Fundamentals (min-max still applies wherever a view doesn't override it). The
+Customize Columns modal gained an "Update <view>" action for built-ins, and the
+old pre-existing global `heat_prefs` remain as a fallback default under any
+per-view setting. Backend: built-in overrides + per-view heat maps persist to
+`.portfolio_tracker_column_views.json` via the extended `/api/column-views`
+endpoints (new `/api/column-views/builtin-heat`; DELETE on a built-in name now
+resets it instead of erroring). Column-view persistence gained unit-test
+coverage (`tests/test_column_views.py`). No column widths or the "Fit to screen"
+layout changed — the table renders exactly as before.
+
 ## 1.4.4 — 2026-07-08
 Fixed a race condition in the "Fit to screen" table layout that could pin
 the holdings table's wrapper a few pixels shorter than its actual content

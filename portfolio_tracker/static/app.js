@@ -265,11 +265,12 @@ let SORT = { key: "pct_ytd", dir: -1 };
  * Column views (Pass D)
  * ---------------------------------------------------------------------------
  * COLS is the registry of every available column. BUILTIN_VIEWS holds the
- * three immutable presets — ordered key lists drawn from COLS. STATE owns
- * the active selection (activeViewName, customViews, activeColumnOverride),
- * but all rendering goes through getActiveColumns() so consumers never
- * need to know whether a view is built-in, custom, or a dirty in-memory
- * override.
+ * three preset column lists and BUILTIN_VIEW_HEAT their factory color modes.
+ * Built-in views are editable in place: STATE.builtinOverrides layers per-view
+ * column/color deltas on top of the factory definition (custom views carry
+ * their own columns + color map). All rendering goes through getActiveColumns()
+ * / getViewHeat() so consumers never need to know whether the active view is
+ * built-in-with-override or custom.
  *
  * To add a new column: append a registry entry to COLS above (with key,
  * label, render, optional heat/align/sortable/sortValue), add a COL_INFO
@@ -287,6 +288,14 @@ const BUILTIN_VIEWS = {
   "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","earnings_surprise","rec_trend_fh","insider_mspr","above_sma_20","above_sma_50","above_sma_200","news_sentiment"],
 };
 const BUILTIN_ORDER = ["Default", "Fundamentals", "Momentum"];
+/* Factory per-view color-coding ("heat") defaults. Only columns whose default
+ * mode should DEVIATE from the column's intrinsic default (minmax for yo_dyn,
+ * on for div) need an entry here — everything else falls back automatically.
+ * This is what makes the color type a property of the view: EV/EBITDA is
+ * percentile-ranked in Fundamentals but min-max wherever else it appears. */
+const BUILTIN_VIEW_HEAT = {
+  "Fundamentals": { ev_ebitda: "percentile" },
+};
 const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
 const DESC_DEFAULT_KEYS = new Set(["pct_ytd","pct_1y","pct_1w","pct_1m","pct_3m","pct_6m","delta_ath","market_cap","price","target_upside_pct"]);
 
@@ -294,15 +303,46 @@ function normalizeBuiltinViewName(name) {
   return BUILTIN_VIEW_ALIASES[name] || name;
 }
 
-function getActiveViewKeys() {
-  if (typeof STATE !== "undefined" && STATE && Array.isArray(STATE.activeColumnOverride)) {
-    return STATE.activeColumnOverride;
+/* ---- Effective view resolution ----------------------------------------
+ * A view (built-in or custom) resolves to an effective {columns, heat}.
+ * Built-in views layer a persisted override (STATE.builtinOverrides) on top
+ * of the factory definition; custom views carry their own columns + heat.
+ * All rendering + the customize modal read through these so no consumer needs
+ * to know which flavour of view is active. */
+function factoryColumnsFor(name) {
+  return (BUILTIN_VIEWS[normalizeBuiltinViewName(name)] || BUILTIN_VIEWS["Default"]).slice();
+}
+function factoryHeatFor(name) {
+  return Object.assign({}, BUILTIN_VIEW_HEAT[normalizeBuiltinViewName(name)] || {});
+}
+function getViewColumns(name) {
+  name = normalizeBuiltinViewName(name);
+  const S = (typeof STATE !== "undefined" && STATE) || {};
+  if (BUILTIN_VIEWS[name]) {
+    const ov = (S.builtinOverrides || {})[name];
+    if (ov && Array.isArray(ov.columns) && ov.columns.length) return ov.columns.slice();
+    return factoryColumnsFor(name);
   }
-  const name = normalizeBuiltinViewName((typeof STATE !== "undefined" && STATE && STATE.activeViewName) || "Default");
-  if (BUILTIN_VIEWS[name]) return BUILTIN_VIEWS[name];
-  const cv = (typeof STATE !== "undefined" && STATE && STATE.customViews) || {};
-  if (cv[name] && Array.isArray(cv[name].columns)) return cv[name].columns;
-  return BUILTIN_VIEWS["Default"];
+  const cv = (S.customViews || {})[name];
+  return cv && Array.isArray(cv.columns) ? cv.columns.slice() : factoryColumnsFor("Default");
+}
+/* Effective per-view color-mode map. For built-ins the factory map is the
+ * base and the persisted override wins on a per-column basis; for customs the
+ * stored map is authoritative. The override stores only explicit user deltas
+ * (never the factory values) so a future factory change still reaches views
+ * the user hasn't overridden for that column. */
+function getViewHeat(name) {
+  name = normalizeBuiltinViewName(name);
+  const S = (typeof STATE !== "undefined" && STATE) || {};
+  if (BUILTIN_VIEWS[name]) {
+    const ov = (S.builtinOverrides || {})[name];
+    return Object.assign(factoryHeatFor(name), (ov && ov.heat) || {});
+  }
+  const cv = (S.customViews || {})[name];
+  return Object.assign({}, (cv && cv.heat) || {});
+}
+function getActiveViewKeys() {
+  return getViewColumns((typeof STATE !== "undefined" && STATE && STATE.activeViewName) || "Default");
 }
 function getActiveColumns() {
   return getActiveViewKeys().map(k => COLS_BY_KEY[k]).filter(Boolean);
@@ -356,30 +396,48 @@ function persistFitColumnsPreference(on) {
   catch (e) {}
 }
 
-/* Per-column heat-coloring mode, global across all views/tabs (like
-   fit_columns/fx_quote above) — not tied to any saved column view. */
+/* Color-coding ("heat") mode is now a property of the active view (see
+   getViewHeat) — EV/EBITDA can be percentile in Fundamentals but min-max in
+   Default. The legacy global localStorage map is retained only as a fallback
+   default for any (view, column) with no explicit per-view mode, so a user's
+   pre-existing global tweaks still apply as a baseline; new toggles write to
+   the view, not the global. */
 function readHeatPrefs() {
   try {
     const raw = localStorage.getItem("heat_prefs");
     return raw ? JSON.parse(raw) : {};
   } catch (e) { return {}; }
 }
-function persistHeatPrefs(prefs) {
-  try { localStorage.setItem("heat_prefs", JSON.stringify(prefs)); } catch (e) {}
-}
 function getHeatMode(key) {
   const col = COLS_BY_KEY[key];
   if (!col || !col.heat) return null;
-  const prefs = STATE.heatPrefs || {};
-  if (col.heat.kind === "yo_dyn") return prefs[key] || "minmax";
-  if (col.heat.kind === "div") return prefs[key] === "off" ? "off" : "on";
+  const viewHeat = getViewHeat(STATE.activeViewName);
+  let mode = viewHeat[key];
+  if (mode == null) mode = (STATE.heatPrefs || {})[key]; // legacy global fallback
+  if (col.heat.kind === "yo_dyn") {
+    return (mode === "off" || mode === "percentile" || mode === "minmax") ? mode : "minmax";
+  }
+  if (col.heat.kind === "div") return mode === "off" ? "off" : "on";
   return null; // "yo" (analyst_rating) — uncontrolled, always legacy-on
 }
 function setHeatMode(key, mode) {
-  STATE.heatPrefs = STATE.heatPrefs || {};
-  STATE.heatPrefs[key] = mode;
-  persistHeatPrefs(STATE.heatPrefs);
-  render();
+  const name = normalizeBuiltinViewName(STATE.activeViewName);
+  if (isBuiltinView(name)) {
+    const ov = STATE.builtinOverrides[name] || {};
+    ov.heat = Object.assign({}, ov.heat || {});
+    ov.heat[key] = mode;
+    STATE.builtinOverrides[name] = ov;
+    render();
+    persistBuiltinHeat(name, key, mode);
+  } else if (STATE.customViews[name]) {
+    const cv = STATE.customViews[name];
+    cv.heat = Object.assign({}, cv.heat || {});
+    cv.heat[key] = mode;
+    render();
+    debouncedSaveCustom(name, cv.columns, cv.heat);
+  } else {
+    render();
+  }
 }
 
 /* Heat-map endpoint colors per theme. */
@@ -1159,9 +1217,10 @@ function cellStyleHeat(col, value, theme, ctx) {
  * UI surface: a slim row above the table with built-in preset chips,
  * a "+ Custom" dropdown listing user-saved views, and a Customize button
  * that opens the modal. STATE.activeViewName drives which set of column
- * keys getActiveColumns() returns; activeColumnOverride holds the live
- * in-memory order when the user is dragging a built-in preset (the
- * yellow "Modified" pill exposes Save-as-new and Reset actions).
+ * keys getActiveColumns() returns. Built-in views are now editable in place:
+ * edits persist as a per-view override (STATE.builtinOverrides, mirroring the
+ * server's builtin_overrides map) and a "Reset to default" pill appears
+ * whenever the active built-in differs from its factory definition.
  * --------------------------------------------------------------------------- */
 
 const CV_CUSTOM_KEY = "__cv_custom__";
@@ -1176,28 +1235,20 @@ function sameColumnKeys(left, right) {
   return true;
 }
 
-function syncBuiltinDirtyState(keys) {
-  if (!isBuiltinView(STATE.activeViewName)) {
-    STATE.activeColumnOverride = null;
-    STATE.viewDirty = false;
-    return;
-  }
-  const baseKeys = BUILTIN_VIEWS[normalizeBuiltinViewName(STATE.activeViewName)] || [];
-  if (sameColumnKeys(keys, baseKeys)) {
-    STATE.activeColumnOverride = null;
-    STATE.viewDirty = false;
-    return;
-  }
-  STATE.activeColumnOverride = keys.slice();
-  STATE.viewDirty = true;
+/* Does the active built-in differ from its factory definition (columns OR an
+   explicit color override)? Drives the "Reset to default" pill. */
+function builtinHasOverride(name) {
+  name = normalizeBuiltinViewName(name);
+  if (!isBuiltinView(name)) return false;
+  const ov = (STATE.builtinOverrides || {})[name];
+  if (!ov) return false;
+  if (Array.isArray(ov.columns) && ov.columns.length && !sameColumnKeys(ov.columns, factoryColumnsFor(name))) return true;
+  return !!(ov.heat && Object.keys(ov.heat).length);
 }
 
 function currentActiveKeys() {
-  /* Returns the live list of keys for the active view (override wins). */
-  if (Array.isArray(STATE.activeColumnOverride)) return STATE.activeColumnOverride.slice();
-  if (isBuiltinView(STATE.activeViewName)) return BUILTIN_VIEWS[normalizeBuiltinViewName(STATE.activeViewName)].slice();
-  const cv = STATE.customViews[STATE.activeViewName];
-  return cv && Array.isArray(cv.columns) ? cv.columns.slice() : BUILTIN_VIEWS["Default"].slice();
+  /* Returns the live list of effective column keys for the active view. */
+  return getViewColumns(STATE.activeViewName);
 }
 
 async function loadColumnViews() {
@@ -1206,14 +1257,13 @@ async function loadColumnViews() {
     if (!r.ok) return;
     const j = await r.json();
     STATE.customViews = j.custom || {};
+    STATE.builtinOverrides = j.builtin_overrides || {};
     const desired = normalizeBuiltinViewName(j.active || "Default");
     if (isBuiltinView(desired) || STATE.customViews[desired]) {
       STATE.activeViewName = desired;
     } else {
       STATE.activeViewName = "Default";
     }
-    STATE.activeColumnOverride = null;
-    STATE.viewDirty = false;
     render();
   } catch (e) { /* persistence is best-effort */ }
 }
@@ -1228,30 +1278,50 @@ async function persistActiveView(name) {
   } catch (e) { /* best-effort */ }
 }
 
+/* Persist a view definition (columns + heat). A built-in name is routed
+   server-side to its override store; any other name is a custom view. On
+   success we refresh both maps from the response. */
+async function persistColumnView(name, columns, heat) {
+  try {
+    const r = await fetch("/api/column-views", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, columns, heat: heat || {}}),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      STATE.customViews = j.custom || STATE.customViews;
+      STATE.builtinOverrides = j.builtin_overrides || STATE.builtinOverrides;
+    }
+  } catch (e) {}
+}
+
+/* Heat-only toggle on a built-in — kept separate so it never freezes the
+   view's columns to a factory-equal override. */
+async function persistBuiltinHeat(name, key, mode) {
+  try {
+    const r = await fetch("/api/column-views/builtin-heat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name: normalizeBuiltinViewName(name), key, mode}),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      STATE.builtinOverrides = j.builtin_overrides || STATE.builtinOverrides;
+    }
+  } catch (e) {}
+}
+
 let _cvSaveTimer = null;
-function debouncedSaveCustom(name, columns) {
+function debouncedSaveCustom(name, columns, heat) {
   clearTimeout(_cvSaveTimer);
-  _cvSaveTimer = setTimeout(async () => {
-    try {
-      const r = await fetch("/api/column-views", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({name, columns}),
-      });
-      if (r.ok) {
-        const j = await r.json();
-        STATE.customViews = j.custom || STATE.customViews;
-      }
-    } catch (e) {}
-  }, 250);
+  _cvSaveTimer = setTimeout(() => { persistColumnView(name, columns, heat); }, 250);
 }
 
 function setActiveView(name, {persist = true} = {}) {
   name = normalizeBuiltinViewName(name);
   if (!isBuiltinView(name) && !STATE.customViews[name]) return;
   STATE.activeViewName = name;
-  STATE.activeColumnOverride = null;
-  STATE.viewDirty = false;
   render();
   if (persist) persistActiveView(name);
 }
@@ -1306,6 +1376,7 @@ function renderColumnViewBar() {
           if (r.ok) {
             const j = await r.json();
             STATE.customViews = j.custom || {};
+            STATE.builtinOverrides = j.builtin_overrides || STATE.builtinOverrides;
             if (STATE.activeViewName === name) STATE.activeViewName = j.active || "Default";
             render();
           }
@@ -1321,9 +1392,11 @@ function renderColumnViewBar() {
   };
   document.addEventListener("click", () => dd.classList.remove("open"), {once: true});
   wrap.appendChild(btn); wrap.appendChild(dd);
-  /* Dirty pill */
+  /* "Modified" pill — shown when the active built-in differs from factory,
+     exposing Save-as-new and Reset-to-default. Custom views have no factory
+     to diverge from, so no pill. */
   const dirty = document.getElementById("cv-dirty");
-  if (dirty) dirty.hidden = !STATE.viewDirty;
+  if (dirty) dirty.hidden = !builtinHasOverride(activeName);
   const fitBtn = document.getElementById("cv-fit-toggle");
   if (fitBtn) {
     fitBtn.classList.toggle("active", !!STATE.fitColumns);
@@ -1331,9 +1404,19 @@ function renderColumnViewBar() {
   }
 }
 
-function resetViewOverride() {
-  STATE.activeColumnOverride = null;
-  STATE.viewDirty = false;
+/* Reset the active built-in to its factory definition by dropping its
+   server-side override (columns + all color overrides). */
+async function resetViewOverride() {
+  const name = normalizeBuiltinViewName(STATE.activeViewName);
+  if (!isBuiltinView(name) || !builtinHasOverride(name)) return;
+  try {
+    const r = await fetch(`/api/column-views/${encodeURIComponent(name)}`, {method: "DELETE"});
+    if (r.ok) {
+      const j = await r.json();
+      STATE.builtinOverrides = j.builtin_overrides || {};
+      STATE.customViews = j.custom || STATE.customViews;
+    }
+  } catch (e) {}
   render();
 }
 
@@ -1344,17 +1427,17 @@ async function promptAndSaveCurrentAsNew() {
   if (!name) return;
   if (isBuiltinView(name)) { alert(`"${name}" is a built-in name; pick another.`); return; }
   const columns = currentActiveKeys();
+  const heat = getViewHeat(STATE.activeViewName);  // snapshot the live color config
   try {
     const r = await fetch("/api/column-views", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({name, columns}),
+      body: JSON.stringify({name, columns, heat}),
     });
     if (!r.ok) { const j = await r.json().catch(()=>({})); alert(j.error || "Save failed."); return; }
     const j = await r.json();
     STATE.customViews = j.custom || STATE.customViews;
-    STATE.activeColumnOverride = null;
-    STATE.viewDirty = false;
+    STATE.builtinOverrides = j.builtin_overrides || STATE.builtinOverrides;
     setActiveView(name);
   } catch (e) { alert("Save failed."); }
 }
@@ -1390,16 +1473,19 @@ function openColumnPicker() {
     selected: new Set(activeKeys),
     order,
   };
-  const editingActiveCustom = !isBuiltinView(STATE.activeViewName) && STATE.customViews[STATE.activeViewName];
+  /* Every active view — built-in or custom — is now editable in place, so the
+     modal always offers "Update <active>" plus "Save as new". */
+  const activeName = normalizeBuiltinViewName(STATE.activeViewName);
+  const isBuiltinActive = isBuiltinView(activeName);
   modal.innerHTML = `
     <h2>Customize Columns</h2>
-    <div class="cv-modal-sub">Toggle which columns appear and drag to reorder. Color-coding controls apply immediately. ${editingActiveCustom ? `Editing <b>${escapeHtml(STATE.activeViewName)}</b>.` : "Save as a new view when you're done."}</div>
+    <div class="cv-modal-sub">Toggle which columns appear and drag to reorder. Color-coding controls apply immediately. Editing <b>${escapeHtml(activeName)}</b>${isBuiltinActive ? " (a built-in view — Reset restores its defaults)" : ""}.</div>
     <ul class="cv-list" id="cv-modal-list"></ul>
     <div class="cv-modal-foot">
-      <input type="text" class="cv-name-input" id="cv-name-input" placeholder="${editingActiveCustom ? "New name (optional)" : "View name"}" value="${editingActiveCustom ? "" : ""}" />
+      <input type="text" class="cv-name-input" id="cv-name-input" placeholder="New name (optional)" value="" />
       <button id="cv-modal-cancel">Cancel</button>
-      ${editingActiveCustom ? `<button id="cv-modal-update" class="primary">Update "${escapeHtml(STATE.activeViewName)}"</button>` : ""}
-      <button id="cv-modal-save" class="primary">${editingActiveCustom ? "Save as new" : "Save view"}</button>
+      <button id="cv-modal-update" class="primary">Update "${escapeHtml(activeName)}"</button>
+      <button id="cv-modal-save" class="primary">Save as new</button>
     </div>
   `;
   renderColumnPickerList();
@@ -1529,24 +1615,34 @@ async function saveColumnPicker({asNew}) {
   if (!cols.includes("symbol")) {
     if (!confirm("This view doesn't include the Ticker column. Save anyway?")) return;
   }
-  let name;
+  let name, heat;
   const inputVal = (document.getElementById("cv-name-input").value || "").trim();
   if (asNew) {
     name = inputVal;
     if (!name) { alert("Enter a name for the new view."); return; }
     if (isBuiltinView(name)) { alert(`"${name}" is a built-in name; pick another.`); return; }
+    /* A brand-new custom view captures the full live color config (it has no
+       factory to inherit from). */
+    heat = getViewHeat(STATE.activeViewName);
   } else {
-    name = STATE.activeViewName;
+    name = normalizeBuiltinViewName(STATE.activeViewName);
+    /* Updating an existing view persists the column change while preserving
+       the view's already-saved explicit color overrides (color controls apply
+       immediately, so they're saved before this runs). */
+    heat = isBuiltinView(name)
+      ? ((STATE.builtinOverrides[name] || {}).heat || {})
+      : ((STATE.customViews[name] || {}).heat || {});
   }
   try {
     const r = await fetch("/api/column-views", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({name, columns: cols}),
+      body: JSON.stringify({name, columns: cols, heat}),
     });
     if (!r.ok) { const j = await r.json().catch(()=>({})); alert(j.error || "Save failed."); return; }
     const j = await r.json();
     STATE.customViews = j.custom || STATE.customViews;
+    STATE.builtinOverrides = j.builtin_overrides || STATE.builtinOverrides;
     closeColumnPicker();
     setActiveView(name);
   } catch (e) { alert("Save failed."); }
@@ -1603,18 +1699,22 @@ function reorderActiveColumns(fromKey, toKey) {
   if (fromIdx < 0 || toIdx < 0) return;
   cur.splice(fromIdx, 1);
   cur.splice(toIdx, 0, fromKey);
-  if (isBuiltinView(STATE.activeViewName)) {
-    syncBuiltinDirtyState(cur);
+  const name = normalizeBuiltinViewName(STATE.activeViewName);
+  if (isBuiltinView(name)) {
+    /* Built-in views are now editable in place: persist the new order as a
+       per-view override immediately (preserving any explicit color overrides). */
+    const ov = STATE.builtinOverrides[name] || {};
+    ov.columns = cur;
+    STATE.builtinOverrides[name] = ov;
     render();
+    persistColumnView(name, cur, ov.heat || {});
   } else {
     /* Custom view: persist new order immediately. */
-    if (STATE.customViews[STATE.activeViewName]) {
-      STATE.customViews[STATE.activeViewName].columns = cur;
+    if (STATE.customViews[name]) {
+      STATE.customViews[name].columns = cur;
     }
-    STATE.activeColumnOverride = null;
-    STATE.viewDirty = false;
     render();
-    debouncedSaveCustom(STATE.activeViewName, cur);
+    debouncedSaveCustom(name, cur, (STATE.customViews[name] || {}).heat || {});
   }
 }
 
@@ -2580,15 +2680,16 @@ let STATE = {
   // each time the active tab changes; saved/edited via the weights popup.
   weightPresets: [],       // [{name, weights, saved_at}]
   // Pass D — column views. activeViewName is global (one selection
-  // across all portfolios). customViews mirrors the server's
-  // .portfolio_tracker_column_views.json. activeColumnOverride is set
-  // when the user drags headers on a built-in view (transient until
-  // saved/reset).
+  // across all portfolios). customViews and builtinOverrides both mirror
+  // the server's .portfolio_tracker_column_views.json — built-in views are
+  // editable in place, their per-view deltas (columns + color modes) living
+  // in builtinOverrides and persisting immediately (no transient state).
   activeViewName: "Default",
   customViews: {},
-  activeColumnOverride: null,
-  viewDirty: false,
+  builtinOverrides: {},   // per-view overrides for built-in views (mirrors server)
   fitColumns: readFitColumnsPreference(),
+  // Legacy global color-mode map — now only a fallback default under any
+  // per-view color setting (see getHeatMode); new toggles write to the view.
   heatPrefs: readHeatPrefs(),
 };
 

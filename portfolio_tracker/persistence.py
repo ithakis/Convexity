@@ -550,11 +550,27 @@ _BUILTIN_COLUMN_VIEW_ALIASES = {
     "Trader View": "Momentum",
 }
 _BUILTIN_COLUMN_VIEW_NAMES = {"Default", "Fundamentals", "Momentum"}
+# Valid per-column color-coding ("heat") modes. Persisted per view (both
+# built-in overrides and custom views carry their own map) so, e.g.,
+# EV/EBITDA can be percentile-colored in Fundamentals but min-max elsewhere.
+_HEAT_MODES = {"off", "on", "percentile", "minmax"}
 
 
 def _normalize_builtin_column_view_name(name: str) -> str:
     clean = (name or "Default").strip() or "Default"
     return _BUILTIN_COLUMN_VIEW_ALIASES.get(clean, clean)
+
+
+def _sanitize_heat(heat) -> dict:
+    """Keep only {column_key: valid_mode} pairs — defends the render path
+    against a malformed payload writing a nonsense color mode."""
+    if not isinstance(heat, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, mode in heat.items():
+        if isinstance(key, str) and isinstance(mode, str) and mode in _HEAT_MODES:
+            out[key] = mode
+    return out
 
 
 def _column_views_path() -> Path:
@@ -563,14 +579,15 @@ def _column_views_path() -> Path:
 
 def _read_column_views_raw() -> dict:
     path = _column_views_path()
+    empty = {"custom_views": {}, "builtin_overrides": {}, "active_view": "Default"}
     if not path.exists():
-        return {"custom_views": {}, "active_view": "Default"}
+        return empty
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"custom_views": {}, "active_view": "Default"}
+        return empty
     if not isinstance(data, dict):
-        return {"custom_views": {}, "active_view": "Default"}
+        return empty
     cv = data.get("custom_views") if isinstance(data.get("custom_views"), dict) else {}
     active = _normalize_builtin_column_view_name(str(data.get("active_view") or "Default"))
     cleaned: dict[str, dict] = {}
@@ -583,9 +600,29 @@ def _read_column_views_raw() -> dict:
         clean_cols = [str(c) for c in cols if isinstance(c, (str, int))]
         cleaned[str(name).strip()] = {
             "columns": clean_cols,
+            "heat": _sanitize_heat(entry.get("heat")),
             "created_at": entry.get("created_at"),
         }
-    return {"custom_views": cleaned, "active_view": active}
+    # Built-in overrides: per-view deltas from the factory definition. columns
+    # is present only when the user reordered/added/removed columns; heat holds
+    # only the explicit color-mode overrides (never the factory defaults — so a
+    # future factory change still propagates to any view the user hasn't frozen).
+    bo_raw = data.get("builtin_overrides") if isinstance(data.get("builtin_overrides"), dict) else {}
+    builtin_overrides: dict[str, dict] = {}
+    for name, entry in bo_raw.items():
+        clean_name = _normalize_builtin_column_view_name(str(name))
+        if clean_name not in _BUILTIN_COLUMN_VIEW_NAMES or not isinstance(entry, dict):
+            continue
+        ov: dict = {}
+        cols = entry.get("columns")
+        if isinstance(cols, list) and cols:
+            ov["columns"] = [str(c) for c in cols if isinstance(c, (str, int))]
+        heat = _sanitize_heat(entry.get("heat"))
+        if heat:
+            ov["heat"] = heat
+        if ov:
+            builtin_overrides[clean_name] = ov
+    return {"custom_views": cleaned, "builtin_overrides": builtin_overrides, "active_view": active}
 
 
 def _write_column_views_raw(raw: dict) -> None:
@@ -598,35 +635,69 @@ def load_column_views() -> dict:
         return _read_column_views_raw()
 
 
-def upsert_column_view(name: str, columns: list) -> dict:
-    clean_name = (name or "").strip()
-    if not clean_name:
+def upsert_column_view(name: str, columns: list, heat=None) -> dict:
+    """Upsert a view definition. A built-in name (Default/Fundamentals/
+    Momentum) is routed to the builtin_overrides store — the built-in views
+    are now editable in place, not replaced — while any other name creates or
+    updates a normal custom view. Both carry an optional per-view `heat` map."""
+    clean_name = _normalize_builtin_column_view_name(name)
+    if not (name or "").strip():
         raise ValueError("view name required")
-    if clean_name in _BUILTIN_COLUMN_VIEW_NAMES:
-        raise ValueError(f"'{clean_name}' is a built-in view and cannot be overwritten")
     if not isinstance(columns, list) or not columns:
         raise ValueError("columns must be a non-empty list")
     clean_cols = [str(c) for c in columns if isinstance(c, (str, int))]
+    clean_heat = _sanitize_heat(heat)
     with _COLUMN_VIEWS_LOCK:
         raw = _read_column_views_raw()
-        existing = raw["custom_views"].get(clean_name) or {}
-        raw["custom_views"][clean_name] = {
-            "columns": clean_cols,
-            "created_at": existing.get("created_at") or datetime.now(timezone.utc).isoformat(),
-        }
+        if clean_name in _BUILTIN_COLUMN_VIEW_NAMES:
+            ov: dict = {"columns": clean_cols}
+            if clean_heat:
+                ov["heat"] = clean_heat
+            raw["builtin_overrides"][clean_name] = ov
+        else:
+            existing = raw["custom_views"].get(clean_name) or {}
+            raw["custom_views"][clean_name] = {
+                "columns": clean_cols,
+                "heat": clean_heat,
+                "created_at": existing.get("created_at") or datetime.now(timezone.utc).isoformat(),
+            }
+        _write_column_views_raw(raw)
+        return raw
+
+
+def set_builtin_view_heat(name: str, key: str, mode: str) -> dict:
+    """Set one color-mode override on a built-in view without disturbing its
+    columns (used by the modal's live color controls, which apply immediately
+    even when the user hasn't reordered any columns)."""
+    clean_name = _normalize_builtin_column_view_name(name)
+    if clean_name not in _BUILTIN_COLUMN_VIEW_NAMES:
+        raise ValueError(f"'{clean_name}' is not a built-in view")
+    if not isinstance(key, str) or not key or mode not in _HEAT_MODES:
+        raise ValueError("invalid heat key/mode")
+    with _COLUMN_VIEWS_LOCK:
+        raw = _read_column_views_raw()
+        ov = raw["builtin_overrides"].get(clean_name) or {}
+        heat = dict(ov.get("heat") or {})
+        heat[key] = mode
+        ov["heat"] = heat
+        raw["builtin_overrides"][clean_name] = ov
         _write_column_views_raw(raw)
         return raw
 
 
 def delete_column_view(name: str) -> dict:
-    clean_name = (name or "").strip()
-    if clean_name in _BUILTIN_COLUMN_VIEW_NAMES:
-        raise ValueError(f"'{clean_name}' is a built-in view and cannot be deleted")
+    """Delete a custom view, OR — for a built-in name — reset it to factory by
+    dropping its override entry. Both are 'forget the stored thing for this
+    name'; a built-in can never be truly removed, only reset."""
+    clean_name = _normalize_builtin_column_view_name(name)
     with _COLUMN_VIEWS_LOCK:
         raw = _read_column_views_raw()
-        raw["custom_views"].pop(clean_name, None)
-        if raw.get("active_view") == clean_name:
-            raw["active_view"] = "Default"
+        if clean_name in _BUILTIN_COLUMN_VIEW_NAMES:
+            raw["builtin_overrides"].pop(clean_name, None)
+        else:
+            raw["custom_views"].pop(clean_name, None)
+            if raw.get("active_view") == clean_name:
+                raw["active_view"] = "Default"
         _write_column_views_raw(raw)
         return raw
 
