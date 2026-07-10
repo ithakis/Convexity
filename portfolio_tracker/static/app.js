@@ -111,6 +111,40 @@ const COLS = [
   { key: "dividend_yield", label: "Div Yield", w: 78, align: "right", sortable: true,
     heat: { kind: "yo_dyn", favor: "high" },
     render: (r) => fmtPctDirect(r.dividend_yield) },
+  /* Extended fundamentals — same yo_dyn ramp family as the block above, so
+     the per-view Off / Percentile / Min-Max background modes apply. Favor
+     "low" for price multiples and payout (cheaper / more sustainable = blue),
+     "high" for returns, margins, growth, yield and liquidity. */
+  { key: "price_book",     label: "P/B",       w: 56,  align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "low" },
+    render: (r) => fmt2(r.price_book) },
+  { key: "roe",            label: "ROE",       w: 64,  align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "high" },
+    render: (r) => fmtPctDirect(r.roe) },
+  { key: "roa",            label: "ROA",       w: 64,  align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "high" },
+    render: (r) => fmtPctDirect(r.roa) },
+  { key: "gross_margin",   label: "Gross Mgn", w: 74,  align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "high" },
+    render: (r) => fmtPctDirect(r.gross_margin) },
+  { key: "profit_margin",  label: "Net Mgn",   w: 68,  align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "high" },
+    render: (r) => fmtPctDirect(r.profit_margin) },
+  { key: "fcf_yield",      label: "FCF Yield", w: 74,  align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "high" },
+    render: (r) => fmtPctDirect(r.fcf_yield) },
+  { key: "revenue_growth", label: "Rev Grw",   w: 68,  align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "high" },
+    render: (r) => fmtPctDirect(r.revenue_growth) },
+  { key: "earnings_growth", label: "EPS Grw",  w: 68,  align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "high" },
+    render: (r) => fmtPctDirect(r.earnings_growth) },
+  { key: "quick_ratio",    label: "Quick Ratio", w: 82, align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "high" },
+    render: (r) => fmt2(r.quick_ratio) },
+  { key: "payout_ratio",   label: "Payout %",  w: 72,  align: "right", sortable: true,
+    heat: { kind: "yo_dyn", favor: "low" },
+    render: (r) => fmtPctDirect(r.payout_ratio) },
   /* Analyst recommendation mean: 1 = Strong Buy → 5 = Sell. Lower is
      more bullish, so the ramp paints high ratings (sell side) orange. */
   { key: "analyst_rating",label: "Rating",  w: 64,  align: "right", sortable: true,
@@ -185,11 +219,21 @@ const COL_INFO = {
   debt_equity:   "Debt-to-equity ratio. Higher means more leverage relative to shareholder equity.",
   current_ratio: "Current assets divided by current liabilities. Above 1 usually signals better short-term liquidity.",
   dividend_yield: "Annual cash dividend divided by price. Higher yields can support total return but may also reflect risk.",
+  price_book:    "Price-to-Book: market cap ÷ book value of equity. Below 1 can signal value (or distressed assets); less meaningful for asset-light businesses.",
+  roe:           "Return on Equity: trailing net income ÷ shareholder equity. Higher means more profit per dollar of equity; can be inflated by leverage.",
+  roa:           "Return on Assets: trailing net income ÷ total assets. Leverage-neutral profitability — useful to cross-check a high ROE.",
+  gross_margin:  "Gross margin: (revenue − cost of goods) ÷ revenue. Higher means more pricing power and production efficiency.",
+  profit_margin: "Net profit margin: trailing net income ÷ revenue. The bottom-line margin after all costs, interest, and tax.",
+  fcf_yield:     "Free-cash-flow yield: trailing free cash flow ÷ market cap. A cash-based valuation check — higher means more cash generated per dollar of price.",
+  revenue_growth: "Year-over-year revenue growth (most recent quarter vs the same quarter last year).",
+  earnings_growth: "Year-over-year earnings growth (most recent quarter vs the same quarter last year). Very large values usually reflect a small base-year number.",
+  quick_ratio:   "Quick ratio: (current assets − inventory) ÷ current liabilities. Stricter liquidity test than the current ratio; above 1 covers near-term obligations without selling inventory.",
+  payout_ratio:  "Dividend payout ratio: dividends ÷ net income. Lower is more sustainable and leaves room to grow the dividend; above 100% means paying out more than earned.",
   analyst_rating:"Mean analyst recommendation, 1 (Strong Buy) → 5 (Sell). Lower is more bullish.",
   target_upside_pct: "Distance from current price to mean analyst price target, signed (positive = upside).",
   w52_high:      "Highest closing price over the trailing 52 weeks.",
   w52_low:       "Lowest closing price over the trailing 52 weeks.",
-  news_sentiment: "AI-assessed news sentiment (last 7 days). Dot: green = bullish, gray = neutral, red = bearish. Hover for summary. Powered by Finnhub news + OpenRouter AI.",
+  news_sentiment: "News sentiment signal over the selected analysis window (News tab → Window, default 7 days): per-article AI scores aggregated with recency/source/novelty/relevance weights, plus a β·market systematic tilt. Dot: green = bullish, gray = neutral, red = bearish. Hover for the Bloomberg-style brief. Finnhub + Yahoo news, NVIDIA NIM scoring.",
 };
 
 /* Short (~40-55 char) inline descriptions for the Customize Columns modal —
@@ -231,6 +275,16 @@ const COL_INFO_SHORT = {
   debt_equity: "Leverage vs. equity",
   current_ratio: "Current assets ÷ liabilities",
   dividend_yield: "Annual dividend ÷ price",
+  price_book: "Price ÷ book value of equity",
+  roe: "Net income ÷ shareholder equity",
+  roa: "Net income ÷ total assets",
+  gross_margin: "Gross profit ÷ revenue",
+  profit_margin: "Net income ÷ revenue",
+  fcf_yield: "Free cash flow ÷ market cap",
+  revenue_growth: "Revenue growth, YoY",
+  earnings_growth: "Earnings growth, YoY",
+  quick_ratio: "Liquid assets ÷ liabilities",
+  payout_ratio: "Dividends ÷ net income",
   analyst_rating: "Mean analyst rating, 1–5",
   target_upside_pct: "Upside to mean price target",
   w52_high: "Highest close, trailing 52 weeks",
@@ -245,8 +299,13 @@ const COL_GROUP = {
   sector: "Core", industry: "Core",
   ps_ratio: "Valuation", pe_ratio: "Valuation", forward_pe: "Valuation",
   peg: "Valuation", ev_revenue: "Valuation", ev_ebitda: "Valuation",
+  price_book: "Valuation", fcf_yield: "Valuation",
   operating_margin: "Profitability & Leverage", debt_equity: "Profitability & Leverage",
   current_ratio: "Profitability & Leverage", dividend_yield: "Profitability & Leverage",
+  roe: "Profitability & Leverage", roa: "Profitability & Leverage",
+  gross_margin: "Profitability & Leverage", profit_margin: "Profitability & Leverage",
+  quick_ratio: "Profitability & Leverage", payout_ratio: "Profitability & Leverage",
+  revenue_growth: "Profitability & Leverage", earnings_growth: "Profitability & Leverage",
   pct_ytd: "Returns", pct_1y: "Returns", pct_1w: "Returns", pct_1m: "Returns",
   pct_3m: "Returns", pct_6m: "Returns", target_upside_pct: "Returns",
   spark: "Technical & Momentum", delta_ath: "Technical & Momentum", rs_rank: "Technical & Momentum",
@@ -900,6 +959,40 @@ function fmtCompactMoney(v, ccy) {
   return sym + scaled.toFixed(1) + unit;
 }
 function fmt2(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed(2); }
+
+/* Canonical user-visible date format across the app: "Jul 7, 2026".
+   Accepts a Date, epoch ms, or ISO string; bare YYYY-MM-DD strings are
+   parsed as local-calendar dates (not UTC) so they never shift a day. */
+function fmtDateMDY(d) {
+  let dt;
+  if (d instanceof Date) dt = d;
+  else if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    const [y, m, dd] = d.split("-").map(Number);
+    dt = new Date(y, m - 1, dd);
+  } else dt = new Date(d);
+  if (isNaN(dt)) return d == null ? "—" : String(d);
+  return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+/* Same, without the year — for compact stamps like the flash tape. */
+function fmtDateMD(d) {
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt)) return "—";
+  return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+/* Day-Month-Year, e.g. "09 Jul 2026" — used for the app version tag only
+   (conventional release-note date format, distinct from fmtDateMDY above). */
+function fmtDateDMY(d) {
+  let dt;
+  if (d instanceof Date) dt = d;
+  else if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    const [y, m, dd] = d.split("-").map(Number);
+    dt = new Date(y, m - 1, dd);
+  } else dt = new Date(d);
+  if (isNaN(dt)) return d == null ? "—" : String(d);
+  const day = String(dt.getDate()).padStart(2, "0");
+  const month = dt.toLocaleDateString("en-US", { month: "short" });
+  return `${day} ${month} ${dt.getFullYear()}`;
+}
 function fmtPctSigned(v) {
   if (v == null || !isFinite(v)) return na();
   const sign = v > 0 ? "+" : (v < 0 ? "" : "+");
@@ -2111,7 +2204,7 @@ function renderChart() {
     const p = (sec[sec.length-1][1] / sec[0][1] - 1) * 100;
     parts.push(`<span><b class="${p>=0?"pos":"neg"}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · ${DETAIL.data.sector_etf || "Sector"}</span>`);
   }
-  parts.push(`<span style="margin-left:auto">${new Date(t0).toLocaleDateString()} → ${new Date(t1).toLocaleDateString()}</span>`);
+  parts.push(`<span style="margin-left:auto">${fmtDateMDY(t0)} → ${fmtDateMDY(t1)}</span>`);
   const info = $("#m-range-info");
   info.innerHTML = parts.join("");
   info.style.display = "flex";
@@ -2186,7 +2279,7 @@ function attachChartInteraction() {
     const stockPct = (sp[1] / g.stock[0][1] - 1) * 100;
     const dt = new Date(sp[0]);
     tt.innerHTML = `
-      <div class="tt-date">${dt.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'})}</div>
+      <div class="tt-date">${fmtDateMDY(dt)}</div>
       <div class="tt-row"><span class="tt-label">Price</span><b>${fmtMoney(sp[1], DETAIL.data && DETAIL.data.currency)}</b></div>
       <div class="tt-row"><span class="tt-label">${DETAIL.data.symbol}</span><b style="color:${stockPct>=0?'var(--pos)':'var(--neg)'}">${(stockPct>=0?'+':'')+stockPct.toFixed(2)}%</b></div>
       ${extra}
@@ -2222,7 +2315,7 @@ function attachChartInteraction() {
             drag += `<span><b class="${p>=0?'pos':'neg'}">${(p>=0?'+':'')+p.toFixed(2)}%</b> · S&amp;P</span>`;
           }
         }
-        drag += `<span style="margin-left:auto">${new Date(g.stock[iA][0]).toLocaleDateString()} → ${new Date(g.stock[iB][0]).toLocaleDateString()}</span>`;
+        drag += `<span style="margin-left:auto">${fmtDateMDY(g.stock[iA][0])} → ${fmtDateMDY(g.stock[iB][0])}</span>`;
         info.innerHTML = drag;
       }
     }
@@ -2568,12 +2661,12 @@ function renderSections() {
   if (d.summary) {
     aboutHtml = `
       <div class="m-sec full">
-        <h3>About${d.next_earnings ? ` · Next earnings: <b style="color:var(--text); font-weight:700">${d.next_earnings}</b>` : ""}</h3>
+        <h3>About${d.next_earnings ? ` · Next earnings: <b style="color:var(--text); font-weight:700">${fmtDateMDY(d.next_earnings)}</b>` : ""}</h3>
         <div class="m-summary collapsed" id="m-summary">${escapeHtml(d.summary)}</div>
         <button class="m-summary-toggle" onclick="this.previousElementSibling.classList.toggle('collapsed'); this.textContent = this.previousElementSibling.classList.contains('collapsed') ? 'Show more' : 'Show less';">Show more</button>
       </div>`;
   } else if (d.next_earnings) {
-    aboutHtml = `<div class="m-sec full"><h3>Upcoming</h3><div class="m-summary">Next earnings: <b style="color:var(--text)">${d.next_earnings}</b></div></div>`;
+    aboutHtml = `<div class="m-sec full"><h3>Upcoming</h3><div class="m-summary">Next earnings: <b style="color:var(--text)">${fmtDateMDY(d.next_earnings)}</b></div></div>`;
   }
 
   sec.innerHTML = `
@@ -2640,7 +2733,7 @@ function relTime(iso) {
     if (diff < 3600) return Math.max(1, Math.floor(diff/60)) + "m ago";
     if (diff < 86400) return Math.floor(diff/3600) + "h ago";
     if (diff < 86400*30) return Math.floor(diff/86400) + "d ago";
-    return new Date(iso).toLocaleDateString();
+    return fmtDateMDY(iso);
   } catch { return ""; }
 }
 
@@ -3903,11 +3996,11 @@ function renderAnalystDashboard(a) {
   if (STATE.analyticsLoading && !holdings.length && !notCovered.length) {
     host.innerHTML = `
       <div class="an-head">
-        <span class="an-title">Analyst sentiment</span>
+        <span class="an-title">Analyst Sentiment</span>
         <span class="an-sub">Portfolio-weighted analyst consensus from yfinance.</span>
       </div>
       <div class="an-grid"><div class="an-card"><div class="lc-block">${lcHtml("loading analyst sentiment", {bar: true})}</div></div></div>
-      <div class="an-coverage-foot"><span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span></div>
+      <div class="an-coverage-foot"><span></span><span class="an-version">${versionLabel()}</span></div>
     `;
     return;
   }
@@ -3916,11 +4009,11 @@ function renderAnalystDashboard(a) {
   if (!holdings.length && !notCovered.length) {
     host.innerHTML = `
       <div class="an-head">
-        <span class="an-title">Analyst sentiment</span>
+        <span class="an-title">Analyst Sentiment</span>
         <span class="an-sub">Build a portfolio to see weighted analyst consensus, rating distribution and price-target upside.</span>
       </div>
       <div class="an-grid"><div class="an-card"><div style="color:var(--muted);font-size:12px;padding:6px 0">No analyst data yet.</div></div></div>
-      <div class="an-coverage-foot"><span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span></div>
+      <div class="an-coverage-foot"><span></span><span class="an-version">${versionLabel()}</span></div>
     `;
     return;
   }
@@ -4066,7 +4159,7 @@ function renderAnalystDashboard(a) {
 
   host.innerHTML = `
     <div class="an-head">
-      <span class="an-title">Analyst sentiment</span>
+      <span class="an-title">Analyst Sentiment</span>
       <span class="an-sub">Portfolio-weighted analyst consensus from yfinance · positions in ${escapeHtml(a.display_ccy || FX_QUOTE)}.${STATE.analyticsLoading ? ` ${lcHtml("refreshing", {bar: true})}` : ""}</span>
       <span class="an-mode-note">Aggregated by
         <button type="button" class="an-mode-btn" id="an-mode-btn" aria-haspopup="listbox" aria-expanded="false">
@@ -4083,8 +4176,8 @@ function renderAnalystDashboard(a) {
     </div>
     <div class="an-grid">${card1}${card2}${card3}${tableHtml}</div>
     <div class="an-coverage-foot">
-            ${notCoveredHtml}
-      <span>${new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</span>
+      <span>${notCoveredHtml}</span>
+      <span class="an-version">${versionLabel()}</span>
     </div>
   `;
 
@@ -4417,7 +4510,7 @@ function attachPortfolioChartInteraction(g) {
     }
     const dt = new Date(sp[0]);
     tt.innerHTML = `
-      <div class="tt-date">${dt.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'})}</div>
+      <div class="tt-date">${fmtDateMDY(dt)}</div>
       <div class="tt-row"><span>Portfolio</span><b class="${pct>=0?'pos':'neg'}">${(pct>=0?'+':'')+pct.toFixed(2)}%</b></div>
       ${extra}
     `;
@@ -4462,7 +4555,7 @@ function attachPortfolioChartInteraction(g) {
             drag += `<span><b class="${sc>=0?'pos':'neg'}">${(sc>=0?'+':'')+sc.toFixed(2)}%</b> · Sector mix</span>`;
           }
         }
-        drag += `<span class="selection-hint">${new Date(g.port[iA][0]).toLocaleDateString()} → ${new Date(g.port[iB][0]).toLocaleDateString()}</span>`;
+        drag += `<span class="selection-hint">${fmtDateMDY(g.port[iA][0])} → ${fmtDateMDY(g.port[iB][0])}</span>`;
         info.innerHTML = drag;
       }
     }
@@ -4994,64 +5087,184 @@ $("#news-btn").onclick = () => {
   if (willOpen) loadNewsSentiment();
 };
 $("#ns-refresh").onclick = () => refreshNewsSentiment();
+$("#ns-diag-toggle").onclick = (e) => {
+  // The (i) button lives inside the toggle header — let it handle its own
+  // click without also collapsing/expanding the diagnostics body.
+  if (e.target.closest("#ns-diag-info")) return;
+  toggleNsDiagnostics();
+};
+$("#ns-diag-info").onclick = (e) => { e.stopPropagation(); toggleNsDiagAbout(); };
+
+/* Panel-local state: sentiment dicts are the enriched backend shape
+ * (s_idio / s_sys / s_total / confidence / events / disagreement + legacy
+ * tier/score/summary). Articles come from the cache-only tape route and
+ * carry per-article score/event/relevance after an array-scored refresh. */
+const NS = {
+  market: null,
+  sentiment: {},
+  articles: [],
+  status: null,
+  filterSym: "",
+  filterEvent: "",
+  tapeTiers: new Set(),  // sentiment-tier filter for the flash tape (empty = all)
+  sortKey: "total",   // constituent-table sort column
+  sortDir: -1,        // 1 asc, -1 desc
+  expanded: null,     // symbol whose brief row is expanded in the table
+  diagLoaded: false,
+  // Analysis window (item 3): how far back the news fetch/scoring reaches.
+  // Applied on the next Refresh; persisted per user.
+  lookbackDays: (() => {
+    const v = parseInt(localStorage.getItem("ns_lookback") || "7", 10);
+    return [3, 7, 14, 30].includes(v) ? v : 7;
+  })(),
+  tlSym: "",         // timeline ticker filter ("" = all)
+  tlPeriod: "1W",    // timeline window
+};
+
+/* Lookback control wiring — active pill + persistence. The new window only
+ * takes effect on Refresh (cache-bust path), which the tooltip explains. */
+(() => {
+  const box = $("#ns-lookback");
+  if (!box) return;
+  const sync = () => box.querySelectorAll("button[data-days]").forEach(b =>
+    b.classList.toggle("active", parseInt(b.dataset.days, 10) === NS.lookbackDays));
+  box.querySelectorAll("button[data-days]").forEach(b => {
+    b.onclick = () => {
+      NS.lookbackDays = parseInt(b.dataset.days, 10);
+      localStorage.setItem("ns_lookback", String(NS.lookbackDays));
+      sync();
+      renderNsTimeline();
+    };
+  });
+  sync();
+})();
+
+function nsSymbols() { return DATA.map(r => r.symbol).filter(Boolean); }
 
 async function loadNewsSentiment() {
-  const body = $("#ns-market-body");
-  const pBody = $("#ns-portfolio-body");
-  const indBody = $("#ns-indices-body");
-  body.innerHTML = '<div class="ns-loading">Loading market sentiment...</div>';
-  pBody.innerHTML = '<div class="ns-loading">Loading constituent sentiment...</div>';
-  indBody.innerHTML = '<div class="ns-loading">Analyzing portfolio news...</div>';
+  const symbols = nsSymbols();
+  $("#ns-market-body").innerHTML = '<div class="ns-loading">Loading market sentiment...</div>';
+  $("#ns-portfolio-body").innerHTML = '<div class="ns-loading">Loading constituent sentiment...</div>';
 
-  const symbols = DATA.map(r => r.symbol).filter(Boolean);
   const mktP = fetch("/api/news-market").then(r => r.json());
   const pfP = symbols.length
     ? fetch(`/api/news-sentiment?symbols=${encodeURIComponent(symbols.join(","))}`).then(r => r.json())
     : Promise.resolve(null);
-  const [mktRes, pfRes] = await Promise.allSettled([mktP, pfP]);
+  const tapeP = symbols.length
+    ? fetch(`/api/news-tape?symbols=${encodeURIComponent(symbols.join(","))}`).then(r => r.json())
+    : Promise.resolve(null);
+  const [mktRes, pfRes, tapeRes] = await Promise.allSettled([mktP, pfP, tapeP]);
 
-  if (mktRes.status === "fulfilled") renderMarketSentiment(mktRes.value);
-  else body.innerHTML = '<div class="ns-panel-empty">Failed to load market sentiment.</div>';
-
-  if (!symbols.length) {
-    setNewsUpdatedLabel(mktRes.status === "fulfilled" ? mktRes.value.sentiment : null, null);
-    pBody.innerHTML = '<div class="ns-panel-empty">Build the dashboard first to see per-stock sentiment.</div>';
-    return;
+  if (mktRes.status === "fulfilled") {
+    NS.market = mktRes.value.sentiment || null;
+    NS.status = mktRes.value.status || NS.status;
   }
   if (pfRes.status === "fulfilled" && pfRes.value) {
-    const sentiment = pfRes.value.sentiment || {};
-    renderPortfolioSentiment(sentiment, symbols, pfRes.value.status);
-    setNewsUpdatedLabel(mktRes.status === "fulfilled" ? mktRes.value.sentiment : null, sentiment);
-    patchRowSentiment(sentiment);
-  } else {
-    setNewsUpdatedLabel(mktRes.status === "fulfilled" ? mktRes.value.sentiment : null, null);
-    pBody.innerHTML = '<div class="ns-panel-empty">Failed to load portfolio sentiment.</div>';
-    indBody.innerHTML = '<div class="ns-panel-empty">Failed.</div>';
+    NS.sentiment = pfRes.value.sentiment || {};
+    NS.status = pfRes.value.status || NS.status;
   }
+  if (tapeRes.status === "fulfilled" && tapeRes.value) {
+    NS.articles = tapeRes.value.articles || [];
+  }
+  renderNewsPanel(symbols);
+  if (Object.keys(NS.sentiment).length) patchRowSentiment(NS.sentiment);
+}
+
+function nsRefreshContext(symbols) {
+  /* Quant context shipped to the backend: betas + row numbers feed the
+   * decomposition and the Bloomberg briefs; weights drive staged order
+   * and let the server know the active weighting. */
+  const weights = weightsForMode(STATE.mode) || {};
+  const betas = {}, rows = {};
+  for (const r of DATA) {
+    if (!r.symbol) continue;
+    if (r.beta != null) betas[r.symbol] = r.beta;
+    rows[r.symbol] = {
+      name: r.name ?? null,
+      price: r.price ?? null,
+      pct_1d: r.pct_1d ?? null,
+      pct_1w: r.pct_1w ?? null,
+      pct_ytd: r.pct_ytd ?? null,
+      delta_ath: r.delta_ath ?? null,
+    };
+  }
+  return {weights, betas, rows, lookback_days: NS.lookbackDays};
 }
 
 async function refreshNewsSentiment() {
   const btn = $("#ns-refresh");
   btn.disabled = true;
-  btn.textContent = "Refreshing...";
-  const symbols = DATA.map(r => r.symbol).filter(Boolean);
+  const symbols = nsSymbols();
+  let done = 0;
+  btn.textContent = "Refreshing…";
 
   try {
     const resp = await fetch("/api/news-refresh", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({symbols}),
+      body: JSON.stringify({symbols, context: nsRefreshContext(symbols)}),
     });
-    const data = await resp.json();
-    renderMarketSentiment({sentiment: data.market, articles: null, status: data.status});
-    renderPortfolioSentiment(data.portfolio || {}, symbols, data.status);
-    patchRowSentiment(data.portfolio || {});
-    setNewsUpdatedLabel(data.market, data.portfolio || {});
+    if (!resp.ok || !resp.body) {
+      const j = await resp.json().catch(() => ({}));
+      throw new Error(j.error || ("HTTP " + resp.status));
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done: rDone, value } = await reader.read();
+      if (rDone) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.type === "market") {
+          NS.market = msg.sentiment || null;
+          renderMarketSentiment();
+          btn.textContent = `Refreshing… market ✓ 0/${symbols.length}`;
+        } else if (msg.type === "symbol") {
+          done += 1;
+          if (msg.sentiment) NS.sentiment[msg.symbol] = msg.sentiment;
+          renderNsGauge(symbols);
+          renderPortfolioSentiment(symbols);
+          btn.textContent = `Refreshing… ${done}/${symbols.length}`;
+        } else if (msg.type === "done") {
+          NS.market = msg.market || NS.market;
+          NS.sentiment = msg.portfolio || NS.sentiment;
+          NS.status = msg.status || NS.status;
+        } else if (msg.type === "error") {
+          throw new Error(msg.error || "refresh failed");
+        }
+      }
+    }
+    // Tape articles now carry fresh per-article scores — reload them.
+    try {
+      const tape = await fetch(`/api/news-tape?symbols=${encodeURIComponent(symbols.join(","))}`).then(r => r.json());
+      NS.articles = tape.articles || [];
+    } catch (e) { /* tape is decorative — keep the stale one */ }
+    renderNewsPanel(symbols);
+    patchRowSentiment(NS.sentiment);
   } catch (e) {
-    $("#ns-market-body").innerHTML = '<div class="ns-panel-empty">Refresh failed.</div>';
+    $("#ns-market-body").innerHTML = `<div class="ns-panel-empty">Refresh failed. ${escapeHtml(String(e.message || e))}</div>`;
   }
   btn.disabled = false;
   btn.textContent = "↻ Refresh";
+}
+
+function renderNewsPanel(symbols) {
+  symbols = symbols || nsSymbols();
+  renderNsGauge(symbols);
+  renderMarketSentiment();
+  renderNsMovers();
+  renderNsWatch(symbols);
+  renderNsTimeline();
+  renderNsTape();
+  renderPortfolioSentiment(symbols);
+  setNewsUpdatedLabel(NS.market, NS.sentiment);
 }
 
 function latestNewsAssessment(marketSentiment, portfolioSentiment) {
@@ -5076,7 +5289,8 @@ function setNewsUpdatedLabel(marketSentiment, portfolioSentiment) {
     return;
   }
   const dt = new Date(stamp);
-  updated.textContent = `As of ${dt.toLocaleString()}`;
+  const time = dt.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  updated.textContent = `As of ${fmtDateMDY(dt)}, ${time}`;
 }
 
 function nsKeyDiagnostic(status) {
@@ -5096,84 +5310,637 @@ function nsKeyDiagnostic(status) {
   return "Rate-limited or temporarily unavailable — try again in ~60s.";
 }
 
-function renderMarketSentiment(mkt) {
+function fmtSig(v, digits = 2) {
+  if (v == null || !isFinite(v)) return "—";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(digits)}`;
+}
+
+function nsScoreDot(score) {
+  /* Per-article / per-signal dot colored by sign+magnitude. */
+  if (score == null || !isFinite(score)) return '<span class="ns-dot ns-empty"></span>';
+  let color = "#94a3b8";
+  if (score > 0.15) color = score > 0.5 ? "#22c55e" : "#4ade80";
+  else if (score < -0.15) color = score < -0.5 ? "#ef4444" : "#f87171";
+  return `<span class="ns-dot" style="background:${color}" data-tip="${fmtSig(score)}"></span>`;
+}
+
+function nsTierFromScore(s) {
+  /* Client-side label for aggregate numbers (portfolio gauge). Fixed
+   * thresholds — per-stock tiers come calibrated from the server. */
+  if (s <= -0.5) return "very_bearish";
+  if (s <= -0.15) return "bearish";
+  if (s < 0.15) return "neutral";
+  if (s < 0.5) return "bullish";
+  return "very_bullish";
+}
+
+const NS_EVENT_LABELS = {
+  earnings: "Earnings", guidance: "Guidance", ma: "M&A", analyst: "Analyst",
+  legal_regulatory: "Legal/Reg", product: "Product", insider: "Insider",
+  macro: "Macro", other: "Other",
+};
+
+function renderNsGauge(symbols) {
+  const body = $("#ns-gauge-body");
+  const weights = weightsForMode(STATE.mode) || {};
+  let W = 0, sTot = 0, sSys = 0, sIdio = 0, nAssessed = 0, nBear = 0, nFlag = 0;
+  for (const sym of symbols) {
+    const s = NS.sentiment[sym];
+    if (!s || s.s_total == null) continue;
+    const wi = weights[sym] != null ? weights[sym] : 1 / Math.max(1, symbols.length);
+    W += wi;
+    sTot += wi * s.s_total;
+    sSys += wi * (s.s_sys || 0);
+    sIdio += wi * (s.s_idio || 0);
+    nAssessed++;
+    if (s.tier === "bearish" || s.tier === "very_bearish") nBear++;
+    if (s.disagreement) nFlag++;
+  }
+  if (!W || !nAssessed) {
+    body.innerHTML = `<div class="ns-panel-empty">No assessed holdings yet. ${escapeHtml(nsKeyDiagnostic(NS.status))}</div>`;
+    return;
+  }
+  sTot /= W; sSys /= W; sIdio /= W;
+  const tier = nsTierFromScore(sTot);
+  const tierLabel = NS_LABELS[tier] || "Neutral";
+  const barSeg = (v, cls) => {
+    const pct = Math.min(100, Math.abs(v) * 100);
+    return `<div class="ns-decomp-row">
+      <span class="ns-decomp-label">${cls === "sys" ? "Systematic (β·mkt)" : "Stock-specific"}</span>
+      <span class="ns-decomp-track"><span class="ns-decomp-fill ${cls} ${v >= 0 ? "pos" : "neg"}" style="width:${pct}%"></span></span>
+      <span class="ns-decomp-val">${fmtSig(v)}</span>
+    </div>`;
+  };
+  const flagNote = nFlag ? ` · ${nFlag} flagged ⚑` : "";
+  // Analysis-window transparency (item 3): surface the lookback + recency tau
+  // the assessed signals were actually computed with.
+  const anyS = symbols.map(s => NS.sentiment[s]).find(s => s && s.lookback_days);
+  const windowNote = anyS
+    ? ` · window ${anyS.lookback_days}d (recency τ ${anyS.recency_tau_days ?? "3"}d)` : "";
+  body.innerHTML = `
+    <div class="ns-gauge-top">
+      <span class="ns-gauge-num">${fmtSig(sTot)}</span>
+      <span class="ns-tier-badge ${tier}">${escapeHtml(tierLabel)}</span>
+    </div>
+    ${barSeg(sSys, "sys")}
+    ${barSeg(sIdio, "idio")}
+    <div class="ns-gauge-foot">${nAssessed} of ${symbols.length} holdings assessed · ${nBear} bearish${flagNote}${windowNote}</div>
+  `;
+}
+
+function renderMarketSentiment() {
   const body = $("#ns-market-body");
-  const s = mkt.sentiment;
+  const s = NS.market;
   if (!s) {
-    const msg = nsKeyDiagnostic(mkt && mkt.status);
-    body.innerHTML = `<div class="ns-panel-empty">No market sentiment available. ${escapeHtml(msg)}</div>`;
+    body.innerHTML = `<div class="ns-panel-empty">No market sentiment available. ${escapeHtml(nsKeyDiagnostic(NS.status))}</div>`;
     return;
   }
   const tierLabel = NS_LABELS[s.tier] || "Neutral";
   const tierCls = NS_COLORS[s.tier] ? s.tier : "neutral";
+  const tape = s.tape ? `<div class="ns-mkt-tape">${escapeHtml(s.tape)}</div>` : "";
+  const conf = s.confidence != null ? ` · conf ${(s.confidence * 100).toFixed(0)}%` : "";
   body.innerHTML = `
     <div class="ns-market-summary">${escapeHtml(s.summary)}</div>
+    ${tape}
     <span class="ns-tier-badge ${tierCls}">${escapeHtml(tierLabel)}</span>
-    <span class="ns-score">${s.score >= 0 ? "+" : ""}${s.score.toFixed(2)} | ${s.article_count || 0} articles</span>
+    <span class="ns-score">${fmtSig(s.score)} | ${s.article_count || 0} articles${conf}</span>
   `;
 }
 
-function renderPortfolioSentiment(sentiment, symbols, status) {
-  const indBody = $("#ns-indices-body");
-  const pBody = $("#ns-portfolio-body");
+function nsBestArticle(sym) {
+  /* Attribution pick for Movers: the highest-|score| high/med-relevance
+   * article, else the most recent one. */
+  const arts = NS.articles.filter(a => a.symbol === sym);
+  if (!arts.length) return null;
+  const scored = arts.filter(a => a.score != null && a.relevance !== "low");
+  if (scored.length) {
+    scored.sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
+    return scored[0];
+  }
+  return arts[0];
+}
 
-  const tiers = {very_bullish: 0, bullish: 0, neutral: 0, bearish: 0, very_bearish: 0};
-  let counted = 0;
+function renderNsMovers() {
+  const body = $("#ns-movers-body");
+  const movers = DATA.filter(r => r.symbol && r.pct_1d != null)
+    .sort((a, b) => Math.abs(b.pct_1d) - Math.abs(a.pct_1d))
+    .slice(0, 5);
+  if (!movers.length) {
+    body.innerHTML = '<div class="ns-panel-empty">Build the dashboard to see movers.</div>';
+    return;
+  }
+  const rows = movers.map(r => {
+    const art = nsBestArticle(r.symbol);
+    const head = art
+      ? `<a href="${escapeHtml(art.url || "#")}" target="_blank" rel="noopener">${escapeHtml(art.headline || "")}</a>` +
+        (art.source ? ` <span class="ns-src">${escapeHtml(art.source)}</span>` : "")
+      : '<span class="ns-src">no recent coverage</span>';
+    return `<div class="ns-mover-row">
+      <span class="ns-tape-sym">${r.symbol}</span>
+      <span class="${r.pct_1d >= 0 ? "pos" : "neg"} ns-mover-pct">${fmtPctSigned(r.pct_1d)}</span>
+      <span class="ns-mover-head">${head}</span>
+    </div>`;
+  });
+  body.innerHTML = rows.join("");
+}
+
+function renderNsWatch(symbols) {
+  const body = $("#ns-watch-body");
+  const items = [];
   for (const sym of symbols) {
-    const s = sentiment[sym];
-    if (s && s.tier && tiers[s.tier] !== undefined) { tiers[s.tier]++; counted++; }
-  }
-
-  if (counted) {
-    const parts = [];
-    for (const [tier, count] of Object.entries(tiers)) {
-      if (count > 0) {
-        const pct = (count / counted * 100).toFixed(0);
-        const label = NS_LABELS[tier] || tier;
-        const color = NS_COLORS[tier] || "#94a3b8";
-        parts.push(`<span style="color:${color};font-weight:600">${pct}%</span> ${label}`);
-      }
+    const s = NS.sentiment[sym];
+    if (!s) continue;
+    if (s.disagreement) {
+      items.push(`<div class="ns-watch-row">⚑ <b>${sym}</b> — AI and dictionary sentiment disagree; treat the signal with caution.</div>`);
     }
-    const total = (status && typeof status.total === "number") ? status.total : symbols.length;
-    indBody.innerHTML = `
-      <div style="font-size:12px;line-height:1.8">${parts.join(" &middot; ")}</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:4px">${counted} of ${total} stocks assessed</div>
-    `;
-  } else {
-    const msg = nsKeyDiagnostic(status);
-    indBody.innerHTML = `<div class="ns-panel-empty">No sentiment data available. ${escapeHtml(msg)}</div>`;
+    if (s.tier === "very_bearish" || s.tier === "very_bullish") {
+      const lbl = NS_LABELS[s.tier] || s.tier;
+      const color = NS_COLORS[s.tier] || "var(--muted)";
+      items.push(`<div class="ns-watch-row"><span style="color:${color};font-weight:600">●</span> <b>${sym}</b> — ${lbl}: ${escapeHtml(s.summary || "")}</div>`);
+    }
   }
-
   const dataBySymbol = new Map(DATA.map(d => [d.symbol, d]));
-  const rows = symbols.map(sym => {
-    const r = dataBySymbol.get(sym) || {};
-    const s = sentiment[sym];
-    return {sym, name: r.name || "", price: r.price, pct: r.pct_1d, currency: r.currency, s};
+  for (const sym of symbols) {
+    const ne = (dataBySymbol.get(sym) || {}).next_earnings;
+    if (ne) items.push(`<div class="ns-watch-row">📅 <b>${sym}</b> — earnings ${escapeHtml(fmtDateMDY(ne))}</div>`);
+  }
+  body.innerHTML = items.length ? items.slice(0, 10).join("")
+    : '<div class="ns-panel-empty">Nothing flagged — no strong signals, disagreements, or imminent catalysts.</div>';
+}
+
+function renderNsTape() {
+  const filtBody = $("#ns-tape-filters");
+  const body = $("#ns-tape-body");
+  if (!NS.articles.length) {
+    filtBody.innerHTML = "";
+    body.innerHTML = '<div class="ns-panel-empty">No cached articles yet — refresh to fill the tape.</div>';
+    return;
+  }
+  const syms = [...new Set(NS.articles.map(a => a.symbol))].sort();
+  const events = [...new Set(NS.articles.map(a => a.event).filter(Boolean))];
+  const symOpts = ['<option value="">All tickers</option>']
+    .concat(syms.map(s => `<option value="${s}" ${NS.filterSym === s ? "selected" : ""}>${s}</option>`)).join("");
+  // Sentiment-tier filter (multi-select). Empty set = All. Any combination of
+  // the five tiers can be active at once (item 5): click "All" to clear, or
+  // toggle individual tiers to build e.g. {very_bearish, bearish}.
+  const tierChipDefs = [
+    ["very_bullish", "Very Bullish"], ["bullish", "Bullish"], ["neutral", "Neutral"],
+    ["bearish", "Bearish"], ["very_bearish", "Very Bearish"],
+  ];
+  const allOn = NS.tapeTiers.size === 0;
+  const tierChips =
+    `<button class="ns-tier-chip ${allOn ? "on" : ""}" data-tier="__all__">All</button>` +
+    tierChipDefs.map(([t, lbl]) =>
+      `<button class="ns-tier-chip t-${t} ${NS.tapeTiers.has(t) ? "on" : ""}" data-tier="${t}">${lbl}</button>`).join("");
+  const evChips = events.map(ev =>
+    `<button class="ns-ev-chip ${NS.filterEvent === ev ? "on" : ""}" data-ev="${ev}">${NS_EVENT_LABELS[ev] || ev}</button>`).join("");
+  filtBody.innerHTML =
+    `<select id="ns-tape-sym-filter" class="ns-tape-select">${symOpts}</select>` +
+    `<span class="ns-tape-sep"></span><span class="ns-tape-grp">${tierChips}</span>` +
+    (evChips ? `<span class="ns-tape-sep"></span><span class="ns-tape-grp">${evChips}</span>` : "");
+  const sel = $("#ns-tape-sym-filter");
+  if (sel) sel.onchange = () => { NS.filterSym = sel.value; renderNsTape(); };
+  filtBody.querySelectorAll(".ns-tier-chip").forEach(btn => {
+    btn.onclick = () => {
+      const t = btn.dataset.tier;
+      if (t === "__all__") { NS.tapeTiers.clear(); }
+      else if (NS.tapeTiers.has(t)) { NS.tapeTiers.delete(t); }
+      else { NS.tapeTiers.add(t); }
+      renderNsTape();
+    };
+  });
+  filtBody.querySelectorAll(".ns-ev-chip").forEach(btn => {
+    btn.onclick = () => {
+      NS.filterEvent = NS.filterEvent === btn.dataset.ev ? "" : btn.dataset.ev;
+      renderNsTape();
+    };
   });
 
+  let arts = NS.articles;
+  if (NS.filterSym) arts = arts.filter(a => a.symbol === NS.filterSym);
+  if (NS.filterEvent) arts = arts.filter(a => a.event === NS.filterEvent);
+  if (NS.tapeTiers.size) arts = arts.filter(a =>
+    a.score != null && isFinite(a.score) && NS.tapeTiers.has(nsTierFromScore(a.score)));
+  arts = arts.slice(0, 120);
+  if (!arts.length) {
+    body.innerHTML = '<div class="ns-panel-empty">No articles match the filter.</div>';
+    return;
+  }
+  const rows = arts.map(a => {
+    const dt = a.datetime ? new Date(a.datetime * 1000) : null;
+    const stamp = dt ? `${fmtDateMD(dt)} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}` : "—";
+    const ev = a.event ? `<span class="ns-ev-tag">${NS_EVENT_LABELS[a.event] || a.event}</span>` : "";
+    const dup = a.n_duplicates ? `<span class="ns-dup" data-tip="${a.n_duplicates} syndicated copies collapsed">×${a.n_duplicates + 1}</span>` : "";
+    return `<div class="ns-tape-row">
+      <span class="ns-tape-time">${stamp}</span>
+      <span class="ns-tape-sym">${escapeHtml(a.symbol || "")}</span>
+      ${nsScoreDot(a.score)}
+      <span class="ns-tape-head"><a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a></span>
+      ${ev}${dup}
+      <span class="ns-src">${escapeHtml(a.source || "")}</span>
+    </div>`;
+  });
+  body.innerHTML = rows.join("");
+}
+
+/* --- News Timeline (item 4) ---------------------------------------------
+ * x = time, one bar per cached article. Bar height encodes signal strength
+ * (strong = very bullish/bearish, medium = bullish/bearish, short gray =
+ * neutral/unscored); color encodes direction. Period tabs mirror the price
+ * charts; the ticker select mirrors the Flash Tape filter. Pure HTML/CSS
+ * bars (no canvas) so the shared [data-tip] tooltip system works per bar. */
+const NS_TL_PERIODS = [["1D", 1], ["3D", 3], ["1W", 7], ["2W", 14], ["1M", 30]];
+
+function nsTlLevel(score) {
+  if (score == null || !isFinite(score)) return { h: 22, color: "#94a3b8", lbl: "neutral" };
+  const a = Math.abs(score);
+  if (a > 0.5) return { h: 92, color: score > 0 ? "#22c55e" : "#ef4444", lbl: score > 0 ? "very bullish" : "very bearish" };
+  if (a > 0.15) return { h: 58, color: score > 0 ? "#4ade80" : "#f87171", lbl: score > 0 ? "bullish" : "bearish" };
+  return { h: 22, color: "#94a3b8", lbl: "neutral" };
+}
+
+function renderNsTimeline() {
+  const ctl = $("#ns-tl-controls");
+  const body = $("#ns-tl-body");
+  if (!ctl || !body) return;
+  if (!NS.articles.length) {
+    ctl.innerHTML = "";
+    body.innerHTML = '<div class="ns-panel-empty">No cached articles yet — refresh to fill the timeline.</div>';
+    return;
+  }
+  // Controls: ticker select (like the tape) + period tabs (like price charts).
+  const syms = [...new Set(NS.articles.map(a => a.symbol))].sort();
+  const symOpts = ['<option value="">All tickers</option>']
+    .concat(syms.map(s => `<option value="${s}" ${NS.tlSym === s ? "selected" : ""}>${s}</option>`)).join("");
+  const periodBtns = NS_TL_PERIODS.map(([p]) =>
+    `<button class="ns-tl-p ${NS.tlPeriod === p ? "active" : ""}" data-p="${p}" type="button">${p}</button>`).join("");
+  ctl.innerHTML =
+    `<select id="ns-tl-sym" class="ns-tape-select">${symOpts}</select>` +
+    `<span class="ns-tl-periods">${periodBtns}</span>` +
+    `<span class="ns-tl-legend">` +
+    `<span class="ns-tl-lg"><i style="background:#22c55e;height:10px"></i>strong</span>` +
+    `<span class="ns-tl-lg"><i style="background:#4ade80;height:7px"></i>moderate</span>` +
+    `<span class="ns-tl-lg"><i style="background:#94a3b8;height:4px"></i>neutral</span>` +
+    `<span class="ns-tl-lg">green bullish · red bearish</span></span>`;
+  $("#ns-tl-sym").onchange = (e) => { NS.tlSym = e.target.value; renderNsTimeline(); };
+  ctl.querySelectorAll(".ns-tl-p").forEach(b => {
+    b.onclick = () => { NS.tlPeriod = b.dataset.p; renderNsTimeline(); };
+  });
+
+  const days = (NS_TL_PERIODS.find(([p]) => p === NS.tlPeriod) || ["1W", 7])[1];
+  const now = Date.now();
+  const t0 = now - days * 86400e3;
+  let arts = NS.articles.filter(a => a.datetime && a.datetime * 1000 >= t0);
+  if (NS.tlSym) arts = arts.filter(a => a.symbol === NS.tlSym);
+  if (!arts.length) {
+    body.innerHTML = '<div class="ns-panel-empty">No articles in this window — widen the period or the analysis window, then refresh.</div>';
+    return;
+  }
+  // Bars, oldest→newest so later (newer) bars paint on top when overlapping.
+  arts = arts.slice().sort((a, b) => a.datetime - b.datetime);
+  const bars = arts.map(a => {
+    const x = ((a.datetime * 1000 - t0) / (now - t0)) * 100;
+    const lv = nsTlLevel(a.score);
+    const dt = new Date(a.datetime * 1000);
+    const stamp = `${fmtDateMD(dt)} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+    const sc = (a.score != null && isFinite(a.score)) ? ` ${fmtSig(a.score)}` : "";
+    const head = (a.headline || "").slice(0, 110);
+    const tip = `${stamp} · ${a.symbol || ""}${sc} (${lv.lbl}) — ${head}`;
+    return `<a class="ns-tl-bar" href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener"
+      style="left:${x.toFixed(3)}%;height:${lv.h}%;background:${lv.color}"
+      data-tip="${escapeHtml(tip)}"></a>`;
+  }).join("");
+  // Time axis: ~5 evenly spaced ticks with subtle grid lines.
+  const nTicks = 5;
+  let ticks = "";
+  for (let i = 0; i <= nTicks; i++) {
+    const frac = i / nTicks;
+    const t = t0 + frac * (now - t0);
+    const d = new Date(t);
+    const lbl = days <= 3
+      ? `${fmtDateMD(d)} ${String(d.getHours()).padStart(2, "0")}:00`
+      : fmtDateMD(d);
+    ticks += `<span class="ns-tl-tick" style="left:${(frac * 100).toFixed(2)}%"><i></i>${lbl}</span>`;
+  }
+  body.innerHTML = `<div class="ns-tl-plot">${ticks}${bars}<div class="ns-tl-baseline"></div></div>`;
+}
+
+/* --- Resizable news quad (item 1) ----------------------------------------
+ * The vertical gutter re-splits the two columns (fr units — intrinsically
+ * zero-sum), the horizontal gutter re-splits the two rows (pixel heights,
+ * frozen from the live layout on first drag so total height is conserved).
+ * Cards reflow/auto-scale live during the drag because only grid tracks
+ * change. Double-click a gutter to reset; splits persist per user. */
+(() => {
+  const quad = $("#ns-quad");
+  const gv = $("#ns-qgut-v"), gh = $("#ns-qgut-h");
+  if (!quad || !gv || !gh) return;
+  const KEY = "ns_quad_split";
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch { saved = {}; }
+  const apply = (s) => {
+    if (s.c1 != null) {
+      quad.style.setProperty("--nsq-c1", `${s.c1}fr`);
+      quad.style.setProperty("--nsq-c2", `${1 - s.c1}fr`);
+    }
+    if (s.r1 != null && s.r2 != null) {
+      quad.style.setProperty("--nsq-r1", `${s.r1}px`);
+      quad.style.setProperty("--nsq-r2", `${s.r2}px`);
+      quad.classList.add("rows-fixed");
+    }
+  };
+  apply(saved);
+  const persist = () => localStorage.setItem(KEY, JSON.stringify(saved));
+
+  gv.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    try { gv.setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
+    const rect = quad.getBoundingClientRect();
+    const gut = gv.getBoundingClientRect().width;
+    const move = (ev) => {
+      const frac = Math.min(0.8, Math.max(0.2, (ev.clientX - rect.left) / (rect.width - gut)));
+      saved.c1 = Math.round(frac * 1000) / 1000;
+      apply(saved);
+    };
+    const up = () => {
+      gv.removeEventListener("pointermove", move);
+      gv.removeEventListener("pointerup", up);
+      persist();
+    };
+    gv.addEventListener("pointermove", move);
+    gv.addEventListener("pointerup", up);
+  });
+
+  gh.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    try { gh.setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
+    // Freeze the current auto row heights so the drag is zero-sum in px.
+    const h1 = $("#ns-gauge-card").getBoundingClientRect().height;
+    const h2 = $("#ns-movers-card").getBoundingClientRect().height;
+    const total = h1 + h2;
+    const y0 = e.clientY;
+    const move = (ev) => {
+      if (total < 130) return; // too small to split meaningfully
+      const dy = ev.clientY - y0;
+      const min = Math.min(60, total / 2); // keep clamp bounds ordered even for short cards
+      const r1 = Math.min(total - min, Math.max(min, h1 + dy));
+      saved.r1 = Math.round(r1);
+      saved.r2 = Math.round(total - r1);
+      apply(saved);
+    };
+    const up = () => {
+      gh.removeEventListener("pointermove", move);
+      gh.removeEventListener("pointerup", up);
+      persist();
+    };
+    gh.addEventListener("pointermove", move);
+    gh.addEventListener("pointerup", up);
+  });
+
+  const reset = (which) => {
+    if (which === "v") { delete saved.c1; quad.style.removeProperty("--nsq-c1"); quad.style.removeProperty("--nsq-c2"); }
+    else {
+      delete saved.r1; delete saved.r2;
+      quad.style.removeProperty("--nsq-r1"); quad.style.removeProperty("--nsq-r2");
+      quad.classList.remove("rows-fixed");
+    }
+    persist();
+  };
+  gv.addEventListener("dblclick", () => reset("v"));
+  gh.addEventListener("dblclick", () => reset("h"));
+})();
+
+function renderPortfolioSentiment(symbols, _status) {
+  const pBody = $("#ns-portfolio-body");
+  symbols = symbols || nsSymbols();
+  if (!symbols.length) {
+    pBody.innerHTML = '<div class="ns-panel-empty">Build the dashboard first to see per-stock sentiment.</div>';
+    return;
+  }
+  const dataBySymbol = new Map(DATA.map(d => [d.symbol, d]));
+  // Sortable column registry. `sv(sym)` returns the sort value (numbers for
+  // numeric columns, lowercased strings for text). Events is intentionally
+  // absent — sorting a set of event tags is meaningless (item 3).
+  const nsCols = [
+    { key: "ticker",  label: "Ticker",  cls: "",  align: "l", sv: (r) => (r.symbol || "").toLowerCase() },
+    { key: "company", label: "Company", cls: "",  align: "l", sv: (r) => (r.name || "").toLowerCase() },
+    { key: "price",   label: "Price",   cls: "r", align: "r", sv: (r) => r.price },
+    { key: "pct_1d",  label: "% 1D",    cls: "r", align: "r", sv: (r) => r.pct_1d },
+    { key: "beta",    label: "β",       cls: "r", align: "r", sv: (r) => r.beta },
+    { key: "idio",    label: "Idio",    cls: "r", align: "r", tip: "Idiosyncratic news score — company-specific signal only", sv: (r, s) => s ? s.s_idio : null },
+    { key: "sys",     label: "Sys",     cls: "r", align: "r", tip: "Systematic tilt: κ·β·market sentiment", sv: (r, s) => s ? s.s_sys : null },
+    { key: "total",   label: "Total",   cls: "c", align: "c", tip: "Total signal = clip(κ·β·mkt + idio), tier calibrated vs trailing distribution", sv: (r, s) => s ? s.s_total : null },
+    { key: "conf",    label: "Conf",    cls: "c", align: "c", tip: "Confidence: evidence mass, article agreement, self-consistency", sv: (r, s) => s ? s.confidence : null },
+    { key: "events",  label: "Events",  cls: "",  align: "l", sortable: false },
+    { key: "flag",    label: "⚑",       cls: "c", align: "c", tip: "AI vs Loughran-McDonald dictionary disagreement flag", sv: (r, s) => (s && s.disagreement) ? 1 : 0 },
+  ];
+  const colByKey = Object.fromEntries(nsCols.map(c => [c.key, c]));
+  // Sort the symbol order. Missing values always sink to the bottom regardless
+  // of direction, so unassessed holdings never crowd the top.
+  const sortCol = colByKey[NS.sortKey] && colByKey[NS.sortKey].sortable !== false
+    ? colByKey[NS.sortKey] : colByKey.total;
+  const dir = NS.sortDir;
+  const orderedSyms = symbols.slice().sort((sa, sb) => {
+    const va = sortCol.sv(dataBySymbol.get(sa) || {}, NS.sentiment[sa]);
+    const vb = sortCol.sv(dataBySymbol.get(sb) || {}, NS.sentiment[sb]);
+    const na = va == null || (typeof va === "number" && !isFinite(va));
+    const nb = vb == null || (typeof vb === "number" && !isFinite(vb));
+    if (na && nb) return 0;
+    if (na) return 1;
+    if (nb) return -1;
+    if (va < vb) return -1 * dir;
+    if (va > vb) return 1 * dir;
+    return 0;
+  });
+  const th = (c) => {
+    const arrow = (c.sortable !== false && NS.sortKey === c.key)
+      ? `<span class="ns-sort-arr">${NS.sortDir < 0 ? "▾" : "▴"}</span>` : "";
+    const cls = [c.cls, c.sortable !== false ? "ns-sortable" : ""].filter(Boolean).join(" ");
+    const tip = c.tip ? ` data-tip="${c.tip}"` : "";
+    const dataAttr = c.sortable !== false ? ` data-sortkey="${c.key}"` : "";
+    return `<th class="${cls}"${tip}${dataAttr}>${c.label}${arrow}</th>`;
+  };
   let html = `<table class="ns-table">
-    <thead><tr>
-      <th>Ticker</th><th>Company</th><th class="r">Price</th><th class="r">% 1D</th>
-      <th class="c">NS</th><th>Sentiment</th><th>Summary</th>
-    </tr></thead><tbody>`;
-  for (const {sym, name, price, pct, currency, s} of rows) {
+    <thead><tr><th></th>${nsCols.map(th).join("")}</tr></thead><tbody>`;
+  for (const sym of orderedSyms) {
+    const r = dataBySymbol.get(sym) || {};
+    const s = NS.sentiment[sym];
     const tierLabel = s ? (NS_LABELS[s.tier] || s.tier) : "—";
     const tierColor = s ? (NS_COLORS[s.tier] || "#94a3b8") : "var(--muted)";
-    const dot = s ? nsDot(s) : nsDot(null);
-    const summary = s ? escapeHtml(s.summary || "") : "—";
-    const pctHtml = pct != null ? fmtPctSigned(pct) : "—";
-    html += `<tr>
+    const events = s && s.events
+      ? Object.entries(s.events).map(([ev, n]) =>
+          `<span class="ns-ev-tag">${NS_EVENT_LABELS[ev] || ev}${n > 1 ? " ×" + n : ""}</span>`).join(" ")
+      : "";
+    const conf = s && s.confidence != null
+      ? `<span class="ns-conf-track"><span class="ns-conf-fill" style="width:${(s.confidence * 100).toFixed(0)}%"></span></span>`
+      : "—";
+    const isOpen = NS.expanded === sym;
+    html += `<tr class="ns-row" data-sym="${sym}">
+      <td class="c ns-expander">${s ? (isOpen ? "▾" : "▸") : ""}</td>
       <td class="sym">${sym}</td>
-      <td class="name">${escapeHtml(name)}</td>
-      <td class="r">${price != null ? fmtMoney(price, currency) : "—"}</td>
-      <td class="r">${pctHtml}</td>
-      <td class="c">${dot}</td>
-      <td style="color:${tierColor};font-weight:600;font-size:11px">${tierLabel}</td>
-      <td class="summary">${summary}</td>
+      <td class="name">${escapeHtml(r.name || "")}</td>
+      <td class="r">${r.price != null ? fmtMoney(r.price, r.currency) : "—"}</td>
+      <td class="r">${r.pct_1d != null ? fmtPctSigned(r.pct_1d) : "—"}</td>
+      <td class="r">${r.beta != null ? r.beta.toFixed(2) : "—"}</td>
+      <td class="r">${s ? fmtSig(s.s_idio) : "—"}</td>
+      <td class="r">${s ? fmtSig(s.s_sys) : "—"}</td>
+      <td class="c" style="color:${tierColor};font-weight:600;font-size:11px">${s ? nsDot(s) + " " + tierLabel : "—"}</td>
+      <td class="c">${conf}</td>
+      <td>${events}</td>
+      <td class="c">${s && s.disagreement ? '<span data-tip="AI and LM dictionary disagree on polarity">⚑</span>' : ""}</td>
     </tr>`;
+    if (isOpen && s) {
+      // Order by |score| desc so the most material (bullish OR bearish) news
+      // leads; neutral/unscored articles sink to the bottom (item 9).
+      const absScore = a => (a.score != null && isFinite(a.score)) ? Math.abs(a.score) : -1;
+      const arts = NS.articles.filter(a => a.symbol === sym)
+        .slice()
+        .sort((a, b) => absScore(b) - absScore(a))
+        .slice(0, 6).map(a =>
+        `<div class="ns-brief-art">${nsScoreDot(a.score)} <a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a> <span class="ns-src">${escapeHtml(a.source || "")}</span></div>`).join("");
+      const lm = s.s_lm != null ? ` · LM dictionary ${fmtSig(s.s_lm)}` : "";
+      const fb = s.fallback ? " · single-call fallback" : "";
+      html += `<tr class="ns-brief-row"><td colspan="12">
+        <div class="ns-brief">${escapeHtml(s.summary || "")}</div>
+        <div class="ns-brief-meta">${s.article_count || 0} articles${lm}${fb}</div>
+        ${arts}
+      </td></tr>`;
+    }
   }
   html += "</tbody></table>";
   pBody.innerHTML = html;
+  pBody.querySelectorAll("th.ns-sortable").forEach(thEl => {
+    thEl.onclick = () => {
+      const key = thEl.dataset.sortkey;
+      if (NS.sortKey === key) {
+        NS.sortDir = -NS.sortDir;         // same column → flip direction
+      } else {
+        NS.sortKey = key;
+        // Text columns default ascending (A→Z); numeric default descending.
+        NS.sortDir = (key === "ticker" || key === "company") ? 1 : -1;
+      }
+      renderPortfolioSentiment(symbols);
+    };
+  });
+  pBody.querySelectorAll("tr.ns-row").forEach(tr => {
+    tr.onclick = (e) => {
+      if (e.target.closest("a")) return;
+      const sym = tr.dataset.sym;
+      NS.expanded = NS.expanded === sym ? null : sym;
+      renderPortfolioSentiment(symbols);
+    };
+  });
+}
+
+const NS_DIAG_ABOUT_HTML = `
+  <p><b>What this panel is.</b> Model Diagnostics is the evidence that the sentiment
+  engine is calibrated and actually predictive — not just plausible-looking. It is
+  computed from <code>.portfolio_tracker_sentiment_history.json</code>, the append-only
+  log of every score the model has ever produced, joined against realized returns.</p>
+  <p><b>Rank IC — score vs forward idiosyncratic return.</b> For each past score we take
+  the stock's <i>idiosyncratic</i> forward return (its move with the market component
+  <code>β·r_SPY</code> stripped out) over the next 1 and 5 trading days, then compute the
+  <b>Spearman rank correlation</b> between score and that return. A positive IC means
+  higher scores preceded higher stock-specific returns — the signal has predictive
+  content. The t-stat flags whether it is distinguishable from zero; <code>n</code> is
+  the number of scored observations with a realized forward return available. Small
+  samples are labelled indicative — the number firms up as history accumulates.</p>
+  <p><b>Mean forward 1d idio return by tier.</b> A monotonicity check: average realized
+  next-day idiosyncratic return within each tier, from Very Bearish to Very Bullish. If
+  the model is well-ordered these bars should rise left-to-right. A tier that is out of
+  order is a miscalibration you can see at a glance.</p>
+  <p><b>Score distribution (90d).</b> Histogram of <code>s_total</code> over the trailing
+  90 days. It shows the engine is using the full range rather than clustering at neutral,
+  and whether quantile tier-calibration is active yet (it switches on once ≥100
+  observations exist; until then fixed thresholds are used).</p>
+  <p class="ns-diag-about-foot">Methodology: per-article LLM scoring → recency×source×novelty×relevance
+  weighted aggregation → <code>s_total = clip(κ·β·s_mkt + s_idio)</code> with κ=0.2, tiers
+  calibrated to rolling score quantiles. Loughran-McDonald dictionary runs in parallel as
+  a disagreement guardrail. See the ⚑ flag in the constituent table.</p>`;
+
+function toggleNsDiagAbout() {
+  const about = $("#ns-diag-about");
+  const btn = $("#ns-diag-info");
+  const willOpen = about.classList.contains("hidden");
+  if (willOpen && !about.innerHTML) about.innerHTML = NS_DIAG_ABOUT_HTML;
+  about.classList.toggle("hidden");
+  if (btn) btn.classList.toggle("on", willOpen);
+}
+
+async function toggleNsDiagnostics() {
+  const body = $("#ns-diag-body");
+  const arrow = $("#ns-diag-arrow");
+  const willOpen = body.classList.contains("hidden");
+  body.classList.toggle("hidden");
+  arrow.innerHTML = willOpen ? "&#9662;" : "&#9656;";
+  if (!willOpen) return;
+  body.innerHTML = '<div class="ns-loading">Computing diagnostics…</div>';
+  try {
+    const d = await fetch("/api/news-diagnostics").then(r => r.json());
+    renderNsDiagnostics(d);
+  } catch (e) {
+    body.innerHTML = '<div class="ns-panel-empty">Diagnostics unavailable.</div>';
+  }
+}
+
+function renderNsDiagnostics(d) {
+  const body = $("#ns-diag-body");
+  if (!d || d.error) {
+    body.innerHTML = '<div class="ns-panel-empty">Diagnostics unavailable.</div>';
+    return;
+  }
+  const parts = [];
+  // Rank IC — the "does the score correlate with subsequent idiosyncratic
+  // moves" evidence (Spearman; small n is labelled as indicative only).
+  if (d.ic && (d.ic["1d"] || d.ic["5d"])) {
+    const row = (label, o) => o
+      ? `<tr><td>${label}</td><td class="r">${o.ic != null ? fmtSig(o.ic, 3) : "—"}</td><td class="r">${o.n}</td><td class="r">${o.t_stat != null ? o.t_stat : "—"}</td></tr>`
+      : "";
+    const smallN = Math.max((d.ic["1d"] || {}).n || 0, (d.ic["5d"] || {}).n || 0) < 200;
+    parts.push(`<div class="ns-diag-sec">
+      <h5>Rank IC — score vs forward idiosyncratic return</h5>
+      <table class="ns-table ns-diag-table"><thead><tr><th>Horizon</th><th class="r">Spearman IC</th><th class="r">n</th><th class="r">t-stat</th></tr></thead>
+      <tbody>${row("1 day", d.ic["1d"])}${row("5 days", d.ic["5d"])}</tbody></table>
+      ${smallN ? '<div class="ns-diag-note">n &lt; 200 — indicative only; evidence accumulates with each refresh.</div>' : ""}
+    </div>`);
+  } else {
+    parts.push('<div class="ns-diag-sec"><h5>Rank IC</h5><div class="ns-panel-empty">Not enough history yet — refresh over a few days to accumulate observations.</div></div>');
+  }
+  // Tier monotonicity — mean forward return should rise from very_bearish
+  // to very_bullish.
+  const tierOrder = ["very_bearish", "bearish", "neutral", "bullish", "very_bullish"];
+  if (d.tiers && Object.keys(d.tiers).length) {
+    const maxAbs = Math.max(0.1, ...tierOrder.map(t => Math.abs((d.tiers[t] || {}).mean_fwd_1d_pct || 0)));
+    const bars = tierOrder.filter(t => d.tiers[t]).map(t => {
+      const o = d.tiers[t];
+      const w = Math.abs(o.mean_fwd_1d_pct) / maxAbs * 100;
+      const color = NS_COLORS[t] || "#94a3b8";
+      return `<div class="ns-diag-tier-row">
+        <span class="ns-diag-tier-label" style="color:${color}">${NS_LABELS[t] || t}</span>
+        <span class="ns-decomp-track"><span class="ns-decomp-fill ${o.mean_fwd_1d_pct >= 0 ? "pos" : "neg"}" style="width:${w}%"></span></span>
+        <span class="ns-decomp-val">${fmtSig(o.mean_fwd_1d_pct, 2)}% (n=${o.n})</span>
+      </div>`;
+    }).join("");
+    parts.push(`<div class="ns-diag-sec"><h5>Mean forward 1d idio return by tier</h5>${bars}</div>`);
+  }
+  // Score distribution — range-usage evidence.
+  if (d.histogram && d.histogram.n > 0) {
+    const maxC = Math.max(...d.histogram.counts, 1);
+    const cols = d.histogram.counts.map((c, i) => {
+      const h = Math.round(c / maxC * 48);
+      const mid = -1 + (i + 0.5) * 0.1;
+      const color = mid > 0.15 ? "#4ade80" : (mid < -0.15 ? "#f87171" : "#94a3b8");
+      return `<div class="ns-hist-col" data-tip="[${(-1 + i * 0.1).toFixed(1)}, ${(-0.9 + i * 0.1).toFixed(1)}): ${c}" style="height:${Math.max(2, h)}px;background:${color}"></div>`;
+    }).join("");
+    const calNote = d.calibration_active
+      ? `quantile calibration active (${d.calibration_n} obs)`
+      : `fixed thresholds until ${100} obs (${d.calibration_n} so far)`;
+    parts.push(`<div class="ns-diag-sec"><h5>Score distribution (90d, s_total)</h5>
+      <div class="ns-hist">${cols}</div>
+      <div class="ns-hist-axis"><span>-1</span><span>0</span><span>+1</span></div>
+      <div class="ns-diag-note">${calNote}</div></div>`);
+  }
+  body.innerHTML = parts.join("") || '<div class="ns-panel-empty">No diagnostics data yet.</div>';
 }
 
 function patchRowSentiment(sentiment) {
@@ -6262,7 +7029,7 @@ async function mptLoadRuns() {
     return `<div class="pf-mpt-run-row" data-id="${escapeHtml(r.id)}">
       <div style="flex:1">
         <div><b>${escapeHtml(p.lookback || "")} ${escapeHtml(p.frequency || "")}</b> · ${(p.display_ccy || "USD")}</div>
-        <div class="meta">${escapeHtml(r.saved_at || "").slice(0, 16).replace("T", " ")} · tangent Sharpe ${t.sharpe != null ? Number(t.sharpe).toFixed(2) : "—"}</div>
+        <div class="meta">${r.saved_at ? escapeHtml(fmtDateMDY(r.saved_at) + " " + String(r.saved_at).slice(11, 16)) : ""} · tangent Sharpe ${t.sharpe != null ? Number(t.sharpe).toFixed(2) : "—"}</div>
       </div>
       <button class="del" title="Delete">✕</button>
     </div>`;
@@ -6736,11 +7503,21 @@ function fxInit() {
   });
 }
 
+// Loaded once at startup, then read by renderAnalystDashboard()'s coverage-foot
+// row (the version tag lives there now — see .an-version — instead of the old
+// fixed-position overlay). Any `.an-version` element already in the DOM when
+// this resolves is patched directly so a slow /api/health response still lands.
+let APP_VERSION = null; // {version, date} — date is a raw ISO "yyyy-mm-dd"
+
+function versionLabel() {
+  return APP_VERSION ? `v${APP_VERSION.version} (${fmtDateDMY(APP_VERSION.date)})` : "";
+}
+
 function loadAppVersion() {
-  const el = $("#app-footer");
-  if (!el) return;
   fetch("/api/health").then(r => r.json()).then(d => {
-    if (d && d.version) el.textContent = `Portfolio _App v${d.version}`;
+    if (!d || !d.version) return;
+    APP_VERSION = { version: d.version, date: d.version_date };
+    document.querySelectorAll(".an-version").forEach(el => { el.textContent = versionLabel(); });
   }).catch(() => {});
 }
 

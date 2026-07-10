@@ -297,8 +297,43 @@ Key architecture:
   but no sentiment; all functions return None, UI shows hollow dots/dashes.
 - The NS column (10px colored dot) appears in Default and Momentum views,
   NOT in Fundamentals. Background warm-up runs 2s after build completes.
-- The News tab (topbar button, mutual exclusion with Portfolio panel) shows
-  market overview sentiment + per-stock constituent breakdown with AI summaries.
+- **Redesigned engine (2026-07, full design record in
+  `docs/news_tab_redesign_plan.md`):** news is merged Finnhub + yfinance
+  `tk.news`, deduplicated (rapidfuzz title similarity, optional dep like
+  symbol_db) with syndication counts kept as a salience signal. Scoring is
+  per-article via ONE NIM call/ticker returning a JSON array
+  (`_ARRAY_SYSTEM_PROMPT`; the old blob prompt is the validated fallback),
+  run twice and averaged when `SELF_CONSISTENCY=True` (default).
+  Aggregation is deterministic math, not vibes: recency (τ=3d) ×
+  source-tier × novelty × relevance weights → `s_idio` + confidence.
+  `lexicon.py` (Loughran-McDonald word lists vendored in
+  `data/lm_lexicon.json`) scores every article for free in parallel;
+  strong opposite-sign LLM-vs-lexicon disagreement flags the ticker and
+  caps confidence at 0.5. Decomposition: `s_total = clip(KAPPA·β·s_mkt +
+  s_idio)` with **KAPPA=0.2 fixed by an S&P 100 sensitivity study**
+  (`scripts/kappa_sensitivity.py` + results JSON — re-run it before
+  changing KAPPA; idio scores are compressed (σ≈0.12) so larger κ lets the
+  market term dominate the cross-section). Tiers are calibrated to rolling
+  90d score quantiles from `.portfolio_tracker_sentiment_history.json`
+  (10/20/40/20/10 by construction; fixed thresholds until 100 obs).
+  Sentiment dicts keep legacy keys (`tier/score/summary`) plus
+  `s_idio/s_sys/s_total/s_lm/confidence/events/disagreement/fallback`.
+  Routes: `/api/news-refresh` streams NDJSON staged market-first-then-
+  symbols-by-weight and accepts a `context` payload (betas/weights/row
+  numbers → prompts + decomposition); `/api/news-tape` is a cache-only
+  merged article feed for the tape; `/api/news-diagnostics` computes
+  Spearman rank IC vs forward 1d/5d idiosyncratic returns, per-tier
+  forward-return monotonicity, and the score histogram.
+  `scripts/benchmark_sentiment_prompt.py` certifies the prompt on
+  Financial PhraseBank — run manually after any prompt/model change.
+- The News tab (topbar button, mutual exclusion with Portfolio panel):
+  portfolio signal gauge with a systematic/idiosyncratic split, compact
+  Market·Systematic-Risk card (cross-asset tape via yfinance injected into
+  the prompt), Movers with headline attribution, What to Watch
+  (disagreement flags, extreme tiers, earnings catalysts), a filterable
+  flash-headline tape, an expandable constituent table with Bloomberg Way
+  briefs (compressed four-paragraph lead, ≤60 words, banned-word list in
+  the prompt), and a collapsed Model Diagnostics section.
 
 ### Analytics (`/api/portfolio-analytics-multi`)
 `analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
@@ -962,14 +997,18 @@ Run via `python -m portfolio_tracker.desktop` (what the installed launcher
 actually invokes). Single file, ~160 lines:
 
 - **Splash contract**: shown immediately via `QSplashScreen` (icon +
-  "Portfolio _App" + "Made by Alexander Tsoskounoglou 2026 · v{version}", colors
-  matching the dashboard's own dark theme — `#0d1117`/`#e6edf3`/`#7d8590`
+  "Portfolio _App" + "Made by Alexander Tsoskounoglou 2026 · v{version_display}",
+  colors matching the dashboard's own dark theme — `#0d1117`/`#e6edf3`/`#7d8590`
   from `style.css`). A `QElapsedTimer` starts the moment it's shown. The
-  main window is revealed on `max(0, 7000ms - elapsed)` after the
+  main window is revealed on `max(0, 6000ms - elapsed)` after the
   `QWebEngineView`'s `loadFinished` fires, via `reveal()` (guarded by a
   `nonlocal` flag so it only runs once). A 20s **safety timer** also calls
   `reveal()` unconditionally, so a stalled/failed page load can never trap
-  the user on the splash forever.
+  the user on the splash forever. The subtitle's font is 12pt, sized down
+  from an original 14pt specifically to keep the longer
+  "v{version} (dd Mon yyyy)" string comfortably inside the 480px-wide
+  splash pixmap — verified by rendering the real pixmap headlessly
+  (`QT_QPA_PLATFORM=offscreen`) rather than guessing at text width.
 - **External-link routing** (`_ExternalLinkPage`, a `QWebEnginePage`
   subclass): the dashboard has exactly two `target="_blank"` links —
   company website (`app.js` detail modal) and news article links (`app.js`
@@ -1165,8 +1204,8 @@ before ever touching the real `pt` env / `/Applications` entry).
   `portfolio_tracker.frontier`/`mpt`/`numba` (deferred to its two call sites
   in `server.py`, ~1.7s — the Optimize/MPT feature is on-demand). `pandas` +
   `yfinance` (~2.5s) stay eager since the first data render needs them. Net:
-  the whole import now finishes inside the 7s minimum-splash window, so the
-  perceived launch time is the intended 7s floor, not import time. The 7s is
+  the whole import now finishes inside the 6s minimum-splash window, so the
+  perceived launch time is the intended 6s floor, not import time. The 6s is
   a **minimum** visible duration (deliberately longer than the boot itself
   needs, so there's always a moment to watch it); a slower
   boot keeps the splash up longer, and a 20s safety timer + boot-still-running
@@ -1219,21 +1258,37 @@ empirically re-confirmed under CI).
 ## 15. Version tracking
 
 Single source of truth: `__version__` in `portfolio_tracker/__init__.py`
-(currently `1.4.4`). Scheme is `1.X.Y` — X bumps on a major new
+(currently `1.5.0`). Scheme is `1.X.Y` — X bumps on a major new
 feature/release, Y bumps on smaller polish/fixes in between. `CHANGELOG.md`
 maps every version to the PR(s) it came from.
 
-**Where it's surfaced:**
-- Terminal startup banner (`portfolio_tracker/server.py`'s `main()`).
-- `GET /api/health` → `{"ok", "ts", "version"}` — the frontend's source.
-- Bottom-right footer in the web UI (`#app-footer` in `index.html`,
-  populated by `loadAppVersion()` in `app.js`, styled in `style.css`).
-- Desktop app splash subtitle and main window title
-  (`portfolio_tracker/desktop.py`).
+The module also exports `__version_date__` (ISO `yyyy-mm-dd`, the release
+date of `__version__`) and `__version_display__` (pre-formatted
+`"1.5.0 (09 Jul 2026)"` — day-month-year, deliberately different from the
+app's general "Jul 9, 2026" date format; this is the one place that uses
+day-first). `__version_display__` is what Python-side surfaces (splash,
+window title, terminal banner) should use directly; the frontend instead
+reads the raw `version`/`version_date` fields from `/api/health` and
+formats them with its own `fmtDateDMY()` helper, so both sides format from
+the same two source values without duplicating the format string.
 
-**When bumping:** update `__version__`, add a line to `CHANGELOG.md`. No
-other files need touching — the banner/footer/splash all read the same
-constant (browser mode via `/api/health`, desktop mode via direct import).
+**Where it's surfaced:**
+- Terminal startup banner (`portfolio_tracker/server.py`'s `main()`) — uses `__version_display__`.
+- `GET /api/health` → `{"ok", "ts", "version", "version_date"}` — the frontend's source.
+- The app footer/version tag lives in the Analyst Sentiment section's
+  coverage-footer row (`.an-coverage-foot` in `app.js`'s
+  `renderAnalystDashboard`, right-aligned via `.an-version`), populated by
+  `loadAppVersion()` + `versionLabel()`. **Not** a fixed-position page
+  overlay — that was removed (the old `#app-footer` div/CSS no longer
+  exist); the version tag now only renders where the Analyst Sentiment
+  section is in view, which was a deliberate user-requested tradeoff.
+- Desktop app splash subtitle and main window title
+  (`portfolio_tracker/desktop.py`), both via `__version_display__`.
+
+**When bumping:** update `__version__` and `__version_date__`, add a line
+to `CHANGELOG.md`. No other files need touching — every surface above reads
+the same two constants (browser mode via `/api/health`, desktop mode via
+direct import).
 
 **Reasoning before a bump (standing policy — do not skip):** before touching
 `__version__`, reason out loud in the response to the user about whether the

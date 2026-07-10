@@ -224,6 +224,30 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             out["operating_margin"] = _safe_num(info.get("operatingMargins"))
             out["debt_equity"] = _safe_num(info.get("debtToEquity"))
             out["current_ratio"] = _safe_num(info.get("currentRatio"))
+            # Extended fundamentals (all straight from the same info dict —
+            # zero extra network cost on the streaming path). Margins/growth/
+            # returns come back as fractions (0.42 = 42%); the frontend
+            # formats them, never re-detects units.
+            out["price_book"] = _safe_num(info.get("priceToBook"))
+            out["roe"] = _safe_num(info.get("returnOnEquity"))
+            out["roa"] = _safe_num(info.get("returnOnAssets"))
+            out["gross_margin"] = _safe_num(info.get("grossMargins"))
+            out["profit_margin"] = _safe_num(info.get("profitMargins"))
+            out["revenue_growth"] = _safe_num(info.get("revenueGrowth"))
+            # Prefer annual earningsGrowth; fall back to quarterly ONLY when
+            # annual is truly absent — `or` would wrongly discard a legitimate
+            # 0.0 (flat YoY) and substitute the quarterly figure instead.
+            _eg = info.get("earningsGrowth")
+            if _eg is None:
+                _eg = info.get("earningsQuarterlyGrowth")
+            out["earnings_growth"] = _safe_num(_eg)
+            out["quick_ratio"] = _safe_num(info.get("quickRatio"))
+            out["payout_ratio"] = _safe_num(info.get("payoutRatio"))
+            # FCF yield = free cash flow / market cap, both from info. Only
+            # computed when both legs are present and positive-denominator.
+            fcf = _safe_num(info.get("freeCashflow"))
+            mcap = _safe_num(out.get("market_cap"))
+            out["fcf_yield"] = (fcf / mcap) if (fcf is not None and mcap) else None
             out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
             out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
             out["rec_key"] = (info.get("recommendationKey") or "").strip().lower() or None

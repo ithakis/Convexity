@@ -112,27 +112,68 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 <!-- News & Sentiment panel -->
 <div id="news-panel" class="hidden">
   <div class="ns-head">
-    <h3 class="ns-title">Market &amp; Portfolio Sentiment</h3>
-    <button id="ns-refresh" class="ns-refresh-btn" data-tip="Force-refresh all news and re-run sentiment analysis.">&#8635; Refresh</button>
+    <h3 class="ns-title">News &amp; Sentiment</h3>
+    <!-- Lookback control (item 3): how far back the news analysis reaches.
+         Applied on the next Refresh (the cache is keyed per symbol and only
+         busted by a refresh). The recency decay tau scales with the window
+         so long lookbacks actually use their older articles. -->
+    <div class="ns-lookback" id="ns-lookback" role="group" aria-label="News analysis window">
+      <span class="ns-lb-label" data-tip="Analysis window: how far back the news fetch and scoring reach. Takes effect on the next Refresh. Articles are never equal-weighted — each is weighted by recency e^(−age/τ) (τ scales with the window: 7D → 3.0d, 30D → 12.9d), source credibility (Reuters/Bloomberg/WSJ 1.0 · CNBC/Barron's 0.8 · PR wires 0.5), novelty (syndicated copies discounted), and target relevance (primary subject 1.0 · co-subject 0.6 · passing mention 0.1).">Window</span>
+      <button data-days="3" type="button">3D</button>
+      <button data-days="7" type="button" class="active">7D</button>
+      <button data-days="14" type="button">14D</button>
+      <button data-days="30" type="button">30D</button>
+    </div>
+    <button id="ns-refresh" class="ns-refresh-btn" data-tip="Staged refresh: market first, then constituents by portfolio weight. Two AI passes per stock (self-consistency). Uses the selected analysis window.">&#8635; Refresh</button>
     <span class="ns-updated" id="ns-updated"></span>
   </div>
-  <div class="ns-grid" id="ns-grid">
+  <!-- Resizable 2x2 quad (item 1): one grid, draggable gutters. The vertical
+       gutter re-splits the columns (zero-sum fr), the horizontal one re-splits
+       the rows (pixel heights fixed on first drag). Double-click a gutter to
+       reset. Split persists in localStorage. -->
+  <div class="ns-quad" id="ns-quad">
+    <div class="ns-card ns-gauge" id="ns-gauge-card">
+      <h4>Portfolio Signal</h4>
+      <div class="ns-gauge-body" id="ns-gauge-body">
+        <div class="ns-empty">Refresh to compute the portfolio signal.</div>
+      </div>
+    </div>
+    <div class="ns-qgut ns-qgut-v" id="ns-qgut-v" title="Drag to resize · double-click to reset"></div>
     <div class="ns-card ns-market" id="ns-market-card">
-      <h4>Market Overview</h4>
+      <h4>Market &middot; Systematic Risk</h4>
       <div class="ns-market-body" id="ns-market-body">
         <div class="ns-empty">Click Refresh or build the dashboard to load market sentiment.</div>
       </div>
     </div>
-    <div class="ns-card ns-indices" id="ns-indices-card">
-      <h4>Portfolio Sentiment</h4>
-      <div class="ns-indices-body" id="ns-indices-body">
-        <div class="ns-empty">No sentiment data yet.</div>
-      </div>
+    <div class="ns-qgut ns-qgut-h" id="ns-qgut-h" title="Drag to resize · double-click to reset"></div>
+    <div class="ns-card" id="ns-movers-card">
+      <h4>Movers</h4>
+      <div id="ns-movers-body"><div class="ns-empty">No data yet.</div></div>
     </div>
+    <div class="ns-card" id="ns-watch-card">
+      <h4>What to Watch</h4>
+      <div id="ns-watch-body"><div class="ns-empty">No data yet.</div></div>
+    </div>
+  </div>
+  <!-- News timeline (item 4): when news landed, at what intensity. -->
+  <div class="ns-card ns-tl-card" id="ns-tl-card">
+    <h4>News Timeline</h4>
+    <div class="ns-tl-controls" id="ns-tl-controls"></div>
+    <div class="ns-tl-body" id="ns-tl-body"><div class="ns-empty">Refresh to load the news timeline.</div></div>
+  </div>
+  <div class="ns-card ns-tape-card" id="ns-tape-card">
+    <h4>Flash Tape</h4>
+    <div class="ns-tape-filters" id="ns-tape-filters"></div>
+    <div class="ns-tape-body" id="ns-tape-body"><div class="ns-empty">Refresh to load the headline tape.</div></div>
   </div>
   <div class="ns-portfolio" id="ns-portfolio">
     <h4>Constituent Breakdown</h4>
     <div class="ns-portfolio-body" id="ns-portfolio-body"></div>
+  </div>
+  <div class="ns-card ns-diag" id="ns-diag-card">
+    <h4 class="ns-diag-toggle" id="ns-diag-toggle">Model Diagnostics <span id="ns-diag-arrow">&#9656;</span><button type="button" class="ns-diag-info" id="ns-diag-info" title="What is this?" aria-label="About Model Diagnostics">i</button></h4>
+    <div class="ns-diag-about hidden" id="ns-diag-about"></div>
+    <div class="ns-diag-body hidden" id="ns-diag-body"></div>
   </div>
 </div>
 
@@ -459,6 +500,10 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
      via getActiveColumns(). Drag-and-drop on the live <th> elements also
      mutates the active view (with a "modified" pill when reordering on a
      built-in preset). -->
+<!-- Section anchor (item 2): Bloomberg-style hairline rule + kicker marking
+     where the holdings table starts, regardless of which panel is open. -->
+<div class="section-anchor" id="anchor-holdings"><span class="sa-kicker">Holdings</span></div>
+
 <div class="cv-bar" id="cv-bar">
   <div class="cv-seg" id="cv-builtins" role="tablist" aria-label="Column view"></div>
   <div class="cv-custom-wrap" id="cv-custom-wrap"></div>
@@ -483,6 +528,10 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
      "Save as new view" prompts for a name; "Update <name>" overwrites the
      active custom view. Built-ins are read-only here. -->
 <div class="modal-bg" id="cv-modal-bg" hidden><div class="modal cv-modal" id="cv-modal" role="dialog" aria-modal="true" aria-label="Customize columns"></div></div>
+
+<!-- Section anchor (item 2, second instance): marks the Analyst Sentiment
+     section right after the main table. -->
+<div class="section-anchor" id="anchor-analyst"><span class="sa-kicker">Analyst Sentiment</span></div>
 
 <div id="analyst-dashboard" aria-label="Analyst sentiment dashboard"></div>
 
@@ -692,7 +741,6 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 
 <div class="modal-bg" id="modal-bg"><div class="modal" id="modal"></div></div>
 <div class="toast" id="toast"></div>
-<div class="app-footer" id="app-footer"></div>
 
 <script src="/static/app.js"></script>
 

@@ -62,6 +62,7 @@ Icon
 .claude/settings.local.json
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+.claude/launch.json
 .pytest_cache/
 
 # Logs & temp
@@ -87,3 +88,5 @@ icon.ico
 # OS
 Thumbs.db
 ehthumbs.db
+.portfolio_tracker_sentiment_history.json
+scripts/kappa_sensitivity_results.json

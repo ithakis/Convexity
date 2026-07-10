@@ -5,6 +5,38 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.5.0 — 2026-07-09
+Major News tab redesign. The four top cards (Portfolio Signal, Market·
+Systematic Risk, Movers, What to Watch) are now one resizable quad — drag
+either gutter to re-split columns/rows zero-sum, double-click to reset,
+split persists. Added a News Timeline card (per-article bars by sentiment
+strength, period tabs, ticker filter) above Flash Tape, and a lookback
+window control (3D/7D/14D/30D) that actually threads through to the
+backend scoring pipeline — recency decay (τ) now scales with the selected
+window instead of a fixed 3-day constant, and the Portfolio Signal footer
+shows which window a given score was computed with. New Bloomberg-style
+"hairline rule + kicker" section anchors mark the start of the holdings
+table and Analyst Sentiment. Section titles across the News tab are one
+size larger, Title Case, and text-colored instead of small/uppercase/
+muted; fixed Model Diagnostics not collapsing after a second click (a
+missing `display:none` CSS rule, not a JS bug). All user-visible dates
+standardized to "Jul 9, 2026" everywhere.
+
+Ten new opt-in fundamentals columns (Customize Columns only, not in any
+built-in preset): P/B, ROE, ROA, Gross Mgn, Net Mgn, FCF Yield, Rev Grw,
+EPS Grw, Quick Ratio, Payout % — sourced from the same yfinance `info`
+call `fetch_one` already makes, so no extra latency on the streaming
+build path. All support the existing Off/Percentile/Min-Max heat modes.
+
+Follow-up polish: the quad's default column split moved from 60/40 to a
+near-even 47/53 (right column gets slightly more room); desktop splash
+minimum floor shortened 7s → 6s; the app version now shows its release
+date next to it (e.g. "v1.5.0 (09 Jul 2026)") in the splash, window
+title, terminal banner, and app UI; the version tag moved out of a
+permanent fixed-position corner overlay into the Analyst Sentiment
+section's footer row (right-aligned), and the redundant date that used
+to sit at the bottom-left of that same row was removed.
+
 ## 1.4.5 — 2026-07-08
 The three built-in views (Default, Fundamentals, Momentum) are now editable in
 place, just like custom views — reorder/add/remove columns and change per-column

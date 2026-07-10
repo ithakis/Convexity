@@ -44,13 +44,13 @@ from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QSplashScreen
 
-from portfolio_tracker import __version__
+from portfolio_tracker import __version_display__
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ICON_PNG = _REPO_ROOT / "icon.png"
 _ICON_ICNS = _REPO_ROOT / "icon.icns"
 _BUNDLE_ID = "com.ithakis.portfoliotracker"
-_MIN_SPLASH_MS = 7000
+_MIN_SPLASH_MS = 6000
 _SPLASH_SAFETY_MS = 20000
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
@@ -124,12 +124,12 @@ def _build_splash_pixmap(dpr: float) -> QPixmap:
     painter.drawText(QRect(0, 208, width, 40), Qt.AlignmentFlag.AlignCenter, "Portfolio _App")
 
     sub_font = QFont()
-    sub_font.setPointSize(14)
+    sub_font.setPointSize(12)
     painter.setFont(sub_font)
     painter.setPen(QColor(_MUTED))
     painter.drawText(
         QRect(0, 248, width, 30), Qt.AlignmentFlag.AlignCenter,
-        f"Made by Alexander Tsoskounoglou 2026 · v{__version__}",
+        f"Made by Alexander Tsoskounoglou 2026 · v{__version_display__}",
     )
 
     painter.end()
@@ -233,7 +233,7 @@ class _ExternalLinkPage(QWebEnginePage):
 class _MainWindow(QMainWindow):
     def __init__(self, url: str):
         super().__init__()
-        self.setWindowTitle(f"Portfolio _App v{__version__}")
+        self.setWindowTitle(f"Portfolio _App v{__version_display__}")
         self.resize(1440, 900)
         self._url = url
 

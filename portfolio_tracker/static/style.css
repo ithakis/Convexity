@@ -1475,15 +1475,43 @@
   .na { color: var(--muted); }
 
   /* Analyst sentiment dashboard (replaces the old footer block) */
+  /* Section anchors (item 2, "hairline rule + kicker"): a 1px muted-accent
+     rule with a small uppercase micro-label — the Bloomberg-style visual cue
+     that a new major section starts here. Used twice: before the holdings
+     table and before Analyst Sentiment. Also the gap-rhythm fix for item 9:
+     the anchor supplies the section spacing, so the blocks around it keep
+     tight margins. */
+  .section-anchor {
+    display: flex; align-items: center; gap: 10px;
+    margin: 14px 16px 0;
+  }
+  .section-anchor::before {
+    content: ""; flex: none; width: 18px; height: 1px;
+    background: color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  .section-anchor::after {
+    content: ""; flex: 1; height: 1px;
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .sa-kicker {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; white-space: nowrap; cursor: default;
+    color: color-mix(in srgb, var(--accent) 78%, var(--muted));
+  }
+  /* The table-wrap already contributes its own bottom padding + scrollbar
+     gutter, so the analyst anchor needs a smaller top margin than the
+     holdings anchor for the two section gaps to read as equal (item 9). */
+  #anchor-analyst { margin-top: 4px; }
+
   #analyst-dashboard {
-    margin: 16px 16px 16px; padding: 16px;
+    margin: 10px 16px 16px; padding: 16px;
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px;
   }
   .an-head {
     display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
     margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
   }
-  .an-head .an-title { font-size: 14px; font-weight: 700; color: var(--text); }
+  .an-head .an-title { font-size: 15px; font-weight: 700; color: var(--text); }
   .an-head .an-sub { font-size: 11.5px; color: var(--muted); }
   .an-head .an-mode-note { margin-left: auto; font-size: 11.5px; color: var(--muted); position: relative; }
   .an-head .an-mode-note b { color: var(--text); font-weight: 600; }
@@ -1668,6 +1696,7 @@
   }
   .an-coverage-foot b { color: var(--text); font-weight: 600; }
   .an-coverage-foot .credit { color: var(--muted); font-size: 11px; }
+  .an-version { color: var(--muted); font-size: 10.5px; letter-spacing: 0.2px; opacity: 0.75; flex: none; }
   .an-not-covered {
     color: var(--muted); font-size: 11px;
   }
@@ -1913,17 +1942,61 @@
   }
   .ns-refresh-btn:hover { border-color: var(--accent); }
   .ns-updated { font-size: 11px; color: var(--muted); }
-  .ns-grid {
-    display: grid; grid-template-columns: 1.5fr 1fr; gap: 12px; margin-bottom: 12px;
+  /* Analysis-window control (item 3). */
+  .ns-lookback { display: inline-flex; align-items: center; gap: 4px; }
+  .ns-lb-label { font-size: 11px; color: var(--muted); margin-right: 2px; cursor: default; }
+  .ns-lookback button {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; font-size: 10.5px; padding: 3px 8px; cursor: pointer;
+    font-variant-numeric: tabular-nums;
   }
-  @media (max-width: 900px) { .ns-grid { grid-template-columns: 1fr; } }
+  .ns-lookback button:hover { border-color: var(--accent); color: var(--text); }
+  .ns-lookback button.active {
+    border-color: var(--accent); color: var(--accent); font-weight: 700;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  /* Resizable 2x2 quad (item 1). Column split is fr-based (zero-sum by
+     construction); rows auto-size until the user drags the horizontal gutter,
+     at which point pixel heights are frozen (.rows-fixed) and the cards
+     scroll internally instead of growing. */
+  .ns-quad {
+    display: grid;
+    grid-template-columns: minmax(200px, var(--nsq-c1, 1fr)) 12px minmax(200px, var(--nsq-c2, 1.1fr));
+    grid-template-rows: var(--nsq-r1, auto) 12px var(--nsq-r2, auto);
+    margin-bottom: 14px;
+  }
+  #ns-gauge-card  { grid-area: 1 / 1; }
+  #ns-market-card { grid-area: 1 / 3; }
+  #ns-movers-card { grid-area: 3 / 1; }
+  #ns-watch-card  { grid-area: 3 / 3; }
+  .ns-quad .ns-card { min-width: 0; min-height: 0; }
+  .ns-quad.rows-fixed .ns-card { overflow-y: auto; }
+  .ns-qgut { position: relative; touch-action: none; }
+  .ns-qgut::after {
+    content: ""; position: absolute; background: transparent;
+    border-radius: 2px; transition: background 0.12s ease;
+  }
+  .ns-qgut-v { grid-area: 1 / 2 / 4 / 3; cursor: col-resize; }
+  .ns-qgut-v::after { left: 5px; right: 5px; top: 8px; bottom: 8px; }
+  .ns-qgut-h { grid-area: 2 / 1 / 3 / 4; cursor: row-resize; }
+  .ns-qgut-h::after { top: 5px; bottom: 5px; left: 8px; right: 8px; }
+  .ns-qgut:hover::after, .ns-qgut:active::after {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  @media (max-width: 900px) {
+    .ns-quad { display: block; }
+    .ns-quad .ns-card { margin-bottom: 12px; }
+    .ns-qgut { display: none; }
+  }
   .ns-card {
     background: var(--bg-subtle); border: 1px solid var(--border);
     border-radius: 8px; padding: 10px 12px;
   }
+  /* Section titles (item 7): one step larger, text-colored (white in dark
+     mode), Title Case from the markup — no uppercase transform. */
   .ns-card h4 {
-    font-size: 11.5px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.05em; color: var(--muted); margin: 0 0 8px;
+    font-size: 13px; font-weight: 700; text-transform: none;
+    letter-spacing: 0.01em; color: var(--text); margin: 0 0 8px;
   }
   .ns-panel-empty { font-size: 12px; color: var(--muted); padding: 8px 0; }
   .ns-market-summary {
@@ -1942,8 +2015,8 @@
   .ns-score { font-size: 11px; color: var(--muted); margin-left: 6px; }
 
   .ns-portfolio h4 {
-    font-size: 11.5px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.05em; color: var(--muted); margin: 0 0 8px;
+    font-size: 13px; font-weight: 700; text-transform: none;
+    letter-spacing: 0.01em; color: var(--text); margin: 0 0 8px;
   }
   .ns-table {
     width: 100%; border-collapse: collapse; font-size: 12px;
@@ -1968,6 +2041,196 @@
   .ns-table .name { color: var(--muted); max-width: 140px; }
   .ns-loading { display: flex; align-items: center; gap: 6px; padding: 12px 0; font-size: 12px; color: var(--muted); }
 
+  /* --- News tab redesign: gauge / decomposition / tape / diagnostics --- */
+  .ns-gauge-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .ns-gauge-num {
+    font-size: 24px; font-weight: 700; letter-spacing: -0.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .ns-gauge-foot { font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .ns-decomp-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .ns-decomp-label { font-size: 11px; color: var(--muted); width: 118px; flex: none; }
+  .ns-decomp-track {
+    flex: 1; height: 6px; background: color-mix(in srgb, var(--border) 55%, transparent);
+    border-radius: 3px; overflow: hidden; display: block;
+  }
+  .ns-decomp-fill { display: block; height: 100%; border-radius: 3px; }
+  .ns-decomp-fill.pos { background: #4ade80; }
+  .ns-decomp-fill.neg { background: #f87171; }
+  .ns-decomp-val {
+    font-size: 11px; width: 74px; flex: none; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .ns-mkt-tape {
+    font-size: 11px; color: var(--muted); margin: 6px 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .ns-mover-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; font-size: 12px; }
+  .ns-mover-pct { font-variant-numeric: tabular-nums; flex: none; width: 58px; text-align: right; }
+  .ns-mover-head { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ns-mover-head a { color: var(--text); text-decoration: none; }
+  .ns-mover-head a:hover { color: var(--accent); }
+  .ns-watch-row { font-size: 12px; padding: 4px 0; line-height: 1.45; }
+  .ns-tape-card { margin-bottom: 18px; }
+  .ns-tape-card h4 { margin-bottom: 6px; }
+  .ns-portfolio { margin-bottom: 18px; }
+
+  /* --- News Timeline (item 4) --- */
+  .ns-tl-card { margin-bottom: 14px; }
+  .ns-tl-controls {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;
+  }
+  .ns-tl-periods { display: inline-flex; gap: 2px; }
+  .ns-tl-p {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    font-size: 10.5px; padding: 3px 8px; cursor: pointer;
+    border-radius: 0; border-right-width: 0;
+  }
+  .ns-tl-p:first-child { border-radius: 6px 0 0 6px; }
+  .ns-tl-p:last-child { border-radius: 0 6px 6px 0; border-right-width: 1px; }
+  .ns-tl-p:hover { color: var(--text); }
+  .ns-tl-p.active { color: var(--accent); font-weight: 700; background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .ns-tl-legend { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; font-size: 10px; color: var(--muted); }
+  .ns-tl-lg { display: inline-flex; align-items: flex-end; gap: 4px; }
+  .ns-tl-lg i { display: inline-block; width: 4px; border-radius: 1px 1px 0 0; }
+  .ns-tl-plot {
+    position: relative; height: 140px;
+    border-bottom: 1px solid var(--border);
+    margin: 4px 2px 18px;
+  }
+  .ns-tl-bar {
+    position: absolute; bottom: 0; width: 4px; margin-left: -2px;
+    border-radius: 2px 2px 0 0; opacity: 0.9; display: block;
+  }
+  .ns-tl-bar:hover { opacity: 1; outline: 1px solid var(--text); }
+  .ns-tl-baseline { position: absolute; left: 0; right: 0; bottom: 0; height: 1px; }
+  .ns-tl-tick {
+    position: absolute; top: 0; bottom: -16px; font-size: 9.5px; color: var(--muted);
+    transform: translateX(-50%); display: flex; flex-direction: column;
+    justify-content: flex-end; align-items: center; pointer-events: none;
+    white-space: nowrap;
+  }
+  .ns-tl-tick i {
+    position: absolute; top: 0; bottom: 16px; width: 1px;
+    background: color-mix(in srgb, var(--border) 45%, transparent);
+  }
+  .ns-tl-tick:first-child { transform: translateX(0); align-items: flex-start; }
+  .ns-tl-tick:last-of-type { transform: translateX(-100%); align-items: flex-end; }
+  .ns-tape-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .ns-tape-select {
+    background: var(--bg-canvas); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; font-size: 11px; padding: 3px 6px;
+  }
+  .ns-ev-chip {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 999px; font-size: 10.5px; padding: 2px 9px; cursor: pointer;
+  }
+  .ns-ev-chip:hover { border-color: var(--accent); color: var(--text); }
+  .ns-ev-chip.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .ns-tape-body { max-height: 320px; overflow-y: auto; }
+  .ns-tape-row {
+    display: flex; align-items: center; gap: 8px; padding: 3px 0;
+    font-size: 11.5px; border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+  }
+  .ns-tape-time {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--muted);
+    font-size: 10.5px; flex: none; width: 76px;
+  }
+  .ns-tape-sym { font-weight: 700; flex: none; min-width: 46px; font-size: 11px; }
+  .ns-tape-head { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ns-tape-head a { color: var(--text); text-decoration: none; }
+  .ns-tape-head a:hover { color: var(--accent); }
+  .ns-ev-tag {
+    flex: none; font-size: 9.5px; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 4px; padding: 0 5px; white-space: nowrap;
+  }
+  .ns-dup { flex: none; font-size: 10px; color: var(--muted); }
+  .ns-src { flex: none; font-size: 10px; color: var(--muted); max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ns-conf-track {
+    display: inline-block; width: 40px; height: 5px; vertical-align: middle;
+    background: color-mix(in srgb, var(--border) 55%, transparent); border-radius: 3px; overflow: hidden;
+  }
+  .ns-conf-fill { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  .ns-row { cursor: pointer; }
+  .ns-expander { color: var(--muted); width: 16px; }
+  /* Expanded brief cell: the parent .ns-table td forces nowrap+ellipsis for
+     the data rows — the brief must override so its text wraps instead of being
+     clipped on the right (see item 9). */
+  .ns-brief-row td {
+    background: color-mix(in srgb, var(--border) 18%, transparent);
+    white-space: normal; overflow: visible; text-overflow: clip;
+  }
+  .ns-brief { font-size: 12px; line-height: 1.5; padding: 4px 0 2px; }
+  .ns-brief-meta { font-size: 10.5px; color: var(--muted); margin: 2px 0 6px; }
+  .ns-brief-art { font-size: 11.5px; padding: 2px 0; display: flex; align-items: flex-start; gap: 6px; }
+  .ns-brief-art a { flex: 1; min-width: 0; }
+  .ns-brief-art .ns-dot { margin-top: 4px; flex: none; }
+  .ns-brief-art a { color: var(--text); text-decoration: none; }
+  .ns-brief-art a:hover { color: var(--accent); }
+  /* Sortable constituent-table headers (item 3). */
+  .ns-table th.ns-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  .ns-table th.ns-sortable:hover { color: var(--text); }
+  .ns-sort-arr { font-size: 9px; margin-left: 2px; color: var(--accent); }
+
+  /* Flash-tape sentiment-tier filter chips (items 4-5). */
+  .ns-tape-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 2px; }
+  .ns-tape-grp { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .ns-tier-chip {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 999px; font-size: 10.5px; padding: 2px 9px; cursor: pointer;
+  }
+  .ns-tier-chip:hover { border-color: var(--accent); color: var(--text); }
+  .ns-tier-chip.on { color: #fff; font-weight: 600; }
+  .ns-tier-chip.on[data-tier="__all__"] { background: var(--accent); border-color: var(--accent); }
+  .ns-tier-chip.t-very_bullish.on { background: #22c55e; border-color: #22c55e; }
+  .ns-tier-chip.t-bullish.on      { background: #4ade80; border-color: #4ade80; color: #0b1a10; }
+  .ns-tier-chip.t-neutral.on      { background: #94a3b8; border-color: #94a3b8; color: #10151d; }
+  .ns-tier-chip.t-bearish.on      { background: #f87171; border-color: #f87171; }
+  .ns-tier-chip.t-very_bearish.on { background: #ef4444; border-color: #ef4444; }
+
+  /* Model Diagnostics (i) info button + about panel (item 6). */
+  .ns-diag-info {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 15px; height: 15px; margin-left: 8px; padding: 0; vertical-align: middle;
+    border: 1px solid var(--border); border-radius: 50%; background: transparent;
+    color: var(--muted); font-size: 10px; font-style: italic; font-weight: 700;
+    font-family: Georgia, "Times New Roman", serif; cursor: pointer; line-height: 1;
+  }
+  .ns-diag-info:hover, .ns-diag-info.on { border-color: var(--accent); color: var(--accent); }
+  .ns-diag-about {
+    font-size: 12px; line-height: 1.55; color: var(--text);
+    background: color-mix(in srgb, var(--border) 14%, transparent);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; margin: 8px 0 4px; max-width: 760px;
+  }
+  .ns-diag-about.hidden { display: none; }
+  .ns-diag-about p { margin: 0 0 8px; }
+  .ns-diag-about p:last-child { margin-bottom: 0; }
+  .ns-diag-about b { color: var(--text); }
+  .ns-diag-about code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px;
+    background: color-mix(in srgb, var(--border) 40%, transparent);
+    padding: 0 3px; border-radius: 3px;
+  }
+  .ns-diag-about-foot { font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 8px; }
+
+  .ns-diag-toggle { cursor: pointer; user-select: none; }
+  /* Item 8: without this rule the diagnostics body could open but never
+     visually close — the .hidden class had no display rule at this level. */
+  .ns-diag-body.hidden { display: none; }
+  .ns-diag-sec { margin: 10px 0; }
+  .ns-diag-sec h5 { font-size: 11px; color: var(--muted); margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .ns-diag-table { max-width: 420px; }
+  .ns-diag-note { font-size: 10.5px; color: var(--muted); margin-top: 4px; }
+  .ns-diag-tier-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+  .ns-diag-tier-label { font-size: 11px; width: 96px; flex: none; font-weight: 600; }
+  .ns-hist { display: flex; align-items: flex-end; gap: 2px; height: 52px; max-width: 420px; }
+  .ns-hist-col { flex: 1; border-radius: 2px 2px 0 0; min-height: 2px; }
+  .ns-hist-axis {
+    display: flex; justify-content: space-between; max-width: 420px;
+    font-size: 10px; color: var(--muted); margin-top: 2px;
+  }
+
   .toast {
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
     background: var(--bg-canvas); border: 1px solid var(--border); padding: 9px 14px;
@@ -1976,8 +2239,3 @@
   }
   .toast.show { opacity: 1; }
 
-  .app-footer {
-    position: fixed; bottom: 6px; right: 10px; z-index: 5;
-    color: var(--muted); font-size: 10.5px; letter-spacing: 0.2px;
-    opacity: 0.55; pointer-events: none; user-select: none;
-  }

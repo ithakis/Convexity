@@ -39,7 +39,7 @@ def _showwarning_filter(message, category, filename, lineno, file=None, line=Non
 warnings.showwarning = _showwarning_filter
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-from portfolio_tracker import __version__
+from portfolio_tracker import __version__, __version_date__, __version_display__
 from portfolio_tracker.analytics import (
     _bulk_close,
     analyze_portfolio,
@@ -143,7 +143,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if parsed.path == "/api/health":
-            self._send_json(200, {"ok": True, "ts": datetime.now(timezone.utc).isoformat(), "version": __version__})
+            self._send_json(200, {
+                "ok": True, "ts": datetime.now(timezone.utc).isoformat(),
+                "version": __version__, "version_date": __version_date__,
+            })
             return
         if parsed.path == "/api/watchlists":
             self._send_json(200, {"watchlists": load_watchlists()})
@@ -286,6 +289,27 @@ class Handler(BaseHTTPRequestHandler):
                     "articles": articles,
                     "status": _ns.status(),
                 })
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/news-tape":
+            if _ns is None:
+                self._send_json(503, {"error": "news_sentiment module not available"})
+                return
+            q = parse_qs(parsed.query)
+            symbols = [s.strip().upper() for s in (q.get("symbols") or [""])[0].split(",") if s.strip()]
+            try:
+                # Cache-only read — safe to call on every panel open.
+                self._send_json(200, {"articles": _ns.get_cached_articles(symbols)})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/news-diagnostics":
+            if _ns is None:
+                self._send_json(503, {"error": "news_sentiment module not available"})
+                return
+            try:
+                self._send_json(200, _ns.compute_diagnostics())
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
@@ -601,10 +625,40 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 symbols = [str(s).strip().upper() for s in (payload.get("symbols") or []) if s]
-                result = _ns.refresh_sentiment(symbols)
-                self._send_json(200, result)
+                context = payload.get("context") if isinstance(payload.get("context"), dict) else None
             except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
+                self._send_json(400, {"error": str(exc)})
+                return
+            # NDJSON staged stream (mirrors /api/quotes-stream): market lands
+            # first, then constituents by weight — the panel fills as results
+            # arrive instead of blocking for the whole refresh.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            write_lock = threading.Lock()
+            aborted = threading.Event()
+
+            def _emit(kind: str, body: dict) -> None:
+                if aborted.is_set():
+                    return
+                try:
+                    with write_lock:
+                        self.wfile.write(_safe_json({"type": kind, **body}))
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    aborted.set()
+
+            try:
+                _emit("start", {"total": len(symbols)})
+                result = _ns.refresh_sentiment(symbols, context=context,
+                                               progress_cb=_emit)
+                _emit("done", result)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except Exception as exc:
+                _emit("error", {"error": str(exc)})
             return
 
         if parsed.path == "/api/quotes-stream":
@@ -769,7 +823,7 @@ def main() -> None:
     server, port = start_server()
     url = f"http://localhost:{port}/"
     print("=" * 60)
-    print(f"  Portfolio _App v{__version__} running at {url}")
+    print(f"  Portfolio _App v{__version_display__} running at {url}")
     print("  Press Ctrl+C to stop.")
     print("=" * 60)
     threading.Timer(0.8, lambda: subprocess.run(
