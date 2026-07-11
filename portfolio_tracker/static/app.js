@@ -1035,6 +1035,18 @@ function textOnHeat(t, theme) {
   if (theme === "dark") return mag > 0.65 ? "#ffffff" : "var(--text)";
   return mag > 0.55 ? "#ffffff" : "var(--text)";
 }
+function returnColor(pct, anchor = 6) {
+  /* Magnitude-scaled TEXT color for a signed return: muted near 0, deepening
+     to full green/red as |pct| approaches `anchor`. Sibling of colorDiverging
+     (which tints a background); this returns a readable foreground color.
+     Reused by the News Movers list and the Market·Systematic tape. */
+  if (pct == null || !isFinite(pct)) return "";
+  const theme = getTheme();
+  const C = THEME_COLORS[theme];
+  const neutral = theme === "dark" ? [125, 133, 144] : [110, 118, 129]; /* --muted */
+  const t = clamp(pct / anchor, -1, 1);
+  return rgbMix(neutral, pct >= 0 ? C.pos : C.neg, Math.abs(t));
+}
 
 /* ===========================================================================
  * Visual primitives
@@ -1197,11 +1209,13 @@ function msprBadge(o) {
 }
 
 const NS_COLORS = {
-  very_bullish: "#22c55e",
+  /* Deep saturated endpoints for the "very" tiers vs pale plain tiers, so the
+     two steps read clearly apart on the timeline, dots, and badges. */
+  very_bullish: "#16a34a",
   bullish:      "#86efac",
   neutral:      "#94a3b8",
   bearish:      "#fca5a5",
-  very_bearish: "#ef4444",
+  very_bearish: "#dc2626",
 };
 const NS_LABELS = {
   very_bullish: "Very Bullish",
@@ -1960,7 +1974,7 @@ function openModal(r) {
 }
 function closeModal() { $("#modal-bg").classList.remove("show"); DETAIL.data = null; }
 $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") closeModal(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeInfo(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeInfo(); closeNsProgress(); } });
 
 function renderModalSkeleton() {
   const r = DETAIL.row;
@@ -5191,6 +5205,119 @@ function nsRefreshContext(symbols) {
   return {weights, betas, rows, lookback_days: NS.lookbackDays};
 }
 
+/* ---- News refresh progress modal ---------------------------------------
+ * One job row per constituent + the market. Each bar fills through the
+ * backend stage events (start → fetch → score1 → score2 → aggregate → done);
+ * two rows animate at once because the refresh runs a 2-worker pool. */
+const NS_PROG_STAGE = {
+  queued:    { frac: 0.00, txt: "queued" },
+  start:     { frac: 0.05, txt: "starting…" },
+  fetch:     { frac: 0.35, txt: "fetched news…" },
+  score1:    { frac: 0.60, txt: "AI pass 1…" },
+  score2:    { frac: 0.85, txt: "AI pass 2…" },
+  aggregate: { frac: 0.95, txt: "aggregating…" },
+};
+
+function updateNsProgCount() {
+  const c = $("#ns-prog-count");
+  if (c && NS.prog) c.textContent = `${NS.prog.done}/${NS.prog.total}`;
+}
+
+function openNsProgress(plan) {
+  const bg = $("#ns-prog-bg");
+  const list = $("#ns-prog-jobs");
+  if (!bg || !list) return;
+  // Cancel any pending auto-close from a previous refresh — otherwise its
+  // 900ms timer could fire and hide the modal this new refresh just opened
+  // (the Refresh button re-enables before that timer elapses).
+  clearTimeout(NS.progCloseTimer);
+  NS.prog = { jobs: new Map(), total: 0, done: 0, error: false };
+  list.innerHTML = "";
+  const add = (id, label) => {
+    const row = document.createElement("div");
+    row.className = "ns-prog-job";
+    row.innerHTML =
+      `<span class="ns-prog-sym"></span>` +
+      `<span class="ns-prog-track"><span class="ns-prog-fill"></span></span>` +
+      `<span class="ns-prog-status">queued</span>`;
+    row.querySelector(".ns-prog-sym").textContent = label;
+    list.appendChild(row);
+    NS.prog.jobs.set(id, {
+      label, frac: 0, done: false, el: row,
+      fill: row.querySelector(".ns-prog-fill"),
+      status: row.querySelector(".ns-prog-status"),
+    });
+  };
+  if (plan.market) add("__market__", "Market");
+  (plan.symbols || []).forEach(s => add(s, s));
+  NS.prog.total = NS.prog.jobs.size;
+  updateNsProgCount();
+  const foot = $("#ns-prog-foot");
+  if (foot) {
+    // Clear a previous run's error styling — otherwise a failed refresh
+    // permanently reddens every subsequent refresh's footer.
+    foot.classList.remove("ns-prog-err");
+    foot.textContent = `Window ${plan.days || NS.lookbackDays}d · 2 workers in parallel`;
+  }
+  bg.hidden = false;
+  bg.classList.add("show");
+  if (!bg.dataset.wired) {  // backdrop-click close, attached once
+    bg.addEventListener("click", e => { if (e.target === bg) closeNsProgress(); });
+    bg.dataset.wired = "1";
+  }
+}
+
+function updateNsProgressJob(id, patch) {
+  if (!NS.prog) return;
+  const job = NS.prog.jobs.get(id);
+  if (!job) return;
+  if (patch.stage) {
+    const st = NS_PROG_STAGE[patch.stage];
+    if (st) {
+      job.frac = Math.max(job.frac, patch.frac != null ? patch.frac : st.frac);
+      job.status.textContent = st.txt;
+    }
+    if (!job.done) job.el.classList.add("active");
+  }
+  if (patch.done && !job.done) {
+    job.done = true;
+    job.frac = 1;
+    job.el.classList.remove("active");
+    job.el.classList.add("done");
+    const s = patch.sentiment;
+    if (s && (s.tier || s.score != null)) {
+      const tier = s.tier || "neutral";
+      job.fill.style.background = NS_COLORS[tier] || "var(--accent)";
+      const lbl = NS_LABELS[tier] || "done";
+      job.status.textContent = s.score != null ? `${lbl} ${fmtSig(s.score)}` : lbl;
+      job.status.style.color = NS_COLORS[tier] || "";
+    } else {
+      job.el.classList.add("empty");
+      job.status.textContent = "no news";
+    }
+    NS.prog.done += 1;
+    updateNsProgCount();
+  }
+  job.fill.style.width = (job.frac * 100).toFixed(1) + "%";
+}
+
+function nsProgressError(message) {
+  if (!NS.prog) return;
+  NS.prog.error = true;
+  const foot = $("#ns-prog-foot");
+  if (foot) {
+    foot.textContent = `Refresh failed: ${message}`;
+    foot.classList.add("ns-prog-err");
+  }
+}
+
+function closeNsProgress() {
+  const bg = $("#ns-prog-bg");
+  if (!bg) return;
+  bg.classList.remove("show");
+  bg.hidden = true;
+}
+
 async function refreshNewsSentiment() {
   const btn = $("#ns-refresh");
   btn.disabled = true;
@@ -5222,15 +5349,23 @@ async function refreshNewsSentiment() {
         if (!line) continue;
         let msg;
         try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.type === "market") {
+        if (msg.type === "plan") {
+          openNsProgress(msg);
+        } else if (msg.type === "market_stage") {
+          updateNsProgressJob("__market__", { stage: msg.stage, frac: msg.frac });
+        } else if (msg.type === "symbol_stage") {
+          updateNsProgressJob(msg.symbol, { stage: msg.stage, frac: msg.frac });
+        } else if (msg.type === "market") {
           NS.market = msg.sentiment || null;
           renderMarketSentiment();
+          updateNsProgressJob("__market__", { done: true, sentiment: msg.sentiment });
           btn.textContent = `Refreshing… market ✓ 0/${symbols.length}`;
         } else if (msg.type === "symbol") {
           done += 1;
           if (msg.sentiment) NS.sentiment[msg.symbol] = msg.sentiment;
           renderNsGauge(symbols);
           renderPortfolioSentiment(symbols);
+          updateNsProgressJob(msg.symbol, { done: true, sentiment: msg.sentiment });
           btn.textContent = `Refreshing… ${done}/${symbols.length}`;
         } else if (msg.type === "done") {
           NS.market = msg.market || NS.market;
@@ -5248,8 +5383,15 @@ async function refreshNewsSentiment() {
     } catch (e) { /* tape is decorative — keep the stale one */ }
     renderNewsPanel(symbols);
     patchRowSentiment(NS.sentiment);
+    // Brief hold so the last bar's fill is visible, then dismiss. Tracked so a
+    // subsequent refresh can cancel it (see openNsProgress).
+    NS.progCloseTimer = setTimeout(closeNsProgress, 900);
   } catch (e) {
-    $("#ns-market-body").innerHTML = `<div class="ns-panel-empty">Refresh failed. ${escapeHtml(String(e.message || e))}</div>`;
+    const detail = escapeHtml(String(e.message || e));
+    $("#ns-market-body").innerHTML = `<div class="ns-panel-empty">Refresh failed. ${detail}</div>`;
+    // Keep the modal open showing the error (closeable via backdrop/Esc)
+    // rather than silently vanishing on failure.
+    nsProgressError(detail);
   }
   btn.disabled = false;
   btn.textContent = "↻ Refresh";
@@ -5319,8 +5461,8 @@ function nsScoreDot(score) {
   /* Per-article / per-signal dot colored by sign+magnitude. */
   if (score == null || !isFinite(score)) return '<span class="ns-dot ns-empty"></span>';
   let color = "#94a3b8";
-  if (score > 0.15) color = score > 0.5 ? "#22c55e" : "#4ade80";
-  else if (score < -0.15) color = score < -0.5 ? "#ef4444" : "#f87171";
+  if (score > 0.15) color = score > 0.5 ? "#16a34a" : "#86efac";
+  else if (score < -0.15) color = score < -0.5 ? "#dc2626" : "#fca5a5";
   return `<span class="ns-dot" style="background:${color}" data-tip="${fmtSig(score)}"></span>`;
 }
 
@@ -5397,7 +5539,18 @@ function renderMarketSentiment() {
   }
   const tierLabel = NS_LABELS[s.tier] || "Neutral";
   const tierCls = NS_COLORS[s.tier] ? s.tier : "neutral";
-  const tape = s.tape ? `<div class="ns-mkt-tape">${escapeHtml(s.tape)}</div>` : "";
+  // Structured cross-asset tape: label muted, return magnitude-colored. Falls
+  // back to the legacy pre-formatted string when tape_items is absent.
+  let tape = "";
+  if (Array.isArray(s.tape_items) && s.tape_items.length) {
+    const items = s.tape_items.map(it =>
+      `<span class="ns-mkt-item"><span class="ns-mkt-lbl">${escapeHtml(it.label)}</span> ` +
+      `<span class="ns-mkt-val" style="color:${returnColor(it.pct, 2.5)}">${fmtPctSigned(it.pct)} 1d</span></span>`
+    ).join('<span class="ns-mkt-sep">·</span>');
+    tape = `<div class="ns-mkt-tape">${items}</div>`;
+  } else if (s.tape) {
+    tape = `<div class="ns-mkt-tape">${escapeHtml(s.tape)}</div>`;
+  }
   const conf = s.confidence != null ? ` · conf ${(s.confidence * 100).toFixed(0)}%` : "";
   body.innerHTML = `
     <div class="ns-market-summary">${escapeHtml(s.summary)}</div>
@@ -5437,7 +5590,7 @@ function renderNsMovers() {
       : '<span class="ns-src">no recent coverage</span>';
     return `<div class="ns-mover-row">
       <span class="ns-tape-sym">${r.symbol}</span>
-      <span class="${r.pct_1d >= 0 ? "pos" : "neg"} ns-mover-pct">${fmtPctSigned(r.pct_1d)}</span>
+      <span class="ns-mover-pct" style="color:${returnColor(r.pct_1d, 6)}">${fmtPctSigned(r.pct_1d)}</span>
       <span class="ns-mover-head">${head}</span>
     </div>`;
   });
@@ -5552,10 +5705,13 @@ function renderNsTape() {
 const NS_TL_PERIODS = [["1D", 1], ["3D", 3], ["1W", 7], ["2W", 14], ["1M", 30]];
 
 function nsTlLevel(score) {
+  /* 3-level magnitude ramp. "very" tiers use deep saturated green/red
+     (#16a34a / #dc2626); plain tiers use pale (#86efac / #fca5a5) so the two
+     are unmistakable on the timeline (was #22c55e vs #4ade80 — too close). */
   if (score == null || !isFinite(score)) return { h: 22, color: "#94a3b8", lbl: "neutral" };
   const a = Math.abs(score);
-  if (a > 0.5) return { h: 92, color: score > 0 ? "#22c55e" : "#ef4444", lbl: score > 0 ? "very bullish" : "very bearish" };
-  if (a > 0.15) return { h: 58, color: score > 0 ? "#4ade80" : "#f87171", lbl: score > 0 ? "bullish" : "bearish" };
+  if (a > 0.5) return { h: 92, color: score > 0 ? "#16a34a" : "#dc2626", lbl: score > 0 ? "very bullish" : "very bearish" };
+  if (a > 0.15) return { h: 58, color: score > 0 ? "#86efac" : "#fca5a5", lbl: score > 0 ? "bullish" : "bearish" };
   return { h: 22, color: "#94a3b8", lbl: "neutral" };
 }
 
@@ -5578,8 +5734,8 @@ function renderNsTimeline() {
     `<select id="ns-tl-sym" class="ns-tape-select">${symOpts}</select>` +
     `<span class="ns-tl-periods">${periodBtns}</span>` +
     `<span class="ns-tl-legend">` +
-    `<span class="ns-tl-lg"><i style="background:#22c55e;height:10px"></i>strong</span>` +
-    `<span class="ns-tl-lg"><i style="background:#4ade80;height:7px"></i>moderate</span>` +
+    `<span class="ns-tl-lg"><i style="background:#16a34a;height:10px"></i>strong</span>` +
+    `<span class="ns-tl-lg"><i style="background:#86efac;height:7px"></i>moderate</span>` +
     `<span class="ns-tl-lg"><i style="background:#94a3b8;height:4px"></i>neutral</span>` +
     `<span class="ns-tl-lg">green bullish · red bearish</span></span>`;
   $("#ns-tl-sym").onchange = (e) => { NS.tlSym = e.target.value; renderNsTimeline(); };

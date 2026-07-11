@@ -56,6 +56,17 @@ SUPPORTED_FX: list[str] = [
 ]
 
 
+# ----------------------------- Rate-limit heuristics -------------------------
+
+def _is_rate_limited_error(exc: Exception) -> bool:
+    """Yahoo/yfinance don't raise a typed rate-limit exception — this is the
+    shared substring heuristic used by every yfinance retry loop in the app
+    (fetcher.fetch_one, news_sentiment._fetch_yf_news) so the two don't drift
+    out of sync on what counts as "back off and retry" vs "fail fast"."""
+    msg = str(exc).lower()
+    return "rate" in msg or "429" in msg or "too many" in msg
+
+
 # ----------------------------- Numeric helpers ------------------------------
 
 def _safe_num(v) -> float | None:

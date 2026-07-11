@@ -924,6 +924,26 @@ gh pr status
 gh pr checks <number>
 ```
 
+**After a merge, make the new version the live one — this does not happen
+automatically.** PR work happens in a worktree (`.claude/worktrees/...`);
+`gh pr merge` updates `origin/main` on GitHub, but neither the user's main
+checkout at the repo root nor their already-running `dashboard.py` process
+picks that up by itself. Two separate steps, both required:
+
+1. **Pull the main checkout.** `git -C <repo root> pull origin main` (or
+   `git status --branch` first to confirm it's actually behind — merging
+   from a worktree never touches the root checkout's working tree).
+2. **Restart the live server.** Per §3: `pkill` the running
+   `dashboard.py` process, then relaunch it with the QF12 env python. A
+   long-lived process keeps serving whatever code was loaded at its own
+   start time — Python doesn't hot-reload, so an old process will keep
+   reporting the pre-merge `__version__` via `/api/health` and the footer
+   indefinitely without a restart, even though the repo on disk is current.
+
+Verify with `curl -s http://127.0.0.1:8765/api/health` and confirm
+`version` matches the just-merged `__version__` before telling the user
+the update is live.
+
 ---
 
 ## 14. Desktop app (PySide6 + QtWebEngine)

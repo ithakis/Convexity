@@ -740,6 +740,21 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 </div>
 
 <div class="modal-bg" id="modal-bg"><div class="modal" id="modal"></div></div>
+
+<!-- News refresh progress modal: one job row per constituent + the market,
+     each with a bar that fills through fetch → AI pass 1 → pass 2 → done.
+     Two rows animate at once (the refresh runs a 2-worker pool). -->
+<div class="modal-bg" id="ns-prog-bg" hidden>
+  <div class="modal ns-prog-modal" role="dialog" aria-modal="true" aria-label="Refreshing news sentiment">
+    <div class="ns-prog-head">
+      <span class="ns-prog-title">Refreshing news &amp; sentiment</span>
+      <span class="ns-prog-count" id="ns-prog-count"></span>
+    </div>
+    <div class="ns-prog-jobs" id="ns-prog-jobs"></div>
+    <div class="ns-prog-foot" id="ns-prog-foot"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="/static/app.js"></script>

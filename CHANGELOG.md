@@ -5,6 +5,46 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.5.1 — 2026-07-10
+News tab refresh reworked to actually honour the selected analysis window.
+`_fetch_yf_news` now pulls via `get_news(count=N)` (scaled to the window,
+capped at 100) instead of the `.news` property, which was hard-capped at ~10
+most-recent items and so never spanned more than a day or two on an active
+ticker regardless of the 3D/7D/14D/30D control. yfinance news calls are now
+globally throttled (`_YF_LIMITER`, 40/min) with jittered retry so a full
+windowed refresh can't burst Yahoo into a 429, and the market feed is windowed
+too — merging Finnhub's general feed with benchmark-index news (`^GSPC`/
+`^IXIC`) so the market timeline spans the window instead of showing only the
+latest. Retained-article cap raised 20 → 60, via a new `_window_sample()` that
+time-stratifies the retained set across the window instead of keeping only
+the newest N (a plain newest-N cut still collapsed to hours for high-volume
+tickers like NVDA even after deepening the fetch — the newest 60 articles for
+a firehose ticker can all land within the same afternoon). AI scoring still
+reads the newest 15 (`_SCORE_BATCH`, now a shared module constant instead of
+duplicated literals). Finnhub's per-request article slice now scales with the
+window (`min(300, days*20)`) instead of a flat cap, so a 30D lookback on a
+high-volume name doesn't get truncated back down to its newest few days.
+Market/company news caches no longer lock in a Finnhub-outage-degraded
+(yfinance-only) result for the full 30-day TTL — degraded results get a short
+TTL so a Finnhub recovery isn't masked for a month. Both market AND per-symbol
+news/sentiment cache keys are now windowed (`|{days}`) so a 7D and 30D refresh
+never shadow each other; `get_cached_sentiment` (the fast per-row NS-dot read)
+sweeps all lookback buckets since it isn't tied to the News tab's selected
+window.
+
+New refresh progress modal: a centered popup lists every job (market + each
+constituent, weight-sorted) with a per-job bar that fills through fetch → AI
+pass 1 → pass 2 → aggregate; two rows animate at once (the 2-worker pool),
+completed jobs show tier color + score, and it auto-closes when done. Backed
+by new `plan`/`market_stage`/`symbol_stage` NDJSON events on `/api/news-refresh`.
+
+Coloring: Movers and the Market·Systematic cross-asset tape now magnitude-color
+each return (muted near zero → full green/red at magnitude) via a new
+`returnColor()` helper — Movers were previously uncolored (dead `pos`/`neg`
+classes with no CSS rule). News Timeline "very bullish/bearish" tiers deepened
+(`#16a34a`/`#dc2626`) against paler plain tiers so the two steps read clearly
+apart; unified across timeline bars, per-article dots, and tier badges.
+
 ## 1.5.0 — 2026-07-09
 Major News tab redesign. The four top cards (Portfolio Signal, Market·
 Systematic Risk, Movers, What to Watch) are now one resizable quad — drag

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import sys
 import time
 import threading
@@ -35,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from portfolio_tracker.helpers import _load_local_secret, _repo_root
+from portfolio_tracker.helpers import _is_rate_limited_error, _load_local_secret, _repo_root
 from portfolio_tracker import lexicon as _lex
 
 # API key loading (env var, then a strictly-local file found by walking
@@ -82,6 +83,16 @@ _RECENCY_TAU_DAYS = 3.0
 # tau=3.0 behaviour.
 _DEFAULT_LOOKBACK_DAYS = 7
 _LOOKBACK_CHOICES = (3, 7, 14, 30)
+
+# Load-bearing pair: `_SCORE_BATCH` is both "how many articles get AI-scored"
+# (get_news_sentiment/get_market_sentiment slice articles[:_SCORE_BATCH]) AND
+# the `min_recent` passed to _window_sample — the two MUST match, or scoring
+# would silently include time-bucket-sampled older articles instead of
+# genuinely-most-recent ones, breaking the recency-weighted aggregation's
+# assumption. `_ARTICLE_CAP` is the retained total (scored + time-sampled)
+# that the timeline/tape render from.
+_SCORE_BATCH = 15
+_ARTICLE_CAP = 60
 
 
 def _clamp_lookback(days) -> int:
@@ -342,6 +353,14 @@ class _RateLimiter:
 
 _FH_LIMITER = _RateLimiter(max_per_min=55, name="finnhub")
 _NV_LIMITER = _RateLimiter(max_per_min=60, name="nvidia")
+# yfinance has no official rate limit and no app-level throttle anywhere else
+# in the codebase (price/analytics paths burst at 5-8 workers). Windowed news
+# now fetches deeper per ticker AND for benchmark indices, so a full-portfolio
+# refresh could realistically burst Yahoo into a 429. This limiter caps just
+# the news calls; kept conservative because it shares Yahoo's backend with the
+# unthrottled price/analytics traffic.
+_YF_LIMITER = _RateLimiter(max_per_min=40, name="yfinance-news")
+_YF_MAX_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +479,54 @@ def _dedup_articles(articles: list[dict]) -> list[dict]:
     return kept
 
 
+def _window_sample(articles: list[dict], cap: int, min_recent: int) -> list[dict]:
+    """Trim to ~`cap` while spanning the lookback window instead of collapsing
+    to the newest `cap` articles.
+
+    High-volume tickers (NVDA, MSFT) publish enough that the newest N cluster
+    within hours, so a plain newest-N cut makes the timeline show only "today"
+    even though older articles were fetched. We keep the newest `min_recent`
+    verbatim (AI scoring reads articles[:min_recent], recency-weighted, and
+    must stay genuinely most-recent) then TIME-stratify the older remainder:
+    split its time span into `slots` equal buckets and keep the newest article
+    from each non-empty bucket. Stratifying by time (not by index) is the point
+    — index striding over-samples the dense recent cluster and still drops the
+    older days. Input and output are newest-first; the result may be smaller
+    than `cap` when older buckets are empty (coverage beats raw count here).
+    """
+    if len(articles) <= cap:
+        return articles
+    recent = articles[:min_recent]
+    rest = articles[min_recent:]
+    slots = cap - min_recent
+    if slots <= 0 or not rest:
+        return recent
+    # Undated articles (datetime missing/0 — e.g. an unparsed yfinance pubDate)
+    # have no time signal to stratify on. A single one used to collapse tmin
+    # to 0 and blow up the whole span, so they're excluded from bucketing and
+    # merged back in afterward, capped to whatever slot budget remains.
+    dated = [a for a in rest if a.get("datetime")]
+    undated = [a for a in rest if not a.get("datetime")]
+    if not dated:
+        return recent + undated[:slots]
+    times = [a["datetime"] for a in dated]
+    tmin, tmax = min(times), max(times)
+    if tmax <= tmin:
+        sampled = dated[:slots]
+    else:
+        span = tmax - tmin
+        buckets: dict[int, dict] = {}
+        for a in dated:
+            t = a["datetime"]
+            idx = min(slots - 1, int((t - tmin) / span * slots))
+            if idx not in buckets or t > buckets[idx]["datetime"]:
+                buckets[idx] = a  # newest per time-bucket
+        sampled = list(buckets.values())
+    leftover = max(0, slots - len(sampled))
+    result = recent + sampled + undated[:leftover]
+    return sorted(result, key=lambda a: a.get("datetime") or 0, reverse=True)
+
+
 def _parse_yf_epoch(content: dict, item: dict) -> int:
     """Best-effort epoch seconds from a yfinance news payload."""
     ts = content.get("pubDate") or content.get("displayTime")
@@ -477,15 +544,36 @@ def _parse_yf_epoch(content: dict, item: dict) -> int:
 def _fetch_yf_news(symbol: str, days: int) -> list[dict]:
     """yfinance news merged as a secondary source — free, keyless, and the
     only coverage for many non-US tickers where Finnhub free returns [].
-    Flaky by nature: any failure degrades silently to Finnhub-only."""
-    try:
-        import yfinance as yf
-        raw = yf.Ticker(symbol).news or []
-    except Exception:
-        return []
+    Flaky by nature: any failure degrades silently to Finnhub-only.
+
+    Uses get_news(count=N), NOT the `.news` property: `.news` is hard-capped
+    at ~10 most-recent items, so on an active ticker it never spans more than
+    a day or two regardless of the requested window. `count` scales with the
+    window (capped at 100 to bound cost) and the results are then filtered to
+    the window client-side below. A FRESH Ticker is built every call on
+    purpose — Ticker caches its news per-instance and would otherwise ignore
+    a larger `count` on a reused object. Globally throttled via _YF_LIMITER +
+    jittered retry so a full-portfolio windowed refresh can't burst Yahoo
+    into a 429 (mirrors fetcher.fetch_one's 429 handling)."""
+    import yfinance as yf  # hoisted out of the loop — re-importing per attempt
+                            # wasted a rate-limit slot before the module-cache
+                            # hit even resolved on the very first (cold) call
+    count = min(100, max(30, days * 8))
+    raw: list = []
+    for attempt in range(_YF_MAX_RETRIES):
+        _YF_LIMITER.acquire()
+        try:
+            raw = yf.Ticker(symbol).get_news(count=count, tab="news") or []
+            break
+        except Exception as exc:
+            if _is_rate_limited_error(exc) and attempt < _YF_MAX_RETRIES - 1:
+                _YF_LIMITER.penalize()
+                time.sleep(2.0 + attempt * 2.0 + random.random() * 0.5)
+                continue
+            return []
     cutoff = datetime.now(timezone.utc).timestamp() - days * 86400
     out: list[dict] = []
-    for n in raw[:15]:
+    for n in raw:
         if not isinstance(n, dict):
             continue
         content = n.get("content") if isinstance(n.get("content"), dict) else n
@@ -514,8 +602,12 @@ def _fetch_yf_news(symbol: str, days: int) -> list[dict]:
 
 def fetch_company_news(symbol: str, days: int = 7) -> list[dict] | None:
     """Fetch recent news for a single ticker from Finnhub + yfinance,
-    deduplicated. Returns normalised article list (most recent first)."""
-    cache_key = f"news|{symbol}"
+    deduplicated. Returns normalised article list (most recent first).
+
+    Keyed by `days` — mirrors fetch_market_news: a 7d and 30d GET must not
+    collide/shadow each other, otherwise switching the News-tab window
+    silently keeps serving whichever window was cached first."""
+    cache_key = f"news|{symbol}|{days}"
     cached = _cache_get(_NEWS_CACHE, cache_key)
     if cached is _MISS:
         return None
@@ -528,7 +620,13 @@ def fetch_company_news(symbol: str, days: int = 7) -> list[dict] | None:
     articles: list[dict] = []
     fh_failed = raw is None  # transient failure vs "returned but empty"
     if isinstance(raw, list):
-        for a in raw[:30]:
+        # Deep, window-scaled slice, NOT a flat newest-30/150 — Finnhub
+        # returns newest-first within the from/to range, so a fixed cap
+        # still collapses a wide window to its newest days for a high-volume
+        # ticker. Scales like the yfinance count below; _window_sample then
+        # spreads the retained set across the window.
+        fh_cap = min(300, max(60, days * 20))
+        for a in raw[:fh_cap]:
             articles.append({
                 "headline": a.get("headline", ""),
                 "summary": a.get("summary", ""),
@@ -543,14 +641,32 @@ def fetch_company_news(symbol: str, days: int = 7) -> list[dict] | None:
             return None  # transient — don't negative-cache
         _cache_put(_NEWS_CACHE, cache_key, _MISS, _NEG_TTL)
         return None
-    articles = _dedup_articles(articles)[:20]
-    _cache_put(_NEWS_CACHE, cache_key, articles, _NEWS_TTL)
+    # Span the window (timeline/tape) rather than keeping only the newest N.
+    # AI scoring still reads the newest 15 (min_recent) in get_news_sentiment;
+    # recency-weighted aggregation keeps that split sound.
+    articles = _window_sample(_dedup_articles(articles), cap=_ARTICLE_CAP, min_recent=_SCORE_BATCH)
+    # A Finnhub outage still lets yfinance-only articles through above (better
+    # than nothing), but that's a DEGRADED result — cache it briefly, not for
+    # the full 30-day _NEWS_TTL, so a real Finnhub recovery isn't masked for
+    # a month. (Mirrors the "transient failure never long-caches" rule below.)
+    _cache_put(_NEWS_CACHE, cache_key, articles, _NEG_TTL if fh_failed else _NEWS_TTL)
     return articles
 
 
-def fetch_market_news() -> list[dict] | None:
-    """Fetch general market news (not ticker-specific)."""
-    cache_key = "news|__market__"
+# Benchmark indices whose yfinance news gives the market feed a real window.
+# Finnhub's general feed has no date param (latest ~30 only), so windowed
+# market coverage comes from these tickers via the same _fetch_yf_news path.
+_MARKET_INDEX_TICKERS = ("^GSPC", "^IXIC")
+
+
+def fetch_market_news(days: int = _DEFAULT_LOOKBACK_DAYS) -> list[dict] | None:
+    """Fetch general market news (not ticker-specific).
+
+    Finnhub `category=general` supplies the latest general feed (no window),
+    merged with windowed yfinance news for the benchmark indices so the market
+    timeline spans the selected window instead of showing only the latest.
+    Keyed by `days` so different windows don't shadow each other in cache."""
+    cache_key = f"news|__market__|{days}"
     cached = _cache_get(_NEWS_CACHE, cache_key)
     if cached is _MISS:
         return None
@@ -558,35 +674,44 @@ def fetch_market_news() -> list[dict] | None:
         return cached
 
     raw = _fh_call("news", {"category": "general"})
-    if raw is None:
-        return None
-    if not isinstance(raw, list):
-        _cache_put(_NEWS_CACHE, cache_key, _MISS, _NEG_TTL)
-        return None
+    fh_failed = raw is None
     articles = []
-    for a in raw[:30]:
-        articles.append({
-            "headline": a.get("headline", ""),
-            "summary": a.get("summary", ""),
-            "source": a.get("source", ""),
-            "datetime": a.get("datetime", 0),
-            "url": a.get("url", ""),
-        })
+    if isinstance(raw, list):
+        for a in raw[:30]:
+            articles.append({
+                "headline": a.get("headline", ""),
+                "summary": a.get("summary", ""),
+                "source": a.get("source", ""),
+                "datetime": a.get("datetime", 0),
+                "url": a.get("url", ""),
+            })
+    # Windowed index news (S&P 500, Nasdaq) — merged so the market feed honours
+    # the lookback window. Each is individually best-effort inside _fetch_yf_news.
+    for idx in _MARKET_INDEX_TICKERS:
+        articles.extend(_fetch_yf_news(idx, days))
     if not articles:
+        if fh_failed:
+            return None  # transient Finnhub failure and no yf news — don't negative-cache
         _cache_put(_NEWS_CACHE, cache_key, _MISS, _NEG_TTL)
         return None
-    articles = _dedup_articles(articles)[:20]
-    _cache_put(_NEWS_CACHE, cache_key, articles, _NEWS_TTL)
+    articles = _window_sample(_dedup_articles(articles), cap=_ARTICLE_CAP, min_recent=_SCORE_BATCH)
+    # Same degraded-result rule as fetch_company_news: a Finnhub outage still
+    # lets an index-only (yfinance) feed through, but it must not lock in for
+    # the full 30-day _NEWS_TTL — that would silently mask a Finnhub recovery.
+    _cache_put(_NEWS_CACHE, cache_key, articles, _NEG_TTL if fh_failed else _NEWS_TTL)
     return articles
 
 
-def _market_tape_context() -> str:
-    """Cross-asset one-liner injected into the market prompt so the brief can
-    lead with numbers (SPY/QQQ/10Y move). Free via yfinance; any failure
-    returns "" and the prompt simply omits the block."""
+def _market_tape_context() -> tuple[str, list[dict]]:
+    """Cross-asset moves for the market card. Returns (tape_string, items):
+    the string (SPY/QQQ/10Y 1d moves) is injected into the market prompt so
+    the brief can lead with numbers; `items` is [{label, pct}] so the frontend
+    can color each return by magnitude. Free via yfinance; any failure returns
+    ("", []) and the prompt simply omits the block."""
     try:
         import yfinance as yf
-        parts = []
+        parts: list[str] = []
+        items: list[dict] = []
         labels = {"SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF", "^TNX": "US 10Y yield (x10 bp)"}
         data = yf.download(list(labels), period="5d", interval="1d",
                            progress=False, auto_adjust=True)["Close"]
@@ -595,11 +720,12 @@ def _market_tape_context() -> str:
                 s = data[sym].dropna()
                 chg = (s.iloc[-1] / s.iloc[-2] - 1.0) * 100.0
                 parts.append(f"{label}: {chg:+.2f}% 1d")
+                items.append({"label": label, "pct": round(float(chg), 2)})
             except Exception:
                 continue
-        return "; ".join(parts)
+        return "; ".join(parts), items
     except Exception:
-        return ""
+        return "", []
 
 
 # ---------------------------------------------------------------------------
@@ -1090,7 +1216,7 @@ def _build_articles_prompt(articles: list[dict], symbol: str,
              f"ONLY — attribute news to its true subject; a rival's or partner's news "
              f"is not {symbol}'s sentiment unless it directly affects {symbol}.",
              _format_quant_context(symbol, row_ctx)]
-    for i, a in enumerate(articles[:15], 1):
+    for i, a in enumerate(articles[:_SCORE_BATCH], 1):
         ts = a.get("datetime", 0)
         if isinstance(ts, (int, float)) and ts > 0:
             date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -1112,7 +1238,7 @@ def _build_market_prompt(articles: list[dict], tape: str = "") -> str:
     lines = ["Score market sentiment from these articles:"]
     if tape:
         lines.append(f"\nCROSS-ASSET TAPE (1-day moves): {tape}\n")
-    for i, a in enumerate(articles[:15], 1):
+    for i, a in enumerate(articles[:_SCORE_BATCH], 1):
         headline = a.get("headline", "")
         source = a.get("source", "")
         lines.append(f"[{i}] {source}: {headline}")
@@ -1129,19 +1255,26 @@ def _score_articles_once(system_prompt: str, user_prompt: str,
 
 
 def _score_articles(system_prompt: str, user_prompt: str,
-                    n_articles: int) -> tuple[list[dict], str, float] | None:
+                    n_articles: int, stage_cb=None) -> tuple[list[dict], str, float] | None:
     """Per-article scoring with optional 2-pass self-consistency.
 
     Returns (scores, brief, agreement) where scores aligns to article order
     (None entries = article not scored) and agreement in [0,1] discounts
     confidence when the two passes disagree. One usable pass is accepted;
-    both failing returns None (caller falls back to blob scoring)."""
+    both failing returns None (caller falls back to blob scoring).
+
+    `stage_cb(stage, frac)` (optional) fires after each AI pass so the refresh
+    progress modal can fill a per-job bar through the two passes."""
     first = _score_articles_once(system_prompt, user_prompt, n_articles)
+    if stage_cb:
+        stage_cb("score1", 0.6)
     if not SELF_CONSISTENCY:
         if first is None:
             return None
         return first[0], first[1], 1.0
     second = _score_articles_once(system_prompt, user_prompt, n_articles)
+    if stage_cb:
+        stage_cb("score2", 0.85)
     if first is None and second is None:
         return None
     if first is None or second is None:
@@ -1176,7 +1309,8 @@ def _score_articles(system_prompt: str, user_prompt: str,
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_news_sentiment(symbol: str, context: dict | None = None) -> dict | None:
+def get_news_sentiment(symbol: str, context: dict | None = None,
+                       stage_cb=None) -> dict | None:
     """Per-ticker sentiment. Cache-first, then fetch+analyze if stale.
 
     `context` (optional): {"beta": float, "s_mkt": float, "row": {...}} —
@@ -1184,28 +1318,33 @@ def get_news_sentiment(symbol: str, context: dict | None = None) -> dict | None:
     payload feeds quant context into the Bloomberg brief. Missing context
     degrades to pure idiosyncratic scoring.
 
+    `stage_cb(stage, frac)` (optional) fires at fetch/score1/score2/aggregate
+    so the refresh progress modal can fill a per-job bar.
+
     Returns the enriched sentiment dict (legacy keys tier/score/summary are
     always populated; score == s_total, summary == brief) or None.
     """
-    cache_key = f"sentiment|{symbol}"
+    ctx = context or {}
+    days = _clamp_lookback(ctx.get("lookback_days") or _DEFAULT_LOOKBACK_DAYS)
+    cache_key = f"sentiment|{symbol}|{days}"
     cached = _cache_get(_SENTIMENT_CACHE, cache_key)
     if cached is _MISS:
         return None
     if cached is not None:
         return cached
 
-    ctx = context or {}
-    days = _clamp_lookback(ctx.get("lookback_days") or _DEFAULT_LOOKBACK_DAYS)
     tau = _tau_for_days(days)
     articles = fetch_company_news(symbol, days=days)
+    if stage_cb:
+        stage_cb("fetch", 0.35)
     if not articles:
         _cache_put(_SENTIMENT_CACHE, cache_key, _MISS, _NEG_TTL)
         return None
 
     row_ctx = ctx.get("row")
     prompt = _build_articles_prompt(articles, symbol, row_ctx)
-    batch = articles[:15]
-    scored = _score_articles(_ARRAY_SYSTEM_PROMPT, prompt, len(batch))
+    batch = articles[:_SCORE_BATCH]
+    scored = _score_articles(_ARRAY_SYSTEM_PROMPT, prompt, len(batch), stage_cb=stage_cb)
 
     fallback = False
     if scored is not None:
@@ -1215,7 +1354,7 @@ def get_news_sentiment(symbol: str, context: dict | None = None) -> dict | None:
         for a, sc in zip(batch, per_article):
             if sc is not None:
                 a.update(sc)
-        _cache_put(_NEWS_CACHE, f"news|{symbol}", articles, _NEWS_TTL)
+        _cache_put(_NEWS_CACHE, f"news|{symbol}|{days}", articles, _NEWS_TTL)
         agg = aggregate_scores(batch, tau=tau)
         if agg is None:
             return None
@@ -1243,6 +1382,8 @@ def get_news_sentiment(symbol: str, context: dict | None = None) -> dict | None:
         events = {}
         fallback = True
 
+    if stage_cb:
+        stage_cb("aggregate", 0.95)
     s_lm = lm_aggregate(batch, tau=tau)
     disagreement = is_disagreement(s_idio, s_lm)
     if disagreement:
@@ -1251,7 +1392,11 @@ def get_news_sentiment(symbol: str, context: dict | None = None) -> dict | None:
     beta = ctx.get("beta")
     s_mkt = ctx.get("s_mkt")
     if s_mkt is None:
-        mkt_cached = _cache_get(_SENTIMENT_CACHE, "sentiment|__market__")
+        # Best-effort fallback for callers with no explicit s_mkt (e.g. ad-hoc
+        # get_news_sentiment(symbol) with no context) — look up the market
+        # entry for THIS call's own window so it doesn't cross-contaminate
+        # with a market score computed for a different lookback.
+        mkt_cached = _cache_get(_SENTIMENT_CACHE, f"sentiment|__market__|{days}")
         if mkt_cached is not None and mkt_cached is not _MISS:
             s_mkt = mkt_cached.get("score")
     s_total = combine_signal(s_idio, beta, s_mkt)
@@ -1300,33 +1445,49 @@ def get_news_sentiment(symbol: str, context: dict | None = None) -> dict | None:
 
 
 def get_cached_sentiment(symbol: str) -> dict | None:
-    """O(1) cache-only read — safe to call from fetch_one hot path."""
-    cached = _cache_get(_SENTIMENT_CACHE, f"sentiment|{symbol}")
-    if cached is _MISS or cached is None:
-        return None
-    return cached
+    """Cache-only read — safe to call from fetch_one hot path.
+
+    The NS dot in the main table isn't tied to the News tab's selected
+    window, so this sweeps every lookback bucket (default-first) rather
+    than reading a single key — sentiment is now cached per-window
+    (see get_news_sentiment), and the row that triggered the last
+    refresh may not have used the default window."""
+    for days in (_DEFAULT_LOOKBACK_DAYS, *_LOOKBACK_CHOICES):
+        cached = _cache_get(_SENTIMENT_CACHE, f"sentiment|{symbol}|{days}")
+        if cached is not None and cached is not _MISS:
+            return cached
+    return None
 
 
-def get_market_sentiment() -> dict | None:
+def get_market_sentiment(days: int = _DEFAULT_LOOKBACK_DAYS,
+                         stage_cb=None) -> dict | None:
     """Market-wide sentiment (s_mkt) — per-article scored, aggregated with
     the same weighting math as stocks. Tier uses fixed thresholds (market
-    history is one observation per refresh — too sparse for quantiles)."""
-    cache_key = "sentiment|__market__"
+    history is one observation per refresh — too sparse for quantiles).
+
+    `days` windows the benchmark-index news the market feed is built from —
+    keyed into the cache so a 7d and a 30d refresh don't collide/shadow each
+    other (a GET-only read after a window change would otherwise silently
+    serve whichever window was cached last, mislabeled).
+    `stage_cb(stage, frac)` (optional) fills the market job's progress bar."""
+    cache_key = f"sentiment|__market__|{days}"
     cached = _cache_get(_SENTIMENT_CACHE, cache_key)
     if cached is _MISS:
         return None
     if cached is not None:
         return cached
 
-    articles = fetch_market_news()
+    articles = fetch_market_news(days=days)
+    if stage_cb:
+        stage_cb("fetch", 0.35)
     if not articles:
         _cache_put(_SENTIMENT_CACHE, cache_key, _MISS, _NEG_TTL)
         return None
 
-    tape = _market_tape_context()
+    tape, tape_items = _market_tape_context()
     prompt = _build_market_prompt(articles, tape)
-    batch = articles[:15]
-    scored = _score_articles(_MARKET_ARRAY_SYSTEM_PROMPT, prompt, len(batch))
+    batch = articles[:_SCORE_BATCH]
+    scored = _score_articles(_MARKET_ARRAY_SYSTEM_PROMPT, prompt, len(batch), stage_cb=stage_cb)
 
     fallback = False
     if scored is not None:
@@ -1334,7 +1495,7 @@ def get_market_sentiment() -> dict | None:
         for a, sc in zip(batch, per_article):
             if sc is not None:
                 a.update(sc)
-        _cache_put(_NEWS_CACHE, "news|__market__", articles, _NEWS_TTL)
+        _cache_put(_NEWS_CACHE, f"news|__market__|{days}", articles, _NEWS_TTL)
         agg = aggregate_scores(batch)
         if agg is None:
             return None
@@ -1350,6 +1511,8 @@ def get_market_sentiment() -> dict | None:
         confidence = 0.3
         fallback = True
 
+    if stage_cb:
+        stage_cb("aggregate", 0.95)
     tier = calibrate_tier(s_mkt, None)  # fixed thresholds by design
     result = {
         "tier": tier,
@@ -1357,7 +1520,8 @@ def get_market_sentiment() -> dict | None:
         "summary": brief or "No summary available.",
         "s_mkt": round(s_mkt, 4),
         "confidence": confidence,
-        "tape": tape,
+        "tape": tape,            # legacy pre-formatted string (back-compat)
+        "tape_items": tape_items,  # structured [{label, pct}] for per-item coloring
         "fallback": fallback,
         "article_count": len(articles),
         "assessed_at": datetime.now(timezone.utc).isoformat(),
@@ -1403,13 +1567,18 @@ def _restore_cache_if_refresh_failed(news_key: str, sentiment_key: str,
         _cache_restore(_SENTIMENT_CACHE, sentiment_key, prev_sent)
 
 
-def _refresh_symbol_sentiment(symbol: str, context: dict | None = None) -> dict | None:
-    news_key = f"news|{symbol}"
-    sentiment_key = f"sentiment|{symbol}"
+def _refresh_symbol_sentiment(symbol: str, context: dict | None = None,
+                              stage_cb=None) -> dict | None:
+    if stage_cb:
+        stage_cb("start", 0.05)
+    ctx = context or {}
+    days = _clamp_lookback(ctx.get("lookback_days") or _DEFAULT_LOOKBACK_DAYS)
+    news_key = f"news|{symbol}|{days}"
+    sentiment_key = f"sentiment|{symbol}|{days}"
     prev_news = _cache_take(_NEWS_CACHE, news_key)
     prev_sent = _cache_take(_SENTIMENT_CACHE, sentiment_key)
     try:
-        get_news_sentiment(symbol, context)
+        get_news_sentiment(symbol, context, stage_cb=stage_cb)
     finally:
         _restore_cache_if_refresh_failed(news_key, sentiment_key, prev_news, prev_sent)
     cached = _cache_get(_SENTIMENT_CACHE, sentiment_key)
@@ -1418,13 +1587,14 @@ def _refresh_symbol_sentiment(symbol: str, context: dict | None = None) -> dict 
     return cached
 
 
-def _refresh_market_sentiment() -> dict | None:
-    news_key = "news|__market__"
-    sentiment_key = "sentiment|__market__"
+def _refresh_market_sentiment(days: int = _DEFAULT_LOOKBACK_DAYS,
+                              stage_cb=None) -> dict | None:
+    news_key = f"news|__market__|{days}"
+    sentiment_key = f"sentiment|__market__|{days}"
     prev_news = _cache_take(_NEWS_CACHE, news_key)
     prev_sent = _cache_take(_SENTIMENT_CACHE, sentiment_key)
     try:
-        get_market_sentiment()
+        get_market_sentiment(days, stage_cb=stage_cb)
     finally:
         _restore_cache_if_refresh_failed(news_key, sentiment_key, prev_news, prev_sent)
     cached = _cache_get(_SENTIMENT_CACHE, sentiment_key)
@@ -1459,20 +1629,46 @@ def refresh_sentiment(symbols: list[str], context: dict | None = None,
     Returns {market, portfolio, status} where status surfaces enough
     diagnostic info for the UI to show a precise message instead of a
     generic 'check API keys' fallback.
+
+    Progress events emitted via `progress_cb` (in addition to the completion
+    events consumed today): `plan` (up front, lists all jobs so the modal can
+    render every row as queued), `market_stage`/`symbol_stage`
+    ({stage: start|fetch|score1|score2|aggregate, frac}) so each job's bar
+    fills as its two AI passes run.
     """
-    market = _refresh_market_sentiment()
+    ctx = context or {}
+    days = _clamp_lookback(ctx.get("lookback_days") or _DEFAULT_LOOKBACK_DAYS)
+    weights = ctx.get("weights") or {}
+    ordered = sorted(symbols, key=lambda s: -(weights.get(s) or 0.0))
+    if progress_cb:
+        # Emit the full job list up front so the modal shows every row as
+        # "queued" immediately, before any work lands.
+        progress_cb("plan", {"market": True, "symbols": ordered, "days": days})
+
+    def _market_stage(stage, frac):
+        if progress_cb:
+            progress_cb("market_stage", {"stage": stage, "frac": frac})
+    _market_stage("start", 0.05)
+    market = _refresh_market_sentiment(days, stage_cb=_market_stage)
     if progress_cb:
         progress_cb("market", {"sentiment": market})
     s_mkt = market.get("score") if market else None
 
-    weights = (context or {}).get("weights") or {}
-    ordered = sorted(symbols, key=lambda s: -(weights.get(s) or 0.0))
+    def _mk_stage_cb(sym):
+        if not progress_cb:
+            return None
+        def cb(stage, frac):
+            # _emit is thread-safe (write_lock in the route); safe to call
+            # from the 2 worker threads concurrently.
+            progress_cb("symbol_stage", {"symbol": sym, "stage": stage, "frac": frac})
+        return cb
 
     portfolio: dict[str, dict | None] = {}
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {
             pool.submit(_refresh_symbol_sentiment, sym,
-                        _symbol_context(sym, context, s_mkt)): sym
+                        _symbol_context(sym, context, s_mkt),
+                        _mk_stage_cb(sym)): sym
             for sym in ordered
         }
         for future in as_completed(futures):

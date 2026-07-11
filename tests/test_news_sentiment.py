@@ -39,16 +39,17 @@ def test_refresh_symbol_restores_previous_cache_on_transient_failure(monkeypatch
         "assessed_at": "2026-05-23T09:00:00+00:00",
     }
     now = time.time()
-    ns._NEWS_CACHE["news|MSFT"] = (now, ns._NEWS_TTL, prev_news)
-    ns._SENTIMENT_CACHE["sentiment|MSFT"] = (now, ns._SENTIMENT_TTL, prev_sentiment)
+    ns._NEWS_CACHE["news|MSFT|7"] = (now, ns._NEWS_TTL, prev_news)
+    ns._SENTIMENT_CACHE["sentiment|MSFT|7"] = (now, ns._SENTIMENT_TTL, prev_sentiment)
 
-    monkeypatch.setattr(ns, "get_news_sentiment", lambda symbol, context=None: None)
+    monkeypatch.setattr(ns, "get_news_sentiment",
+                        lambda symbol, context=None, stage_cb=None: None)
 
     result = ns._refresh_symbol_sentiment("MSFT")
 
     assert result == prev_sentiment
-    assert ns._cache_get(ns._NEWS_CACHE, "news|MSFT") == prev_news
-    assert ns._cache_get(ns._SENTIMENT_CACHE, "sentiment|MSFT") == prev_sentiment
+    assert ns._cache_get(ns._NEWS_CACHE, "news|MSFT|7") == prev_news
+    assert ns._cache_get(ns._SENTIMENT_CACHE, "sentiment|MSFT|7") == prev_sentiment
 
 
 def test_refresh_sentiment_returns_consistent_status_shape(monkeypatch):
@@ -70,9 +71,10 @@ def test_refresh_sentiment_returns_consistent_status_shape(monkeypatch):
 
     monkeypatch.setattr(ns, "FINNHUB_API_KEY", "fh-test")
     monkeypatch.setattr(ns, "NVIDIA_API_KEY", "nv-test")
-    monkeypatch.setattr(ns, "_refresh_market_sentiment", lambda: market)
+    monkeypatch.setattr(ns, "_refresh_market_sentiment",
+                        lambda days=7, stage_cb=None: market)
     monkeypatch.setattr(ns, "_refresh_symbol_sentiment",
-                        lambda symbol, context=None: sentiments[symbol])
+                        lambda symbol, context=None, stage_cb=None: sentiments[symbol])
 
     result = ns.refresh_sentiment(["MSFT", "TSLA"])
     status = result["status"]
@@ -261,6 +263,36 @@ def test_dedup_collapses_syndicated_copies():
     guid = [a for a in out if "guidance" in a["headline"].lower()][0]
     assert guid["n_duplicates"] == 1
     assert guid["datetime"] == now - 100  # earliest copy kept as canonical
+
+
+def test_window_sample_spans_window_instead_of_collapsing_to_newest():
+    now = _time.time()
+    # 40 articles evenly spread across 7 days, newest-first (matches
+    # _dedup_articles' output order).
+    arts = [{"headline": f"h{i}", "datetime": now - i * (7 * 86400 / 40), "url": f"u{i}"}
+            for i in range(40)]
+    out = ns._window_sample(arts, cap=25, min_recent=10)
+    span_days = (out[0]["datetime"] - out[-1]["datetime"]) / 86400.0
+    assert span_days > 5.0  # a plain newest-25 cut would only span ~4.4 days
+    assert out[:10] == arts[:10]  # newest `min_recent` kept verbatim, in order
+
+
+def test_window_sample_zero_timestamp_does_not_collapse_the_window():
+    # Regression: a single datetime==0 article (unparsed yfinance pubDate)
+    # used to make tmin=0, blowing up the bucket span so every dated article
+    # landed in the same last bucket and the retained set collapsed to ~2.
+    now = _time.time()
+    dated = [{"headline": f"h{i}", "datetime": now - i * 3600, "url": f"u{i}"}
+              for i in range(40)]
+    zero_ts = [{"headline": "unparsed-date", "datetime": 0, "url": "uz"}]
+    out = ns._window_sample(dated + zero_ts, cap=30, min_recent=10)
+    assert len(out) > 20  # not collapsed to ~2
+
+
+def test_window_sample_all_zero_timestamps_does_not_crash():
+    arts = [{"headline": f"z{i}", "datetime": 0, "url": f"u{i}"} for i in range(20)]
+    out = ns._window_sample(arts, cap=15, min_recent=5)
+    assert len(out) == 15
 
 
 def test_validate_article_scores_strictness():

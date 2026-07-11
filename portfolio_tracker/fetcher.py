@@ -18,6 +18,7 @@ from portfolio_tracker.cache import (
 )
 from portfolio_tracker.helpers import (
     _bollinger_pct_b,
+    _is_rate_limited_error,
     _macd_hist_pct,
     _normalize_dividend_yield,
     _pct_change,
@@ -297,8 +298,7 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
         except Exception as exc:
             msg = str(exc)
             last_err = msg[:200] if msg else type(exc).__name__
-            low = msg.lower()
-            if "rate" in low or "429" in low or "too many" in low:
+            if _is_rate_limited_error(exc):
                 time.sleep(2.0 + attempt * 2.0 + random.random() * 0.5)
             else:
                 time.sleep(0.6 + attempt * 1.2 + random.random() * 0.4)
