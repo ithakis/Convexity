@@ -1693,20 +1693,45 @@ def refresh_sentiment(symbols: list[str], context: dict | None = None,
     }
 
 
-def get_cached_articles(symbols: list[str], limit: int = 250) -> list[dict]:
-    """Merged article feed for the flash tape — cache-only, O(n), never
-    triggers a fetch. Articles carry per-article score/event/relevance when
-    the symbol has been scored via the array path."""
+def get_cached_articles(symbols: list[str], limit: int = 800) -> list[dict]:
+    """Merged article feed for the flash tape / timeline — cache-only, O(n),
+    never triggers a fetch. Articles carry per-article score/event/relevance
+    when the symbol has been scored via the array path.
+
+    News is cached per lookback window (see fetch_company_news), and this
+    feed isn't tied to any one window — it backs the Timeline, which has its
+    own independent period selector. Sweep the widest-to-narrowest cached
+    bucket per symbol so a 30D cache (a superset of what 7D would have
+    fetched) is preferred when present, instead of reading one fixed key
+    that nothing writes to once the window scoping changes.
+
+    Truncation is time-stratified, NOT a flat newest-N cut. A multi-symbol
+    portfolio publishes hundreds of articles/day collectively, so a plain
+    `out[:limit]` of the merged newest-first feed collapsed the whole
+    Timeline into the last ~19 hours even though every symbol's cache spans
+    the full window (verified: 15 hyperscalers cached 696 articles across a
+    week, but newest-250 kept only Jul 10-11). `_window_sample` keeps the
+    newest `min_recent` intact — the flash tape only ever renders its
+    freshest ~120 — and spreads the remaining budget across the window's
+    time buckets so every day of the Timeline stays populated. Below `limit`
+    it's a no-op, so normal-size portfolios pass through at full density."""
     out: list[dict] = []
     for sym in symbols:
-        arts = _cache_get(_NEWS_CACHE, f"news|{sym}")
-        if arts and arts is not _MISS:
+        arts = None
+        for days in sorted(_LOOKBACK_CHOICES, reverse=True):
+            cand = _cache_get(_NEWS_CACHE, f"news|{sym}|{days}")
+            if cand and cand is not _MISS:
+                arts = cand
+                break
+        if arts:
             for a in arts:
                 b = dict(a)
                 b["symbol"] = sym
                 out.append(b)
     out.sort(key=lambda a: a.get("datetime") or 0, reverse=True)
-    return out[:limit]
+    if len(out) > limit:
+        out = _window_sample(out, cap=limit, min_recent=120)
+    return out
 
 
 def compute_diagnostics() -> dict:

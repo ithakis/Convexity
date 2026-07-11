@@ -295,6 +295,29 @@ def test_window_sample_all_zero_timestamps_does_not_crash():
     assert len(out) == 15
 
 
+def test_get_cached_articles_spans_window_across_many_symbols():
+    # Regression: a multi-symbol portfolio publishes hundreds of articles/day
+    # collectively, so a flat newest-N truncation of the merged feed collapsed
+    # the whole timeline into the last few hours even though each symbol's
+    # cache spanned the full week. get_cached_articles must time-stratify so
+    # every day stays represented. (See news_sentiment.get_cached_articles.)
+    now = _time.time()
+    # 15 symbols, each with 40 articles spanning a full 7 days: the newest
+    # slice across all of them (600 articles) would otherwise clump into
+    # roughly the newest day.
+    syms = [f"S{i}" for i in range(15)]
+    for s in syms:
+        arts = [{"headline": f"{s}-{j}", "url": f"{s}/{j}",
+                 "datetime": now - j * (7 * 86400 / 40)} for j in range(40)]
+        ns._NEWS_CACHE[f"news|{s}|7"] = (now, ns._NEWS_TTL, arts)
+    out = ns.get_cached_articles(syms, limit=250)
+    assert len(out) <= 250
+    span_days = (out[0]["datetime"] - out[-1]["datetime"]) / 86400.0
+    assert span_days > 5.0, f"timeline collapsed to {span_days:.1f}d instead of spanning the week"
+    # Newest-first ordering preserved for the flash tape.
+    assert out[0]["datetime"] >= out[-1]["datetime"]
+
+
 def test_validate_article_scores_strictness():
     ok = ns._validate_article_scores({
         "articles": [

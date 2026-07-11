@@ -5,6 +5,23 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.5.2 — 2026-07-11
+Fix the News Timeline collapsing to the last ~1 day even with a 7-day (or
+wider) window selected. `get_cached_articles` — which backs both the flash
+tape and the Timeline — merged every constituent's cache newest-first and
+truncated the union to a flat newest-250. A multi-symbol portfolio publishes
+hundreds of articles/day collectively, so the newest 250 all fell within the
+last ~19 hours even though each symbol's per-window cache already spanned the
+full week (verified: 15 hyperscalers cached 696 articles across Jul 4-11, but
+newest-250 kept only Jul 10-11). Now time-stratifies the merged feed via
+`_window_sample` above a raised cap — the newest `min_recent` stay intact for
+the flash tape, the rest spread across the window's time buckets so every day
+of the Timeline stays populated; below the cap it's a no-op so normal-size
+portfolios pass through at full density. Also sweeps widest-to-narrowest
+cached window per symbol, fixing a stale-key read left over from 1.5.1's
+window-scoped cache keys. Verified live: 692 rendered timeline bars span the
+full week instead of clumping into two days.
+
 ## 1.5.1 — 2026-07-10
 News tab refresh reworked to actually honour the selected analysis window.
 `_fetch_yf_news` now pulls via `get_news(count=N)` (scaled to the window,
