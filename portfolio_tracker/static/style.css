@@ -42,21 +42,25 @@
   }
   /* ---------------------------------------------------------------------------
    * Bloomberg terminal theme (hidden Easter-egg: long-press the theme switch).
-   * Signature look: pure-black canvas, amber body text, Bloomberg-orange accent,
-   * colour-blind-safe green/red for up/down (official Bloomberg palette values:
-   * orange #fb8b1e, red #ff433d). All widget colours flow from these vars plus
-   * the THEME_COLORS.bloomberg RGB triplets in app.js — no per-widget overrides
-   * beyond legibility fixes (text on the orange accent goes near-black).
+   * The real terminal's hierarchy — the whole point of the look — is:
+   *   WHITE data on pure black, AMBER reserved for labels/headers/editable
+   *   fields, orange fills for active controls, BLUE selection highlights,
+   *   green/red strictly for up/down (official red #ff433d, orange #fb8b1e).
+   * v1 of this theme painted body text amber too, which flattened everything
+   * into one colour — do not regress to that. --text stays white; the amber
+   * lives in --muted (labels/secondary) plus the few per-widget overrides
+   * below (table headers, ticker symbols, the constituents field — "amber =
+   * editable" is the terminal's own convention).
    * ------------------------------------------------------------------------- */
   [data-theme="bloomberg"] {
     --bg: #000000;
-    --bg-subtle: #0b0b0c;
+    --bg-subtle: #121212;
     --bg-canvas: #000000;
-    --border: #2b2a24;
-    --text: #ffa92e;            /* Bloomberg amber — primary data/text */
-    --muted: #b6893f;           /* dim amber/tan — secondary text */
+    --border: #333333;          /* neutral gray dividers, not amber-tinted */
+    --text: #f2f2f2;            /* WHITE — data values, like the real terminal */
+    --muted: #f49f31;           /* Bloomberg amber — labels/secondary text */
     --accent: #fb8b1e;          /* Bloomberg orange — buttons, active states */
-    --accent-soft: #3a2708;
+    --accent-soft: #38230a;
     --pos: #33d17a;
     --pos-rgb: 51, 209, 122;
     --neg: #ff433d;
@@ -64,11 +68,19 @@
     --warn: #f5b301;
     --warn-rgb: 245, 179, 1;
     --bg-rgb: 0, 0, 0;
-    --row-alt: #0c0b09;
-    --header-bg: #0a0a0a;
-    --hover: #241a06;
+    --row-alt: #0e0e0e;
+    --header-bg: #141414;
+    --hover: #14273f;           /* dark blue — Bloomberg's selection-bar blue */
     --on-accent: #050505;       /* near-black text on the bright orange accent */
   }
+  /* Bloomberg fidelity overrides — amber where the terminal uses amber. */
+  [data-theme="bloomberg"] table#tbl th { color: var(--muted); }
+  [data-theme="bloomberg"] td.sym,
+  [data-theme="bloomberg"] .an-table td.sym,
+  [data-theme="bloomberg"] .ns-table .sym,
+  [data-theme="bloomberg"] .ns-tape-sym,
+  [data-theme="bloomberg"] .pf-w-sym { color: var(--muted); }
+  [data-theme="bloomberg"] #tickers { color: var(--muted); }
   * { box-sizing: border-box; }
   html, body {
     background: var(--bg); color: var(--text); margin: 0;

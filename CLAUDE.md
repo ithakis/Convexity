@@ -625,12 +625,19 @@ Two places have the contract documented; keep them in sync:
 - CSS variables (`--accent`, `--bg-canvas`, `--text`, `--muted`,
   `--border`, `--pos`, `--neg`) defined in `:root` and overridden under
   `[data-theme="dark"]`.
-- **Three themes: `light`, `dark`, `bloomberg`** (a black/amber/orange
-  Bloomberg-terminal palette added in v1.5.3). Because the whole app is
-  variable-driven, a theme is *entirely* a `[data-theme="…"]` block plus a
-  matching `THEME_COLORS.<name>` RGB-triplet entry in `app.js` (the latter
-  feeds the JS-computed heatmap/spark/RS-bar/delta-bar colours). To add a
-  fourth theme, copy those two blocks — no per-widget CSS. `--on-accent` is
+- **Three themes: `light`, `dark`, `bloomberg`** (a Bloomberg-terminal
+  palette added in v1.5.3). Because the whole app is variable-driven, a
+  theme is a `[data-theme="…"]` block plus a matching `THEME_COLORS.<name>`
+  RGB-triplet entry in `app.js` (the latter feeds the JS-computed
+  heatmap/spark/RS-bar/delta-bar colours). To add a fourth theme, copy those
+  two blocks. **Bloomberg's colour hierarchy is the point — don't flatten
+  it**: `--text` is WHITE (data values), `--muted` is AMBER (labels/headers/
+  secondary), `--hover` is the terminal's dark selection blue, borders are
+  neutral gray. The first cut made body text amber too and the user rejected
+  it ("everything is the same color"). A short fidelity-override block right
+  under the variable block additionally paints table `th`, ticker `.sym`
+  cells, and the `#tickers` textarea amber ("amber = editable" is the
+  terminal's own convention). `--on-accent` is
   the text/thumb colour placed *on* an `--accent` fill (white in light/dark,
   near-black in Bloomberg so text stays legible on the bright orange); any
   new accent-filled control must use `color: var(--on-accent)`, never a

@@ -5,6 +5,18 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.5.4 — 2026-07-12
+Rework the Bloomberg theme's colour hierarchy to match the real terminal.
+v1.5.3 painted body text amber, flattening everything into one colour; the
+actual Bloomberg look is **white data on black with amber reserved for
+labels** — so `--text` is now white `#f2f2f2`, `--muted` is amber `#f49f31`
+(labels/headers/secondary), borders are neutral gray `#333`, `--hover` is
+the terminal's dark selection blue `#14273f`, and panel surfaces are
+`#121212` (per the palette in feremabraz/bloomberg-terminal). A small
+fidelity-override block paints table headers, ticker symbols, and the
+constituents textarea amber — "amber = editable" being the terminal's own
+convention. Light/dark themes untouched.
+
 ## 1.5.3 — 2026-07-11
 Add a third UI theme: a **Bloomberg terminal** palette (pure-black canvas,
 amber body text, Bloomberg-orange accent, colour-blind-safe green/red for
