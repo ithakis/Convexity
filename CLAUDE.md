@@ -625,6 +625,24 @@ Two places have the contract documented; keep them in sync:
 - CSS variables (`--accent`, `--bg-canvas`, `--text`, `--muted`,
   `--border`, `--pos`, `--neg`) defined in `:root` and overridden under
   `[data-theme="dark"]`.
+- **Three themes: `light`, `dark`, `bloomberg`** (a black/amber/orange
+  Bloomberg-terminal palette added in v1.5.3). Because the whole app is
+  variable-driven, a theme is *entirely* a `[data-theme="…"]` block plus a
+  matching `THEME_COLORS.<name>` RGB-triplet entry in `app.js` (the latter
+  feeds the JS-computed heatmap/spark/RS-bar/delta-bar colours). To add a
+  fourth theme, copy those two blocks — no per-widget CSS. `--on-accent` is
+  the text/thumb colour placed *on* an `--accent` fill (white in light/dark,
+  near-black in Bloomberg so text stays legible on the bright orange); any
+  new accent-filled control must use `color: var(--on-accent)`, never a
+  hardcoded `#fff`. Two JS branches that ask "is this a dark canvas?" use the
+  `isDarkTheme(t)` helper (true for `dark` **and** `bloomberg`) rather than
+  `=== "dark"`.
+- **Theme switch interaction** (`setupThemeSwitch` in `app.js`): a short
+  click toggles light↔dark (Bloomberg counts as non-light, so a click exits
+  it to light); a **long-press (≥500ms)** on the switch activates the hidden
+  Bloomberg theme (pointer events cover mouse+touch; the terminating click is
+  swallowed via a `longFired` flag). Choice persists in `localStorage.theme`
+  and is restored by `readTheme()` (which accepts all of `THEME_NAMES`).
 - Tooltips use TWO patterns:
   - **Pseudo-element `::after`** on `[data-tip]` — fast, declarative.
     Used for header tooltips and overlay-pill info icons.

@@ -5,6 +5,17 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.5.3 — 2026-07-11
+Add a third UI theme: a **Bloomberg terminal** palette (pure-black canvas,
+amber body text, Bloomberg-orange accent, colour-blind-safe green/red for
+up/down). It's a hidden Easter-egg — **long-press the theme switch** (≥500ms)
+to activate; a normal click still toggles light↔dark. Implemented purely
+through the existing CSS-variable system: a new `[data-theme="bloomberg"]`
+block plus a `THEME_COLORS.bloomberg` entry in `app.js`, so every widget
+themes in one shot. A new `--on-accent` variable keeps text legible on the
+bright orange accent (near-black in Bloomberg, white elsewhere). The choice
+persists in `localStorage` like the other themes.
+
 ## 1.5.2 — 2026-07-11
 Fix the News Timeline collapsing to the last ~1 day even with a 7-day (or
 wider) window selected. `get_cached_articles` — which backs both the flash

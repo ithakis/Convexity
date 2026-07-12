@@ -17,6 +17,7 @@
     --row-alt: #f6f8fa;
     --header-bg: #f6f8fa;
     --hover: #fff8c5;
+    --on-accent: #ffffff;   /* text/thumb color placed on an --accent fill */
   }
   [data-theme="dark"] {
     --bg: #0d1117;
@@ -37,6 +38,36 @@
     --row-alt: #161b22;
     --header-bg: #161b22;
     --hover: #1f2937;
+    --on-accent: #ffffff;
+  }
+  /* ---------------------------------------------------------------------------
+   * Bloomberg terminal theme (hidden Easter-egg: long-press the theme switch).
+   * Signature look: pure-black canvas, amber body text, Bloomberg-orange accent,
+   * colour-blind-safe green/red for up/down (official Bloomberg palette values:
+   * orange #fb8b1e, red #ff433d). All widget colours flow from these vars plus
+   * the THEME_COLORS.bloomberg RGB triplets in app.js — no per-widget overrides
+   * beyond legibility fixes (text on the orange accent goes near-black).
+   * ------------------------------------------------------------------------- */
+  [data-theme="bloomberg"] {
+    --bg: #000000;
+    --bg-subtle: #0b0b0c;
+    --bg-canvas: #000000;
+    --border: #2b2a24;
+    --text: #ffa92e;            /* Bloomberg amber — primary data/text */
+    --muted: #b6893f;           /* dim amber/tan — secondary text */
+    --accent: #fb8b1e;          /* Bloomberg orange — buttons, active states */
+    --accent-soft: #3a2708;
+    --pos: #33d17a;
+    --pos-rgb: 51, 209, 122;
+    --neg: #ff433d;
+    --neg-rgb: 255, 67, 61;
+    --warn: #f5b301;
+    --warn-rgb: 245, 179, 1;
+    --bg-rgb: 0, 0, 0;
+    --row-alt: #0c0b09;
+    --header-bg: #0a0a0a;
+    --hover: #241a06;
+    --on-accent: #050505;       /* near-black text on the bright orange accent */
   }
   * { box-sizing: border-box; }
   html, body {
@@ -60,7 +91,7 @@
     transition: background 0.12s, border-color 0.12s;
   }
   .topbar button:hover { background: var(--bg-subtle); border-color: var(--accent); }
-  .topbar button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .topbar button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   .topbar button.primary:hover { filter: brightness(1.08); background: var(--accent); }
   .topbar button:disabled { opacity: 0.55; cursor: progress; }
   .topbar .spacer { flex: 1; }
@@ -99,7 +130,7 @@
   }
   /* Primary Portfolio button — accent fill, distinct call to action */
   .topbar button.portfolio-btn {
-    background: var(--accent); color: #fff; border-color: var(--accent);
+    background: var(--accent); color: var(--on-accent); border-color: var(--accent);
     font-weight: 600; padding: 0 14px; gap: 6px;
     display: inline-flex; align-items: center;
   }
@@ -182,6 +213,10 @@
     box-shadow: 0 1px 3px rgba(0,0,0,0.18);
   }
   .ts-track.on .ts-thumb { transform: translateX(13px); }
+  /* Bloomberg mode (long-press): amber glow on the switch + lit sun icon so the
+     hidden theme is visually acknowledged when active. */
+  .theme-switch.bbg .ts-track { background: var(--accent); box-shadow: 0 0 6px rgba(251, 139, 30, 0.7); }
+  .theme-switch.bbg #ts-sun { color: var(--accent); text-shadow: 0 0 6px rgba(251, 139, 30, 0.6); }
 
   /* Info icon button */
   .info-btn {
@@ -382,7 +417,7 @@
   .panel-row button:active { transform: translateY(1px); }
   .panel-row button:disabled { opacity: 0.55; cursor: not-allowed; }
   .panel-row button.primary {
-    background: var(--accent); color: #fff; border-color: var(--accent);
+    background: var(--accent); color: var(--on-accent); border-color: var(--accent);
     box-shadow: 0 1px 2px rgba(9, 105, 218, 0.25);
     font-weight: 600;
   }
@@ -520,7 +555,7 @@
   .pf-mode-toggle button:last-child, .pf-period-tabs button:last-child { border-right: none; }
   .pf-mode-toggle button:hover, .pf-period-tabs button:hover { color: var(--text); background: var(--bg-subtle); }
   .pf-mode-toggle button.active, .pf-period-tabs button.active {
-    background: var(--accent); color: #fff;
+    background: var(--accent); color: var(--on-accent);
   }
   /* Preset pill bar — replaces the rigid 3-button mode toggle. Built/Cap pills
      stay first; named presets follow; trailing + / ✎ controls open the
@@ -541,7 +576,7 @@
   }
   .pf-mode-pill:hover { color: var(--text); border-color: var(--accent); }
   .pf-mode-pill.active {
-    background: var(--accent); color: #fff; border-color: var(--accent);
+    background: var(--accent); color: var(--on-accent); border-color: var(--accent);
   }
   .pf-mode-pill .pf-mode-edit {
     display: inline-flex; align-items: center; justify-content: center;
@@ -760,7 +795,7 @@
     background: var(--bg-subtle); cursor: pointer; color: var(--muted); padding: 0;
     font-size: 12px;
   }
-  .pf-w-lock.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .pf-w-lock.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   .pf-weights-foot {
     display: flex; justify-content: flex-end; gap: 8px;
     padding: 10px 14px; border-top: 1px solid var(--border);
@@ -770,7 +805,7 @@
     background: var(--bg-subtle); cursor: pointer; color: var(--text); font-size: 12.5px;
   }
   .pf-weights-foot button.primary {
-    background: var(--accent); color: #fff; border-color: var(--accent);
+    background: var(--accent); color: var(--on-accent); border-color: var(--accent);
   }
   .pf-weights-foot button.primary:hover { filter: brightness(1.08); }
   .pf-weights-foot button.danger {
@@ -820,7 +855,7 @@
     border: 1px solid var(--border); background: var(--bg-subtle); color: var(--text);
     font-size: 12px; cursor: pointer;
   }
-  .pf-inline-prompt button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .pf-inline-prompt button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   .pf-inline-prompt .pf-ip-err { color: var(--neg); font-size: 11.5px; min-height: 14px; }
 
   /* MPT overlay (Portfolio Optimization workspace) — sits above everything,
@@ -897,7 +932,7 @@
   }
   .pf-mpt-ctl .seg button:last-child { border-right: none; }
   .pf-mpt-ctl .seg button:hover { color: var(--text); background: var(--bg-subtle); }
-  .pf-mpt-ctl .seg button.active { background: var(--accent); color: #fff; }
+  .pf-mpt-ctl .seg button.active { background: var(--accent); color: var(--on-accent); }
   .pf-mpt-ctl input[type="number"] {
     padding: 0 9px; border-radius: 7px; border: 1px solid var(--border);
     background: var(--bg-canvas); color: var(--text); font-size: 12px;
@@ -1022,7 +1057,7 @@
 
   .pf-mpt-run {
     padding: 0 18px; border-radius: 8px;
-    background: var(--accent); color: #fff; border: 1px solid var(--accent);
+    background: var(--accent); color: var(--on-accent); border: 1px solid var(--accent);
     font-weight: 700; font-size: 12.5px; cursor: pointer; line-height: 1;
   }
   .pf-mpt-run:hover { filter: brightness(1.08); }
@@ -1156,7 +1191,7 @@
     background: var(--bg-canvas); border: 1px solid var(--border); cursor: pointer; color: var(--text);
     font-size: 12px; font-weight: 600;
   }
-  .pf-mpt-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .pf-mpt-actions button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   .pf-mpt-actions button:hover { filter: brightness(1.05); border-color: var(--accent); }
   @keyframes mpt-apply-flash { 0%,100%{box-shadow:none} 30%{box-shadow:0 0 0 3px rgba(var(--accent-rgb,9,105,218),0.4)} }
   .pf-mpt-apply-flash { animation: mpt-apply-flash 0.6s ease; }
@@ -1346,7 +1381,7 @@
     border-left: 1px solid var(--border);
   }
   .cv-seg-btn:first-child { border-left: none; }
-  .cv-seg-btn.active { background: var(--accent); color: white; }
+  .cv-seg-btn.active { background: var(--accent); color: var(--on-accent); }
   .cv-seg-btn:hover:not(.active) { filter: brightness(0.95); }
 
   .cv-modal-foot {
@@ -1366,7 +1401,7 @@
     border-radius: 6px; cursor: pointer;
   }
   .cv-modal-foot button.primary {
-    background: var(--accent); border-color: var(--accent); color: white;
+    background: var(--accent); border-color: var(--accent); color: var(--on-accent);
   }
   .cv-modal-foot button:hover { filter: brightness(0.95); }
 

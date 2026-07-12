@@ -425,17 +425,23 @@ function ensureSortKey() {
 /* ===========================================================================
  * Theme
  * --------------------------------------------------------------------------- */
+const THEME_NAMES = ["light", "dark", "bloomberg"];
 function getTheme() { return document.documentElement.dataset.theme || "light"; }
+/* Bloomberg is a dark-canvas theme — heatmap/spark/return-colour math that
+   branches on "is this a dark background" must treat it like dark. */
+function isDarkTheme(t) { t = t || getTheme(); return t === "dark" || t === "bloomberg"; }
 function setTheme(name) {
   document.documentElement.dataset.theme = name;
   localStorage.setItem("theme", name);
   const track = document.getElementById("ts-track");
-  if (track) track.classList.toggle("on", name === "dark");
+  if (track) track.classList.toggle("on", name !== "light");
+  const btn = document.getElementById("theme-switch");
+  if (btn) btn.classList.toggle("bbg", name === "bloomberg");
   if (DATA.length) render();
 }
 function readTheme() {
   const saved = localStorage.getItem("theme");
-  if (saved === "dark" || saved === "light") return saved;
+  if (THEME_NAMES.includes(saved)) return saved;
   return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
@@ -514,6 +520,13 @@ const THEME_COLORS = {
     neg:  [248, 81, 73],     /* #f85149 */
     warn: [251, 146, 60],    /* #fb923c  orange-400, lighter on dark bg */
     blue: [96, 165, 250],    /* #60a5fa  Tailwind blue-400, lighter on dark bg */
+  },
+  bloomberg: {
+    bg:   [0, 0, 0],         /* #000000  pure-black terminal canvas */
+    pos:  [51, 209, 122],    /* #33d17a  up/green */
+    neg:  [255, 67, 61],     /* #ff433d  official Bloomberg down/red */
+    warn: [245, 179, 1],     /* #f5b301  gold */
+    blue: [77, 199, 249],    /* #4dc7f9  Bloomberg cyan */
   },
 };
 
@@ -1032,7 +1045,7 @@ function textOnHeat(t, theme) {
   /* Switch to white text once tint is deep enough that the standard fg
      would lose contrast.  Pick threshold per theme. */
   const mag = Math.abs(t);
-  if (theme === "dark") return mag > 0.65 ? "#ffffff" : "var(--text)";
+  if (isDarkTheme(theme)) return mag > 0.65 ? "#ffffff" : "var(--text)";
   return mag > 0.55 ? "#ffffff" : "var(--text)";
 }
 function returnColor(pct, anchor = 6) {
@@ -1043,7 +1056,7 @@ function returnColor(pct, anchor = 6) {
   if (pct == null || !isFinite(pct)) return "";
   const theme = getTheme();
   const C = THEME_COLORS[theme];
-  const neutral = theme === "dark" ? [125, 133, 144] : [110, 118, 129]; /* --muted */
+  const neutral = isDarkTheme(theme) ? [125, 133, 144] : [110, 118, 129]; /* --muted */
   const t = clamp(pct / anchor, -1, 1);
   return rgbMix(neutral, pct >= 0 ? C.pos : C.neg, Math.abs(t));
 }
@@ -5077,7 +5090,33 @@ $("#edit-btn").onclick = () => {
   }
 };
 $("#info-btn").onclick = openInfo;
-$("#theme-switch").onclick = () => setTheme(getTheme() === "dark" ? "light" : "dark");
+/* Theme switch: a short click toggles light↔dark (bloomberg counts as
+   non-light, so it exits to light); a long-press (≥500ms) reveals the hidden
+   Bloomberg terminal theme. Pointer events cover mouse + touch in one path. */
+(function setupThemeSwitch() {
+  const btn = $("#theme-switch");
+  if (!btn) return;
+  const LONG_MS = 500;
+  let timer = null, longFired = false;
+  const startPress = () => {
+    longFired = false;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      longFired = true;
+      if (getTheme() !== "bloomberg") { setTheme("bloomberg"); toast("Bloomberg terminal theme"); }
+    }, LONG_MS);
+  };
+  const cancelPress = () => { clearTimeout(timer); timer = null; };
+  btn.addEventListener("pointerdown", startPress);
+  btn.addEventListener("pointerup", cancelPress);
+  btn.addEventListener("pointerleave", cancelPress);
+  btn.addEventListener("pointercancel", cancelPress);
+  btn.addEventListener("click", (e) => {
+    // Swallow the click that terminates a long-press so it doesn't also toggle.
+    if (longFired) { longFired = false; e.preventDefault(); e.stopPropagation(); return; }
+    setTheme(getTheme() === "light" ? "dark" : "light");
+  });
+})();
 $("#tickers").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runPrimary(); }
 });
