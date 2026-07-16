@@ -335,6 +335,36 @@ Key architecture:
   briefs (compressed four-paragraph lead, ≤60 words, banned-word list in
   the prompt), and a collapsed Model Diagnostics section.
 
+**ML sentiment (`portfolio_tracker/ml_sentiment.py` + `relevance.py` +
+`ml_features.py`, added on branch MLNews):** a LightGBM model that predicts the
+vol-standardized, beta-adjusted abnormal return (SAR) implied by news text,
+trained on FNSPID (5.75M symbol-tagged articles, 2009–2023) via the pipeline in
+`ml/scripts/00…12` (design record: `docs/ml_sentiment_design.md`, lit review:
+`docs/ml_sentiment_lit_review.md`). Key contracts:
+- **Artifact** lives at `~/.portfolio_tracker/ml_model/mlsent-v1/`
+  (`MLSENT_MODEL_DIR` overrides): LightGBM booster + train-fitted idf vector +
+  df-pruning column mask + frozen tier cuts + feature schema. Missing/corrupt
+  artifact ⇒ `available()=False` and every call returns `None` — the LLM path
+  is untouched (same graceful-degradation model as `finnhub_adapter`).
+- **Train/serve parity is the invariant**: `ml_features.py` (hashed TF-IDF
+  2^18 uni+bi, `HASH_SUMMARY_MAX_CHARS=600`, ~33 dense cols) and
+  `relevance.py` (deterministic relevance heuristic + the shared title-dedup
+  used by `_dedup_articles`) are imported by BOTH `ml/` training and
+  production. Changing them invalidates the deployed artifact — parity tests
+  in `tests/test_ml_sentiment.py` guard this.
+- **Relevance stays hand-set** (never fitted on FNSPID) so a future ML
+  relevance model can be trained on that corpus without contamination.
+- `get_news_sentiment` adds `ml_sar / ml_score / ml_tier / ml_confidence /
+  ml_n` beside the LLM keys and persists `ml_sar`/`ml_tier` into the sentiment
+  history, so `compute_diagnostics` can compare ML vs LLM rank-IC as history
+  accumulates (the 2–4 week shadow window before any UI surfaces `ml_tier`).
+- **Retraining gotcha (hard-won):** FLAML+LightGBM on the raw 262k-column
+  sparse matrix re-bins per trial×fold and stalls (16h in
+  `PushDataToMultiValBin`). Keep the df-pruning mask, `log_max_bin=5`, and the
+  capped search space in `07_train_flaml.py`; re-derive tier cuts (`09`) after
+  any retrain, and recalibrate cuts quarterly — holdout tier masses drift even
+  when tier-mean monotonicity holds.
+
 ### Analytics (`/api/portfolio-analytics-multi`)
 `analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
 Returns either `{set_name: analytics_dict | {"error": ...}}` OR

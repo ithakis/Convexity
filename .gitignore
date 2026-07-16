@@ -71,6 +71,12 @@ Icon
 *.bak
 *.orig
 
+# ML training data & artifacts — 30+GB of FNSPID raw/parquet/features, never committed
+ml/data/
+*.parquet
+ml/**/*.csv
+ml/**/*.npz
+
 # yfinance / requests cache
 .cache/
 *.sqlite

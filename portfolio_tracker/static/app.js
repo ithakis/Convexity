@@ -6101,9 +6101,38 @@ function renderNsDiagnostics(d) {
   } else {
     parts.push('<div class="ns-diag-sec"><h5>Rank IC</h5><div class="ns-panel-empty">Not enough history yet — refresh over a few days to accumulate observations.</div></div>');
   }
+  // ML shadow scoreboard — the LightGBM return-trained model runs silently
+  // beside the AI signal; this table is the 2-4 week validation that decides
+  // whether ml_tier ever gets surfaced in the main UI. llm_ic_common is the
+  // AI signal re-scored on the SAME records so the comparison is fair.
+  const tierOrder = ["very_bearish", "bearish", "neutral", "bullish", "very_bullish"];
+  if (d.ml && d.ml.n_records > 0) {
+    const icRow = (label, o) => o
+      ? `<tr><td>${label}</td><td class="r">${o["1d"] && o["1d"].ic != null ? fmtSig(o["1d"].ic, 3) : "—"}</td><td class="r">${o["5d"] && o["5d"].ic != null ? fmtSig(o["5d"].ic, 3) : "—"}</td><td class="r">${o["1d"] ? o["1d"].n : "—"}</td><td class="r">${o["1d"] && o["1d"].t_stat != null ? o["1d"].t_stat : "—"}</td></tr>`
+      : "";
+    const mlBars = tierOrder.filter(t => d.ml.tiers && d.ml.tiers[t]).map(t => {
+      const o = d.ml.tiers[t];
+      const maxAbs = Math.max(0.1, ...tierOrder.map(x => Math.abs((d.ml.tiers[x] || {}).mean_fwd_1d_pct || 0)));
+      const w = Math.abs(o.mean_fwd_1d_pct) / maxAbs * 100;
+      const color = NS_COLORS[t] || "#94a3b8";
+      return `<div class="ns-diag-tier-row">
+        <span class="ns-diag-tier-label" style="color:${color}">${NS_LABELS[t] || t}</span>
+        <span class="ns-decomp-track"><span class="ns-decomp-fill ${o.mean_fwd_1d_pct >= 0 ? "pos" : "neg"}" style="width:${w}%"></span></span>
+        <span class="ns-decomp-val">${fmtSig(o.mean_fwd_1d_pct, 2)}% (n=${o.n})</span>
+      </div>`;
+    }).join("");
+    parts.push(`<div class="ns-diag-sec">
+      <h5>ML shadow scoreboard — return-trained model vs AI (same records)</h5>
+      <table class="ns-table ns-diag-table"><thead><tr><th>Signal</th><th class="r">IC 1d</th><th class="r">IC 5d</th><th class="r">n</th><th class="r">t 1d</th></tr></thead>
+      <tbody>${icRow("ML (LightGBM)", d.ml.ic)}${icRow("AI (LLM)", d.ml.llm_ic_common)}</tbody></table>
+      ${mlBars ? `<div class="ns-diag-note" style="margin-top:6px">Mean forward 1d idio return by ML tier</div>${mlBars}` : ""}
+      <div class="ns-diag-note">Shadow mode — ${d.ml.days} day${d.ml.days === 1 ? "" : "s"} of history (${d.ml.n_records} obs${d.ml.date_min ? `, since ${d.ml.date_min}` : ""}). The ML signal does not drive tiers or the gauge until this comparison validates it.</div>
+    </div>`);
+  } else {
+    parts.push('<div class="ns-diag-sec"><h5>ML shadow scoreboard</h5><div class="ns-panel-empty">No ML-scored history yet — refresh news to start accumulating (requires the deployed mlsent artifact).</div></div>');
+  }
   // Tier monotonicity — mean forward return should rise from very_bearish
   // to very_bullish.
-  const tierOrder = ["very_bearish", "bearish", "neutral", "bullish", "very_bullish"];
   if (d.tiers && Object.keys(d.tiers).length) {
     const maxAbs = Math.max(0.1, ...tierOrder.map(t => Math.abs((d.tiers[t] || {}).mean_fwd_1d_pct || 0)));
     const bars = tierOrder.filter(t => d.tiers[t]).map(t => {

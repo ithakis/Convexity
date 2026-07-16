@@ -1403,6 +1403,25 @@ def get_news_sentiment(symbol: str, context: dict | None = None,
     s_sys = round(s_total - max(-1.0, min(1.0, s_idio)), 4)
     tier = calibrate_tier(s_total, _calibration_scores())
 
+    # ML sentiment (MLNews pipeline) — additive shadow signal alongside the
+    # LLM path. Degrades to nothing when the mlsent artifact isn't deployed;
+    # never allowed to break the LLM result.
+    ml_fields = None
+    try:
+        from portfolio_tracker import ml_sentiment as _ml
+
+        if _ml.available():
+            scored_ml = []
+            for a in batch:
+                s = _ml.score_article(a, symbol)
+                if s is not None:
+                    scored_ml.append({**s, "datetime": a.get("datetime"),
+                                      "source": a.get("source"),
+                                      "n_duplicates": a.get("n_duplicates", 0)})
+            ml_fields = _ml.aggregate(scored_ml)
+    except Exception:
+        ml_fields = None
+
     if not brief:
         brief = "No summary available."
     result = {
@@ -1427,6 +1446,8 @@ def get_news_sentiment(symbol: str, context: dict | None = None,
         "recency_tau_days": round(tau, 2),
         "assessed_at": datetime.now(timezone.utc).isoformat(),
     }
+    if ml_fields:
+        result.update(ml_fields)
     _cache_put(_SENTIMENT_CACHE, cache_key, result, _SENTIMENT_TTL)
     _history_append({
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -1440,6 +1461,10 @@ def get_news_sentiment(symbol: str, context: dict | None = None,
         "n_articles": n_scored,
         "price": (row_ctx or {}).get("price"),
         "beta": beta,
+        # ML shadow signal — lets compute_diagnostics measure ML IC with the
+        # same forward-return plumbing as the LLM signal.
+        "ml_sar": (ml_fields or {}).get("ml_sar"),
+        "ml_tier": (ml_fields or {}).get("ml_tier"),
     })
     return result
 
@@ -1817,31 +1842,66 @@ def compute_diagnostics() -> dict:
             return None
         return float(np.corrcoef(rx, ry)[0, 1])
 
+    def _pack(x: list[float], y: list[float]) -> dict:
+        ic = _spearman(x, y)
+        t_stat = None
+        if ic is not None and len(x) > 2 and abs(ic) < 1.0:
+            t_stat = round(ic * math.sqrt((len(x) - 2) / (1.0 - ic * ic)), 2)
+        return {"ic": (round(ic, 4) if ic is not None else None),
+                "n": len(x), "t_stat": t_stat}
+
+    # LLM IC over all records; ML IC over the subset that carries ml_sar,
+    # with the LLM re-scored on that SAME subset (llm_ic_common) so the
+    # shadow scoreboard is an apples-to-apples comparison.
     ic_out: dict[str, Any] = {}
+    ml_ic: dict[str, Any] = {}
+    llm_common_ic: dict[str, Any] = {}
     tier_stats: dict[str, dict] = {}
+    ml_tier_stats: dict[str, dict] = {}
     for horizon, label in ((1, "1d"), (5, "5d")):
         xs, ys = [], []
+        mxs, mys, lxs = [], [], []
         for rec in records:
             fr = _fwd_idio(rec, horizon)
             if fr is None:
                 continue
             xs.append(float(rec["s_idio"]))
             ys.append(fr)
+            has_ml = isinstance(rec.get("ml_sar"), (int, float))
+            if has_ml:
+                mxs.append(float(rec["ml_sar"]))
+                mys.append(fr)
+                lxs.append(float(rec["s_idio"]))
             if horizon == 1:
                 t = rec.get("tier") or "neutral"
                 st = tier_stats.setdefault(t, {"n": 0, "sum": 0.0})
                 st["n"] += 1
                 st["sum"] += fr
-        ic = _spearman(xs, ys)
-        t_stat = None
-        if ic is not None and len(xs) > 2 and abs(ic) < 1.0:
-            t_stat = round(ic * math.sqrt((len(xs) - 2) / (1.0 - ic * ic)), 2)
-        ic_out[label] = {"ic": (round(ic, 4) if ic is not None else None),
-                         "n": len(xs), "t_stat": t_stat}
+                if has_ml:
+                    mt = rec.get("ml_tier") or "neutral"
+                    mst = ml_tier_stats.setdefault(mt, {"n": 0, "sum": 0.0})
+                    mst["n"] += 1
+                    mst["sum"] += fr
+        ic_out[label] = _pack(xs, ys)
+        ml_ic[label] = _pack(mxs, mys)
+        llm_common_ic[label] = _pack(lxs, mys)
     out["ic"] = ic_out
     out["tiers"] = {
         t: {"n": st["n"], "mean_fwd_1d_pct": round(st["sum"] / st["n"] * 100.0, 3)}
         for t, st in tier_stats.items() if st["n"] > 0
+    }
+    ml_records = [r for r in records if isinstance(r.get("ml_sar"), (int, float))]
+    ml_dates = sorted({r.get("date") for r in ml_records if r.get("date")})
+    out["ml"] = {
+        "n_records": len(ml_records),
+        "days": len(ml_dates),
+        "date_min": ml_dates[0] if ml_dates else None,
+        "date_max": ml_dates[-1] if ml_dates else None,
+        "ic": ml_ic,
+        "llm_ic_common": llm_common_ic,
+        "tiers": {t: {"n": st["n"],
+                      "mean_fwd_1d_pct": round(st["sum"] / st["n"] * 100.0, 3)}
+                  for t, st in ml_tier_stats.items() if st["n"] > 0},
     }
     return out
 

@@ -5,6 +5,20 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.6.0 — 2026-07-16
+ML News Sentiment (branch MLNews): a LightGBM model trained on FNSPID (5.75M
+articles, 2009–2023) predicts the vol-standardized beta-adjusted abnormal
+return (SAR) implied by news text; deployed artifact at
+`~/.portfolio_tracker/ml_model/mlsent-v1/` with graceful degradation. New
+modules `ml_sentiment.py` / `relevance.py` / `ml_features.py` (train/serve
+parity contract), `ml_*` fields in the sentiment dict + history, and an ML
+shadow scoreboard in the News tab's Model Diagnostics comparing ML vs LLM
+rank-IC on identical records. Validation: 8/8 gates (IC 0.0263 holdout, 6.4σ
+above shuffled-label null; IC>0 in 9/9 walk-forward years; monotone tier
+means OOS). Training pipeline in `ml/scripts/`, design record in
+`docs/ml_sentiment_design.md`, 60-paper lit review in
+`docs/ml_sentiment_lit_review.md`.
+
 ## 1.5.4 — 2026-07-12
 Rework the Bloomberg theme's colour hierarchy to match the real terminal.
 v1.5.3 painted body text amber, flattening everything into one colour; the

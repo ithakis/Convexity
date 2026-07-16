@@ -1,0 +1,208 @@
+"""Deterministic news-relevance heuristic + shared title-dedup primitives.
+
+Shared between the ML training pipeline (ml/scripts/*) and production
+inference (ml_sentiment.py) so both sides score relevance and collapse
+syndicated duplicates with EXACTLY the same logic — train/serve skew on
+these inputs would silently corrupt the model.
+
+Two hard design constraints:
+1. NO parameters fitted on FNSPID (or any news data). Every weight below is
+   hand-set. The user plans to train an ML relevance model later on the same
+   corpus the sentiment model is trained on; that only stays legitimate if
+   this heuristic never learned from that corpus.
+2. Dependencies limited to stdlib + rapidfuzz (optional) + symbol_db
+   (optional) — importable by the app without the ml/ tree or sklearn.
+
+Relevance intuition (Boudoukh et al. 2013: only ~half of firm-tagged news is
+firm-relevant; conditioning on relevance ~doubles explained variance):
+an article is relevant to a symbol when the company is the SUBJECT — named
+early and prominently, not one ticker among twenty in a "stocks to watch"
+roundup from a low-tier syndicator.
+"""
+from __future__ import annotations
+
+import re
+import sqlite3
+from functools import lru_cache
+from pathlib import Path
+
+try:
+    from rapidfuzz import fuzz as _fuzz  # type: ignore
+except ImportError:  # pragma: no cover - optional dep, mirrors news_sentiment
+    _fuzz = None
+
+# Same threshold as news_sentiment._DEDUP_SIMILARITY — keep in sync.
+DEDUP_SIMILARITY = 85
+
+# Fuzzy company-name match threshold (partial_ratio on normalized text).
+_NAME_MATCH = 88
+
+# Roundup/listicle patterns — articles ABOUT many stocks, not about this one.
+_BOILERPLATE_RE = re.compile(
+    r"stocks?\s+to\s+(watch|buy|sell)|top\s+\d+|\d+\s+(best|top|worst|cheap)"
+    r"|movers|market\s+wrap|weekly\s+(recap|roundup)|roundup|watchlist"
+    r"|\bvs\.?\s|earnings\s+calendar|premarket|after.?hours\s+movers",
+    re.IGNORECASE,
+)
+
+# Legal-suffix noise stripped from company names before matching.
+_NAME_SUFFIX_RE = re.compile(
+    r"\b(incorporated|inc|corporation|corp|company|co|limited|ltd|plc|holdings?"
+    r"|group|nv|sa|ag|se|lp|llc|trust|fund|etf)\b\.?",
+    re.IGNORECASE,
+)
+
+
+# ------------------------------------------------------------------ dedup
+def norm_title(title: str) -> str:
+    """Identical to news_sentiment._norm_title — lowercase, alnum-only, squeezed."""
+    return " ".join("".join(c if c.isalnum() or c.isspace() else " "
+                            for c in (title or "").lower()).split())
+
+
+def is_near_duplicate(title_a: str, title_b: str) -> bool:
+    na, nb = norm_title(title_a), norm_title(title_b)
+    if not na or not nb:
+        return False
+    if _fuzz is not None:
+        return _fuzz.token_set_ratio(na, nb) >= DEDUP_SIMILARITY
+    return na == nb
+
+
+def cluster_titles(titles: list[str]) -> tuple[list[int], list[int]]:
+    """Greedy near-duplicate clustering in input order (caller pre-sorts by time).
+
+    Returns (keep_indices, dup_counts): positions of cluster canonicals in the
+    input list and, aligned with them, how many duplicates each absorbed.
+    Same semantics as news_sentiment._dedup_articles; titles that normalize to
+    empty are kept as their own singletons (they carry no dedup evidence).
+    """
+    keep_idx: list[int] = []
+    dup_counts: list[int] = []
+    kept_norms: list[str] = []
+    for i, t in enumerate(titles):
+        norm = norm_title(t)
+        if not norm:
+            keep_idx.append(i)
+            dup_counts.append(0)
+            kept_norms.append(f"\x00empty{i}")  # never matches anything real
+            continue
+        dup_of = None
+        for j, kn in enumerate(kept_norms):
+            if _fuzz is not None:
+                if _fuzz.token_set_ratio(norm, kn) >= DEDUP_SIMILARITY:
+                    dup_of = j
+                    break
+            elif norm == kn:
+                dup_of = j
+                break
+        if dup_of is not None:
+            dup_counts[dup_of] += 1
+        else:
+            keep_idx.append(i)
+            dup_counts.append(0)
+            kept_norms.append(norm)
+    return keep_idx, dup_counts
+
+
+# ------------------------------------------------------------------ company names
+def _find_symbol_db() -> Path | None:
+    here = Path(__file__).resolve().parent
+    for base in (here.parent, *here.parent.parents):
+        p = base / "symbol_db.sqlite"
+        if p.exists():
+            return p
+    return None
+
+
+@lru_cache(maxsize=1)
+def load_company_names() -> dict[str, str]:
+    """{ticker: company name} from symbol_db.sqlite; {} when unavailable."""
+    db = _find_symbol_db()
+    if db is None:
+        return {}
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        rows = con.execute("SELECT ticker, name FROM symbols").fetchall()
+        con.close()
+        return {t.upper(): n for t, n in rows if t and n}
+    except Exception:
+        return {}
+
+
+def _clean_name(name: str) -> str:
+    return norm_title(_NAME_SUFFIX_RE.sub(" ", name or ""))
+
+
+def _name_hits(clean_name: str, text_norm: str) -> bool:
+    if len(clean_name) < 3 or not text_norm:
+        return False
+    if clean_name in text_norm:
+        return True
+    if _fuzz is not None:
+        return _fuzz.partial_ratio(clean_name, text_norm) >= _NAME_MATCH
+    return False
+
+
+def _ticker_hits(symbol: str, raw_text: str) -> bool:
+    """Word-boundary ticker match. 1-2 char tickers (A, IT, ALL...) collide with
+    English words, so those require an explicit cashtag/parenthesis form."""
+    if not raw_text:
+        return False
+    sym = re.escape(symbol.upper())
+    if len(symbol) <= 2:
+        return re.search(rf"\${sym}\b|\({sym}\)|NYSE:\s*{sym}\b|NASDAQ:\s*{sym}\b",
+                         raw_text, re.IGNORECASE) is not None
+    return re.search(rf"\b{sym}\b", raw_text) is not None
+
+
+# ------------------------------------------------------------------ relevance
+def relevance_score(
+    title: str,
+    summary: str | None,
+    symbol: str,
+    company_name: str | None = None,
+    co_mention_count: int = 1,
+    publisher_tier: float = 0.7,
+) -> float:
+    """Relevance of one article to one symbol, in [0.05, 1.0]. Deterministic.
+
+    Multiplicative combination of:
+      mention position  — company named in title (1.0) > lead 150 chars (0.6)
+                          > summary body (0.35) > tagged-only (0.2)
+      co-mention penalty— 1/(1 + 0.4*(n-1)): a 5-ticker roundup is worth ~0.4
+      boilerplate       — x0.45 when the title matches listicle/roundup patterns
+      headline length   — x0.85 beyond 120 chars (roundups run long)
+      publisher tier    — softened to 0.75..1.0 so source quality tilts but
+                          never dominates the text evidence
+    """
+    # NaN floats from pandas are truthy — isinstance, not `or`, is the guard.
+    title = title if isinstance(title, str) else ""
+    summary = summary if isinstance(summary, str) else ""
+    if company_name is not None and not isinstance(company_name, str):
+        company_name = None
+    if company_name is None:
+        company_name = load_company_names().get((symbol or "").upper())
+    clean = _clean_name(company_name) if company_name else ""
+
+    title_norm = norm_title(title)
+    lead_norm = norm_title(summary[:150])
+    body_norm = norm_title(summary[150:1000])
+
+    if _ticker_hits(symbol, title) or _name_hits(clean, title_norm):
+        mention = 1.0
+    elif _ticker_hits(symbol, summary[:150]) or _name_hits(clean, lead_norm):
+        mention = 0.6
+    elif _ticker_hits(symbol, summary[150:1000]) or _name_hits(clean, body_norm):
+        mention = 0.35
+    else:
+        mention = 0.2
+
+    n_co = max(1, int(co_mention_count))
+    p_co = 1.0 / (1.0 + 0.4 * (n_co - 1))
+    p_boiler = 0.45 if _BOILERPLATE_RE.search(title) else 1.0
+    p_len = 0.85 if len(title) > 120 else 1.0
+    p_pub = 0.75 + 0.25 * max(0.0, min(1.0, float(publisher_tier)))
+
+    score = mention * p_co * p_boiler * p_len * p_pub
+    return round(max(0.05, min(1.0, score)), 4)
