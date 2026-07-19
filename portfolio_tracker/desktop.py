@@ -38,9 +38,9 @@ from pathlib import Path
 # QtWebEngineWidgets must be imported before QApplication is constructed —
 # keep every PySide6 import at module top even though the splash would appear
 # marginally sooner without them.
-from PySide6.QtCore import QElapsedTimer, QRect, QRectF, Qt, QTimer, QUrl
+from PySide6.QtCore import QElapsedTimer, QRect, QRectF, Qt, QTimer, QUrl, QStandardPaths
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
-from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineDownloadRequest
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QSplashScreen
 
@@ -230,6 +230,32 @@ class _ExternalLinkPage(QWebEnginePage):
         return popup
 
 
+def _handle_download(download: "QWebEngineDownloadRequest", window: "_MainWindow") -> None:
+    # QWebEngineProfile.downloadRequested is auto-cancelled (silently — no
+    # error, no file) unless a connected slot calls accept(). The Export
+    # button (server.py's /api/export-xlsx, sent with a Content-Disposition
+    # attachment header) relies on exactly this signal, so without a handler
+    # here it looked like the button did nothing. downloadFileName() already
+    # carries the server's suggested name; we just redirect the directory to
+    # the OS Downloads folder (Chromium's own default is a fixed internal
+    # path, not necessarily where a user would look).
+    downloads_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+    if downloads_dir:
+        download.setDownloadDirectory(downloads_dir)
+    download.accept()
+
+    def _on_state_changed(state) -> None:
+        if state == QWebEngineDownloadRequest.DownloadState.DownloadCompleted:
+            path = str(Path(download.downloadDirectory()) / download.downloadFileName())
+            log.info("download completed: %s", path)
+            window.statusBar().showMessage(f"Saved: {path}", 8000)
+        elif state == QWebEngineDownloadRequest.DownloadState.DownloadInterrupted:
+            log.warning("download interrupted: %s", download.downloadFileName())
+            window.statusBar().showMessage(f"Download failed: {download.downloadFileName()}", 8000)
+
+    download.stateChanged.connect(_on_state_changed)
+
+
 class _MainWindow(QMainWindow):
     def __init__(self, url: str):
         super().__init__()
@@ -241,6 +267,9 @@ class _MainWindow(QMainWindow):
         self.page = _ExternalLinkPage(self.view)
         self.view.setPage(self.page)
         self.setCentralWidget(self.view)
+        self.page.profile().downloadRequested.connect(
+            lambda download: _handle_download(download, self)
+        )
         # NB: deliberately does NOT load here — the caller connects
         # loadProgress/loadFinished first, then calls load(), so a load
         # that finishes early can't slip past before its handler is wired.

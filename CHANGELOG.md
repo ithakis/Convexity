@@ -5,6 +5,20 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.6.2 — 2026-07-19
+Windows desktop-app fixes. `install.ps1` shortcuts launched `pythonw.exe`
+directly, which starts fine but hard-crashes with no Python traceback
+(0xc06d007f in KERNELBASE.dll) as soon as numpy/scipy/numba's MKL +
+llvmlite DLLs get exercised — the plain launch never gets the DLL search
+path that `conda activate`/`conda run` sets up. Shortcuts now target a
+hidden `launch_desktop.vbs` wrapper that runs the app via `conda run -n pt`.
+Browser-mode's auto-open hard-coded macOS's `open -a "Google Chrome"` and
+silently did nothing on Windows; now branches on `sys.platform`
+(`os.startfile` on Windows, `webbrowser.open` elsewhere). The desktop app's
+Export button produced no file — `QWebEngineProfile.downloadRequested` had
+no connected handler, so Qt silently cancelled every download; now wired to
+save into the OS Downloads folder with a status-bar confirmation.
+
 ## 1.6.1 — 2026-07-16
 News tab v1.6.1 — the ML model is **promoted to the primary displayed signal**
 (the LLM becomes a challenger). Backend: `news_sentiment.get_news_sentiment`

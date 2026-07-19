@@ -13,6 +13,7 @@ import threading
 import time
 import warnings
 import subprocess
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -826,9 +827,15 @@ def main() -> None:
     print(f"  Portfolio _App v{__version_display__} running at {url}")
     print("  Press Ctrl+C to stop.")
     print("=" * 60)
-    threading.Timer(0.8, lambda: subprocess.run(
-        ["open", "-a", "Google Chrome", url], check=False
-    )).start()
+    def _open_browser() -> None:
+        if sys.platform == "darwin":
+            subprocess.run(["open", "-a", "Google Chrome", url], check=False)
+        elif sys.platform == "win32":
+            os.startfile(url)  # noqa: S606 - local dashboard URL, not user input
+        else:
+            webbrowser.open(url)
+
+    threading.Timer(0.8, _open_browser).start()
     try:
         # serve_forever() now runs on a background thread (see start_server);
         # block the main thread on an interruptible sleep so Ctrl+C still

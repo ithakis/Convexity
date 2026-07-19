@@ -1,4 +1,4 @@
-# Bootstrap the Portfolio _App desktop app on Windows: install Miniforge
+﻿# Bootstrap the Portfolio _App desktop app on Windows: install Miniforge
 # if missing, create/update the `pt` conda env, generate the app icon, and
 # create Start Menu + Desktop shortcuts. Safe to re-run — every step is
 # idempotent.
@@ -127,6 +127,26 @@ Image.open(r'$IconPng').save(r'$IconIco', sizes=[(16,16),(32,32),(48,48),(64,64)
 # ---------------------------------------------------------------------------
 # 4. Create Start Menu + Desktop shortcuts.
 # ---------------------------------------------------------------------------
+# Shortcuts do NOT launch $EnvPythonw directly. A conda env's native deps
+# (numpy/scipy/numba's MKL + llvmlite DLLs under envs\<name>\Library\bin)
+# rely on the DLL search path that `conda activate` / `conda run` sets up.
+# Without it, pythonw.exe starts fine but hard-crashes with no Python
+# traceback (Windows Application-Error 0xc06d007f in KERNELBASE.dll) as
+# soon as a background task exercises numba/scipy — reproduced directly on
+# this machine, both via a bare shortcut-style launch and via
+# `python.exe dashboard.py`; `conda run -n <env> ...` did not crash under
+# the same load. Route the shortcut through `conda run` inside a hidden
+# .vbs wrapper (WScript.Shell.Run with windowStyle 0) so there's no console
+# flash for what's meant to be a GUI app.
+$LauncherVbs = Join-Path $RepoDir "launch_desktop.vbs"
+$CondaBatEscaped = $CondaExe -replace '"', '""'
+$VbsContent = @"
+Set shell = CreateObject("WScript.Shell")
+shell.CurrentDirectory = "$RepoDir"
+shell.Run "cmd /c ""$CondaBatEscaped"" run -n $EnvName --no-capture-output pythonw -m portfolio_tracker.desktop", 0, False
+"@
+Set-Content -Path $LauncherVbs -Value $VbsContent -Encoding ASCII
+
 $StartMenuDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
 $DesktopDir = [Environment]::GetFolderPath("Desktop")
 
@@ -135,8 +155,8 @@ function New-AppShortcut {
     $shortcutPath = Join-Path $Directory "$AppName.lnk"
     $WshShell = New-Object -ComObject WScript.Shell
     $Shortcut = $WshShell.CreateShortcut($shortcutPath)
-    $Shortcut.TargetPath = $EnvPythonw
-    $Shortcut.Arguments = "-m portfolio_tracker.desktop"
+    $Shortcut.TargetPath = "$env:WINDIR\System32\wscript.exe"
+    $Shortcut.Arguments = "`"$LauncherVbs`""
     $Shortcut.WorkingDirectory = $RepoDir
     if (Test-Path $IconIco) {
         $Shortcut.IconLocation = $IconIco
