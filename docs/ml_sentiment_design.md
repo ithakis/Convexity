@@ -184,3 +184,17 @@ ml/scripts/10_export_artifact.py --deploy`. Optional deps `lightgbm`,
   9.8M untagged rows.
 - Python's builtin `hash()` is process-salted — artifact schema hashes must
   use hashlib.
+
+## 11. Shadow → primary promotion (v1.6.1, 2026-07-16)
+
+Promoted the ML model from shadow to the **primary displayed signal** in the
+News tab. `get_news_sentiment` now sets the canonical `tier`/`score` to the ML
+values when available (LLM preserved as `llm_tier`/`llm_score`, `disp_source`
+flag), writes per-article ML scores onto the article feed, and persists
+`ml_score`/`ml_confidence` to history. `compute_diagnostics` gained four live
+panels (rolling IC, calibration curve, ML–LLM agreement grid, coverage &
+confidence); the frozen backtest write-up moved into a new in-app **Methodology**
+article. Graceful LLM fallback is unchanged (missing artifact ⇒ `disp_source=
+"llm"`, LLM drives the UI). No model/artifact/featurizer change — train/serve
+parity and all `tests/test_ml_*` remain intact. Live ML performance continues to
+accrue in Model Diagnostics; quarterly tier-cut recalibration still applies.

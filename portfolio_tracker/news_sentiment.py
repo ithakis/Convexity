@@ -1415,6 +1415,15 @@ def get_news_sentiment(symbol: str, context: dict | None = None,
             for a in batch:
                 s = _ml.score_article(a, symbol)
                 if s is not None:
+                    sar_pred = s.get("sar_pred")
+                    # Per-article ML write-back (v1.6.1 ML-primary): stamp the
+                    # per-headline ML signal onto the cached article dicts (same
+                    # objects the flash tape / timeline read) so those surfaces
+                    # can color and filter by ML. tanh maps SAR -> [-1,1] like
+                    # the LLM per-article score.
+                    if isinstance(sar_pred, (int, float)):
+                        a["ml_sar"] = sar_pred
+                        a["ml_score"] = round(math.tanh(sar_pred / 2.0), 4)
                     scored_ml.append({**s, "datetime": a.get("datetime"),
                                       "source": a.get("source"),
                                       "n_duplicates": a.get("n_duplicates", 0)})
@@ -1448,6 +1457,19 @@ def get_news_sentiment(symbol: str, context: dict | None = None,
     }
     if ml_fields:
         result.update(ml_fields)
+        # Promote ML to the PRIMARY displayed signal (v1.6.1). The LLM call is
+        # kept as the challenger under llm_* so Model Diagnostics can compare
+        # the two and the gauge can show both. disp_source tells the frontend
+        # which engine produced the visible tier/score. Every consumer that
+        # reads `tier`/`score` (NS dot, xlsx, gauge) now shows ML automatically.
+        result["llm_tier"] = tier
+        result["llm_score"] = round(s_total, 4)
+        result["tier"] = ml_fields["ml_tier"]
+        result["score"] = ml_fields["ml_score"]
+        result["disp_source"] = "ml"
+    else:
+        # No ML artifact / no ML score for this stock -> LLM stays primary.
+        result["disp_source"] = "llm"
     _cache_put(_SENTIMENT_CACHE, cache_key, result, _SENTIMENT_TTL)
     _history_append({
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -1461,10 +1483,13 @@ def get_news_sentiment(symbol: str, context: dict | None = None,
         "n_articles": n_scored,
         "price": (row_ctx or {}).get("price"),
         "beta": beta,
-        # ML shadow signal — lets compute_diagnostics measure ML IC with the
-        # same forward-return plumbing as the LLM signal.
+        # ML primary signal — lets compute_diagnostics measure ML IC, the
+        # agreement grid (ml_tier vs the LLM `tier` above), calibration, and
+        # coverage/confidence, all with the same forward-return plumbing.
         "ml_sar": (ml_fields or {}).get("ml_sar"),
         "ml_tier": (ml_fields or {}).get("ml_tier"),
+        "ml_score": (ml_fields or {}).get("ml_score"),
+        "ml_confidence": (ml_fields or {}).get("ml_confidence"),
     })
     return result
 
@@ -1903,6 +1928,92 @@ def compute_diagnostics() -> dict:
                       "mean_fwd_1d_pct": round(st["sum"] / st["n"] * 100.0, 3)}
                   for t, st in ml_tier_stats.items() if st["n"] > 0},
     }
+
+    # --- v1.6.1 live diagnostics panels (ML-primary framing) -------------
+    # Precompute forward-1d idio return once per record, tagged with date,
+    # the LLM idio score, and ML SAR/tier when present.
+    rows_1d = []
+    for rec in records:
+        fr = _fwd_idio(rec, 1)
+        if fr is None:
+            continue
+        rows_1d.append({
+            "date": rec.get("date"),
+            "llm": float(rec["s_idio"]),
+            "ml": float(rec["ml_sar"]) if isinstance(rec.get("ml_sar"), (int, float)) else None,
+            "fwd": fr,
+        })
+
+    # Rolling (expanding-window) IC: ML vs LLM as observations accumulate —
+    # the 'is the live signal holding up?' evidence.
+    roll_dates = sorted({r["date"] for r in rows_1d if r["date"]})
+    rolling = []
+    for d in roll_dates:
+        upto = [r for r in rows_1d if r["date"] and r["date"] <= d]
+        llm_ic = _spearman([r["llm"] for r in upto], [r["fwd"] for r in upto])
+        mlp = [r for r in upto if r["ml"] is not None]
+        ml_ic = _spearman([r["ml"] for r in mlp], [r["fwd"] for r in mlp])
+        rolling.append({
+            "date": d,
+            "ml_ic": (round(ml_ic, 4) if ml_ic is not None else None),
+            "llm_ic": (round(llm_ic, 4) if llm_ic is not None else None),
+            "n": len(upto), "n_ml": len(mlp),
+        })
+    out["rolling"] = rolling
+
+    # Calibration curve: rank-bin ML SAR, mean realized forward-1d idio return
+    # per bin — points should trend upward left->right if the model is ordered.
+    mlp = [r for r in rows_1d if r["ml"] is not None]
+    calib = []
+    if len(mlp) >= 10:
+        mlp.sort(key=lambda r: r["ml"])
+        nb = min(10, max(2, len(mlp) // 10))
+        for g in np.array_split(np.arange(len(mlp)), nb):
+            grp = [mlp[int(i)] for i in g]
+            if not grp:
+                continue
+            calib.append({
+                "pred_mean": round(sum(r["ml"] for r in grp) / len(grp), 4),
+                "realized_mean_pct": round(sum(r["fwd"] for r in grp) / len(grp) * 100.0, 3),
+                "n": len(grp),
+            })
+    out["calibration_curve"] = calib
+
+    # ML vs LLM tier agreement grid (5x5). rows = ML tier, cols = LLM tier;
+    # the diagonal is agreement, off-diagonal mass = independent signal.
+    order = ["very_bearish", "bearish", "neutral", "bullish", "very_bullish"]
+    matrix = [[0] * 5 for _ in range(5)]
+    n_agree = n_both = 0
+    for rec in records:
+        mt, lt = rec.get("ml_tier"), rec.get("tier")
+        if mt in order and lt in order:
+            matrix[order.index(mt)][order.index(lt)] += 1
+            n_both += 1
+            if mt == lt:
+                n_agree += 1
+    out["agreement"] = {
+        "order": order, "matrix": matrix, "n": n_both,
+        "agree_pct": (round(n_agree / n_both * 100.0, 1) if n_both else None),
+    }
+
+    # Coverage & confidence: how much of the book the ML signal actually
+    # covers, and how confident it is.
+    conf_counts = [0] * 10
+    confs = []
+    for rec in records:
+        c = rec.get("ml_confidence")
+        if isinstance(c, (int, float)):
+            confs.append(float(c))
+            conf_counts[min(9, max(0, int(float(c) * 10)))] += 1
+    n_ml_total = sum(1 for rec in records if isinstance(rec.get("ml_sar"), (int, float)))
+    out["coverage"] = {
+        "n_records": len(records),
+        "n_ml": n_ml_total,
+        "pct": (round(n_ml_total / len(records) * 100.0, 1) if records else 0.0),
+        "conf_hist": {"edges": [i / 10 for i in range(11)], "counts": conf_counts},
+        "conf_mean": (round(sum(confs) / len(confs), 3) if confs else None),
+    }
+
     return out
 
 

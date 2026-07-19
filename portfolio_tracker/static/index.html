@@ -171,7 +171,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
     <div class="ns-portfolio-body" id="ns-portfolio-body"></div>
   </div>
   <div class="ns-card ns-diag" id="ns-diag-card">
-    <h4 class="ns-diag-toggle" id="ns-diag-toggle">Model Diagnostics <span id="ns-diag-arrow">&#9656;</span><button type="button" class="ns-diag-info" id="ns-diag-info" title="What is this?" aria-label="About Model Diagnostics">i</button></h4>
+    <h4 class="ns-diag-toggle" id="ns-diag-toggle">Model Diagnostics <span id="ns-diag-arrow">&#9656;</span><button type="button" class="ns-diag-info" id="ns-diag-info" title="What is this?" aria-label="About Model Diagnostics">i</button><button type="button" class="ns-methodology-link" id="ns-methodology-btn" data-tip="Full write-up: how the ML news-sentiment model was built, tested, and how to read it">Methodology</button></h4>
     <div class="ns-diag-about hidden" id="ns-diag-about"></div>
     <div class="ns-diag-body hidden" id="ns-diag-body"></div>
   </div>
@@ -740,6 +740,11 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 </div>
 
 <div class="modal-bg" id="modal-bg"><div class="modal" id="modal"></div></div>
+
+<!-- Methodology modal (90% viewport): the technical article on how the ML
+     news-sentiment model was built, validated, and how to read it. Content is
+     built once in JS (openMethodology) and cached. -->
+<div class="modal-bg" id="methodology-bg"><div class="modal methodology-modal" id="methodology-modal" role="dialog" aria-modal="true" aria-label="News sentiment methodology"></div></div>
 
 <!-- News refresh progress modal: one job row per constituent + the market,
      each with a bar that fills through fetch → AI pass 1 → pass 2 → done.

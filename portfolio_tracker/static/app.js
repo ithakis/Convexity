@@ -1242,7 +1242,8 @@ function nsDot(ns) {
   if (!ns || !ns.tier) return `<span class="ns-dot ns-empty" data-tip="News sentiment not yet loaded"></span>`;
   const color = NS_COLORS[ns.tier] || NS_COLORS.neutral;
   const label = NS_LABELS[ns.tier] || "Neutral";
-  const tip = `${label} (${ns.score >= 0 ? "+" : ""}${ns.score.toFixed(2)}) — ${ns.summary || ""}`;
+  const eng = ns.disp_source === "ml" ? "ML" : "AI";
+  const tip = `${label} (${ns.score >= 0 ? "+" : ""}${ns.score.toFixed(2)}) · ${eng} — ${ns.summary || ""}`;
   return `<span class="ns-dot" style="background:${color}" data-tip="${escapeHtml(tip)}"></span>`;
 }
 
@@ -1987,7 +1988,7 @@ function openModal(r) {
 }
 function closeModal() { $("#modal-bg").classList.remove("show"); DETAIL.data = null; }
 $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") closeModal(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeInfo(); closeNsProgress(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeInfo(); closeNsProgress(); closeMethodology(); } });
 
 function renderModalSkeleton() {
   const r = DETAIL.row;
@@ -5141,12 +5142,15 @@ $("#news-btn").onclick = () => {
 };
 $("#ns-refresh").onclick = () => refreshNewsSentiment();
 $("#ns-diag-toggle").onclick = (e) => {
-  // The (i) button lives inside the toggle header — let it handle its own
-  // click without also collapsing/expanding the diagnostics body.
+  // The (i) and Methodology buttons live inside the toggle header — let them
+  // handle their own clicks without also collapsing/expanding the body.
   if (e.target.closest("#ns-diag-info")) return;
+  if (e.target.closest("#ns-methodology-btn")) return;
   toggleNsDiagnostics();
 };
 $("#ns-diag-info").onclick = (e) => { e.stopPropagation(); toggleNsDiagAbout(); };
+$("#ns-methodology-btn").onclick = (e) => { e.stopPropagation(); openMethodology(); };
+$("#methodology-bg").addEventListener("click", (e) => { if (e.target.id === "methodology-bg") closeMethodology(); });
 
 /* Panel-local state: sentiment dicts are the enriched backend shape
  * (s_idio / s_sys / s_total / confidence / events / disagreement + legacy
@@ -5160,7 +5164,7 @@ const NS = {
   filterSym: "",
   filterEvent: "",
   tapeTiers: new Set(),  // sentiment-tier filter for the flash tape (empty = all)
-  sortKey: "total",   // constituent-table sort column
+  sortKey: "signal",  // constituent-table sort column (ML-primary signal)
   sortDir: -1,        // 1 asc, -1 desc
   expanded: null,     // symbol whose brief row is expanded in the table
   diagLoaded: false,
@@ -5172,6 +5176,7 @@ const NS = {
   })(),
   tlSym: "",         // timeline ticker filter ("" = all)
   tlPeriod: "1W",    // timeline window
+  tlTiers: new Set(),  // timeline sentiment-tier filter (empty = all), independent of the tape
 };
 
 /* Lookback control wiring — active pill + persistence. The new window only
@@ -5515,6 +5520,171 @@ function nsTierFromScore(s) {
   return "very_bullish";
 }
 
+/* Per-article displayed signal (v1.6.1 ML-primary): the ML per-headline
+ * score when the model scored it, else the LLM per-article idio score. Keeps
+ * the flash tape and news timeline consistent with the ML-first gauge/dots. */
+function nsDispArticleScore(a) {
+  if (!a) return null;
+  const v = (a.ml_score != null && isFinite(a.ml_score)) ? a.ml_score : a.score;
+  return (v != null && isFinite(v)) ? v : null;
+}
+function nsDispArticleTier(a) {
+  const v = nsDispArticleScore(a);
+  return v == null ? null : nsTierFromScore(v);
+}
+
+/* Shared sentiment-tier filter chips (flash tape + news timeline). `activeSet`
+ * is the live Set of enabled tiers (empty = All). Returns the chip markup;
+ * callers wire the click handlers (they toggle their own Set + re-render). */
+const NS_TIER_CHIP_DEFS = [
+  ["very_bullish", "Very Bullish"], ["bullish", "Bullish"], ["neutral", "Neutral"],
+  ["bearish", "Bearish"], ["very_bearish", "Very Bearish"],
+];
+function nsTierChips(activeSet) {
+  const allOn = activeSet.size === 0;
+  return `<button class="ns-tier-chip ${allOn ? "on" : ""}" data-tier="__all__">All</button>` +
+    NS_TIER_CHIP_DEFS.map(([t, lbl]) =>
+      `<button class="ns-tier-chip t-${t} ${activeSet.has(t) ? "on" : ""}" data-tier="${t}">${lbl}</button>`).join("");
+}
+function nsWireTierChips(container, activeSet, rerender) {
+  container.querySelectorAll(".ns-tier-chip").forEach(btn => {
+    btn.onclick = () => {
+      const t = btn.dataset.tier;
+      if (t === "__all__") activeSet.clear();
+      else if (activeSet.has(t)) activeSet.delete(t);
+      else activeSet.add(t);
+      rerender();
+    };
+  });
+}
+
+/* ===== Shared inline-SVG chart helpers (Model Diagnostics + Methodology) =====
+ * Self-contained (no chart lib — house rule), theme-aware (colors via CSS vars
+ * in style=), interactive via native <title> hover + CSS :hover highlight. */
+function svgEsc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+const SVG_POS = "var(--pos)", SVG_NEG = "var(--neg)", SVG_ACC = "var(--accent)", SVG_MUT = "var(--muted)", SVG_BRD = "var(--border)";
+
+/* Signed single-series bar chart. data: [{label, value, color?, tip?}]. */
+function svgBars(data, opts) {
+  opts = opts || {};
+  const W = opts.w || 460, H = opts.h || 190, padL = 32, padR = 8, padT = 10, padB = 30;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const vals = data.map(d => d.value).filter(v => v != null && isFinite(v));
+  let vmax = Math.max(0, ...vals, opts.vmax != null ? opts.vmax : -Infinity);
+  let vmin = Math.min(0, ...vals, opts.vmin != null ? opts.vmin : Infinity);
+  if (!isFinite(vmax)) vmax = 1; if (!isFinite(vmin)) vmin = 0;
+  if (vmax === vmin) vmax = vmin + 1;
+  const span = vmax - vmin;
+  const yOf = v => padT + ((vmax - v) / span) * ih;
+  const y0 = yOf(0), gap = iw / data.length, bw = Math.min(38, gap * 0.6);
+  let bars = "", labels = "";
+  data.forEach((d, i) => {
+    const cx = padL + gap * i + gap / 2;
+    const v = (d.value != null && isFinite(d.value)) ? d.value : 0;
+    const yv = yOf(v), top = Math.min(yv, y0), hgt = Math.max(0.6, Math.abs(yv - y0));
+    const col = d.color || (v >= 0 ? SVG_POS : SVG_NEG);
+    bars += `<rect class="svg-bar" x="${(cx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" rx="1.5" style="fill:${col}"><title>${svgEsc(d.tip || (d.label + ": " + (opts.fmt ? opts.fmt(v) : v)))}</title></rect>`;
+    labels += `<text x="${cx.toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${svgEsc(d.label)}</text>`;
+  });
+  const zero = `<line x1="${padL}" y1="${y0.toFixed(1)}" x2="${W - padR}" y2="${y0.toFixed(1)}" style="stroke:${SVG_BRD}" stroke-width="1"/>`;
+  return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${zero}${bars}${labels}</svg>`;
+}
+
+/* Grouped bars. cats: [labels]; seriesList: [{name,color,values:[]}]. */
+function svgGroupedBars(cats, seriesList, opts) {
+  opts = opts || {};
+  const W = opts.w || 460, H = opts.h || 200, padL = 34, padR = 8, padT = 10, padB = 40;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  let all = [];
+  seriesList.forEach(s => s.values.forEach(v => { if (v != null && isFinite(v)) all.push(v); }));
+  let vmax = Math.max(0, ...all), vmin = Math.min(0, ...all);
+  if (vmax === vmin) vmax = vmin + 1;
+  const span = vmax - vmin, yOf = v => padT + ((vmax - v) / span) * ih, y0 = yOf(0);
+  const gap = iw / cats.length, ns = seriesList.length, bw = Math.min(20, gap * 0.72 / ns);
+  let bars = "", labels = "";
+  cats.forEach((c, i) => {
+    const cx = padL + gap * i + gap / 2;
+    seriesList.forEach((s, j) => {
+      const v = (s.values[i] != null && isFinite(s.values[i])) ? s.values[i] : 0;
+      const x = cx - (ns * bw) / 2 + j * bw;
+      const yv = yOf(v), top = Math.min(yv, y0), hgt = Math.max(0.6, Math.abs(yv - y0));
+      bars += `<rect class="svg-bar" x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${(bw - 1).toFixed(1)}" height="${hgt.toFixed(1)}" rx="1.2" style="fill:${s.color}"><title>${svgEsc(s.name + " · " + c + ": " + (opts.fmt ? opts.fmt(v) : v))}</title></rect>`;
+    });
+    labels += `<text x="${cx.toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="8.5">${svgEsc(c)}</text>`;
+  });
+  const zero = `<line x1="${padL}" y1="${y0.toFixed(1)}" x2="${W - padR}" y2="${y0.toFixed(1)}" style="stroke:${SVG_BRD}" stroke-width="1"/>`;
+  const leg = seriesList.map((s, j) =>
+    `<g transform="translate(${padL + j * 120},${H - 10})"><rect width="9" height="9" rx="2" style="fill:${s.color}"/><text x="13" y="8" style="fill:var(--text)" font-size="9">${svgEsc(s.name)}</text></g>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${zero}${bars}${labels}${leg}</svg>`;
+}
+
+/* Multi-line chart. series: [{name,color,points:[{x,y,tip?}]}]. x numeric.
+ * opts: {w,h,xLabels?,fmt?,y0?} — set y0:true to draw a zero baseline. */
+function svgLine(series, opts) {
+  opts = opts || {};
+  const W = opts.w || 460, H = opts.h || 190, padL = 36, padR = 10, padT = 12, padB = 30;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  let xs = [], ys = [];
+  series.forEach(s => s.points.forEach(p => { if (isFinite(p.x)) xs.push(p.x); if (isFinite(p.y)) ys.push(p.y); }));
+  if (!xs.length) return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart"></svg>`;
+  let xmin = Math.min(...xs), xmax = Math.max(...xs);
+  if (xmin === xmax) { xmin -= 0.5; xmax += 0.5; }
+  let ymax = Math.max(...ys), ymin = Math.min(...ys);
+  if (opts.y0) { ymax = Math.max(ymax, 0); ymin = Math.min(ymin, 0); }
+  if (ymax === ymin) { ymax += 0.01; ymin -= 0.01; }
+  const pad = (ymax - ymin) * 0.1; ymax += pad; ymin -= pad;
+  const xOf = x => padL + ((x - xmin) / (xmax - xmin)) * iw;
+  const yOf = y => padT + ((ymax - y) / (ymax - ymin)) * ih;
+  let out = "";
+  if (opts.y0) out += `<line x1="${padL}" y1="${yOf(0).toFixed(1)}" x2="${W - padR}" y2="${yOf(0).toFixed(1)}" style="stroke:${SVG_BRD}" stroke-dasharray="3 3" stroke-width="1"/>`;
+  // y axis labels (min / 0 / max)
+  const yt = opts.y0 ? [ymin, 0, ymax] : [ymin, (ymin + ymax) / 2, ymax];
+  yt.forEach(v => { out += `<text x="2" y="${(yOf(v) + 3).toFixed(1)}" style="fill:var(--muted)" font-size="8">${(opts.fmt ? opts.fmt(v) : v.toFixed(2))}</text>`; });
+  series.forEach(s => {
+    const pts = s.points.filter(p => isFinite(p.x) && isFinite(p.y));
+    if (!pts.length) return;
+    const dpath = pts.map((p, i) => `${i ? "L" : "M"}${xOf(p.x).toFixed(1)} ${yOf(p.y).toFixed(1)}`).join(" ");
+    out += `<path d="${dpath}" fill="none" style="stroke:${s.color}" stroke-width="2" stroke-linejoin="round"/>`;
+    pts.forEach(p => { out += `<circle class="svg-dot" cx="${xOf(p.x).toFixed(1)}" cy="${yOf(p.y).toFixed(1)}" r="2.6" style="fill:${s.color}"><title>${svgEsc(p.tip || (s.name + ": " + p.y))}</title></circle>`; });
+  });
+  if (opts.xLabels) {
+    opts.xLabels.forEach(l => { out += `<text x="${xOf(l.x).toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="8">${svgEsc(l.label)}</text>`; });
+  }
+  const leg = series.map((s, j) =>
+    `<g transform="translate(${padL + j * 120},${padT})"><rect width="9" height="9" rx="2" style="fill:${s.color}"/><text x="13" y="8" style="fill:var(--text)" font-size="9">${svgEsc(s.name)}</text></g>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${out}${leg}</svg>`;
+}
+
+/* Heatmap grid (agreement matrix). matrix[r][c] counts; rowLabels/colLabels. */
+function svgHeat(matrix, rowLabels, colLabels, opts) {
+  opts = opts || {};
+  const cell = opts.cell || 34, padL = 74, padT = 20, padB = 16;
+  const nr = rowLabels.length, nc = colLabels.length;
+  const W = padL + nc * cell + 8, H = padT + nr * cell + padB;
+  let mx = 0;
+  matrix.forEach(row => row.forEach(v => { if (v > mx) mx = v; }));
+  mx = mx || 1;
+  let cells = "", rlab = "", clab = "";
+  for (let r = 0; r < nr; r++) {
+    for (let c = 0; c < nc; c++) {
+      const v = matrix[r][c] || 0;
+      const op = v ? (0.12 + 0.78 * (v / mx)) : 0.04;
+      const x = padL + c * cell, y = padT + r * cell;
+      cells += `<rect x="${x}" y="${y}" width="${cell - 2}" height="${cell - 2}" rx="3" style="fill:${SVG_ACC};opacity:${op.toFixed(3)}"><title>ML ${svgEsc(rowLabels[r])} × AI ${svgEsc(colLabels[c])}: ${v}</title></rect>`;
+      if (v) cells += `<text x="${(x + cell / 2 - 1).toFixed(1)}" y="${(y + cell / 2 + 2).toFixed(1)}" text-anchor="middle" style="fill:var(--text)" font-size="10" font-weight="600">${v}</text>`;
+    }
+    rlab += `<text x="${padL - 6}" y="${(padT + r * cell + cell / 2 + 2).toFixed(1)}" text-anchor="end" style="fill:var(--muted)" font-size="8.5">${svgEsc(rowLabels[r])}</text>`;
+  }
+  for (let c = 0; c < nc; c++) {
+    clab += `<text x="${(padL + c * cell + cell / 2 - 1).toFixed(1)}" y="${padT - 6}" text-anchor="middle" style="fill:var(--muted)" font-size="8.5">${svgEsc(colLabels[c])}</text>`;
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${cells}${rlab}${clab}</svg>`;
+}
+
+const NS_TIER_SHORT = { very_bearish: "V.Bear", bearish: "Bear", neutral: "Neut", bullish: "Bull", very_bullish: "V.Bull" };
+
 const NS_EVENT_LABELS = {
   earnings: "Earnings", guidance: "Guidance", ma: "M&A", analyst: "Analyst",
   legal_regulatory: "Legal/Reg", product: "Product", insider: "Insider",
@@ -5524,7 +5694,9 @@ const NS_EVENT_LABELS = {
 function renderNsGauge(symbols) {
   const body = $("#ns-gauge-body");
   const weights = weightsForMode(STATE.mode) || {};
+  // Two parallel weighted aggregates: ML (primary, v1.6.1) and LLM (challenger).
   let W = 0, sTot = 0, sSys = 0, sIdio = 0, nAssessed = 0, nBear = 0, nFlag = 0;
+  let Wml = 0, mlAgg = 0, mlConf = 0, nMl = 0;
   for (const sym of symbols) {
     const s = NS.sentiment[sym];
     if (!s || s.s_total == null) continue;
@@ -5536,14 +5708,18 @@ function renderNsGauge(symbols) {
     nAssessed++;
     if (s.tier === "bearish" || s.tier === "very_bearish") nBear++;
     if (s.disagreement) nFlag++;
+    if (s.ml_score != null && isFinite(s.ml_score)) {
+      Wml += wi;
+      mlAgg += wi * s.ml_score;
+      mlConf += wi * (s.ml_confidence || 0);
+      nMl++;
+    }
   }
   if (!W || !nAssessed) {
     body.innerHTML = `<div class="ns-panel-empty">No assessed holdings yet. ${escapeHtml(nsKeyDiagnostic(NS.status))}</div>`;
     return;
   }
   sTot /= W; sSys /= W; sIdio /= W;
-  const tier = nsTierFromScore(sTot);
-  const tierLabel = NS_LABELS[tier] || "Neutral";
   const barSeg = (v, cls) => {
     const pct = Math.min(100, Math.abs(v) * 100);
     return `<div class="ns-decomp-row">
@@ -5553,15 +5729,49 @@ function renderNsGauge(symbols) {
     </div>`;
   };
   const flagNote = nFlag ? ` · ${nFlag} flagged ⚑` : "";
-  // Analysis-window transparency (item 3): surface the lookback + recency tau
-  // the assessed signals were actually computed with.
+  // Analysis-window transparency: surface the lookback + recency tau the
+  // assessed signals were actually computed with.
   const anyS = symbols.map(s => NS.sentiment[s]).find(s => s && s.lookback_days);
   const windowNote = anyS
     ? ` · window ${anyS.lookback_days}d (recency τ ${anyS.recency_tau_days ?? "3"}d)` : "";
+
+  if (Wml && nMl) {
+    // ML-primary readout. ml_sar is already β-adjusted (idiosyncratic by
+    // construction), so there is no systematic/idiosyncratic split to show;
+    // instead we surface confidence + coverage and keep the LLM as a small
+    // muted challenger line.
+    const mlScore = mlAgg / Wml;
+    const conf = mlConf / Wml;
+    const tier = nsTierFromScore(mlScore);
+    const llmTier = nsTierFromScore(sTot);
+    const covPct = Math.round(nMl / nAssessed * 100);
+    body.innerHTML = `
+      <div class="ns-gauge-top">
+        <span class="ns-gauge-num">${fmtSig(mlScore)}</span>
+        <span class="ns-tier-badge ${tier}">${escapeHtml(NS_LABELS[tier] || "Neutral")}</span>
+        <span class="ns-eng-tag ns-eng-ml" data-tip="Return-trained LightGBM model — the primary signal (v1.6.1). See Methodology.">ML</span>
+      </div>
+      <div class="ns-gauge-metrics">
+        <span class="ns-gauge-metric"><span class="lbl">Confidence</span><b>${Math.round(conf * 100)}%</b></span>
+        <span class="ns-gauge-metric"><span class="lbl">ML coverage</span><b>${nMl}/${nAssessed}</b> <span class="sub">(${covPct}%)</span></span>
+      </div>
+      <div class="ns-gauge-challenger" data-tip="Legacy LLM sentiment, kept as a challenger for comparison in Model Diagnostics.">
+        <span class="ns-eng-tag ns-eng-llm">AI</span>
+        <span>challenger ${fmtSig(sTot)}</span>
+        <span class="ns-tier-badge sm ${llmTier}">${escapeHtml(NS_LABELS[llmTier] || "Neutral")}</span>
+      </div>
+      <div class="ns-gauge-foot">${nAssessed} of ${symbols.length} holdings assessed · ${nBear} bearish${flagNote}${windowNote}</div>
+    `;
+    return;
+  }
+
+  // Fallback: no ML coverage -> the original LLM decomposition gauge.
+  const tier = nsTierFromScore(sTot);
   body.innerHTML = `
     <div class="ns-gauge-top">
       <span class="ns-gauge-num">${fmtSig(sTot)}</span>
-      <span class="ns-tier-badge ${tier}">${escapeHtml(tierLabel)}</span>
+      <span class="ns-tier-badge ${tier}">${escapeHtml(NS_LABELS[tier] || "Neutral")}</span>
+      <span class="ns-eng-tag ns-eng-llm" data-tip="LLM sentiment — the ML model has not scored these holdings (no deployed artifact or no coverage yet).">AI</span>
     </div>
     ${barSeg(sSys, "sys")}
     ${barSeg(sIdio, "idio")}
@@ -5604,9 +5814,9 @@ function nsBestArticle(sym) {
    * article, else the most recent one. */
   const arts = NS.articles.filter(a => a.symbol === sym);
   if (!arts.length) return null;
-  const scored = arts.filter(a => a.score != null && a.relevance !== "low");
+  const scored = arts.filter(a => nsDispArticleScore(a) != null && a.relevance !== "low");
   if (scored.length) {
-    scored.sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
+    scored.sort((a, b) => Math.abs(nsDispArticleScore(b)) - Math.abs(nsDispArticleScore(a)));
     return scored[0];
   }
   return arts[0];
@@ -5672,18 +5882,10 @@ function renderNsTape() {
   const events = [...new Set(NS.articles.map(a => a.event).filter(Boolean))];
   const symOpts = ['<option value="">All tickers</option>']
     .concat(syms.map(s => `<option value="${s}" ${NS.filterSym === s ? "selected" : ""}>${s}</option>`)).join("");
-  // Sentiment-tier filter (multi-select). Empty set = All. Any combination of
-  // the five tiers can be active at once (item 5): click "All" to clear, or
-  // toggle individual tiers to build e.g. {very_bearish, bearish}.
-  const tierChipDefs = [
-    ["very_bullish", "Very Bullish"], ["bullish", "Bullish"], ["neutral", "Neutral"],
-    ["bearish", "Bearish"], ["very_bearish", "Very Bearish"],
-  ];
-  const allOn = NS.tapeTiers.size === 0;
-  const tierChips =
-    `<button class="ns-tier-chip ${allOn ? "on" : ""}" data-tier="__all__">All</button>` +
-    tierChipDefs.map(([t, lbl]) =>
-      `<button class="ns-tier-chip t-${t} ${NS.tapeTiers.has(t) ? "on" : ""}" data-tier="${t}">${lbl}</button>`).join("");
+  // Sentiment-tier filter (multi-select). Empty set = All; any combination of
+  // the five tiers can be active. Tier comes from the DISPLAYED (ML-first)
+  // per-article score so it matches the gauge/dots. Shared with the timeline.
+  const tierChips = nsTierChips(NS.tapeTiers);
   const evChips = events.map(ev =>
     `<button class="ns-ev-chip ${NS.filterEvent === ev ? "on" : ""}" data-ev="${ev}">${NS_EVENT_LABELS[ev] || ev}</button>`).join("");
   filtBody.innerHTML =
@@ -5692,15 +5894,7 @@ function renderNsTape() {
     (evChips ? `<span class="ns-tape-sep"></span><span class="ns-tape-grp">${evChips}</span>` : "");
   const sel = $("#ns-tape-sym-filter");
   if (sel) sel.onchange = () => { NS.filterSym = sel.value; renderNsTape(); };
-  filtBody.querySelectorAll(".ns-tier-chip").forEach(btn => {
-    btn.onclick = () => {
-      const t = btn.dataset.tier;
-      if (t === "__all__") { NS.tapeTiers.clear(); }
-      else if (NS.tapeTiers.has(t)) { NS.tapeTiers.delete(t); }
-      else { NS.tapeTiers.add(t); }
-      renderNsTape();
-    };
-  });
+  nsWireTierChips(filtBody, NS.tapeTiers, renderNsTape);
   filtBody.querySelectorAll(".ns-ev-chip").forEach(btn => {
     btn.onclick = () => {
       NS.filterEvent = NS.filterEvent === btn.dataset.ev ? "" : btn.dataset.ev;
@@ -5711,8 +5905,10 @@ function renderNsTape() {
   let arts = NS.articles;
   if (NS.filterSym) arts = arts.filter(a => a.symbol === NS.filterSym);
   if (NS.filterEvent) arts = arts.filter(a => a.event === NS.filterEvent);
-  if (NS.tapeTiers.size) arts = arts.filter(a =>
-    a.score != null && isFinite(a.score) && NS.tapeTiers.has(nsTierFromScore(a.score)));
+  if (NS.tapeTiers.size) arts = arts.filter(a => {
+    const t = nsDispArticleTier(a);
+    return t != null && NS.tapeTiers.has(t);
+  });
   arts = arts.slice(0, 120);
   if (!arts.length) {
     body.innerHTML = '<div class="ns-panel-empty">No articles match the filter.</div>';
@@ -5726,7 +5922,7 @@ function renderNsTape() {
     return `<div class="ns-tape-row">
       <span class="ns-tape-time">${stamp}</span>
       <span class="ns-tape-sym">${escapeHtml(a.symbol || "")}</span>
-      ${nsScoreDot(a.score)}
+      ${nsScoreDot(nsDispArticleScore(a))}
       <span class="ns-tape-head"><a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a></span>
       ${ev}${dup}
       <span class="ns-src">${escapeHtml(a.source || "")}</span>
@@ -5769,9 +5965,12 @@ function renderNsTimeline() {
     .concat(syms.map(s => `<option value="${s}" ${NS.tlSym === s ? "selected" : ""}>${s}</option>`)).join("");
   const periodBtns = NS_TL_PERIODS.map(([p]) =>
     `<button class="ns-tl-p ${NS.tlPeriod === p ? "active" : ""}" data-p="${p}" type="button">${p}</button>`).join("");
+  // Sentiment-tier filter chips (same control as the Flash Tape, item: parity)
+  // but backed by NS.tlTiers so the two filters are independent.
   ctl.innerHTML =
     `<select id="ns-tl-sym" class="ns-tape-select">${symOpts}</select>` +
     `<span class="ns-tl-periods">${periodBtns}</span>` +
+    `<span class="ns-tape-grp ns-tl-tiers">${nsTierChips(NS.tlTiers)}</span>` +
     `<span class="ns-tl-legend">` +
     `<span class="ns-tl-lg"><i style="background:#16a34a;height:10px"></i>strong</span>` +
     `<span class="ns-tl-lg"><i style="background:#86efac;height:7px"></i>moderate</span>` +
@@ -5781,12 +5980,17 @@ function renderNsTimeline() {
   ctl.querySelectorAll(".ns-tl-p").forEach(b => {
     b.onclick = () => { NS.tlPeriod = b.dataset.p; renderNsTimeline(); };
   });
+  nsWireTierChips(ctl.querySelector(".ns-tl-tiers"), NS.tlTiers, renderNsTimeline);
 
   const days = (NS_TL_PERIODS.find(([p]) => p === NS.tlPeriod) || ["1W", 7])[1];
   const now = Date.now();
   const t0 = now - days * 86400e3;
   let arts = NS.articles.filter(a => a.datetime && a.datetime * 1000 >= t0);
   if (NS.tlSym) arts = arts.filter(a => a.symbol === NS.tlSym);
+  if (NS.tlTiers.size) arts = arts.filter(a => {
+    const t = nsDispArticleTier(a);
+    return t != null && NS.tlTiers.has(t);
+  });
   if (!arts.length) {
     body.innerHTML = '<div class="ns-panel-empty">No articles in this window — widen the period or the analysis window, then refresh.</div>';
     return;
@@ -5795,10 +5999,11 @@ function renderNsTimeline() {
   arts = arts.slice().sort((a, b) => a.datetime - b.datetime);
   const bars = arts.map(a => {
     const x = ((a.datetime * 1000 - t0) / (now - t0)) * 100;
-    const lv = nsTlLevel(a.score);
+    const ds = nsDispArticleScore(a);
+    const lv = nsTlLevel(ds);
     const dt = new Date(a.datetime * 1000);
     const stamp = `${fmtDateMD(dt)} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
-    const sc = (a.score != null && isFinite(a.score)) ? ` ${fmtSig(a.score)}` : "";
+    const sc = (ds != null && isFinite(ds)) ? ` ${fmtSig(ds)}` : "";
     const head = (a.headline || "").slice(0, 110);
     const tip = `${stamp} · ${a.symbol || ""}${sc} (${lv.lbl}) — ${head}`;
     return `<a class="ns-tl-bar" href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener"
@@ -5922,10 +6127,11 @@ function renderPortfolioSentiment(symbols, _status) {
     { key: "price",   label: "Price",   cls: "r", align: "r", sv: (r) => r.price },
     { key: "pct_1d",  label: "% 1D",    cls: "r", align: "r", sv: (r) => r.pct_1d },
     { key: "beta",    label: "β",       cls: "r", align: "r", sv: (r) => r.beta },
-    { key: "idio",    label: "Idio",    cls: "r", align: "r", tip: "Idiosyncratic news score — company-specific signal only", sv: (r, s) => s ? s.s_idio : null },
-    { key: "sys",     label: "Sys",     cls: "r", align: "r", tip: "Systematic tilt: κ·β·market sentiment", sv: (r, s) => s ? s.s_sys : null },
-    { key: "total",   label: "Total",   cls: "c", align: "c", tip: "Total signal = clip(κ·β·mkt + idio), tier calibrated vs trailing distribution", sv: (r, s) => s ? s.s_total : null },
-    { key: "conf",    label: "Conf",    cls: "c", align: "c", tip: "Confidence: evidence mass, article agreement, self-consistency", sv: (r, s) => s ? s.confidence : null },
+    { key: "signal",  label: "Signal",  cls: "c", align: "c", tip: "Primary signal (v1.6.1): the return-trained ML model's tier. Falls back to the LLM when the model hasn't scored this stock.", sv: (r, s) => s ? s.score : null },
+    { key: "ai",      label: "AI",      cls: "c", align: "c", tip: "Challenger: the legacy LLM total signal, kept for comparison", sv: (r, s) => s ? (s.llm_score != null ? s.llm_score : s.s_total) : null },
+    { key: "idio",    label: "Idio",    cls: "r", align: "r", tip: "LLM idiosyncratic news score — company-specific signal only", sv: (r, s) => s ? s.s_idio : null },
+    { key: "sys",     label: "Sys",     cls: "r", align: "r", tip: "LLM systematic tilt: κ·β·market sentiment", sv: (r, s) => s ? s.s_sys : null },
+    { key: "conf",    label: "Conf",    cls: "c", align: "c", tip: "Confidence: evidence mass, article agreement, self-consistency", sv: (r, s) => s ? (s.ml_confidence != null ? s.ml_confidence : s.confidence) : null },
     { key: "events",  label: "Events",  cls: "",  align: "l", sortable: false },
     { key: "flag",    label: "⚑",       cls: "c", align: "c", tip: "AI vs Loughran-McDonald dictionary disagreement flag", sv: (r, s) => (s && s.disagreement) ? 1 : 0 },
   ];
@@ -5933,7 +6139,7 @@ function renderPortfolioSentiment(symbols, _status) {
   // Sort the symbol order. Missing values always sink to the bottom regardless
   // of direction, so unassessed holdings never crowd the top.
   const sortCol = colByKey[NS.sortKey] && colByKey[NS.sortKey].sortable !== false
-    ? colByKey[NS.sortKey] : colByKey.total;
+    ? colByKey[NS.sortKey] : colByKey.signal;
   const dir = NS.sortDir;
   const orderedSyms = symbols.slice().sort((sa, sb) => {
     const va = sortCol.sv(dataBySymbol.get(sa) || {}, NS.sentiment[sa]);
@@ -5962,12 +6168,17 @@ function renderPortfolioSentiment(symbols, _status) {
     const s = NS.sentiment[sym];
     const tierLabel = s ? (NS_LABELS[s.tier] || s.tier) : "—";
     const tierColor = s ? (NS_COLORS[s.tier] || "#94a3b8") : "var(--muted)";
+    // AI (LLM) challenger tier for the comparison column.
+    const llmTier = s ? (s.llm_tier || nsTierFromScore(s.llm_score != null ? s.llm_score : s.s_total)) : null;
+    const aiColor = llmTier ? (NS_COLORS[llmTier] || "#94a3b8") : "var(--muted)";
+    const aiVal = s ? fmtSig(s.llm_score != null ? s.llm_score : s.s_total) : "—";
+    const confVal = s ? (s.ml_confidence != null ? s.ml_confidence : s.confidence) : null;
     const events = s && s.events
       ? Object.entries(s.events).map(([ev, n]) =>
           `<span class="ns-ev-tag">${NS_EVENT_LABELS[ev] || ev}${n > 1 ? " ×" + n : ""}</span>`).join(" ")
       : "";
-    const conf = s && s.confidence != null
-      ? `<span class="ns-conf-track"><span class="ns-conf-fill" style="width:${(s.confidence * 100).toFixed(0)}%"></span></span>`
+    const conf = confVal != null
+      ? `<span class="ns-conf-track"><span class="ns-conf-fill" style="width:${(confVal * 100).toFixed(0)}%"></span></span>`
       : "—";
     const isOpen = NS.expanded === sym;
     html += `<tr class="ns-row" data-sym="${sym}">
@@ -5977,9 +6188,10 @@ function renderPortfolioSentiment(symbols, _status) {
       <td class="r">${r.price != null ? fmtMoney(r.price, r.currency) : "—"}</td>
       <td class="r">${r.pct_1d != null ? fmtPctSigned(r.pct_1d) : "—"}</td>
       <td class="r">${r.beta != null ? r.beta.toFixed(2) : "—"}</td>
+      <td class="c" style="color:${tierColor};font-weight:600;font-size:11px">${s ? nsDot(s) + " " + tierLabel : "—"}</td>
+      <td class="c" style="color:${aiColor};font-size:11px">${s ? aiVal : "—"}</td>
       <td class="r">${s ? fmtSig(s.s_idio) : "—"}</td>
       <td class="r">${s ? fmtSig(s.s_sys) : "—"}</td>
-      <td class="c" style="color:${tierColor};font-weight:600;font-size:11px">${s ? nsDot(s) + " " + tierLabel : "—"}</td>
       <td class="c">${conf}</td>
       <td>${events}</td>
       <td class="c">${s && s.disagreement ? '<span data-tip="AI and LM dictionary disagree on polarity">⚑</span>' : ""}</td>
@@ -5987,15 +6199,15 @@ function renderPortfolioSentiment(symbols, _status) {
     if (isOpen && s) {
       // Order by |score| desc so the most material (bullish OR bearish) news
       // leads; neutral/unscored articles sink to the bottom (item 9).
-      const absScore = a => (a.score != null && isFinite(a.score)) ? Math.abs(a.score) : -1;
+      const absScore = a => { const v = nsDispArticleScore(a); return v != null ? Math.abs(v) : -1; };
       const arts = NS.articles.filter(a => a.symbol === sym)
         .slice()
         .sort((a, b) => absScore(b) - absScore(a))
         .slice(0, 6).map(a =>
-        `<div class="ns-brief-art">${nsScoreDot(a.score)} <a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a> <span class="ns-src">${escapeHtml(a.source || "")}</span></div>`).join("");
+        `<div class="ns-brief-art">${nsScoreDot(nsDispArticleScore(a))} <a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a> <span class="ns-src">${escapeHtml(a.source || "")}</span></div>`).join("");
       const lm = s.s_lm != null ? ` · LM dictionary ${fmtSig(s.s_lm)}` : "";
       const fb = s.fallback ? " · single-call fallback" : "";
-      html += `<tr class="ns-brief-row"><td colspan="12">
+      html += `<tr class="ns-brief-row"><td colspan="13">
         <div class="ns-brief">${escapeHtml(s.summary || "")}</div>
         <div class="ns-brief-meta">${s.article_count || 0} articles${lm}${fb}</div>
         ${arts}
@@ -6028,30 +6240,30 @@ function renderPortfolioSentiment(symbols, _status) {
 }
 
 const NS_DIAG_ABOUT_HTML = `
-  <p><b>What this panel is.</b> Model Diagnostics is the evidence that the sentiment
-  engine is calibrated and actually predictive — not just plausible-looking. It is
-  computed from <code>.portfolio_tracker_sentiment_history.json</code>, the append-only
-  log of every score the model has ever produced, joined against realized returns.</p>
-  <p><b>Rank IC — score vs forward idiosyncratic return.</b> For each past score we take
-  the stock's <i>idiosyncratic</i> forward return (its move with the market component
-  <code>β·r_SPY</code> stripped out) over the next 1 and 5 trading days, then compute the
-  <b>Spearman rank correlation</b> between score and that return. A positive IC means
-  higher scores preceded higher stock-specific returns — the signal has predictive
-  content. The t-stat flags whether it is distinguishable from zero; <code>n</code> is
-  the number of scored observations with a realized forward return available. Small
-  samples are labelled indicative — the number firms up as history accumulates.</p>
-  <p><b>Mean forward 1d idio return by tier.</b> A monotonicity check: average realized
-  next-day idiosyncratic return within each tier, from Very Bearish to Very Bullish. If
-  the model is well-ordered these bars should rise left-to-right. A tier that is out of
-  order is a miscalibration you can see at a glance.</p>
-  <p><b>Score distribution (90d).</b> Histogram of <code>s_total</code> over the trailing
-  90 days. It shows the engine is using the full range rather than clustering at neutral,
-  and whether quantile tier-calibration is active yet (it switches on once ≥100
-  observations exist; until then fixed thresholds are used).</p>
-  <p class="ns-diag-about-foot">Methodology: per-article LLM scoring → recency×source×novelty×relevance
-  weighted aggregation → <code>s_total = clip(κ·β·s_mkt + s_idio)</code> with κ=0.2, tiers
-  calibrated to rolling score quantiles. Loughran-McDonald dictionary runs in parallel as
-  a disagreement guardrail. See the ⚑ flag in the constituent table.</p>`;
+  <p><b>What this panel is.</b> Model Diagnostics is the <i>live</i> evidence that the
+  primary <b>return-trained ML model</b> is calibrated and actually predictive — not just
+  plausible-looking. It is computed from <code>.portfolio_tracker_sentiment_history.json</code>,
+  the append-only log of every score the model has produced, joined against realized returns.
+  The LLM ("AI") is shown alongside as a challenger. For how the ML model was built and its full
+  backtest, use the <b>Methodology</b> link.</p>
+  <p><b>Live rank IC — ML vs AI.</b> For each past score we take the stock's <i>idiosyncratic</i>
+  forward return (its move with the market component <code>β·r_SPY</code> stripped out) over the
+  next 1 and 5 trading days, then compute the <b>Spearman rank correlation</b> between score and
+  that return. Positive = predictive. The AI row is re-scored on the same records so the
+  comparison is fair. Small samples are indicative until history builds up.</p>
+  <p><b>Rolling live IC.</b> The same IC computed on an expanding window through each date — a
+  stable line above zero means the signal is holding up in production, not just on backtest.</p>
+  <p><b>Calibration.</b> Predicted-SAR bins vs the mean realized next-day return. An upward slope
+  means higher predictions really do precede higher returns.</p>
+  <p><b>ML vs AI tier agreement.</b> A 5×5 grid of where the two engines land. Off-diagonal mass
+  means the ML model adds independent signal rather than echoing the LLM.</p>
+  <p><b>Coverage &amp; confidence, and forward return by ML tier.</b> How much of the book the ML
+  model scores and how confident it is, plus a monotonicity check that realized returns rise from
+  the Very Bearish to the Very Bullish tier.</p>
+  <p class="ns-diag-about-foot">Primary signal: hashed TF-IDF + lexicon + event/meta features →
+  LightGBM → vol-standardized, market-adjusted abnormal return (SAR) → 5 tiers by calibrated
+  quantiles. The LLM path (recency×source×novelty×relevance weighted, κ=0.2) is retained as the
+  challenger. See <b>Methodology</b> for the full write-up.</p>`;
 
 function toggleNsDiagAbout() {
   const about = $("#ns-diag-about");
@@ -6085,69 +6297,94 @@ function renderNsDiagnostics(d) {
     return;
   }
   const parts = [];
-  // Rank IC — the "does the score correlate with subsequent idiosyncratic
-  // moves" evidence (Spearman; small n is labelled as indicative only).
-  if (d.ic && (d.ic["1d"] || d.ic["5d"])) {
-    const row = (label, o) => o
-      ? `<tr><td>${label}</td><td class="r">${o.ic != null ? fmtSig(o.ic, 3) : "—"}</td><td class="r">${o.n}</td><td class="r">${o.t_stat != null ? o.t_stat : "—"}</td></tr>`
-      : "";
-    const smallN = Math.max((d.ic["1d"] || {}).n || 0, (d.ic["5d"] || {}).n || 0) < 200;
-    parts.push(`<div class="ns-diag-sec">
-      <h5>Rank IC — score vs forward idiosyncratic return</h5>
-      <table class="ns-table ns-diag-table"><thead><tr><th>Horizon</th><th class="r">Spearman IC</th><th class="r">n</th><th class="r">t-stat</th></tr></thead>
-      <tbody>${row("1 day", d.ic["1d"])}${row("5 days", d.ic["5d"])}</tbody></table>
-      ${smallN ? '<div class="ns-diag-note">n &lt; 200 — indicative only; evidence accumulates with each refresh.</div>' : ""}
-    </div>`);
-  } else {
-    parts.push('<div class="ns-diag-sec"><h5>Rank IC</h5><div class="ns-panel-empty">Not enough history yet — refresh over a few days to accumulate observations.</div></div>');
-  }
-  // ML shadow scoreboard — the LightGBM return-trained model runs silently
-  // beside the AI signal; this table is the 2-4 week validation that decides
-  // whether ml_tier ever gets surfaced in the main UI. llm_ic_common is the
-  // AI signal re-scored on the SAME records so the comparison is fair.
   const tierOrder = ["very_bearish", "bearish", "neutral", "bullish", "very_bullish"];
+  const shortLabels = tierOrder.map(t => NS_TIER_SHORT[t] || t);
+
+  // Intro — ML is the primary signal; these panels track it live. The frozen
+  // training/backtest story lives in the Methodology popup.
+  parts.push(`<div class="ns-diag-intro">The <b>return-trained ML model</b> is the primary signal (v1.6.1). These
+    panels are <b>live evidence</b> that accumulate as news is refreshed and realized returns land — the LLM is shown as a
+    challenger. For how the model was built and its full backtest, open <b>Methodology</b>.</div>`);
+
+  // 1) ML vs AI live IC scoreboard (ML primary). llm_ic_common re-scores the
+  // LLM on the SAME records for an apples-to-apples comparison.
   if (d.ml && d.ml.n_records > 0) {
-    const icRow = (label, o) => o
-      ? `<tr><td>${label}</td><td class="r">${o["1d"] && o["1d"].ic != null ? fmtSig(o["1d"].ic, 3) : "—"}</td><td class="r">${o["5d"] && o["5d"].ic != null ? fmtSig(o["5d"].ic, 3) : "—"}</td><td class="r">${o["1d"] ? o["1d"].n : "—"}</td><td class="r">${o["1d"] && o["1d"].t_stat != null ? o["1d"].t_stat : "—"}</td></tr>`
+    const icRow = (label, o, cls) => o
+      ? `<tr class="${cls || ""}"><td>${label}</td><td class="r">${o["1d"] && o["1d"].ic != null ? fmtSig(o["1d"].ic, 3) : "—"}</td><td class="r">${o["5d"] && o["5d"].ic != null ? fmtSig(o["5d"].ic, 3) : "—"}</td><td class="r">${o["1d"] ? o["1d"].n : "—"}</td><td class="r">${o["1d"] && o["1d"].t_stat != null ? o["1d"].t_stat : "—"}</td></tr>`
       : "";
-    const mlBars = tierOrder.filter(t => d.ml.tiers && d.ml.tiers[t]).map(t => {
-      const o = d.ml.tiers[t];
-      const maxAbs = Math.max(0.1, ...tierOrder.map(x => Math.abs((d.ml.tiers[x] || {}).mean_fwd_1d_pct || 0)));
-      const w = Math.abs(o.mean_fwd_1d_pct) / maxAbs * 100;
-      const color = NS_COLORS[t] || "#94a3b8";
-      return `<div class="ns-diag-tier-row">
-        <span class="ns-diag-tier-label" style="color:${color}">${NS_LABELS[t] || t}</span>
-        <span class="ns-decomp-track"><span class="ns-decomp-fill ${o.mean_fwd_1d_pct >= 0 ? "pos" : "neg"}" style="width:${w}%"></span></span>
-        <span class="ns-decomp-val">${fmtSig(o.mean_fwd_1d_pct, 2)}% (n=${o.n})</span>
-      </div>`;
-    }).join("");
     parts.push(`<div class="ns-diag-sec">
-      <h5>ML shadow scoreboard — return-trained model vs AI (same records)</h5>
+      <h5>Live rank IC — ML vs AI (same records)</h5>
       <table class="ns-table ns-diag-table"><thead><tr><th>Signal</th><th class="r">IC 1d</th><th class="r">IC 5d</th><th class="r">n</th><th class="r">t 1d</th></tr></thead>
-      <tbody>${icRow("ML (LightGBM)", d.ml.ic)}${icRow("AI (LLM)", d.ml.llm_ic_common)}</tbody></table>
-      ${mlBars ? `<div class="ns-diag-note" style="margin-top:6px">Mean forward 1d idio return by ML tier</div>${mlBars}` : ""}
-      <div class="ns-diag-note">Shadow mode — ${d.ml.days} day${d.ml.days === 1 ? "" : "s"} of history (${d.ml.n_records} obs${d.ml.date_min ? `, since ${d.ml.date_min}` : ""}). The ML signal does not drive tiers or the gauge until this comparison validates it.</div>
+      <tbody>${icRow("ML (LightGBM)", d.ml.ic, "ns-diag-primary")}${icRow("AI (LLM)", d.ml.llm_ic_common)}</tbody></table>
+      <div class="ns-diag-note">Spearman IC of each signal vs the next 1d / 5d idiosyncratic return. Positive = predictive. ${d.ml.days} day${d.ml.days === 1 ? "" : "s"} of history (${d.ml.n_records} obs${d.ml.date_min ? `, since ${d.ml.date_min}` : ""}); small samples are indicative until they build up.</div>
     </div>`);
   } else {
-    parts.push('<div class="ns-diag-sec"><h5>ML shadow scoreboard</h5><div class="ns-panel-empty">No ML-scored history yet — refresh news to start accumulating (requires the deployed mlsent artifact).</div></div>');
+    parts.push('<div class="ns-diag-sec"><h5>Live rank IC — ML vs AI</h5><div class="ns-panel-empty">No ML-scored history yet — refresh news to start accumulating (requires the deployed mlsent artifact).</div></div>');
   }
-  // Tier monotonicity — mean forward return should rise from very_bearish
-  // to very_bullish.
-  if (d.tiers && Object.keys(d.tiers).length) {
-    const maxAbs = Math.max(0.1, ...tierOrder.map(t => Math.abs((d.tiers[t] || {}).mean_fwd_1d_pct || 0)));
-    const bars = tierOrder.filter(t => d.tiers[t]).map(t => {
-      const o = d.tiers[t];
-      const w = Math.abs(o.mean_fwd_1d_pct) / maxAbs * 100;
-      const color = NS_COLORS[t] || "#94a3b8";
-      return `<div class="ns-diag-tier-row">
-        <span class="ns-diag-tier-label" style="color:${color}">${NS_LABELS[t] || t}</span>
-        <span class="ns-decomp-track"><span class="ns-decomp-fill ${o.mean_fwd_1d_pct >= 0 ? "pos" : "neg"}" style="width:${w}%"></span></span>
-        <span class="ns-decomp-val">${fmtSig(o.mean_fwd_1d_pct, 2)}% (n=${o.n})</span>
-      </div>`;
-    }).join("");
-    parts.push(`<div class="ns-diag-sec"><h5>Mean forward 1d idio return by tier</h5>${bars}</div>`);
+
+  // 2) Rolling live IC — is the signal holding up as observations accrue?
+  if (Array.isArray(d.rolling) && d.rolling.length >= 2) {
+    const idx = d.rolling.map((r, i) => ({ ...r, i }));
+    const mlPts = idx.filter(r => r.ml_ic != null).map(r => ({ x: r.i, y: r.ml_ic, tip: `${r.date} · ML IC ${fmtSig(r.ml_ic, 3)} (n=${r.n_ml})` }));
+    const llmPts = idx.filter(r => r.llm_ic != null).map(r => ({ x: r.i, y: r.llm_ic, tip: `${r.date} · AI IC ${fmtSig(r.llm_ic, 3)} (n=${r.n})` }));
+    const step = Math.max(1, Math.floor(idx.length / 5));
+    const xLabels = idx.filter((_, i) => i % step === 0).map(r => ({ x: r.i, label: (r.date || "").slice(5) }));
+    const chart = svgLine([
+      { name: "ML", color: SVG_ACC, points: mlPts },
+      { name: "AI", color: SVG_MUT, points: llmPts },
+    ], { y0: true, xLabels, fmt: v => v.toFixed(2) });
+    parts.push(`<div class="ns-diag-sec"><h5>Rolling live IC (expanding window)</h5>${chart}
+      <div class="ns-diag-note">Cumulative IC through each date. A stable line above zero is the "still working live" signal.</div></div>`);
+  } else {
+    parts.push('<div class="ns-diag-sec"><h5>Rolling live IC</h5><div class="ns-panel-empty">Needs at least two days of history — check back after a few refreshes.</div></div>');
   }
-  // Score distribution — range-usage evidence.
+
+  // 3) Calibration curve — predicted-SAR bins vs realized forward return.
+  if (Array.isArray(d.calibration_curve) && d.calibration_curve.length >= 2) {
+    const pts = d.calibration_curve.map(b => ({ x: b.pred_mean, y: b.realized_mean_pct, tip: `pred SAR ${fmtSig(b.pred_mean, 3)} → realized ${fmtSig(b.realized_mean_pct, 2)}% (n=${b.n})` }));
+    const chart = svgLine([{ name: "Realized", color: SVG_ACC, points: pts }], { y0: true, fmt: v => v.toFixed(2) });
+    parts.push(`<div class="ns-diag-sec"><h5>Calibration — predicted vs realized</h5>${chart}
+      <div class="ns-diag-note">Each point is a bin of predicted SAR (x) vs the mean realized next-day idiosyncratic return (y, %). An upward-sloping line means higher predictions really do precede higher returns.</div></div>`);
+  } else {
+    parts.push('<div class="ns-diag-sec"><h5>Calibration — predicted vs realized</h5><div class="ns-panel-empty">Needs ≥10 ML-scored observations with realized returns.</div></div>');
+  }
+
+  // 4) ML–LLM tier agreement grid.
+  if (d.agreement && d.agreement.n > 0) {
+    const chart = svgHeat(d.agreement.matrix, d.agreement.order.map(t => NS_TIER_SHORT[t] || t), d.agreement.order.map(t => NS_TIER_SHORT[t] || t), { cell: 32 });
+    parts.push(`<div class="ns-diag-sec"><h5>ML vs AI tier agreement</h5>
+      <div class="ns-diag-grid-wrap"><div class="ns-diag-axis-y">ML tier ↓</div>${chart}</div>
+      <div class="ns-diag-note">Rows = ML tier, columns = AI tier. Diagonal = agreement (${d.agreement.agree_pct != null ? d.agreement.agree_pct + "%" : "—"} of ${d.agreement.n}); off-diagonal mass means the ML model is adding signal the LLM misses, not just echoing it.</div></div>`);
+  }
+
+  // 5) Coverage & confidence.
+  if (d.coverage) {
+    const cv = d.coverage;
+    const confBars = (cv.conf_hist && cv.conf_hist.counts.some(c => c > 0))
+      ? svgBars(cv.conf_hist.counts.map((c, i) => ({ label: (i % 2 === 0) ? (i / 10).toFixed(1) : "", value: c, color: SVG_ACC, tip: `conf [${(i / 10).toFixed(1)}, ${((i + 1) / 10).toFixed(1)}): ${c}` })), { h: 130, fmt: v => v })
+      : "";
+    parts.push(`<div class="ns-diag-sec"><h5>ML coverage &amp; confidence</h5>
+      <div class="ns-diag-tiles">
+        <div class="ns-diag-tile"><b>${cv.n_ml}</b><span>ML-scored obs</span></div>
+        <div class="ns-diag-tile"><b>${cv.pct}%</b><span>of records</span></div>
+        <div class="ns-diag-tile"><b>${cv.conf_mean != null ? Math.round(cv.conf_mean * 100) + "%" : "—"}</b><span>mean confidence</span></div>
+      </div>
+      ${confBars ? `<div class="ns-diag-note" style="margin-top:4px">Confidence distribution</div>${confBars}` : ""}</div>`);
+  }
+
+  // 6) Mean forward 1d idio return by ML tier — live monotonicity check.
+  if (d.ml && d.ml.tiers && Object.keys(d.ml.tiers).length) {
+    const bars = tierOrder.filter(t => d.ml.tiers[t]).map(t => ({
+      label: NS_TIER_SHORT[t] || t,
+      value: d.ml.tiers[t].mean_fwd_1d_pct,
+      color: NS_COLORS[t] || "#94a3b8",
+      tip: `${NS_LABELS[t] || t}: ${fmtSig(d.ml.tiers[t].mean_fwd_1d_pct, 2)}% (n=${d.ml.tiers[t].n})`,
+    }));
+    parts.push(`<div class="ns-diag-sec"><h5>Mean forward 1d return by ML tier</h5>${svgBars(bars, { h: 160, fmt: v => v.toFixed(2) + "%" })}
+      <div class="ns-diag-note">Should rise left→right if the tiers are well-ordered.</div></div>`);
+  }
+
+  // 7) Score distribution (LLM s_total) — range-usage evidence (kept).
   if (d.histogram && d.histogram.n > 0) {
     const maxC = Math.max(...d.histogram.counts, 1);
     const cols = d.histogram.counts.map((c, i) => {
@@ -6159,12 +6396,176 @@ function renderNsDiagnostics(d) {
     const calNote = d.calibration_active
       ? `quantile calibration active (${d.calibration_n} obs)`
       : `fixed thresholds until ${100} obs (${d.calibration_n} so far)`;
-    parts.push(`<div class="ns-diag-sec"><h5>Score distribution (90d, s_total)</h5>
+    parts.push(`<div class="ns-diag-sec"><h5>AI score distribution (90d, s_total)</h5>
       <div class="ns-hist">${cols}</div>
       <div class="ns-hist-axis"><span>-1</span><span>0</span><span>+1</span></div>
       <div class="ns-diag-note">${calNote}</div></div>`);
   }
   body.innerHTML = parts.join("") || '<div class="ns-panel-empty">No diagnostics data yet.</div>';
+}
+
+/* ===== Methodology modal (90% viewport) ==================================
+ * A plain-language-first technical write-up of how the ML news-sentiment model
+ * was built, tested, and how to read it. Numbers are the frozen mlsent-v1
+ * validation results. Charts reuse the shared inline-SVG helpers above. */
+let _methodologyBuilt = false;
+function openMethodology() {
+  const bg = $("#methodology-bg"), modal = $("#methodology-modal");
+  if (!bg || !modal) return;
+  if (!_methodologyBuilt) {
+    modal.innerHTML = methodologyHtml();
+    _methodologyBuilt = true;
+    const cb = $("#methodology-close");
+    if (cb) cb.onclick = closeMethodology;
+    if (window.renderMathInElement) {
+      try {
+        renderMathInElement(modal, { delimiters: [{ left: "$$", right: "$$", display: true }], throwOnError: false });
+      } catch { /* formula falls back to raw text */ }
+    }
+  }
+  bg.classList.add("show");
+}
+function closeMethodology() { const bg = $("#methodology-bg"); if (bg) bg.classList.remove("show"); }
+
+function mthPipelineSvg() {
+  const stages = [
+    ["News", "Finnhub + yfinance"],
+    ["Features", "TF-IDF + lexicon + events"],
+    ["LightGBM", "gradient-boosted trees"],
+    ["SAR", "abnormal return"],
+    ["5 tiers", "V.Bear → V.Bull"],
+  ];
+  const W = 900, H = 96, bw = 150, bh = 54, gap = (W - bw * stages.length) / (stages.length - 1);
+  let out = "";
+  stages.forEach((s, i) => {
+    const x = i * (bw + gap), y = (H - bh) / 2;
+    out += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="8" style="fill:var(--bg-subtle);stroke:${SVG_ACC}" stroke-width="1.4"/>`;
+    out += `<text x="${x + bw / 2}" y="${y + 22}" text-anchor="middle" style="fill:var(--text)" font-size="14" font-weight="700">${svgEsc(s[0])}</text>`;
+    out += `<text x="${x + bw / 2}" y="${y + 39}" text-anchor="middle" style="fill:var(--muted)" font-size="9.5">${svgEsc(s[1])}</text>`;
+    if (i < stages.length - 1) {
+      const a2 = x + bw + gap;
+      out += `<line x1="${x + bw + 2}" y1="${H / 2}" x2="${a2 - 7}" y2="${H / 2}" style="stroke:${SVG_MUT}" stroke-width="1.6"/>`;
+      out += `<path d="M${a2 - 7},${H / 2 - 4} L${a2 - 1},${H / 2} L${a2 - 7},${H / 2 + 4} z" style="fill:${SVG_MUT}"/>`;
+    }
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${out}</svg>`;
+}
+
+function methodologyHtml() {
+  // Frozen mlsent-v1 numbers (ml/data/reports/*.json + design doc).
+  const wf = [["2015", 0.0236], ["2016", 0.0383], ["2017", 0.0384], ["2018", 0.0309], ["2019", 0.0205], ["2020", 0.0639], ["2021", 0.0117], ["2022", 0.0159], ["2023", 0.042]];
+  const tShort = ["V.Bear", "Bear", "Neut", "Bull", "V.Bull"];
+  const decile = [-0.0747, -0.0299, 0.0053, -0.0055, -0.0142, 0.0207, -0.0158, -0.0187, -0.0259, 0.1222];
+
+  const chartWF = svgBars(wf.map(([y, v]) => ({ label: y, value: v, color: SVG_ACC, tip: `${y}: IC ${v.toFixed(4)}` })), { h: 190, w: 520, fmt: v => v.toFixed(3) });
+  const chartTiers = svgGroupedBars(tShort, [
+    { name: "Calibration", color: SVG_MUT, values: [-0.2616, -0.048, -0.0305, -0.0058, 0.1971] },
+    { name: "Holdout", color: SVG_ACC, values: [-0.0862, -0.0063, 0.0027, 0.008, 0.4589] },
+  ], { h: 210, w: 520, fmt: v => v.toFixed(3) });
+  const chartShift = svgBars([
+    { label: "real", value: 0.0263, color: SVG_ACC, tip: "Real IC 0.0263" },
+    { label: "+5d", value: -0.0122, color: SVG_NEG, tip: "+5d shifted −0.0122 — overreaction reversal, not leakage" },
+    { label: "−5d", value: 0.0051, color: SVG_MUT, tip: "−5d shifted 0.0051" },
+  ], { h: 170, w: 340, fmt: v => v.toFixed(4) });
+  const chartSel = svgGroupedBars(["Ridge (dense)", "Deployed LGBM"], [
+    { name: "Holdout window", color: SVG_MUT, values: [0.0418, 0.0263] },
+    { name: "Selection window", color: SVG_ACC, values: [0.005, 0.0336] },
+  ], { h: 190, w: 420, fmt: v => v.toFixed(3) });
+  const chartDecile = svgBars(decile.map((v, i) => ({ label: `D${i + 1}`, value: v, color: v >= 0 ? SVG_POS : SVG_NEG, tip: `Decile ${i + 1}: mean realized SAR ${v.toFixed(4)}` })), { h: 180, w: 520, fmt: v => v.toFixed(3) });
+
+  const stat = (v, l) => `<div class="mth-stat"><b>${v}</b><span>${l}</span></div>`;
+  return `
+  <div class="mth-head">
+    <div>
+      <h2>How the News Sentiment Model Works</h2>
+      <div class="mth-sub">A return-trained signal — grounded in how stocks actually move on news, not an AI's opinion</div>
+    </div>
+    <button class="m-close" id="methodology-close" title="Close" aria-label="Close">×</button>
+  </div>
+  <div class="mth-body">
+    <div class="mth-stats">
+      ${stat("5.75M", "news articles trained on")}
+      ${stat("9 / 9", "years with positive signal")}
+      ${stat("+0.026", "holdout rank IC")}
+      ${stat("68%", "polarity sanity check")}
+    </div>
+
+    <section class="mth-sec">
+      <h3>1 · The idea</h3>
+      <p>Most sentiment tools ask a language model "does this headline sound good or bad?" We do something different: we teach a model what <b>the market itself</b> did after similar news in the past, so the score reflects likely price impact rather than tone.</p>
+      <ul>
+        <li>Ground truth is the stock's <b>own move right after the news</b>, with the market's move stripped out.</li>
+        <li>The model learns which words and events preceded real up- or down-moves — an evidence-based read, not a vibe.</li>
+        <li>Because it is trained on returns, the output is directly about "how much did this matter for the price?"</li>
+      </ul>
+      ${mthPipelineSvg()}
+    </section>
+
+    <section class="mth-sec">
+      <h3>2 · What "good news" means, numerically</h3>
+      <p>For every historical article we measure the stock's return over the first trading window that <i>starts after</i> the news (so we never peek at moves that already happened), remove the market's contribution, and divide by the stock's normal volatility. That gives a fair, comparable score called the <b>Standardized Abnormal Return (SAR)</b>.</p>
+      <ul>
+        <li><b>Timing-aware:</b> news after the close uses the overnight-to-next move; intraday news uses the next close-to-close.</li>
+        <li><b>Market-adjusted:</b> subtract <span class="mth-mono">β · index return</span> so a rising tide doesn't look like good news.</li>
+        <li><b>Volatility-standardized:</b> a 2% move means more for a calm stock than a jumpy one — dividing by volatility levels the field.</li>
+      </ul>
+      $$SAR = \\frac{r_{\\text{window}} - \\beta \\cdot m_{\\text{window}}}{\\sigma_{\\text{window}}}$$
+    </section>
+
+    <section class="mth-sec">
+      <h3>3 · The data</h3>
+      <p>Training used <b>FNSPID</b>, a public dataset of 5.75 million symbol-tagged US news articles from 2009–2023, joined to daily prices.</p>
+      <ul>
+        <li>The most recent six months were held out entirely as an <b>out-of-time test</b> — the model never saw them while learning.</li>
+        <li>Syndicated copies of the same story are collapsed so one press release doesn't count ten times.</li>
+        <li>All trailing statistics (volatility, beta) use only data available <i>before</i> each article — a strict no-look-ahead rule.</li>
+      </ul>
+    </section>
+
+    <section class="mth-sec">
+      <h3>4 · The model</h3>
+      <p>Headlines and summaries become numeric features; a <b>LightGBM</b> gradient-boosted-tree model maps them to a predicted SAR.</p>
+      <ul>
+        <li><b>Text features:</b> hashed word/phrase counts (TF-IDF) plus a finance dictionary (Loughran-McDonald) and ~16 event flags (earnings, M&A, guidance, legal…).</li>
+        <li><b>Relevance</b> — how much a story is really <i>about</i> the company — is a transparent hand-built rule, deliberately <i>not</i> machine-learned, so a future relevance model can be trained on the same data without contamination.</li>
+        <li>The model is intentionally small (56 trees) — on noisy financial text, bigger overfits. It is judged by rank correlation with returns, not by fit.</li>
+      </ul>
+    </section>
+
+    <section class="mth-sec">
+      <h3>5 · Does it work?</h3>
+      <p>A single news score is a weak predictor — but a small, <i>consistent</i> edge applied across hundreds of names is exactly how quant signals add value. The evidence below is from the untouched test period.</p>
+      <div class="mth-charts">
+        <div class="mth-chart"><h4>Signal every year (walk-forward rank IC)</h4>${chartWF}<p class="mth-cap">Positive in all 9 years, and no single year carries it (max 22% of the total). This is stability, not a one-year fluke.</p></div>
+        <div class="mth-chart"><h4>Higher tier → higher realized return</h4>${chartTiers}<p class="mth-cap">Average realized return rises from the Very Bearish to the Very Bullish tier on both the calibration and the untouched holdout set.</p></div>
+        <div class="mth-chart"><h4>No look-ahead leakage</h4>${chartShift}<p class="mth-cap">Shifting the label 5 days <i>forward</i> kills the signal (and even reverses — the classic overreaction bounce), exactly what a clean, non-leaking model should show.</p></div>
+        <div class="mth-chart"><h4>The honest-baseline test</h4>${chartSel}<p class="mth-cap">A simpler model looked better on one window (0.042) but collapsed on the next (0.005); the deployed model was the only one consistent across both — so it shipped.</p></div>
+        <div class="mth-chart"><h4>Prediction decile vs realized return</h4>${chartDecile}<p class="mth-cap">The top decile of predictions clearly precedes the strongest realized moves — the model concentrates its conviction where it counts.</p></div>
+      </div>
+      <p class="mth-note">Other gates passed too: the real signal is ~6σ above a shuffled-label null, a leakage spot-check found 0 violations in 44 samples, and on the Financial PhraseBank benchmark the model's sign matches human labels 68% of the time.</p>
+    </section>
+
+    <section class="mth-sec">
+      <h3>6 · The five tiers</h3>
+      <p>Predicted SARs are turned into the five familiar labels using calibrated cut-points, so each tier means the same thing over time.</p>
+      <ul>
+        <li>Cuts are set on out-of-sample predictions, not the test set, and require the middle "neutral" band to carry essentially no directional signal.</li>
+        <li>The tier averages must increase in order and stay stable under resampling before the cuts are frozen.</li>
+        <li>Tier populations drift as markets change, so the cuts are <b>recalibrated quarterly</b>.</li>
+      </ul>
+    </section>
+
+    <section class="mth-sec">
+      <h3>7 · Limitations &amp; what's next</h3>
+      <ul>
+        <li>This is a <b>probabilistic edge, not a crystal ball</b> — any single call can be wrong; the value is in the average across many.</li>
+        <li>It reads text, so it can't know a number the market already expected — genuine surprise is what it captures best.</li>
+        <li>The legacy LLM signal is kept as a live <b>challenger</b> in Model Diagnostics; where the two disagree is often the most interesting place to look.</li>
+        <li>As of v1.6.1 the ML model is the <b>primary</b> displayed signal; its live performance is tracked in the diagnostics panels below and reviewed on an ongoing basis.</li>
+      </ul>
+    </section>
+    <div class="mth-foot">Model <code>mlsent-v1</code> · trained on FNSPID 2009–2023 · held-out test Jul–Dec 2023. Numbers shown are the frozen validation results; live performance is in Model Diagnostics.</div>
+  </div>`;
 }
 
 function patchRowSentiment(sentiment) {

@@ -355,9 +355,29 @@ trained on FNSPID (5.75M symbol-tagged articles, 2009–2023) via the pipeline i
 - **Relevance stays hand-set** (never fitted on FNSPID) so a future ML
   relevance model can be trained on that corpus without contamination.
 - `get_news_sentiment` adds `ml_sar / ml_score / ml_tier / ml_confidence /
-  ml_n` beside the LLM keys and persists `ml_sar`/`ml_tier` into the sentiment
-  history, so `compute_diagnostics` can compare ML vs LLM rank-IC as history
-  accumulates (the 2–4 week shadow window before any UI surfaces `ml_tier`).
+  ml_n` beside the LLM keys and persists `ml_sar`/`ml_tier`/`ml_score`/
+  `ml_confidence` into the sentiment history.
+- **ML is the PRIMARY displayed signal (v1.6.1).** When `ml_fields` are present,
+  `get_news_sentiment` promotes the canonical `tier`/`score` to the ML values and
+  preserves the LLM call as `llm_tier`/`llm_score` (with `disp_source="ml"`);
+  when absent it leaves the LLM values in place (`disp_source="llm"`). This
+  centralizes promotion so every consumer that reads `tier`/`score` (the main
+  holdings-table NS dot, xlsx export, the News-tab gauge/constituent table) shows
+  ML automatically, with a clean LLM fallback. Per-article ML scores are also
+  written back onto the cached article dicts (`a["ml_score"]`, `a["ml_sar"]`, the
+  same objects the flash tape / timeline read) so those surfaces color/filter by
+  ML too. Frontend display helpers: `nsDispArticleScore`/`nsDispArticleTier` in
+  `app.js` pick ML-first with LLM fallback.
+- `compute_diagnostics` returns, besides the legacy `ic`/`tiers`/`histogram`/`ml`
+  (ML vs LLM live IC + per-ML-tier forward returns), four v1.6.1 live panels:
+  `rolling` (expanding-window ML & LLM IC by date), `calibration_curve`
+  (predicted-SAR bins vs realized forward return), `agreement` (5×5 ML-tier ×
+  LLM-tier grid + `agree_pct`), and `coverage` (`n_ml`, `%`, confidence hist).
+  The News tab renders these via shared inline-SVG helpers (`svgBars`,
+  `svgGroupedBars`, `svgLine`, `svgHeat` — no chart lib, `<title>` hover tips).
+  The frozen training/backtest story lives in the **Methodology** modal
+  (`openMethodology` in `app.js`, a 90vw×90vh article with six SVG charts + a
+  KaTeX SAR formula); Model Diagnostics stays "live evidence only."
 - **Retraining gotcha (hard-won):** FLAML+LightGBM on the raw 262k-column
   sparse matrix re-bins per trial×fold and stalls (16h in
   `PushDataToMultiValBin`). Keep the df-pruning mask, `log_max_bin=5`, and the

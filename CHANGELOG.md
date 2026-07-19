@@ -5,6 +5,21 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.6.1 — 2026-07-16
+News tab v1.6.1 — the ML model is **promoted to the primary displayed signal**
+(the LLM becomes a challenger). Backend: `news_sentiment.get_news_sentiment`
+writes per-article ML scores onto the article feed and sets the displayed
+`tier`/`score` to ML (with `disp_source`, `llm_tier`, `llm_score` preserved for
+comparison); `compute_diagnostics` gains four live panels — rolling expanding-
+window IC (ML vs LLM), a predicted-vs-realized calibration curve, a 5×5 ML–LLM
+tier agreement grid, and ML coverage/confidence. Frontend: the portfolio gauge,
+constituent table (new **Signal** + **AI** columns), NS dots, tape and timeline
+now lead with ML and fall back to the LLM when the artifact is absent; a new
+**Methodology** link opens a 90%-viewport technical article (7 sections, six
+self-contained interactive SVG charts, KaTeX SAR formula) explaining how the
+model was built and validated; the News Timeline gains a sentiment-tier filter
+mirroring the Flash Tape. No model/artifact change — train/serve parity intact.
+
 ## 1.6.0 — 2026-07-16
 ML News Sentiment (branch MLNews): a LightGBM model trained on FNSPID (5.75M
 articles, 2009–2023) predicts the vol-standardized beta-adjusted abnormal
