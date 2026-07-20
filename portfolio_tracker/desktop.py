@@ -394,7 +394,8 @@ def main() -> None:
     splash.set_stage("Loading market data engine", 0.55)
     threading.Thread(target=_boot_worker, name="pt-boot", daemon=True).start()
 
-    state = {"window": None, "revealed": False, "reveal_scheduled": False, "load_tries": 0}
+    state = {"window": None, "revealed": False, "reveal_scheduled": False, "load_tries": 0,
+             "load_ok": False}
     _MAX_LOAD_TRIES = 4
 
     def reveal() -> None:
@@ -406,7 +407,15 @@ def main() -> None:
         # entire lifetime of the app.
         anim.stop()
         window = state["window"]
-        window.show()
+        # Full screen only when the page actually rendered. The failure
+        # reveals (retry-exhausted, 20s safety timer) keep a normal window so
+        # a blank page still has visible chrome — macOS native fullscreen
+        # hides the title bar and close button, which would trap the user in
+        # an empty fullscreen Space with no obvious way out.
+        if state["load_ok"]:
+            window.showFullScreen()
+        else:
+            window.show()
         window.raise_()
         window.activateWindow()
         splash.finish(window)
@@ -436,6 +445,7 @@ def main() -> None:
     def on_load_finished(ok: bool) -> None:
         log.info("page loadFinished ok=%s try=%d (+%.2fs)", ok, state["load_tries"], time.monotonic() - t0)
         if ok:
+            state["load_ok"] = True
             splash.set_stage("Ready", 1.0)
             schedule_reveal()
             return

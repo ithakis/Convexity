@@ -513,7 +513,15 @@ dependency (loaded from CDN, used only for column-guide formulas).
 ### Column registry (`COLS` + `BUILTIN_VIEWS`)
 `COLS` (≈line 3714) is the single source of truth for every available
 column — `key`, `label`, `w`, `align`, `sortable`, `render(r)`, optional
-`heat`, `bg`, `sortValue`, `td_cls`. `BUILTIN_VIEWS` (just below COLS)
+`heat`, `bg`, `sortValue`, `td_cls`. A `heat.kind === "yo_dyn"` column exposes
+a per-view background mode in Customize: **Off / 2C-Quantile / Quantile /
+Min-Max** (`getHeatMode`/`cellStyleHeat`). "Quantile" = single-blue quintile
+buckets, "2C-Quantile" = orange↔blue diverging quintiles, "Min-Max" =
+continuous 10th/90th-clipped blue. `favor:"low"` flips which end is best (e.g.
+`analyst_rating`: 1 = Strong Buy reads blue). The old `"percentile"` mode +
+`kind:"yo"` fixed-orange ramp were removed; a stored `"percentile"` migrates to
+`"quantile"` on read. New modes must also be whitelisted in
+`persistence._HEAT_MODES`. `BUILTIN_VIEWS` (just below COLS)
 maps each preset (`Default`, `Fundamentals`, `Momentum`) to an ordered
 list of column keys. Legacy names (`IB View`, `Trader View`) are still
 accepted and normalised through the alias helpers so saved state migrates
@@ -675,6 +683,10 @@ Two places have the contract documented; keep them in sync:
 - CSS variables (`--accent`, `--bg-canvas`, `--text`, `--muted`,
   `--border`, `--pos`, `--neg`) defined in `:root` and overridden under
   `[data-theme="dark"]`.
+- **Corner-radius scale** (`--r-lg` / `--r-md` / `--r-sm` / `--r-xs` in the base
+  `:root`, currently the "Sharp" 6/4/2/1 px tier). Every non-circular
+  `border-radius` reads a token, so app-wide roundness tunes from these four
+  values alone; pills/circles (`999px` / `50%`) stay literal on purpose.
 - **Three themes: `light`, `dark`, `bloomberg`** (a Bloomberg-terminal
   palette added in v1.5.3). Because the whole app is variable-driven, a
   theme is a `[data-theme="…"]` block plus a matching `THEME_COLORS.<name>`

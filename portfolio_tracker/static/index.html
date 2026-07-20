@@ -11,8 +11,8 @@
 <body>
 
 <div class="topbar" id="topbar">
-  <button id="edit-btn" class="portfolio-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
-  <button id="news-btn" data-tip="Open the News &amp; Sentiment dashboard: AI-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
+  <button id="edit-btn" class="tab-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
+  <button id="news-btn" class="tab-btn" data-tip="Open the News &amp; Sentiment dashboard: AI-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
   <button id="optimize" data-tip="Open the Portfolio Optimization workspace: compute the long-only efficient frontier from your current holdings (Markowitz CLA, Ledoit-Wolf shrinkage), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
   <button id="refresh" data-tip="Pull fresh quotes from Yahoo Finance for the current portfolio and rebuild the derived metrics as rows stream back in.">↻ Refresh</button>
   <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
@@ -761,6 +761,25 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- Export-success popup. Rendered by exportXlsx(): confirms the file saved,
+     names it, and offers the filename as a re-download link (blob URL kept
+     alive until this closes). -->
+<div class="confirm-bg export-bg" id="export-bg">
+  <div class="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title">
+    <div class="export-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+    </div>
+    <div class="export-head" id="export-title">Export complete</div>
+    <div class="export-body">
+      Saved to your <b>Downloads</b> folder.
+      <a class="export-file" id="export-file-link" download>file.xlsx</a>
+    </div>
+    <div class="export-foot">
+      <button id="export-done" class="primary" type="button">Done</button>
+    </div>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 

@@ -5,6 +5,30 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.7.0 — 2026-07-19
+UI/UX batch (7 features):
+- **Cell-background modes.** `yo_dyn` columns now offer Off / 2C-Quantile
+  (orange↔blue diverging quintiles) / Quantile (single-blue quintiles) / Min-Max
+  in Customize. The `Rating` column joins them (blue = bullish low rating),
+  replacing its old fixed-orange ramp; the removed `"percentile"` mode migrates
+  to `"quantile"` on read.
+- **Analyst Sentiment header de-duplicated.** Removed the redundant white
+  title/subtitle; the "Aggregated by" control moved onto the Per-holding
+  consensus line, reclaiming vertical space (the blue section kicker stays).
+- **Built-in views edit in place.** Customize makes `Update "<view>"` the primary
+  action and demotes "Save as new", so editing a default view no longer nags to
+  fork a copy.
+- **Sharper corners.** New `--r-lg/md/sm/xs` radius tokens (Sharp 6/4/2/1 px);
+  all non-circular radii read a token so app-wide roundness tunes from four
+  values.
+- **RS peak highlight.** The strongest of the 12 monthly RS bars gets a
+  full-saturation fill + darker outline so the peak reads at a glance.
+- **Visible textarea selection.** The Portfolio constituents box now paints an
+  accent selection highlight instead of the faint browser default.
+- **Export confirmation popup.** A centered "Export complete" modal with the
+  filename as a live re-download link (blob revoked on close), replacing the
+  bare toast; the error path still toasts.
+
 ## 1.6.2 — 2026-07-19
 Windows desktop-app fixes. `install.ps1` shortcuts launched `pythonw.exe`
 directly, which starts fine but hard-crashes with no Python traceback

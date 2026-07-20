@@ -112,7 +112,7 @@ const COLS = [
     heat: { kind: "yo_dyn", favor: "high" },
     render: (r) => fmtPctDirect(r.dividend_yield) },
   /* Extended fundamentals — same yo_dyn ramp family as the block above, so
-     the per-view Off / Percentile / Min-Max background modes apply. Favor
+     the per-view Off / 2C-Quantile / Quantile / Min-Max background modes apply. Favor
      "low" for price multiples and payout (cheaper / more sustainable = blue),
      "high" for returns, margins, growth, yield and liquidity. */
   { key: "price_book",     label: "P/B",       w: 56,  align: "right", sortable: true,
@@ -145,10 +145,11 @@ const COLS = [
   { key: "payout_ratio",   label: "Payout %",  w: 72,  align: "right", sortable: true,
     heat: { kind: "yo_dyn", favor: "low" },
     render: (r) => fmtPctDirect(r.payout_ratio) },
-  /* Analyst recommendation mean: 1 = Strong Buy → 5 = Sell. Lower is
-     more bullish, so the ramp paints high ratings (sell side) orange. */
+  /* Analyst recommendation mean: 1 = Strong Buy → 5 = Sell. Lower is more
+     bullish, so it colors like any other fundamentals column with favor:"low"
+     — the favorable (low) end reads blue, the sell side (high) reads orange. */
   { key: "analyst_rating",label: "Rating",  w: 64,  align: "right", sortable: true,
-    heat: { kind: "yo", clipMin: 1, clipMax: 5, naMax: true },
+    heat: { kind: "yo_dyn", favor: "low" },
     render: (r) => fmt2(r.recommendation_mean),
     sortValue: (r) => r.recommendation_mean },
   { key: "rec_trend_fh", label: "Rec Δ6M", w: 72, align: "center", sortable: true,
@@ -351,9 +352,9 @@ const BUILTIN_ORDER = ["Default", "Fundamentals", "Momentum"];
  * mode should DEVIATE from the column's intrinsic default (minmax for yo_dyn,
  * on for div) need an entry here — everything else falls back automatically.
  * This is what makes the color type a property of the view: EV/EBITDA is
- * percentile-ranked in Fundamentals but min-max wherever else it appears. */
+ * quantile-shaded in Fundamentals but min-max wherever else it appears. */
 const BUILTIN_VIEW_HEAT = {
-  "Fundamentals": { ev_ebitda: "percentile" },
+  "Fundamentals": { ev_ebitda: "quantile" },
 };
 const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
 const DESC_DEFAULT_KEYS = new Set(["pct_ytd","pct_1y","pct_1w","pct_1m","pct_3m","pct_6m","delta_ath","market_cap","price","target_upside_pct"]);
@@ -462,7 +463,7 @@ function persistFitColumnsPreference(on) {
 }
 
 /* Color-coding ("heat") mode is now a property of the active view (see
-   getViewHeat) — EV/EBITDA can be percentile in Fundamentals but min-max in
+   getViewHeat) — EV/EBITDA can be quantile in Fundamentals but min-max in
    Default. The legacy global localStorage map is retained only as a fallback
    default for any (view, column) with no explicit per-view mode, so a user's
    pre-existing global tweaks still apply as a baseline; new toggles write to
@@ -480,10 +481,11 @@ function getHeatMode(key) {
   let mode = viewHeat[key];
   if (mode == null) mode = (STATE.heatPrefs || {})[key]; // legacy global fallback
   if (col.heat.kind === "yo_dyn") {
-    return (mode === "off" || mode === "percentile" || mode === "minmax") ? mode : "minmax";
+    if (mode === "percentile") mode = "quantile"; // migrate the old continuous-rank mode
+    return (mode === "off" || mode === "2c" || mode === "quantile" || mode === "minmax") ? mode : "minmax";
   }
   if (col.heat.kind === "div") return mode === "off" ? "off" : "on";
-  return null; // "yo" (analyst_rating) — uncontrolled, always legacy-on
+  return null; // no controllable heat mode
 }
 function setHeatMode(key, mode) {
   const name = normalizeBuiltinViewName(STATE.activeViewName);
@@ -1020,16 +1022,8 @@ function na() { return '<span class="na">n/a</span>'; }
 /* ===========================================================================
  * Heat-map scales
  * --------------------------------------------------------------------------- */
-function colorYO(t, theme) {
-  /* yellow → orange.  Tints the background colour toward the "warn" endpoint
-     so it works in both themes. */
-  t = clamp(t, 0, 1);
-  const C = THEME_COLORS[theme];
-  /* Use ~92% of the way to warn at full saturation so text stays readable. */
-  return rgbMix(C.bg, C.warn, t * 0.92);
-}
 function colorBlue(t, theme) {
-  /* background → blue.  Same mix ratio as colorYO for consistent readability. */
+  /* background → blue.  Consistent mix ratio for readability across ramps. */
   t = clamp(t, 0, 1);
   const C = THEME_COLORS[theme];
   return rgbMix(C.bg, C.blue, t * 0.92);
@@ -1039,6 +1033,14 @@ function colorDiverging(t, theme) {
   t = clamp(t, -1, 1);
   const C = THEME_COLORS[theme];
   const tgt = t >= 0 ? C.pos : C.neg;
+  return rgbMix(C.bg, tgt, Math.abs(t) * 0.9);
+}
+function colorOrangeBlue(t, theme) {
+  /* Two-color quantile ramp: t in [-1, 1]; negative → orange (worst quantiles),
+     0 → background (mid quantile), positive → blue (best quantiles). */
+  t = clamp(t, -1, 1);
+  const C = THEME_COLORS[theme];
+  const tgt = t >= 0 ? C.blue : C.warn;
   return rgbMix(C.bg, tgt, Math.abs(t) * 0.9);
 }
 function textOnHeat(t, theme) {
@@ -1124,15 +1126,25 @@ function rsBars(arr) {
   const bw = (w - (n - 1) * gap) / n;
   const theme = getTheme();
   const C = THEME_COLORS[theme];
+  /* Index of the strongest month — that bar gets a darker, fully-saturated
+     green so the peak stands out from the ramp at a glance. First max wins
+     on ties; guarded for empty/NaN via the length check above. */
+  let peak = 0, peakV = -Infinity;
+  for (let i = 0; i < n; i++) { const vi = arr[i] || 0; if (vi > peakV) { peakV = vi; peak = i; } }
+  const peakStroke = rgbMix(C.pos, [0, 0, 0], 0.4); // deep green outline for the peak
   let svg = "";
   for (let i = 0; i < n; i++) {
     const v = clamp(arr[i] || 0, 0, 1);
     const bh = Math.max(1, v * (h - 2));
     const x = i * (bw + gap);
     const y = h - bh;
-    /* Brighter green for higher rank — tint pos endpoint into bg. */
-    const c = rgbMix(C.bg, C.pos, 0.35 + v * 0.6);
-    svg += `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${bw.toFixed(2)}" height="${bh.toFixed(2)}" fill="${c}" rx="0.5"/>`;
+    /* Brighter green for higher rank — tint pos endpoint into bg. The peak
+       month gets full-saturation fill plus a darker-green outline so it reads
+       as a highlight in every theme (a darker fill alone recedes on dark bg). */
+    const isPeak = i === peak;
+    const c = isPeak ? rgbMix(C.bg, C.pos, 1) : rgbMix(C.bg, C.pos, 0.35 + v * 0.6);
+    const stroke = isPeak ? ` stroke="${peakStroke}" stroke-width="0.8"` : "";
+    svg += `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${bw.toFixed(2)}" height="${bh.toFixed(2)}" fill="${c}"${stroke} rx="0.5"/>`;
   }
   return `<svg class="rs" viewBox="0 0 ${w} ${h}">${svg}</svg>`;
 }
@@ -1287,41 +1299,31 @@ function recTrendCell(arr) {
 function cellStyleHeat(col, value, theme, ctx) {
   const h = col.heat;
   if (!h) return "";
-  if (h.kind === "yo") {
-    /* Fixed-ceiling orange ramp. n/a → max if h.naMax.
-       h.invert flips the ramp so lower values get more saturated colour
-       (used for analyst-rating, where 1 = strong buy, 5 = sell). */
-    let t;
-    if (value == null || !isFinite(value)) {
-      if (!h.naMax) return "";
-      t = 1;
-    } else {
-      const lo = h.clipMin, hi = h.clipMax;
-      t = (hi === lo) ? 0.5 : clamp((value - lo) / (hi - lo), 0, 1);
-      if (h.invert) t = 1 - t;
-    }
-    return `background:${colorYO(t, theme)};`;
-  }
   if (h.kind === "yo_dyn") {
-    /* Dynamic per-column, per-render blue ramp: the most business-favorable
-       value currently on screen (per h.favor) is most blue, least-favorable
-       is neutral. n/a always renders neutral. ctx carries the active color
-       mode ("minmax" = percentile-clipped 10th/90th, or "percentile" = pure
-       rank), computed once per render — never a hardcoded clip constant, and
-       never derailed by a single outlier the way a raw min/max would be. */
+    /* Dynamic per-column, per-render ramp keyed on where each value sits among
+       the rows currently on screen (per h.favor: the most business-favorable
+       value reads blue). n/a always renders neutral. ctx carries the active
+       mode, computed once per render:
+         - "minmax":   percentile-clipped 10th/90th, continuous blue ramp
+                       (robust to a single outlier the way raw min/max isn't).
+         - "quantile": quintile bucket, single-color blue by bucket.
+         - "2c":       quintile bucket, two-color orange↔blue diverging. */
     if (value == null || !isFinite(value)) return "";
     if (!ctx) return "";
-    let t;
-    if (ctx.mode === "percentile") {
-      t = percentileRankOf(ctx.sorted, value);
-      if (t == null) return "";
-    } else {
+    if (ctx.mode === "minmax") {
       const { lo, hi } = ctx;
       if (lo == null || hi == null) return "";
-      t = (hi === lo) ? 0 : clamp((value - lo) / (hi - lo), 0, 1);
+      let t = (hi === lo) ? 0 : clamp((value - lo) / (hi - lo), 0, 1);
+      if (h.favor === "low") t = 1 - t;
+      return `background:${colorBlue(t, theme)};`;
     }
-    if (h.favor === "low") t = 1 - t;
-    return `background:${colorBlue(t, theme)};`;
+    const rank = percentileRankOf(ctx.sorted, value);
+    if (rank == null) return "";
+    let q = clamp(Math.floor(rank * 5), 0, 4) / 4; // quintile position {0,.25,.5,.75,1}
+    if (h.favor === "low") q = 1 - q;
+    return ctx.mode === "2c"
+      ? `background:${colorOrangeBlue(q * 2 - 1, theme)};`
+      : `background:${colorBlue(q, theme)};`;
   }
   if (h.kind === "div") {
     if (value == null || !isFinite(value)) return "";
@@ -1594,19 +1596,21 @@ function openColumnPicker() {
     selected: new Set(activeKeys),
     order,
   };
-  /* Every active view — built-in or custom — is now editable in place, so the
-     modal always offers "Update <active>" plus "Save as new". */
+  /* Every active view — built-in or custom — is editable in place: "Update
+     <active>" (the primary action) saves the edits straight back onto the
+     current view, no naming, no forced fork. "Save as new" is the secondary
+     escape hatch for deliberately branching a copy. */
   const activeName = normalizeBuiltinViewName(STATE.activeViewName);
   const isBuiltinActive = isBuiltinView(activeName);
   modal.innerHTML = `
     <h2>Customize Columns</h2>
-    <div class="cv-modal-sub">Toggle which columns appear and drag to reorder. Color-coding controls apply immediately. Editing <b>${escapeHtml(activeName)}</b>${isBuiltinActive ? " (a built-in view — Reset restores its defaults)" : ""}.</div>
+    <div class="cv-modal-sub">Toggle which columns appear and drag to reorder. Color-coding controls apply immediately. Edits save straight to <b>${escapeHtml(activeName)}</b>${isBuiltinActive ? " (a built-in view — Reset restores its defaults)" : ""}.</div>
     <ul class="cv-list" id="cv-modal-list"></ul>
     <div class="cv-modal-foot">
       <input type="text" class="cv-name-input" id="cv-name-input" placeholder="New name (optional)" value="" />
       <button id="cv-modal-cancel">Cancel</button>
+      <button id="cv-modal-save">Save as new</button>
       <button id="cv-modal-update" class="primary">Update "${escapeHtml(activeName)}"</button>
-      <button id="cv-modal-save" class="primary">Save as new</button>
     </div>
   `;
   renderColumnPickerList();
@@ -1630,7 +1634,7 @@ function closeColumnPicker() {
 
 function buildHeatControl(key) {
   const c = COLS_BY_KEY[key];
-  if (!c || !c.heat || c.heat.kind === "yo") return null; // no control: no-heat columns + analyst_rating
+  if (!c || !c.heat) return null; // no control for columns without a heat spec
   if (c.heat.kind === "div") {
     const sw = document.createElement("button");
     sw.type = "button";
@@ -1650,7 +1654,7 @@ function buildHeatControl(key) {
   if (c.heat.kind === "yo_dyn") {
     const seg = document.createElement("span"); seg.className = "cv-seg";
     const current = getHeatMode(key);
-    for (const [val, label] of [["off", "Off"], ["percentile", "Percentile"], ["minmax", "Min-Max"]]) {
+    for (const [val, label] of [["off", "Off"], ["2c", "2C-Quantile"], ["quantile", "Quantile"], ["minmax", "Min-Max"]]) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "cv-seg-btn" + (current === val ? " active" : "");
@@ -1905,10 +1909,11 @@ function render() {
   const theme = getTheme();
   /* Per-column heat context, computed once per render across the live rows
      currently being shown — NOT a fixed clip range, so the ramp always
-     reflects what's actually on screen right now. Mode ("off" / "percentile"
-     / "minmax") comes from the user's per-column preference (getHeatMode);
-     ctx === null means "don't color this column at all" (Off, or a "div"
-     column the user switched off), which the per-cell loop below skips. */
+     reflects what's actually on screen right now. Mode ("off" / "2c" /
+     "quantile" / "minmax") comes from the user's per-column preference
+     (getHeatMode); ctx === null means "don't color this column at all" (Off,
+     or a "div" column the user switched off), which the per-cell loop below
+     skips. */
   const heatCtx = {};
   for (const c of cols) {
     if (!c.heat) continue;
@@ -1918,11 +1923,11 @@ function render() {
       const vals = rows.map(r => r[c.key]).filter(v => v != null && isFinite(v));
       if (vals.length < 2) { heatCtx[c.key] = null; continue; }
       const sorted = vals.slice().sort((a, b) => a - b);
-      heatCtx[c.key] = (mode === "percentile")
-        ? { mode: "percentile", sorted }
-        : { mode: "minmax", lo: percentileOf(sorted, 0.1), hi: percentileOf(sorted, 0.9) };
+      heatCtx[c.key] = (mode === "minmax")
+        ? { mode: "minmax", lo: percentileOf(sorted, 0.1), hi: percentileOf(sorted, 0.9) }
+        : { mode, sorted }; // "quantile" or "2c" — quintile-bucketed from the live rows
     } else {
-      heatCtx[c.key] = {}; // "div" (on) or "yo" (analyst_rating, uncontrolled) — proceed as-is
+      heatCtx[c.key] = {}; // "div" (on) — proceed as-is
     }
   }
   for (const r of rows) {
@@ -1988,7 +1993,7 @@ function openModal(r) {
 }
 function closeModal() { $("#modal-bg").classList.remove("show"); DETAIL.data = null; }
 $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") closeModal(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeInfo(); closeNsProgress(); closeMethodology(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeInfo(); closeNsProgress(); closeMethodology(); closeExportPopup(); } });
 
 function renderModalSkeleton() {
   const r = DETAIL.row;
@@ -3359,7 +3364,13 @@ async function createNewTab() {
   STATE.customWeights = null;
   $("#tickers").value = "";
   DATA = []; render();
+  // Keep the topbar tab state in sync with the panel being opened — the
+  // accent fill on .tab-btn.active is the only "which tab is open" signal,
+  // and this open-path bypasses the #edit-btn click handler that manages it.
   $("#input-panel").classList.remove("hidden");
+  $("#edit-btn").classList.add("active");
+  $("#news-panel").classList.add("hidden");
+  $("#news-btn").classList.remove("active");
   $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Paste tickers and press <b>Build Dashboard</b>.</div>`;
   renderTabs(); renderEditorMeta();
   $("#tickers").focus();
@@ -3531,21 +3542,44 @@ async function exportXlsx() {
     const cd = r.headers.get("content-disposition") || "";
     const m = cd.match(/filename="?([^";]+)"?/i);
     if (m) fname = m[1];
-    const a = document.createElement("a");
     const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
     a.href = url;
     a.download = fname;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
-    toast(`Exported ${fname}`);
+    // Keep the blob URL alive so the popup's filename can re-download it;
+    // it's revoked when the popup closes (openExportPopup).
+    openExportPopup(fname, url);
   } catch (err) {
     toast(err.message || "Export failed.");
   } finally {
     btn.innerHTML = origHtml;
     btn.disabled = origDisabled;
   }
+}
+
+/* Pretty export-success popup. `url` is a live blob URL; the filename link
+   re-saves the file on click, and the URL is revoked once the popup closes so
+   we don't leak object URLs across repeated exports. */
+function closeExportPopup() {
+  const bg = document.getElementById("export-bg");
+  if (!bg || !bg.classList.contains("show")) return;
+  bg.classList.remove("show");
+  if (bg._blobUrl) { URL.revokeObjectURL(bg._blobUrl); bg._blobUrl = null; }
+}
+function openExportPopup(fname, url) {
+  const bg = document.getElementById("export-bg");
+  if (!bg) { toast(`Exported ${fname}`); URL.revokeObjectURL(url); return; }
+  if (bg._blobUrl) URL.revokeObjectURL(bg._blobUrl); // clear a prior export's URL
+  bg._blobUrl = url;
+  const link = document.getElementById("export-file-link");
+  if (link) { link.textContent = fname; link.href = url; link.download = fname; }
+  bg.classList.add("show");
+  const done = document.getElementById("export-done");
+  if (done) done.onclick = closeExportPopup;
+  bg.onclick = (e) => { if (e.target === bg) closeExportPopup(); };
 }
 
 /* ===========================================================================
@@ -4024,7 +4058,6 @@ function renderAnalystDashboard(a) {
   if (STATE.analyticsLoading && !holdings.length && !notCovered.length) {
     host.innerHTML = `
       <div class="an-head">
-        <span class="an-title">Analyst Sentiment</span>
         <span class="an-sub">Portfolio-weighted analyst consensus from yfinance.</span>
       </div>
       <div class="an-grid"><div class="an-card"><div class="lc-block">${lcHtml("loading analyst sentiment", {bar: true})}</div></div></div>
@@ -4037,7 +4070,6 @@ function renderAnalystDashboard(a) {
   if (!holdings.length && !notCovered.length) {
     host.innerHTML = `
       <div class="an-head">
-        <span class="an-title">Analyst Sentiment</span>
         <span class="an-sub">Build a portfolio to see weighted analyst consensus, rating distribution and price-target upside.</span>
       </div>
       <div class="an-grid"><div class="an-card"><div style="color:var(--muted);font-size:12px;padding:6px 0">No analyst data yet.</div></div></div>
@@ -4158,9 +4190,24 @@ function renderAnalystDashboard(a) {
     </tr>`;
   }).join("");
 
+  /* The aggregation-mode dropdown (was a duplicate "Analyst Sentiment" header
+     above) now rides on the Per-holding consensus card header, right-aligned. */
+  const modeDropdown = `
+    <span class="an-mode-note">Aggregated by
+      <button type="button" class="an-mode-btn" id="an-mode-btn" aria-haspopup="listbox" aria-expanded="false">
+        <span id="an-mode-label">${escapeHtml(labelForMode(STATE.mode))}</span>
+        <span class="an-caret">▾</span>
+      </button>
+      <div class="an-mode-menu" id="an-mode-menu" role="listbox" aria-label="Aggregation method">
+        <div class="an-mode-opt" data-mode="equal"  role="option" data-selected="${STATE.mode === 'equal' ? '1' : '0'}">Equal-weight</div>
+        <div class="an-mode-opt" data-mode="cap"    role="option" data-selected="${STATE.mode === 'cap' ? '1' : '0'}">Cap-weighted</div>
+        ${(STATE.weightPresets || []).map(p => `<div class="an-mode-opt" data-mode="${escapeHtml(modeId(p.name))}" role="option" data-selected="${STATE.mode === modeId(p.name) ? '1' : '0'}">${escapeHtml(p.name)}</div>`).join("")}
+        ${STATE.mode === 'custom' ? `<div class="an-mode-opt" data-mode="custom" role="option" data-selected="1">Custom (unsaved)</div>` : ""}
+      </div>
+    </span>`;
   const tableHtml = holdings.length ? `
     <div class="an-card" style="grid-column: 1 / -1;">
-      <h4>Per-holding consensus <span class="an-sub">click a column to sort</span></h4>
+      <h4 class="an-card-head">Per-holding consensus <span class="an-sub">click a column to sort</span>${modeDropdown}</h4>
       <div class="an-table-wrap">
         <table class="an-table" id="an-table">
           <thead><tr>
@@ -4186,25 +4233,9 @@ function renderAnalystDashboard(a) {
   })() : "";
 
   host.innerHTML = `
-    <div class="an-head">
-      <span class="an-title">Analyst Sentiment</span>
-      <span class="an-sub">Portfolio-weighted analyst consensus from yfinance · positions in ${escapeHtml(a.display_ccy || FX_QUOTE)}.${STATE.analyticsLoading ? ` ${lcHtml("refreshing", {bar: true})}` : ""}</span>
-      <span class="an-mode-note">Aggregated by
-        <button type="button" class="an-mode-btn" id="an-mode-btn" aria-haspopup="listbox" aria-expanded="false">
-          <span id="an-mode-label">${escapeHtml(labelForMode(STATE.mode))}</span>
-          <span class="an-caret">▾</span>
-        </button>
-        <div class="an-mode-menu" id="an-mode-menu" role="listbox" aria-label="Aggregation method">
-          <div class="an-mode-opt" data-mode="equal"  role="option" data-selected="${STATE.mode === 'equal' ? '1' : '0'}">Equal-weight</div>
-          <div class="an-mode-opt" data-mode="cap"    role="option" data-selected="${STATE.mode === 'cap' ? '1' : '0'}">Cap-weighted</div>
-          ${(STATE.weightPresets || []).map(p => `<div class="an-mode-opt" data-mode="${escapeHtml(modeId(p.name))}" role="option" data-selected="${STATE.mode === modeId(p.name) ? '1' : '0'}">${escapeHtml(p.name)}</div>`).join("")}
-          ${STATE.mode === 'custom' ? `<div class="an-mode-opt" data-mode="custom" role="option" data-selected="1">Custom (unsaved)</div>` : ""}
-        </div>
-      </span>
-    </div>
     <div class="an-grid">${card1}${card2}${card3}${tableHtml}</div>
     <div class="an-coverage-foot">
-      <span>${notCoveredHtml}</span>
+      <span>${notCoveredHtml}${STATE.analyticsLoading ? ` ${lcHtml("refreshing", {bar: true})}` : ""}</span>
       <span class="an-version">${versionLabel()}</span>
     </div>
   `;
@@ -5071,6 +5102,31 @@ $("#build").onclick = runPrimary;
 $("#refresh").onclick = () => build({keepPanelOpen: $("#input-panel").classList.contains("hidden") ? false : true});
 $("#save-as").onclick = saveAsNewWatchlist;
 $("#export").onclick = exportXlsx;
+// Action buttons (Refresh, Export) flash accent on click to confirm the
+// underlying process fired. Restart the keyframe on rapid re-clicks via a
+// forced reflow. Separate listeners so they never touch the action handlers.
+function flashBtn(el) {
+  el.classList.remove("flash");
+  void el.offsetWidth;
+  el.classList.add("flash");
+}
+for (const id of ["refresh", "export"]) {
+  const btn = $("#" + id);
+  if (!btn) continue;
+  // One persistent cleanup listener per button: a rapid re-click cancels the
+  // running animation (animationcancel — animationend never fires), so a
+  // per-click {once} listener would be orphaned and pile up. Filter on the
+  // animation name because animationend bubbles up from child animations.
+  btn.addEventListener("animationend", (e) => {
+    if (e.animationName === "topbar-btn-flash") btn.classList.remove("flash");
+  });
+  btn.addEventListener("click", () => {
+    // Refresh refuses to run on an empty tickers box (build() early-returns
+    // with a toast) — don't flash "process fired" for a rejected click.
+    if (id === "refresh" && !$("#tickers").value.trim()) return;
+    flashBtn(btn);
+  });
+}
 // Keep labels in sync whenever the active view or the textarea changes.
 $("#tickers").addEventListener("input", updatePrimaryButtonLabels);
 $("#edit-btn").onclick = () => {

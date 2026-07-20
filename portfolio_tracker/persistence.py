@@ -553,7 +553,9 @@ _BUILTIN_COLUMN_VIEW_NAMES = {"Default", "Fundamentals", "Momentum"}
 # Valid per-column color-coding ("heat") modes. Persisted per view (both
 # built-in overrides and custom views carry their own map) so, e.g.,
 # EV/EBITDA can be percentile-colored in Fundamentals but min-max elsewhere.
-_HEAT_MODES = {"off", "on", "percentile", "minmax"}
+# "percentile" is retained only so legacy stored overrides still validate on
+# read; the frontend migrates it to "quantile" and never writes it anew.
+_HEAT_MODES = {"off", "on", "percentile", "quantile", "2c", "minmax"}
 
 
 def _normalize_builtin_column_view_name(name: str) -> str:
