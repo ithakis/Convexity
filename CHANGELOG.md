@@ -5,6 +5,39 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.7.1 — 2026-07-21
+Senior code pass — two owner-reported bugs + correctness/perf/LOC cleanup:
+- **Saved weights now applied everywhere.** Switching portfolios no longer leaks
+  the previous tab's weight mode: `loadPresetsForView` restores each portfolio's
+  own saved active preset deterministically (was gated on `STATE.mode === "cap"`,
+  so a leaked equal/preset mode silently fell back to cap-weight with no pill lit).
+  Excel export previously **ignored saved weights entirely** and always cap-weighted
+  every sheet; it now resolves each view's active preset (cap fallback) and labels
+  the metrics section with the actual weighting used.
+- **Portfolio performance graph is saved with the portfolio.** The cumulative
+  1M/1Y/5Y curve (analytics `series`) was stripped before persisting and never
+  rebuilt on reopen, so the chart showed "Not enough data to plot" after any reload.
+  `series` is now persisted in the analytics cache; older series-less caches paint
+  the panel instantly and silently backfill the curve via one live fetch (a fetch
+  failure leaves the cached panel intact — no error-wipe, no refetch loop).
+- **Correctness:** removed a duplicate `fmtPctSigned` (the dead earlier definition
+  meant signed-% cells rendered `—` instead of the `n/a` span); fixed `_fx_usd_series`
+  caching an empty series for the full 4h TTL on a transient failure (poisoned
+  non-USD conversion) — now short-cached like `fx_index_history`.
+- **Performance:** analytics `_analyst_for` reuses the per-symbol analyst fields the
+  rows already carry and drops its redundant `Ticker.info` + `recommendations`
+  re-fetch (N fewer yfinance calls on cold analytics; `fetch_one`'s single
+  `recommendations` call is now the sole source, feeding both the column and
+  analytics); the streaming build coalesces per-row `render()` via
+  `requestAnimationFrame` (was ~150 full-table rebuilds per build).
+- **LOC / de-dup:** shared `_safe_num` / `_normalize_dividend_yield` (removed copies
+  in `xlsx_export`/`finnhub_adapter`); a `ynum(...)` COLS factory for the numeric-heat
+  columns; a `Handler._read_json()` helper replacing the repeated Content-Length +
+  `json.loads` boilerplate across all POST routes; a `_write_header_cells` xlsx helper;
+  removed a dead `#pf-mode-toggle` listener and orphaned `updateModeButtons` alias.
+- **Docs:** CLAUDE.md §12 MPT cloud-budget table reconciled to the shipped
+  `frontier.py` configs; §7 export contract updated to reflect saved-weight honoring.
+
 ## 1.7.0 — 2026-07-19
 UI/UX batch (7 features):
 - **Cell-background modes.** `yo_dyn` columns now offer Off / 2C-Quantile

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import mimetypes
 import os
 import socket
@@ -42,7 +41,6 @@ logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 from portfolio_tracker import __version__, __version_date__, __version_display__
 from portfolio_tracker.analytics import (
-    _bulk_close,
     analyze_portfolio,
     analyze_portfolios_multi,
 )
@@ -97,6 +95,16 @@ class Handler(BaseHTTPRequestHandler):
         msg = format % args
         if "/api/" in msg or msg.startswith('"GET / '):
             print(f"[{self.log_date_time_string()}] {msg}")
+
+    def _read_json(self) -> dict:
+        """Read + JSON-parse the request body, returning ``{}`` for an empty
+        body. Collapses the Content-Length read + ``json.loads(... or b"{}")``
+        that every POST branch repeated verbatim. Malformed JSON raises
+        json.JSONDecodeError (a ValueError subclass) exactly as the inline code
+        did, so each caller's existing except-clauses map it to the same
+        400/500 response — external behavior is unchanged."""
+        length = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(length) or b"{}")
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, default=_json_default).encode("utf-8")
@@ -368,9 +376,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/watchlists":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 watchlists, changed = upsert_watchlist(
                     str(payload.get("name") or ""),
                     str(payload.get("entries") or ""),
@@ -383,9 +390,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/quotes":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 entries = payload.get("entries") or []
                 rows = fetch_portfolio([str(e) for e in entries])
                 self._send_json(200, {"rows": rows})
@@ -394,9 +400,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/column-views":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 raw = upsert_column_view(
                     str(payload.get("name") or ""),
                     payload.get("columns") or [],
@@ -417,9 +422,8 @@ class Handler(BaseHTTPRequestHandler):
             # Live per-column color-mode toggle on a built-in view. Kept
             # separate from the full upsert above so a heat-only change never
             # freezes the view's columns to a factory-equal override.
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 raw = set_builtin_view_heat(
                     str(payload.get("name") or ""),
                     str(payload.get("key") or ""),
@@ -437,9 +441,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/column-views/active":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 raw = set_active_column_view(str(payload.get("name") or ""))
                 self._send_json(200, {"active": raw.get("active_view")})
             except ValueError as exc:
@@ -450,9 +453,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/api/views/"):
             name = unquote(parsed.path[len("/api/views/"):])
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 entries = str(payload.get("entries") or "")
                 rows = payload.get("rows") or []
                 if not isinstance(rows, list):
@@ -465,9 +467,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/portfolio/rename":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 old = str(payload.get("old") or "").strip()
                 new = str(payload.get("new") or "").strip()
                 if not old or not new:
@@ -490,9 +491,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/last-view":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 set_last_view(str(payload.get("name") or ""))
                 self._send_json(200, {"ok": True})
             except Exception as exc:
@@ -500,9 +500,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/portfolio-analytics":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 rows = payload.get("rows") or []
                 weights = payload.get("weights") or {}
                 period = str(payload.get("period") or "1Y")
@@ -517,9 +516,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/portfolio-analytics-multi":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 rows = payload.get("rows") or []
                 weight_sets = payload.get("weight_sets") or {}
                 period = str(payload.get("period") or "1Y")
@@ -534,9 +532,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/efficient-frontier":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 rows = payload.get("rows") or []
                 if not isinstance(rows, list) or not rows:
                     self._send_json(400, {"error": "rows[] required"})
@@ -558,9 +555,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/mpt-runs":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 view = str(payload.get("view") or "").strip()
                 run = payload.get("run") or {}
                 if not view or not isinstance(run, dict):
@@ -573,9 +569,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/weight-presets":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 view = str(payload.get("view") or "").strip()
                 name = str(payload.get("name") or "").strip()
                 weights = payload.get("weights") or {}
@@ -594,9 +589,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/weight-presets/active":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 view = str(payload.get("view") or "").strip()
                 name = payload.get("name")
                 out = set_active_weight_preset(view, (str(name) if name is not None else None))
@@ -606,9 +600,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/analytics-cache":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 view = str(payload.get("view") or "").strip()
                 key = str(payload.get("key") or "").strip()
                 body = payload.get("payload") or {}
@@ -622,9 +615,8 @@ class Handler(BaseHTTPRequestHandler):
             if _ns is None:
                 self._send_json(503, {"error": "news_sentiment module not available"})
                 return
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 symbols = [str(s).strip().upper() for s in (payload.get("symbols") or []) if s]
                 context = payload.get("context") if isinstance(payload.get("context"), dict) else None
             except Exception as exc:
@@ -663,9 +655,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/quotes-stream":
-            length = int(self.headers.get("Content-Length") or 0)
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json()
                 entries = payload.get("entries") or []
             except Exception as exc:
                 self._send_json(400, {"error": str(exc)})

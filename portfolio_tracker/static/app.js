@@ -3,6 +3,20 @@
 /* ===========================================================================
  * Column definitions
  * --------------------------------------------------------------------------- */
+
+// Factory for the fundamentals numeric-heat columns — all right-aligned,
+// sortable, and painted by the shared yo_dyn dynamic-blue ramp (favor "low" =
+// low value reads blue, "high" = high value reads blue). `fmt` defaults to the
+// 2-decimal formatter; percent columns pass fmtPctDirect. Collapses ~20
+// byte-identical COLS entries. fmt2/fmtPctDirect are function declarations
+// (hoisted), so referencing them here — they're defined lower in the file — is
+// safe even though COLS is built at module-load time.
+function ynum(key, label, w, favor, fmt) {
+  return { key, label, w, align: "right", sortable: true,
+           heat: { kind: "yo_dyn", favor },
+           render: (r) => (fmt || fmt2)(r[key]) };
+}
+
 const COLS = [
   { key: "logo",        label: "",          w: 22,  align: "center", sortable: false,
     render: (r) => logoImg(r.symbol) },
@@ -16,13 +30,9 @@ const COLS = [
     render: (r) => fmtCompactMoney(r.market_cap, r.currency) },
   /* P/S: dynamic blue ramp — cheapest P/S currently on screen is most blue,
      priciest is neutral. n/a renders with no background. */
-  { key: "ps_ratio",    label: "P/S",       w: 56,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmt2(r.ps_ratio) },
+  ynum("ps_ratio", "P/S", 56, "low"),
   /* P/E: dynamic blue ramp — cheapest P/E currently on screen is most blue. */
-  { key: "pe_ratio",    label: "P/E",       w: 56,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmt2(r.pe_ratio) },
+  ynum("pe_ratio", "P/E", 56, "low"),
   { key: "pct_ytd",     label: "% YTD",     w: 78,  align: "right", sortable: true,
     heat: { kind: "div", anchor: 100 },
     render: (r) => fmtPctSigned(r.pct_ytd) },
@@ -87,64 +97,28 @@ const COLS = [
      less levered currently on screen = most blue). Op Mgn, Curr Ratio, Div Yield:
      favor high (more profitable / more liquid / more income = most blue). n/a
      always renders with no background. */
-  { key: "forward_pe",    label: "Fwd P/E", w: 64,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmt2(r.forward_pe) },
-  { key: "peg",           label: "PEG",     w: 58,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmt2(r.peg) },
-  { key: "ev_revenue",    label: "EV/Rev",  w: 68,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmt2(r.ev_revenue) },
-  { key: "ev_ebitda",     label: "EV/EBITDA", w: 78, align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmt2(r.ev_ebitda) },
-  { key: "operating_margin", label: "Op Mgn", w: 68, align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmtPctDirect(r.operating_margin) },
-  { key: "debt_equity",   label: "D/E",     w: 56,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmt2(r.debt_equity) },
-  { key: "current_ratio", label: "Curr Ratio", w: 78, align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmt2(r.current_ratio) },
-  { key: "dividend_yield", label: "Div Yield", w: 78, align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmtPctDirect(r.dividend_yield) },
+  ynum("forward_pe", "Fwd P/E", 64, "low"),
+  ynum("peg", "PEG", 58, "low"),
+  ynum("ev_revenue", "EV/Rev", 68, "low"),
+  ynum("ev_ebitda", "EV/EBITDA", 78, "low"),
+  ynum("operating_margin", "Op Mgn", 68, "high", fmtPctDirect),
+  ynum("debt_equity", "D/E", 56, "low"),
+  ynum("current_ratio", "Curr Ratio", 78, "high"),
+  ynum("dividend_yield", "Div Yield", 78, "high", fmtPctDirect),
   /* Extended fundamentals — same yo_dyn ramp family as the block above, so
      the per-view Off / 2C-Quantile / Quantile / Min-Max background modes apply. Favor
      "low" for price multiples and payout (cheaper / more sustainable = blue),
      "high" for returns, margins, growth, yield and liquidity. */
-  { key: "price_book",     label: "P/B",       w: 56,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmt2(r.price_book) },
-  { key: "roe",            label: "ROE",       w: 64,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmtPctDirect(r.roe) },
-  { key: "roa",            label: "ROA",       w: 64,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmtPctDirect(r.roa) },
-  { key: "gross_margin",   label: "Gross Mgn", w: 74,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmtPctDirect(r.gross_margin) },
-  { key: "profit_margin",  label: "Net Mgn",   w: 68,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmtPctDirect(r.profit_margin) },
-  { key: "fcf_yield",      label: "FCF Yield", w: 74,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmtPctDirect(r.fcf_yield) },
-  { key: "revenue_growth", label: "Rev Grw",   w: 68,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmtPctDirect(r.revenue_growth) },
-  { key: "earnings_growth", label: "EPS Grw",  w: 68,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmtPctDirect(r.earnings_growth) },
-  { key: "quick_ratio",    label: "Quick Ratio", w: 82, align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "high" },
-    render: (r) => fmt2(r.quick_ratio) },
-  { key: "payout_ratio",   label: "Payout %",  w: 72,  align: "right", sortable: true,
-    heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmtPctDirect(r.payout_ratio) },
+  ynum("price_book", "P/B", 56, "low"),
+  ynum("roe", "ROE", 64, "high", fmtPctDirect),
+  ynum("roa", "ROA", 64, "high", fmtPctDirect),
+  ynum("gross_margin", "Gross Mgn", 74, "high", fmtPctDirect),
+  ynum("profit_margin", "Net Mgn", 68, "high", fmtPctDirect),
+  ynum("fcf_yield", "FCF Yield", 74, "high", fmtPctDirect),
+  ynum("revenue_growth", "Rev Grw", 68, "high", fmtPctDirect),
+  ynum("earnings_growth", "EPS Grw", 68, "high", fmtPctDirect),
+  ynum("quick_ratio", "Quick Ratio", 82, "high"),
+  ynum("payout_ratio", "Payout %", 72, "low", fmtPctDirect),
   /* Analyst recommendation mean: 1 = Strong Buy → 5 = Sell. Lower is more
      bullish, so it colors like any other fundamentals column with favor:"low"
      — the favorable (low) end reads blue, the sell side (high) reads orange. */
@@ -1007,11 +981,6 @@ function fmtDateDMY(d) {
   const day = String(dt.getDate()).padStart(2, "0");
   const month = dt.toLocaleDateString("en-US", { month: "short" });
   return `${day} ${month} ${dt.getFullYear()}`;
-}
-function fmtPctSigned(v) {
-  if (v == null || !isFinite(v)) return na();
-  const sign = v > 0 ? "+" : (v < 0 ? "" : "+");
-  return sign + v.toFixed(2) + "%";
 }
 function fmtPctDirect(v) {
   if (v == null || !isFinite(v)) return na();
@@ -2851,24 +2820,33 @@ function weightsForMode(mode) {
   }
   return capWeightsOf(rows);
 }
-async function loadPresetsForView(name) {
+async function loadPresetsForView(name, opts) {
+  // `opts.restoreMode` (set only on a tab switch) makes this tab's weight mode
+  // deterministic from its OWN saved state instead of whatever leaked in from
+  // the previously-active tab. The build() caller omits it so a rebuild keeps
+  // the mode the user currently has selected.
+  opts = opts || {};
   // Anonymous / unsaved tabs don't have presets — keep the list empty.
   if (!name || name === AD_HOC_KEY) {
     STATE.weightPresets = [];
+    if (opts.restoreMode) STATE.mode = "cap";  // ad-hoc has no presets → safe default
     return;
   }
   try {
     const r = await fetch(`/api/weight-presets?view=${encodeURIComponent(name)}`);
     const d = await r.json();
     STATE.weightPresets = Array.isArray(d.presets) ? d.presets : [];
-    // Honor the server-side active selection on initial load so the user's
-    // last choice is restored across sessions. We only apply it if the
-    // current mode is the safe default ("cap").
-    if (d.active && STATE.mode === "cap" && presetByName(d.active)) {
-      STATE.mode = modeId(d.active);
+    // Honor the server-side active selection so the user's last choice is
+    // restored across sessions. Set the mode from THIS view's own active preset
+    // if it still exists, else the safe "cap" default — never inherit a leaked
+    // equal/preset mode from another tab (which used to fall through to
+    // cap-weight with no active pill highlighted).
+    if (opts.restoreMode) {
+      STATE.mode = (d.active && presetByName(d.active)) ? modeId(d.active) : "cap";
     }
   } catch (_) {
     STATE.weightPresets = [];
+    if (opts.restoreMode) STATE.mode = "cap";
   }
 }
 async function persistActivePreset() {
@@ -2946,16 +2924,18 @@ async function loadAnalyticsCacheForView(name) {
   } catch (_) { /* ignore — fall back to in-memory + fresh fetch */ }
 }
 
-// Slim a full analytics payload to the static fields worth persisting.
-// `series` is large and only used by the live time-series chart, which is
-// always re-fetched on demand — no point storing it on disk.
+// Slim a full analytics payload to the fields worth persisting.
+// `series` (the whole-portfolio cumulative curve, plus SPY/NASDAQ/drawdown
+// overlays) is now kept so the performance chart survives a reload — otherwise
+// a reopened portfolio shows "Not enough data to plot" until a live re-fetch.
+// It is the largest field, but persisting it is what makes the graph durable.
 function _slimAnalyticsForCache(a) {
   if (!a || typeof a !== "object" || a.error) return null;
   const out = {};
   const keep = ["period", "display_ccy", "weights_applied", "active_symbols",
                 "missing_symbols", "stats", "spy_stats", "nasdaq_stats",
                 "weighted", "contribution", "analyst", "exposure",
-                "concentration", "warnings"];
+                "concentration", "warnings", "series"];
   for (const k of keep) if (k in a) out[k] = a[k];
   return out;
 }
@@ -2989,6 +2969,20 @@ async function build(opts) {
 
   let total = entries.length;
   let done = 0;
+  // The stream can deliver ~150 rows and a full render() per row is wasteful
+  // (each is a complete table rebuild). Coalesce to at most one render per
+  // animation frame while streaming; flushRender() forces the final sorted
+  // render on "done" (or once when the stream ends without one — sawDone
+  // guards against a redundant second full render on the happy path).
+  let _renderRAF = 0, sawDone = false;
+  const scheduleRender = () => {
+    if (_renderRAF) return;
+    _renderRAF = requestAnimationFrame(() => { _renderRAF = 0; render(); });
+  };
+  const flushRender = () => {
+    if (_renderRAF) { cancelAnimationFrame(_renderRAF); _renderRAF = 0; }
+    render();
+  };
   try {
     const r = await fetch("/api/quotes-stream", {
       method: "POST",
@@ -3019,14 +3013,17 @@ async function build(opts) {
         } else if (msg.type === "row") {
           done = msg.done || (done + 1);
           DATA.push(msg.row);
-          render();
+          scheduleRender();
           showProgress((done / Math.max(1, total)) * 100);
           $("#status").innerHTML = lcHtml("streaming quotes", {bar: true, meta: `${done}·${total}`});
         } else if (msg.type === "done") {
+          sawDone = true;
+          flushRender();
           showProgress(100);
         }
       }
     }
+    if (!sawDone) flushRender();  // final sorted render if the stream ended without a "done" line
     {
       const _nm = STATE.activeView || AD_HOC_KEY;
       $("#status").innerHTML = `<span class="status-name">${escapeHtml(viewLabel(_nm))}</span><span class="status-meta">updated ${escapeHtml(new Date().toLocaleTimeString())}</span>`;
@@ -3191,11 +3188,15 @@ async function activateTab(name, opts) {
   STATE.activeView = name;
   STATE.customWeights = null;
   // Keep STATE.analyticsByTab[*] across switches — re-visiting paints from memory.
-  if (STATE.mode === "custom") STATE.mode = "cap";
-  // Switching tabs swaps the per-portfolio preset list. loadPresetsForView
-  // may also restore the active preset (only if the current mode is the safe
-  // default "cap"), so the user's last selection persists across sessions.
-  await loadPresetsForView(name);
+  // Neutralize any weight mode leaked from the previous tab up front; the
+  // restoreMode load below then sets THIS tab's deterministic mode (its own
+  // saved active preset, or "cap"). Without this reset a leaked equal/preset
+  // mode could survive into a tab that has no such preset.
+  STATE.mode = "cap";
+  // Switching tabs swaps the per-portfolio preset list, and loadPresetsForView
+  // (restoreMode) restores this tab's own active preset so the user's last
+  // selection persists across sessions.
+  await loadPresetsForView(name, {restoreMode: true});
   // Seed the in-memory analytics map from disk so reopening a portfolio
   // hydrates the Rating Distribution panel without re-fetching from
   // yfinance. requestAnalytics() will still kick off in the cached-rows
@@ -3633,9 +3634,15 @@ async function requestAnalytics(opts) {
   const key = analyticsCacheKey(mode, period);
   const tabMap = currentAnalyticsMap();
 
-  // Cache hit → instant.
+  // Cache hit → instant. A payload cached before series-persistence (older
+  // saved views) has no chart series on disk; in that case paint the panel from
+  // cache immediately but fall through to a live fetch that backfills series —
+  // without the loading spinner, so the instant-panel UX is preserved. Once
+  // series is present the normal short-circuit below takes over, so a backfilled
+  // (or freshly-built) tab never refetches in a loop.
   const cached = tabMap[key];
-  if (cached && !opts.force) {
+  const backfillSeries = !!(cached && !opts.force && !cached.series);
+  if (cached && !opts.force && !backfillSeries) {
     STATE.analytics = cached;
     STATE.analyticsLoading = false;
     renderAnalyticsBody();
@@ -3643,7 +3650,8 @@ async function requestAnalytics(opts) {
   }
 
   const reqId = ++_analyticsReqId;
-  STATE.analyticsLoading = true;
+  if (backfillSeries) STATE.analytics = cached;   // keep the cached panel on screen during the silent backfill
+  STATE.analyticsLoading = !backfillSeries;
   renderAnalyticsBody();
 
   // Build the weight_sets we'll request. Always include the *active* mode;
@@ -3680,7 +3688,15 @@ async function requestAnalytics(opts) {
     }
     STATE.analytics = tabMap[key] || results[mode] || null;
   } catch (e) {
-    STATE.analytics = {error: e.message};
+    // On a silent series-backfill the cached panel is already on screen; a fetch
+    // failure (yfinance rate-limit / network blip) must LEAVE it intact rather
+    // than replacing it with an error state. Otherwise reopening an older saved
+    // view during a blip would wipe the stats/analyst panel — and, since the
+    // failed fetch never persists `series`, re-wipe it on every subsequent
+    // reopen until one fetch happens to succeed. Only a genuine cache miss
+    // (nothing already shown) surfaces the error; the backfill keeps
+    // STATE.analytics === cached (set before the fetch), chart simply absent.
+    if (!backfillSeries) STATE.analytics = {error: e.message};
   } finally {
     if (reqId === _analyticsReqId) STATE.analyticsLoading = false;
     renderAnalyticsBody();
@@ -3760,7 +3776,9 @@ function labelForMode(m) {
 }
 
 function fmtPctSigned(v, d) {
-  if (v == null || !isFinite(v)) return "—";
+  // null/non-finite → styled n/a span, matching the sibling cell formatters
+  // (fmt2 / fmtPctDirect). Zero carries no "+" sign, same as those siblings.
+  if (v == null || !isFinite(v)) return na();
   d = d == null ? 2 : d;
   const sign = v > 0 ? "+" : "";
   return sign + Number(v).toFixed(d) + "%";
@@ -4961,8 +4979,6 @@ function _ipSubmit() {
   hideInlinePrompt();
   if (onOk) onOk(v);
 }
-
-function updateModeButtons() { renderModeBar(); }
 
 function renderModeBar() {
   // Rebuilds the pill bar: Equal, Cap, each saved preset, then [+] (and [✎]
@@ -6633,15 +6649,8 @@ function patchRowSentiment(sentiment) {
 }
 
 /* --- Analytics controls --- */
-$("#pf-mode-toggle").addEventListener("click", (e) => {
-  const btn = e.target.closest("button[data-mode]");
-  if (!btn) return;
-  const mode = btn.dataset.mode;
-  if (mode === "custom") { openWeightsPopup(); return; }
-  STATE.mode = mode;
-  updateModeButtons();
-  requestAnalytics();
-});
+// Mode-pill clicks are wired per-pill inside renderModeBar() (the pills are
+// <span data-mode>, dispatched through selectMode). No delegated handler here.
 $("#pf-period-tabs").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-p]");
   if (!btn) return;

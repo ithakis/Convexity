@@ -31,7 +31,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from portfolio_tracker.helpers import _load_local_secret
+from portfolio_tracker.helpers import _load_local_secret, _safe_num
 
 # Key resolution (env var, then a strictly-local ``.finnhub_key`` found by
 # walking upward from this module's directory) lives in
@@ -96,15 +96,6 @@ def _fh_call(path: str, params: dict[str, Any], symbol: str) -> Any | None:
         return None
 
 
-def _num(v: Any) -> float | None:
-    try:
-        if v is None:
-            return None
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-
 def get_earnings_surprise(symbol: str) -> list[dict] | None:
     """Up to 8 quarters of EPS surprise, most-recent first.
 
@@ -130,8 +121,8 @@ def get_earnings_surprise(symbol: str) -> list[dict] | None:
             return None
         out: list[dict] = []
         for e in raw[:8]:
-            actual = _num(e.get("actual"))
-            estimate = _num(e.get("estimate"))
+            actual = _safe_num(e.get("actual"))
+            estimate = _safe_num(e.get("estimate"))
             if estimate in (None, 0) or actual is None:
                 surprise_pct = None
             else:
@@ -192,7 +183,7 @@ def get_insider_sentiment(symbol: str) -> dict | None:
             return None
         latest = max(data, key=lambda d: (d.get("year", 0), d.get("month", 0)))
         out = {
-            "mspr": _num(latest.get("mspr")),
+            "mspr": _safe_num(latest.get("mspr")),
             "change": int(latest.get("change") or 0),
             "year": int(latest.get("year") or 0),
             "month": int(latest.get("month") or 0),

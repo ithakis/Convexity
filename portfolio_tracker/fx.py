@@ -43,7 +43,15 @@ def _fx_usd_series(ccy: str, period_yf: str) -> pd.Series | None:
         series = df["Close"].dropna() if "Close" in df.columns else pd.Series(dtype=float)
     except Exception:
         series = pd.Series(dtype=float)
-    _FX_CCY_HIST_CACHE[key] = (time.time(), series)
+    # Only full-TTL cache a real series. A transient yfinance failure yields an
+    # empty series; caching that for the full 4h TTL would poison every non-USD
+    # conversion until it expired (CLAUDE.md §9). Back-date the timestamp so an
+    # empty entry expires in ~10s — same short-negative-cache pattern as
+    # fx_index_history's empty-result guard.
+    if series.empty:
+        _FX_CCY_HIST_CACHE[key] = (time.time() - _FX_CCY_HIST_TTL + 10.0, series)
+    else:
+        _FX_CCY_HIST_CACHE[key] = (time.time(), series)
     return series
 
 

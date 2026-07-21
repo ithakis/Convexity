@@ -654,7 +654,12 @@ Two places have the contract documented; keep them in sync:
    side-by-side.
 2. **One sheet per portfolio**:
    - Meta block (name, constituents, cached-at, holdings count)
-   - **Portfolio Metrics** — 4-column table Portfolio / SPY / NASDAQ
+   - **Portfolio Metrics** — 4-column table Portfolio / SPY / NASDAQ. The
+     Portfolio column honors the view's saved **active weight preset**
+     (`_resolve_active_weights`, projected onto row symbols + renormalized), and
+     the section header names the actual weighting (e.g. "Portfolio Metrics
+     (Tilt, 1Y)"); it falls back to cap-weight only when the view has no active
+     preset. (Was previously hardcoded cap-weight regardless of saved weights.)
    - **Analyst Coverage** — mean rating, target upside, distribution
    - **Sector Exposure**
    - **Concentration** — top-5, Herfindahl, effective N
@@ -870,9 +875,10 @@ mpt.portfolio_stats(weights, mu, cov, rf=0) -> {ret, vol, sharpe}
 ```python
 _MPT_LOOKBACK_YF = {"1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}
 _MPT_BUDGETS = {
-    "fast":     {"cloud":   4_000, "frontier": 40,  "label": "Fast (~2s)"},
-    "standard": {"cloud":  25_000, "frontier": 120, "label": "Standard (~5s)"},
-    "thorough": {"cloud": 100_000, "frontier": 250, "label": "Thorough (~15s)"},
+    "fast":       {"cloud":    200_000, "frontier":  80, "label": "Fast — 200k configs (~1s)"},
+    "standard":   {"cloud":  1_000_000, "frontier": 200, "label": "Standard — 1M configs (~4s)"},
+    "thorough":   {"cloud":  3_500_000, "frontier": 400, "label": "Thorough — 3.5M configs (~14s)"},
+    "exhaustive": {"cloud": 15_000_000, "frontier": 800, "label": "Exhaustive — 15M configs (~60s)"},
 }
 ```
 

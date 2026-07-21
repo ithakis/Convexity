@@ -41,6 +41,11 @@ from openpyxl.utils import get_column_letter
 
 import yfinance as yf
 
+# Numeric coercion + dividend-yield normalisation live in helpers.py — the
+# canonical copies. `_maybe_num` is an alias for `_safe_num` (identical finite-
+# float-or-None semantics) kept only so the many call sites below read the same.
+from portfolio_tracker.helpers import _normalize_dividend_yield, _safe_num as _maybe_num
+
 
 # --------------------------------------------------------------------------
 # Holdings table — primary columns in display order. Anything else found on
@@ -225,39 +230,6 @@ def _sanitize_sheet_name(name: str, used: set[str]) -> str:
     return cand
 
 
-def _maybe_num(v) -> Optional[float]:
-    try:
-        x = float(v)
-        if x != x or x in (float("inf"), float("-inf")):
-            return None
-        return x
-    except (TypeError, ValueError):
-        return None
-
-
-def _normalize_dividend_yield(
-    raw_yield,
-    *,
-    price=None,
-    dividend_rate=None,
-    trailing_yield=None,
-    trailing_rate=None,
-) -> Optional[float]:
-    px = _maybe_num(price)
-    if px is not None and px > 0:
-        for rate_value in (dividend_rate, trailing_rate):
-            rate = _maybe_num(rate_value)
-            if rate is not None and rate >= 0:
-                return float(rate / px)
-
-    for yield_value in (raw_yield, trailing_yield):
-        val = _maybe_num(yield_value)
-        if val is None or val < 0:
-            continue
-        return float(val / 100.0) if val > 1.0 else float(val)
-    return None
-
-
 def _flatten_value(v):
     """Coerce a row-payload value to something openpyxl will accept."""
     if v is None:
@@ -282,15 +254,18 @@ _SECTION_FONT = Font(bold=True, size=12)
 _TITLE_FONT = Font(bold=True, size=14)
 
 
-def _analytics_result_for_period(result: dict) -> dict:
-    """Normalize analyze_portfolios_multi output to the cap-weighted result."""
+def _analytics_result_for_period(result: dict, set_name: str = "cap") -> dict:
+    """Pull the single weight-set we asked for out of analyze_portfolios_multi's
+    output. `set_name` is whatever key we passed in weight_sets (the active
+    preset name, else "cap"), so the export reflects the portfolio's real
+    weighting rather than always assuming cap-weighted."""
     if not isinstance(result, dict):
         return {"error": "invalid analytics payload"}
     if "results" in result:
-        return result["results"].get("cap") or {}
+        return result["results"].get(set_name) or {}
     if "error" in result:
         return {"error": result["error"]}
-    return result.get("cap") or result
+    return result.get(set_name) or result
 
 
 def _first_available_analytics(analytics_by_period: dict[str, dict], periods: list[str]) -> dict:
@@ -338,11 +313,7 @@ def _write_overview(wb: Workbook, summaries: list[dict], metric_periods: list[st
             f"{period} Excess vs SPY %",
         ])
     row = 4
-    for col, h in enumerate(headers, 1):
-        c = ws.cell(row=row, column=col, value=h)
-        c.font = _HEADER_FONT
-        c.fill = _HEADER_FILL
-        c.alignment = Alignment(horizontal="center")
+    _write_header_cells(ws, row, headers)
     for s in summaries:
         row += 1
         ws.cell(row=row, column=1, value=s.get("name"))
@@ -379,6 +350,18 @@ def _write_section(ws, r: int, title: str) -> int:
     return r + 1
 
 
+def _write_header_cells(ws, r: int, labels: Iterable[str]) -> None:
+    """Write one styled table-header row (bold white on dark, centered) from
+    column 1. Shared by the overview, per-period metrics, and holdings tables
+    so the three headers stay visually identical without repeating the
+    fill/font/alignment triple at each call site."""
+    for col_idx, label in enumerate(labels, 1):
+        c = ws.cell(row=r, column=col_idx, value=label)
+        c.font = _HEADER_FONT
+        c.fill = _HEADER_FILL
+        c.alignment = Alignment(horizontal="center")
+
+
 def _per_symbol_analyst(analytics: dict) -> dict[str, dict]:
     """Pull the per-holding analyst rows out of analytics["analyst"]["holdings"]
     and key them by ticker, so the holdings table can look them up cheaply."""
@@ -400,6 +383,7 @@ def _write_portfolio_sheet(
     analytics_by_period: dict[str, dict],
     metric_periods: list[str],
     analyst_fallback: dict[str, dict],
+    weighting_label: str = "cap-weighted",
 ) -> None:
     ws = wb.create_sheet(title=sheet_name)
     rows = view.get("rows") or []
@@ -433,7 +417,7 @@ def _write_portfolio_sheet(
     else:
         for period in metric_periods:
             analytics = analytics_by_period.get(period) or {}
-            r = _write_section(ws, r, f"Portfolio Metrics (cap-weighted, {period})")
+            r = _write_section(ws, r, f"Portfolio Metrics ({weighting_label}, {period})")
             if analytics.get("error"):
                 ws.cell(row=r, column=1, value=f"(analytics unavailable: {analytics['error']})").font = Font(italic=True, color="9CA3AF")
                 r += 2
@@ -441,12 +425,7 @@ def _write_portfolio_sheet(
             stats = analytics.get("stats") or {}
             spy_stats = analytics.get("spy_stats") or {}
             ndx_stats = analytics.get("nasdaq_stats") or {}
-            h_cells = ["Metric", "Portfolio", "SPY", "NASDAQ"]
-            for col_idx, h in enumerate(h_cells, 1):
-                cell = ws.cell(row=r, column=col_idx, value=h)
-                cell.font = _HEADER_FONT
-                cell.fill = _HEADER_FILL
-                cell.alignment = Alignment(horizontal="center")
+            _write_header_cells(ws, r, ["Metric", "Portfolio", "SPY", "NASDAQ"])
             r += 1
             for key, label in STATS_KEYS:
                 ws.cell(row=r, column=1, value=label).font = Font(bold=True)
@@ -510,11 +489,7 @@ def _write_portfolio_sheet(
     extra_cols = [(k, k) for k in extra_keys]
 
     headers = HOLDINGS_PRIMARY_COLS + extra_cols + ANALYST_COLS
-    for col_idx, (_key, label) in enumerate(headers, 1):
-        h = ws.cell(row=r, column=col_idx, value=label)
-        h.font = _HEADER_FONT
-        h.fill = _HEADER_FILL
-        h.alignment = Alignment(horizontal="center")
+    _write_header_cells(ws, r, [label for _key, label in headers])
     header_row = r
 
     analyst_col_keys = {k for k, _ in ANALYST_COLS}
@@ -565,6 +540,56 @@ def _write_portfolio_sheet(
 
 
 # --------------------------------------------------------------------------
+# Weighting resolution
+# --------------------------------------------------------------------------
+
+def _resolve_active_weights(view: dict, rows: list[dict]) -> tuple[dict[str, float], str, str]:
+    """Resolve the weighting the export should use for one portfolio.
+
+    Mirrors the frontend (``weightsForMode`` in app.js): the view's active
+    weight preset — the ``weight_presets`` entry whose name == the view's
+    ``active_weight_preset`` — projected onto the current row symbols, with
+    symbols absent from the preset defaulting to 0 and negatives clamped to 0,
+    then renormalized to sum 1.0. Falls back to market-cap weighting when there
+    is no active preset, the named preset is missing, or the projection sums to
+    <= 0 (e.g. the preset predates every current holding) — same cap fallback
+    the frontend uses.
+
+    Returns ``(weights, set_name, label)``: ``set_name`` is the key handed to
+    analyze_portfolios_multi (so ``_analytics_result_for_period`` can pull the
+    matching result back out), and ``label`` describes the weighting in the
+    sheet's "Portfolio Metrics" header.
+    """
+    active_name = str((view or {}).get("active_weight_preset") or "").strip()
+    if active_name:
+        presets = view.get("weight_presets")
+        preset = None
+        if isinstance(presets, list):
+            for p in presets:
+                if isinstance(p, dict) and str(p.get("name") or "").strip() == active_name:
+                    preset = p
+                    break
+        if isinstance(preset, dict):
+            # Preset weight keys are stored upper-cased (persistence.
+            # _normalize_preset_weights); match row symbols the same way.
+            raw = preset.get("weights") if isinstance(preset.get("weights"), dict) else {}
+            projected: dict[str, float] = {}
+            total = 0.0
+            for r in rows:
+                sym = r.get("symbol") if isinstance(r, dict) else None
+                if not sym:
+                    continue
+                w = _maybe_num(raw.get(str(sym).strip().upper()))
+                w = w if (w is not None and w > 0) else 0.0
+                projected[sym] = w
+                total += w
+            if total > 0:
+                return ({s: w / total for s, w in projected.items()}, active_name, active_name)
+    # No usable preset → market-cap weighting (matches the frontend fallback).
+    return (_cap_weights(rows), "cap", "cap-weighted")
+
+
+# --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
 
@@ -612,20 +637,23 @@ def build_workbook(
     # data from the engine (the rich `analyst.holdings` block) so we only
     # do the redundant info-only fetch for the leftovers.
     summaries: list[dict] = []
-    portfolio_analytics: list[tuple[str, dict, dict[str, dict]]] = []  # (name, view, analytics_by_period)
+    # (name, view, analytics_by_period, weighting_label)
+    portfolio_analytics: list[tuple[str, dict, dict[str, dict], str]] = []
     covered_symbols: set[str] = set()
     for name, view in valid_views:
         rows = view.get("rows") or []
+        # Use the portfolio's own saved active weighting, not a blanket cap
+        # assumption, so the exported metrics match what the user sees.
+        weights, set_name, weighting_label = _resolve_active_weights(view, rows)
         analytics_by_period: dict[str, dict] = {}
         if analytics_runner is not None:
-            weights = _cap_weights(rows)
             for analytics_period in metric_periods:
                 try:
-                    result = analytics_runner(rows, {"cap": weights}, analytics_period, display_ccy)
-                    analytics_by_period[analytics_period] = _analytics_result_for_period(result)
+                    result = analytics_runner(rows, {set_name: weights}, analytics_period, display_ccy)
+                    analytics_by_period[analytics_period] = _analytics_result_for_period(result, set_name)
                 except Exception as exc:
                     analytics_by_period[analytics_period] = {"error": f"runner failed: {exc}"}
-        portfolio_analytics.append((name, view, analytics_by_period))
+        portfolio_analytics.append((name, view, analytics_by_period, weighting_label))
         # Symbols already covered by analytics["analyst"]["holdings"].
         for analytics in analytics_by_period.values():
             for h in ((analytics.get("analyst") or {}).get("holdings") or []):
@@ -639,9 +667,10 @@ def build_workbook(
     analyst_fallback = gather_analyst_info(leftovers) if leftovers else {}
 
     # Write per-portfolio sheets + summaries.
-    for name, view, analytics_by_period in portfolio_analytics:
+    for name, view, analytics_by_period, weighting_label in portfolio_analytics:
         sheet_name = _sanitize_sheet_name(name, used_names)
-        _write_portfolio_sheet(wb, sheet_name, name, view, analytics_by_period, metric_periods, analyst_fallback)
+        _write_portfolio_sheet(wb, sheet_name, name, view, analytics_by_period,
+                               metric_periods, analyst_fallback, weighting_label)
         summaries.append({
             "name": name,
             "rows": len(view.get("rows") or []),

@@ -7,7 +7,7 @@ import time
 import numpy as np
 
 from portfolio_tracker import mpt
-from portfolio_tracker.analytics import _bulk_close, _PERIOD_YF
+from portfolio_tracker.analytics import _bulk_close
 from portfolio_tracker.cache import _cache_get, _cache_put
 from portfolio_tracker.fx import _apply_fx_to_closes, _norm_ccy_for_fx
 

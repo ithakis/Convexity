@@ -10,15 +10,14 @@ import pandas as pd
 import yfinance as yf
 
 from portfolio_tracker.cache import (
-    _BULK_CLOSE_CACHE, _BULK_CLOSE_MISS,
+    _BULK_CLOSE_MISS,
     _CACHE_TTL_ANALYTICS,
     _bulk_close_get_cached, _bulk_close_put,
     _cache_get, _cache_put,
 )
-from portfolio_tracker.fetcher import _SECTOR_ETF, _safe_info
+from portfolio_tracker.fetcher import _SECTOR_ETF
 from portfolio_tracker.fx import _apply_fx_to_closes, _norm_ccy_for_fx
 from portfolio_tracker.helpers import (
-    _normalize_dividend_yield,
     _safe_num,
     _series_to_points,
 )
@@ -148,59 +147,68 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
     return pd.concat(out, axis=1).sort_index()
 
 
-def _analyst_for(symbol: str) -> dict:
-    cache_key = f"analyst|{symbol}"
-    hit = _cache_get(cache_key)
-    if hit is not None:
-        return hit
-    info: dict = {}
-    try:
-        tk = yf.Ticker(symbol)
-        info = _safe_info(tk)
-    except Exception:
-        tk = None  # type: ignore
-    price = _safe_num(info.get("currentPrice") or info.get("regularMarketPrice") or info.get("last_price"))
+def _analyst_for(symbol: str, row: dict | None = None) -> dict:
+    """Analyst block for one symbol, reusing the fields `fetch_one` already put
+    on the row instead of re-fetching them.
+
+    The streaming row already carries recommendation_mean / target_mean_price /
+    rec_key / n_analysts / rating_dist / dividend_yield / ev_ebitda / price /
+    currency per symbol, so re-hitting Ticker.info + tk.recommendations for those
+    is pure waste. Only the target low/high/median trio is absent from the row,
+    so that trio is the *sole* reason to touch Ticker.info here — and
+    tk.recommendations is dropped entirely (dist comes from row["rating_dist"]).
+    Net effect: cold analytics drops from ~2 yfinance calls/active symbol
+    (tk.info via _safe_info + tk.recommendations) to at most 1 (a bare tk.info
+    for the target trio), and to 0 when the row already supplies that trio.
+    Output shape is byte-for-byte identical to before (same 12 keys)."""
+    row = row or {}
+    price = _safe_num(row.get("price"))
     out = {
-        "mean_rating": _safe_num(info.get("recommendationMean")),
-        "rec_key": (info.get("recommendationKey") or "").strip().lower() or None,
-        "n_analysts": _safe_num(info.get("numberOfAnalystOpinions")),
-        "target_mean": _safe_num(info.get("targetMeanPrice")),
-        "target_median": _safe_num(info.get("targetMedianPrice")),
-        "target_low": _safe_num(info.get("targetLowPrice")),
-        "target_high": _safe_num(info.get("targetHighPrice")),
-        "div_yield": _normalize_dividend_yield(
-            info.get("dividendYield"),
-            price=price,
-            dividend_rate=info.get("dividendRate"),
-            trailing_yield=info.get("trailingAnnualDividendYield"),
-            trailing_rate=info.get("trailingAnnualDividendRate"),
-        ),
-        "ev_ebitda": _safe_num(info.get("enterpriseToEbitda")),
+        "mean_rating": _safe_num(row.get("recommendation_mean")),
+        "rec_key": (row.get("rec_key") or "").strip().lower() or None,
+        "n_analysts": _safe_num(row.get("n_analysts")),
+        "target_mean": _safe_num(row.get("target_mean_price")),
+        # Row's dividend_yield is already normalized to a fraction at ingestion
+        # (fetcher._normalize_dividend_yield) — reuse it, don't re-derive.
+        "div_yield": _safe_num(row.get("dividend_yield")),
+        "ev_ebitda": _safe_num(row.get("ev_ebitda")),
         "price": price,
-        "currency": (info.get("financialCurrency") or info.get("currency") or "").upper() or None,
-        "dist": None,
+        "currency": (row.get("currency") or "").upper() or None,
+        "dist": row.get("rating_dist") if isinstance(row.get("rating_dist"), dict) else None,
     }
-    if tk is not None:
-        try:
-            recs = tk.recommendations
-        except Exception:
-            recs = None
-        try:
-            if recs is not None and not recs.empty:
-                row = recs.iloc[0]
-                d = {
-                    "strongBuy": int(row.get("strongBuy", 0) or 0),
-                    "buy": int(row.get("buy", 0) or 0),
-                    "hold": int(row.get("hold", 0) or 0),
-                    "sell": int(row.get("sell", 0) or 0),
-                    "strongSell": int(row.get("strongSell", 0) or 0),
-                }
-                if any(d.values()):
-                    out["dist"] = d
-        except Exception:
-            pass
-    thin = (out["mean_rating"] is None and out["target_mean"] is None and out["price"] is None)
-    _cache_put(cache_key, out, ttl=300.0 if thin else _CACHE_TTL_ANALYTICS)
+
+    # Prefer any target trio the row supplies (future-proofing); only the gaps
+    # justify a network call. A single bare tk.info covers all three — cheaper
+    # than _safe_info (which additionally pings fast_info we don't need here).
+    trio = {
+        "target_low": _safe_num(row.get("target_low")),
+        "target_high": _safe_num(row.get("target_high")),
+        "target_median": _safe_num(row.get("target_median")),
+    }
+    if any(v is None for v in trio.values()):
+        cache_key = f"analyst_targets|{symbol}"
+        hit = _cache_get(cache_key)
+        if hit is not None:
+            for k in trio:
+                if trio[k] is None:
+                    trio[k] = hit.get(k)
+        else:
+            info: dict = {}
+            try:
+                info = yf.Ticker(symbol).info or {}
+            except Exception:
+                info = {}
+            fetched = {
+                "target_low": _safe_num(info.get("targetLowPrice")),
+                "target_high": _safe_num(info.get("targetHighPrice")),
+                "target_median": _safe_num(info.get("targetMedianPrice")),
+            }
+            for k in trio:
+                if trio[k] is None:
+                    trio[k] = fetched[k]
+            thin = all(v is None for v in fetched.values())
+            _cache_put(cache_key, fetched, ttl=300.0 if thin else _CACHE_TTL_ANALYTICS)
+    out.update(trio)
     return out
 
 
@@ -319,7 +327,7 @@ def analyze_portfolios_multi(
     analyst_blocks: dict[str, dict] = {}
     if active:
         with ThreadPoolExecutor(max_workers=min(8, max(1, len(active)))) as pool:
-            futs = {pool.submit(_analyst_for, s): s for s in active}
+            futs = {pool.submit(_analyst_for, s, by_sym.get(s, {})): s for s in active}
             for fut in as_completed(futs):
                 try:
                     analyst_blocks[futs[fut]] = fut.result()
