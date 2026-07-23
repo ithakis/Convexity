@@ -5,6 +5,69 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.8.0 — 2026-07-22
+**Optimize tab reborn: Black-Litterman returns + mean-CVaR frontier.** The
+Markowitz mean-variance engine is fully removed and replaced end-to-end.
+- **Return engine — Black-Litterman.** Expected returns are now the BL posterior,
+  not a historical mean. The prior is the market-cap equilibrium (reverse
+  optimization Π = δ·Σ·w_mkt, caps FX-normalized to a common currency first);
+  views are absolute per-asset returns implied by 12-month analyst price targets,
+  with per-asset uncertainty tightening on analyst count / low dispersion. A single
+  **Analyst-trust dial** [0,1] scales the view uncertainty Ω — 0 = pure market
+  prior, 1 = full trust in targets. Covariance estimator is selectable
+  (Sample / Ledoit-Wolf default / EWMA); Ledoit-Wolf now shrinks in per-period
+  units then annualizes (was a ~10× under-shrink unit mismatch).
+- **Risk engine — CVaR.** Risk is Conditional Value-at-Risk on the daily FX-adjusted
+  return scenarios (~750 over 3Y), α adjustable 90–99% (default 95). CDaR and max
+  drawdown are always computed and displayed for the selected portfolio (shown, not
+  optimized); annualized vol is kept as a reference metric.
+- **Optimizer — true mean-CVaR frontier.** Sweeps the return floor to trace a
+  Return-vs-CVaR efficient frontier via the Rockafellar-Uryasev LP. Constraints:
+  long-only + fully-invested toggle (off ⇒ cash allowed, Σw ≤ 1) and optional
+  per-position min/max box. **Solver is a bespoke numba primal-dual interior-point
+  method** that eliminates the T scenario variables analytically each Newton step
+  (whole frontier ≪100 ms; ~40–60 ms for a typical portfolio); scipy/HiGHS is kept
+  as a **test-only** reference (`tests/_cvar_reference.py`) certifying the fast
+  solver to 1e-6. No scipy on the production hot path.
+- **UI.** New chart: X = CVaR 95% (annualized, ×√252), Y = expected return (BL);
+  single risk slider riding the frontier (min-CVaR → max-return); return-colored
+  Monte-Carlo cloud rebased into (CVaR, return) space; 1/N, cap-weight, current
+  anchors. Controls: risk slider, CVaR confidence, fully-invested toggle,
+  per-position min/max, analyst-trust dial, covariance selector, lookback, cloud
+  density. Side panel shows expected return, CVaR95, CDaR/max-drawdown, vol (ref.),
+  analyst-view coverage, and the weights table. About-guide and all tooltips
+  rewritten; tests rewritten against the new surface.
+- **8 cores + streaming + stability bands (v2 rework).** The compute now saturates
+  all cores via numba `prange` and streams honest progress. Specifically:
+  - **All-cores compute.** `_cloud_kernel` and the new `_bootstrap_cvar` are
+    `@njit(parallel=True)` over `prange`, so the Monte-Carlo cloud and the bootstrap
+    band run on every core (~650 LP solves/s, ~65k cloud pts/s on 8 cores).
+  - **Bootstrap frontier-stability band.** The compute budget is spent on something
+    real: each of B replicas resamples the daily scenarios with replacement and
+    re-solves the frontier, yielding a per-point CVaR uncertainty band (10th–90th
+    pct) drawn on the chart and reported in the side panel — not visual padding.
+  - **Wall-clock budgets.** Light / Standard / Dense are now **time targets**
+    (~5 / ~15 / ~60 s), not fixed counts: the cloud is a fixed modest density,
+    then the bootstrap runs until the target elapses, adapting to portfolio size.
+  - **Honest streaming progress + ETA + Cancel.** `/api/efficient-frontier` now
+    streams NDJSON (`progress`/`done`/`error`); the bar shows true pct = elapsed/target
+    and a live ETA. A **Cancel** button aborts the request — the server stops the
+    8-core work at the next chunk boundary. (Replaces the old fixed-duration fake bar.)
+  - **Per-position min/max.** Weight limits are now **per holding** (an editable
+    Symbol / Min% / Max% grid with an "All positions" broadcast row), not one global
+    box; the solver already took per-asset boxes.
+  - **Analyst-trust default lowered to 25%** (was 50%), from a 25-paper review: raw
+    sell-side price-target *levels* are optimism-biased and only weakly/negatively
+    predictive, so the posterior leans mostly on the equilibrium prior by default.
+  - **Run history dropped.** Only the last run per portfolio is persisted and
+    restored on open (`get_last_mpt_run`); the runs list + `GET/DELETE
+    /api/mpt-runs/<id>` were removed. First-Optimize latency also eliminated by
+    warming the numba JIT in a background thread at server startup.
+- **Removed:** `critical_line[_with_floor]`, `frontier_curve`, `tangency_portfolio`,
+  `monte_carlo_cloud`, `annualize`, `portfolio_stats`, `cvar_curve`, the vol/return
+  cloud + MV compute-budget tiers + the second CVaR slider, and the `tangency` /
+  `min_vol` / `cvar_frontier` JSON keys.
+
 ## 1.7.1 — 2026-07-21
 Senior code pass — two owner-reported bugs + correctness/perf/LOC cleanup:
 - **Saved weights now applied everywhere.** Switching portfolios no longer leaks

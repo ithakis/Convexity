@@ -13,7 +13,7 @@
 <div class="topbar" id="topbar">
   <button id="edit-btn" class="tab-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
   <button id="news-btn" class="tab-btn" data-tip="Open the News &amp; Sentiment dashboard: AI-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
-  <button id="optimize" data-tip="Open the Portfolio Optimization workspace: compute the long-only efficient frontier from your current holdings (Markowitz CLA, Ledoit-Wolf shrinkage), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
+  <button id="optimize" data-tip="Open the Portfolio Optimization workspace: trace the mean-CVaR efficient frontier from your holdings using Black-Litterman expected returns (market-cap equilibrium + analyst-target views), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
   <button id="refresh" data-tip="Pull fresh quotes from Yahoo Finance for the current portfolio and rebuild the derived metrics as rows stream back in.">↻ Refresh</button>
   <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
        per portfolio. Each sheet must include EVERY column the app can show for a
@@ -240,9 +240,9 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   <div class="pf-mpt-modal">
     <div class="pf-mpt-head">
       <span class="pf-mpt-title" id="pf-mpt-title">Portfolio Optimization</span>
-      <span class="pf-mpt-sub" id="pf-mpt-sub">Markowitz long-only · Critical Line Algorithm</span>
+      <span class="pf-mpt-sub" id="pf-mpt-sub">Black-Litterman returns · mean-CVaR frontier</span>
       <span class="spacer"></span>
-      <button id="pf-mpt-info" class="info-btn pf-mpt-info-btn" title="About Modern Portfolio Theory" type="button"><span class="info-icon-circle">i</span></button>
+      <button id="pf-mpt-info" class="info-btn pf-mpt-info-btn" title="About Black-Litterman &amp; Mean-CVaR" type="button"><span class="info-icon-circle">i</span></button>
       <button id="pf-mpt-close" class="pf-mpt-close" title="Close (Esc)">✕</button>
     </div>
     <div class="pf-mpt-controls" id="pf-mpt-controls">
@@ -256,15 +256,41 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         </div>
       </div>
       <div class="pf-mpt-ctl">
-        <label>Frequency</label>
-        <div class="seg" id="pf-mpt-freq">
-          <button data-v="daily">Daily</button>
-          <button data-v="weekly" class="active">Weekly</button>
-          <button data-v="monthly">Monthly</button>
+        <label>CVaR confidence <span class="pf-mpt-rf-info" data-tip="Tail level α for Conditional Value-at-Risk (expected shortfall). CVaR is the average daily loss in the worst (1−α) of days, estimated on the daily return scenarios over the lookback. Higher α = deeper, rarer tail. Displayed annualized (×√252).">i</span></label>
+        <div class="seg" id="pf-mpt-alpha">
+          <button data-v="0.90">90%</button>
+          <button data-v="0.95" class="active">95%</button>
+          <button data-v="0.99">99%</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl">
+        <label>Constraint <span class="pf-mpt-rf-info" data-tip="Fully invested: weights sum to 100% (Σw = 1). Allow cash: weights may sum to less than 100%, the remainder held in cash earning the risk-free rate (Σw ≤ 1). Long-only always — no shorting.">i</span></label>
+        <div class="seg" id="pf-mpt-invest">
+          <button data-v="full" class="active">Fully invested</button>
+          <button data-v="cash">Allow cash</button>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl">
+        <label>Position limits <span class="pf-mpt-rf-info" data-tip="Per-asset weight box constraints — set a min (diversification floor) and max (concentration cap) for each holding individually. Defaults 0–100% (unconstrained long-only). The 'All' row applies a value to every position at once. Infeasible combinations (e.g. Σmin > 100%) are rejected.">i</span></label>
+        <button type="button" class="pf-mpt-bounds-btn" id="pf-mpt-bounds-btn" aria-expanded="false">Per-position min / max ▾</button>
+      </div>
+      <div class="pf-mpt-ctl pf-mpt-ctl-haircut">
+        <label>Analyst trust <span class="pf-mpt-rf-info" data-tip="How strongly the Black-Litterman posterior leans on analyst 12-month price targets vs. the market-cap equilibrium prior. 0% = ignore analysts (pure equilibrium); 100% = full confidence in targets. The dial scales the view uncertainty Ω. Default 25% — sell-side price-target levels are optimism-biased and only weakly predictive (see the Guide's references).">i</span></label>
+        <div class="pf-mpt-haircut-wrap">
+          <input id="pf-mpt-haircut" type="range" min="0" max="100" step="5" value="25"/>
+          <span class="pf-mpt-haircut-val" id="pf-mpt-haircut-val">25%</span>
+        </div>
+      </div>
+      <div class="pf-mpt-ctl">
+        <label>Covariance <span class="pf-mpt-rf-info" data-tip="Estimator for the covariance Σ feeding the BL equilibrium prior Π = δ·Σ·w_mkt. Sample: raw. Ledoit-Wolf: shrunk toward constant-correlation (default, robust when assets ≈ observations). EWMA: exponentially weighted, favouring recent regimes.">i</span></label>
+        <div class="seg" id="pf-mpt-cov">
+          <button data-v="sample">Sample</button>
+          <button data-v="ledoit" class="active">Ledoit-Wolf</button>
+          <button data-v="ewma">EWMA</button>
         </div>
       </div>
       <div class="pf-mpt-ctl pf-mpt-ctl-rf">
-        <label>Risk-free (annual)<span class="pf-mpt-rf-info" data-tip="Annualized risk-free rate (in %) used as the baseline return in Sharpe and tangency calculations. Auto fills it from the short-rate proxy for the portfolio currency (e.g. ^IRX, US 13-week T-Bill), averaged over the selected lookback. The sparkline shows that proxy's history — hover for the time series.">i</span></label>
+        <label>Risk-free (annual)<span class="pf-mpt-rf-info" data-tip="Annualized risk-free rate (in %). Sets the excess-return baseline for the Black-Litterman prior and the cash leg when 'Allow cash' is on. Auto fills it from the short-rate proxy for the portfolio currency (e.g. ^IRX, US 13-week T-Bill), averaged over the lookback. The sparkline shows that proxy's history — hover for the series.">i</span></label>
         <div class="pf-mpt-rf-wrap">
           <input id="pf-mpt-rf" type="number" min="0" max="20" step="0.05" value="4.50"/>
           <div class="pf-mpt-rf-spark-wrap" id="pf-mpt-rf-spark-wrap">
@@ -274,30 +300,32 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
           <button type="button" id="pf-mpt-rf-auto" class="pf-mpt-rf-auto" data-tip="Refill the input with the trailing-window mean of the short-rate proxy (e.g. ^IRX). Click to recompute after changing the lookback or currency.">Auto</button>
         </div>
       </div>
-      <div class="pf-mpt-ctl pf-mpt-ctl-div">
-        <label>Allocation <span class="pf-mpt-rf-info" data-tip="Sparse: unconstrained long-only Markowitz — the optimiser is free to drop assets to 0%, often leaving most holdings at zero weight. Diversified: every asset receives at least a minimum weight (auto-scaled by portfolio size — about 0.5/N, never above 1/N) so the frontier keeps all constituents in the mix. Same math (Critical Line Algorithm via variable substitution), no extra solver.">i</span></label>
-        <div class="seg" id="pf-mpt-mode">
-          <button data-v="sparse" class="active">Sparse</button>
-          <button data-v="diversified">Diversified</button>
-        </div>
-      </div>
       <div class="pf-mpt-ctl">
-        <label>Compute budget</label>
+        <label>Compute budget <span class="pf-mpt-rf-info" data-tip="How much 8-core work to spend on the frontier's bootstrap stability band + Monte-Carlo cloud. Light ≈ 5s, Standard ≈ 15s, Dense ≈ 60s. More budget = more bootstrap replicas (tighter uncertainty band) and a denser cloud. Data fetch (~1s) is on top.">i</span></label>
         <div class="pf-mpt-select" id="pf-mpt-budget" data-value="standard" tabindex="0" role="combobox" aria-expanded="false" aria-haspopup="listbox">
-          <span class="pf-mpt-select-label">Standard — 1M configs (~4s)</span>
+          <span class="pf-mpt-select-label">Standard — ~15s</span>
           <span class="pf-mpt-select-caret" aria-hidden="true">▾</span>
           <ul class="pf-mpt-select-menu" role="listbox" hidden>
-            <li data-value="fast" role="option">Fast — 200k configs (~1s)</li>
-            <li data-value="standard" role="option" aria-selected="true">Standard — 1M configs (~4s)</li>
-            <li data-value="thorough" role="option">Thorough — 3.5M configs (~14s)</li>
-            <li data-value="exhaustive" role="option">Exhaustive — 15M configs (~60s)</li>
+            <li data-value="light" role="option">Light — ~5s</li>
+            <li data-value="standard" role="option" aria-selected="true">Standard — ~15s</li>
+            <li data-value="dense" role="option">Dense — ~60s</li>
           </ul>
         </div>
       </div>
       <div class="pf-mpt-ctl pf-mpt-ctl-run">
         <label>&nbsp;</label>
-        <button class="pf-mpt-run" id="pf-mpt-run">Run optimization</button>
+        <div class="pf-mpt-run-row">
+          <button class="pf-mpt-cancel" id="pf-mpt-cancel" hidden>Cancel</button>
+          <button class="pf-mpt-run" id="pf-mpt-run">Run optimization</button>
+        </div>
       </div>
+    </div>
+    <div class="pf-mpt-bounds" id="pf-mpt-bounds" hidden>
+      <div class="pf-mpt-bounds-head">
+        <span>Per-position weight limits (%) — blank = unconstrained (0–100)</span>
+        <button type="button" class="pf-mpt-bounds-reset" id="pf-mpt-bounds-reset">Reset all</button>
+      </div>
+      <div class="pf-mpt-bounds-grid" id="pf-mpt-bounds-grid"></div>
     </div>
     <div class="pf-mpt-body">
       <div class="pf-mpt-chartwrap">
@@ -312,18 +340,11 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
           <div class="pf-mpt-status" id="pf-mpt-status">Run the optimization to draw the efficient frontier.</div>
         </div>
         <div class="pf-mpt-slider-row" data-line="frontier">
-          <span class="pf-mpt-slider-label">Frontier</span>
-          <span>Min-vol</span>
+          <span class="pf-mpt-slider-label">Risk</span>
+          <span>Min-CVaR</span>
           <input type="range" id="pf-mpt-slider" min="0" max="100" value="50" disabled/>
           <span>Max-return</span>
           <span class="pf-mpt-slider-readout" id="pf-mpt-slider-readout">—</span>
-        </div>
-        <div class="pf-mpt-slider-row cvar" data-line="cvar">
-          <span class="pf-mpt-slider-label">CVaR</span>
-          <span>99%</span>
-          <input type="range" id="pf-mpt-cvar-slider" min="0" max="49" value="0" disabled/>
-          <span>50%</span>
-          <span class="pf-mpt-slider-readout" id="pf-mpt-cvar-readout">—</span>
         </div>
         <div class="pf-mpt-legend" id="pf-mpt-legend"></div>
       </div>
@@ -338,8 +359,6 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
           <button id="pf-mpt-apply" class="primary">Apply to Portfolio</button>
           <button id="pf-mpt-save">Save as Custom Weights</button>
         </div>
-        <h4>Recent runs</h4>
-        <div class="pf-mpt-runs" id="pf-mpt-runs"><span class="pf-mpt-status">No saved runs yet.</span></div>
       </div>
     </div>
   </div>
@@ -353,140 +372,115 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   <div class="info-modal">
     <div class="info-head">
       <div>
-        <div class="info-head-title">Modern Portfolio Theory — Guide</div>
-        <div class="info-head-sub">Motivation, theory, limitations, and a worked example</div>
+        <div class="info-head-title">Black-Litterman &amp; Mean-CVaR — Guide</div>
+        <div class="info-head-sub">Where returns come from, how risk is measured, and how the frontier is traced</div>
       </div>
       <button class="info-head-close" id="pf-mpt-info-close" type="button" title="Close (Esc)">&#215;</button>
     </div>
     <p class="info-intro">
-      Modern Portfolio Theory (MPT) — introduced by Harry Markowitz in 1952 — is the
-      mathematical foundation for trading off expected return against risk when
-      combining risky assets. This optimiser implements long-only, fully-invested,
-      mean-variance MPT with the Critical Line Algorithm (Markowitz, 1959).
+      This optimiser answers two questions separately. <b>What return do we expect?</b>
+      is handled by the <b>Black-Litterman</b> model, which blends the market's own
+      implied views with analyst price targets. <b>How much can we lose?</b> is
+      handled by <b>Conditional Value-at-Risk (CVaR)</b>, the average loss in the worst
+      tail of days. The efficient frontier then trades expected return against CVaR —
+      not against variance.
     </p>
     <div class="info-grid">
 
       <div class="info-card info-card-wide">
-        <div class="info-card-name">Motivation — the free-lunch intuition</div>
+        <div class="info-card-name">Return engine — Black-Litterman</div>
         <div class="info-card-desc">
-          Most investors hold many assets because diversification reduces portfolio
-          volatility without proportionally reducing expected return — what Markowitz
-          called &ldquo;the only free lunch in finance&rdquo;. When two assets are imperfectly
-          correlated (ρ &lt; 1), the variance of their weighted sum is strictly less
-          than the weighted sum of their variances. Stacking many imperfectly
-          correlated bets therefore shifts the portfolio toward the upper-left of
-          the (volatility, return) plane: more return per unit of risk.
+          Using historical average returns as the forecast is famously fragile: the
+          optimiser amplifies estimation noise into extreme corner portfolios.
+          Black-Litterman (1990) instead starts from the returns the market <i>already
+          implies</i> and nudges them with your views. The <b>equilibrium prior</b>
+          is recovered by reverse optimisation from the market-cap weights
+          <b>w<sub>mkt</sub></b>:
         </div>
+        <div class="info-formula">$$\Pi = \delta\,\Sigma\,w_{\mathrm{mkt}}, \qquad \delta = \frac{\text{risk premium}}{w_{\mathrm{mkt}}^\top \Sigma\, w_{\mathrm{mkt}}}$$</div>
+        <div class="info-card-desc">
+          <b>Π</b> is the excess return that would make today's market-cap weights
+          optimal for a representative investor with risk-aversion <b>δ</b>. Market
+          caps are FX-normalised to a common currency first, so a ¥-quoted mega-cap
+          doesn't swamp the prior on units alone.
+        </div>
+        <div class="info-card-desc">
+          <b>Views</b> come from 12-month analyst price targets — one absolute view
+          per covered asset, <b>q<sub>i</sub> = target<sub>i</sub>/price<sub>i</sub> − 1 − r<sub>f</sub></b>
+          (excess). Each view's uncertainty <b>Ω<sub>ii</sub></b> tightens with more
+          analysts and lower target dispersion. The posterior combines prior and views:
+        </div>
+        <div class="info-formula">$$\mu_{\mathrm{BL}} = \Pi + \tau\Sigma P^\top\!\left(P\,\tau\Sigma\,P^\top + \Omega\right)^{-1}\!\left(Q - P\Pi\right)$$</div>
         <div class="info-card-why">
-          The <b>efficient frontier</b> is the locus of portfolios that achieve the
-          maximum expected return for each given level of risk. Anything below the
-          frontier is dominated — you can always find another long-only portfolio
-          with the same risk but a higher expected return.
+          The <b>Analyst trust</b> dial is a single global scalar in [0, 1] that
+          scales Ω. At 0% the views vanish (Ω → ∞) and the posterior collapses to the
+          pure market prior; at 100% (Ω → 0) it snaps to the analyst targets. Assets
+          with no target simply keep the prior — no view is invented for them.
         </div>
       </div>
 
       <div class="info-card info-card-wide">
-        <div class="info-card-name">Theory — the mean-variance optimisation</div>
+        <div class="info-card-name">Risk engine — CVaR on daily scenarios</div>
         <div class="info-card-desc">
-          Given an asset universe with annualised mean-return vector <b>μ</b> and
-          annualised covariance matrix <b>Σ</b>, a portfolio is a weight vector
-          <b>w</b> summing to one. Its expected return and variance are
-        </div>
-        <div class="info-formula">$$\mu_p = w^\top \mu \qquad \sigma_p^{\,2} = w^\top \Sigma\, w$$</div>
-        <div class="info-card-desc">
-          The Markowitz program seeks, for each target return <b>R⋆</b>, the
-          long-only portfolio that minimises variance subject to that target:
-        </div>
-        <div class="info-formula">$$\min_{w}\ w^\top \Sigma\, w \quad \text{s.t.}\quad w^\top \mu = R^\star,\ \ w^\top \mathbf{1} = 1,\ \ w \ge 0$$</div>
-        <div class="info-card-desc">
-          Sweeping <b>R⋆</b> traces the efficient frontier. The
-          <b>Critical Line Algorithm</b> (CLA) used here solves the entire
-          piecewise-linear frontier in one pass by tracking which assets are at
-          their lower bound versus &ldquo;free&rdquo;, jumping between turning points where the
-          active set changes. The <b>tangency portfolio</b> — the point on the
-          frontier maximising the Sharpe ratio — is
-        </div>
-        <div class="info-formula">$$w^{\mathrm{tan}} = \arg\max_{w \in \mathcal{F}}\ \frac{\mu_p - r_f}{\sigma_p}$$</div>
-        <div class="info-card-desc">
-          where <b>r<sub>f</sub></b> is the risk-free rate. Geometrically it is the
-          point at which a line from <b>(0, r<sub>f</sub>)</b> is tangent to the
-          frontier — the steepest reward-to-risk ratio achievable with risky assets.
+          Variance penalises upside and downside alike. <b>CVaR<sub>α</sub></b>
+          (expected shortfall) instead measures only the left tail: the average loss
+          on the worst <b>(1−α)</b> fraction of days. Scenarios are the raw
+          <b>daily</b> FX-adjusted returns over the lookback (~750 for 3Y), so the tail
+          is empirical — no normality assumption. The X-axis is annualised (×√252) so
+          it is comparable to the return axis.
         </div>
         <div class="info-card-desc">
-          The dashed orange curve overlays a separate family of optima: the
-          <b>minimum-CVaR</b> portfolios. For confidence level α∈[0.5, 0.99],
-          <b>CVaR<sub>α</sub></b> (expected shortfall, ES<sub>α</sub>) is the
-          expected loss conditional on being in the worst (1−α) tail of the
-          empirical return distribution. Each point is solved as a
-          <b>Rockafellar-Uryasev</b> linear program:
+          For a target expected return, the minimum-CVaR portfolio is the
+          <b>Rockafellar-Uryasev</b> (2000) linear program, which linearises the tail
+          average exactly:
         </div>
-        <div class="info-formula">$$\min_{w,\zeta,u}\ \zeta + \frac{1}{(1-\alpha)T} \sum_{t} u_t \quad \text{s.t.}\quad u_t \ge -R_t^\top w - \zeta,\ \ u_t \ge 0,\ \ w^\top \mathbf{1} = 1,\ \ w \ge L$$</div>
+        <div class="info-formula">$$\min_{w,\zeta,u}\ \zeta + \frac{1}{(1-\alpha)T}\sum_{t} u_t \quad \text{s.t.}\quad u_t \ge -R_t^\top w - \zeta,\ \ u_t \ge 0,\ \ \mu_{\mathrm{BL}}^\top w \ge R^\star$$</div>
+        <div class="info-formula">$$w \in [w_{\min}, w_{\max}], \qquad w^\top\mathbf{1} = 1\ \ (\text{or } \le 1 \text{ with cash})$$</div>
         <div class="info-card-desc">
-          At the optimum, <b>ζ⋆ = VaR<sub>α</sub></b> and the objective equals
-          <b>CVaR<sub>α</sub></b>. The slider scans α from 99% (strict tail) down
-          to 50%; lower α weighs broader downside in the objective and typically
-          accepts a tighter portfolio with less concentration.
+          At the optimum <b>ζ⋆ = VaR<sub>α</sub></b> and the objective equals
+          <b>CVaR<sub>α</sub></b>. Sweeping the return floor <b>R⋆</b> from the
+          global min-CVaR portfolio up to the max-return portfolio traces the whole
+          <b>return-vs-CVaR frontier</b> — the curve the risk slider rides.
         </div>
         <div class="info-card-why">
-          Sample covariance is noisy when the number of assets approaches the
-          number of observations. This module shrinks it toward a
-          constant-correlation target using the <b>Ledoit-Wolf</b> estimator with a
-          data-driven intensity α ∈ [0, 1]:
-        </div>
-        <div class="info-formula">$$\hat{\Sigma} = \alpha\, T + (1-\alpha)\, S$$</div>
-        <div class="info-card-desc">
-          where <b>S</b> is the sample covariance and <b>T</b> the
-          constant-correlation target. This stabilises the optimisation when the
-          frontier is highly sensitive to small changes in <b>Σ</b>.
+          The LP is solved by a bespoke <b>numba primal-dual interior-point</b> method
+          that eliminates the T scenario variables analytically each Newton step,
+          collapsing the linear system to an (N+1)×(N+1) solve — the whole frontier
+          in well under 100&nbsp;ms, with no scipy on the hot path. A reference HiGHS
+          solver certifies it to 1e-6 in the test-suite.
         </div>
       </div>
 
       <div class="info-card">
-        <div class="info-card-name">Limitations</div>
-        <div class="info-card-desc">
-          MPT&rsquo;s elegance hides several traps that matter in practice:
-        </div>
+        <div class="info-card-name">What's shown</div>
         <ul class="info-feature-list">
-          <li><b>Estimation error in μ dominates.</b> Historical mean returns are noisy
-              forecasts; the optimiser amplifies that noise into extreme corner
-              portfolios (&ldquo;Markowitz error maximisation&rdquo;).</li>
-          <li><b>Covariance instability.</b> Sample Σ rotates with the lookback window;
-              the Ledoit-Wolf shrinkage applied here mitigates but does not
-              eliminate this.</li>
-          <li><b>Long-only.</b> No shorting, no leverage — many academic results
-              (efficient frontier as a hyperbola, two-fund separation) only hold
-              when shorts are allowed.</li>
-          <li><b>No transaction costs, taxes, or liquidity constraints.</b> The
-              optimiser will happily produce a 0.18% NVDA allocation; whether that
-              is sensible to trade is up to you.</li>
-          <li><b>Variance ≠ risk.</b> Mean-variance treats upside and downside
-              symmetrically. For asymmetric return distributions consider CVaR or
-              downside-deviation formulations.</li>
-          <li><b>Backward-looking.</b> The frontier reflects the chosen lookback
-              window; it is not a forecast.</li>
+          <li><b>Expected return (BL)</b> — the posterior return of the selected
+              portfolio, annualised.</li>
+          <li><b>CVaR<sub>95</sub></b> — the risk axis: annualised expected shortfall
+              at the chosen confidence.</li>
+          <li><b>CDaR / Max drawdown</b> — the deepest and average-worst peak-to-trough
+              declines of the selected weights over the lookback path. Shown, not
+              optimised.</li>
+          <li><b>Vol (reference)</b> — annualised standard deviation, for context only.</li>
+          <li><b>Cloud</b> — random long-only portfolios rebased into (CVaR, return)
+              space, so you can see the frontier really is the upper edge.</li>
         </ul>
       </div>
 
       <div class="info-card">
-        <div class="info-card-name">Example — closed-form two-asset case</div>
-        <div class="info-card-desc">
-          For two risky assets with volatilities <b>σ<sub>1</sub>, σ<sub>2</sub></b>
-          and correlation <b>ρ</b>, the minimum-variance long-only weight on asset 1 is
-        </div>
-        <div class="info-formula">$$w_1^\star = \frac{\sigma_2^{\,2} - \rho\,\sigma_1 \sigma_2}{\sigma_1^{\,2} + \sigma_2^{\,2} - 2\rho\,\sigma_1 \sigma_2}$$</div>
-        <div class="info-card-desc">
-          with <b>w<sub>2</sub><sup>⋆</sup> = 1 − w<sub>1</sub><sup>⋆</sup></b>
-          (clipped to [0, 1] for the long-only constraint).
-          For <b>σ<sub>1</sub></b> = 20%, <b>σ<sub>2</sub></b> = 30%, <b>ρ</b> = 0.2,
-          this gives <b>w<sub>1</sub><sup>⋆</sup></b> ≈ 0.78 and a portfolio volatility
-          of about 18.4% — strictly below either asset&rsquo;s standalone volatility.
-          The free lunch in one line of algebra.
-        </div>
-        <div class="info-card-why">
-          The <b>n</b>-asset generalisation requires no new ideas: the same KKT
-          conditions yield a piecewise-linear path in weight space, which the CLA
-          enumerates corner by corner.
-        </div>
+        <div class="info-card-name">Limitations</div>
+        <ul class="info-feature-list">
+          <li><b>Analyst targets are noisy.</b> The trust dial exists precisely so you
+              can dial their influence down; at 0% you get the pure market prior.</li>
+          <li><b>Tail estimation needs data.</b> A 99% CVaR on one year of daily data
+              rests on only ~2–3 tail days; longer lookbacks give steadier tails.</li>
+          <li><b>Covariance still matters.</b> It drives the BL prior even though risk
+              is CVaR-based — Ledoit-Wolf shrinkage stabilises it.</li>
+          <li><b>Long-only.</b> No shorting or leverage; the fully-invested toggle only
+              relaxes to holding cash.</li>
+          <li><b>Backward-looking.</b> Both the scenarios and the covariance reflect the
+              chosen lookback; the frontier is not a forecast.</li>
+        </ul>
       </div>
 
     </div>

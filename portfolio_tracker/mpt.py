@@ -1,56 +1,70 @@
 """
-mpt.py — Modern Portfolio Theory primitives for the Portfolio Tracker.
+mpt.py — Portfolio-optimization primitives: Black-Litterman expected returns
++ a mean-CVaR efficient frontier.
 
-Long-only, fully-invested (sum=1) mean-variance optimization, plus a
-minimum-CVaR frontier. The mean-variance core (CLA, Ledoit-Wolf, Monte-Carlo
-cloud) is NumPy/Pandas with numba JIT. The CVaR path adds SciPy: the
-Rockafellar-Uryasev formulation is a linear program solved with SciPy's
-HiGHS backend (scipy.optimize.linprog) over sparse scenario matrices
-(scipy.sparse), which keeps it fast for the hundreds-of-scenarios case.
-Designed for ~5–60 assets and a 10–20 s wall budget per call (data fetch
-dominates; the math here is <100 ms).
+This module replaces the old Markowitz mean-variance engine (Critical Line
+Algorithm, tangency portfolio, vol/return Monte-Carlo cloud) with two pieces:
 
-Public surface (kept minimal — see HTTP handler in dashboard.py):
-    compute_returns(closes_df, freq)        -> returns_df
-    annualize(returns_df, freq)             -> (mu, sigma)        (annualized mean + cov)
-    ledoit_wolf_shrink(cov)                 -> shrunken cov
-    critical_line(mu, cov)                  -> [turning points]   (Markowitz CLA, long-only)
-    frontier_curve(turning_points, n)       -> list[{ret, vol, weights}]
-    tangency_portfolio(curve, rf)           -> {ret, vol, weights, sharpe}
-    monte_carlo_cloud(mu, cov, n)           -> list[(vol, ret, sharpe)]
-    portfolio_stats(w, mu, cov, rf=0)       -> {ret, vol, sharpe}
+1. **Return engine — Black-Litterman.** The optimizer's expected-return vector is
+   the BL posterior, NOT a historical mean. The prior is the market-implied
+   equilibrium (reverse optimization, Π = δ·Σ·w_mkt) and the views are absolute
+   per-asset returns implied by 12-month analyst price targets, tempered by a
+   global analyst-trust haircut. `black_litterman()` returns the posterior μ and
+   a breakdown for the UI.
 
-The Critical Line Algorithm (Markowitz 1959; Bailey & López de Prado 2013) is
-used instead of a per-target QP loop because it returns the *entire* exact
-piecewise-linear frontier in a single pass — orders of magnitude faster than
-calling scipy.optimize.minimize for each target return.
+2. **Risk engine — CVaR on daily scenarios.** Risk is Conditional Value-at-Risk
+   estimated directly on the empirical daily return scenarios (~750 over 3Y),
+   NOT a parametric variance. The mean-CVaR efficient frontier
+
+       maximise  μ_BLᵀw   subject to   CVaR_α(w) ≤ c ,  w ∈ box ,  Σw = 1
+
+   is traced by sweeping the return floor and, at each point, minimising CVaR via
+   the Rockafellar-Uryasev linear program. That LP is solved by a **custom
+   numba-JIT primal-dual interior-point method** (`_cvar_pdip`) that exploits the
+   LP's structure: the T scenario-slack variables form a diagonal block that is
+   eliminated analytically each Newton step, collapsing the linear system to an
+   (N+1)×(N+1) dense solve (N = #assets ≤ ~60). No scipy on the hot path.
+
+   A scipy/HiGHS reference solver for the same LP lives in the test-suite only
+   (`tests/_cvar_reference.py`) and is used to certify `_cvar_pdip` to 1e-6.
+
+Public surface (used by `frontier.py`):
+    compute_returns(closes_df, freq)                 -> returns_df
+    annualized_cov(returns_df, freq, model)          -> cov_df   (sample/ledoit/ewma)
+    ledoit_wolf_shrink(cov, returns=None)            -> cov_df
+    black_litterman(...)                             -> dict (posterior μ + breakdown)
+    mean_cvar_frontier(returns_df, mu, alpha, ...)   -> dict (frontier + endpoints)
+    portfolio_risk_metrics(weights, mu, cov, returns, alpha=0.95, rf=0.04,
+                           fully_invested=True)      -> dict {ret, cvar, vol, mdd, cdar}
+    cvar_return_cloud(returns_df, mu, alpha, n)      -> list of [cvar_ann, ret_ann]
+
+Designed for ~2–60 assets and a 10–20 s wall budget per call (data fetch
+dominates; the optimization math here is well under 100 ms).
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
 from numba import njit, prange
-from scipy.optimize import linprog
-from scipy.sparse import csr_matrix, eye as speye, hstack as sphstack
-
 
 FREQ_PER_YEAR = {"daily": 252, "weekly": 52, "monthly": 12}
 _FREQ_RESAMPLE = {"daily": None, "weekly": "W-FRI", "monthly": "M"}
+TRADING_DAYS = 252
 
 
 # ---------------------------------------------------------------------------
 # Returns + covariance
 # ---------------------------------------------------------------------------
 
-def compute_returns(closes: pd.DataFrame, freq: str) -> pd.DataFrame:
+def compute_returns(closes: pd.DataFrame, freq: str = "daily") -> pd.DataFrame:
     """Resample close prices to the requested frequency and return pct-change.
 
-    Drops the first row (NaN) and any column / row with insufficient overlap.
+    Drops the first row (NaN) and any column with insufficient overlap. The
+    mean-CVaR path uses ``freq="daily"`` so the scenario set is the raw daily
+    returns; the BL covariance can be estimated at any supported frequency.
     """
     freq = freq.lower()
     if freq not in FREQ_PER_YEAR:
@@ -60,26 +74,48 @@ def compute_returns(closes: pd.DataFrame, freq: str) -> pd.DataFrame:
     if rule is not None:
         px = px.resample(rule).last()
     rets = px.pct_change().dropna(how="all")
-    # Drop columns that are mostly NaN; require at least 60% coverage
+    # Require at least 60% coverage per column before we drop remaining NaN rows.
     min_obs = max(8, int(0.6 * len(rets)))
     keep = [c for c in rets.columns if rets[c].notna().sum() >= min_obs]
     rets = rets[keep].dropna()
     return rets
 
 
-def annualize(returns: pd.DataFrame, freq: str) -> tuple[pd.Series, pd.DataFrame]:
-    """Annualized mean (vector) and covariance (matrix) from periodic returns."""
+def _sample_cov(returns: pd.DataFrame, freq: str) -> pd.DataFrame:
+    """Annualized sample covariance."""
     n = FREQ_PER_YEAR[freq.lower()]
-    mu = returns.mean() * n
-    cov = returns.cov() * n
-    return mu, cov
+    return returns.cov() * n
+
+
+def _ewma_cov(returns: pd.DataFrame, freq: str, halflife: float = 60.0) -> pd.DataFrame:
+    """Annualized exponentially-weighted covariance (RiskMetrics-style).
+
+    Recent observations weigh more (``halflife`` in periods). Uses a mean-centred
+    weighted cross-product; annualized by periods-per-year so it is directly
+    comparable to the sample estimator and usable as the BL prior covariance.
+    """
+    n = FREQ_PER_YEAR[freq.lower()]
+    x = returns.values.astype(float)
+    t = x.shape[0]
+    if t < 2:
+        return returns.cov() * n
+    lam = 0.5 ** (1.0 / max(1e-9, float(halflife)))
+    # Weights newest→oldest, normalised to sum 1.
+    w = lam ** np.arange(t - 1, -1, -1)
+    w = w / w.sum()
+    mean = (w[:, None] * x).sum(axis=0)
+    xc = x - mean
+    cov = (xc * w[:, None]).T @ xc
+    # Symmetrize (guards against tiny fp asymmetry) and annualize.
+    cov = 0.5 * (cov + cov.T) * n
+    return pd.DataFrame(cov, index=returns.columns, columns=returns.columns)
 
 
 def ledoit_wolf_shrink(cov: pd.DataFrame, returns: pd.DataFrame | None = None) -> pd.DataFrame:
     """Ledoit-Wolf shrinkage toward the constant-correlation target.
 
     If ``returns`` is provided we estimate the optimal shrinkage intensity from
-    it; otherwise we use a fixed 0.2 prior. Pure NumPy, ~20 lines.
+    it; otherwise we use a fixed 0.2 prior. Pure NumPy.
     """
     s = cov.values.astype(float)
     n = s.shape[0]
@@ -88,7 +124,6 @@ def ledoit_wolf_shrink(cov: pd.DataFrame, returns: pd.DataFrame | None = None) -
     var = np.diag(s)
     std = np.sqrt(np.clip(var, 1e-18, None))
     corr = s / np.outer(std, std)
-    # average off-diagonal correlation
     mask = ~np.eye(n, dtype=bool)
     r_bar = float(corr[mask].mean()) if mask.any() else 0.0
     target = r_bar * np.outer(std, std)
@@ -96,7 +131,6 @@ def ledoit_wolf_shrink(cov: pd.DataFrame, returns: pd.DataFrame | None = None) -
     if returns is None or len(returns) < 4:
         alpha = 0.2
     else:
-        # Light-touch Ledoit-Wolf intensity: based on variance of sample cov
         x = returns.values - returns.values.mean(axis=0, keepdims=True)
         t = x.shape[0]
         phi_mat = ((x[:, :, None] * x[:, None, :]) - s[None, :, :]) ** 2
@@ -107,787 +141,1055 @@ def ledoit_wolf_shrink(cov: pd.DataFrame, returns: pd.DataFrame | None = None) -
     return pd.DataFrame(shrunk, index=cov.index, columns=cov.columns)
 
 
-# ---------------------------------------------------------------------------
-# Critical Line Algorithm (long-only, sum=1, no upper bound)
-# ---------------------------------------------------------------------------
+def annualized_cov(returns: pd.DataFrame, freq: str, model: str = "ledoit") -> pd.DataFrame:
+    """Annualized covariance via the selected estimator.
 
-@dataclass
-class _TurningPoint:
-    w: np.ndarray         # weights vector
-    lam: float            # lambda (risk-aversion parameter at this corner)
-    ret: float            # annualised return
-    vol: float            # annualised vol
-
-
-def _stats(w: np.ndarray, mu: np.ndarray, cov: np.ndarray) -> tuple[float, float]:
-    r = float(w @ mu)
-    v = float(math.sqrt(max(w @ cov @ w, 0.0)))
-    return r, v
-
-
-def critical_line(mu_in: pd.Series, cov_in: pd.DataFrame,
-                  lower: float = 0.0) -> list[_TurningPoint]:
-    """Markowitz CLA for long-only, sum=1, with a per-asset lower bound.
-
-    Returns a list of turning points ordered from max-return corner (highest
-    lambda) down to min-variance corner (lambda → 0). The efficient frontier
-    is the piecewise-linear path between consecutive turning points.
-
-    Algorithm: Bailey & López de Prado (2013), simplified for the box
-    ``[lower, 1]`` with the sum-to-one equality constraint. ``lower = 0`` is
-    the standard long-only case; ``lower > 0`` enforces a per-asset minimum
-    weight (Diversified mode). At ``N·lower → 1`` the only feasible
-    portfolio is equal-weight, and we return that single corner.
+    ``model`` ∈ {"sample", "ledoit" (default), "ewma"}. Ledoit-Wolf is the
+    default because with 15–60 assets the raw sample covariance is noisy and the
+    BL prior Π = δ·Σ·w_mkt inherits that noise directly.
     """
-    symbols = list(mu_in.index)
-    mu = mu_in.values.astype(float)
-    cov = cov_in.loc[symbols, symbols].values.astype(float)
-    n = len(mu)
-    if n == 0:
-        return []
-    if n == 1:
-        w = np.array([1.0])
-        r, v = _stats(w, mu, cov)
-        return [_TurningPoint(w, 0.0, r, v)]
-    if lower < 0:
-        lower = 0.0
-    # Degenerate: floor saturates the budget — only feasible portfolio is
-    # equal-weight (w_i = 1/N everywhere).
-    if lower * n >= 1.0 - 1e-12:
-        w = np.full(n, 1.0 / n)
-        r, v = _stats(w, mu, cov)
-        return [_TurningPoint(w, 0.0, r, v)]
+    m = (model or "ledoit").lower()
+    if m == "sample":
+        return _sample_cov(returns, freq)
+    if m == "ewma":
+        return _ewma_cov(returns, freq)
+    # default: Ledoit-Wolf. Shrink in PER-PERIOD units so the data-driven
+    # intensity (which compares the sample-cov variance against ‖S−target‖ using
+    # the raw `returns`) is unit-consistent, THEN annualize. Shrinking an already
+    # ×252 covariance while estimating intensity from raw daily returns mixes
+    # units and collapses the shrinkage to ≈0 (defeats the estimator).
+    n = FREQ_PER_YEAR[freq.lower()]
+    return ledoit_wolf_shrink(returns.cov(), returns) * n
 
-    # ---- Step 1: starting corner = max-return feasible portfolio. With a
-    # floor, that puts every asset at `lower` and gives the residual
-    # (1 - (n-1)*lower) to the highest-mean asset.
-    free: list[int] = []
-    w = np.full(n, lower)
-    order = np.argsort(-mu)
-    w[order[0]] = 1.0 - (n - 1) * lower
-    free = [int(order[0])]
-    turning: list[_TurningPoint] = []
-    r, v = _stats(w, mu, cov)
-    turning.append(_TurningPoint(w.copy(), float("inf"), r, v))
 
-    def _solve_free(free_idx: list[int]) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
-        """Solve for free-asset weights as affine functions of lambda.
+# ---------------------------------------------------------------------------
+# Black-Litterman
+# ---------------------------------------------------------------------------
+#
+# All quantities are in *excess-return* space (over rf) until the final step,
+# where rf is added back so callers see total expected returns. Working in
+# excess space is the standard BL convention and keeps δ, Π and the views on the
+# same footing.
 
-        Returns (alpha, beta, c, w_F) where w_F(λ) = alpha + λ * beta is the
-        optimal free-asset allocation, and c sums beta. The KKT system for
-        the constrained QP (min ½ w'Σw - λ μ'w s.t. Σ w = 1, w_B fixed) gives
-        a linear system in [w_F; ν] that we split into a constant and a
-        λ-scaled component.
-        """
-        F = free_idx
-        kF = len(F)
-        if kF == 0:
-            raise RuntimeError("CLA: empty free set")
-        cov_FF = cov[np.ix_(F, F)]
-        # Construct KKT matrix:
-        # [ Σ_FF   1 ] [ w_F ] = [  λ μ_F - Σ_FB w_B ]
-        # [ 1ᵀ     0 ] [  ν  ]   [  1 - 1ᵀ w_B       ]
-        B = [i for i in range(n) if i not in F]
-        w_B = w[B] if B else np.zeros(0)
-        cov_FB = cov[np.ix_(F, B)] if B else np.zeros((kF, 0))
-        rhs0 = np.empty(kF + 1)
-        rhs0[:kF] = -cov_FB @ w_B if B else 0.0
-        rhs0[kF] = 1.0 - (w_B.sum() if B else 0.0)
-        rhs1 = np.empty(kF + 1)
-        rhs1[:kF] = mu[F]
-        rhs1[kF] = 0.0
-        K = np.zeros((kF + 1, kF + 1))
-        K[:kF, :kF] = cov_FF
-        K[:kF, kF] = 1.0
-        K[kF, :kF] = 1.0
-        # Pseudo-inverse handles singular cov on degenerate corners
-        try:
-            sol0 = np.linalg.solve(K, rhs0)
-            sol1 = np.linalg.solve(K, rhs1)
-        except np.linalg.LinAlgError:
-            sol0 = np.linalg.lstsq(K, rhs0, rcond=None)[0]
-            sol1 = np.linalg.lstsq(K, rhs1, rcond=None)[0]
-        alpha = sol0[:kF]
-        beta = sol1[:kF]
-        return alpha, beta, float(beta.sum()), w_B
+def black_litterman(
+    symbols: list[str],
+    cov: pd.DataFrame,
+    mkt_weights: dict[str, float],
+    views: dict[str, dict],
+    *,
+    rf: float = 0.04,
+    tau: float = 0.05,
+    haircut: float = 0.5,
+    risk_premium: float = 0.05,
+    k0: float = 5.0,
+    d0: float = 0.25,
+) -> dict:
+    """Black-Litterman posterior expected returns.
 
-    max_iter = 4 * n + 20
-    lam_prev = float("inf")
+    Parameters
+    ----------
+    symbols       : asset order (aligns cov / weights / views).
+    cov           : annualized covariance Σ (aligned to ``symbols``).
+    mkt_weights   : market-cap weights w_mkt (any positive scaling; renormalized).
+    views         : ``{sym: {"q": excess_view_return, "n": n_analysts,
+                    "disp": (hi-lo)/tgt}}`` — one absolute view per covered asset.
+                    Assets absent here get no view (fall back to the prior via Σ).
+    rf            : annual risk-free rate (added back at the end).
+    tau           : prior-uncertainty scalar (τΣ).
+    haircut       : analyst-trust H ∈ [0,1]. 0 ⇒ ignore analysts (posterior→prior),
+                    1 ⇒ full trust (posterior→views). Scales Ω by (1-H)/H.
+    risk_premium  : target market risk premium used to calibrate δ.
+    k0, d0        : view-confidence knobs (count saturation / dispersion scale).
+
+    Returns
+    -------
+    dict with ``mu`` (posterior *total* annual return per symbol), ``prior``
+    (equilibrium total return rf+Π), ``q`` (per-symbol view or None), ``delta``,
+    ``tau``, ``haircut``, ``viewed``, ``no_view``.
+    """
+    n = len(symbols)
+    Sig = cov.reindex(index=symbols, columns=symbols).values.astype(float)
+
+    # Market-cap weights, renormalized over the active set.
+    w = np.array([max(0.0, float(mkt_weights.get(s, 0.0))) for s in symbols], dtype=float)
+    tot = w.sum()
+    w = w / tot if tot > 0 else np.full(n, 1.0 / n)
+
+    # δ from a target market risk premium: premium = δ·σ²_mkt ⇒ δ = premium/σ²_mkt.
+    var_mkt = float(w @ Sig @ w)
+    delta = (risk_premium / var_mkt) if var_mkt > 1e-12 else 2.5
+    delta = float(min(max(delta, 0.5), 50.0))  # keep sane
+    pi = delta * (Sig @ w)  # equilibrium excess returns (prior mean)
+
+    # Assemble the views: P = identity rows for covered assets.
+    H = float(min(max(haircut, 0.0), 1.0))
+    q_map: dict[str, float | None] = {s: None for s in symbols}
+    viewed: list[str] = []
+    if H > 1e-6 and views:
+        rows, qs, omegas = [], [], []
+        for i, s in enumerate(symbols):
+            v = views.get(s)
+            if not v:
+                continue
+            q = v.get("q")
+            if q is None or not math.isfinite(float(q)):
+                continue
+            nn = float(v.get("n") or 0.0)
+            disp = v.get("disp")
+            disp = float(disp) if (disp is not None and math.isfinite(float(disp))) else 0.5
+            # Per-asset confidence: more analysts + tighter dispersion ⇒ tighter view.
+            n_conf = nn / (nn + k0) if nn > 0 else 0.15
+            disp_conf = 1.0 / (1.0 + max(0.0, disp) / max(1e-9, d0))
+            c_i = max(1e-3, n_conf * disp_conf)
+            base = tau * Sig[i, i]
+            # Ω tightens as H→1 and as confidence rises; (1-H)/H → 0 at full trust.
+            omega_i = base / c_i * ((1.0 - H) / H)
+            rows.append(i)
+            qs.append(float(q))
+            omegas.append(max(omega_i, 1e-12))
+            q_map[s] = float(q)
+            viewed.append(s)
+        if rows:
+            idx = np.array(rows, dtype=np.int64)
+            Q = np.array(qs, dtype=float)
+            Omega = np.diag(np.array(omegas, dtype=float))
+            tS = tau * Sig
+            tSP = tS[:, idx]                 # τΣ Pᵀ  (n×k)
+            PtSP = tS[np.ix_(idx, idx)]      # P τΣ Pᵀ (k×k)
+            k = idx.size
+            A = PtSP + Omega + 1e-12 * np.eye(k)
+            adj = tSP @ np.linalg.solve(A, Q - pi[idx])
+            post = pi + adj
+        else:
+            post = pi
+    else:
+        post = pi
+
+    mu_total = {s: float(rf + post[i]) for i, s in enumerate(symbols)}
+    prior_total = {s: float(rf + pi[i]) for i, s in enumerate(symbols)}
+    return {
+        "mu": mu_total,
+        "prior": prior_total,
+        "q": {s: (float(rf + q_map[s]) if q_map[s] is not None else None) for s in symbols},
+        "delta": float(delta),
+        "tau": float(tau),
+        "haircut": float(H),
+        "viewed": viewed,
+        "no_view": [s for s in symbols if s not in viewed],
+    }
+
+
+# ---------------------------------------------------------------------------
+# CVaR / drawdown helpers (empirical, on a portfolio's scenario returns)
+# ---------------------------------------------------------------------------
+
+def _tail_count(t: int, level: float) -> int:
+    """Number of observations in the worst (1-level) tail = ceil((1-level)·t).
+
+    The ``- 1e-9`` guards against floating-point dust: e.g. (1-0.95)·300 evaluates
+    to 15.000000000000013, whose naive ceil is 16 rather than the intended 15.
+    """
+    return max(1, int(math.ceil((1.0 - level) * t - 1e-9)))
+
+
+def cvar_of(port_ret: np.ndarray, alpha: float) -> float:
+    """Empirical CVaR_α of a portfolio return series (positive = expected loss).
+
+    CVaR = mean of the worst (1-α) fraction of losses. Loss = -return.
+    """
+    r = np.asarray(port_ret, dtype=float)
+    r = r[np.isfinite(r)]
+    t = r.size
+    if t == 0:
+        return float("nan")
+    k = _tail_count(t, alpha)
+    worst = np.sort(r)[:k]          # k smallest returns (largest losses)
+    return float(-worst.mean())
+
+
+def max_drawdown(port_ret: np.ndarray) -> float:
+    """Maximum drawdown (positive fraction) of the compounded return path."""
+    r = np.asarray(port_ret, dtype=float)
+    r = r[np.isfinite(r)]
+    if r.size == 0:
+        return float("nan")
+    curve = np.cumprod(1.0 + r)
+    peak = np.maximum.accumulate(curve)
+    dd = 1.0 - curve / peak
+    return float(dd.max()) if dd.size else 0.0
+
+
+def cdar(port_ret: np.ndarray, beta: float = 0.95) -> float:
+    """Conditional Drawdown-at-Risk: mean of the worst (1-β) drawdowns."""
+    r = np.asarray(port_ret, dtype=float)
+    r = r[np.isfinite(r)]
+    if r.size == 0:
+        return float("nan")
+    curve = np.cumprod(1.0 + r)
+    peak = np.maximum.accumulate(curve)
+    dd = 1.0 - curve / peak
+    k = _tail_count(dd.size, beta)
+    worst = np.sort(dd)[::-1][:k]   # k largest drawdowns
+    return float(worst.mean())
+
+
+# ---------------------------------------------------------------------------
+# Mean-CVaR solver — numba-JIT primal-dual interior-point method (Mehrotra)
+# ---------------------------------------------------------------------------
+#
+# LP (min-CVaR at confidence α, with an optional return floor):
+#
+#   variables : w ∈ R^N (weights), ζ ∈ R (VaR), u ∈ R^T_+ (scenario slack)
+#   minimise  : ζ + κ·Σ_t u_t                         κ = 1/((1-α)T)
+#   s.t.      : u_t + R_t·w + ζ ≥ 0     (t=1..T)       scenario
+#               a_ret·w ≥ b_ret                        return floor (inactive if b_ret=-inf)
+#               l ≤ w ≤ h                              box
+#               Σw = 1        (fully-invested)   OR    Σw ≤ 1 (cash allowed)
+#
+# At the optimum ζ*=VaR_α and the objective equals CVaR_α (daily units).
+#
+# We solve with an infeasible-start Mehrotra predictor-corrector. The Newton
+# system's u-block is diagonal, so u is eliminated by a Schur complement and each
+# iteration reduces to a dense (N+1)×(N+1) [+1 border row for the Σw=1 equality]
+# solve — the T-sized work stays as two matmuls (R and Rᵀ). See the module
+# docstring for why this beats calling scipy.optimize.linprog per frontier point.
+#
+# Inequality groups (slack s = q - Gz ≥ 0, dual λ ≥ 0):
+#   L : w ≥ l           s_L = w - l          D1 = λL/sL
+#   U : w ≤ h           s_U = h - w          D2 = λU/sU
+#   Nn: u ≥ 0           s_N = u              D3 = λN/sN
+#   Rt: a_ret·w ≥ b_ret s_R = a_ret·w-b_ret  D4 = λR/sR
+#   S : Rw+ζ+u ≥ 0      s_S = Rw+ζ+u         D5 = λS/sS
+#   C : Σw ≤ 1  (cash)  s_C = 1 - Σw         D6 = λC/sC   (only if not fully_invested)
+
+
+@njit(cache=True, fastmath=True)
+def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
+    """Solve one mean-CVaR LP. Returns (w, zeta, cvar, converged).
+
+    All inputs are float64 arrays / scalars. ``fully_invested`` is 1 (Σw=1) or 0
+    (Σw≤1). ``b_ret = -1e18`` disables the return floor.
+    """
+    T = R.shape[0]
+    N = R.shape[1]
+    nx = N + 1  # x = (w, zeta)
+
+    # ---- starting point (interior, infeasible allowed) ----
+    w = np.empty(N)
+    for i in range(N):
+        w[i] = min(max(1.0 / N, l[i] + 1e-3), h[i] - 1e-3) if h[i] - l[i] > 2e-3 else 0.5 * (l[i] + h[i])
+    zeta = 0.0
+    # portfolio scenario returns at start
+    u = np.empty(T)
+    for t in range(T):
+        rt = 0.0
+        for i in range(N):
+            rt += R[t, i] * w[i]
+        u[t] = abs(rt) + 1.0   # ensures s_S = rt+zeta+u > 0 and u > 0
+
+    # slacks
+    sL = np.empty(N); sU = np.empty(N)
+    for i in range(N):
+        sL[i] = max(w[i] - l[i], 1e-6)
+        sU[i] = max(h[i] - w[i], 1e-6)
+    sN = np.empty(T); sS = np.empty(T)
+    for t in range(T):
+        sN[t] = max(u[t], 1e-6)
+        rt = 0.0
+        for i in range(N):
+            rt += R[t, i] * w[i]
+        sS[t] = max(rt + zeta + u[t], 1e-6)
+    aw = 0.0
+    for i in range(N):
+        aw += a_ret[i] * w[i]
+    sR = max(aw - b_ret, 1e-6)
+    sumw = 0.0
+    for i in range(N):
+        sumw += w[i]
+    sC = max(1.0 - sumw, 1e-6)
+
+    # duals: balance the initial complementarity products (λ_i·s_i ≈ 1) instead
+    # of λ=1. This also neutralises a disabled return floor (s_R≈1e18 ⇒ λ_R≈1e-18
+    # ⇒ product ≈ 1, so it never pollutes the duality measure) and typically
+    # halves iterations vs a flat λ=1 start.
+    lL = np.empty(N); lU = np.empty(N)
+    for i in range(N):
+        lL[i] = 1.0 / sL[i]
+        lU[i] = 1.0 / sU[i]
+    lN = np.empty(T); lS = np.empty(T)
+    for t in range(T):
+        lN[t] = 1.0 / sN[t]
+        lS[t] = 1.0 / sS[t]
+    lR = 1.0 / sR
+    lC = 1.0 / sC
+    y = 0.0  # equality dual (budget)
+
+    m = 2 * N + 2 * T + 1 + (0 if fully_invested == 1 else 1)  # #inequalities
+
+    conv = 0
     for _ in range(max_iter):
-        # Decide candidate transitions: an asset enters or leaves the free set
-        # at the λ where its weight hits 0 or where lagrangian sign flips.
-        alpha, beta, _, _ = _solve_free(free)
+        # ---- duality measure ----
+        comp = 0.0
+        for i in range(N):
+            comp += sL[i] * lL[i] + sU[i] * lU[i]
+        for t in range(T):
+            comp += sN[t] * lN[t] + sS[t] * lS[t]
+        comp += sR * lR
+        if fully_invested == 0:
+            comp += sC * lC
+        mu = comp / m
 
-        # Candidate λ where a free asset's weight hits 0 (it would leave free)
-        best_lam = -math.inf
-        best_action: tuple[str, int] | None = None
-        for k, i in enumerate(free):
-            b = beta[k]
-            a = alpha[k]
-            if abs(b) < 1e-14:
-                continue
-            lam_i = (lower - a) / b   # w_i(λ) = a + λ b = lower
-            if lam_i < lam_prev - 1e-12 and lam_i > best_lam:
-                best_lam = lam_i
-                best_action = ("remove", i)
-
-        # Candidate λ where a bound asset would want to become free (gradient
-        # of Lagrangian on its bound becomes favorable).
-        # For an asset i at bound 0, it enters when
-        #   λ μ_i  - Σ_iF w_F(λ) - ν(λ) = 0
-        # which is linear in λ; solve for λ.
-        # We compute ν(λ) implicitly via KKT — easier: refit including i and
-        # check whether its weight would become positive.
-        for i in range(n):
-            if i in free:
-                continue
-            trial = sorted(free + [i])
-            try:
-                a_t, b_t, _, _ = _solve_free(trial)
-            except Exception:
-                continue
-            j = trial.index(i)
-            a_i, b_i = a_t[j], b_t[j]
-            if abs(b_i) < 1e-14:
-                continue
-            lam_i = (lower - a_i) / b_i   # weight of i hits lower from above at this λ
-            if lam_i < lam_prev - 1e-12 and lam_i > best_lam:
-                best_lam = lam_i
-                best_action = ("add", i)
-
-        if best_action is None or best_lam <= 0:
-            # Compute global minimum-variance portfolio (λ = 0). Bound assets
-            # stay at `lower`; free assets take the KKT-solved α₀ value.
-            alpha0, _, _, _ = _solve_free(free)
-            w_new = np.full(n, lower)
-            for k, i in enumerate(free):
-                w_new[i] = max(lower, alpha0[k])
-            s = w_new.sum()
-            # Renormalise only via the free assets — bound assets must stay
-            # at exactly `lower`. Compute the excess and redistribute on the
-            # free set proportionally to their already-clipped values.
-            excess = s - 1.0
-            if abs(excess) > 1e-12 and free:
-                free_sum = sum(w_new[i] - lower for i in free)
-                if free_sum > 1e-12:
-                    scale = (free_sum - excess) / free_sum
-                    for i in free:
-                        w_new[i] = lower + (w_new[i] - lower) * scale
-            r, v = _stats(w_new, mu, cov)
-            turning.append(_TurningPoint(w_new, 0.0, r, v))
+        # 1e-9 duality gap ⇒ objective accurate to well past the 1e-6 bar the
+        # HiGHS cross-check enforces. Tighter (1e-10) makes degenerate near-cash
+        # vertices spuriously hit the iteration cap without improving the answer.
+        if mu < 1e-9:
+            conv = 1
             break
 
-        # Apply transition
-        lam_prev = best_lam
-        w_new = np.full(n, lower)
-        alpha_t, beta_t, _, _ = _solve_free(free if best_action[0] == "remove"
-                                            else sorted(free + [best_action[1]]))
-        idx_set = free if best_action[0] == "remove" else sorted(free + [best_action[1]])
-        for k, i in enumerate(idx_set):
-            w_new[i] = max(lower, alpha_t[k] + best_lam * beta_t[k])
-        s = w_new.sum()
-        excess = s - 1.0
-        if abs(excess) > 1e-12 and idx_set:
-            free_sum = sum(w_new[i] - lower for i in idx_set)
-            if free_sum > 1e-12:
-                scale = (free_sum - excess) / free_sum
-                for i in idx_set:
-                    w_new[i] = lower + (w_new[i] - lower) * scale
-        r, v = _stats(w_new, mu, cov)
-        turning.append(_TurningPoint(w_new, best_lam, r, v))
-        # Update free set
-        if best_action[0] == "remove":
-            free = [i for i in free if i != best_action[1]]
-            if not free:
-                # All free assets have hit `lower` — we've reached the
-                # most-diversified extreme. Bail out with this as the min-vol
-                # corner instead of re-seeding (which would only loop).
-                break
+        # ---- diagonal D = λ/s per group ----
+        D1 = lL / sL
+        D2 = lU / sU
+        D3 = lN / sN
+        D5 = lS / sS
+        D4 = lR / sR
+        D6 = lC / sC
+
+        # ---- primal residuals r_p = Gz + s - q (per group) ----
+        # For s defined independently we track r_p to drive feasibility.
+        # r_p_L = (-w + sL) - (-l) = sL - (w - l)
+        rpL = np.empty(N); rpU = np.empty(N)
+        for i in range(N):
+            rpL[i] = sL[i] - (w[i] - l[i])
+            rpU[i] = sU[i] - (h[i] - w[i])
+        rpN = np.empty(T); rpS = np.empty(T)
+        for t in range(T):
+            rt = 0.0
+            for i in range(N):
+                rt += R[t, i] * w[i]
+            rpN[t] = sN[t] - u[t]
+            rpS[t] = sS[t] - (rt + zeta + u[t])
+        aw = 0.0; sumw = 0.0
+        for i in range(N):
+            aw += a_ret[i] * w[i]
+            sumw += w[i]
+        rpR = sR - (aw - b_ret)
+        rpC = sC - (1.0 - sumw)
+        rb = sumw - 1.0  # equality residual (budget), only used if fully_invested
+
+        # ---- dual residual r_d = c + Gᵀλ + Bᵀy ----
+        # c: c_w=0, c_zeta=1, c_u=kappa
+        rSsum = 0.0
+        for t in range(T):
+            rSsum += lS[t]
+        rdw = np.empty(N)
+        for i in range(N):
+            v = 0.0
+            # groups touching w: L(-I), U(+I), R(-a_ret), S(-R), C(+1 if cash)
+            v += -lL[i] + lU[i] - lR * a_ret[i]
+            for t in range(T):
+                v += -R[t, i] * lS[t]
+            if fully_invested == 0:
+                v += lC
+            else:
+                v += y  # Bᵀy, budget column = 1
+            rdw[i] = v
+        rdz = 1.0 - rSsum
+        rdu = np.empty(T)
+        for t in range(T):
+            rdu[t] = kappa - lN[t] - lS[t]
+
+        # ================= Mehrotra: affine predictor =================
+        # r_c = λ∘s (σ=0). rhs uses (r_c - λ∘r_p)/s and r_d.
+        # Build reduced (x=(w,zeta)) system twice (affine, then corrector);
+        # H is identical, only rhs differs.
+
+        # g_t after u-elimination: g = D3*D5/(D3+D5)
+        g = np.empty(T)
+        for t in range(T):
+            g[t] = D3[t] * D5[t] / (D3[t] + D5[t])
+
+        # ---- build S_xx (nx×nx) once ----
+        Sxx = np.zeros((nx, nx))
+        for i in range(N):
+            Sxx[i, i] += D1[i] + D2[i]
+        # return rank-1: D4 * a_ret a_retᵀ
+        for i in range(N):
+            di = D4 * a_ret[i]
+            for j in range(N):
+                Sxx[i, j] += di * a_ret[j]
+        # cash rank-1: D6 * 1 1ᵀ
+        if fully_invested == 0:
+            for i in range(N):
+                for j in range(N):
+                    Sxx[i, j] += D6
+        # scenario contribution g_t (R_t;1)(R_t;1)ᵀ  via matmuls
+        Rg = np.empty((T, N))
+        for t in range(T):
+            for i in range(N):
+                Rg[t, i] = g[t] * R[t, i]
+        RtGR = R.T @ Rg              # N×N
+        RtG = np.empty(N)            # Σ_t g_t R_t
+        gsum = 0.0
+        for t in range(T):
+            gsum += g[t]
+        for i in range(N):
+            acc = 0.0
+            for t in range(T):
+                acc += Rg[t, i]
+            RtG[i] = acc
+        for i in range(N):
+            for j in range(N):
+                Sxx[i, j] += RtGR[i, j]
+            Sxx[i, N] += RtG[i]
+            Sxx[N, i] += RtG[i]
+        Sxx[N, N] += gsum
+
+        # augmented KKT matrix M (with budget border if fully invested)
+        if fully_invested == 1:
+            nk = nx + 1
         else:
-            free = sorted(free + [best_action[1]])
+            nk = nx
+        M = np.zeros((nk, nk))
+        for i in range(nx):
+            for j in range(nx):
+                M[i, j] = Sxx[i, j]
+        if fully_invested == 1:
+            for i in range(N):
+                M[i, nx] = 1.0
+                M[nx, i] = 1.0
 
-    return turning
+        # helper values reused by both solves
+        # e_t coefficient for reducing rhs_u: E = D5/(D3+D5)
+        Ecoef = np.empty(T)
+        for t in range(T):
+            Ecoef[t] = D5[t] / (D3[t] + D5[t])
+
+        # ================= affine predictor (sigma=0) =================
+        # tv_* = (r_c - lam*rp)/s  with r_c = lam*s  ->  tv = lam - lam*rp/s
+        tvL = np.empty(N); tvU = np.empty(N)
+        for i in range(N):
+            tvL[i] = lL[i] - lL[i] * rpL[i] / sL[i]
+            tvU[i] = lU[i] - lU[i] * rpU[i] / sU[i]
+        tvN = np.empty(T); tvS = np.empty(T)
+        for t in range(T):
+            tvN[t] = lN[t] - lN[t] * rpN[t] / sN[t]
+            tvS[t] = lS[t] - lS[t] * rpS[t] / sS[t]
+        tvR = lR - lR * rpR / sR
+        tvC = lC - lC * rpC / sC
+
+        dw_a = np.empty(N); dz_a = np.empty(1); du_a = np.empty(T)
+        dy_a = np.empty(1)
+        _solve_reduced(M, nx, nk, N, T, fully_invested,
+                       rdw, rdz, rdu, rb, tvL, tvU, tvN, tvS, tvR, tvC,
+                       a_ret, R, D5, Ecoef,
+                       dw_a, dz_a, du_a, dy_a)
+
+        # recover affine Ds, Dlam per group. Ds = -rp - G*Dz ; complementarity
+        # (sigma=0): Lam*Ds + S*Dlam = -(lam*s)  ->  Dlam = -lam - lam*Ds/s.
+        dsL_a = np.empty(N); dsU_a = np.empty(N)
+        dlL_a = np.empty(N); dlU_a = np.empty(N)
+        dlN_a = np.empty(T); dlS_a = np.empty(T)
+        du_af = du_a
+        dz_af = dz_a[0]
+        for i in range(N):
+            dsL = -rpL[i] - (-dw_a[i])
+            dsU = -rpU[i] - dw_a[i]
+            dsL_a[i] = dsL; dsU_a[i] = dsU
+            dlL_a[i] = -lL[i] - lL[i] * dsL / sL[i]
+            dlU_a[i] = -lU[i] - lU[i] * dsU / sU[i]
+        dsN_a = np.empty(T); dsS_a = np.empty(T)
+        for t in range(T):
+            rdw_t = 0.0
+            for i in range(N):
+                rdw_t += R[t, i] * dw_a[i]
+            gzN = -du_af[t]
+            gzS = -(rdw_t + dz_af + du_af[t])
+            dsN = -rpN[t] - gzN
+            dsS = -rpS[t] - gzS
+            dsN_a[t] = dsN; dsS_a[t] = dsS
+            dlN_a[t] = -lN[t] - lN[t] * dsN / sN[t]
+            dlS_a[t] = -lS[t] - lS[t] * dsS / sS[t]
+        adw_r = 0.0; sumdw = 0.0
+        for i in range(N):
+            adw_r += a_ret[i] * dw_a[i]
+            sumdw += dw_a[i]
+        gzR = -adw_r
+        dsR_a = -rpR - gzR
+        dlR_a = -lR - lR * dsR_a / sR
+        gzC = sumdw
+        dsC_a = -rpC - gzC
+        dlC_a = -lC - lC * dsC_a / sC
+
+        # affine step length (fraction to boundary on s,λ ≥ 0)
+        a_aff = 1.0
+        a_aff = _ratio(a_aff, sL, dsL_a); a_aff = _ratio(a_aff, sU, dsU_a)
+        a_aff = _ratio(a_aff, sN, dsN_a); a_aff = _ratio(a_aff, sS, dsS_a)
+        a_aff = _ratio(a_aff, lL, dlL_a); a_aff = _ratio(a_aff, lU, dlU_a)
+        a_aff = _ratio(a_aff, lN, dlN_a); a_aff = _ratio(a_aff, lS, dlS_a)
+        a_aff = _ratio1(a_aff, sR, dsR_a); a_aff = _ratio1(a_aff, lR, dlR_a)
+        if fully_invested == 0:
+            a_aff = _ratio1(a_aff, sC, dsC_a); a_aff = _ratio1(a_aff, lC, dlC_a)
+
+        # mu_aff
+        comp_aff = 0.0
+        for i in range(N):
+            comp_aff += (sL[i] + a_aff * dsL_a[i]) * (lL[i] + a_aff * dlL_a[i])
+            comp_aff += (sU[i] + a_aff * dsU_a[i]) * (lU[i] + a_aff * dlU_a[i])
+        for t in range(T):
+            comp_aff += (sN[t] + a_aff * dsN_a[t]) * (lN[t] + a_aff * dlN_a[t])
+            comp_aff += (sS[t] + a_aff * dsS_a[t]) * (lS[t] + a_aff * dlS_a[t])
+        comp_aff += (sR + a_aff * dsR_a) * (lR + a_aff * dlR_a)
+        if fully_invested == 0:
+            comp_aff += (sC + a_aff * dsC_a) * (lC + a_aff * dlC_a)
+        mu_aff = comp_aff / m
+        sigma = (mu_aff / mu) ** 3
+        if sigma > 1.0:
+            sigma = 1.0
+        sig_mu = sigma * mu
+
+        # ================= corrector solve =================
+        # r_c = λ s - sig_mu + Δs_aff∘Δλ_aff ; tv = (r_c - λ rp)/s
+        for i in range(N):
+            rcL = lL[i] * sL[i] - sig_mu + dsL_a[i] * dlL_a[i]
+            rcU = lU[i] * sU[i] - sig_mu + dsU_a[i] * dlU_a[i]
+            tvL[i] = (rcL - lL[i] * rpL[i]) / sL[i]
+            tvU[i] = (rcU - lU[i] * rpU[i]) / sU[i]
+        for t in range(T):
+            rcN = lN[t] * sN[t] - sig_mu + dsN_a[t] * dlN_a[t]
+            rcS = lS[t] * sS[t] - sig_mu + dsS_a[t] * dlS_a[t]
+            tvN[t] = (rcN - lN[t] * rpN[t]) / sN[t]
+            tvS[t] = (rcS - lS[t] * rpS[t]) / sS[t]
+        rcR = lR * sR - sig_mu + dsR_a * dlR_a
+        tvR = (rcR - lR * rpR) / sR
+        rcC = lC * sC - sig_mu + dsC_a * dlC_a
+        tvC = (rcC - lC * rpC) / sC
+
+        dw = np.empty(N); dz = np.empty(1); du = np.empty(T); dyv = np.empty(1)
+        _solve_reduced(M, nx, nk, N, T, fully_invested,
+                       rdw, rdz, rdu, rb, tvL, tvU, tvN, tvS, tvR, tvC,
+                       a_ret, R, D5, Ecoef,
+                       dw, dz, du, dyv)
+
+        # recover ds, dl for corrector
+        dsL = np.empty(N); dsU = np.empty(N); dlL = np.empty(N); dlU = np.empty(N)
+        for i in range(N):
+            gzl = -dw[i]; gzu = dw[i]
+            dsL[i] = -rpL[i] - gzl
+            dsU[i] = -rpU[i] - gzu
+            rcL = lL[i] * sL[i] - sig_mu + dsL_a[i] * dlL_a[i]
+            rcU = lU[i] * sU[i] - sig_mu + dsU_a[i] * dlU_a[i]
+            dlL[i] = (-rcL - lL[i] * dsL[i]) / sL[i]
+            dlU[i] = (-rcU - lU[i] * dsU[i]) / sU[i]
+        dsN = np.empty(T); dsS = np.empty(T); dlN = np.empty(T); dlS = np.empty(T)
+        dz0 = dz[0]
+        for t in range(T):
+            rdw_t = 0.0
+            for i in range(N):
+                rdw_t += R[t, i] * dw[i]
+            gzN = -du[t]
+            gzS = -(rdw_t + dz0 + du[t])
+            dsN[t] = -rpN[t] - gzN
+            dsS[t] = -rpS[t] - gzS
+            rcN = lN[t] * sN[t] - sig_mu + dsN_a[t] * dlN_a[t]
+            rcS = lS[t] * sS[t] - sig_mu + dsS_a[t] * dlS_a[t]
+            dlN[t] = (-rcN - lN[t] * dsN[t]) / sN[t]
+            dlS[t] = (-rcS - lS[t] * dsS[t]) / sS[t]
+        adw_r = 0.0; sumdw = 0.0
+        for i in range(N):
+            adw_r += a_ret[i] * dw[i]
+            sumdw += dw[i]
+        dsR = -rpR - (-adw_r)
+        rcR = lR * sR - sig_mu + dsR_a * dlR_a
+        dlR = (-rcR - lR * dsR) / sR
+        dsC = -rpC - sumdw
+        rcC = lC * sC - sig_mu + dsC_a * dlC_a
+        dlC = (-rcC - lC * dsC) / sC
+
+        # step length (fraction to boundary, η=0.95)
+        eta = 0.95
+        a_p = 1.0
+        a_p = _ratio(a_p, sL, dsL); a_p = _ratio(a_p, sU, dsU)
+        a_p = _ratio(a_p, sN, dsN); a_p = _ratio(a_p, sS, dsS)
+        a_p = _ratio(a_p, lL, dlL); a_p = _ratio(a_p, lU, dlU)
+        a_p = _ratio(a_p, lN, dlN); a_p = _ratio(a_p, lS, dlS)
+        a_p = _ratio1(a_p, sR, dsR); a_p = _ratio1(a_p, lR, dlR)
+        if fully_invested == 0:
+            a_p = _ratio1(a_p, sC, dsC); a_p = _ratio1(a_p, lC, dlC)
+        step = eta * a_p
+        if step > 1.0:
+            step = 1.0
+
+        # ---- update ----
+        for i in range(N):
+            w[i] += step * dw[i]
+            sL[i] += step * dsL[i]; sU[i] += step * dsU[i]
+            lL[i] += step * dlL[i]; lU[i] += step * dlU[i]
+        zeta += step * dz0
+        for t in range(T):
+            u[t] += step * du[t]
+            sN[t] += step * dsN[t]; sS[t] += step * dsS[t]
+            lN[t] += step * dlN[t]; lS[t] += step * dlS[t]
+        sR += step * dsR; lR += step * dlR
+        if fully_invested == 0:
+            sC += step * dsC; lC += step * dlC
+        else:
+            y += step * dyv[0]
+
+    # objective = zeta + kappa * sum(max(0, -(R w + zeta))) — recompute cleanly
+    cvar = zeta
+    for t in range(T):
+        rt = 0.0
+        for i in range(N):
+            rt += R[t, i] * w[i]
+        loss = -(rt + zeta)
+        if loss > 0.0:
+            cvar += kappa * loss
+    # clip tiny negatives on weights and (if fully invested) renormalize gently
+    for i in range(N):
+        if w[i] < l[i]:
+            w[i] = l[i]
+        elif w[i] > h[i]:
+            w[i] = h[i]
+    return w, zeta, cvar, conv
 
 
-def critical_line_with_floor(mu_in: pd.Series, cov_in: pd.DataFrame,
-                             floor: float) -> list[_TurningPoint]:
-    """Convenience: long-only CLA with a per-asset minimum weight.
+@njit(cache=True, fastmath=True)
+def _ratio(alpha, s, ds):
+    """Fraction-to-boundary over an array: max α s.t. s+α ds ≥ 0."""
+    n = s.shape[0]
+    for i in range(n):
+        if ds[i] < 0.0:
+            r = -s[i] / ds[i]
+            if r < alpha:
+                alpha = r
+    return alpha
 
-    Equivalent to ``critical_line(mu, cov, lower=floor)`` — kept as a named
-    entry point so callers reading the dashboard side can see at a glance
-    that Diversified mode goes through here.
+
+@njit(cache=True, fastmath=True)
+def _ratio1(alpha, s, ds):
+    """Fraction-to-boundary for a scalar."""
+    if ds < 0.0:
+        r = -s / ds
+        if r < alpha:
+            alpha = r
+    return alpha
+
+
+@njit(cache=True, fastmath=True)
+def _solve_reduced(M, nx, nk, N, T, fully_invested,
+                   rdw, rdz, rdu, rb, tvL, tvU, tvN, tvS, tvR, tvC,
+                   a_ret, R, D5, Ecoef,
+                   dw_out, dz_out, du_out, dy_out):
+    """Solve the reduced KKT system for (Δw, Δζ, Δu, Δy).
+
+    rhs_z = -r_d + Gᵀ((r_c - λ∘r_p)/s) = -r_d + Gᵀ(tv). Then u eliminated:
+    rhs_x -= Σ_t Ecoef_t * tvU-part... (see module math). ``M`` is the prebuilt
+    augmented matrix (Schur S_xx plus budget border when fully invested).
     """
-    return critical_line(mu_in, cov_in, lower=max(0.0, float(floor)))
+    # Gᵀ(tv): w-part = -tvL + tvU - tvR a_ret - Rᵀ tvS (+ tvC if cash)
+    # zeta-part = -Σ tvS ; u-part = -tvN - tvS
+    gtw = np.empty(N)
+    tvSsum = 0.0
+    for t in range(T):
+        tvSsum += tvS[t]
+    for i in range(N):
+        v = -tvL[i] + tvU[i] - tvR * a_ret[i]
+        for t in range(T):
+            v += -R[t, i] * tvS[t]
+        if fully_invested == 0:
+            v += tvC
+        gtw[i] = v
+    gtz = -tvSsum
+    gtu = np.empty(T)
+    for t in range(T):
+        gtu[t] = -tvN[t] - tvS[t]
+
+    # rhs_z (full): -r_d + Gᵀtv
+    rzw = np.empty(N)
+    for i in range(N):
+        rzw[i] = -rdw[i] + gtw[i]
+    rzz = -rdz + gtz
+    rzu = np.empty(T)
+    for t in range(T):
+        rzu[t] = -rdu[t] + gtu[t]
+
+    # eliminate u: rhs_x -= H_xu H_uu^{-1} rhs_u, with column t = D5_t (R_t;1),
+    # H_uu^{-1}_t = 1/(D3+D5). e_t = Ecoef_t * rzu_t  (Ecoef=D5/(D3+D5))
+    ew = np.zeros(N)
+    ez = 0.0
+    for t in range(T):
+        e = Ecoef[t] * rzu[t]
+        for i in range(N):
+            ew[i] += e * R[t, i]
+        ez += e
+    rxw = np.empty(N)
+    for i in range(N):
+        rxw[i] = rzw[i] - ew[i]
+    rxz = rzz - ez
+
+    # assemble and solve augmented system
+    rhs = np.empty(nk)
+    for i in range(N):
+        rhs[i] = rxw[i]
+    rhs[N] = rxz
+    if fully_invested == 1:
+        rhs[nx] = -rb
+    sol = np.linalg.solve(M, rhs)
+    for i in range(N):
+        dw_out[i] = sol[i]
+    dz_out[0] = sol[N]
+    if fully_invested == 1:
+        dy_out[0] = sol[nx]
+    else:
+        dy_out[0] = 0.0
+
+    # recover Δu_t = (1/(D3+D5)) (rzu_t - D5_t (R_t·Δw + Δζ))
+    dz0 = dz_out[0]
+    for t in range(T):
+        rdw_t = 0.0
+        for i in range(N):
+            rdw_t += R[t, i] * dw_out[i]
+        inv = Ecoef[t] / D5[t]  # = 1/(D3+D5)
+        du_out[t] = inv * (rzu[t] - D5[t] * (rdw_t + dz0))
 
 
 # ---------------------------------------------------------------------------
-# Frontier sampling + tangency
-# ---------------------------------------------------------------------------
-
-def _segment_arc_len(a: _TurningPoint, b: _TurningPoint,
-                     mu_v: np.ndarray, cov_v: np.ndarray, k: int = 8) -> float:
-    """Approximate arc length of the (vol, ret) curve as weights walk a→b.
-
-    Both ``ret`` and ``vol²`` are quadratic in the segment parameter ``t``
-    (ret is linear; vol² = wᵀΣw becomes A + 2Bt + Ct²), so a small Simpson
-    rule on ``k+1`` sample points is more than enough — empirically <1e-4
-    relative error vs k=64 even on pathological segments.
-    """
-    if k < 2:
-        k = 2
-    ts = np.linspace(0.0, 1.0, k + 1)
-    rs = np.empty(k + 1)
-    vs = np.empty(k + 1)
-    for i, t in enumerate(ts):
-        w = (1.0 - t) * a.w + t * b.w
-        rs[i] = float(w @ mu_v)
-        vs[i] = math.sqrt(max(float(w @ cov_v @ w), 0.0))
-    return float(np.sum(np.hypot(np.diff(vs), np.diff(rs))))
-
-
-def frontier_curve(turning: list[_TurningPoint], mu: pd.Series, cov: pd.DataFrame,
-                   n_samples: int = 200) -> list[dict]:
-    """Sample n points along the piecewise-linear efficient frontier.
-
-    Improvements over the simple Euclidean-chord allocation:
-
-    * Per-segment sample count is proportional to the **arc length** of the
-      curve in (vol, ret) space — not the straight-line chord. Without this,
-      curved segments (where weight-space linearity ≠ (vol,ret) linearity)
-      get under-sampled and the rendered polyline cuts the arc, producing
-      visible "spikes" between dense and sparse segments.
-    * **Every turning point is included exactly once and in order** so the
-      true min-variance corner (``turning[-1]``) and max-return corner
-      (``turning[0]``) are the first and last entries of the output. That
-      lets the UI slider land precisely on them at its endpoints.
-    * An **upper-envelope filter** drops any sample whose ``ret`` is ≤ the
-      running max ``ret`` at a smaller ``vol``. Mathematically the efficient
-      frontier is the upper envelope of the feasible set, so we enforce
-      monotone-nondecreasing ret(vol). Kills residual numerical jitter that
-      would otherwise show as zigzags.
-
-    Returns dicts ``{ret, vol, weights}`` ordered from min-vol to max-ret.
-    """
-    if not turning:
-        return []
-    # Order from min-vol (last turning point, λ≈0) to max-ret (first, λ→∞)
-    tp = list(reversed(turning))
-    symbols = list(mu.index)
-    mu_v = mu.values.astype(float)
-    cov_v = cov.loc[symbols, symbols].values.astype(float)
-
-    def _pt(w: np.ndarray) -> dict:
-        r, v = _stats(w, mu_v, cov_v)
-        return {"ret": r, "vol": v, "weights": dict(zip(symbols, w.tolist()))}
-
-    if len(tp) == 1:
-        return [_pt(tp[0].w)]
-
-    # Arc length per segment for sample-budget allocation
-    seg_lens = [max(1e-12, _segment_arc_len(a, b, mu_v, cov_v))
-                for a, b in zip(tp[:-1], tp[1:])]
-    total = sum(seg_lens) or 1e-12
-    n_samples = max(len(tp), int(n_samples))
-    # Floor of 3 interior samples per segment so even tiny corners get drawn
-    interior_budget = max(0, n_samples - len(tp))
-    per_seg_extra = [max(0, int(round(interior_budget * L / total))) for L in seg_lens]
-
-    pts: list[dict] = [_pt(tp[0].w)]  # exact min-vol corner
-    for (a, b), extra in zip(zip(tp[:-1], tp[1:]), per_seg_extra):
-        k = max(0, extra)
-        if k > 0:
-            # Interior samples strictly between t=0 and t=1 (corners are added
-            # by neighbouring segments / the explicit append below).
-            for t in np.linspace(0.0, 1.0, k + 2)[1:-1]:
-                w = (1.0 - t) * a.w + t * b.w
-                # CLA weights are non-negative by construction, but clip+renorm
-                # is cheap insurance against floating-point drift.
-                w = np.clip(w, 0.0, None)
-                s = w.sum()
-                if s > 0:
-                    w = w / s
-                pts.append(_pt(w))
-        # Append the right-hand corner exactly once
-        pts.append(_pt(b.w))
-
-    # Sort by vol and apply the upper-envelope filter. This is the *definition*
-    # of the efficient frontier in (vol, ret) space, so any non-monotone
-    # samples are by construction dominated — safe to drop.
-    pts.sort(key=lambda p: (p["vol"], -p["ret"]))
-    cleaned: list[dict] = []
-    best_ret = -math.inf
-    for p in pts:
-        if p["ret"] > best_ret + 1e-12:
-            cleaned.append(p)
-            best_ret = p["ret"]
-    # Ensure the exact endpoints are present (they should be after sort, but
-    # the filter can drop a numerically-identical duplicate of the corner).
-    if cleaned and cleaned[0]["vol"] > tp[0].vol + 1e-12:
-        cleaned.insert(0, _pt(tp[0].w))
-    if cleaned and cleaned[-1]["ret"] < tp[-1].ret - 1e-12:
-        cleaned.append(_pt(tp[-1].w))
-    return cleaned
-
-
-def tangency_portfolio(curve: list[dict], rf: float = 0.0) -> dict | None:
-    """Max-Sharpe point on the supplied frontier polyline."""
-    if not curve:
-        return None
-    best = max(curve, key=lambda p: (p["ret"] - rf) / p["vol"] if p["vol"] > 1e-12 else -math.inf)
-    sharpe = (best["ret"] - rf) / best["vol"] if best["vol"] > 1e-12 else float("nan")
-    return {**best, "sharpe": sharpe}
-
-
-# ---------------------------------------------------------------------------
-# Monte-Carlo cloud (visual decoration)
+# Bootstrap frontier-stability band — parallel across all cores (prange)
 # ---------------------------------------------------------------------------
 #
-# Design notes
-# ------------
-# The cloud serves two purposes for the user:
-#   (1) visually convey the feasible set of long-only portfolios, and
-#   (2) make the efficient-frontier curve look honest by ensuring some
-#       random samples actually sit at or near the frontier.
-#
-# A pure Dirichlet(α≈0.3-1.0) sampler on N≈55 assets concentrates around
-# equal-weight portfolios (mass is roughly Beta-distributed with mean 1/N
-# and tiny variance), so the resulting cloud never reaches the high-return
-# corner (≈100% on the best-mu asset) nor the low-vol corner (concentrated
-# on the lowest-vol asset). The frontier ends up "floating" above an
-# unrelated cluster — visually suspect, even when correct.
-#
-# The mixture sampler below explicitly explores:
-#   * sparse-k subsets — pick k ∈ {1,2,3,5,8,13,21}, Dirichlet(1) within
-#     the subset. Reaches single-asset and small-coalition corners.
-#   * low-α Dirichlet (α=0.05) — heavily skewed, often near-corner.
-#   * medium-α Dirichlet (α=0.3) — the legacy "concentrated" tier.
-#   * high-α Dirichlet (α=1.0) — uniform on the simplex.
-#
-# All evaluation goes through a numba-JIT, parallel kernel (`_mc_kernel`)
-# so 30M portfolios on a modern multi-core box finish in ~30-60s with
-# bounded memory. The outer Python loop streams batches and discards W
-# after each batch — only the (vol, ret, sharpe) triples persist.
-# Result is returned as a contiguous (N, 3) float32 array.
-
-_SPARSE_K_CHOICES = np.array([1, 2, 3, 5, 8, 13, 21], dtype=np.int64)
-
+# The optimization math is cheap, so the compute budget the user dials in
+# (light/standard/dense) is spent here, where it buys something real: the
+# sampling uncertainty of the frontier. Each of B replicas resamples the T daily
+# scenarios with replacement and re-solves the min-CVaR LP at every frontier
+# return level; the cross-replica spread of the resulting CVaR is the band.
 
 @njit(parallel=True, fastmath=True, cache=True)
-def _mc_kernel(W, mu_v, cov_v, rf):
-    """Compute (vol, ret, sharpe) for each row of W. JIT, multi-core, no allocations of W."""
-    n = W.shape[0]
-    m = W.shape[1]
-    out = np.empty((n, 3), dtype=np.float32)
-    for i in prange(n):
-        r = 0.0
-        for j in range(m):
-            r += W[i, j] * mu_v[j]
-        v2 = 0.0
-        for j in range(m):
-            s = 0.0
-            for k in range(m):
-                s += W[i, k] * cov_v[k, j]
-            v2 += W[i, j] * s
-        if v2 < 0.0:
-            v2 = 0.0
-        v = math.sqrt(v2)
-        out[i, 0] = np.float32(v)
-        out[i, 1] = np.float32(r)
-        if v > 1e-12:
-            out[i, 2] = np.float32((r - rf) / v)
-        else:
-            out[i, 2] = np.float32(np.nan)
+def _bootstrap_cvar(R, a_ret, targets, l, h, kappa, fully_invested, seeds):
+    """Annualized CVaR at each target on B bootstrap-resampled scenario sets.
+
+    ``prange`` over the B replicas (one per seed) → all cores. Returns
+    cvar_ann[B, K]; row spread = frontier sampling uncertainty. Each inner solve
+    is an independent :func:`_cvar_pdip` call, safe to run concurrently.
+    """
+    B = seeds.shape[0]
+    K = targets.shape[0]
+    T = R.shape[0]
+    N = R.shape[1]
+    ann = math.sqrt(252.0)
+    out = np.empty((B, K))
+    for b in prange(B):
+        np.random.seed(seeds[b])            # per-replica determinism (thread-local RNG)
+        Rb = np.empty((T, N))
+        for t in range(T):
+            src = np.random.randint(0, T)   # resample a scenario row with replacement
+            for i in range(N):
+                Rb[t, i] = R[src, i]
+        for k in range(K):
+            w, zeta, cvar, conv = _cvar_pdip(Rb, a_ret, targets[k], l, h,
+                                             kappa, fully_invested, 60)
+            out[b, k] = cvar * ann
     return out
 
 
-def _sample_batch(rng: np.random.Generator, n_assets: int, batch_size: int,
-                  floor: float = 0.0) -> np.ndarray:
-    """Mixture sampler: returns (batch_size, n_assets) float64 weights summing to 1 per row.
+def bootstrap_cvar(R: np.ndarray, ctx: dict, seeds: np.ndarray) -> np.ndarray:
+    """Run one bootstrap chunk (thin py wrapper around the prange kernel).
 
-    When ``floor > 0`` (Diversified mode) sparse-k samples violate the
-    per-asset minimum by construction, so we skip them entirely and reweight
-    the Dirichlet mixture across α=0.3/1.0 (low-α concentrates mass on few
-    assets and is also a poor fit when every asset must carry weight).
-    Each row is shifted via ``w = floor + B * ũ`` with ``B = 1 - N*floor``
-    so the per-asset floor is exactly enforced.
+    ``ctx`` is the ``_ctx`` dict returned by :func:`mean_cvar_frontier`. Called
+    once per streamed chunk so the orchestrator can report progress and honour
+    cancellation between chunks. Returns cvar_ann[len(seeds), K].
     """
-    W = np.zeros((batch_size, n_assets), dtype=np.float64)
-    if floor > 0.0 and n_assets >= 1 and floor * n_assets < 1.0:
-        # Diversified mixture: medium / high Dirichlet only (skip sparse-k
-        # because at least one entry would be 0 < floor).
-        n_med  = int(0.50 * batch_size)
-        n_high = batch_size - n_med
-        row = 0
-        if n_med > 0:
-            W[row:row + n_med, :] = rng.dirichlet(np.full(n_assets, 0.3), size=n_med)
-            row += n_med
-        if n_high > 0:
-            W[row:row + n_high, :] = rng.dirichlet(np.full(n_assets, 1.0), size=n_high)
-        # Apply floor: w = floor + B * ũ
-        B = 1.0 - n_assets * floor
-        W = floor + B * W
-        return W
-    # Sparse (default) — original mixture
-    # Split: 25% sparse-k, 30% low-α, 25% medium-α, 20% high-α
-    n_sparse = int(0.25 * batch_size)
-    n_low    = int(0.30 * batch_size)
-    n_med    = int(0.25 * batch_size)
-    n_high   = batch_size - n_sparse - n_low - n_med
-    row = 0
-    # Sparse-k: pick k assets uniformly, then Dirichlet(1) inside that subset
-    if n_sparse > 0 and n_assets >= 1:
-        ks = rng.choice(_SPARSE_K_CHOICES, size=n_sparse)
-        # Cap k at n_assets so we don't ask for more than we have
-        ks = np.clip(ks, 1, n_assets)
-        for r in range(n_sparse):
-            k = int(ks[r])
-            cols = rng.choice(n_assets, size=k, replace=False)
-            w_sub = rng.dirichlet(np.ones(k))
-            W[row, cols] = w_sub
-            row += 1
-    # Low-alpha Dirichlet across all assets
-    if n_low > 0:
-        W[row:row + n_low, :] = rng.dirichlet(np.full(n_assets, 0.05), size=n_low)
-        row += n_low
-    # Medium-alpha Dirichlet
-    if n_med > 0:
-        W[row:row + n_med, :] = rng.dirichlet(np.full(n_assets, 0.3), size=n_med)
-        row += n_med
-    # High-alpha Dirichlet (~uniform on simplex)
-    if n_high > 0:
-        W[row:row + n_high, :] = rng.dirichlet(np.full(n_assets, 1.0), size=n_high)
-    return W
+    return _bootstrap_cvar(
+        np.ascontiguousarray(R, dtype=np.float64),
+        ctx["a_ret"], ctx["targets"], ctx["l"], ctx["h"],
+        float(ctx["kappa"]), int(ctx["fi"]),
+        np.ascontiguousarray(seeds, dtype=np.int64),
+    )
 
 
-def _sample_perturbed(rng: np.random.Generator, frontier_weights: np.ndarray,
-                      n_samples: int, jitter: float = 0.40,
-                      floor: float = 0.0) -> np.ndarray:
-    """Sample portfolios as perturbations of CLA frontier weights.
+# ---------------------------------------------------------------------------
+# Frontier orchestration (pure-python wrappers around the JIT core)
+# ---------------------------------------------------------------------------
 
-    The CLA frontier path covers the *upper edge* of the feasible set
-    (max-return-for-vol). A pure-Dirichlet cloud concentrates at the simplex
-    centroid and leaves the rendered frontier curve floating above the dots.
-    Mixing perturbed-frontier samples fills the region *adjacent* to the
-    frontier, so the cloud visibly hugs the curve.
+def _max_return_weights(mu_ex: np.ndarray, l: np.ndarray, h: np.ndarray,
+                        fully_invested: bool) -> np.ndarray:
+    """Closed-form max-(excess-)return long-only box portfolio.
 
-    Each row is ``(1 - j) * w_base + j * dirichlet(alpha=2.0)`` where
-    ``w_base`` is a uniformly-chosen row of ``frontier_weights`` and ``j``
-    itself is uniform in ``[jitter/2, jitter]`` for spread variety. The
-    ``floor`` constraint is enforced post-mix.
+    Every asset starts at its floor ``l`` (a hard constraint in both modes), then
+    the remaining budget greedily fills the highest-μ_ex assets up to their cap.
+    Fully invested spends the whole budget to Σw=1; cash-allowed only funds
+    *positive*-μ_ex assets beyond their floors (idle cash beats a negative bet).
     """
-    if frontier_weights is None or frontier_weights.size == 0:
-        return np.zeros((0, 0), dtype=np.float64)
-    K, n_assets = frontier_weights.shape
-    if n_samples <= 0 or n_assets == 0:
-        return np.zeros((0, n_assets), dtype=np.float64)
-    base_idx = rng.integers(0, K, size=n_samples)
-    base = np.ascontiguousarray(frontier_weights[base_idx], dtype=np.float64)
-    noise = rng.dirichlet(np.full(n_assets, 2.0), size=n_samples)
-    j = rng.uniform(jitter * 0.5, jitter, size=n_samples).reshape(-1, 1)
-    W = (1.0 - j) * base + j * noise
-    if floor > 0.0 and floor * n_assets < 1.0:
-        # Clamp to floor and renormalise on the residual budget.
-        W = np.maximum(W, floor)
-        B = 1.0 - n_assets * floor
-        # Re-distribute excess back so each row sums to 1.
-        s = W.sum(axis=1, keepdims=True)
-        W = floor + B * (W - floor) / np.maximum(s - n_assets * floor, 1e-12)
+    # Fund every mandatory floor first in BOTH modes (a per-asset lower bound is a
+    # hard constraint regardless of the Σw=1 vs Σw≤1 budget); then greedily fill.
+    w = l.copy()
+    budget = 1.0 - w.sum()
+    order = np.argsort(-mu_ex)
+    for i in order:
+        if budget <= 1e-12:
+            break
+        if (not fully_invested) and mu_ex[i] <= 0.0:
+            continue
+        room = h[i] - w[i]
+        add = min(room, budget)
+        if add > 0:
+            w[i] += add
+            budget -= add
+    return w
+
+
+def _as_bound_vec(x, n: int, default: float) -> np.ndarray:
+    """Coerce a scalar OR per-asset array bound into a length-n float vector.
+
+    ``w_min``/``w_max`` may now be a single number (applied to every asset) or a
+    per-asset sequence (the per-position min/max box the UI sends). Missing/NaN
+    entries fall back to ``default``; every value is clamped into [0, 1].
+    """
+    if x is None:
+        arr = np.full(n, float(default))
+    elif np.isscalar(x):
+        arr = np.full(n, float(x))
     else:
-        # Renormalise to sum=1 (Dirichlet noise already sums to 1, base too,
-        # but the convex combination is exact only in expectation).
-        s = W.sum(axis=1, keepdims=True)
-        W = W / np.maximum(s, 1e-12)
-    return W
+        arr = np.asarray(x, dtype=float).ravel()
+        if arr.size != n:
+            arr = np.full(n, float(default))
+        arr = np.where(np.isfinite(arr), arr, float(default))
+    return np.clip(arr, 0.0, 1.0)
 
 
-def monte_carlo_cloud(mu: pd.Series, cov: pd.DataFrame, n_samples: int = 25_000,
-                      rf: float = 0.0, seed: int = 42, batch_size: int = 50_000,
-                      anchor_weights: np.ndarray | None = None,
-                      floor: float = 0.0,
-                      frontier_weights: np.ndarray | None = None,
-                      perturbed_fraction: float = 0.35) -> np.ndarray:
-    """Hybrid sampler: perturbed-frontier + mixture-Dirichlet, long-only.
+def mean_cvar_frontier(
+    returns: pd.DataFrame,
+    mu: dict[str, float],
+    *,
+    alpha: float = 0.95,
+    w_min=0.0,
+    w_max=1.0,
+    fully_invested: bool = True,
+    rf: float = 0.04,
+    n_points: int = 24,
+    cov: pd.DataFrame | None = None,
+    cdar_beta: float = 0.95,
+) -> dict:
+    """Trace the mean-CVaR efficient frontier.
 
-    Returns an ``(N, 3) float32`` ndarray of ``(vol, ret, sharpe)`` rows. ``N``
-    is ``n_samples`` plus the number of anchor rows (if any). Weights are
-    streamed batch-by-batch so peak RAM stays at ``O(batch_size * n_assets)``
-    regardless of total sample count.
-
-    Sampling strategy:
-      - ``perturbed_fraction`` of ``n_samples`` come from
-        ``_sample_perturbed(frontier_weights)`` — these hug the frontier curve.
-      - The remaining samples come from the original Dirichlet mixture
-        (``_sample_batch``) — these fill the diffuse feasible region away
-        from the frontier. Default 35/65 split is biased toward the wide
-        cloud so the lower-right (high-vol) region renders densely.
-
-    If ``frontier_weights`` is None (or empty), the sampler degrades to the
-    pure-Dirichlet behaviour — preserves caller back-compat.
-
-    ``anchor_weights`` (optional ``(K, n_assets) float64``) lets the caller
-    inject specific portfolios. Appended at the end of the output, untouched.
+    ``returns`` = daily FX-adjusted scenario returns (columns aligned to ``mu``).
+    ``w_min``/``w_max`` are each either a scalar (uniform box) or a per-asset
+    sequence aligned to ``returns.columns`` (the per-position limits the UI
+    sends). Returns a dict with ``frontier`` (min-CVaR→max-return list of point
+    dicts), ``min_cvar``, ``max_ret``, ``ok`` and an internal ``_ctx`` the
+    orchestrator reuses for the bootstrap stability band. Each point carries
+    ``{ret, cvar, vol, mdd, cdar, weights}`` with CVaR annualized (×√252) and
+    return/vol annualized. CVaR is optimized in daily units internally.
     """
-    symbols = list(mu.index)
-    n_assets = len(symbols)
-    if n_assets == 0:
-        return np.empty((0, 3), dtype=np.float32)
-    n_samples = max(0, int(n_samples))
-    n_anchor = 0 if anchor_weights is None else int(anchor_weights.shape[0])
-    total = n_samples + n_anchor
-    if total <= 0:
-        return np.empty((0, 3), dtype=np.float32)
+    symbols = list(returns.columns)
+    n = len(symbols)
+    if n < 1:
+        return {"ok": False, "error": "no assets"}
+    R = np.ascontiguousarray(returns.values, dtype=np.float64)
+    T = R.shape[0]
+    mu_ann = np.array([float(mu.get(s, 0.0)) for s in symbols], dtype=float)
+    # per-asset box (scalar broadcast or the UI's per-position vectors)
+    l = _as_bound_vec(w_min, n, 0.0)
+    h = _as_bound_vec(w_max, n, 1.0)
+    # Repair only genuinely inverted boxes (max < min). An *equal* box is a
+    # legitimate user constraint — a pin (min==max==x ⇒ hold exactly x) or an
+    # exclude (max==0) — and must survive intact; widening it (the old `<=`)
+    # silently let pinned/excluded positions take extra weight.
+    h = np.where(h < l, np.maximum(l, 1.0 / n if fully_invested else 1.0), h)
+    # Σmin > 1 is infeasible in either mode (w ≥ l ⇒ Σw ≥ Σl); Σmax < 1 only bites
+    # when fully invested (weights must reach Σw = 1).
+    if float(l.sum()) > 1.0 + 1e-9:
+        return {"ok": False, "error": "infeasible per-position minimums "
+                                       f"(Σmin={l.sum():.2f} exceeds 100%)"}
+    if fully_invested and float(h.sum()) < 1.0 - 1e-9:
+        return {"ok": False, "error": "infeasible per-position maximums for a fully-invested "
+                                       f"portfolio (Σmax={h.sum():.2f} below 100%)"}
+    kappa = 1.0 / ((1.0 - float(alpha)) * T)
+    fi = 1 if fully_invested else 0
+    ann = math.sqrt(TRADING_DAYS)
 
-    rng = np.random.default_rng(seed)
-    mu_v = np.ascontiguousarray(mu.values, dtype=np.float64)
-    cov_v = np.ascontiguousarray(cov.loc[symbols, symbols].values, dtype=np.float64)
-    out = np.empty((total, 3), dtype=np.float32)
+    cov_v = None
+    if cov is not None:
+        cov_v = cov.reindex(index=symbols, columns=symbols).values.astype(float)
 
-    # Split between perturbed-frontier and pure-Dirichlet samples.
-    have_frontier = (frontier_weights is not None
-                     and getattr(frontier_weights, "size", 0) > 0
-                     and frontier_weights.shape[1] == n_assets)
-    pf = float(perturbed_fraction) if have_frontier else 0.0
-    pf = max(0.0, min(1.0, pf))
-    n_pert = int(round(n_samples * pf))
-    n_diri = n_samples - n_pert
+    disabled = -1.0e18
+    a_ret = mu_ann if fully_invested else (mu_ann - rf)
 
-    cursor = 0
-    bs = max(1024, int(batch_size))
+    def _point(w: np.ndarray) -> dict:
+        port = R @ w
+        cv_daily = cvar_of(port, alpha)
+        ret_ann = float(mu_ann @ w) if fully_invested else float(rf + (mu_ann - rf) @ w)
+        vol = None
+        if cov_v is not None:
+            vol = float(math.sqrt(max(0.0, w @ cov_v @ w)))
+        return {
+            "ret": ret_ann,
+            "cvar": float(cv_daily * ann),
+            "vol": vol,
+            "mdd": max_drawdown(port),
+            "cdar": cdar(port, cdar_beta),
+            "weights": {symbols[i]: float(w[i]) for i in range(n)},
+            "_t": float(a_ret @ w),  # target-return level (for bootstrap band alignment)
+        }
 
-    # Perturbed-frontier batches — hug the curve.
-    remaining = n_pert
-    while remaining > 0:
-        b = min(bs, remaining)
-        W = _sample_perturbed(rng, frontier_weights, b, floor=floor)
-        out[cursor:cursor + b] = _mc_kernel(W, mu_v, cov_v, float(rf))
-        cursor += b
-        remaining -= b
-        del W
+    def _ctx(targets: np.ndarray) -> dict:
+        # Everything the bootstrap band needs to re-solve at the frontier's own
+        # return levels on resampled scenarios (see _bootstrap_cvar / frontier.py).
+        return {"a_ret": a_ret, "l": l, "h": h, "kappa": float(kappa),
+                "fi": int(fi), "targets": np.ascontiguousarray(targets, dtype=np.float64)}
 
-    # Dirichlet-mixture batches — preserve wide coverage.
-    remaining = n_diri
-    while remaining > 0:
-        b = min(bs, remaining)
-        W = _sample_batch(rng, n_assets, b, floor=floor)
-        out[cursor:cursor + b] = _mc_kernel(W, mu_v, cov_v, float(rf))
-        cursor += b
-        remaining -= b
-        del W
+    if n == 1:
+        w = np.array([1.0])
+        p = _point(w)
+        return {"ok": True, "frontier": [p], "min_cvar": p, "max_ret": p,
+                "n_nonconv": 0, "_ctx": _ctx(np.array([p["_t"]]))}
 
-    # Anchors (small, evaluated as one batch)
-    if n_anchor > 0:
-        Wa = np.ascontiguousarray(anchor_weights, dtype=np.float64)
-        out[cursor:cursor + n_anchor] = _mc_kernel(Wa, mu_v, cov_v, float(rf))
+    # endpoints. Track non-convergence so the orchestrator can warn rather than
+    # silently trust an iterate that hit the iteration cap.
+    n_nonconv = 0
+    w_min_cvar, _, _, conv = _cvar_pdip(R, a_ret, disabled, l, h, kappa, fi, 60)
+    n_nonconv += 0 if conv else 1
+    p_min = _point(w_min_cvar)
+    w_maxret = _max_return_weights(mu_ann - (0.0 if fully_invested else rf), l, h, fully_invested)
+    p_max = _point(w_maxret)
 
+    r_lo = float(a_ret @ w_min_cvar)
+    r_hi = float(a_ret @ w_maxret)
+    pts: list[dict] = [p_min]
+    if r_hi > r_lo + 1e-9:
+        targets = np.linspace(r_lo, r_hi, max(3, int(n_points)))
+        for b in targets[1:-1]:
+            w, _, _, conv = _cvar_pdip(R, a_ret, float(b), l, h, kappa, fi, 60)
+            n_nonconv += 0 if conv else 1
+            pts.append(_point(w))
+    pts.append(p_max)
+
+    # sort by cvar, enforce the efficient upper-envelope (ret nondecreasing in cvar)
+    pts.sort(key=lambda p: (p["cvar"], -p["ret"]))
+    cleaned: list[dict] = []
+    best = -1e18
+    for p in pts:
+        if p["ret"] > best + 1e-9:
+            cleaned.append(p)
+            best = p["ret"]
+    if not cleaned:
+        cleaned = [p_min]
+    targets = np.array([p["_t"] for p in cleaned], dtype=np.float64)
+    return {"ok": True, "frontier": cleaned, "min_cvar": cleaned[0],
+            "max_ret": cleaned[-1], "n_nonconv": int(n_nonconv), "_ctx": _ctx(targets)}
+
+
+def portfolio_risk_metrics(weights: dict[str, float], mu: dict[str, float],
+                           cov: pd.DataFrame | None, returns: pd.DataFrame,
+                           alpha: float = 0.95, rf: float = 0.04,
+                           fully_invested: bool = True) -> dict:
+    """Metrics for an arbitrary weight vector (anchors: equal/cap/current)."""
+    symbols = list(returns.columns)
+    n = len(symbols)
+    w = np.array([float(weights.get(s, 0.0)) for s in symbols], dtype=float)
+    R = returns.values.astype(float)
+    port = R @ w
+    mu_ann = np.array([float(mu.get(s, 0.0)) for s in symbols], dtype=float)
+    sw = w.sum()
+    ret_ann = float(mu_ann @ w) if fully_invested else float(rf * (1.0 - sw) + (mu_ann @ w))
+    vol = None
+    if cov is not None:
+        cov_v = cov.reindex(index=symbols, columns=symbols).values.astype(float)
+        vol = float(math.sqrt(max(0.0, w @ cov_v @ w)))
+    return {
+        "ret": ret_ann,
+        "cvar": float(cvar_of(port, alpha) * math.sqrt(TRADING_DAYS)),
+        "vol": vol,
+        "mdd": max_drawdown(port),
+        "cdar": cdar(port),
+        "weights": {symbols[i]: float(w[i]) for i in range(n)},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Light (CVaR, return) cloud — visual decoration
+# ---------------------------------------------------------------------------
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _cloud_kernel(W, R, mu_ann, alpha):
+    """(cvar_daily, ret_ann) for each row of W. Parallel over portfolios (prange)."""
+    K = W.shape[0]
+    N = W.shape[1]
+    T = R.shape[0]
+    k = int(math.ceil((1.0 - alpha) * T - 1e-9))  # matches _tail_count
+    if k < 1:
+        k = 1
+    out = np.empty((K, 2))
+    for j in prange(K):
+        port = np.empty(T)  # thread-local scratch (must be inside the parallel loop)
+        r = 0.0
+        for i in range(N):
+            r += W[j, i] * mu_ann[i]
+        for t in range(T):
+            pv = 0.0
+            for i in range(N):
+                pv += W[j, i] * R[t, i]
+            port[t] = pv
+        srt = np.sort(port)
+        tail = 0.0
+        for t in range(k):
+            tail += srt[t]
+        out[j, 0] = -tail / k
+        out[j, 1] = r
     return out
 
 
-def anchor_samples(turning: list[_TurningPoint], n_per_segment: int = 4) -> np.ndarray:
-    """Sample weight vectors along the CLA piecewise-linear frontier path.
+def cvar_return_cloud(returns: pd.DataFrame, mu: dict[str, float],
+                      alpha: float = 0.95, n: int = 4000, seed: int = 42) -> list:
+    """A light long-only cloud in (CVaR_annual, return_annual) space.
 
-    Used by ``compute_efficient_frontier`` to feed ``monte_carlo_cloud`` so
-    the cloud explicitly contains portfolios that lie on the frontier — gives
-    the user visual proof that the rendered curve really is achievable.
-    Returns ``(K, n_assets) float64``.
+    Dirichlet mixture (concentrated + uniform + a few sparse-k) so the cloud
+    spans corners without the old 15M-config machinery. Returns ``[[cvar,ret],…]``.
     """
-    if not turning:
-        return np.zeros((0, 0), dtype=np.float64)
-    tp = list(reversed(turning))  # min-vol -> max-ret
-    n_assets = len(tp[0].w)
-    if len(tp) == 1:
-        return tp[0].w.reshape(1, n_assets).astype(np.float64)
-    rows: list[np.ndarray] = []
-    for a, b in zip(tp[:-1], tp[1:]):
-        for t in np.linspace(0.0, 1.0, max(2, n_per_segment), endpoint=False):
-            w = (1.0 - t) * a.w + t * b.w
-            w = np.clip(w, 0.0, None)
-            s = w.sum()
-            if s > 0:
-                w = w / s
-            rows.append(w)
-    rows.append(tp[-1].w)
-    return np.asarray(rows, dtype=np.float64)
+    symbols = list(returns.columns)
+    n_assets = len(symbols)
+    if n_assets < 2 or returns.shape[0] < 2:
+        return []
+    R = np.ascontiguousarray(returns.values, dtype=np.float64)
+    mu_ann = np.array([float(mu.get(s, 0.0)) for s in symbols], dtype=float)
+    rng = np.random.default_rng(seed)
+    n = max(500, int(n))
+    n_lo = n // 3
+    n_hi = n // 3
+    n_sp = n - n_lo - n_hi
+    W = np.empty((n, n_assets), dtype=np.float64)
+    W[:n_lo] = rng.dirichlet(np.full(n_assets, 0.15), size=n_lo)
+    W[n_lo:n_lo + n_hi] = rng.dirichlet(np.full(n_assets, 1.0), size=n_hi)
+    # sparse-k rows
+    base = n_lo + n_hi
+    ks = np.clip(rng.choice(np.array([1, 2, 3, 5, 8]), size=n_sp), 1, n_assets)
+    W[base:] = 0.0
+    for r in range(n_sp):
+        kk = int(ks[r])
+        cols = rng.choice(n_assets, size=kk, replace=False)
+        W[base + r, cols] = rng.dirichlet(np.ones(kk))
+    arr = _cloud_kernel(W, R, mu_ann, float(alpha))
+    ann = math.sqrt(TRADING_DAYS)
+    arr[:, 0] *= ann
+    return arr.tolist()
 
 
-# Warm the JIT cache at import so the first user request doesn't pay the
-# ~1-2 s compile cost. Uses a tiny dummy problem.
+# ---------------------------------------------------------------------------
+# JIT warm-up (first user call shouldn't pay the compile cost)
+# ---------------------------------------------------------------------------
+
 def _warm_jit() -> None:
-    _W = np.array([[0.5, 0.5], [1.0, 0.0]], dtype=np.float64)
-    _mu = np.array([0.1, 0.05], dtype=np.float64)
-    _cov = np.array([[0.04, 0.0], [0.0, 0.04]], dtype=np.float64)
-    _mc_kernel(_W, _mu, _cov, 0.0)
+    rng = np.random.default_rng(0)
+    R = np.ascontiguousarray(rng.standard_normal((40, 3)) * 0.01)
+    mu = np.array([0.08, 0.10, 0.06])
+    l = np.zeros(3); h = np.ones(3)
+    _cvar_pdip(R, mu, -1e18, l, h, 1.0 / (0.05 * 40), 1, 40)
+    _cloud_kernel(np.ascontiguousarray(rng.dirichlet(np.ones(3), size=8)), R, mu, 0.95)
+    _bootstrap_cvar(R, mu, np.array([0.05, 0.10]), l, h, 1.0 / (0.05 * 40), 1,
+                    np.array([1, 2], dtype=np.int64))
 
 
 try:
     _warm_jit()
 except Exception:
-    # Warm-up failure should not break import; the first real call will JIT lazily.
+    # Warm-up failure must not break import; the first real call JITs lazily.
     pass
-
-
-# ---------------------------------------------------------------------------
-# Single-portfolio stats
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Minimum-CVaR optimization (Rockafellar–Uryasev LP)
-# ---------------------------------------------------------------------------
-#
-# For confidence level α ∈ (0, 1), the min-CVaR portfolio at α minimises the
-# expected loss conditional on the loss being in the worst (1-α) quantile.
-# Rockafellar & Uryasev (2000) showed this can be cast as a linear program
-# over the joint variables (w, ζ, u):
-#
-#     variables : w ∈ R^N (weights),
-#                 ζ ∈ R   (the VaR — sign convention: loss = -portfolio return),
-#                 u ∈ R^T_+ (slack per scenario)
-#     minimise  : ζ + 1/((1-α) T) · Σ_t u_t
-#     s.t.      : u_t ≥ -R_t · w - ζ          (scenario inequality)
-#                 u_t ≥ 0                      (non-negative slack)
-#                 Σ w = 1                      (fully invested)
-#                 lower ≤ w_i ≤ 1              (long-only with optional floor)
-#
-# At the optimum, ζ* = VaR_α and the objective equals CVaR_α. T scenarios
-# are the rows of ``returns`` (the same per-period returns used elsewhere
-# in this module). Solved with scipy's HiGHS backend.
-
-def _cvar_lp(returns_arr: np.ndarray, alpha: float, lower: float = 0.0
-             ) -> tuple[np.ndarray, float, float] | None:
-    """Solve the Rockafellar-Uryasev LP for one confidence level α.
-
-    Returns ``(w, var, cvar)`` where ``var`` is ζ* (the LP's VaR variable in
-    return-space; positive means a loss) and ``cvar`` is the optimum
-    objective. Returns ``None`` on solver failure.
-    """
-    R = np.asarray(returns_arr, dtype=float)
-    T, N = R.shape
-    if T < 2 or N < 1:
-        return None
-    if not (0.0 < alpha < 1.0):
-        return None
-    tail = (1.0 - alpha) * T
-    if tail <= 0:
-        return None
-
-    # Decision variable order: [w (N), ζ (1), u (T)]
-    n_vars = N + 1 + T
-    c = np.zeros(n_vars)
-    c[N] = 1.0
-    c[N + 1:] = 1.0 / tail
-
-    # Inequality A_ub x ≤ b_ub for u_t ≥ -R_t·w - ζ  ⇔  -R_t·w - ζ - u_t ≤ 0
-    # Use sparse blocks; dense versions blow up for T > 500.
-    neg_R = csr_matrix(-R)
-    neg_one_col = csr_matrix(-np.ones((T, 1)))
-    neg_eye_T = -speye(T, format="csr")
-    A_ub = sphstack([neg_R, neg_one_col, neg_eye_T], format="csr")
-    b_ub = np.zeros(T)
-
-    # Equality Σ w = 1
-    A_eq = csr_matrix(
-        (np.ones(N), (np.zeros(N, dtype=int), np.arange(N))),
-        shape=(1, n_vars),
-    )
-    b_eq = np.array([1.0])
-
-    # Bounds: w_i ∈ [lower, 1]; ζ free; u_t ≥ 0.
-    bounds = ([(lower, 1.0)] * N
-              + [(None, None)]
-              + [(0.0, None)] * T)
-
-    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
-                  bounds=bounds, method="highs")
-    if not res.success:
-        return None
-    x = res.x
-    w = np.clip(x[:N], lower, 1.0)
-    # The LP equality already pins Σw = 1; clipping only removes sub-tolerance
-    # drift. Renormalise to absorb that drift ONLY when there is no active
-    # floor — dividing by the sum can push a weight back below `lower` and
-    # break the long-only floor, so with a floor we leave the clipped vector
-    # as-is (it already sums to 1 to ~1e-12).
-    if lower <= 0.0:
-        s = float(w.sum())
-        if s > 1e-12:
-            w = w / s
-    var = float(x[N])
-    cvar = float(res.fun)
-    return w, var, cvar
-
-
-def min_cvar_portfolio(returns: pd.DataFrame, alpha: float,
-                       floor: float = 0.0) -> dict | None:
-    """Long-only min-CVaR portfolio at confidence level α.
-
-    Returns ``{weights: {sym: w}, cvar, var}`` (CVaR and VaR are in
-    per-period return units, sign convention: positive = loss). Returns
-    ``None`` on solver failure.
-    """
-    if returns is None or returns.empty:
-        return None
-    symbols = list(returns.columns)
-    res = _cvar_lp(returns.values, float(alpha), lower=max(0.0, float(floor)))
-    if res is None:
-        return None
-    w, var, cvar = res
-    return {"weights": {s: float(w[i]) for i, s in enumerate(symbols)},
-            "cvar": cvar, "var": var}
-
-
-def cvar_curve(returns: pd.DataFrame, alphas: Iterable[float],
-               mu: pd.Series, cov: pd.DataFrame, rf: float = 0.0,
-               floor: float = 0.0) -> list[dict]:
-    """Build a curve of min-CVaR portfolios across confidence levels.
-
-    For each α in ``alphas`` we solve the Rockafellar-Uryasev LP and project
-    the resulting weight vector into the same (vol, ret) coordinate system
-    used by the MV frontier — that lets the dashboard render the two
-    curves on a shared chart. Output is one dict per α with keys
-    ``conf, ret, vol, sharpe, cvar, var, weights``.
-
-    Order follows the input ``alphas``; the dashboard passes them in
-    descending order (99 → 50) so slider index 0 = strict tail.
-    """
-    if returns is None or returns.empty:
-        return []
-    symbols = list(returns.columns)
-    # Align mu/cov to the returns' column order so the (vol, ret) projection
-    # below uses consistent indexing with the LP solution.
-    mu_aln = mu.reindex(symbols).values.astype(float)
-    cov_aln = cov.reindex(index=symbols, columns=symbols).values.astype(float)
-    R = returns.values.astype(float)
-    lower = max(0.0, float(floor))
-
-    out: list[dict] = []
-    for a in alphas:
-        af = float(a)
-        if not (0.0 < af < 1.0):
-            continue
-        res = _cvar_lp(R, af, lower=lower)
-        if res is None:
-            continue
-        w, var, cvar = res
-        r, v = _stats(w, mu_aln, cov_aln)
-        sharpe = (r - rf) / v if v > 1e-12 else float("nan")
-        out.append({
-            "conf": af,
-            "ret": float(r),
-            "vol": float(v),
-            "sharpe": float(sharpe) if math.isfinite(sharpe) else None,
-            "cvar": float(cvar),
-            "var": float(var),
-            "weights": {s: float(w[i]) for i, s in enumerate(symbols)},
-        })
-    return out
-
-
-def portfolio_stats(weights: dict[str, float], mu: pd.Series, cov: pd.DataFrame,
-                    rf: float = 0.0) -> dict:
-    symbols = list(mu.index)
-    w = np.array([weights.get(s, 0.0) for s in symbols], dtype=float)
-    s = w.sum()
-    if s > 0:
-        w = w / s
-    r, v = _stats(w, mu.values.astype(float), cov.loc[symbols, symbols].values.astype(float))
-    sharpe = (r - rf) / v if v > 1e-12 else float("nan")
-    return {"ret": r, "vol": v, "sharpe": sharpe}

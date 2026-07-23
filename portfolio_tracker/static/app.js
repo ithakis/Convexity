@@ -6710,29 +6710,31 @@ document.addEventListener("keydown", (e) => {
 renderModeBar();
 
 /* ===========================================================================
- * MPT — Portfolio Optimization overlay
+ * Portfolio Optimization overlay — Black-Litterman + mean-CVaR
  * --------------------------------------------------------------------------
- * The Optimize button opens a full-screen workspace that computes the
- * long-only efficient frontier from the active portfolio, lets the user pick
- * a point along it with a slider, and apply / save the resulting weights as
- * a named preset. Math lives in mpt.py (Critical Line Algorithm); this code
- * just drives the UI and renders the inline SVG chart.
+ * The Optimize button opens a full-screen workspace that traces the mean-CVaR
+ * efficient frontier from the active portfolio (expected returns from
+ * Black-Litterman, risk from CVaR on daily scenarios), lets the user pick a
+ * point along it with a single risk slider, and apply / save the resulting
+ * weights as a named preset. Math lives in mpt.py; this code drives the UI and
+ * renders the two-canvas chart. Chart axes: X = CVaR (annualized), Y = expected
+ * return (BL). Frontier points carry {ret, cvar, vol, mdd, cdar, weights}.
  * --------------------------------------------------------------------------- */
 const MPT = {
   result: null,        // latest /api/efficient-frontier response
   selectedIdx: 0,      // index into result.frontier for the slider marker
-  cvarIdx: 0,          // index into result.cvar_frontier for the CVaR slider
-  hoverIdx: null,      // index of point under cursor (cloud or frontier)
-  activeLine: "frontier", // which curve drives sidebar/apply: "frontier" | "cvar"
+  hoverIdx: null,      // index of frontier point under cursor
   pulseUntil: 0,       // performance.now() time at which the current pulse ends
-  pulseKind: null,     // legend key being pulsed (frontier|cvar|tangency|equal|cap|current)
+  pulseKind: null,     // legend key being pulsed (frontier|equal|cap|current)
   pulseRaf: 0,         // rAF id for the active pulse animation loop
   view: null,          // portfolio name this run is bound to
-  runs: [],            // saved runs metadata for the active view
+  bounds: {},          // {symbol: {min?, max?}} per-position weight limits (fractions)
+  abort: null,         // AbortController for the in-flight streaming run (Cancel)
+  alphaTimer: 0,       // debounce id for α auto-rerun
   busy: false,
 };
 
-function openMptOverlay() {
+async function openMptOverlay() {
   if (!DATA.length) return toast("Build a portfolio first.");
   if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
     // Ad-hoc tabs still get to optimize, but the runs sidebar + save flows
@@ -6741,7 +6743,7 @@ function openMptOverlay() {
       "Save the portfolio first to keep runs / presets.";
   } else {
     document.getElementById("pf-mpt-sub").textContent =
-      "Markowitz long-only · Critical Line Algorithm · " + STATE.activeView;
+      "Black-Litterman returns · mean-CVaR frontier · " + STATE.activeView;
   }
   MPT.view = STATE.activeView;
   document.getElementById("pf-mpt-bg").classList.add("show");
@@ -6749,26 +6751,31 @@ function openMptOverlay() {
   // can't move. Inner sidebar still scrolls via its own overflow-y.
   document.body.dataset.mptPrevOverflow = document.body.style.overflow || "";
   document.body.style.overflow = "hidden";
-  mptLoadRuns();
+  MPT.bounds = {};                       // start clean each open (mptRestoreLast may repopulate)
+  mptRenderBounds();                     // per-position min/max editor for the active holdings
+  // Sequence the two async writers of #pf-mpt-rf so the rate is deterministic:
+  // restore first (sets lookback + the saved run's rf, if any), then draw the
+  // Auto spark for that lookback — passing keepRf so it never clobbers a
+  // restored rf. No saved run ⇒ rf falls through to Auto (the requested default).
+  const restored = await mptRestoreLast();  // repaint the last saved run, if any
+  await mptFetchRfAuto({silent: true, keepRf: restored});
 }
 function closeMptOverlay() {
+  if (MPT.abort) { try { MPT.abort.abort(); } catch (_) {} MPT.abort = null; }
   document.getElementById("pf-mpt-bg").classList.remove("show");
   document.body.style.overflow = document.body.dataset.mptPrevOverflow || "";
   delete document.body.dataset.mptPrevOverflow;
-  // Cancel any in-flight progress animation so a half-filled bar doesn't
-  // linger if the user reopens the overlay before the next run.
-  mptProgressStop();
+  mptProgressHide();
 }
 
-// Budget label table — also drives the deterministic progress bar duration
-// (#9) and the legend metadata strip.
+// Compute-budget labels. The budget is spent on 8-core (prange) work: bootstrap
+// frontier-stability replicas + the (CVaR, return) cloud. Wall-time targets are
+// approximate — data fetch (~1s) is on top and the real ETA comes from the stream.
 const MPT_BUDGET_LABEL = {
-  fast: "Fast (~2s)",
-  standard: "Standard (~5s)",
-  thorough: "Thorough (~15s)",
-  exhaustive: "Exhaustive (~60s)",
+  light: "Light — ~5s",
+  standard: "Standard — ~15s",
+  dense: "Dense — ~60s",
 };
-const MPT_BUDGET_SECONDS = { fast: 2, standard: 5, thorough: 15, exhaustive: 60 };
 
 function mptSetBudget(value) {
   const root = document.getElementById("pf-mpt-budget");
@@ -6782,127 +6789,168 @@ function mptSetBudget(value) {
   });
 }
 
+// Read every optimizer control into the request payload. Percentages in the UI
+// are sent as fractions. Per-position limits ride along in `bounds`.
 function mptGetParams() {
   const lookback = document.querySelector("#pf-mpt-lookback .active")?.dataset.v || "3Y";
-  const frequency = document.querySelector("#pf-mpt-freq .active")?.dataset.v || "weekly";
+  const alpha = Number(document.querySelector("#pf-mpt-alpha .active")?.dataset.v) || 0.95;
   const rf = (Number(document.getElementById("pf-mpt-rf").value) || 0) / 100;
+  const fully_invested = (document.querySelector("#pf-mpt-invest .active")?.dataset.v || "full") === "full";
+  const cov_model = document.querySelector("#pf-mpt-cov .active")?.dataset.v || "ledoit";
+  const haircut = (Number(document.getElementById("pf-mpt-haircut").value) || 0) / 100;
   const budget = document.getElementById("pf-mpt-budget").dataset.value || "standard";
-  const mode = document.querySelector("#pf-mpt-mode .active")?.dataset.v || "sparse";
-  const diversified = mode === "diversified";
-  return {lookback, frequency, rf, budget, diversified};
+  return {lookback, alpha, rf, fully_invested, cov_model, haircut, budget, bounds: mptGetBounds()};
 }
 
-/* --- Deterministic progress bar --- */
-let _mptProgressTimer = null;
-function mptProgressStart(budget) {
-  const chart = document.getElementById("pf-mpt-chart");
+/* --- Streaming progress bar (real pct + ETA from the NDJSON stream) --- */
+function mptProgressShow() {
   const status = document.getElementById("pf-mpt-status");
-  if (!chart || !status) return;
-  const dur = MPT_BUDGET_SECONDS[budget] || 5;
+  if (!status) return;
   status.innerHTML = `
     <div class="mpt-progress" id="mpt-progress">
-      <div class="mpt-progress-track"><div class="mpt-progress-fill"></div></div>
+      <div class="mpt-progress-track"><div class="mpt-progress-fill" style="width:0%"></div></div>
       <div class="mpt-progress-label">
-        <span class="mpt-progress-text">Optimizing portfolio…</span>
-        <span class="mpt-progress-timer">0.0s / ~${dur}s</span>
+        <span class="mpt-progress-text">Starting…</span>
+        <span class="mpt-progress-timer">0%</span>
       </div>
     </div>`;
-  const root = status.querySelector("#mpt-progress");
-  const fill = root.querySelector(".mpt-progress-fill");
-  const timer = root.querySelector(".mpt-progress-timer");
-  const text = root.querySelector(".mpt-progress-text");
-  // Force layout, then start the CSS width transition over the budget window.
-  void fill.offsetWidth;
-  fill.style.transition = `width ${dur}s linear`;
-  fill.style.width = "100%";
-  const start = performance.now();
-  _mptProgressTimer = setInterval(() => {
-    const elapsed = (performance.now() - start) / 1000;
-    if (elapsed >= dur) {
-      text.textContent = "Finalizing…";
-      timer.textContent = `${elapsed.toFixed(1)}s / ~${dur}s`;
-    } else {
-      timer.textContent = `${elapsed.toFixed(1)}s / ~${dur}s`;
-    }
-  }, 100);
 }
-function mptProgressStop(state) {
-  if (_mptProgressTimer) { clearInterval(_mptProgressTimer); _mptProgressTimer = null; }
+function mptProgressSet(pct, eta, label) {
+  const root = document.getElementById("mpt-progress");
+  if (!root) return;
+  const fill = root.querySelector(".mpt-progress-fill");
+  const text = root.querySelector(".mpt-progress-text");
+  const timer = root.querySelector(".mpt-progress-timer");
+  if (fill) fill.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
+  if (text && label) text.textContent = label;
+  if (timer) timer.textContent = `${Math.round(pct)}%` + (eta != null ? ` · ~${Math.round(eta)}s left` : "");
+}
+function mptProgressHide(state) {
+  const root = document.getElementById("mpt-progress");
+  if (!root) return;
   if (state === "done" || state === "fail") {
-    const root = document.querySelector("#mpt-progress");
-    if (root) {
-      root.classList.add(state);
-      const fill = root.querySelector(".mpt-progress-fill");
-      if (fill) fill.style.width = "100%";
-    }
+    root.classList.add(state);
+    const fill = root.querySelector(".mpt-progress-fill");
+    if (fill) fill.style.width = "100%";
   }
+}
+
+function mptSetRunning(on) {
+  MPT.busy = on;
+  const run = document.getElementById("pf-mpt-run");
+  const cancel = document.getElementById("pf-mpt-cancel");
+  if (run) run.disabled = on;
+  if (cancel) cancel.hidden = !on;
 }
 
 async function mptRun() {
-  if (!DATA.length) return;
-  const btn = document.getElementById("pf-mpt-run");
+  if (!DATA.length || MPT.busy) return;
   const status = document.getElementById("pf-mpt-status");
-  // Clear any previous frame so the cloud/frontier disappear during compute.
   mptClearChart();
   const params = mptGetParams();
-  mptProgressStart(params.budget);
-  btn.disabled = true; MPT.busy = true;
+  mptProgressShow();
+  mptSetRunning(true);
+  const ac = new AbortController();
+  MPT.abort = ac;
+  let done = null;
   try {
     const r = await fetch("/api/efficient-frontier", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        rows: DATA, display_ccy: FX_QUOTE,
-        ...params,
-        current_weights: weightsForMode(STATE.mode),
-      }),
+      method: "POST", headers: {"Content-Type": "application/json"}, signal: ac.signal,
+      body: JSON.stringify({rows: DATA, display_ccy: FX_QUOTE, ...params,
+                            current_weights: weightsForMode(STATE.mode)}),
     });
-    const d = await r.json();
-    if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
-    MPT.result = d;
-    // Default selection = tangency (max Sharpe), if available, else mid-frontier
-    if (d.tangency) {
-      let best = 0, bestSh = -Infinity;
-      d.frontier.forEach((p, i) => {
-        const sh = p.vol > 1e-9 ? (p.ret - params.rf) / p.vol : -Infinity;
-        if (sh > bestSh) { bestSh = sh; best = i; }
-      });
-      MPT.selectedIdx = best;
-    } else {
-      MPT.selectedIdx = Math.floor(d.frontier.length / 2);
+    if (!r.ok || !r.body) {
+      let msg = "HTTP " + r.status;
+      try { const j = await r.json(); if (j.error) msg = j.error; } catch (_) {}
+      throw new Error(msg);
     }
-    document.getElementById("pf-mpt-slider").disabled = false;
-    document.getElementById("pf-mpt-slider").max = String(Math.max(0, d.frontier.length - 1));
-    document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
-    // CVaR slider: index 0 = strictest tail (CVaR99), index N-1 = CVaR50.
-    // Default selection = midpoint of the curve so neither extreme dominates.
-    const cv = d.cvar_frontier || [];
-    const cvarSlider = document.getElementById("pf-mpt-cvar-slider");
-    if (cv.length) {
-      MPT.cvarIdx = Math.floor(cv.length / 2);
-      cvarSlider.disabled = false;
-      cvarSlider.max = String(Math.max(0, cv.length - 1));
-      cvarSlider.value = String(MPT.cvarIdx);
-    } else {
-      MPT.cvarIdx = 0;
-      cvarSlider.disabled = true;
-      cvarSlider.value = "0";
+    // Read the NDJSON stream line-by-line, driving the real progress bar.
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const {value, done: fin} = await reader.read();
+      if (fin) break;
+      buf += dec.decode(value, {stream: true});
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.type === "progress") mptProgressSet(msg.pct, msg.eta, msg.label);
+        else if (msg.type === "done") done = msg.result;
+        else if (msg.type === "error") throw new Error(msg.error || "optimization failed");
+      }
     }
-    MPT.activeLine = "frontier";
-    mptProgressStop("done");
+    if (!done) throw new Error("stream ended without a result");
+    MPT.result = done;
+    // Default selection = best reward-per-CVaR point (max (ret-rf)/cvar).
+    MPT.selectedIdx = mptBestRewardIdx(done, params.rf);
+    const slider = document.getElementById("pf-mpt-slider");
+    slider.disabled = false;
+    slider.max = String(Math.max(0, done.frontier.length - 1));
+    slider.value = String(MPT.selectedIdx);
+    mptProgressHide("done");
     if (status) status.innerHTML = "";
     mptRender();
-    // Auto-save the run. Server-side eviction (mpt save_mpt_run) drops any
-    // stale runs whose portfolio composition or risk-free rate differs from
-    // this one, keeping the Recent-runs list relevant without UI prompts.
-    mptSaveRun({silent: true}).catch(() => {});
+    mptSaveRun({silent: true}).catch(() => {});  // persist as this portfolio's last run
   } catch (e) {
-    mptProgressStop("fail");
+    mptProgressHide("fail");
     if (status) {
-      status.innerHTML = `<div class="pf-mpt-error">Optimization failed: ${escapeHtml(e.message || String(e))}</div>`;
+      status.innerHTML = e.name === "AbortError"
+        ? `<div class="pf-mpt-status">Optimization cancelled.</div>`
+        : `<div class="pf-mpt-error">Optimization failed: ${escapeHtml(e.message || String(e))}</div>`;
     }
   } finally {
-    btn.disabled = false; MPT.busy = false;
+    MPT.abort = null;
+    mptSetRunning(false);
   }
+}
+
+/* --- Per-position weight limits (min/max box, editable per holding) --- */
+function mptGetBounds() {
+  // Prune empty {} entries so the payload only carries real constraints.
+  const out = {};
+  for (const [sym, b] of Object.entries(MPT.bounds || {})) {
+    const e = {};
+    if (b && b.min != null && isFinite(b.min)) e.min = b.min;
+    if (b && b.max != null && isFinite(b.max)) e.max = b.max;
+    if (Object.keys(e).length) out[sym] = e;
+  }
+  return out;
+}
+function mptBoundsSymbols() {
+  return (DATA || []).map(r => r.symbol).filter(Boolean);
+}
+function mptRenderBounds() {
+  const grid = document.getElementById("pf-mpt-bounds-grid");
+  if (!grid) return;
+  const syms = mptBoundsSymbols();
+  const cell = (sym, k) => {
+    const v = MPT.bounds?.[sym]?.[k];
+    const val = v != null && isFinite(v) ? String(Math.round(v * 100)) : "";
+    return `<input class="pf-mpt-bnd" type="number" min="0" max="100" step="1" inputmode="numeric"
+              data-sym="${escapeHtml(sym)}" data-k="${k}" value="${val}"
+              placeholder="${k === "min" ? "0" : "100"}" aria-label="${escapeHtml(sym)} ${k}"/>`;
+  };
+  grid.innerHTML =
+    `<div class="pf-mpt-bnd-row pf-mpt-bnd-head"><span>Position</span><span>Min %</span><span>Max %</span></div>` +
+    `<div class="pf-mpt-bnd-row pf-mpt-bnd-all"><span>All positions</span>` +
+      `<input class="pf-mpt-bnd" type="number" min="0" max="100" step="1" data-all="min" placeholder="0" aria-label="min for all"/>` +
+      `<input class="pf-mpt-bnd" type="number" min="0" max="100" step="1" data-all="max" placeholder="100" aria-label="max for all"/></div>` +
+    syms.map(s => `<div class="pf-mpt-bnd-row"><span title="${escapeHtml(s)}">${escapeHtml(s)}</span>${cell(s, "min")}${cell(s, "max")}</div>`).join("");
+}
+function mptSetBound(sym, k, pctStr) {
+  const b = (MPT.bounds[sym] = MPT.bounds[sym] || {});
+  const n = Number(pctStr);
+  if (pctStr === "" || !isFinite(n)) delete b[k];
+  else b[k] = Math.max(0, Math.min(100, n)) / 100;
+  if (!Object.keys(b).length) delete MPT.bounds[sym];
+}
+function mptResetBounds() {
+  MPT.bounds = {};
+  mptRenderBounds();
 }
 
 function mptClearChart() {
@@ -6962,16 +7010,21 @@ function mptRenderChart() {
   const {cssW, cssH, dpr} = mptSizeCanvases(host);
   const pad = {l: 56, r: 18, t: 18, b: 38};
 
-  // Domain from cloud + frontier + anchors.
+  // Domain from cloud + frontier + anchors. X = CVaR, Y = expected return.
   let xMax = 0, xMin = Infinity, yMax = -Infinity, yMin = Infinity;
   const consume = (v, r) => { if (v < xMin) xMin = v; if (v > xMax) xMax = v; if (r < yMin) yMin = r; if (r > yMax) yMax = r; };
   (d.cloud || []).forEach(p => consume(p[0], p[1]));
-  (d.frontier || []).forEach(p => consume(p.vol, p.ret));
-  (d.cvar_frontier || []).forEach(p => consume(p.vol, p.ret));
-  Object.values(d.anchors || {}).forEach(a => a && consume(a.vol, a.ret));
+  (d.frontier || []).forEach(p => {
+    consume(p.cvar, p.ret);
+    if (p.cvar_lo != null) consume(p.cvar_lo, p.ret);
+    if (p.cvar_hi != null) consume(p.cvar_hi, p.ret);
+  });
+  Object.values(d.anchors || {}).forEach(a => a && consume(a.cvar, a.ret));
   if (!isFinite(xMin)) { xMin = 0; xMax = 0.3; yMin = 0; yMax = 0.2; }
-  const params = mptGetParams();
-  yMin = Math.min(yMin, params.rf);
+  // Floor the y-domain at the rf that actually produced this frontier (from the
+  // run payload), not the live control — the two can differ after a restore.
+  const rf = Number(d.params?.rf) || 0;
+  yMin = Math.min(yMin, rf);
   const dx = (xMax - xMin) * 0.06 || 0.01;
   const dy = (yMax - yMin) * 0.08 || 0.01;
   xMin = Math.max(0, xMin - dx); xMax += dx; yMin -= dy; yMax += dy;
@@ -6983,20 +7036,20 @@ function mptRenderChart() {
                 X: xToPx, Y: yToPx, toPx: (v, r) => [xToPx(v), yToPx(r)]};
   MPT._proj = proj;
 
-  // Sharpe-by-color setup.
-  const sharpeOf = p => (p[0] > 1e-9 ? (p[1] - params.rf) / p[0] : 0);
-  let sMin = Infinity, sMax = -Infinity;
-  (d.cloud || []).forEach(p => { const s = sharpeOf(p); if (s < sMin) sMin = s; if (s > sMax) sMax = s; });
-  if (!isFinite(sMin)) { sMin = 0; sMax = 1; }
-  function sharpeColor(s) {
-    const t = Math.max(0, Math.min(1, (s - sMin) / Math.max(1e-9, sMax - sMin)));
-    const stops = [[94,40,120],[33,144,141],[253,231,37]];
+  // Cloud color-by-return: a low→high return gradient (viridis-like) so the
+  // eye reads the reward dimension directly. Cloud rows are [cvar, ret].
+  let rLo = Infinity, rHi = -Infinity;
+  (d.cloud || []).forEach(p => { if (p[1] < rLo) rLo = p[1]; if (p[1] > rHi) rHi = p[1]; });
+  if (!isFinite(rLo)) { rLo = 0; rHi = 1; }
+  function retColor(ret) {
+    const t = Math.max(0, Math.min(1, (ret - rLo) / Math.max(1e-9, rHi - rLo)));
+    const stops = [[68,1,84],[33,144,141],[253,231,37]];
     const i = t * 2, j = Math.floor(i), f = i - j;
     const a = stops[j], b = stops[Math.min(2, j + 1)];
     return `rgb(${Math.round(a[0]+(b[0]-a[0])*f)},${Math.round(a[1]+(b[1]-a[1])*f)},${Math.round(a[2]+(b[2]-a[2])*f)})`;
   }
 
-  // --- Base canvas: axes + cloud + frontier + anchors + tangency line ---
+  // --- Base canvas: axes + cloud + frontier + anchors ---
   const baseCv = document.getElementById("pf-mpt-base");
   const ctx = baseCv.getContext("2d");
   // Reset transform to identity, then scale so every subsequent call is in
@@ -7004,9 +7057,9 @@ function mptRenderChart() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
 
-  drawAxes(ctx, proj, d, params);
-  drawCloud(ctx, d.cloud || [], proj, sharpeOf, sharpeColor);
-  drawFrontierAndAnchors(ctx, d, proj, params);
+  drawAxes(ctx, proj, d);
+  drawCloud(ctx, d.cloud || [], proj, retColor);
+  drawFrontierAndAnchors(ctx, d, proj);
 
   // --- Overlay canvas: selection + hover ghost ---
   drawOverlay();
@@ -7016,38 +7069,25 @@ function mptRenderChart() {
   // Replace listeners by cloning so we never stack handlers on re-render.
   const fresh = ov.cloneNode(false);
   ov.parentNode.replaceChild(fresh, ov);
-  // Hit-test against BOTH the MV frontier and the CVaR curve. Returns
-  // {line, idx} for the nearest point; line drives which slider moves.
+  // Hit-test against the single mean-CVaR frontier. Returns the nearest index.
   function _hitPoint(ev) {
     const r = fresh.getBoundingClientRect();
     if (!r.width || !r.height) return null;
     const px = (ev.clientX - r.left) * (cssW / r.width);
     const py = (ev.clientY - r.top) * (cssH / r.height);
-    let bestLine = "frontier", best = 0, bestD = Infinity;
+    let best = 0, bestD = Infinity;
     (d.frontier || []).forEach((p, i) => {
-      const dxp = xToPx(p.vol) - px, dyp = yToPx(p.ret) - py;
+      const dxp = xToPx(p.cvar) - px, dyp = yToPx(p.ret) - py;
       const dd = dxp * dxp + dyp * dyp;
-      if (dd < bestD) { bestD = dd; best = i; bestLine = "frontier"; }
+      if (dd < bestD) { bestD = dd; best = i; }
     });
-    (d.cvar_frontier || []).forEach((p, i) => {
-      const dxp = xToPx(p.vol) - px, dyp = yToPx(p.ret) - py;
-      const dd = dxp * dxp + dyp * dyp;
-      if (dd < bestD) { bestD = dd; best = i; bestLine = "cvar"; }
-    });
-    return {line: bestLine, idx: best};
+    return best;
   }
   fresh.addEventListener("click", (ev) => {
-    const hit = _hitPoint(ev);
-    if (!hit) return;
-    if (hit.line === "cvar") {
-      MPT.cvarIdx = hit.idx;
-      MPT.activeLine = "cvar";
-      document.getElementById("pf-mpt-cvar-slider").value = String(hit.idx);
-    } else {
-      MPT.selectedIdx = hit.idx;
-      MPT.activeLine = "frontier";
-      document.getElementById("pf-mpt-slider").value = String(hit.idx);
-    }
+    const idx = _hitPoint(ev);
+    if (idx == null) return;
+    MPT.selectedIdx = idx;
+    document.getElementById("pf-mpt-slider").value = String(idx);
     MPT.hoverIdx = null;
     mptHideFrontierTip();
     mptUpdateSelection();
@@ -7060,16 +7100,16 @@ function mptRenderChart() {
     }
   });
   fresh.addEventListener("mousemove", (ev) => {
-    const hit = _hitPoint(ev);
-    if (!hit || hit.line !== "frontier") {
+    const idx = _hitPoint(ev);
+    if (idx == null) {
       MPT.hoverIdx = null;
       mptUpdateSelection();
       mptHideFrontierTip();
       return;
     }
-    MPT.hoverIdx = hit.idx;
+    MPT.hoverIdx = idx;
     mptUpdateSelection();
-    mptShowFrontierTip(ev, hit.idx);
+    mptShowFrontierTip(ev, idx);
   });
   fresh.addEventListener("mouseleave", () => {
     MPT.hoverIdx = null;
@@ -7077,65 +7117,65 @@ function mptRenderChart() {
     mptHideFrontierTip();
   });
 
-  // --- Legend with marker-shaped swatches. Each entry is clickable — see
-  //     mptLegendClick below for the kind → action mapping. ---
+  // --- Legend with marker-shaped swatches. Anchor entries are clickable and
+  //     snap the risk slider to the nearest frontier point. ---
   const legend = document.getElementById("pf-mpt-legend");
-  const hasCvar = (d.cvar_frontier || []).length > 0;
+  const nViewed = d.meta?.n_viewed, nAssets = d.meta?.n_assets;
+  const blNote = (nViewed != null && nAssets != null)
+    ? `BL: ${nViewed}/${nAssets} assets with analyst views` : "";
   legend.innerHTML = `
-    <span data-legend="frontier" title="Click to switch to the efficient-frontier slider and highlight the line.">${legendSwatch("frontier")}Efficient frontier</span>
-    ${hasCvar ? `<span data-legend="cvar" title="Click to switch to the CVaR slider and highlight the curve.">${legendSwatch("cvar")}CVaR-optimal (α=99↔50)</span>` : ""}
-    <span data-legend="tangency" title="Click to jump to the tangency portfolio.">${legendSwatch("tangency")}Tangency (max Sharpe)</span>
-    <span data-legend="equal" title="Click to jump to the equal-weight portfolio on the frontier.">${legendSwatch("equal")}Equal-weight</span>
-    <span data-legend="cap" title="Click to jump to the cap-weight portfolio on the frontier.">${legendSwatch("cap")}Cap-weight</span>
-    <span data-legend="current" title="Click to jump to the current portfolio on the frontier.">${legendSwatch("current")}Current</span>
+    <span data-legend="frontier" title="Highlight the mean-CVaR efficient frontier.">${legendSwatch("frontier")}Mean-CVaR frontier</span>
+    <span data-legend="equal" title="Click to jump to the equal-weight portfolio.">${legendSwatch("equal")}Equal-weight</span>
+    <span data-legend="cap" title="Click to jump to the cap-weight portfolio.">${legendSwatch("cap")}Cap-weight</span>
+    <span data-legend="current" title="Click to jump to the current portfolio.">${legendSwatch("current")}Current</span>
     <span class="no-click">${legendSwatch("selected")}Selected</span>
-    <span class="no-click" style="margin-left:auto">${(d.meta?.n_samples_actual || (d.cloud || []).length).toLocaleString()} Monte-Carlo portfolios · ${d.meta?.n_obs || "?"} ${d.params?.frequency || "?"} obs · ${d.meta?.total_ms || "?"}ms</span>
+    <span class="no-click" style="margin-left:auto">${(d.cloud || []).length.toLocaleString()} portfolios · ${d.meta?.n_obs || "?"} daily obs · ${blNote} · ${d.meta?.total_ms || "?"}ms</span>
   `;
   legend.querySelectorAll("span[data-legend]").forEach(el => {
     el.addEventListener("click", () => mptLegendClick(el.dataset.legend));
   });
 }
 
-// Snap the MV-frontier slider to the index nearest (vol, ret) — used by
-// the legend's anchor entries so clicking "Equal-weight" jumps the
-// frontier marker to the closest feasible point on the curve.
-function _nearestFrontierIdx(vol, ret) {
+// Default marker: the frontier point with the best reward-per-CVaR,
+// argmax (ret - rf)/cvar — the mean-CVaR analogue of the max-Sharpe anchor.
+function mptBestRewardIdx(d, rf) {
+  const fr = d.frontier || [];
+  if (!fr.length) return 0;
+  let best = 0, bestR = -Infinity;
+  fr.forEach((p, i) => {
+    const r = p.cvar > 1e-9 ? (p.ret - rf) / p.cvar : -Infinity;
+    if (r > bestR) { bestR = r; best = i; }
+  });
+  return best;
+}
+
+// Snap the risk slider to the index nearest (cvar, ret) — used by the legend's
+// anchor entries so clicking "Equal-weight" jumps the marker to the closest
+// point on the frontier.
+function _nearestFrontierIdx(cvar, ret) {
   const d = MPT.result; if (!d || !(d.frontier || []).length) return 0;
   let best = 0, bestD = Infinity;
   d.frontier.forEach((p, i) => {
-    const dvx = (p.vol - vol), dvy = (p.ret - ret);
+    const dvx = (p.cvar - cvar), dvy = (p.ret - ret);
     const dd = dvx * dvx + dvy * dvy;
     if (dd < bestD) { bestD = dd; best = i; }
   });
   return best;
 }
 
-// Legend click handler — kind → (select point + pulse). For the two line
-// entries we switch activeLine; for anchor markers we snap the MV-frontier
-// slider to the closest point on the curve.
+// Legend click handler — kind → (select point + pulse). Anchor markers snap the
+// risk slider to the closest point on the frontier; "frontier" just pulses it.
 function mptLegendClick(kind) {
   const d = MPT.result; if (!d) return;
   switch (kind) {
     case "frontier":
-      MPT.activeLine = "frontier";
-      break;
-    case "cvar":
-      if ((d.cvar_frontier || []).length) MPT.activeLine = "cvar";
-      break;
-    case "tangency":
-      if (d.tangency) {
-        MPT.selectedIdx = _nearestFrontierIdx(d.tangency.vol, d.tangency.ret);
-        MPT.activeLine = "frontier";
-        document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
-      }
       break;
     case "equal":
     case "cap":
     case "current": {
       const a = (d.anchors || {})[kind];
       if (a) {
-        MPT.selectedIdx = _nearestFrontierIdx(a.vol, a.ret);
-        MPT.activeLine = "frontier";
+        MPT.selectedIdx = _nearestFrontierIdx(a.cvar, a.ret);
         document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
       }
       break;
@@ -7151,10 +7191,6 @@ function legendSwatch(kind) {
   switch (kind) {
     case "frontier":
       return `<svg ${c} viewBox="0 0 14 12"><path d="M1 9 Q7 1 13 4" fill="none" stroke="var(--accent)" stroke-width="2.2"/></svg>`;
-    case "cvar":
-      return `<svg ${c} viewBox="0 0 14 12"><path d="M1 9 Q7 1 13 4" fill="none" stroke="#ea580c" stroke-width="2" stroke-dasharray="3 2"/></svg>`;
-    case "tangency":
-      return `<svg ${c} viewBox="0 0 14 12"><polygon points="${star(7,6,5,2.4,5)}" fill="#fbbf24" stroke="#7c2d12" stroke-width="0.6"/></svg>`;
     case "equal":
       return `<svg ${c} viewBox="0 0 14 12"><polygon points="7,1 12,6 7,11 2,6" fill="#8b5cf6"/></svg>`;
     case "cap":
@@ -7177,9 +7213,8 @@ function _mptCssColor(name, fallback) {
   } catch (_e) { return fallback; }
 }
 
-function drawAxes(ctx, proj, d, params) {
+function drawAxes(ctx, proj, d) {
   const {pad, cssW, cssH, xMin, xMax, yMin, yMax, X, Y} = proj;
-  const accent = _mptCssColor("--accent", "#0969da");
   const border = _mptCssColor("--border", "#d0d7de");
   const muted  = _mptCssColor("--muted",  "#6e7781");
   const bgCv   = _mptCssColor("--bg-canvas", "#ffffff");
@@ -7218,40 +7253,37 @@ function drawAxes(ctx, proj, d, params) {
   for (const v of yt) ctx.fillText(fmtPct(v), pad.l - 6, Y(v));
 
   // Axis titles.
+  const aConf = Math.round((d.params?.alpha || 0.95) * 100);
   ctx.font = "11px ui-sans-serif, -apple-system, system-ui, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText("Volatility (annualized)", (cssW - pad.r + pad.l) / 2, cssH - 6);
+  ctx.fillText(`CVaR ${aConf}% (annualized)`, (cssW - pad.r + pad.l) / 2, cssH - 6);
   ctx.save();
   ctx.translate(14, (cssH - pad.b + pad.t) / 2);
   ctx.rotate(-Math.PI / 2);
-  ctx.fillText("Return (annualized)", 0, 0);
+  ctx.fillText("Expected return — Black-Litterman", 0, 0);
   ctx.restore();
 
-  // Tangency dashed line from rf marker → tangency, extended past it.
-  if (d.tangency) {
-    const tx = X(d.tangency.vol), ty = Y(d.tangency.ret);
-    const rfX = X(0), rfY = Y(params.rf);
-    const dxp = tx - rfX, dyp = ty - rfY;
-    const k = 1.6;
-    const ex = rfX + dxp * k, ey = rfY + dyp * k;
+  // rf reference line (horizontal) — the cash return / BL excess baseline. Use
+  // the rf that produced this frontier (d.params), coherent with the y-domain.
+  const rf = Number(d.params?.rf) || 0;
+  const rfY = Math.round(Y(rf)) + 0.5;
+  if (rfY > pad.t && rfY < cssH - pad.b) {
     ctx.save();
-    ctx.strokeStyle = accent; ctx.lineWidth = 1.2;
-    ctx.setLineDash([5, 4]); ctx.globalAlpha = 0.85;
-    ctx.beginPath(); ctx.moveTo(rfX, rfY); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.strokeStyle = muted; ctx.globalAlpha = 0.5; ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(pad.l, rfY); ctx.lineTo(cssW - pad.r, rfY); ctx.stroke();
     ctx.restore();
-    ctx.fillStyle = accent; ctx.globalAlpha = 0.8;
-    ctx.beginPath(); ctx.arc(rfX, rfY, 3, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = accent;
+    ctx.fillStyle = muted;
     ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
     ctx.font = "10px ui-sans-serif, -apple-system, system-ui, sans-serif";
-    ctx.fillText(`rf ${(params.rf * 100).toFixed(2)}%`, rfX + 8, rfY - 6);
+    ctx.fillText(`rf ${(rf * 100).toFixed(2)}%`, pad.l + 6, rfY - 4);
   }
 }
 
-// Cloud paint on the base canvas — single fillRect per point. The caller
-// already set ctx transform so we're in CSS pixels; no manual dpr math.
-function drawCloud(ctx, cloud, proj, sharpeOf, sharpeColor) {
+// Cloud paint on the base canvas — single fillRect per point. Rows are
+// [cvar, ret]; colored by return via the supplied gradient. The caller already
+// set ctx transform so we're in CSS pixels; no manual dpr math.
+function drawCloud(ctx, cloud, proj, retColor) {
   if (!cloud || !cloud.length) return;
   const {X, Y, pad, cssW, cssH, dpr} = proj;
   ctx.save();
@@ -7259,57 +7291,54 @@ function drawCloud(ctx, cloud, proj, sharpeOf, sharpeColor) {
   ctx.beginPath();
   ctx.rect(pad.l, pad.t, cssW - pad.l - pad.r, cssH - pad.t - pad.b);
   ctx.clip();
-  ctx.globalAlpha = 0.85;
-  // Dot side ~1.7 CSS px; bumped slightly on hi-dpi so dots stay visible.
-  const r = Math.max(1.1, 1.7 * Math.min(dpr, 1.5));
-  const step = cloud.length > 1_200_000 ? Math.ceil(cloud.length / 1_200_000) : 1;
-  for (let i = 0; i < cloud.length; i += step) {
+  ctx.globalAlpha = 0.8;
+  // Dot side ~1.8 CSS px; bumped slightly on hi-dpi so dots stay visible.
+  const r = Math.max(1.2, 1.8 * Math.min(dpr, 1.5));
+  for (let i = 0; i < cloud.length; i++) {
     const p = cloud[i];
     const x = X(p[0]), y = Y(p[1]);
-    ctx.fillStyle = sharpeColor(sharpeOf(p));
+    ctx.fillStyle = retColor(p[1]);
     ctx.fillRect(x - r * 0.5, y - r * 0.5, r, r);
   }
   ctx.restore();
 }
 
-function drawFrontierAndAnchors(ctx, d, proj, params) {
+function drawFrontierAndAnchors(ctx, d, proj) {
   const {X, Y} = proj;
   const accent = _mptCssColor("--accent", "#0969da");
-  const cvarColor = "#ea580c";
-  if (d.frontier && d.frontier.length) {
+  const fr = d.frontier || [];
+  // Bootstrap stability band: at each return level the CVaR ranges [cvar_lo,
+  // cvar_hi] across resampled scenario sets. Shade it so the frontier's sampling
+  // uncertainty is visible (wider band = noisier estimate at that point).
+  const hasBand = fr.length > 1 && fr[0].cvar_lo != null && fr[0].cvar_hi != null;
+  if (hasBand) {
     ctx.save();
-    ctx.strokeStyle = accent; ctx.lineWidth = 2.2;
+    ctx.fillStyle = accent; ctx.globalAlpha = 0.14;
+    ctx.beginPath();
+    fr.forEach((p, i) => { const x = X(p.cvar_hi), y = Y(p.ret); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    for (let i = fr.length - 1; i >= 0; i--) ctx.lineTo(X(fr[i].cvar_lo), Y(fr[i].ret));
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  if (fr.length) {
+    ctx.save();
+    ctx.strokeStyle = accent; ctx.lineWidth = 2.4;
     ctx.lineJoin = "round"; ctx.lineCap = "round";
     ctx.beginPath();
-    d.frontier.forEach((p, i) => {
-      const x = X(p.vol), y = Y(p.ret);
+    fr.forEach((p, i) => {
+      const x = X(p.cvar), y = Y(p.ret);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.stroke();
     ctx.restore();
   }
-  // CVaR curve: dashed orange polyline distinct from the MV frontier so the
-  // two families of optima don't blur together.
-  if (d.cvar_frontier && d.cvar_frontier.length) {
-    ctx.save();
-    ctx.strokeStyle = cvarColor; ctx.lineWidth = 2.0;
-    ctx.lineJoin = "round"; ctx.lineCap = "round";
-    ctx.setLineDash([6, 4]);
-    ctx.beginPath();
-    d.cvar_frontier.forEach((p, i) => {
-      const x = X(p.vol), y = Y(p.ret);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-    ctx.restore();
-  }
-  if (d.min_vol) drawMarker(ctx, "endpoint", X(d.min_vol.vol), Y(d.min_vol.ret));
-  if (d.max_ret) drawMarker(ctx, "endpoint", X(d.max_ret.vol), Y(d.max_ret.ret));
+  // Frontier endpoints: min-CVaR (left, conservative) and max-return (right).
+  if (d.min_cvar) drawMarker(ctx, "endpoint", X(d.min_cvar.cvar), Y(d.min_cvar.ret));
+  if (d.max_ret)  drawMarker(ctx, "endpoint", X(d.max_ret.cvar),  Y(d.max_ret.ret));
   const an = d.anchors || {};
-  if (an.equal)   drawMarker(ctx, "equal",   X(an.equal.vol),   Y(an.equal.ret));
-  if (an.cap)     drawMarker(ctx, "cap",     X(an.cap.vol),     Y(an.cap.ret));
-  if (an.current) drawMarker(ctx, "current", X(an.current.vol), Y(an.current.ret));
-  if (d.tangency) drawMarker(ctx, "tangency", X(d.tangency.vol), Y(d.tangency.ret));
+  if (an.equal)   drawMarker(ctx, "equal",   X(an.equal.cvar),   Y(an.equal.ret));
+  if (an.cap)     drawMarker(ctx, "cap",     X(an.cap.cvar),     Y(an.cap.ret));
+  if (an.current) drawMarker(ctx, "current", X(an.current.cvar), Y(an.current.ret));
 }
 
 function drawMarker(ctx, kind, x, y) {
@@ -7336,19 +7365,6 @@ function drawMarker(ctx, kind, x, y) {
       ctx.beginPath(); ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5);
       ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5); ctx.stroke();
       break;
-    case "tangency": {
-      const R = 8, r = 4, n = 5;
-      ctx.fillStyle = "#fbbf24"; ctx.strokeStyle = "#7c2d12"; ctx.lineWidth = 0.8;
-      ctx.beginPath();
-      for (let i = 0; i < 2 * n; i++) {
-        const ang = -Math.PI / 2 + i * Math.PI / n;
-        const rad = i % 2 === 0 ? R : r;
-        const px = x + rad * Math.cos(ang), py = y + rad * Math.sin(ang);
-        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-      }
-      ctx.closePath(); ctx.fill(); ctx.stroke();
-      break;
-    }
   }
   ctx.restore();
 }
@@ -7366,13 +7382,12 @@ function drawOverlay() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
   const accent = _mptCssColor("--accent", "#0969da");
-  const cvarColor = "#ea580c";
 
   // Hover ghost (only when it isn't the same point as the selection).
   if (MPT.hoverIdx != null && MPT.hoverIdx !== MPT.selectedIdx) {
     const hp = d.frontier[MPT.hoverIdx];
     if (hp) {
-      const hx = X(hp.vol), hy = Y(hp.ret);
+      const hx = X(hp.cvar), hy = Y(hp.ret);
       ctx.save();
       ctx.strokeStyle = accent; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.6;
       ctx.beginPath(); ctx.arc(hx, hy, 6, 0, Math.PI * 2); ctx.stroke();
@@ -7382,41 +7397,25 @@ function drawOverlay() {
     }
   }
 
-  // Inactive (muted) ring on the curve that ISN'T currently driving the
-  // sidebar — keeps both sliders' positions visible at a glance.
-  const inactiveIsCvar = MPT.activeLine !== "cvar";
-  const cv_arr = d.cvar_frontier || [];
-  const muted = inactiveIsCvar ? cv_arr[MPT.cvarIdx] : d.frontier[MPT.selectedIdx];
-  if (muted) {
-    const mx = X(muted.vol), my = Y(muted.ret);
-    const mcol = inactiveIsCvar ? cvarColor : accent;
-    ctx.save();
-    ctx.strokeStyle = mcol; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.55;
-    ctx.beginPath(); ctx.arc(mx, my, 7, 0, Math.PI * 2); ctx.stroke();
-    ctx.restore();
-  }
-
-  // Active selection ring on the currently-driven curve.
-  const activeIsCvar = MPT.activeLine === "cvar";
-  const sel = activeIsCvar ? cv_arr[MPT.cvarIdx] : d.frontier[MPT.selectedIdx];
+  // Active selection ring on the frontier.
+  const sel = (d.frontier || [])[MPT.selectedIdx];
   if (sel) {
-    const x = X(sel.vol), y = Y(sel.ret);
-    const col = activeIsCvar ? cvarColor : accent;
+    const x = X(sel.cvar), y = Y(sel.ret);
     ctx.save();
-    ctx.strokeStyle = col; ctx.lineWidth = 2.5;
+    ctx.strokeStyle = accent; ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke();
-    ctx.fillStyle = col;
+    ctx.fillStyle = accent;
     ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
 
   // Pulse layer: fades over the pulse window.
-  drawPulse(ctx, d, proj, accent, cvarColor);
+  drawPulse(ctx, d, proj, accent);
 }
 
 // Pulse animation — fades a highlight ring (or thicker line stroke for the
 // frontier/cvar entries) over a 700 ms window. Uses MPT.pulseUntil + MPT.pulseKind.
-function drawPulse(ctx, d, proj, accent, cvarColor) {
+function drawPulse(ctx, d, proj, accent) {
   const now = performance.now();
   if (!MPT.pulseKind || now >= MPT.pulseUntil) return;
   const PULSE_MS = 700;
@@ -7427,42 +7426,34 @@ function drawPulse(ctx, d, proj, accent, cvarColor) {
   const {X, Y} = proj;
   const kind = MPT.pulseKind;
 
-  const ringAt = (vol, ret, color) => {
-    if (vol == null || ret == null) return;
+  const ringAt = (cvar, ret, color) => {
+    if (cvar == null || ret == null) return;
     ctx.save();
     ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.globalAlpha = alpha;
-    ctx.beginPath(); ctx.arc(X(vol), Y(ret), radius, 0, Math.PI * 2); ctx.stroke();
-    ctx.restore();
-  };
-  const lineWith = (pts, color, lw) => {
-    if (!pts || !pts.length) return;
-    ctx.save();
-    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.globalAlpha = alpha;
-    ctx.lineJoin = "round"; ctx.lineCap = "round";
-    ctx.beginPath();
-    pts.forEach((p, i) => { const x = X(p.vol), y = Y(p.ret); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
-    ctx.stroke();
+    ctx.beginPath(); ctx.arc(X(cvar), Y(ret), radius, 0, Math.PI * 2); ctx.stroke();
     ctx.restore();
   };
 
   switch (kind) {
     case "frontier":
-      lineWith(d.frontier, accent, 5);
-      break;
-    case "cvar":
-      lineWith(d.cvar_frontier, cvarColor, 5);
-      break;
-    case "tangency":
-      if (d.tangency) ringAt(d.tangency.vol, d.tangency.ret, "#fbbf24");
+      if (d.frontier && d.frontier.length) {
+        ctx.save();
+        ctx.strokeStyle = accent; ctx.lineWidth = 5; ctx.globalAlpha = alpha;
+        ctx.lineJoin = "round"; ctx.lineCap = "round";
+        ctx.beginPath();
+        d.frontier.forEach((p, i) => { const x = X(p.cvar), y = Y(p.ret); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+        ctx.stroke();
+        ctx.restore();
+      }
       break;
     case "equal":
-      if (d.anchors?.equal) ringAt(d.anchors.equal.vol, d.anchors.equal.ret, "#8b5cf6");
+      if (d.anchors?.equal) ringAt(d.anchors.equal.cvar, d.anchors.equal.ret, "#8b5cf6");
       break;
     case "cap":
-      if (d.anchors?.cap) ringAt(d.anchors.cap.vol, d.anchors.cap.ret, "#06b6d4");
+      if (d.anchors?.cap) ringAt(d.anchors.cap.cvar, d.anchors.cap.ret, "#06b6d4");
       break;
     case "current":
-      if (d.anchors?.current) ringAt(d.anchors.current.vol, d.anchors.current.ret, "#f59e0b");
+      if (d.anchors?.current) ringAt(d.anchors.current.cvar, d.anchors.current.ret, "#f59e0b");
       break;
   }
 
@@ -7489,8 +7480,7 @@ function mptUpdateSelection() { drawOverlay(); }
 function mptShowFrontierTip(ev, idx) {
   const d = MPT.result; if (!d) return;
   const p = d.frontier[idx]; if (!p) return;
-  const params = mptGetParams();
-  const sharpe = p.vol > 1e-9 ? (p.ret - params.rf) / p.vol : NaN;
+  const aConf = Math.round((d.params?.alpha || 0.95) * 100);
   const top = Object.entries(p.weights || {})
     .filter(([_, w]) => w > 1e-4)
     .sort((a, b) => b[1] - a[1])
@@ -7504,9 +7494,9 @@ function mptShowFrontierTip(ev, idx) {
   }
   tip.innerHTML = `
     <div class="tip-title">Frontier point #${idx + 1} / ${d.frontier.length} <span style="font-weight:400;color:var(--muted);font-size:10px">· click to select</span></div>
-    <div class="tip-row"><span class="k">Return</span><span class="v">${(p.ret * 100).toFixed(2)}%</span></div>
-    <div class="tip-row"><span class="k">Vol</span><span class="v">${(p.vol * 100).toFixed(2)}%</span></div>
-    <div class="tip-row"><span class="k">Sharpe</span><span class="v">${isFinite(sharpe) ? sharpe.toFixed(3) : "—"}</span></div>
+    <div class="tip-row"><span class="k">Expected return</span><span class="v">${(p.ret * 100).toFixed(2)}%</span></div>
+    <div class="tip-row"><span class="k">CVaR ${aConf}%</span><span class="v neg">${(p.cvar * 100).toFixed(2)}%</span></div>
+    <div class="tip-row"><span class="k">Max drawdown</span><span class="v neg">${(p.mdd * 100).toFixed(1)}%</span></div>
     ${top.length ? `<div class="tip-sub">Top weights</div>` + top.map(([s, w]) =>
       `<div class="tip-row"><span class="k">${escapeHtml(s)}</span><span class="v">${(w * 100).toFixed(1)}%</span></div>`
     ).join("") : ""}
@@ -7526,87 +7516,62 @@ function mptHideFrontierTip() {
   if (tip) tip.classList.remove("show");
 }
 
-function star(cx, cy, R, r, n) {
-  // Render a star polygon centered at (cx, cy)
-  const pts = [];
-  for (let i = 0; i < 2 * n; i++) {
-    const ang = -Math.PI / 2 + i * Math.PI / n;
-    const rad = i % 2 === 0 ? R : r;
-    pts.push(`${(cx + rad * Math.cos(ang)).toFixed(1)},${(cy + rad * Math.sin(ang)).toFixed(1)}`);
-  }
-  return pts.join(" ");
-}
-
-// Pull the currently-selected portfolio (frontier or CVaR curve) — single
-// source of truth for the sidebar, apply button, and save flow.
+// Pull the currently-selected frontier point — single source of truth for the
+// sidebar, apply button, and save flow.
 function mptActiveSel() {
   const d = MPT.result; if (!d) return null;
-  if (MPT.activeLine === "cvar") {
-    const cv = d.cvar_frontier || [];
-    return cv[MPT.cvarIdx] || null;
-  }
   return (d.frontier || [])[MPT.selectedIdx] || null;
 }
 
 function mptRenderSide() {
   const d = MPT.result; if (!d) return;
   const sel = mptActiveSel(); if (!sel) return;
-  const params = mptGetParams();
-  const sharpe = sel.vol > 1e-9 ? (sel.ret - params.rf) / sel.vol : NaN;
+  const bl = d.bl || {};
+  const aConf = Math.round((d.params?.alpha || 0.95) * 100);
   const stats = document.getElementById("pf-mpt-stats");
-  const isCvar = MPT.activeLine === "cvar";
-  // Sidebar readouts under each slider track current selection along its curve.
+  // Slider readout: expected return / CVaR at the current point.
   const sliderReadout = document.getElementById("pf-mpt-slider-readout");
   if (sliderReadout) {
-    const fp = (d.frontier || [])[MPT.selectedIdx];
-    sliderReadout.textContent = fp
-      ? `${(fp.ret * 100).toFixed(1)}% / ${(fp.vol * 100).toFixed(1)}%`
-      : "—";
+    sliderReadout.textContent = `${(sel.ret * 100).toFixed(1)}% ret / ${(sel.cvar * 100).toFixed(1)}% CVaR`;
   }
-  const cvarReadout = document.getElementById("pf-mpt-cvar-readout");
-  if (cvarReadout) {
-    const cv = (d.cvar_frontier || [])[MPT.cvarIdx];
-    cvarReadout.textContent = cv ? `α=${Math.round(cv.conf * 100)}%` : "—";
-  }
-  // Stats block. CVaR/VaR are returned in per-period units (matches the
-  // returns frequency used for optimisation). Multiply by 100 for %.
-  let extraRows = "";
-  if (isCvar && sel.cvar != null) {
-    const freq = d.params?.frequency || "weekly";
-    const conf = Math.round((sel.conf || 0) * 100);
-    extraRows = `
-      <span class="k">CVaR (α=${conf}%, ${freq})</span><span class="v neg">${(sel.cvar * 100).toFixed(2)}%</span>
-      <span class="k">VaR (α=${conf}%, ${freq})</span><span class="v neg">${(sel.var * 100).toFixed(2)}%</span>`;
-  }
+  const cash = d.params?.fully_invested === false;
+  const invested = Object.values(sel.weights || {}).reduce((a, b) => a + b, 0);
+  const nBoot = d.meta?.n_boot || 0;
+  const bandRow = (sel.cvar_lo != null && sel.cvar_hi != null)
+    ? `<span class="k">CVaR band (bootstrap)</span><span class="v" title="10th–90th percentile of CVaR across ${nBoot} bootstrap-resampled scenario sets — the frontier's sampling uncertainty at this point.">${(sel.cvar_lo * 100).toFixed(1)}–${(sel.cvar_hi * 100).toFixed(1)}%</span>`
+    : "";
   stats.innerHTML = `
-    <span class="k">Source</span><span class="v">${isCvar ? "Min-CVaR" : "Efficient frontier"}</span>
-    <span class="k">Annualised return</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
-    <span class="k">Annualised vol</span><span class="v">${(sel.vol * 100).toFixed(2)}%</span>
-    <span class="k">Sharpe (rf ${(params.rf*100).toFixed(2)}%)</span><span class="v ${sharpe >= 0 ? "pos" : "neg"}">${isFinite(sharpe) ? sharpe.toFixed(3) : "—"}</span>
-    ${extraRows}
+    <span class="k">Expected return (BL)</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
+    <span class="k">CVaR ${aConf}% (annualized)</span><span class="v neg">${(sel.cvar * 100).toFixed(2)}%</span>
+    ${bandRow}
+    <span class="k">Max drawdown</span><span class="v neg">${(sel.mdd * 100).toFixed(1)}%</span>
+    <span class="k">CDaR (95%)</span><span class="v neg">${(sel.cdar * 100).toFixed(1)}%</span>
+    <span class="k">Volatility (ref.)</span><span class="v">${sel.vol != null ? (sel.vol * 100).toFixed(2) + "%" : "—"}</span>
+    ${cash ? `<span class="k">Invested / cash</span><span class="v">${(invested*100).toFixed(0)}% / ${((1-invested)*100).toFixed(0)}%</span>` : ""}
+    <span class="k">Analyst views</span><span class="v">${(bl.viewed || []).length}/${(d.symbols || []).length}${bl.haircut != null ? ` <span style="color:var(--muted);font-weight:400">@ ${Math.round(bl.haircut*100)}% trust</span>` : ""}</span>
     <span class="k">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
   `;
-  // Weights bars (sorted descending; zero-weight rows hidden for clarity)
+  // Weights bars (sorted descending; zero-weight rows hidden). Show the BL
+  // posterior return per asset as context when hovering the row title.
   const wlist = document.getElementById("pf-mpt-wlist");
   const ws = Object.entries(sel.weights || {})
     .filter(([_, w]) => w > 1e-4)
     .sort((a, b) => b[1] - a[1]);
   if (!ws.length) {
-    wlist.innerHTML = `<span class="pf-mpt-status">No weights at this point.</span>`;
+    wlist.innerHTML = `<span class="pf-mpt-status">No weights at this point (all cash).</span>`;
   } else {
     const maxW = ws[0][1];
-    wlist.innerHTML = ws.map(([sym, w]) => `
+    wlist.innerHTML = ws.map(([sym, w]) => {
+      const mu = bl.mu ? bl.mu[sym] : null;
+      const tip = mu != null ? `${sym} · BL return ${(mu*100).toFixed(1)}%` : sym;
+      return `
       <div class="pf-mpt-wrow">
-        <span title="${escapeHtml(sym)}">${escapeHtml(sym)}</span>
+        <span title="${escapeHtml(tip)}">${escapeHtml(sym)}</span>
         <div class="pf-mpt-track"><div class="pf-mpt-fill" style="width:${(w/maxW*100).toFixed(1)}%"></div></div>
         <span class="pf-mpt-val">${(w * 100).toFixed(2)}%</span>
-      </div>
-    `).join("");
+      </div>`;
+    }).join("");
   }
-  // Slider-row highlighting follows activeLine.
-  document.querySelectorAll(".pf-mpt-slider-row").forEach(r => {
-    r.classList.toggle("active-line", r.dataset.line === MPT.activeLine);
-  });
 }
 
 function mptApplyToPortfolio() {
@@ -7625,14 +7590,9 @@ function mptApplyToPortfolio() {
   renderModeBar();
   persistActivePreset();
   requestAnalytics({force: true});
-  if (MPT.activeLine === "cvar") {
-    const conf = Math.round((sel.conf || 0) * 100);
-    toast(`Applied min-CVaR α=${conf}% — ${(sel.ret * 100).toFixed(1)}% ret, ${(sel.vol * 100).toFixed(1)}% vol.`);
-  } else {
-    const pt = MPT.selectedIdx + 1;
-    const total = (d.frontier || []).length;
-    toast(`Applied MPT point ${pt}/${total} — ${(sel.ret * 100).toFixed(1)}% ret, ${(sel.vol * 100).toFixed(1)}% vol.`);
-  }
+  const pt = MPT.selectedIdx + 1;
+  const total = (d.frontier || []).length;
+  toast(`Applied frontier point ${pt}/${total} — ${(sel.ret * 100).toFixed(1)}% ret, ${(sel.cvar * 100).toFixed(1)}% CVaR.`);
 }
 
 function mptSaveAsPreset() {
@@ -7642,16 +7602,15 @@ function mptSaveAsPreset() {
     return toast("Save the portfolio first to keep custom weights.");
   }
   const existing = (STATE.weightPresets || []).map(p => p.name);
-  const suggested = MPT.activeLine === "cvar"
-    ? `CVaR α=${Math.round((sel.conf || 0) * 100)}% ${d.params.lookback} ${d.params.frequency}`
-    : `MPT ${d.params.lookback} ${d.params.frequency}`;
+  const aConf = Math.round((d.params?.alpha || 0.95) * 100);
+  const suggested = `Mean-CVaR${aConf} ${d.params.lookback}`;
   showInlinePrompt({
     title: "Save as Custom Weights",
     description:
-      "Saves the currently selected portfolio (the point on the efficient frontier under the slider) as a named Custom-Weights configuration under this portfolio. " +
+      "Saves the currently selected portfolio (the point on the mean-CVaR frontier under the slider) as a named Custom-Weights configuration under this portfolio. " +
       "Switch between custom configurations from the mode bar to compare strategies side-by-side against Equal-weight and Cap-weight.",
     initial: suggested,
-    placeholder: "e.g. Tangency 3Y Weekly",
+    placeholder: "e.g. Mean-CVaR95 3Y",
     validate(name) {
       if (!name) return "Name required.";
       if (existing.includes(name)) return `"${name}" already exists.`;
@@ -7679,13 +7638,11 @@ async function mptSaveRun({silent} = {silent: false}) {
     return;
   }
   try {
-    // Strip the (heavy) cloud before persisting; it can be re-sampled cheaply.
+    // Persist everything except the (heavy) cloud, which re-samples on load.
     const compact = {
       params: d.params, symbols: d.symbols, missing: d.missing,
-      frontier: d.frontier, cvar_frontier: d.cvar_frontier || [],
-      tangency: d.tangency,
-      min_vol: d.min_vol, max_ret: d.max_ret, anchors: d.anchors,
-      meta: d.meta,
+      frontier: d.frontier, min_cvar: d.min_cvar, max_ret: d.max_ret,
+      anchors: d.anchors, bl: d.bl, meta: d.meta,
     };
     const r = await fetch("/api/mpt-runs", {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -7693,94 +7650,42 @@ async function mptSaveRun({silent} = {silent: false}) {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || "save failed");
-    await mptLoadRuns();
     if (!silent) toast("Run saved.");
   } catch (e) { if (!silent) toast("Save failed: " + (e.message || e)); }
 }
 
-async function mptLoadRuns() {
-  const host = document.getElementById("pf-mpt-runs");
-  if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
-    host.innerHTML = `<span class="pf-mpt-status">Saved runs are per-portfolio.</span>`;
-    MPT.runs = []; return;
-  }
+// Restore the single last saved run for this portfolio on overlay open (run
+// history was dropped — only the most recent run persists). Reflects its params
+// into the controls and repaints the chart. No-op if there is no saved run.
+async function mptRestoreLast() {
+  if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) return false;
+  let run = null;
   try {
     const r = await fetch(`/api/mpt-runs?view=${encodeURIComponent(STATE.activeView)}`);
     const j = await r.json();
-    MPT.runs = j.runs || [];
-  } catch (_) { MPT.runs = []; }
-  if (!MPT.runs.length) {
-    host.innerHTML = `<span class="pf-mpt-status">No saved runs yet.</span>`;
-    return;
-  }
-  host.innerHTML = MPT.runs.map(r => {
-    const p = r.params || {};
-    const t = r.tangency || {};
-    return `<div class="pf-mpt-run-row" data-id="${escapeHtml(r.id)}">
-      <div style="flex:1">
-        <div><b>${escapeHtml(p.lookback || "")} ${escapeHtml(p.frequency || "")}</b> · ${(p.display_ccy || "USD")}</div>
-        <div class="meta">${r.saved_at ? escapeHtml(fmtDateMDY(r.saved_at) + " " + String(r.saved_at).slice(11, 16)) : ""} · tangent Sharpe ${t.sharpe != null ? Number(t.sharpe).toFixed(2) : "—"}</div>
-      </div>
-      <button class="del" title="Delete">✕</button>
-    </div>`;
-  }).join("");
-  host.querySelectorAll(".pf-mpt-run-row").forEach(row => {
-    const id = row.dataset.id;
-    row.addEventListener("click", (e) => {
-      if (e.target.classList.contains("del")) return;
-      mptLoadRun(id);
-    });
-    row.querySelector(".del").addEventListener("click", async (e) => {
-      e.stopPropagation();
-      try {
-        await fetch(`/api/mpt-runs/${encodeURIComponent(id)}?view=${encodeURIComponent(STATE.activeView)}`, {method: "DELETE"});
-        mptLoadRuns();
-      } catch (_) {}
-    });
-  });
-}
-
-async function mptLoadRun(id) {
-  try {
-    const r = await fetch(`/api/mpt-runs/${encodeURIComponent(id)}?view=${encodeURIComponent(STATE.activeView)}`);
-    const j = await r.json();
-    if (!r.ok || !j.run) throw new Error(j.error || "not found");
-    // Saved runs are persisted without the cloud — show an empty cloud so
-    // the chart still renders.
-    MPT.result = {...j.run, cloud: j.run.cloud || []};
-    // Reflect run params in controls
-    if (j.run.params) {
-      const p = j.run.params;
-      document.querySelectorAll("#pf-mpt-lookback button").forEach(b => b.classList.toggle("active", b.dataset.v === p.lookback));
-      document.querySelectorAll("#pf-mpt-freq button").forEach(b => b.classList.toggle("active", b.dataset.v === p.frequency));
-      if (p.rf != null) document.getElementById("pf-mpt-rf").value = (p.rf * 100).toFixed(2);
-      if (p.budget) mptSetBudget(p.budget);
-      const savedMode = p.diversified ? "diversified" : "sparse";
-      document.querySelectorAll("#pf-mpt-mode button").forEach(b => b.classList.toggle("active", b.dataset.v === savedMode));
-    }
-    MPT.selectedIdx = Math.floor((MPT.result.frontier || []).length / 2);
-    document.getElementById("pf-mpt-slider").max = String(Math.max(0, (MPT.result.frontier || []).length - 1));
-    document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
-    document.getElementById("pf-mpt-slider").disabled = false;
-    // CVaR slider — pre-existing saved runs (before this feature) won't have
-    // cvar_frontier, so disable the slider gracefully in that case.
-    const cv = MPT.result.cvar_frontier || [];
-    const cvarSlider = document.getElementById("pf-mpt-cvar-slider");
-    if (cv.length) {
-      MPT.cvarIdx = Math.floor(cv.length / 2);
-      cvarSlider.max = String(Math.max(0, cv.length - 1));
-      cvarSlider.value = String(MPT.cvarIdx);
-      cvarSlider.disabled = false;
-    } else {
-      MPT.cvarIdx = 0;
-      cvarSlider.value = "0";
-      cvarSlider.disabled = true;
-    }
-    MPT.activeLine = "frontier";
-    mptRender();
-  } catch (e) {
-    toast("Load failed: " + (e.message || e));
-  }
+    run = j.last || null;
+  } catch (_) { return false; }
+  if (!run || !Array.isArray(run.frontier) || !run.frontier.length) return false;
+  MPT.result = {...run, cloud: run.cloud || []};
+  const p = run.params || {};
+  const setSeg = (id, v) => document.querySelectorAll(`#${id} button`).forEach(b => b.classList.toggle("active", b.dataset.v === v));
+  if (p.lookback) setSeg("pf-mpt-lookback", p.lookback);
+  if (p.alpha != null) setSeg("pf-mpt-alpha", String(p.alpha));
+  if (p.fully_invested != null) setSeg("pf-mpt-invest", p.fully_invested ? "full" : "cash");
+  if (p.cov_model) setSeg("pf-mpt-cov", p.cov_model);
+  if (p.rf != null) document.getElementById("pf-mpt-rf").value = (p.rf * 100).toFixed(2);
+  if (p.haircut != null) mptSetHaircut(Math.round(p.haircut * 100));
+  if (p.budget) mptSetBudget(p.budget);
+  if (p.bounds && typeof p.bounds === "object") { MPT.bounds = {...p.bounds}; mptRenderBounds(); }
+  MPT.selectedIdx = mptBestRewardIdx(MPT.result, p.rf != null ? p.rf : 0.04);
+  const slider = document.getElementById("pf-mpt-slider");
+  slider.max = String(Math.max(0, (MPT.result.frontier || []).length - 1));
+  slider.value = String(MPT.selectedIdx);
+  slider.disabled = false;
+  const status = document.getElementById("pf-mpt-status");
+  if (status) status.innerHTML = "";
+  mptRender();
+  return true;
 }
 
 /* --- MPT overlay wiring --- */
@@ -7801,7 +7706,6 @@ $("#pf-mpt-info-bg")?.addEventListener("click", (e) => { if (e.target.id === "pf
 let _mptSliderFrame = 0;
 $("#pf-mpt-slider").addEventListener("input", (e) => {
   MPT.selectedIdx = Number(e.target.value) || 0;
-  MPT.activeLine = "frontier";
   MPT.hoverIdx = null;
   if (_mptSliderFrame) return;
   _mptSliderFrame = requestAnimationFrame(() => {
@@ -7810,37 +7714,64 @@ $("#pf-mpt-slider").addEventListener("input", (e) => {
     mptRenderSide();
   });
 });
-let _mptCvarSliderFrame = 0;
-$("#pf-mpt-cvar-slider").addEventListener("input", (e) => {
-  MPT.cvarIdx = Number(e.target.value) || 0;
-  MPT.activeLine = "cvar";
-  MPT.hoverIdx = null;
-  if (_mptCvarSliderFrame) return;
-  _mptCvarSliderFrame = requestAnimationFrame(() => {
-    _mptCvarSliderFrame = 0;
-    mptUpdateSelection();
-    mptRenderSide();
+
+// Segmented single-select controls: clicking a button makes it the active one.
+["pf-mpt-lookback", "pf-mpt-alpha", "pf-mpt-invest", "pf-mpt-cov"].forEach(id => {
+  document.querySelectorAll(`#${id} button`).forEach(b => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll(`#${id} button`).forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      // CVaR confidence α is structurally part of the optimization (it defines
+      // which tail is minimized), so a change needs a re-solve — but re-solves
+      // are fast, so auto-rerun (debounced) to make α feel dynamic. The risk
+      // slider stays fully dynamic client-side; other controls wait for Run.
+      if (id === "pf-mpt-alpha" && MPT.result && !MPT.busy) {
+        clearTimeout(MPT.alphaTimer);
+        MPT.alphaTimer = setTimeout(() => mptRun(), 250);
+      }
+    });
   });
 });
 
-// Segmented-control click handlers (lookback + frequency)
-document.querySelectorAll("#pf-mpt-lookback button").forEach(b => {
-  b.addEventListener("click", () => {
-    document.querySelectorAll("#pf-mpt-lookback button").forEach(x => x.classList.remove("active"));
-    b.classList.add("active");
-  });
+// Cancel the in-flight streaming run (aborts fetch ⇒ server stops the 8-core work).
+document.getElementById("pf-mpt-cancel")?.addEventListener("click", () => {
+  if (MPT.abort) { try { MPT.abort.abort(); } catch (_) {} }
 });
-document.querySelectorAll("#pf-mpt-freq button").forEach(b => {
-  b.addEventListener("click", () => {
-    document.querySelectorAll("#pf-mpt-freq button").forEach(x => x.classList.remove("active"));
-    b.classList.add("active");
-  });
+
+// Per-position limits panel: toggle, live edits, "all" broadcast, reset.
+document.getElementById("pf-mpt-bounds-btn")?.addEventListener("click", (e) => {
+  const panel = document.getElementById("pf-mpt-bounds");
+  if (!panel) return;
+  const show = panel.hidden;
+  panel.hidden = !show;
+  e.currentTarget.setAttribute("aria-expanded", show ? "true" : "false");
+  if (show) mptRenderBounds();
 });
-document.querySelectorAll("#pf-mpt-mode button").forEach(b => {
-  b.addEventListener("click", () => {
-    document.querySelectorAll("#pf-mpt-mode button").forEach(x => x.classList.remove("active"));
-    b.classList.add("active");
-  });
+document.getElementById("pf-mpt-bounds-reset")?.addEventListener("click", mptResetBounds);
+const _mptBoundsGrid = document.getElementById("pf-mpt-bounds-grid");
+_mptBoundsGrid?.addEventListener("input", (e) => {
+  const t = e.target;
+  if (t.classList?.contains("pf-mpt-bnd") && t.dataset.sym) mptSetBound(t.dataset.sym, t.dataset.k, t.value);
+});
+_mptBoundsGrid?.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t.classList?.contains("pf-mpt-bnd") && t.dataset.all) {   // "All positions" → broadcast
+    const k = t.dataset.all;
+    mptBoundsSymbols().forEach(s => mptSetBound(s, k, t.value));
+    mptRenderBounds();
+  }
+});
+
+// Analyst-trust dial: live percentage label.
+function mptSetHaircut(pct) {
+  const slider = document.getElementById("pf-mpt-haircut");
+  const label = document.getElementById("pf-mpt-haircut-val");
+  if (slider) slider.value = String(pct);
+  if (label) label.textContent = `${pct}%`;
+}
+document.getElementById("pf-mpt-haircut")?.addEventListener("input", (e) => {
+  const label = document.getElementById("pf-mpt-haircut-val");
+  if (label) label.textContent = `${Number(e.target.value) || 0}%`;
 });
 
 // --- Custom Compute Budget dropdown ---
@@ -7871,7 +7802,7 @@ document.querySelectorAll("#pf-mpt-mode button").forEach(b => {
 // Holds the most-recent fetched series so the hover crosshair can re-derive
 // per-pixel data without refetching.
 const _RF_SPARK = { series: null, meta: null, lookback: null };
-async function mptFetchRfAuto({silent} = {silent: false}) {
+async function mptFetchRfAuto({silent, keepRf} = {silent: false, keepRf: false}) {
   const btn = document.getElementById("pf-mpt-rf-auto");
   const input = document.getElementById("pf-mpt-rf");
   const spark = document.getElementById("pf-mpt-rf-spark");
@@ -7882,7 +7813,9 @@ async function mptFetchRfAuto({silent} = {silent: false}) {
     const r = await fetch(`/api/risk-free-history?ccy=${encodeURIComponent(FX_QUOTE)}&lookback=${encodeURIComponent(lookback)}`);
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || ("HTTP " + r.status));
-    if (j.mean_pct != null && isFinite(j.mean_pct)) {
+    // keepRf: draw the spark for the current lookback but leave the rf field as
+    // a restored saved run set it (don't overwrite with the Auto mean).
+    if (!keepRf && j.mean_pct != null && isFinite(j.mean_pct)) {
       input.value = Number(j.mean_pct).toFixed(2);
     }
     const series = (j.series || []).filter(p => isFinite(p[1]));

@@ -6,9 +6,10 @@ requests>=2.28.0
 # (mpt.py). Without numba the Exhaustive budget (30M portfolio configurations)
 # would not fit in the advertised wall-time budget on a single core.
 numba>=0.65
-# Required — HiGHS LP solver used by the min-CVaR optimiser
-# (mpt.cvar_curve). Each confidence level is one Rockafellar-Uryasev LP;
-# the dashboard solves 50 of them per "Run optimization" click.
+# Test-only — HiGHS LP solver (scipy.optimize.linprog) is the ground-truth
+# reference in tests/_cvar_reference.py that certifies the production numba
+# mean-CVaR interior-point solver (mpt._cvar_pdip) to 1e-6. NOT on the hot path;
+# the shipped optimizer imports no scipy.
 scipy>=1.10.0
 # Optional but recommended — powers the fuzzy local symbol lookup
 # (symbol_db.py). Without it the dashboard still works (falls back to a

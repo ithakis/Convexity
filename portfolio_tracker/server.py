@@ -60,16 +60,14 @@ from portfolio_tracker.persistence import (
     _CURRENT_KEY,
     clear_analytics_cache,
     delete_column_view,
-    delete_mpt_run,
     delete_view,
     delete_watchlist,
     delete_weight_preset,
     get_analytics_cache,
-    list_mpt_runs,
+    get_last_mpt_run,
     list_views,
     list_weight_presets,
     load_column_views,
-    load_mpt_run,
     load_view,
     load_watchlists,
     rename_view,
@@ -240,9 +238,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": str(exc)})
             return
         if parsed.path == "/api/mpt-runs":
+            # Single last run per portfolio (run history was dropped).
             q = parse_qs(parsed.query)
             view = (q.get("view") or [""])[0].strip()
-            self._send_json(200, {"runs": list_mpt_runs(view)})
+            self._send_json(200, {"last": get_last_mpt_run(view)})
             return
         if parsed.path == "/api/risk-free-history":
             q = parse_qs(parsed.query)
@@ -253,15 +252,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, _risk_free_history(ccy, lb))
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
-            return
-        if parsed.path.startswith("/api/mpt-runs/"):
-            rid = unquote(parsed.path[len("/api/mpt-runs/"):])
-            view = (parse_qs(parsed.query).get("view") or [""])[0].strip()
-            run = load_mpt_run(view, rid)
-            if not run:
-                self._send_json(404, {"error": "run not found"})
-                return
-            self._send_json(200, {"run": run})
             return
         if parsed.path == "/api/weight-presets":
             view = (parse_qs(parsed.query).get("view") or [""])[0].strip()
@@ -532,26 +522,66 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/efficient-frontier":
+            # NDJSON stream: {type:"progress"|"done"|"error"} messages. The client
+            # renders a real pct/ETA bar and can cancel (AbortController) — when it
+            # disconnects, the next write() raises and we close the generator, which
+            # stops the 8-core bootstrap/cloud compute at the next chunk boundary.
             try:
                 payload = self._read_json()
-                rows = payload.get("rows") or []
-                if not isinstance(rows, list) or not rows:
-                    self._send_json(400, {"error": "rows[] required"})
-                    return
-                from portfolio_tracker.frontier import compute_efficient_frontier
-                result = compute_efficient_frontier(
-                    rows,
-                    lookback=str(payload.get("lookback") or "3Y"),
-                    frequency=str(payload.get("frequency") or "weekly"),
-                    display_ccy=str(payload.get("display_ccy") or "USD"),
-                    rf=float(payload.get("rf") or 0.04),
-                    budget=str(payload.get("budget") or "standard"),
-                    current_weights=payload.get("current_weights") or {},
-                    diversified=bool(payload.get("diversified") or False),
-                )
-                self._send_json(200, result)
             except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
+                self._send_json(400, {"error": str(exc)})
+                return
+            rows = payload.get("rows") or []
+            if not isinstance(rows, list) or not rows:
+                self._send_json(400, {"error": "rows[] required"})
+                return
+
+            def _fnum(key, default):
+                try:
+                    v = payload.get(key)
+                    return float(v) if v is not None else default
+                except (TypeError, ValueError):
+                    return default
+
+            # Accept real JSON booleans AND the string forms "false"/"0" some
+            # clients send (bool("false") is truthy, which would wrongly force
+            # fully-invested).
+            _fi = payload.get("fully_invested", True)
+            fully_invested = str(_fi).strip().lower() not in ("false", "0", "no", "")
+            _bounds = payload.get("bounds")
+            bounds = _bounds if isinstance(_bounds, dict) else None
+            budget = str(payload.get("budget") or payload.get("cloud_budget") or "standard")
+
+            from portfolio_tracker.frontier import compute_efficient_frontier_stream
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            gen = compute_efficient_frontier_stream(
+                rows,
+                lookback=str(payload.get("lookback") or "3Y"),
+                display_ccy=str(payload.get("display_ccy") or "USD"),
+                rf=_fnum("rf", 0.04), alpha=_fnum("alpha", 0.95),
+                fully_invested=fully_invested, bounds=bounds,
+                w_min=_fnum("w_min", 0.0), w_max=_fnum("w_max", 1.0),
+                cov_model=str(payload.get("cov_model") or "ledoit"),
+                haircut=_fnum("haircut", 0.25), budget=budget,
+                current_weights=payload.get("current_weights") or {},
+            )
+            try:
+                for msg in gen:
+                    self.wfile.write(_safe_json(msg))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                gen.close()  # client cancelled — stop pulling ⇒ compute halts
+            except Exception as exc:
+                try:
+                    self.wfile.write(_safe_json({"type": "error", "error": str(exc)}))
+                    self.wfile.flush()
+                except Exception:
+                    pass
             return
 
         if parsed.path == "/api/mpt-runs":
@@ -708,15 +738,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
-        if parsed.path.startswith("/api/mpt-runs/"):
-            rid = unquote(parsed.path[len("/api/mpt-runs/"):])
-            view = (parse_qs(parsed.query).get("view") or [""])[0].strip()
-            try:
-                delete_mpt_run(view, rid)
-                self._send_json(200, {"ok": True})
-            except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
-            return
         if parsed.path == "/api/weight-presets":
             q = parse_qs(parsed.query)
             view = (q.get("view") or [""])[0].strip()
@@ -826,7 +847,18 @@ def main() -> None:
         else:
             webbrowser.open(url)
 
+    def _warm_optimizer() -> None:
+        # Import mpt off the startup path so the first Optimize click never pays
+        # the one-time numba JIT compile (~7 s) — it warms in the background here
+        # while the user reads their dashboard. Best-effort; failure is harmless.
+        try:
+            import importlib
+            importlib.import_module("portfolio_tracker.mpt")  # import triggers _warm_jit()
+        except Exception:
+            pass
+
     threading.Timer(0.8, _open_browser).start()
+    threading.Thread(target=_warm_optimizer, name="pt-warm-mpt", daemon=True).start()
     try:
         # serve_forever() now runs on a background thread (see start_server);
         # block the main thread on an interruptible sleep so Ctrl+C still

@@ -471,76 +471,35 @@ def _write_mpt_raw(raw: dict) -> None:
     Path(_MPT_FILE).write_text(body + "\n", encoding="utf-8")
 
 
-def list_mpt_runs(view_name: str) -> list[dict]:
+def get_last_mpt_run(view_name: str) -> dict | None:
+    """The single most-recent saved Optimize run for a portfolio, or None.
+
+    Run *history* was dropped (user request): we persist only the last run so the
+    Optimize tab can restore it on open. The on-disk value may legacily be a list
+    (old multi-run format) — take its newest entry if so.
+    """
     with _MPT_LOCK:
         raw = _read_mpt_raw()
-    runs = (raw.get("runs") or {}).get(view_name) or []
-    meta: list[dict] = []
-    for r in runs:
-        if not isinstance(r, dict):
-            continue
-        meta.append({
-            "id": r.get("id"),
-            "params": r.get("params") or {},
-            "symbols": r.get("symbols") or [],
-            "saved_at": r.get("saved_at"),
-            "tangency": r.get("tangency"),
-        })
-    return meta
-
-
-def load_mpt_run(view_name: str, run_id: str) -> dict | None:
-    with _MPT_LOCK:
-        raw = _read_mpt_raw()
-    for r in (raw.get("runs") or {}).get(view_name) or []:
-        if isinstance(r, dict) and r.get("id") == run_id:
-            return r
-    return None
+    run = (raw.get("runs") or {}).get((view_name or "").strip())
+    if isinstance(run, list):  # legacy multi-run file
+        run = run[0] if run else None
+    return run if isinstance(run, dict) else None
 
 
 def save_mpt_run(view_name: str, run: dict) -> dict:
+    """Persist ``run`` as the portfolio's single last run (overwrites any prior)."""
     clean_view = (view_name or "").strip()
     if not clean_view:
         raise ValueError("view name required")
     rid = run.get("id") or ("run_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f"))
     payload = {**run, "id": rid, "saved_at": datetime.now(timezone.utc).isoformat()}
-    new_symbols = set(payload.get("symbols") or [])
-    new_rf = float((payload.get("params") or {}).get("rf") or 0.0)
     with _MPT_LOCK:
         raw = _read_mpt_raw()
         runs_map = raw.get("runs") if isinstance(raw.get("runs"), dict) else {}
-        runs = runs_map.get(clean_view) or []
-
-        def _keep(r: dict) -> bool:
-            if not isinstance(r, dict):
-                return False
-            if r.get("id") == rid:
-                return False
-            old_syms = set(r.get("symbols") or [])
-            if old_syms != new_symbols:
-                return False
-            old_rf = float((r.get("params") or {}).get("rf") or 0.0)
-            if abs(old_rf - new_rf) > 1e-6:
-                return False
-            return True
-
-        kept = [r for r in runs if _keep(r)]
-        kept.append(payload)
-        kept.sort(key=lambda r: r.get("saved_at") or "", reverse=True)
-        runs_map[clean_view] = kept[:30]
+        runs_map[clean_view] = payload
         raw["runs"] = runs_map
         _write_mpt_raw(raw)
     return payload
-
-
-def delete_mpt_run(view_name: str, run_id: str) -> None:
-    with _MPT_LOCK:
-        raw = _read_mpt_raw()
-        runs_map = raw.get("runs") if isinstance(raw.get("runs"), dict) else {}
-        runs = runs_map.get(view_name) or []
-        runs_map[view_name] = [r for r in runs if not (isinstance(r, dict) and r.get("id") == run_id)]
-        raw["runs"] = runs_map
-        _write_mpt_raw(raw)
 
 
 # ----------------------------- Column views (Pass D) ------------------------

@@ -966,17 +966,14 @@
   .pf-mpt-info-bg { z-index: 95; }
   .pf-mpt-controls {
     --mpt-ctl-h: 32px;
-    display: grid; grid-template-columns: auto auto minmax(220px, 0.55fr) auto minmax(220px, 0.45fr) auto;
-    gap: 12px 14px; align-items: end;
+    display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: end;
     padding: 12px 18px; border-bottom: 1px solid var(--border);
     background: var(--bg-subtle);
-  }
-  @media (max-width: 980px) {
-    .pf-mpt-controls { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
   }
   .pf-mpt-ctl {
     display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; min-width: 0;
   }
+  .pf-mpt-ctl-run { margin-left: auto; }
   .pf-mpt-ctl > label {
     color: var(--muted); font-weight: 600; font-size: 10px; letter-spacing: 0.06em;
     text-transform: uppercase; line-height: 14px;
@@ -987,8 +984,75 @@
   .pf-mpt-ctl input[type="number"],
   .pf-mpt-ctl .pf-mpt-select,
   .pf-mpt-ctl .pf-mpt-rf-wrap,
+  .pf-mpt-ctl .pf-mpt-bounds-btn,
+  .pf-mpt-ctl .pf-mpt-haircut-wrap,
   .pf-mpt-run {
     height: var(--mpt-ctl-h); box-sizing: border-box;
+  }
+  /* Per-position limits: a toggle button that opens the min/max grid below. */
+  .pf-mpt-bounds-btn {
+    padding: 0 12px; background: var(--bg-canvas); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r-sm);
+    font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .pf-mpt-bounds-btn:hover, .pf-mpt-bounds-btn[aria-expanded="true"] {
+    border-color: var(--accent); color: var(--accent);
+  }
+  /* Run + Cancel share one horizontal row so Cancel appears to the LEFT of Run
+     (not stacked below it — the column layout of .pf-mpt-ctl would otherwise
+     add vertical space when Cancel un-hides). */
+  .pf-mpt-run-row { display: flex; align-items: center; gap: 8px; }
+  /* Cancel button — sits beside Run while a streaming optimization is in flight. */
+  .pf-mpt-cancel {
+    height: var(--mpt-ctl-h); box-sizing: border-box; padding: 0 14px;
+    background: transparent; color: var(--neg); border: 1px solid var(--neg);
+    border-radius: var(--r-sm); font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .pf-mpt-cancel:hover { background: var(--neg); color: var(--on-accent, #fff); }
+  .pf-mpt-cancel[hidden] { display: none; }
+  /* Per-position weight-limits grid (Symbol | Min% | Max%), scrolls if long. */
+  .pf-mpt-bounds {
+    margin: 0 16px 10px; padding: 10px 12px; background: var(--bg-canvas);
+    border: 1px solid var(--border); border-radius: var(--r-md);
+  }
+  .pf-mpt-bounds[hidden] { display: none; }
+  .pf-mpt-bounds-head {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 11.5px; color: var(--muted); margin-bottom: 8px;
+  }
+  .pf-mpt-bounds-reset {
+    background: none; border: none; color: var(--accent); font: inherit;
+    font-size: 11.5px; cursor: pointer; padding: 0;
+  }
+  .pf-mpt-bounds-reset:hover { text-decoration: underline; }
+  .pf-mpt-bounds-grid {
+    display: flex; flex-direction: column; gap: 3px;
+    max-height: 220px; overflow-y: auto;
+  }
+  .pf-mpt-bnd-row {
+    display: grid; grid-template-columns: 1fr 72px 72px; gap: 8px; align-items: center;
+    font-size: 12px;
+  }
+  .pf-mpt-bnd-row > span:first-child {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pf-mpt-bnd-head { color: var(--muted); font-size: 11px; padding-bottom: 2px; }
+  .pf-mpt-bnd-all { color: var(--text); font-weight: 600; padding-bottom: 4px;
+    border-bottom: 1px dashed var(--border); margin-bottom: 2px; }
+  .pf-mpt-bnd {
+    width: 100%; height: 26px; box-sizing: border-box; text-align: center; padding: 0 4px;
+    background: var(--bg-subtle); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r-xs); font: inherit; font-size: 12px;
+  }
+  .pf-mpt-bnd:focus { outline: none; border-color: var(--accent); }
+  /* Analyst-trust dial: range slider + live percentage readout. */
+  .pf-mpt-haircut-wrap {
+    display: inline-flex; align-items: center; gap: 8px; min-width: 150px;
+  }
+  .pf-mpt-haircut-wrap input[type="range"] { flex: 1 1 auto; min-width: 90px; accent-color: var(--accent); }
+  .pf-mpt-haircut-val {
+    font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text);
+    min-width: 34px; text-align: right;
   }
   .pf-mpt-ctl .seg {
     display: inline-flex; background: var(--bg-canvas); border: 1px solid var(--border);
@@ -1156,9 +1220,9 @@
   }
   .pf-mpt-chart .pf-mpt-status:empty { display: none; }
 
-  /* Deterministic progress bar shown while /api/efficient-frontier is in
-     flight. We know the expected duration from the budget, so the bar fills
-     over that window and a 100 ms snap-to-100% finishes it on response. */
+  /* Real progress bar driven by the /api/efficient-frontier NDJSON stream: each
+     progress message carries a true pct + ETA (fetch → BL → bootstrap → cloud),
+     so the fill reflects actual work done rather than a guessed duration. */
   .mpt-progress {
     width: min(420px, 80%); display: flex; flex-direction: column; gap: 6px;
     align-items: stretch; color: var(--muted); font-size: 11.5px;
@@ -1170,7 +1234,7 @@
   .mpt-progress-fill {
     position: absolute; top: 0; bottom: 0; left: 0; width: 0%;
     background: linear-gradient(90deg, var(--accent), rgba(9,105,218,0.45));
-    transition: width 0s linear;
+    transition: width 0.35s ease-out;  /* eases between streamed pct updates */
   }
   .mpt-progress.done .mpt-progress-fill { transition: width 0.15s ease-out !important; }
   .mpt-progress.fail .mpt-progress-fill { background: var(--neg); }
@@ -1263,17 +1327,6 @@
   .pf-mpt-actions button:hover { filter: brightness(1.05); border-color: var(--accent); }
   @keyframes mpt-apply-flash { 0%,100%{box-shadow:none} 30%{box-shadow:0 0 0 3px rgba(var(--accent-rgb,9,105,218),0.4)} }
   .pf-mpt-apply-flash { animation: mpt-apply-flash 0.6s ease; }
-  .pf-mpt-runs { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
-  .pf-mpt-runs .pf-mpt-run-row {
-    display: flex; justify-content: space-between; gap: 6px;
-    padding: 5px 7px; border-radius: var(--r-sm); cursor: pointer; border: 1px solid transparent;
-  }
-  .pf-mpt-runs .pf-mpt-run-row:hover { background: var(--bg-canvas); border-color: var(--border); }
-  .pf-mpt-runs .pf-mpt-run-row .meta { color: var(--muted); font-size: 11px; }
-  .pf-mpt-runs .pf-mpt-run-row .del {
-    border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px;
-  }
-  .pf-mpt-runs .pf-mpt-run-row .del:hover { color: var(--neg); }
   .pf-mpt-status {
     padding: 18px 12px; text-align: center; color: var(--muted); font-size: 12.5px;
   }

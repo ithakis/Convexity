@@ -39,8 +39,8 @@ sub-decision.
 │   ├── fetcher.py                ← fetch_one() per-symbol row builder — §4
 │   ├── analytics.py             ← analyze_portfolios_multi(), bulk close, analyst blocks — §4
 │   ├── fx.py                    ← FX spot rates, basket index history, currency conversion — §4
-│   ├── frontier.py              ← Efficient-frontier orchestrator (wraps mpt.py) — §12
-│   ├── mpt.py                   ← Modern Portfolio Theory primitives (CLA, Ledoit-Wolf, MC cloud) — §12
+│   ├── frontier.py              ← Mean-CVaR frontier orchestrator (BL returns + CVaR risk, wraps mpt.py) — §12
+│   ├── mpt.py                   ← Optimization primitives: Black-Litterman + mean-CVaR numba solver — §12
 │   ├── persistence.py           ← JSON CRUD for views/watchlists/presets/MPT runs/column views — §4
 │   ├── cache.py                 ← Process-global TTL cache dicts shared across modules
 │   ├── resolver.py              ← resolve_symbol() pipeline (fuzzy input → Yahoo ticker) — §4
@@ -452,21 +452,19 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/column-views/active`       — set active column view `{name}`
 - `/api/weight-presets`            — upsert `{view, name, weights, rename_from?, set_active?}`
 - `/api/weight-presets/active`     — set `{view, name|null}` as the active preset for a portfolio
-- `/api/efficient-frontier`        — compute long-only MPT frontier `{rows, lookback, frequency, rf, budget, current_weights, display_ccy}`
-- `/api/mpt-runs`                  — save `{view, run}` MPT run (id auto-generated)
+- `/api/efficient-frontier`        — **streams NDJSON** (`progress`/`done`/`error`) for the mean-CVaR frontier. Body `{rows, lookback, rf, alpha, fully_invested, bounds, cov_model, haircut, budget, current_weights, display_ccy}` where `bounds` = `{sym:{min,max}}` per-position weight fractions and `budget` is a wall-clock tier (light≈5s/standard≈15s/dense≈60s). Client renders a real pct/ETA bar; aborting the request cancels the 8-core compute.
+- `/api/mpt-runs`                  — save `{view, run}` as the portfolio's **single last run** (overwrites)
 
 **DELETE**
-- `/api/views/<name>`              — drop a view (cascades to MPT runs)
+- `/api/views/<name>`              — drop a view (cascades to the saved run)
 - `/api/watchlists?name=…`         — drop a watchlist (cascades to view delete)
 - `/api/column-views/<name>`       — drop a custom column view (built-ins rejected with 400)
 - `/api/weight-presets?view=…&name=…` — drop a per-portfolio weight preset
-- `/api/mpt-runs/<id>?view=…`      — drop a saved MPT run
 
 **GET (also)**
 - `/api/column-views`              — `{builtins, custom, active}`
 - `/api/weight-presets?view=…`     — `{presets: [...], active: name|null}` for a portfolio
-- `/api/mpt-runs?view=…`           — saved MPT runs (metadata only) for a portfolio
-- `/api/mpt-runs/<id>?view=…`      — full saved MPT run payload
+- `/api/mpt-runs?view=…`           — `{last: run|null}` — the portfolio's single last run (run history was dropped)
 - `/api/news-sentiment?symbols=…`  — batch per-ticker AI sentiment
 - `/api/news-market`               — market-wide sentiment + articles
 - `/api/news-articles?symbol=…`    — per-ticker articles + sentiment detail
@@ -837,99 +835,118 @@ this is faster than trusting a stale line table.
 
 ---
 
-## 12. `mpt.py` — Modern Portfolio Theory module
+## 12. `mpt.py` — Black-Litterman + mean-CVaR optimizer
 
-Standalone module so the dashboard stays dependency-light and the math is
-testable in isolation. Implements **long-only, sum=1 Markowitz** with a
-clean public surface used by `compute_efficient_frontier` in
-`portfolio_tracker/frontier.py`.
+Standalone module (dependency-light, testable in isolation) implementing the two
+engines behind the Optimize tab. Used by `compute_efficient_frontier` in
+`portfolio_tracker/frontier.py`. **No scipy on the hot path** — the LP solver is a
+custom numba interior-point method; scipy/HiGHS lives only in
+`tests/_cvar_reference.py` and certifies the fast solver to 1e-6 in CI.
+
+The Markowitz mean-variance path (CLA, tangency, vol/return Monte-Carlo cloud,
+`annualize`) was fully removed in v1.8.0 — do not resurrect it.
 
 ### Public API
 
 ```python
-mpt.compute_returns(closes_df, freq) -> returns_df
-mpt.annualize(returns_df, freq) -> (mu_series, cov_df)         # annualized
-mpt.ledoit_wolf_shrink(cov, returns=None) -> cov_df            # toward constant-corr target
-mpt.critical_line(mu, cov) -> [_TurningPoint]                  # Markowitz CLA
-mpt.frontier_curve(turning, mu, cov, n_samples=100) -> [{ret, vol, weights}]
-mpt.tangency_portfolio(curve, rf=0) -> {ret, vol, weights, sharpe}
-mpt.monte_carlo_cloud(mu, cov, n_samples=25000, rf=0, seed=42) -> [(vol, ret, sharpe)]
-mpt.portfolio_stats(weights, mu, cov, rf=0) -> {ret, vol, sharpe}
+mpt.compute_returns(closes_df, freq="daily") -> returns_df
+mpt.annualized_cov(returns_df, freq, model) -> cov_df           # sample / ledoit / ewma
+mpt.ledoit_wolf_shrink(cov, returns=None) -> cov_df             # toward constant-corr target
+mpt.black_litterman(symbols, cov, mkt_weights, views, *, rf, tau, haircut, ...) -> dict
+    # -> {mu, prior, q, delta, tau, haircut, viewed, no_view}  (μ = total annual return)
+mpt.mean_cvar_frontier(returns_df, mu, *, alpha, w_min, w_max, fully_invested, rf,
+                       n_points, cov) -> {ok, frontier, min_cvar, max_ret, n_nonconv, _ctx}
+    # w_min/w_max are scalar OR per-asset vectors (per-position box); _as_bound_vec
+    # coerces. each point: {ret, cvar (√252-annualized), vol, mdd, cdar, weights, _t}
+    # _ctx = {a_ret,l,h,kappa,fi,targets} — reused by bootstrap_cvar (strip before JSON)
+mpt.bootstrap_cvar(R, ctx, seeds) -> cvar_ann[B,K]   # parallel (prange) frontier-stability
+    # band: each seed resamples the T scenarios w/ replacement + re-solves at every target
+mpt.portfolio_risk_metrics(weights, mu, cov, returns, alpha, rf, fully_invested) -> {...}
+mpt.cvar_return_cloud(returns_df, mu, alpha, n, seed) -> [[cvar_ann, ret_ann], ...]  # prange
+mpt.cvar_of(port_ret, alpha) / max_drawdown(port_ret) / cdar(port_ret, beta)
 ```
 
-### Algorithm choices (and why)
+**8-core (`prange`).** `_cloud_kernel` and `_bootstrap_cvar` are `@njit(parallel=True)`;
+each `prange` iteration keeps its scratch buffers thread-local (bugs here = silent
+races). `_bootstrap_cvar` seeds per-replica RNG (`np.random.seed(seeds[b])`) so the
+band is deterministic regardless of thread count. `_warm_jit()` (import-time) and a
+background thread in `server.main()` pre-compile so the first Optimize click never
+pays the ~7 s JIT cost.
 
-- **Critical Line Algorithm (CLA)** for the frontier — produces the exact
-  piecewise-linear path from max-return corner to min-vol corner in *one
-  pass* (~5–50 ms for 50 assets). Avoids the naive
-  `scipy.optimize.minimize` loop over target returns (1–5 s).
-- **Ledoit-Wolf shrinkage** toward constant-correlation target. Pure
-  NumPy, ~20 lines. Stabilises the covariance matrix for portfolios with
-  ~15–60 assets where the sample covariance is noisy.
-- **Monte-Carlo cloud is visual only** — Dirichlet-sampled long-only
-  vectors, vectorised. 100k samples × 50 assets ≈ 200 ms. Mixes two
-  concentrations (α=0.3 and α=1.0) so the cloud fills the feasible set
-  uniformly rather than clustering at the centroid.
+**Streaming orchestration (`frontier.py`).** `compute_efficient_frontier_stream(...)`
+is a generator yielding `{"type":"progress"|"done"|"error"}`; `compute_efficient_frontier`
+is a thin blocking wrapper that drains it (tests + non-streaming callers; pass
+`max_seconds=0` to skip the wall-clock fill and run only the minimum). Budgets are
+**wall-clock targets** (`_BUDGETS` light/standard/dense ≈ 5/15/60 s): the fixed-size
+cloud is drawn first, then the bootstrap band runs until `t_total + target_s`
+(`_BOOT_MIN` floor / `_BOOT_CAP` ceiling). pct = elapsed/target, ETA = target−elapsed
+(both literally true). The server route stops the compute when the client
+disconnects — it stops pulling the generator (`gen.close()`), so cancellation lands
+at the next chunk boundary.
 
-### `_PERIOD_YF` mapping for MPT lookbacks (in `frontier.py`)
-```python
-_MPT_LOOKBACK_YF = {"1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}
-_MPT_BUDGETS = {
-    "fast":       {"cloud":    200_000, "frontier":  80, "label": "Fast — 200k configs (~1s)"},
-    "standard":   {"cloud":  1_000_000, "frontier": 200, "label": "Standard — 1M configs (~4s)"},
-    "thorough":   {"cloud":  3_500_000, "frontier": 400, "label": "Thorough — 3.5M configs (~14s)"},
-    "exhaustive": {"cloud": 15_000_000, "frontier": 800, "label": "Exhaustive — 15M configs (~60s)"},
-}
-```
+### Black-Litterman (return engine)
+- Work in **excess-return space** (over rf); add rf back at the end so callers see
+  total returns. Prior **Π = δ·Σ·w_mkt** (reverse optimization). δ calibrated from a
+  target market risk premium / market variance (`risk_premium / (w_mktᵀΣw_mkt)`,
+  clamped, default fallback ~2.5). `w_mkt` = market-cap weights — **caps are
+  FX-normalized to USD in frontier.py** first (yfinance reports marketCap in native
+  currency; a ¥ cap is ~150× a $ cap numerically and would swamp the prior).
+- Views: P = identity rows for assets with a valid analyst target;
+  q_i = target/price − 1 − rf. Ω diagonal, per-asset confidence from analyst count
+  (`n/(n+k0)`) × dispersion (`1/(1+((hi-lo)/tgt)/d0)`). The **analyst-trust haircut**
+  H ∈ [0,1] scales Ω by `(1-H)/H`: H→0 ⇒ Ω→∞ ⇒ posterior→prior; H→1 ⇒ Ω→0 ⇒
+  posterior→views. Posterior μ_BL = Π + τΣPᵀ(PτΣPᵀ+Ω)⁻¹(Q−PΠ), k×k inverse (k≤N).
+- Posterior covariance is **not** used for risk — risk is empirical CVaR.
 
-### Frequency contract
-- `daily` → 252 periods/yr, no resample.
-- `weekly` → 52 periods/yr, resampled to W-FRI. **Default.** Best
-  signal-to-noise for multi-asset, 1Y–5Y lookbacks; reduces cross-exchange
-  holiday misalignment.
-- `monthly` → 12 periods/yr, resampled to month-end.
+### Mean-CVaR frontier (risk engine)
+- Scenarios = **daily** FX-adjusted returns (~750/3Y). CVaR_α optimized in daily
+  units; reported/plotted `cvar` is **×√252 annualized** for axis-comparability with
+  the annual return (monotone scale ⇒ optimization unchanged).
+- Frontier: sweep the return floor from the min-CVaR portfolio to the max-return
+  portfolio (closed-form `_max_return_weights`), solving the Rockafellar-Uryasev LP
+  at each. Constraints: long-only box `[w_min, w_max]`, and `Σw=1` (fully invested)
+  or `Σw≤1` (cash allowed, remainder credited at rf via μ_ex = μ−rf).
 
-### Performance contract
-- Data fetch dominates: cold ~3–6 s for 20 symbols / 3Y weekly; warm ~50 ms
-  (per-symbol `_BULK_CLOSE_CACHE` shared with analytics).
-- CLA optimisation: <100 ms even for 50 assets.
-- Monte-Carlo at "Standard" (25k): ~400 ms.
-- End-to-end warm: <1 s. Cold "Standard": <8 s. "Thorough": <20 s.
+### Solver — numba primal-dual interior-point (`_cvar_pdip`)
+- Mehrotra predictor-corrector on the RU LP. Variables (w, ζ, u∈R^T). The u-block of
+  the Newton system is diagonal, so u is eliminated by a Schur complement each
+  iteration → a dense **(N+1)×(N+1)** solve (+1 border row for Σw=1). T-sized work
+  stays as two matmuls. Balanced dual start (λ·s ≈ 1) → ~20–25 iters; cap 60 (cash
+  degeneracies need more). Convergence gap 1e-9 (far past the 1e-6 accuracy bar).
+- `mean_cvar_frontier` returns `n_nonconv`; frontier.py turns it into a warning.
+- Certified vs `tests/_cvar_reference.py` (scipy HiGHS): |ΔCVaR|<1e-6 over hundreds
+  of random problems. **Re-run `pytest tests/test_metrics.py -k cvar_pdip` after any
+  solver edit.**
 
-### Reuse from analytics.py / fx.py
-- `analytics._bulk_close()` — price history with the same yfinance cache analytics uses.
-- `fx._apply_fx_to_closes()` — currency normalisation when `display_ccy != "USD"`.
-- `_PERIOD_YF` neighbour — kept separately as `_MPT_LOOKBACK_YF` because
-  MPT only supports a subset of analytics periods.
+### Performance
+- Data fetch dominates the *base* result (cold ~1–5 s); the base optimization math is
+  ~40–150 ms (N≤30). The **budget itself is intentional wall-clock spend** on the
+  bootstrap band (~5/15/60 s), all on `prange`, and is streamed with a real ETA — so
+  "slow" here is the user's dial, not a regression. Cloud (fixed 20k/40k/80k) ~0.3–1.5 s.
+- Reuse: `analytics._bulk_close` (price history), `fx._apply_fx_to_closes` (currency),
+  `frontier._risk_free_history` / `/api/risk-free-history` (rf sparkline).
 
-### Extending
-- **Black-Litterman / views**: extend `annualize` to accept prior views
-  and a confidence matrix; CLA stays as-is.
-- **Constraints** (sector caps, max-position): switch from CLA to
-  scipy.optimize.minimize (SLSQP) with constraint dicts. Add `scipy` to
-  requirements when this lands.
-- **Risk parity / minimum-CVaR**: separate solver in `mpt.py`; the
-  `/api/efficient-frontier` payload shape can absorb additional special
-  portfolios alongside `tangency`/`min_vol`/`max_ret`.
+### `/api/efficient-frontier` params (`frontier.py`)
+`_MPT_LOOKBACK_YF = {"1Y":"1y","3Y":"3y","5Y":"5y","10Y":"10y"}`. Request fields:
+`lookback, display_ccy, rf, alpha, fully_invested, bounds ({sym:{min,max}} fractions),
+cov_model, haircut, budget (light/standard/dense wall-clock tiers), current_weights`.
+Legacy scalar `w_min`/`w_max` and `cloud_budget` are still accepted as fallbacks.
+Frequency is fixed **daily**. Response frontier points carry `cvar_lo/cvar_med/cvar_hi`
+(bootstrap band); `meta.n_boot` is the achieved replica count.
 
-### Saved MPT runs (`.portfolio_tracker_mpt.json`)
+### Saved run (`.portfolio_tracker_mpt.json`) — single last run per portfolio
 ```jsonc
-{ "runs": {
-    "<portfolio name>": [
-      { "id": "run_20260518T0901234567", "saved_at": "...",
-        "params": {lookback, frequency, rf, budget, display_ccy},
-        "symbols": [...], "missing": [...],
-        "frontier": [{ret, vol, weights}, ...],
-        "tangency": {ret, vol, sharpe, weights},
-        "min_vol":  {...}, "max_ret": {...},
-        "anchors":  {equal: {...}, cap: {...}, current: {...}},
-        "meta":     {n_obs, fetch_ms, optimize_ms, total_ms, ...}
-      }
-    ]
-  }
-}
+{ "runs": { "<portfolio name>": {          // one dict per view (NOT a list — history dropped)
+    "id": "run_...", "saved_at": "...",
+    "params": {lookback, alpha, rf, fully_invested, cov_model, haircut, budget, bounds, display_ccy},
+    "symbols": [...], "missing": [...],
+    "frontier": [{ret, cvar, cvar_lo, cvar_med, cvar_hi, vol, mdd, cdar, weights}, ...],
+    "min_cvar": {...}, "max_ret": {...},
+    "anchors": {equal, cap, current}, "bl": {...}, "meta": {...} } } }
 ```
-Capped at 30 newest runs per portfolio. Cascades on view rename/delete.
+`save_mpt_run` overwrites (single run); `get_last_mpt_run` reads it (tolerates the
+legacy list format → newest entry). Cascades on view rename/delete. The heavy `cloud`
+is stripped client-side before saving and re-sampled on load.
 
 ---
 
@@ -1371,7 +1388,7 @@ empirically re-confirmed under CI).
 ## 15. Version tracking
 
 Single source of truth: `__version__` in `portfolio_tracker/__init__.py`
-(currently `1.5.0`). Scheme is `1.X.Y` — X bumps on a major new
+(read it there — do not trust a hardcoded number in this doc). Scheme is `1.X.Y` — X bumps on a major new
 feature/release, Y bumps on smaller polish/fixes in between. `CHANGELOG.md`
 maps every version to the PR(s) it came from.
 
