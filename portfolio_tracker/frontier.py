@@ -149,27 +149,35 @@ def _market_cap_weights(active: list[str], by_sym: dict) -> dict[str, float]:
     return caps
 
 
-def _analyst_views(active: list[str], by_sym: dict, rf: float) -> dict[str, dict]:
-    """Per-asset BL views from 12-month analyst targets (currency-neutral ratios).
+def _analyst_views(active: list[str], by_sym: dict, rf: float
+                   ) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Per-asset BL views + a richer analyst-detail block, in ONE fetch pass.
 
-    view q_i (excess) = target_mean_i / price_i − 1 − rf. Confidence inputs: analyst
-    count and the low/high dispersion. Assets without a usable target get no view.
+    Returns ``(views, detail)``:
+      * ``views[s]`` = ``{q, n, disp}`` — the BL inputs (view q_i (excess) =
+        target_mean_i / price_i − 1 − rf; confidence from analyst count and the
+        low/high dispersion). Assets without a usable target get no view.
+      * ``detail[s]`` = ``{price, target_mean, target_low, target_high,
+        upside_pct, n_analysts, disp}`` — surfaced to the per-company hover in
+        the Optimize tab. Same fetch (one ``_analyst_for`` call per symbol), so
+        no second network pass.
     """
     views: dict[str, dict] = {}
+    detail: dict[str, dict] = {}
 
-    def _one(s: str) -> tuple[str, dict | None]:
+    def _one(s: str) -> tuple[str, dict | None, dict | None]:
         try:
             blk = _analyst_for(s, by_sym.get(s, {}))
         except Exception:
-            return s, None
+            return s, None, None
         price = blk.get("price") or by_sym.get(s, {}).get("price")
         tgt = blk.get("target_mean")
         try:
             price = float(price); tgt = float(tgt)
         except (TypeError, ValueError):
-            return s, None
+            return s, None, None
         if price <= 0 or tgt <= 0:
-            return s, None
+            return s, None, None
         q = tgt / price - 1.0 - float(rf)
         lo, hi = blk.get("target_low"), blk.get("target_high")
         disp = None
@@ -179,14 +187,24 @@ def _analyst_views(active: list[str], by_sym: dict, rf: float) -> dict[str, dict
         except (TypeError, ValueError):
             disp = None
         n = blk.get("n_analysts")
-        return s, {"q": q, "n": (float(n) if n else 0.0), "disp": disp}
+        det = {
+            "price": price, "target_mean": tgt,
+            "target_low": (float(lo) if lo is not None else None),
+            "target_high": (float(hi) if hi is not None else None),
+            "upside_pct": (tgt / price - 1.0) * 100.0,
+            "n_analysts": (int(n) if n else 0),
+            "disp": disp,
+        }
+        return s, {"q": q, "n": (float(n) if n else 0.0), "disp": disp}, det
 
     workers = min(8, max(1, len(active)))
     with _fut.ThreadPoolExecutor(max_workers=workers) as pool:
-        for s, v in pool.map(_one, active):
+        for s, v, det in pool.map(_one, active):
             if v is not None:
                 views[s] = v
-    return views
+            if det is not None:
+                detail[s] = det
+    return views, detail
 
 
 def _build_bounds(active: list[str], bounds: dict | None, w_min: float, w_max: float):
@@ -294,7 +312,7 @@ def compute_efficient_frontier_stream(
     t_bl = time.perf_counter()
     cov = mpt.annualized_cov(returns, "daily", cov_model)
     mkt_w = _market_cap_weights(active, by_sym)
-    views = _analyst_views(active, by_sym, rf)
+    views, analyst_detail = _analyst_views(active, by_sym, rf)
     bl = mpt.black_litterman(active, cov, mkt_w, views, rf=rf, haircut=haircut)
     mu = bl["mu"]
     bl_ms = int((time.perf_counter() - t_bl) * 1000)
@@ -314,15 +332,61 @@ def compute_efficient_frontier_stream(
     ctx = fr.pop("_ctx")
     frontier = fr["frontier"]
     K = len(frontier)
+    # _t (internal target-return level) is not shipped — drop it before the point
+    # dicts leave this function (they go out in both the frontier and done messages).
+    for p in frontier:
+        p.pop("_t", None)
 
-    # ---- (CVaR, return) cloud — fixed modest density, cheap, drawn first ----
+    # ---- anchors (equal / cap / current) — computed up front so the early
+    # frontier message can carry them (they don't depend on cloud/bootstrap) ----
+    eq_w = {s: 1.0 / len(active) for s in active}
+    cap_total = sum(mkt_w.values())
+    cap_w = ({s: mkt_w[s] / cap_total for s in active} if cap_total > 0 else dict(eq_w))
+    cur_in = current_weights or {}
+    cur_total = sum(max(0.0, float(cur_in.get(s, 0.0))) for s in active)
+    cur_w = ({s: max(0.0, float(cur_in.get(s, 0.0))) / cur_total for s in active}
+             if cur_total > 0 else dict(eq_w))
+
+    def _anchor(w: dict) -> dict:
+        return mpt.portfolio_risk_metrics(w, mu, cov, returns, alpha=alpha, rf=rf,
+                                          fully_invested=fully_invested)
+
+    anchors = {"equal": _anchor(eq_w), "cap": _anchor(cap_w), "current": _anchor(cur_w)}
+    bl_payload = {
+        "mu": bl["mu"], "prior": bl["prior"], "q": bl["q"],
+        "delta": bl["delta"], "tau": bl["tau"], "haircut": bl["haircut"],
+        "viewed": bl["viewed"], "no_view": bl["no_view"],
+    }
+    params_payload = {
+        "lookback": lookback_u, "frequency": "daily", "display_ccy": display_ccy,
+        "rf": rf, "alpha": alpha, "fully_invested": bool(fully_invested),
+        "cov_model": cov_model, "haircut": haircut,
+        "budget": budget, "bounds": bounds or {},
+    }
+
+    # Ship the frontier + anchors NOW so the client can fix the axis domain and
+    # draw axes + the frontier line while the cloud streams in beneath it. The
+    # bootstrap band (cvar30_lo/med/hi) is added later and re-shipped in `done`.
+    yield {
+        "type": "frontier",
+        "symbols": active, "missing": missing,
+        "frontier": frontier, "min_cvar": fr["min_cvar"], "max_ret": fr["max_ret"],
+        "anchors": anchors, "bl": bl_payload, "params": params_payload,
+        "meta": {"n_frontier": int(K), "n_cloud": int(cloud_n),
+                 "n_viewed": int(len(bl["viewed"]))},
+    }
+
+    # ---- (CVaR30, return) cloud — streamed in chunks so it fills the scatter
+    # visibly during compute (client draws each chunk as it arrives) ----
     t_cloud = time.perf_counter()
     cloud: list = []
     g = 0
     while len(cloud) < cloud_n:
         take = min(5000, cloud_n - len(cloud))
-        cloud.extend(mpt.cvar_return_cloud(returns, mu, alpha=alpha, n=take, seed=1000 + g))
+        pts = mpt.cvar_return_cloud(returns, mu, alpha=alpha, n=take, seed=1000 + g)
+        cloud.extend(pts)
         g += 1
+        yield {"type": "cloud", "points": pts}
         yield _prog(f"Sampling portfolio cloud… {len(cloud)}/{cloud_n}")
     cloud_ms = int((time.perf_counter() - t_cloud) * 1000)
 
@@ -340,28 +404,25 @@ def compute_efficient_frontier_stream(
         n_boot += per_chunk
         yield _prog(f"Bootstrapping frontier stability… {n_boot} replicas")
     if boot:
-        allb = np.vstack(boot)  # [n_boot, K]
+        allb = np.vstack(boot)  # [n_boot, K] — daily-annualized CVaR per replica
         lo = np.percentile(allb, 10, axis=0)
         med = np.percentile(allb, 50, axis=0)
         hi = np.percentile(allb, 90, axis=0)
         for i, p in enumerate(frontier):
             p["cvar_lo"], p["cvar_med"], p["cvar_hi"] = float(lo[i]), float(med[i]), float(hi[i])
-
-    for p in frontier:
-        p.pop("_t", None)
-
-    # ---- anchors (equal / cap / current) ----
-    eq_w = {s: 1.0 / len(active) for s in active}
-    cap_total = sum(mkt_w.values())
-    cap_w = ({s: mkt_w[s] / cap_total for s in active} if cap_total > 0 else dict(eq_w))
-    cur_in = current_weights or {}
-    cur_total = sum(max(0.0, float(cur_in.get(s, 0.0))) for s in active)
-    cur_w = ({s: max(0.0, float(cur_in.get(s, 0.0))) / cur_total for s in active}
-             if cur_total > 0 else dict(eq_w))
-
-    def _anchor(w: dict) -> dict:
-        return mpt.portfolio_risk_metrics(w, mu, cov, returns, alpha=alpha, rf=rf,
-                                          fully_invested=fully_invested)
+            # The band is computed on DAILY CVaR (i.i.d. bootstrap resampling
+            # destroys the time-ordering the overlapping-10-day estimator needs),
+            # so we transfer only its *relative* width onto the point's own 30-day
+            # CVaR: cvar30_{lo,hi} = cvar30 · (band_{lo,hi} / band_med). This is the
+            # one deliberate approximation in the risk display.
+            c30 = float(p.get("cvar30") or 0.0)
+            m_i = float(med[i])
+            if m_i > 0 and c30 == c30:  # med>0 and cvar30 not NaN
+                p["cvar30_lo"] = c30 * float(lo[i]) / m_i
+                p["cvar30_med"] = c30
+                p["cvar30_hi"] = c30 * float(hi[i]) / m_i
+            else:
+                p["cvar30_lo"] = p["cvar30_med"] = p["cvar30_hi"] = c30
 
     warnings: list[str] = []
     if returns.shape[0] < 200:
@@ -376,19 +437,14 @@ def compute_efficient_frontier_stream(
         "symbols": active, "missing": missing,
         "frontier": frontier,
         "min_cvar": fr["min_cvar"], "max_ret": fr["max_ret"],
-        "cloud": cloud,
-        "anchors": {"equal": _anchor(eq_w), "cap": _anchor(cap_w), "current": _anchor(cur_w)},
-        "bl": {
-            "mu": bl["mu"], "prior": bl["prior"], "q": bl["q"],
-            "delta": bl["delta"], "tau": bl["tau"], "haircut": bl["haircut"],
-            "viewed": bl["viewed"], "no_view": bl["no_view"],
-        },
-        "params": {
-            "lookback": lookback_u, "frequency": "daily", "display_ccy": display_ccy,
-            "rf": rf, "alpha": alpha, "fully_invested": bool(fully_invested),
-            "cov_model": cov_model, "haircut": haircut,
-            "budget": budget, "bounds": bounds or {},
-        },
+        # Cloud was already streamed as `cloud` chunk messages — don't re-ship the
+        # 20-80k points here. The blocking wrapper reassembles them from the chunks.
+        "cloud": [],
+        "anchors": anchors,
+        "asset_stats": mpt.asset_risk_stats(returns, alpha),
+        "analyst_detail": analyst_detail,
+        "bl": bl_payload,
+        "params": params_payload,
         "meta": {
             "n_obs": int(returns.shape[0]), "n_assets": int(len(active)),
             "n_frontier": int(K), "n_cloud": int(len(cloud)),
@@ -413,9 +469,15 @@ def compute_efficient_frontier(rows: list[dict], **kwargs) -> dict:
         kwargs["budget"] = kwargs.pop("cloud_budget")
     kwargs.pop("cloud_budget", None)
     result: dict | None = None
+    cloud_acc: list = []
     for msg in compute_efficient_frontier_stream(rows, **kwargs):
-        if msg["type"] == "done":
+        t = msg["type"]
+        if t == "cloud":                       # reassemble the streamed chunks
+            cloud_acc.extend(msg.get("points") or [])
+        elif t == "done":
             result = msg["result"]
-        elif msg["type"] == "error":
+        elif t == "error":
             return {"error": msg["error"]}
+    if result is not None and not result.get("cloud"):
+        result["cloud"] = cloud_acc            # so non-streaming callers/tests see it
     return result if result is not None else {"error": "no result produced"}

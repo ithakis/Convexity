@@ -330,11 +330,13 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
     <div class="pf-mpt-body">
       <div class="pf-mpt-chartwrap">
         <div class="pf-mpt-chart" id="pf-mpt-chart">
-          <!-- Two-canvas chart: base layer carries axes + cloud + frontier line
-               + anchors (redrawn only when data/viewport changes); overlay
-               carries the selection ring + hover ghost (redrawn on cursor
-               input). Both canvases are sized through one shared helper so
-               the frontier line and Monte-Carlo cloud cannot drift. -->
+          <!-- Three-canvas chart (bottom → top): cloud carries the Monte-Carlo
+               scatter (drawn additively as it streams in during compute); base
+               carries axes + frontier line + anchors (redrawn on data/viewport
+               change); overlay carries the selection ring + hover ghost (redrawn
+               on cursor input). All three are sized through one shared helper so
+               the frontier line and cloud cannot drift. -->
+          <canvas id="pf-mpt-cloud" class="pf-mpt-cv pf-mpt-cv-cloud" aria-hidden="true"></canvas>
           <canvas id="pf-mpt-base" class="pf-mpt-cv pf-mpt-cv-base" aria-hidden="true"></canvas>
           <canvas id="pf-mpt-overlay" class="pf-mpt-cv pf-mpt-cv-overlay" aria-hidden="true"></canvas>
           <div class="pf-mpt-status" id="pf-mpt-status">Run the optimization to draw the efficient frontier.</div>
@@ -359,6 +361,9 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
           <button id="pf-mpt-apply" class="primary">Apply to Portfolio</button>
           <button id="pf-mpt-save">Save as Custom Weights</button>
         </div>
+        <!-- Last-3 run history for this portfolio. Each row reflects a saved run
+             (params summary + headline reward/CVaR) and reloads it on click. -->
+        <div class="pf-mpt-runs" id="pf-mpt-runs"></div>
       </div>
     </div>
   </div>

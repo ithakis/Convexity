@@ -942,11 +942,15 @@ def test_cloud_kernel_parallel_matches_serial():
     R = np.ascontiguousarray(rng.standard_normal((T, N)) * 0.01)
     W = np.ascontiguousarray(rng.dirichlet(np.ones(N), size=Kp))
     mu = rng.uniform(0.0, 0.2, N)
-    out = mpt._cloud_kernel(W, R, mu, 0.95)
+    h = mpt.LIQ_HORIZON
+    out = mpt._cloud_kernel(W, R, mu, 0.95, h)
     port = W @ R.T                      # [Kp, T]
-    k = mpt._tail_count(T, 0.95)
-    ref_cvar = -np.sort(port, axis=1)[:, :k].mean(axis=1)
-    assert np.allclose(out[:, 0], ref_cvar, atol=1e-9)
+    # reference: empirical CVaR of each portfolio's overlapping h-day returns
+    M = T - h + 1
+    ref_rh = np.vstack([mpt.overlapping_h_returns(port[j], h) for j in range(Kp)])
+    k = mpt._tail_count(M, 0.95)
+    ref_cvar = -np.sort(ref_rh, axis=1)[:, :k].mean(axis=1)
+    assert np.allclose(out[:, 0], ref_cvar, atol=1e-8)
     assert np.allclose(out[:, 1], W @ mu, atol=1e-9)
 
 
@@ -965,7 +969,7 @@ def test_frontier_stream_progress_then_done():
                           index=idx, columns=[f"A{i}" for i in range(6)])
     orig_close, orig_views = frontier._bulk_close, frontier._analyst_views
     frontier._bulk_close = lambda syms, period: closes[[s for s in syms if s in closes.columns]]
-    frontier._analyst_views = lambda active, by_sym, rf: {}
+    frontier._analyst_views = lambda active, by_sym, rf: ({}, {})
     try:
         msgs = list(frontier.compute_efficient_frontier_stream(
             rows, budget="light", max_seconds=0.0, haircut=0.25,
@@ -991,17 +995,95 @@ def test_frontier_stream_error_too_few_symbols():
     assert msgs and msgs[-1]["type"] == "error"
 
 
-def test_mpt_last_run_overwrites(tmp_path, monkeypatch):
-    """save_mpt_run keeps only the latest run per view; get_last_mpt_run reads it,
-    and a legacy list-format file returns its newest entry."""
+def test_var_cvar_horizon_estimator():
+    """10d overlapping VaR/CVaR: correct window count, √3 scaling, cvar ≥ var."""
+    rng = np.random.default_rng(7)
+    r = rng.standard_normal(750) * 0.012
+    rh = mpt.overlapping_h_returns(r, 10)
+    assert rh.size == r.size - 9                      # T − h + 1
+    # unscaled reference at 10 days
+    k = mpt._tail_count(rh.size, 0.95)
+    worst = np.sort(rh)[:k]
+    ref_cvar10 = -worst.mean()
+    ref_var10 = -worst[-1]
+    var30, cvar30 = mpt.var_cvar_horizon(r, 0.95)
+    assert cvar30 >= var30                            # shortfall ≥ threshold
+    assert abs(cvar30 - ref_cvar10 * np.sqrt(3.0)) < 1e-12   # √(30/10) scaling
+    assert abs(var30 - ref_var10 * np.sqrt(3.0)) < 1e-12
+    # degenerate: fewer obs than the horizon → single whole-period window (finite)
+    assert mpt.overlapping_h_returns(r[:4], 10).size == 1
+
+
+def test_asset_risk_stats_fields_and_finiteness():
+    """Per-asset stats carry the expected keys and stay finite on normal data."""
+    rng = np.random.default_rng(8)
+    R = pd.DataFrame(rng.standard_normal((400, 3)) * 0.011 + 0.0003,
+                     columns=["A", "B", "C"])
+    st = mpt.asset_risk_stats(R, 0.95)
+    assert set(st["A"]) == {"ret_ann", "ret_total", "var30", "cvar30"}
+    for s in R.columns:
+        assert all(np.isfinite(v) for v in st[s].values())
+        assert st[s]["cvar30"] >= st[s]["var30"]
+
+
+def test_frontier_stream_cloud_frontier_messages_and_payload():
+    """The stream emits a `frontier` msg then `cloud` chunks; `done` omits the bulk
+    cloud but the blocking wrapper reassembles it; 30-day risk fields are present
+    and the displayed frontier is monotone in cvar30."""
+    from portfolio_tracker import frontier
+    rng = np.random.default_rng(2)
+    rows = [{"symbol": f"A{i}", "price": 100.0, "market_cap": 1e11 * (i + 1),
+             "currency": "USD"} for i in range(6)]
+    idx = pd.date_range("2022-01-01", periods=400, freq="B")
+    closes = pd.DataFrame(np.cumprod(1 + rng.standard_normal((400, 6)) * 0.01, axis=0) * 100,
+                          index=idx, columns=[f"A{i}" for i in range(6)])
+    orig_close, orig_views = frontier._bulk_close, frontier._analyst_views
+    frontier._bulk_close = lambda syms, period: closes[[s for s in syms if s in closes.columns]]
+    frontier._analyst_views = lambda active, by_sym, rf: (
+        {}, {"A0": {"price": 100.0, "target_mean": 120.0, "target_low": 100.0,
+                    "target_high": 150.0, "upside_pct": 20.0, "n_analysts": 8, "disp": 0.42}})
+    try:
+        msgs = list(frontier.compute_efficient_frontier_stream(
+            rows, budget="light", max_seconds=0.0))
+        res = frontier.compute_efficient_frontier(rows, budget="light", max_seconds=0.0)
+    finally:
+        frontier._bulk_close, frontier._analyst_views = orig_close, orig_views
+    kinds = [m["type"] for m in msgs]
+    # a `frontier` message precedes the first `cloud` chunk, `done` is last
+    assert "frontier" in kinds and "cloud" in kinds
+    assert kinds.index("frontier") < kinds.index("cloud") < kinds.index("done")
+    done = [m for m in msgs if m["type"] == "done"][0]["result"]
+    assert done["cloud"] == []                        # bulk cloud not re-shipped
+    assert "asset_stats" in done and "analyst_detail" in done
+    assert done["analyst_detail"]["A0"]["upside_pct"] == 20.0
+    p0 = done["frontier"][0]
+    assert {"var30", "cvar30", "cvar30_lo", "cvar30_med", "cvar30_hi"} <= set(p0)
+    xs = [p["cvar30"] for p in done["frontier"]]
+    assert all(b >= a - 1e-9 for a, b in zip(xs, xs[1:]))   # monotone on display axis
+    # blocking wrapper reassembles the streamed cloud
+    assert len(res["cloud"]) >= 500 and all(len(pt) == 2 for pt in res["cloud"][:5])
+
+
+def test_mpt_run_history_last_three(tmp_path, monkeypatch):
+    """save_mpt_run keeps the last 3 runs newest-first, dedupes identical params,
+    caps at 3; get_last_mpt_run/get_mpt_runs read them; legacy formats tolerated."""
     from portfolio_tracker import persistence as P
     monkeypatch.setattr(P, "_MPT_FILE", tmp_path / "mpt.json")
-    P.save_mpt_run("View1", {"params": {"alpha": 0.95}, "symbols": ["A", "B"]})
-    P.save_mpt_run("View1", {"params": {"alpha": 0.99}, "symbols": ["A", "B"]})
-    last = P.get_last_mpt_run("View1")
-    assert last and last["params"]["alpha"] == 0.99          # overwritten, not appended
-    assert P.get_last_mpt_run("Missing") is None
-    # legacy multi-run list format → newest entry
-    P._write_mpt_raw({"runs": {"Old": [{"id": "r2", "saved_at": "2026-02"},
-                                       {"id": "r1", "saved_at": "2026-01"}]}})
-    assert P.get_last_mpt_run("Old")["id"] == "r2"
+    for a in (0.90, 0.95, 0.975, 0.99):                       # 4 distinct params
+        P.save_mpt_run("View1", {"params": {"alpha": a}, "symbols": ["A", "B"]})
+    runs = P.get_mpt_runs("View1")
+    assert [r["params"]["alpha"] for r in runs] == [0.99, 0.975, 0.95]  # newest-first, cap 3
+    assert P.get_last_mpt_run("View1")["params"]["alpha"] == 0.99
+    # identical params → replace newest (dedupe), not append
+    P.save_mpt_run("View1", {"params": {"alpha": 0.99}, "symbols": ["A", "B", "C"]})
+    runs = P.get_mpt_runs("View1")
+    assert len(runs) == 3 and runs[0]["symbols"] == ["A", "B", "C"]
+    assert [r["params"]["alpha"] for r in runs] == [0.99, 0.975, 0.95]
+    assert P.get_mpt_runs("Missing") == [] and P.get_last_mpt_run("Missing") is None
+    # legacy single-dict format → tolerated as a one-element history
+    P._write_mpt_raw({"runs": {"Old": {"id": "r1", "params": {"alpha": 0.95}}}})
+    assert P.get_last_mpt_run("Old")["id"] == "r1"
+    assert len(P.get_mpt_runs("Old")) == 1
+    # legacy multi-run list format → newest entry is index 0
+    P._write_mpt_raw({"runs": {"Leg": [{"id": "r2"}, {"id": "r1"}]}})
+    assert P.get_last_mpt_run("Leg")["id"] == "r2"

@@ -64,7 +64,7 @@ from portfolio_tracker.persistence import (
     delete_watchlist,
     delete_weight_preset,
     get_analytics_cache,
-    get_last_mpt_run,
+    get_mpt_runs,
     list_views,
     list_weight_presets,
     load_column_views,
@@ -238,10 +238,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": str(exc)})
             return
         if parsed.path == "/api/mpt-runs":
-            # Single last run per portfolio (run history was dropped).
+            # Last-3 run history per portfolio: `last` (newest, restored on open)
+            # plus `runs` (the ≤3 list rendered under Apply to Portfolio).
             q = parse_qs(parsed.query)
             view = (q.get("view") or [""])[0].strip()
-            self._send_json(200, {"last": get_last_mpt_run(view)})
+            runs = get_mpt_runs(view)
+            self._send_json(200, {"last": (runs[0] if runs else None), "runs": runs})
             return
         if parsed.path == "/api/risk-free-history":
             q = parse_qs(parsed.query)

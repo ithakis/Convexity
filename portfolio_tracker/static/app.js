@@ -6853,6 +6853,8 @@ async function mptRun() {
   const ac = new AbortController();
   MPT.abort = ac;
   let done = null;
+  MPT._streamProj = null;
+  MPT._gotFrontier = false;   // did THIS run establish a streaming frontier + cloud?
   try {
     const r = await fetch("/api/efficient-frontier", {
       method: "POST", headers: {"Content-Type": "application/json"}, signal: ac.signal,
@@ -6879,22 +6881,36 @@ async function mptRun() {
         if (!line) continue;
         const msg = JSON.parse(line);
         if (msg.type === "progress") mptProgressSet(msg.pct, msg.eta, msg.label);
+        else if (msg.type === "frontier") mptStreamFrontier(msg);
+        else if (msg.type === "cloud") mptStreamCloud(msg.points);
         else if (msg.type === "done") done = msg.result;
         else if (msg.type === "error") throw new Error(msg.error || "optimization failed");
       }
     }
     if (!done) throw new Error("stream ended without a result");
-    MPT.result = done;
+    // Merge the final payload but keep the cloud THIS run accumulated from the
+    // chunks (done.cloud is intentionally empty to avoid re-shipping 20-80k
+    // points). Gate on _gotFrontier, not on MPT.result: without it, a backend
+    // that only sent `done` would splice the PREVIOUS run's scatter under the
+    // new frontier, since MPT.result still holds the last successful run.
+    const cloud = (MPT._gotFrontier && MPT.result?.cloud?.length)
+      ? MPT.result.cloud : (done.cloud || []);
+    MPT.result = {...done, cloud};
     // Default selection = best reward-per-CVaR point (max (ret-rf)/cvar).
-    MPT.selectedIdx = mptBestRewardIdx(done, params.rf);
+    MPT.selectedIdx = mptBestRewardIdx(MPT.result, params.rf);
     const slider = document.getElementById("pf-mpt-slider");
     slider.disabled = false;
-    slider.max = String(Math.max(0, done.frontier.length - 1));
+    slider.max = String(Math.max(0, MPT.result.frontier.length - 1));
     slider.value = String(MPT.selectedIdx);
     mptProgressHide("done");
     if (status) status.innerHTML = "";
-    mptRender();
-    mptSaveRun({silent: true}).catch(() => {});  // persist as this portfolio's last run
+    // Finalize on the same fixed domain the cloud filled into (no jump); the
+    // cloud canvas already holds every chunk, so skip repainting it. Falls back to
+    // a fresh full render if the frontier message never established a domain.
+    if (MPT._streamProj) mptRenderChart({fixedProj: MPT._streamProj, skipCloud: true});
+    else mptRender();
+    mptRenderSide();
+    mptSaveRun({silent: true}).catch(() => {});  // persist onto this portfolio's run history
   } catch (e) {
     mptProgressHide("fail");
     if (status) {
@@ -6904,8 +6920,43 @@ async function mptRun() {
     }
   } finally {
     MPT.abort = null;
+    MPT._streamProj = null;
+    MPT._gotFrontier = false;
     mptSetRunning(false);
   }
+}
+
+// Streaming: the `frontier` message arrives once the frontier solves (before the
+// cloud). Draw axes + frontier + anchors immediately on a domain fixed from the
+// frontier (padded right for the cloud) so the scatter can fill into a stable
+// frame. The cloud canvas is cleared here (mptComputeProj re-sizes it).
+function mptStreamFrontier(msg) {
+  MPT._gotFrontier = true;
+  MPT.result = {
+    symbols: msg.symbols, missing: msg.missing,
+    frontier: msg.frontier, min_cvar: msg.min_cvar, max_ret: msg.max_ret,
+    anchors: msg.anchors, bl: msg.bl, params: msg.params, meta: msg.meta || {},
+    cloud: [],
+  };
+  const host = document.getElementById("pf-mpt-chart");
+  MPT._streamProj = mptComputeProj(MPT.result, host, {cloudRoom: true});
+  const status = document.getElementById("pf-mpt-status");
+  if (status) status.innerHTML = "";     // reveal the chart under the status text
+  const slider = document.getElementById("pf-mpt-slider");
+  if (slider) { slider.disabled = false; slider.max = String(Math.max(0, msg.frontier.length - 1)); }
+  MPT.selectedIdx = Math.min(MPT.selectedIdx || 0, Math.max(0, msg.frontier.length - 1));
+  mptRenderChart({fixedProj: MPT._streamProj, skipCloud: true});
+}
+
+// Streaming: append a cloud chunk to the accumulator and paint it additively.
+function mptStreamCloud(points) {
+  if (!points || !points.length) return;
+  // Only accept chunks belonging to THIS run's frontier — a chunk arriving before
+  // the frontier message would otherwise land in the previous run's accumulator.
+  if (!MPT._gotFrontier || !MPT.result) return;
+  if (!MPT.result.cloud) MPT.result.cloud = [];
+  for (let i = 0; i < points.length; i++) MPT.result.cloud.push(points[i]);
+  if (MPT._streamProj) mptPaintCloud(points, MPT._streamProj, {append: true});
 }
 
 /* --- Per-position weight limits (min/max box, editable per holding) --- */
@@ -6939,7 +6990,8 @@ function mptRenderBounds() {
     `<div class="pf-mpt-bnd-row pf-mpt-bnd-all"><span>All positions</span>` +
       `<input class="pf-mpt-bnd" type="number" min="0" max="100" step="1" data-all="min" placeholder="0" aria-label="min for all"/>` +
       `<input class="pf-mpt-bnd" type="number" min="0" max="100" step="1" data-all="max" placeholder="100" aria-label="max for all"/></div>` +
-    syms.map(s => `<div class="pf-mpt-bnd-row"><span title="${escapeHtml(s)}">${escapeHtml(s)}</span>${cell(s, "min")}${cell(s, "max")}</div>`).join("");
+    syms.map(s => `<div class="pf-mpt-bnd-row"><span data-mpt-sym="${escapeHtml(s)}" style="cursor:help">${escapeHtml(s)}</span>${cell(s, "min")}${cell(s, "max")}</div>`).join("");
+  mptWireAssetTips(grid);
 }
 function mptSetBound(sym, k, pctStr) {
   const b = (MPT.bounds[sym] = MPT.bounds[sym] || {});
@@ -6954,10 +7006,10 @@ function mptResetBounds() {
 }
 
 function mptClearChart() {
-  const base = document.getElementById("pf-mpt-base");
-  if (base) { const ctx = base.getContext("2d"); ctx && ctx.clearRect(0, 0, base.width, base.height); }
-  const ov = document.getElementById("pf-mpt-overlay");
-  if (ov) { const ctx = ov.getContext("2d"); ctx && ctx.clearRect(0, 0, ov.width, ov.height); }
+  for (const id of ["pf-mpt-cloud", "pf-mpt-base", "pf-mpt-overlay"]) {
+    const cv = document.getElementById(id);
+    if (cv) { const ctx = cv.getContext("2d"); ctx && ctx.clearRect(0, 0, cv.width, cv.height); }
+  }
   const leg = document.getElementById("pf-mpt-legend"); if (leg) leg.innerHTML = "";
 }
 
@@ -6972,6 +7024,17 @@ function mptRender() {
 // construction, eliminating the SVG/canvas drift the old 3-layer chart had.
 function mptCurrentScale() { return MPT._proj; }
 
+// Display risk accessors. The chart x-axis + all panels show the 30-day
+// (10d→30d, FRTB liquidity-horizon) VaR/CVaR loss. `cvar30`/`var30` come from the
+// backend; fall back to the legacy annualized `cvar` for pre-1.9 saved runs that
+// predate the 30-day fields (they render — a touch high — until the run is redone).
+function mptCvar(p)   { return p && p.cvar30 != null ? p.cvar30 : (p ? p.cvar : undefined); }
+function mptVar(p)    { return p ? p.var30 : undefined; }
+function mptCvarLo(p) { return p && p.cvar30_lo != null ? p.cvar30_lo : (p ? p.cvar_lo : undefined); }
+function mptCvarHi(p) { return p && p.cvar30_hi != null ? p.cvar30_hi : (p ? p.cvar_hi : undefined); }
+// Format a loss fraction (e.g. 0.12) as "12.0%"; null/NaN → "—".
+function mptFmtLoss(v, dp = 1) { return (v == null || !isFinite(v)) ? "—" : (v * 100).toFixed(dp) + "%"; }
+
 // Resize both canvases identically through one helper so their backing
 // stores cannot drift apart. CSS controls the *display* size (inset:0 +
 // width/height:100%); we touch ONLY the backing store. Setting inline
@@ -6984,7 +7047,10 @@ function mptSizeCanvases(host) {
   const cssW = Math.max(360, Math.floor(rect.width));
   const cssH = Math.max(280, Math.floor(rect.height));
   const W = Math.floor(cssW * dpr), H = Math.floor(cssH * dpr);
-  for (const id of ["pf-mpt-base", "pf-mpt-overlay"]) {
+  // NB: setting width/height CLEARS the canvas. The cloud canvas is sized here
+  // only when we (re)build the projection — never during a streaming run, so its
+  // additively-drawn chunks survive between messages.
+  for (const id of ["pf-mpt-cloud", "pf-mpt-base", "pf-mpt-overlay"]) {
     const cv = document.getElementById(id);
     if (!cv) continue;
     cv.width = W; cv.height = H;
@@ -7003,72 +7069,94 @@ function mptTicks(lo, hi, n) {
   return out;
 }
 
-function mptRenderChart() {
-  const d = MPT.result; if (!d) return;
-  const host = document.getElementById("pf-mpt-chart");
-  // Atomic size for both canvases.
+// Build the chart projection. X = 30-day CVaR, Y = expected return. Normally the
+// domain spans cloud + frontier + anchors; during a streaming run we pass
+// {cloudRoom:true} to fix the domain from the frontier alone (padded right for the
+// incoming cloud) so the axis stays put while the scatter fills in.
+function mptComputeProj(d, host, opts = {}) {
   const {cssW, cssH, dpr} = mptSizeCanvases(host);
   const pad = {l: 56, r: 18, t: 18, b: 38};
-
-  // Domain from cloud + frontier + anchors. X = CVaR, Y = expected return.
   let xMax = 0, xMin = Infinity, yMax = -Infinity, yMin = Infinity;
-  const consume = (v, r) => { if (v < xMin) xMin = v; if (v > xMax) xMax = v; if (r < yMin) yMin = r; if (r > yMax) yMax = r; };
-  (d.cloud || []).forEach(p => consume(p[0], p[1]));
-  (d.frontier || []).forEach(p => {
-    consume(p.cvar, p.ret);
-    if (p.cvar_lo != null) consume(p.cvar_lo, p.ret);
-    if (p.cvar_hi != null) consume(p.cvar_hi, p.ret);
-  });
-  Object.values(d.anchors || {}).forEach(a => a && consume(a.cvar, a.ret));
+  const consume = (v, r) => {
+    if (v == null || !isFinite(v)) return;
+    if (v < xMin) xMin = v; if (v > xMax) xMax = v; if (r < yMin) yMin = r; if (r > yMax) yMax = r;
+  };
+  if (!opts.cloudRoom) (d.cloud || []).forEach(p => consume(p[0], p[1]));
+  (d.frontier || []).forEach(p => { consume(mptCvar(p), p.ret); consume(mptCvarLo(p), p.ret); consume(mptCvarHi(p), p.ret); });
+  Object.values(d.anchors || {}).forEach(a => a && consume(mptCvar(a), a.ret));
   if (!isFinite(xMin)) { xMin = 0; xMax = 0.3; yMin = 0; yMax = 0.2; }
   // Floor the y-domain at the rf that actually produced this frontier (from the
   // run payload), not the live control — the two can differ after a restore.
   const rf = Number(d.params?.rf) || 0;
   yMin = Math.min(yMin, rf);
+  // Streaming: reserve x-space to the right for the cloud (concentrated single-
+  // asset portfolios sit at higher CVaR than the efficient frontier).
+  if (opts.cloudRoom) { const span = (xMax - xMin) || 0.01; xMax = xMin + span * 1.6; }
   const dx = (xMax - xMin) * 0.06 || 0.01;
   const dy = (yMax - yMin) * 0.08 || 0.01;
   xMin = Math.max(0, xMin - dx); xMax += dx; yMin -= dy; yMax += dy;
-
-  // Projection in CSS pixels (toPx); fromPx for hit-testing.
   const xToPx = v => pad.l + (v - xMin) / (xMax - xMin) * (cssW - pad.l - pad.r);
   const yToPx = r => cssH - pad.b - (r - yMin) / (yMax - yMin) * (cssH - pad.t - pad.b);
-  const proj = {xMin, xMax, yMin, yMax, pad, cssW, cssH, dpr,
-                X: xToPx, Y: yToPx, toPx: (v, r) => [xToPx(v), yToPx(r)]};
-  MPT._proj = proj;
+  return {xMin, xMax, yMin, yMax, pad, cssW, cssH, dpr,
+          X: xToPx, Y: yToPx, toPx: (v, r) => [xToPx(v), yToPx(r)]};
+}
 
-  // Cloud color-by-return: a low→high return gradient (viridis-like) so the
-  // eye reads the reward dimension directly. Cloud rows are [cvar, ret].
-  let rLo = Infinity, rHi = -Infinity;
-  (d.cloud || []).forEach(p => { if (p[1] < rLo) rLo = p[1]; if (p[1] > rHi) rHi = p[1]; });
-  if (!isFinite(rLo)) { rLo = 0; rHi = 1; }
-  function retColor(ret) {
+// Return-gradient color factory (viridis-like) over the projection's y-domain —
+// stable across streaming chunks (doesn't shift as new cloud points arrive).
+function mptRetColor(proj) {
+  const rLo = proj.yMin, rHi = proj.yMax;
+  return function (ret) {
     const t = Math.max(0, Math.min(1, (ret - rLo) / Math.max(1e-9, rHi - rLo)));
     const stops = [[68,1,84],[33,144,141],[253,231,37]];
     const i = t * 2, j = Math.floor(i), f = i - j;
     const a = stops[j], b = stops[Math.min(2, j + 1)];
     return `rgb(${Math.round(a[0]+(b[0]-a[0])*f)},${Math.round(a[1]+(b[1]-a[1])*f)},${Math.round(a[2]+(b[2]-a[2])*f)})`;
-  }
+  };
+}
 
-  // --- Base canvas: axes + cloud + frontier + anchors ---
+// Paint the cloud onto its own (bottom) canvas. append=false clears first (full
+// redraw); append=true adds a streamed chunk without wiping the accumulated dots.
+function mptPaintCloud(points, proj, {append} = {append: false}) {
+  const cv = document.getElementById("pf-mpt-cloud");
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(proj.dpr, 0, 0, proj.dpr, 0, 0);
+  if (!append) ctx.clearRect(0, 0, proj.cssW, proj.cssH);
+  if (points && points.length) drawCloud(ctx, points, proj, mptRetColor(proj));
+}
+
+function mptRenderChart(opts = {}) {
+  const d = MPT.result; if (!d) return;
+  const host = document.getElementById("pf-mpt-chart");
+  // A fixed projection (streaming) keeps the axis stable while the cloud fills;
+  // otherwise recompute the domain from the current data (cloud + frontier).
+  const proj = opts.fixedProj || mptComputeProj(d, host);
+  MPT._proj = proj;
+  const {cssW, cssH, dpr} = proj;
+  const xToPx = proj.X, yToPx = proj.Y;
+
+  // --- Base canvas: axes + frontier + anchors (cloud lives on its own layer) ---
   const baseCv = document.getElementById("pf-mpt-base");
   const ctx = baseCv.getContext("2d");
   // Reset transform to identity, then scale so every subsequent call is in
   // CSS pixels — the same units as the projection.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
-
   drawAxes(ctx, proj, d);
-  drawCloud(ctx, d.cloud || [], proj, retColor);
   drawFrontierAndAnchors(ctx, d, proj);
 
-  // --- Overlay canvas: selection + hover ghost ---
-  drawOverlay();
+  // --- Cloud canvas: full redraw unless a streaming run is managing it ---
+  if (!opts.skipCloud) mptPaintCloud(d.cloud || [], proj, {append: false});
 
   // --- Wire interaction on the overlay canvas (top of stack) ---
   const ov = document.getElementById("pf-mpt-overlay");
   // Replace listeners by cloning so we never stack handlers on re-render.
+  // NB: cloneNode copies attributes, NOT the bitmap — so the overlay must be
+  // painted AFTER this swap, else the selection ring is wiped and only reappears
+  // on the next mousemove/slider input.
   const fresh = ov.cloneNode(false);
   ov.parentNode.replaceChild(fresh, ov);
+  drawOverlay();   // paint the selection ring onto the *new* overlay canvas
   // Hit-test against the single mean-CVaR frontier. Returns the nearest index.
   function _hitPoint(ev) {
     const r = fresh.getBoundingClientRect();
@@ -7077,7 +7165,7 @@ function mptRenderChart() {
     const py = (ev.clientY - r.top) * (cssH / r.height);
     let best = 0, bestD = Infinity;
     (d.frontier || []).forEach((p, i) => {
-      const dxp = xToPx(p.cvar) - px, dyp = yToPx(p.ret) - py;
+      const dxp = xToPx(mptCvar(p)) - px, dyp = yToPx(p.ret) - py;
       const dd = dxp * dxp + dyp * dyp;
       if (dd < bestD) { bestD = dd; best = i; }
     });
@@ -7143,7 +7231,8 @@ function mptBestRewardIdx(d, rf) {
   if (!fr.length) return 0;
   let best = 0, bestR = -Infinity;
   fr.forEach((p, i) => {
-    const r = p.cvar > 1e-9 ? (p.ret - rf) / p.cvar : -Infinity;
+    const c = mptCvar(p);
+    const r = c > 1e-9 ? (p.ret - rf) / c : -Infinity;
     if (r > bestR) { bestR = r; best = i; }
   });
   return best;
@@ -7156,7 +7245,7 @@ function _nearestFrontierIdx(cvar, ret) {
   const d = MPT.result; if (!d || !(d.frontier || []).length) return 0;
   let best = 0, bestD = Infinity;
   d.frontier.forEach((p, i) => {
-    const dvx = (p.cvar - cvar), dvy = (p.ret - ret);
+    const dvx = (mptCvar(p) - cvar), dvy = (p.ret - ret);
     const dd = dvx * dvx + dvy * dvy;
     if (dd < bestD) { bestD = dd; best = i; }
   });
@@ -7175,7 +7264,7 @@ function mptLegendClick(kind) {
     case "current": {
       const a = (d.anchors || {})[kind];
       if (a) {
-        MPT.selectedIdx = _nearestFrontierIdx(a.cvar, a.ret);
+        MPT.selectedIdx = _nearestFrontierIdx(mptCvar(a), a.ret);
         document.getElementById("pf-mpt-slider").value = String(MPT.selectedIdx);
       }
       break;
@@ -7256,7 +7345,12 @@ function drawAxes(ctx, proj, d) {
   const aConf = Math.round((d.params?.alpha || 0.95) * 100);
   ctx.font = "11px ui-sans-serif, -apple-system, system-ui, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText(`CVaR ${aConf}% (annualized)`, (cssW - pad.r + pad.l) / 2, cssH - 6);
+  // Label the axis for what is actually plotted: 30-day loss for current runs,
+  // "annualized" for a restored pre-1.9 run whose points predate the cvar30
+  // fields (mptCvar falls back to the old annualized value for those).
+  const has30 = (d.frontier || []).some(p => p && p.cvar30 != null);
+  ctx.fillText(has30 ? `CVaR ${aConf}% · 30-day loss` : `CVaR ${aConf}% (annualized · legacy run)`,
+               (cssW - pad.r + pad.l) / 2, cssH - 6);
   ctx.save();
   ctx.translate(14, (cssH - pad.b + pad.t) / 2);
   ctx.rotate(-Math.PI / 2);
@@ -7310,13 +7404,13 @@ function drawFrontierAndAnchors(ctx, d, proj) {
   // Bootstrap stability band: at each return level the CVaR ranges [cvar_lo,
   // cvar_hi] across resampled scenario sets. Shade it so the frontier's sampling
   // uncertainty is visible (wider band = noisier estimate at that point).
-  const hasBand = fr.length > 1 && fr[0].cvar_lo != null && fr[0].cvar_hi != null;
+  const hasBand = fr.length > 1 && mptCvarLo(fr[0]) != null && mptCvarHi(fr[0]) != null;
   if (hasBand) {
     ctx.save();
     ctx.fillStyle = accent; ctx.globalAlpha = 0.14;
     ctx.beginPath();
-    fr.forEach((p, i) => { const x = X(p.cvar_hi), y = Y(p.ret); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-    for (let i = fr.length - 1; i >= 0; i--) ctx.lineTo(X(fr[i].cvar_lo), Y(fr[i].ret));
+    fr.forEach((p, i) => { const x = X(mptCvarHi(p)), y = Y(p.ret); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    for (let i = fr.length - 1; i >= 0; i--) ctx.lineTo(X(mptCvarLo(fr[i])), Y(fr[i].ret));
     ctx.closePath(); ctx.fill();
     ctx.restore();
   }
@@ -7326,19 +7420,19 @@ function drawFrontierAndAnchors(ctx, d, proj) {
     ctx.lineJoin = "round"; ctx.lineCap = "round";
     ctx.beginPath();
     fr.forEach((p, i) => {
-      const x = X(p.cvar), y = Y(p.ret);
+      const x = X(mptCvar(p)), y = Y(p.ret);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.stroke();
     ctx.restore();
   }
   // Frontier endpoints: min-CVaR (left, conservative) and max-return (right).
-  if (d.min_cvar) drawMarker(ctx, "endpoint", X(d.min_cvar.cvar), Y(d.min_cvar.ret));
-  if (d.max_ret)  drawMarker(ctx, "endpoint", X(d.max_ret.cvar),  Y(d.max_ret.ret));
+  if (d.min_cvar) drawMarker(ctx, "endpoint", X(mptCvar(d.min_cvar)), Y(d.min_cvar.ret));
+  if (d.max_ret)  drawMarker(ctx, "endpoint", X(mptCvar(d.max_ret)),  Y(d.max_ret.ret));
   const an = d.anchors || {};
-  if (an.equal)   drawMarker(ctx, "equal",   X(an.equal.cvar),   Y(an.equal.ret));
-  if (an.cap)     drawMarker(ctx, "cap",     X(an.cap.cvar),     Y(an.cap.ret));
-  if (an.current) drawMarker(ctx, "current", X(an.current.cvar), Y(an.current.ret));
+  if (an.equal)   drawMarker(ctx, "equal",   X(mptCvar(an.equal)),   Y(an.equal.ret));
+  if (an.cap)     drawMarker(ctx, "cap",     X(mptCvar(an.cap)),     Y(an.cap.ret));
+  if (an.current) drawMarker(ctx, "current", X(mptCvar(an.current)), Y(an.current.ret));
 }
 
 function drawMarker(ctx, kind, x, y) {
@@ -7387,7 +7481,7 @@ function drawOverlay() {
   if (MPT.hoverIdx != null && MPT.hoverIdx !== MPT.selectedIdx) {
     const hp = d.frontier[MPT.hoverIdx];
     if (hp) {
-      const hx = X(hp.cvar), hy = Y(hp.ret);
+      const hx = X(mptCvar(hp)), hy = Y(hp.ret);
       ctx.save();
       ctx.strokeStyle = accent; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.6;
       ctx.beginPath(); ctx.arc(hx, hy, 6, 0, Math.PI * 2); ctx.stroke();
@@ -7400,7 +7494,7 @@ function drawOverlay() {
   // Active selection ring on the frontier.
   const sel = (d.frontier || [])[MPT.selectedIdx];
   if (sel) {
-    const x = X(sel.cvar), y = Y(sel.ret);
+    const x = X(mptCvar(sel)), y = Y(sel.ret);
     ctx.save();
     ctx.strokeStyle = accent; ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke();
@@ -7441,19 +7535,19 @@ function drawPulse(ctx, d, proj, accent) {
         ctx.strokeStyle = accent; ctx.lineWidth = 5; ctx.globalAlpha = alpha;
         ctx.lineJoin = "round"; ctx.lineCap = "round";
         ctx.beginPath();
-        d.frontier.forEach((p, i) => { const x = X(p.cvar), y = Y(p.ret); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+        d.frontier.forEach((p, i) => { const x = X(mptCvar(p)), y = Y(p.ret); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
         ctx.stroke();
         ctx.restore();
       }
       break;
     case "equal":
-      if (d.anchors?.equal) ringAt(d.anchors.equal.cvar, d.anchors.equal.ret, "#8b5cf6");
+      if (d.anchors?.equal) ringAt(mptCvar(d.anchors.equal), d.anchors.equal.ret, "#8b5cf6");
       break;
     case "cap":
-      if (d.anchors?.cap) ringAt(d.anchors.cap.cvar, d.anchors.cap.ret, "#06b6d4");
+      if (d.anchors?.cap) ringAt(mptCvar(d.anchors.cap), d.anchors.cap.ret, "#06b6d4");
       break;
     case "current":
-      if (d.anchors?.current) ringAt(d.anchors.current.cvar, d.anchors.current.ret, "#f59e0b");
+      if (d.anchors?.current) ringAt(mptCvar(d.anchors.current), d.anchors.current.ret, "#f59e0b");
       break;
   }
 
@@ -7495,7 +7589,8 @@ function mptShowFrontierTip(ev, idx) {
   tip.innerHTML = `
     <div class="tip-title">Frontier point #${idx + 1} / ${d.frontier.length} <span style="font-weight:400;color:var(--muted);font-size:10px">· click to select</span></div>
     <div class="tip-row"><span class="k">Expected return</span><span class="v">${(p.ret * 100).toFixed(2)}%</span></div>
-    <div class="tip-row"><span class="k">CVaR ${aConf}%</span><span class="v neg">${(p.cvar * 100).toFixed(2)}%</span></div>
+    <div class="tip-row"><span class="k">VaR ${aConf}% (30d)</span><span class="v neg">${mptFmtLoss(mptVar(p))}</span></div>
+    <div class="tip-row"><span class="k">CVaR ${aConf}% (30d)</span><span class="v neg">${mptFmtLoss(mptCvar(p))}</span></div>
     <div class="tip-row"><span class="k">Max drawdown</span><span class="v neg">${(p.mdd * 100).toFixed(1)}%</span></div>
     ${top.length ? `<div class="tip-sub">Top weights</div>` + top.map(([s, w]) =>
       `<div class="tip-row"><span class="k">${escapeHtml(s)}</span><span class="v">${(w * 100).toFixed(1)}%</span></div>`
@@ -7532,17 +7627,19 @@ function mptRenderSide() {
   // Slider readout: expected return / CVaR at the current point.
   const sliderReadout = document.getElementById("pf-mpt-slider-readout");
   if (sliderReadout) {
-    sliderReadout.textContent = `${(sel.ret * 100).toFixed(1)}% ret / ${(sel.cvar * 100).toFixed(1)}% CVaR`;
+    sliderReadout.textContent = `${(sel.ret * 100).toFixed(1)}% ret / ${mptFmtLoss(mptCvar(sel))} CVaR (30d)`;
   }
   const cash = d.params?.fully_invested === false;
   const invested = Object.values(sel.weights || {}).reduce((a, b) => a + b, 0);
   const nBoot = d.meta?.n_boot || 0;
-  const bandRow = (sel.cvar_lo != null && sel.cvar_hi != null)
-    ? `<span class="k">CVaR band (bootstrap)</span><span class="v" title="10th–90th percentile of CVaR across ${nBoot} bootstrap-resampled scenario sets — the frontier's sampling uncertainty at this point.">${(sel.cvar_lo * 100).toFixed(1)}–${(sel.cvar_hi * 100).toFixed(1)}%</span>`
+  const lo = mptCvarLo(sel), hi = mptCvarHi(sel);
+  const bandRow = (lo != null && hi != null)
+    ? `<span class="k">CVaR band (bootstrap)</span><span class="v" title="10th–90th percentile of CVaR across ${nBoot} bootstrap-resampled scenario sets — the frontier's sampling uncertainty at this point.">${mptFmtLoss(lo)}–${mptFmtLoss(hi)}</span>`
     : "";
   stats.innerHTML = `
     <span class="k">Expected return (BL)</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
-    <span class="k">CVaR ${aConf}% (annualized)</span><span class="v neg">${(sel.cvar * 100).toFixed(2)}%</span>
+    ${sel.var30 != null ? `<span class="k" title="Value-at-Risk: the loss you'd exceed 1-in-${Math.max(1, Math.round(1/(1-(d.params?.alpha||0.95))))} months. Empirical, on overlapping 10-day returns scaled to 30 days (FRTB style).">VaR ${aConf}% (30-day)</span><span class="v neg">${mptFmtLoss(sel.var30, 2)}</span>` : ""}
+    <span class="k" title="${sel.cvar30 != null ? `Conditional VaR / expected shortfall: the average loss in the worst ${Math.round((1-(d.params?.alpha||0.95))*100)}% of months. Overlapping 10-day returns scaled to 30 days (FRTB style).` : "Legacy saved run — annualized CVaR (√252-scaled daily). Re-run to get the 30-day figures."}">CVaR ${aConf}% ${sel.cvar30 != null ? "(30-day)" : "(annualized · legacy)"}</span><span class="v neg">${mptFmtLoss(mptCvar(sel), 2)}</span>
     ${bandRow}
     <span class="k">Max drawdown</span><span class="v neg">${(sel.mdd * 100).toFixed(1)}%</span>
     <span class="k">CDaR (95%)</span><span class="v neg">${(sel.cdar * 100).toFixed(1)}%</span>
@@ -7551,8 +7648,8 @@ function mptRenderSide() {
     <span class="k">Analyst views</span><span class="v">${(bl.viewed || []).length}/${(d.symbols || []).length}${bl.haircut != null ? ` <span style="color:var(--muted);font-weight:400">@ ${Math.round(bl.haircut*100)}% trust</span>` : ""}</span>
     <span class="k">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
   `;
-  // Weights bars (sorted descending; zero-weight rows hidden). Show the BL
-  // posterior return per asset as context when hovering the row title.
+  // Weights bars (sorted descending; zero-weight rows hidden). Each row's symbol
+  // carries a rich hover (mptAssetTip) with the asset's risk/return/analyst stats.
   const wlist = document.getElementById("pf-mpt-wlist");
   const ws = Object.entries(sel.weights || {})
     .filter(([_, w]) => w > 1e-4)
@@ -7561,17 +7658,102 @@ function mptRenderSide() {
     wlist.innerHTML = `<span class="pf-mpt-status">No weights at this point (all cash).</span>`;
   } else {
     const maxW = ws[0][1];
-    wlist.innerHTML = ws.map(([sym, w]) => {
-      const mu = bl.mu ? bl.mu[sym] : null;
-      const tip = mu != null ? `${sym} · BL return ${(mu*100).toFixed(1)}%` : sym;
-      return `
+    wlist.innerHTML = ws.map(([sym, w]) => `
       <div class="pf-mpt-wrow">
-        <span title="${escapeHtml(tip)}">${escapeHtml(sym)}</span>
+        <span data-mpt-sym="${escapeHtml(sym)}">${escapeHtml(sym)}</span>
         <div class="pf-mpt-track"><div class="pf-mpt-fill" style="width:${(w/maxW*100).toFixed(1)}%"></div></div>
         <span class="pf-mpt-val">${(w * 100).toFixed(2)}%</span>
-      </div>`;
-    }).join("");
+      </div>`).join("");
+    mptWireAssetTips(wlist);
   }
+}
+
+// ---- Per-company hover tooltip (Weights list + bounds editor) ---------------
+// Rich per-asset context for the Optimize tab: the weight at the selected point,
+// realized return (annualized + total over the lookback), 30-day VaR/CVaR, the BL
+// posterior return, and the analyst target (mean / upside / range / dispersion).
+// Risk/return rows come from the run payload (asset_stats/analyst_detail/bl); when
+// there's no run yet (bounds editor before Run) it degrades to the DATA row.
+function mptAssetTip(sym) {
+  const d = MPT.result;
+  const st = d?.asset_stats?.[sym];
+  const an = d?.analyst_detail?.[sym];
+  const mu = d?.bl?.mu?.[sym];
+  const sel = mptActiveSel();
+  const w = sel?.weights?.[sym];
+  const row = (k, v, cls) => `<div class="tip-row"><span class="k">${k}</span><span class="v${cls ? " " + cls : ""}">${v}</span></div>`;
+  const pct = (x, dp = 1) => (x == null || !isFinite(x)) ? "—" : (x * 100).toFixed(dp) + "%";
+  const signed = (x, dp = 1) => (x == null || !isFinite(x)) ? "—" : (x >= 0 ? "+" : "") + (x * 100).toFixed(dp) + "%";
+  let rows = "";
+  if (w != null) rows += row("Weight (selected)", pct(w, 2));
+  if (st) {
+    rows += row("Return — annualized", signed(st.ret_ann), st.ret_ann >= 0 ? "pos" : "neg");
+    rows += row("Return — total (window)", signed(st.ret_total), st.ret_total >= 0 ? "pos" : "neg");
+    rows += row("VaR (30-day)", pct(st.var30), "neg");
+    rows += row("CVaR (30-day)", pct(st.cvar30), "neg");
+  } else {
+    // No run yet — fall back to what the holdings row already knows.
+    const r = (DATA || []).find(x => x.symbol === sym);
+    if (r) {
+      if (r.pct_1y != null) rows += row("Return — 1Y", signed(r.pct_1y / 100), r.pct_1y >= 0 ? "pos" : "neg");
+      if (r.sector) rows += row("Sector", escapeHtml(r.sector));
+    }
+    rows += `<div class="tip-sub">Run the optimization for risk stats.</div>`;
+  }
+  if (mu != null) rows += row("BL posterior return", signed(mu));
+  if (an) {
+    rows += `<div class="tip-sub">Analyst target</div>`;
+    if (an.target_mean != null) rows += row("Mean target", an.target_mean.toLocaleString(undefined, {maximumFractionDigits: 2}));
+    if (an.upside_pct != null) rows += row("Implied upside", signed(an.upside_pct / 100), an.upside_pct >= 0 ? "pos" : "neg");
+    if (an.target_low != null && an.target_high != null) {
+      rows += row("Range (low–high)", `${an.target_low.toLocaleString(undefined, {maximumFractionDigits: 2})}–${an.target_high.toLocaleString(undefined, {maximumFractionDigits: 2})}`);
+    }
+    if (an.disp != null) rows += row("Target dispersion", pct(an.disp) + (an.n_analysts ? ` · ${an.n_analysts} an.` : ""));
+  }
+  return `<div class="tip-title">${escapeHtml(sym)}</div>${rows}`;
+}
+function mptAssetTipEl() {
+  let tip = document.getElementById("pf-mpt-asset-tip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "pf-mpt-asset-tip";
+    tip.className = "pf-mpt-asset-tip";
+    document.body.appendChild(tip);
+  }
+  return tip;
+}
+function mptShowAssetTip(ev, sym) {
+  const tip = mptAssetTipEl();
+  tip.innerHTML = mptAssetTip(sym);
+  tip.classList.add("show");
+  if (typeof placeTip === "function") {
+    placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
+                   width: 0, height: 0}, {preferred: "left", offset: 14, gap: 8});
+  } else {
+    tip.style.left = (ev.clientX + 14) + "px";
+    tip.style.top = (ev.clientY + 14) + "px";
+  }
+}
+function mptHideAssetTip() {
+  const tip = document.getElementById("pf-mpt-asset-tip");
+  if (tip) tip.classList.remove("show");
+}
+// Delegate hover on any element carrying data-mpt-sym within `root`.
+function mptWireAssetTips(root) {
+  if (!root || root._mptTipsWired) return;
+  root._mptTipsWired = true;
+  root.addEventListener("mouseover", (ev) => {
+    const el = ev.target.closest("[data-mpt-sym]");
+    if (el) mptShowAssetTip(ev, el.getAttribute("data-mpt-sym"));
+  });
+  root.addEventListener("mousemove", (ev) => {
+    const el = ev.target.closest("[data-mpt-sym]");
+    if (el) mptShowAssetTip(ev, el.getAttribute("data-mpt-sym"));
+  });
+  root.addEventListener("mouseout", (ev) => {
+    const el = ev.target.closest("[data-mpt-sym]");
+    if (el && !el.contains(ev.relatedTarget)) mptHideAssetTip();
+  });
 }
 
 function mptApplyToPortfolio() {
@@ -7592,7 +7774,7 @@ function mptApplyToPortfolio() {
   requestAnalytics({force: true});
   const pt = MPT.selectedIdx + 1;
   const total = (d.frontier || []).length;
-  toast(`Applied frontier point ${pt}/${total} — ${(sel.ret * 100).toFixed(1)}% ret, ${(sel.cvar * 100).toFixed(1)}% CVaR.`);
+  toast(`Applied frontier point ${pt}/${total} — ${(sel.ret * 100).toFixed(1)}% ret, ${mptFmtLoss(mptCvar(sel))} CVaR (30d).`);
 }
 
 function mptSaveAsPreset() {
@@ -7638,11 +7820,14 @@ async function mptSaveRun({silent} = {silent: false}) {
     return;
   }
   try {
-    // Persist everything except the (heavy) cloud, which re-samples on load.
+    // Persist everything, plus a DOWNSAMPLED cloud (~2.5k of the 20-80k points) so
+    // a restored run shows a representative scatter without bloating the JSON.
     const compact = {
       params: d.params, symbols: d.symbols, missing: d.missing,
       frontier: d.frontier, min_cvar: d.min_cvar, max_ret: d.max_ret,
       anchors: d.anchors, bl: d.bl, meta: d.meta,
+      asset_stats: d.asset_stats, analyst_detail: d.analyst_detail,
+      cloud: mptDownsampleCloud(d.cloud, 2500),
     };
     const r = await fetch("/api/mpt-runs", {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -7650,22 +7835,88 @@ async function mptSaveRun({silent} = {silent: false}) {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || "save failed");
+    if (MPT.result && j.run?.id) MPT.result.id = j.run.id;  // so the new run highlights
     if (!silent) toast("Run saved.");
+    mptRefreshRunHistory().catch(() => {});   // reflect the new run in the list
   } catch (e) { if (!silent) toast("Save failed: " + (e.message || e)); }
 }
 
-// Restore the single last saved run for this portfolio on overlay open (run
-// history was dropped — only the most recent run persists). Reflects its params
-// into the controls and repaints the chart. No-op if there is no saved run.
-async function mptRestoreLast() {
-  if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) return false;
-  let run = null;
+// Evenly subsample the cloud to at most `cap` points (deterministic stride) so
+// the persisted run stays small but the restored scatter keeps its shape.
+function mptDownsampleCloud(cloud, cap) {
+  if (!Array.isArray(cloud) || cloud.length <= cap) return cloud || [];
+  const step = cloud.length / cap;
+  const out = [];
+  for (let i = 0; i < cap; i++) out.push(cloud[Math.floor(i * step)]);
+  return out;
+}
+
+// ---- Run history (last 3) ---------------------------------------------------
+// Compact relative time ("just now", "5m ago", "3h ago", "2d ago", else date).
+function mptFmtWhen(iso) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return "";
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 45) return "just now";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  if (s < 7 * 86400) return Math.round(s / 86400) + "d ago";
+  return new Date(t).toLocaleDateString();
+}
+function mptRunParamsLabel(p) {
+  if (!p) return "run";
+  const parts = [];
+  if (p.lookback) parts.push(p.lookback);
+  if (p.alpha != null) parts.push(Math.round(p.alpha * 100) + "%");
+  if (p.budget) parts.push(p.budget);
+  if (p.cov_model) parts.push(p.cov_model);
+  return parts.join(" · ");
+}
+function mptRunHeadline(run) {
+  // Headline = the max reward-per-CVaR point's return / 30-day CVaR.
+  const rf = Number(run.params?.rf) || 0;
+  const idx = mptBestRewardIdx(run, rf);
+  const p = (run.frontier || [])[idx];
+  if (!p) return "";
+  return `${(p.ret * 100).toFixed(1)}% / ${mptFmtLoss(mptCvar(p))}`;
+}
+function mptRenderRunHistory(runs) {
+  const host = document.getElementById("pf-mpt-runs");
+  if (!host) return;
+  const list = Array.isArray(runs) ? runs.filter(r => r && Array.isArray(r.frontier) && r.frontier.length) : [];
+  if (!list.length) { host.innerHTML = ""; return; }
+  const curId = MPT.result?.id;
+  host.innerHTML = `<div class="pf-mpt-runs-head">Recent runs</div>` + list.map((run, i) => {
+    const active = (run.id && run.id === curId) ? " active" : "";
+    const when = mptFmtWhen(run.saved_at);
+    return `<button type="button" class="pf-mpt-run${active}" data-run-idx="${i}">
+        <span class="pf-mpt-run-main">
+          <span class="pf-mpt-run-params">${escapeHtml(mptRunParamsLabel(run.params))}</span>
+          <span class="pf-mpt-run-when">${escapeHtml(when)}</span>
+        </span>
+        <span class="pf-mpt-run-head">${escapeHtml(mptRunHeadline(run))}</span>
+      </button>`;
+  }).join("");
+  host.querySelectorAll(".pf-mpt-run").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.runIdx);
+      if (MPT._runs && MPT._runs[idx]) mptLoadRun(MPT._runs[idx]);
+    });
+  });
+}
+async function mptRefreshRunHistory() {
+  if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) { MPT._runs = []; mptRenderRunHistory([]); return; }
   try {
     const r = await fetch(`/api/mpt-runs?view=${encodeURIComponent(STATE.activeView)}`);
     const j = await r.json();
-    run = j.last || null;
-  } catch (_) { return false; }
-  if (!run || !Array.isArray(run.frontier) || !run.frontier.length) return false;
+    MPT._runs = Array.isArray(j.runs) ? j.runs : [];
+  } catch (_) { MPT._runs = []; }
+  mptRenderRunHistory(MPT._runs);
+}
+// Load a specific saved run into the chart (reflect its params, repaint).
+function mptLoadRun(run) {
+  if (!run || !Array.isArray(run.frontier) || !run.frontier.length) return;
   MPT.result = {...run, cloud: run.cloud || []};
   const p = run.params || {};
   const setSeg = (id, v) => document.querySelectorAll(`#${id} button`).forEach(b => b.classList.toggle("active", b.dataset.v === v));
@@ -7685,6 +7936,23 @@ async function mptRestoreLast() {
   const status = document.getElementById("pf-mpt-status");
   if (status) status.innerHTML = "";
   mptRender();
+  mptRenderRunHistory(MPT._runs);          // refresh the active-row highlight
+}
+
+// On overlay open: fetch this portfolio's run history (last 3), render the list,
+// and restore the most recent run (params + chart). Returns whether a run was
+// restored (so the caller can decide whether to keep a restored rf).
+async function mptRestoreLast() {
+  MPT._runs = [];
+  if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) { mptRenderRunHistory([]); return false; }
+  try {
+    const r = await fetch(`/api/mpt-runs?view=${encodeURIComponent(STATE.activeView)}`);
+    const j = await r.json();
+    MPT._runs = Array.isArray(j.runs) ? j.runs : (j.last ? [j.last] : []);
+  } catch (_) { mptRenderRunHistory([]); return false; }
+  const run = MPT._runs[0] || null;
+  if (!run || !Array.isArray(run.frontier) || !run.frontier.length) { mptRenderRunHistory(MPT._runs); return false; }
+  mptLoadRun(run);                         // reflects params + repaints + renders history
   return true;
 }
 

@@ -36,7 +36,7 @@ Public surface (used by `frontier.py`):
     mean_cvar_frontier(returns_df, mu, alpha, ...)   -> dict (frontier + endpoints)
     portfolio_risk_metrics(weights, mu, cov, returns, alpha=0.95, rf=0.04,
                            fully_invested=True)      -> dict {ret, cvar, vol, mdd, cdar}
-    cvar_return_cloud(returns_df, mu, alpha, n)      -> list of [cvar_ann, ret_ann]
+    cvar_return_cloud(returns_df, mu, alpha, n)      -> list of [cvar_30day, ret_ann]
 
 Designed for ~2–60 assets and a 10–20 s wall budget per call (data fetch
 dominates; the optimization math here is well under 100 ms).
@@ -53,6 +53,15 @@ from numba import njit, prange
 FREQ_PER_YEAR = {"daily": 252, "weekly": 52, "monthly": 12}
 _FREQ_RESAMPLE = {"daily": None, "weekly": "W-FRI", "monthly": "M"}
 TRADING_DAYS = 252
+
+# FRTB-style tail-risk display horizons (trading days). Displayed VaR/CVaR are
+# computed empirically on *overlapping* LIQ_HORIZON-day returns (the FRTB
+# liquidity-horizon convention — captures autocorrelation/fat tails that a
+# √-time rescale of the daily number would miss), then scaled to DISP_HORIZON
+# by square-root-of-time (√(DISP/LIQ) = √3). These affect *display only* — the
+# frontier is still optimized on the daily CVaR LP. Retune here in one place.
+LIQ_HORIZON = 10
+DISP_HORIZON = 30
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +340,81 @@ def cdar(port_ret: np.ndarray, beta: float = 0.95) -> float:
     k = _tail_count(dd.size, beta)
     worst = np.sort(dd)[::-1][:k]   # k largest drawdowns
     return float(worst.mean())
+
+
+def overlapping_h_returns(port_ret: np.ndarray, h: int) -> np.ndarray:
+    """Overlapping ``h``-day **compounded** returns from a time-ordered series.
+
+    window_i = ∏_{t=i}^{i+h-1}(1+r_t) − 1, for i = 0 … T−h (so T−h+1 windows).
+    Computed via a cumulative-product ratio (O(T), not O(T·h)). Requires the
+    input to be time-ordered — do NOT feed a bootstrap-resampled series here.
+    """
+    r = np.asarray(port_ret, dtype=float)
+    r = r[np.isfinite(r)]
+    t = r.size
+    if h < 1 or t == 0:
+        return np.empty(0, dtype=float)
+    if t < h:
+        # Degenerate (fewer obs than the horizon): fall back to the single
+        # whole-period compounded return. Matches the numba cloud kernel's
+        # degenerate branch exactly so cloud and frontier CVaR never disagree.
+        # Unreachable in the real pipeline (≥60-obs floor upstream).
+        return np.array([float(np.prod(1.0 + r) - 1.0)], dtype=float)
+    g = np.cumprod(1.0 + r)              # g[i] = ∏_{0..i}(1+r)
+    num = g[h - 1:]                      # ∏_{0..i+h-1}, length T−h+1
+    prev = np.empty(t - h + 1, dtype=float)
+    prev[0] = 1.0                        # first window has no prior product
+    prev[1:] = g[:t - h]                 # g[i-1] for i ≥ 1
+    return num / prev - 1.0
+
+
+def var_cvar_horizon(port_ret: np.ndarray, alpha: float,
+                     h_base: int = LIQ_HORIZON,
+                     h_target: int = DISP_HORIZON) -> tuple[float, float]:
+    """Empirical (VaR, CVaR) on overlapping ``h_base``-day returns, √-scaled to ``h_target``.
+
+    Both are positive expected-loss fractions at confidence ``alpha``. VaR is the
+    tail boundary (the α-quantile loss); CVaR is the mean of the worst (1−α) tail
+    — exactly the ``cvar_of`` convention, via the shared ``_tail_count``. Scaled
+    by √(h_target/h_base). Returns ``(nan, nan)`` when there is too little data.
+    """
+    rh = overlapping_h_returns(port_ret, h_base)
+    if rh.size == 0:
+        return float("nan"), float("nan")
+    k = _tail_count(rh.size, alpha)
+    worst = np.sort(rh)[:k]             # k smallest returns = k largest losses
+    scale = math.sqrt(float(h_target) / float(h_base))
+    cvar = float(-worst.mean() * scale)
+    var = float(-worst[-1] * scale)    # least-extreme of the tail = the quantile
+    return var, cvar
+
+
+def asset_risk_stats(returns: pd.DataFrame, alpha: float) -> dict[str, dict]:
+    """Per-asset realized return + 30-day VaR/CVaR from the daily returns matrix.
+
+    Cheap (one pass per column, no refetch — the caller already has ``returns``).
+    ``ret_total`` = cumulative return over the window; ``ret_ann`` = its annualized
+    equivalent; ``var30``/``cvar30`` via :func:`var_cvar_horizon`. Feeds the
+    per-company hover tooltip in the Optimize tab.
+    """
+    out: dict[str, dict] = {}
+    for s in returns.columns:
+        col = np.asarray(returns[s].values, dtype=float)
+        col = col[np.isfinite(col)]
+        if col.size == 0:
+            continue
+        total = float(np.prod(1.0 + col) - 1.0)
+        # 1+total = ∏(1+r) ≥ 0 (a daily return can't be < −1), so the fractional
+        # power is real; a wiped-out asset (total ≤ −1) annualizes to −100%.
+        ann = (float((1.0 + total) ** (TRADING_DAYS / col.size) - 1.0)
+               if total > -1.0 else -1.0)
+        # Guard against a huge gain on a very short series blowing up the exponent
+        # (e.g. 1.5**252 → inf); surface NaN rather than a garbage tooltip number.
+        if not math.isfinite(ann):
+            ann = float("nan")
+        v30, c30 = var_cvar_horizon(col, alpha)
+        out[s] = {"ret_ann": ann, "ret_total": total, "var30": v30, "cvar30": c30}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1016,7 +1100,8 @@ def mean_cvar_frontier(
 
     def _point(w: np.ndarray) -> dict:
         port = R @ w
-        cv_daily = cvar_of(port, alpha)
+        cv_daily = cvar_of(port, alpha)          # daily — drives the efficient envelope
+        var30, cvar30 = var_cvar_horizon(port, alpha)  # 10d→30d — display only
         ret_ann = float(mu_ann @ w) if fully_invested else float(rf + (mu_ann - rf) @ w)
         vol = None
         if cov_v is not None:
@@ -1024,6 +1109,8 @@ def mean_cvar_frontier(
         return {
             "ret": ret_ann,
             "cvar": float(cv_daily * ann),
+            "var30": var30,
+            "cvar30": cvar30,
             "vol": vol,
             "mdd": max_drawdown(port),
             "cdar": cdar(port, cdar_beta),
@@ -1063,8 +1150,15 @@ def mean_cvar_frontier(
             pts.append(_point(w))
     pts.append(p_max)
 
-    # sort by cvar, enforce the efficient upper-envelope (ret nondecreasing in cvar)
-    pts.sort(key=lambda p: (p["cvar"], -p["ret"]))
+    # Sort + enforce the efficient upper-envelope on the *displayed* risk axis
+    # (30-day CVaR), so the plotted frontier is monotone (ret nondecreasing in
+    # cvar30) and never plots to the left of an earlier point. Points optimized on
+    # daily CVaR that turn out dominated on the 30-day axis are dropped from the
+    # display. Fall back to daily cvar if cvar30 is NaN (unreachable ≥60-obs data).
+    def _xkey(p: dict) -> float:
+        c = p.get("cvar30")
+        return float(c) if (c is not None and c == c) else float(p["cvar"])
+    pts.sort(key=lambda p: (_xkey(p), -p["ret"]))
     cleaned: list[dict] = []
     best = -1e18
     for p in pts:
@@ -1095,9 +1189,12 @@ def portfolio_risk_metrics(weights: dict[str, float], mu: dict[str, float],
     if cov is not None:
         cov_v = cov.reindex(index=symbols, columns=symbols).values.astype(float)
         vol = float(math.sqrt(max(0.0, w @ cov_v @ w)))
+    var30, cvar30 = var_cvar_horizon(port, alpha)
     return {
         "ret": ret_ann,
         "cvar": float(cvar_of(port, alpha) * math.sqrt(TRADING_DAYS)),
+        "var30": var30,
+        "cvar30": cvar30,
         "vol": vol,
         "mdd": max_drawdown(port),
         "cdar": cdar(port),
@@ -1110,26 +1207,46 @@ def portfolio_risk_metrics(weights: dict[str, float], mu: dict[str, float],
 # ---------------------------------------------------------------------------
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _cloud_kernel(W, R, mu_ann, alpha):
-    """(cvar_daily, ret_ann) for each row of W. Parallel over portfolios (prange)."""
+def _cloud_kernel(W, R, mu_ann, alpha, h):
+    """(cvar_hday, ret_ann) for each row of W. Parallel over portfolios (prange).
+
+    ``cvar_hday`` is the empirical CVaR of the portfolio's *overlapping* ``h``-day
+    compounded returns (NOT yet scaled to the display horizon — the caller applies
+    the √-time factor). Matches ``var_cvar_horizon``'s estimator so the cloud and
+    the frontier points share one CVaR definition.
+    """
     K = W.shape[0]
     N = W.shape[1]
     T = R.shape[0]
-    k = int(math.ceil((1.0 - alpha) * T - 1e-9))  # matches _tail_count
+    M = T - h + 1                    # number of overlapping h-day windows
+    if M < 1:
+        M = 1
+    k = int(math.ceil((1.0 - alpha) * M - 1e-9))  # matches _tail_count on M
     if k < 1:
         k = 1
     out = np.empty((K, 2))
     for j in prange(K):
-        port = np.empty(T)  # thread-local scratch (must be inside the parallel loop)
+        port = np.empty(T)   # thread-local scratch (must be inside the parallel loop)
+        cp = np.empty(T)     # thread-local cumulative product of (1+port)
+        rh = np.empty(M)     # thread-local overlapping h-day returns
         r = 0.0
         for i in range(N):
             r += W[j, i] * mu_ann[i]
+        acc = 1.0
         for t in range(T):
             pv = 0.0
             for i in range(N):
                 pv += W[j, i] * R[t, i]
             port[t] = pv
-        srt = np.sort(port)
+            acc *= (1.0 + pv)
+            cp[t] = acc
+        if T >= h:
+            for m in range(M):
+                prev = cp[m - 1] if m >= 1 else 1.0
+                rh[m] = cp[m + h - 1] / prev - 1.0
+        else:                 # degenerate: fewer obs than the horizon
+            rh[0] = cp[T - 1] - 1.0
+        srt = np.sort(rh)
         tail = 0.0
         for t in range(k):
             tail += srt[t]
@@ -1140,10 +1257,12 @@ def _cloud_kernel(W, R, mu_ann, alpha):
 
 def cvar_return_cloud(returns: pd.DataFrame, mu: dict[str, float],
                       alpha: float = 0.95, n: int = 4000, seed: int = 42) -> list:
-    """A light long-only cloud in (CVaR_annual, return_annual) space.
+    """A light long-only cloud in (CVaR_30day, return_annual) space.
 
     Dirichlet mixture (concentrated + uniform + a few sparse-k) so the cloud
-    spans corners without the old 15M-config machinery. Returns ``[[cvar,ret],…]``.
+    spans corners without the old 15M-config machinery. The CVaR coordinate is
+    the 10d→30d display CVaR (same estimator as the frontier points), so the
+    scatter shares the chart's x-axis. Returns ``[[cvar30, ret_ann],…]``.
     """
     symbols = list(returns.columns)
     n_assets = len(symbols)
@@ -1167,9 +1286,8 @@ def cvar_return_cloud(returns: pd.DataFrame, mu: dict[str, float],
         kk = int(ks[r])
         cols = rng.choice(n_assets, size=kk, replace=False)
         W[base + r, cols] = rng.dirichlet(np.ones(kk))
-    arr = _cloud_kernel(W, R, mu_ann, float(alpha))
-    ann = math.sqrt(TRADING_DAYS)
-    arr[:, 0] *= ann
+    arr = _cloud_kernel(W, R, mu_ann, float(alpha), int(LIQ_HORIZON))
+    arr[:, 0] *= math.sqrt(float(DISP_HORIZON) / float(LIQ_HORIZON))  # 10d → 30d
     return arr.tolist()
 
 
@@ -1183,7 +1301,7 @@ def _warm_jit() -> None:
     mu = np.array([0.08, 0.10, 0.06])
     l = np.zeros(3); h = np.ones(3)
     _cvar_pdip(R, mu, -1e18, l, h, 1.0 / (0.05 * 40), 1, 40)
-    _cloud_kernel(np.ascontiguousarray(rng.dirichlet(np.ones(3), size=8)), R, mu, 0.95)
+    _cloud_kernel(np.ascontiguousarray(rng.dirichlet(np.ones(3), size=8)), R, mu, 0.95, 10)
     _bootstrap_cvar(R, mu, np.array([0.05, 0.10]), l, h, 1.0 / (0.05 * 40), 1,
                     np.array([1, 2], dtype=np.int64))
 

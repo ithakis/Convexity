@@ -5,6 +5,45 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.9.0 — 2026-07-27
+**Optimize tab: interpretable tail risk, a live-filling cloud, run history, and
+per-company context.** Six targeted improvements on top of the v1.8 mean-CVaR
+engine. The optimization math itself is unchanged — the LP still minimises daily
+CVaR; what changed is what the tab *reports*, *persists*, and *shows*.
+- **Tail risk is now a real, readable loss number (FRTB-style).** The x-axis used
+  to plot daily CVaR scaled by √252, which routinely read >100% — not a loss
+  anyone can act on. Displayed risk is now empirical VaR **and** CVaR computed on
+  **overlapping 10-day compounded returns** (the FRTB liquidity-horizon
+  convention), scaled 10→30 days by √3, at the α the slider is set to. The axis
+  reads "CVaR 95% · 30-day loss" and typical values land in the 10–25% range.
+  `LIQ_HORIZON`/`DISP_HORIZON` in `mpt.py` are the single place to retune.
+- **VaR is reported at all.** The LP solver has always computed ζ = VaR_α and
+  thrown it away; the stats panel, chart tooltip, and slider readout now show
+  30-day VaR beside 30-day CVaR.
+- **The displayed frontier is monotone on the displayed axis.** Points are still
+  solved on daily CVaR but the efficient envelope is cleaned on `cvar30`, so the
+  plotted line can't double back or be visibly dominated by a cloud point.
+- **The cloud fills in as it computes.** The backend streams `frontier` (so axes +
+  frontier draw immediately) then `cloud` chunks; a new dedicated canvas paints
+  each chunk additively beneath the frontier. The 5–60s bootstrap wait is no
+  longer a blank chart. `done` no longer re-ships the 20–80k cloud points.
+- **Saved runs keep their cloud.** It was stripped on save and — despite a comment
+  claiming otherwise — never re-sampled, so every restored run rendered an empty
+  scatter. Runs now persist a ~2.5k-point downsampled cloud.
+- **Last 3 runs per portfolio.** `.portfolio_tracker_mpt.json` moves from one run
+  per view to a newest-first list capped at 3 (a re-run with identical params
+  replaces the newest instead of duplicating). A "Recent runs" list under *Apply to
+  Portfolio* shows each run's params, age, and headline return/CVaR, and reloads it
+  on click. Both legacy on-disk formats are read transparently.
+- **Per-company hover in the Weights section** (and the per-position bounds editor):
+  weight at the selected point, realized return (annualized + total over the
+  lookback), the asset's own 30-day VaR/CVaR, its BL posterior return, and the
+  analyst target — mean, implied upside, low–high range, and dispersion with the
+  analyst count. Served by new `asset_stats` / `analyst_detail` payload blocks,
+  computed from data already fetched (no extra network calls).
+- Restored pre-1.9 runs fall back to the old annualized CVaR and self-label
+  "annualized · legacy" rather than mislabelling it as a 30-day figure.
+
 ## 1.8.0 — 2026-07-22
 **Optimize tab reborn: Black-Litterman returns + mean-CVaR frontier.** The
 Markowitz mean-variance engine is fully removed and replaced end-to-end.

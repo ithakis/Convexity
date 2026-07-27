@@ -453,7 +453,7 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/weight-presets`            — upsert `{view, name, weights, rename_from?, set_active?}`
 - `/api/weight-presets/active`     — set `{view, name|null}` as the active preset for a portfolio
 - `/api/efficient-frontier`        — **streams NDJSON** (`progress`/`done`/`error`) for the mean-CVaR frontier. Body `{rows, lookback, rf, alpha, fully_invested, bounds, cov_model, haircut, budget, current_weights, display_ccy}` where `bounds` = `{sym:{min,max}}` per-position weight fractions and `budget` is a wall-clock tier (light≈5s/standard≈15s/dense≈60s). Client renders a real pct/ETA bar; aborting the request cancels the 8-core compute.
-- `/api/mpt-runs`                  — save `{view, run}` as the portfolio's **single last run** (overwrites)
+- `/api/mpt-runs`                  — save `{view, run}` onto the portfolio's **last-3 run history** (newest-first, cap 3; a run whose `params` match the newest replaces it instead of duplicating)
 
 **DELETE**
 - `/api/views/<name>`              — drop a view (cascades to the saved run)
@@ -464,7 +464,7 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 **GET (also)**
 - `/api/column-views`              — `{builtins, custom, active}`
 - `/api/weight-presets?view=…`     — `{presets: [...], active: name|null}` for a portfolio
-- `/api/mpt-runs?view=…`           — `{last: run|null}` — the portfolio's single last run (run history was dropped)
+- `/api/mpt-runs?view=…`           — `{last: run|null, runs: [...]}` — newest run + the last-3 history (rendered under *Apply to Portfolio*)
 - `/api/news-sentiment?symbols=…`  — batch per-ticker AI sentiment
 - `/api/news-market`               — market-wide sentiment + articles
 - `/api/news-articles?symbol=…`    — per-ticker articles + sentiment detail
@@ -857,14 +857,35 @@ mpt.black_litterman(symbols, cov, mkt_weights, views, *, rf, tau, haircut, ...) 
 mpt.mean_cvar_frontier(returns_df, mu, *, alpha, w_min, w_max, fully_invested, rf,
                        n_points, cov) -> {ok, frontier, min_cvar, max_ret, n_nonconv, _ctx}
     # w_min/w_max are scalar OR per-asset vectors (per-position box); _as_bound_vec
-    # coerces. each point: {ret, cvar (√252-annualized), vol, mdd, cdar, weights, _t}
+    # coerces. each point: {ret, cvar (√252-annualized, ORDERING only), var30, cvar30
+    #   (10d→30d display loss), vol, mdd, cdar, weights, _t}
     # _ctx = {a_ret,l,h,kappa,fi,targets} — reused by bootstrap_cvar (strip before JSON)
 mpt.bootstrap_cvar(R, ctx, seeds) -> cvar_ann[B,K]   # parallel (prange) frontier-stability
     # band: each seed resamples the T scenarios w/ replacement + re-solves at every target
 mpt.portfolio_risk_metrics(weights, mu, cov, returns, alpha, rf, fully_invested) -> {...}
-mpt.cvar_return_cloud(returns_df, mu, alpha, n, seed) -> [[cvar_ann, ret_ann], ...]  # prange
+mpt.cvar_return_cloud(returns_df, mu, alpha, n, seed) -> [[cvar_30day, ret_ann], ...] # prange
 mpt.cvar_of(port_ret, alpha) / max_drawdown(port_ret) / cdar(port_ret, beta)
+mpt.overlapping_h_returns(port_ret, h) -> overlapping h-day COMPOUNDED returns (len T−h+1)
+mpt.var_cvar_horizon(port_ret, alpha, h_base=10, h_target=30) -> (var30, cvar30)
+mpt.asset_risk_stats(returns_df, alpha) -> {sym: {ret_ann, ret_total, var30, cvar30}}
 ```
+
+### Displayed tail risk — 10d→30d (FRTB-style), v1.9
+The optimizer still minimises **daily** CVaR (the LP is unchanged). What the UI
+*shows* is a separate, more interpretable estimator: empirical VaR **and** CVaR on
+**overlapping 10-day compounded returns** (FRTB liquidity-horizon convention),
+scaled 10→30d by **√3** (`LIQ_HORIZON`/`DISP_HORIZON` in mpt.py — the single place
+to retune). Confidence follows the α slider. This replaced the old `×√252`
+annualized CVaR on the x-axis, which routinely exceeded 100% and wasn't a real
+loss number. Frontier points therefore carry BOTH `cvar` (daily×√252, used only to
+keep the solver's ordering) and `var30`/`cvar30` (display). **The efficient
+envelope is cleaned on `cvar30`** so the plotted line is monotone on the axis the
+user actually sees. The bootstrap band stays daily (i.i.d. resampling destroys the
+time-ordering the overlapping estimator needs) and is transferred onto the 30-day
+value multiplicatively — `cvar30_{lo,hi} = cvar30·(band_{lo,hi}/band_med)` — the one
+deliberate approximation. `app.js` reads everything through `mptCvar/mptVar/
+mptCvarLo/mptCvarHi`, which fall back to the legacy annualized `cvar` for restored
+pre-1.9 runs; the axis + stats rows then self-label "annualized · legacy".
 
 **8-core (`prange`).** `_cloud_kernel` and `_bootstrap_cvar` are `@njit(parallel=True)`;
 each `prange` iteration keeps its scratch buffers thread-local (bugs here = silent
@@ -899,9 +920,10 @@ at the next chunk boundary.
 - Posterior covariance is **not** used for risk — risk is empirical CVaR.
 
 ### Mean-CVaR frontier (risk engine)
-- Scenarios = **daily** FX-adjusted returns (~750/3Y). CVaR_α optimized in daily
-  units; reported/plotted `cvar` is **×√252 annualized** for axis-comparability with
-  the annual return (monotone scale ⇒ optimization unchanged).
+- Scenarios = **daily** FX-adjusted returns (~750/3Y). CVaR_α is optimized in daily
+  units. The `cvar` field is the legacy ×√252 annualization, now kept only as the
+  solver's ordering key — **what is plotted/reported is `cvar30`/`var30`** (see
+  "Displayed tail risk" above).
 - Frontier: sweep the return floor from the min-CVaR portfolio to the max-return
   portfolio (closed-form `_max_return_weights`), solving the Rockafellar-Uryasev LP
   at each. Constraints: long-only box `[w_min, w_max]`, and `Σw=1` (fully invested)
@@ -932,18 +954,39 @@ at the next chunk boundary.
 cov_model, haircut, budget (light/standard/dense wall-clock tiers), current_weights`.
 Legacy scalar `w_min`/`w_max` and `cloud_budget` are still accepted as fallbacks.
 Frequency is fixed **daily**. Response frontier points carry `cvar_lo/cvar_med/cvar_hi`
-(bootstrap band); `meta.n_boot` is the achieved replica count.
+(bootstrap band) plus `cvar30_lo/med/hi`; `meta.n_boot` is the achieved replica count.
 
-### Saved run (`.portfolio_tracker_mpt.json`) — single last run per portfolio
+**Streaming message order (v1.9):** the route is message-type-agnostic (it JSON-writes
+every yielded dict), and the generator now emits
+`progress…` → **`frontier`** (frontier + anchors + bl + params, so the client can fix
+the axis domain and draw the line immediately) → **`cloud`** chunks (≤5000 `[cvar30,
+ret]` pairs each — the client paints them additively so the scatter visibly fills)
+→ `done`. **`done.cloud` is deliberately `[]`** — the cloud already went out in the
+chunks; re-shipping 20-80k points would double the payload. The blocking wrapper
+`compute_efficient_frontier` reassembles the chunks into `result["cloud"]` so tests
+and non-streaming callers are unaffected. `done` also carries `asset_stats` and
+`analyst_detail` (the per-company hover data).
+
+### Saved run (`.portfolio_tracker_mpt.json`) — last 3 runs per portfolio
 ```jsonc
-{ "runs": { "<portfolio name>": {          // one dict per view (NOT a list — history dropped)
-    "id": "run_...", "saved_at": "...",
-    "params": {lookback, alpha, rf, fully_invested, cov_model, haircut, budget, bounds, display_ccy},
-    "symbols": [...], "missing": [...],
-    "frontier": [{ret, cvar, cvar_lo, cvar_med, cvar_hi, vol, mdd, cdar, weights}, ...],
-    "min_cvar": {...}, "max_ret": {...},
-    "anchors": {equal, cap, current}, "bl": {...}, "meta": {...} } } }
+{ "runs": { "<portfolio name>": [          // newest-first LIST, capped at 3
+    { "id": "run_...", "saved_at": "...",
+      "params": {lookback, alpha, rf, fully_invested, cov_model, haircut, budget, bounds, display_ccy},
+      "symbols": [...], "missing": [...],
+      "frontier": [{ret, cvar, var30, cvar30, cvar30_lo/med/hi, cvar_lo/med/hi, vol, mdd, cdar, weights}, ...],
+      "min_cvar": {...}, "max_ret": {...},
+      "anchors": {equal, cap, current}, "bl": {...}, "meta": {...},
+      "asset_stats": {...}, "analyst_detail": {...},
+      "cloud": [[cvar30, ret], ...] },   // DOWNSAMPLED to ~2.5k client-side
+    ...] } }
 ```
+`save_mpt_run` unshifts and truncates to `_MPT_MAX_RUNS = 3`; a run whose `params`
+equal the newest entry's **replaces** it (dedupe) rather than duplicating.
+`get_mpt_runs` returns the list, `get_last_mpt_run` its head; `_as_run_list`
+tolerates both legacy formats (bare dict, or an older list). Rename/delete cascades
+move the whole value and are format-agnostic. The cloud **is** persisted now (it was
+previously stripped and never re-sampled, so restored runs rendered an empty
+scatter) — downsampled to ~2.5k points so 3 runs stay small on disk.
 `save_mpt_run` overwrites (single run); `get_last_mpt_run` reads it (tolerates the
 legacy list format → newest entry). Cascades on view rename/delete. The heavy `cloud`
 is stripped client-side before saving and re-sampled on load.

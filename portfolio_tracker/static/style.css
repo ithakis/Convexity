@@ -1212,6 +1212,7 @@
   .pf-mpt-cv {
     position: absolute; inset: 0; width: 100%; height: 100%; display: block;
   }
+  .pf-mpt-cv-cloud { z-index: 0; pointer-events: none; }
   .pf-mpt-cv-base { z-index: 1; pointer-events: none; }
   .pf-mpt-cv-overlay { z-index: 2; cursor: crosshair; pointer-events: auto; }
   .pf-mpt-chart .pf-mpt-status {
@@ -1317,6 +1318,48 @@
     height: 100%; background: var(--accent);
   }
   .pf-mpt-weights .pf-mpt-val { font-variant-numeric: tabular-nums; text-align: right; color: var(--muted); }
+  /* Last-3 run history under Apply to Portfolio. Rows are clickable and reload
+     the saved run; the active row is highlighted. */
+  .pf-mpt-runs { display: flex; flex-direction: column; gap: 5px; margin-top: 4px; }
+  .pf-mpt-runs:empty { display: none; }
+  .pf-mpt-runs .pf-mpt-runs-head {
+    font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--muted); margin-top: 6px;
+  }
+  .pf-mpt-run {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-sm);
+    cursor: pointer; background: transparent; text-align: left; width: 100%;
+    font: inherit; color: var(--text); transition: border-color .12s, background .12s;
+  }
+  .pf-mpt-run:hover { border-color: var(--accent); background: var(--hover); }
+  .pf-mpt-run.active { border-color: var(--accent); }
+  .pf-mpt-run .pf-mpt-run-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .pf-mpt-run .pf-mpt-run-params { font-weight: 600; font-size: 11px; }
+  .pf-mpt-run .pf-mpt-run-when { color: var(--muted); font-size: 10px; }
+  .pf-mpt-run .pf-mpt-run-head { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums;
+    text-align: right; white-space: nowrap; }
+
+  /* Per-company hover tooltip in the Optimize tab (weights list + bounds editor).
+     Reuses the frontier-tip look; richer content (risk/return/analyst). */
+  .pf-mpt-asset-tip {
+    position: fixed; z-index: 130; min-width: 220px; max-width: 300px;
+    background: var(--bg-elevated, var(--bg-card, #fff)); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r-md);
+    padding: 9px 11px; font-size: 11px; box-shadow: 0 8px 28px rgba(0,0,0,.22);
+    opacity: 0; pointer-events: none; transition: opacity .1s;
+  }
+  .pf-mpt-asset-tip.show { opacity: 1; }
+  .pf-mpt-asset-tip .tip-title { font-weight: 700; margin-bottom: 4px; color: var(--text); }
+  .pf-mpt-asset-tip .tip-sub { color: var(--muted); margin-top: 6px; padding-top: 4px;
+    border-top: 1px solid var(--border); }
+  .pf-mpt-asset-tip .tip-row { display: flex; justify-content: space-between; gap: 12px; line-height: 1.5; }
+  .pf-mpt-asset-tip .tip-row .k { color: var(--muted); }
+  .pf-mpt-asset-tip .tip-row .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pf-mpt-asset-tip .v.pos { color: var(--pos); }
+  .pf-mpt-asset-tip .v.neg { color: var(--neg); }
+  .pf-mpt-weights .pf-mpt-wrow > span:first-child { cursor: help; }
+
   .pf-mpt-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .pf-mpt-actions button {
     flex: 1; min-width: 110px; height: 32px; padding: 0 12px; border-radius: var(--r-md);

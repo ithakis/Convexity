@@ -471,23 +471,46 @@ def _write_mpt_raw(raw: dict) -> None:
     Path(_MPT_FILE).write_text(body + "\n", encoding="utf-8")
 
 
-def get_last_mpt_run(view_name: str) -> dict | None:
-    """The single most-recent saved Optimize run for a portfolio, or None.
+_MPT_MAX_RUNS = 3  # per-portfolio run history depth (user request)
 
-    Run *history* was dropped (user request): we persist only the last run so the
-    Optimize tab can restore it on open. The on-disk value may legacily be a list
-    (old multi-run format) — take its newest entry if so.
+
+def _as_run_list(val) -> list[dict]:
+    """Normalize the on-disk per-view value to a newest-first list of run dicts.
+
+    Tolerates the legacy single-dict format (pre-history) and any stray non-dict
+    entries, so an old ``.portfolio_tracker_mpt.json`` upgrades transparently.
     """
+    if isinstance(val, list):
+        return [r for r in val if isinstance(r, dict)]
+    if isinstance(val, dict):
+        return [val]
+    return []
+
+
+def get_mpt_runs(view_name: str) -> list[dict]:
+    """The portfolio's saved Optimize runs, newest-first (≤ ``_MPT_MAX_RUNS``)."""
     with _MPT_LOCK:
         raw = _read_mpt_raw()
-    run = (raw.get("runs") or {}).get((view_name or "").strip())
-    if isinstance(run, list):  # legacy multi-run file
-        run = run[0] if run else None
-    return run if isinstance(run, dict) else None
+    return _as_run_list((raw.get("runs") or {}).get((view_name or "").strip()))
+
+
+def get_last_mpt_run(view_name: str) -> dict | None:
+    """The most-recent saved Optimize run for a portfolio, or None.
+
+    Restored on Optimize-tab open. Tolerates both the current list format and the
+    legacy single-dict format (returns the newest entry).
+    """
+    runs = get_mpt_runs(view_name)
+    return runs[0] if runs else None
 
 
 def save_mpt_run(view_name: str, run: dict) -> dict:
-    """Persist ``run`` as the portfolio's single last run (overwrites any prior)."""
+    """Push ``run`` onto the portfolio's history (newest-first, capped at 3).
+
+    If the incoming run's ``params`` match the current newest entry's, the newest
+    is *replaced* rather than duplicated (so re-running an identical config doesn't
+    fill the list with near-copies). Overflow beyond ``_MPT_MAX_RUNS`` is dropped.
+    """
     clean_view = (view_name or "").strip()
     if not clean_view:
         raise ValueError("view name required")
@@ -496,7 +519,13 @@ def save_mpt_run(view_name: str, run: dict) -> dict:
     with _MPT_LOCK:
         raw = _read_mpt_raw()
         runs_map = raw.get("runs") if isinstance(raw.get("runs"), dict) else {}
-        runs_map[clean_view] = payload
+        history = _as_run_list(runs_map.get(clean_view))
+        new_params = run.get("params")
+        if history and new_params and history[0].get("params") == new_params:
+            history[0] = payload           # dedupe identical params → replace newest
+        else:
+            history.insert(0, payload)
+        runs_map[clean_view] = history[:_MPT_MAX_RUNS]
         raw["runs"] = runs_map
         _write_mpt_raw(raw)
     return payload
