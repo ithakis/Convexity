@@ -68,6 +68,16 @@ const COLS = [
 
   /* Pass D — optional columns (not in Default preset; surfaced via Fundamentals,
      Momentum, or the custom-column picker). */
+  /* Short-horizon returns. Deliberately NOT in any built-in preset — they exist
+     for the custom-column picker and to give the News tab's Constituent
+     Breakdown a shared definition (and matching heat anchors) with this table.
+     Anchors shrink with the horizon so a 3% day reads as loudly as a 12% week. */
+  { key: "pct_1d",        label: "% 1D",    w: 78,  align: "right", sortable: true,
+    heat: { kind: "div", anchor: 5 },
+    render: (r) => fmtPctSigned(r.pct_1d) },
+  { key: "pct_2d",        label: "% 2D",    w: 78,  align: "right", sortable: true,
+    heat: { kind: "div", anchor: 7 },
+    render: (r) => fmtPctSigned(r.pct_2d) },
   { key: "pct_1w",        label: "% 1W",    w: 78,  align: "right", sortable: true,
     heat: { kind: "div", anchor: 20 },
     render: (r) => fmtPctSigned(r.pct_1w) },
@@ -150,7 +160,7 @@ const COLS = [
     render: (r) => fmtMoney(r.w52_high, r.currency) },
   { key: "w52_low",       label: "52W Low", w: 90,  align: "right", sortable: true,
     render: (r) => fmtMoney(r.w52_low, r.currency) },
-  { key: "news_sentiment", label: "NS", w: 36, align: "center", sortable: true,
+  { key: "news_sentiment", label: "NS", w: 48, align: "center", sortable: true,
     sortValue: (r) => r.news_sentiment?.score ?? null,
     render: (r) => nsDot(r.news_sentiment) },
 ];
@@ -176,6 +186,8 @@ const COL_INFO = {
   above_sma_20:  "20-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 month of trading days.",
   above_sma_50:  "50-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 quarter of trading days.",
   above_sma_200: "200-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 year of trading days.",
+  pct_1d:        "Price return over the last trading session (latest close vs. the prior close).",
+  pct_2d:        "Price return over the last two trading sessions. Trading bars, not calendar days, so weekends and holidays don't shorten the window.",
   pct_1w:        "Total price return over the last 7 calendar days.",
   pct_1m:        "Total price return over the last 30 calendar days.",
   pct_3m:        "Total price return over the last 91 calendar days.",
@@ -232,6 +244,8 @@ const COL_INFO_SHORT = {
   above_sma_20: "Price vs. 20-day average",
   above_sma_50: "Price vs. 50-day average",
   above_sma_200: "Price vs. 200-day average",
+  pct_1d: "Return, last session",
+  pct_2d: "Return, last 2 sessions",
   pct_1w: "Return, last 7 days",
   pct_1m: "Return, last 30 days",
   pct_3m: "Return, last 91 days",
@@ -281,7 +295,8 @@ const COL_GROUP = {
   gross_margin: "Profitability & Leverage", profit_margin: "Profitability & Leverage",
   quick_ratio: "Profitability & Leverage", payout_ratio: "Profitability & Leverage",
   revenue_growth: "Profitability & Leverage", earnings_growth: "Profitability & Leverage",
-  pct_ytd: "Returns", pct_1y: "Returns", pct_1w: "Returns", pct_1m: "Returns",
+  pct_ytd: "Returns", pct_1y: "Returns", pct_1d: "Returns", pct_2d: "Returns",
+  pct_1w: "Returns", pct_1m: "Returns",
   pct_3m: "Returns", pct_6m: "Returns", target_upside_pct: "Returns",
   spark: "Technical & Momentum", delta_ath: "Technical & Momentum", rs_rank: "Technical & Momentum",
   above_sma_20: "Technical & Momentum", above_sma_50: "Technical & Momentum", above_sma_200: "Technical & Momentum",
@@ -1219,13 +1234,32 @@ const NS_LABELS = {
   very_bearish: "Very Bearish",
 };
 
+/* Per-holding sentiment dot(s). Both engines are shown side by side, ML first:
+ * the server promotes ML into the canonical tier/score and preserves the LLM
+ * as llm_tier/llm_score, so `ns` normally carries both. Rows the ML model
+ * never scored fall back to a single LLM dot. */
+function nsTierDot(tier, score, engine, summary) {
+  const label = NS_LABELS[tier] || "Neutral";
+  const color = NS_COLORS[tier] || NS_COLORS.neutral;
+  const cls = engine === "ml" ? "ns-dot" : "ns-dot ns-dot-ai";
+  const num = (score != null && isFinite(score)) ? ` (${score >= 0 ? "+" : ""}${score.toFixed(2)})` : "";
+  const tip = `${engine === "ml" ? "ML" : "AI"} · ${label}${num}${summary ? " — " + summary : ""}`;
+  return `<span class="${cls}" style="background:${color}" data-tip="${escapeHtml(tip)}"></span>`;
+}
 function nsDot(ns) {
   if (!ns || !ns.tier) return `<span class="ns-dot ns-empty" data-tip="News sentiment not yet loaded"></span>`;
-  const color = NS_COLORS[ns.tier] || NS_COLORS.neutral;
-  const label = NS_LABELS[ns.tier] || "Neutral";
-  const eng = ns.disp_source === "ml" ? "ML" : "AI";
-  const tip = `${label} (${ns.score >= 0 ? "+" : ""}${ns.score.toFixed(2)}) · ${eng} — ${ns.summary || ""}`;
-  return `<span class="ns-dot" style="background:${color}" data-tip="${escapeHtml(tip)}"></span>`;
+  const summary = ns.summary || "";
+  if (ns.disp_source === "ml") {
+    const llmTier = ns.llm_tier || (ns.llm_score != null ? nsTierFromScore(ns.llm_score) : null);
+    const mlDot = nsTierDot(ns.tier, ns.score, "ml", summary);
+    const aiDot = llmTier
+      ? nsTierDot(llmTier, ns.llm_score != null ? ns.llm_score : ns.s_total, "llm", "")
+      : `<span class="ns-dot ns-dot-ai ns-empty" data-tip="AI — not scored"></span>`;
+    return `<span class="ns-dots">${mlDot}${aiDot}</span>`;
+  }
+  // LLM-only: one hollow ML slot keeps the pair aligned down the column.
+  return `<span class="ns-dots"><span class="ns-dot ns-empty" data-tip="ML — not scored"></span>`
+       + `${nsTierDot(ns.tier, ns.score, "llm", summary)}</span>`;
 }
 
 /* Per-month analyst consensus score; null if no votes that month. */
@@ -1962,7 +1996,7 @@ function openModal(r) {
 }
 function closeModal() { $("#modal-bg").classList.remove("show"); DETAIL.data = null; }
 $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") closeModal(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeInfo(); closeNsProgress(); closeMethodology(); closeExportPopup(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeInfo(); closeNsProgress(); closeMethodology(); closeExportPopup(); closeSettings(); closeTapeFullscreen(); } });
 
 function renderModalSkeleton() {
   const r = DETAIL.row;
@@ -5558,6 +5592,10 @@ function renderNewsPanel(symbols) {
   renderNsWatch(symbols);
   renderNsTimeline();
   renderNsTape();
+  // Keep an open full-screen tape live during a refresh instead of freezing
+  // on the article set it was opened with.
+  const fsBg = $("#ns-tape-fs-bg");
+  if (fsBg && fsBg.classList.contains("show")) renderNsTape({ fullscreen: true });
   renderPortfolioSentiment(symbols);
   setNewsUpdatedLabel(NS.market, NS.sentiment);
 }
@@ -5610,15 +5648,6 @@ function fmtSig(v, digits = 2) {
   return `${v >= 0 ? "+" : ""}${v.toFixed(digits)}`;
 }
 
-function nsScoreDot(score) {
-  /* Per-article / per-signal dot colored by sign+magnitude. */
-  if (score == null || !isFinite(score)) return '<span class="ns-dot ns-empty"></span>';
-  let color = "#94a3b8";
-  if (score > 0.15) color = score > 0.5 ? "#16a34a" : "#86efac";
-  else if (score < -0.15) color = score < -0.5 ? "#dc2626" : "#fca5a5";
-  return `<span class="ns-dot" style="background:${color}" data-tip="${fmtSig(score)}"></span>`;
-}
-
 function nsTierFromScore(s) {
   /* Client-side label for aggregate numbers (portfolio gauge). Fixed
    * thresholds — per-stock tiers come calibrated from the server. */
@@ -5640,6 +5669,39 @@ function nsDispArticleScore(a) {
 function nsDispArticleTier(a) {
   const v = nsDispArticleScore(a);
   return v == null ? null : nsTierFromScore(v);
+}
+
+/* Both engines, separately. The two values have always ridden on every cached
+ * article (the server stamps a.ml_score beside the LLM's a.score) — until now
+ * the UI collapsed them and you could not see where they disagreed, which is
+ * exactly the interesting case. nsDispArticleScore stays as-is because the
+ * tier filter chips still key off the ML-primary value. */
+function nsArticleMlScore(a) {
+  if (!a) return null;
+  return (a.ml_score != null && isFinite(a.ml_score)) ? a.ml_score : null;
+}
+function nsArticleLlmScore(a) {
+  if (!a) return null;
+  return (a.score != null && isFinite(a.score)) ? a.score : null;
+}
+
+/* Two bare dots, ML first then AI. Each carries its own tooltip naming the
+ * engine, so the pair is self-explanatory without labels crowding the row.
+ * A missing engine renders a hollow dot rather than collapsing the pair —
+ * alignment across rows matters more than saving 10px. */
+function nsEngineDot(score, engine) {
+  const label = engine === "ml" ? "ML" : "AI";
+  const cls = engine === "ml" ? "ns-dot" : "ns-dot ns-dot-ai";
+  if (score == null || !isFinite(score)) {
+    return `<span class="${cls} ns-empty" data-tip="${label} — not scored"></span>`;
+  }
+  let color = "#94a3b8";
+  if (score > 0.15) color = score > 0.5 ? "#16a34a" : "#86efac";
+  else if (score < -0.15) color = score < -0.5 ? "#dc2626" : "#fca5a5";
+  return `<span class="${cls}" style="background:${color}" data-tip="${label} ${fmtSig(score)}"></span>`;
+}
+function nsDualDots(a) {
+  return `<span class="ns-dots">${nsEngineDot(nsArticleMlScore(a), "ml")}${nsEngineDot(nsArticleLlmScore(a), "llm")}</span>`;
 }
 
 /* Shared sentiment-tier filter chips (flash tape + news timeline). `activeSet`
@@ -5880,7 +5942,7 @@ function renderNsGauge(symbols) {
     <div class="ns-gauge-top">
       <span class="ns-gauge-num">${fmtSig(sTot)}</span>
       <span class="ns-tier-badge ${tier}">${escapeHtml(NS_LABELS[tier] || "Neutral")}</span>
-      <span class="ns-eng-tag ns-eng-llm" data-tip="LLM sentiment — the ML model has not scored these holdings (no deployed artifact or no coverage yet).">AI</span>
+      <span class="ns-eng-tag ns-eng-llm" data-tip="LLM sentiment — the ML model scored none of these holdings. Open Model Diagnostics for the reason (it names the actual cause: environment, artifact, or simply no coverage yet), or Settings → Logs for the raw backend output.">AI</span>
     </div>
     ${barSeg(sSys, "sys")}
     ${barSeg(sIdio, "idio")}
@@ -5979,11 +6041,31 @@ function renderNsWatch(symbols) {
     : '<div class="ns-panel-empty">Nothing flagged — no strong signals, disagreements, or imminent catalysts.</div>';
 }
 
-function renderNsTape() {
-  const filtBody = $("#ns-tape-filters");
-  const body = $("#ns-tape-body");
+/* The tape renders into either the inline card or the 99%-viewport overlay.
+ * One function, one filter chain, one set of wired controls — the two views
+ * differ only in row cap and per-row detail, and both re-render each other so
+ * a filter change made in one is reflected in the other when it reopens.
+ *
+ * Inline stays deliberately dense (120 rows, single-line ellipsised headlines,
+ * max-height 320px); the full-screen view is the reading surface. */
+const NS_TAPE_CAP_INLINE = 120;
+const NS_TAPE_CAP_FULL = 1000;
+
+function renderNsTape(opts) {
+  const full = !!(opts && opts.fullscreen);
+  const filtBody = $(full ? "#ns-tape-fs-filters" : "#ns-tape-filters");
+  const body = $(full ? "#ns-tape-fs-body" : "#ns-tape-body");
+  if (!filtBody || !body) return;
+  const countEl = full ? $("#ns-tape-fs-count") : null;
+  const rerender = () => {
+    renderNsTape({ fullscreen: full });
+    // Keep the other view in sync so the filters don't diverge between them.
+    if (full) { if ($("#ns-tape-body")) renderNsTape(); }
+    else if ($("#ns-tape-fs-bg").classList.contains("show")) renderNsTape({ fullscreen: true });
+  };
   if (!NS.articles.length) {
     filtBody.innerHTML = "";
+    if (countEl) countEl.textContent = "";
     body.innerHTML = '<div class="ns-panel-empty">No cached articles yet — refresh to fill the tape.</div>';
     return;
   }
@@ -5997,17 +6079,18 @@ function renderNsTape() {
   const tierChips = nsTierChips(NS.tapeTiers);
   const evChips = events.map(ev =>
     `<button class="ns-ev-chip ${NS.filterEvent === ev ? "on" : ""}" data-ev="${ev}">${NS_EVENT_LABELS[ev] || ev}</button>`).join("");
+  const selId = full ? "ns-tape-fs-sym-filter" : "ns-tape-sym-filter";
   filtBody.innerHTML =
-    `<select id="ns-tape-sym-filter" class="ns-tape-select">${symOpts}</select>` +
+    `<select id="${selId}" class="ns-tape-select">${symOpts}</select>` +
     `<span class="ns-tape-sep"></span><span class="ns-tape-grp">${tierChips}</span>` +
     (evChips ? `<span class="ns-tape-sep"></span><span class="ns-tape-grp">${evChips}</span>` : "");
-  const sel = $("#ns-tape-sym-filter");
-  if (sel) sel.onchange = () => { NS.filterSym = sel.value; renderNsTape(); };
-  nsWireTierChips(filtBody, NS.tapeTiers, renderNsTape);
+  const sel = $("#" + selId);
+  if (sel) sel.onchange = () => { NS.filterSym = sel.value; rerender(); };
+  nsWireTierChips(filtBody, NS.tapeTiers, rerender);
   filtBody.querySelectorAll(".ns-ev-chip").forEach(btn => {
     btn.onclick = () => {
       NS.filterEvent = NS.filterEvent === btn.dataset.ev ? "" : btn.dataset.ev;
-      renderNsTape();
+      rerender();
     };
   });
 
@@ -6018,7 +6101,12 @@ function renderNsTape() {
     const t = nsDispArticleTier(a);
     return t != null && NS.tapeTiers.has(t);
   });
-  arts = arts.slice(0, 120);
+  const total = arts.length;
+  arts = arts.slice(0, full ? NS_TAPE_CAP_FULL : NS_TAPE_CAP_INLINE);
+  if (countEl) {
+    countEl.textContent = total > arts.length
+      ? `${arts.length} of ${total} articles` : `${total} article${total === 1 ? "" : "s"}`;
+  }
   if (!arts.length) {
     body.innerHTML = '<div class="ns-panel-empty">No articles match the filter.</div>';
     return;
@@ -6028,16 +6116,66 @@ function renderNsTape() {
     const stamp = dt ? `${fmtDateMD(dt)} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}` : "—";
     const ev = a.event ? `<span class="ns-ev-tag">${NS_EVENT_LABELS[a.event] || a.event}</span>` : "";
     const dup = a.n_duplicates ? `<span class="ns-dup" data-tip="${a.n_duplicates} syndicated copies collapsed">×${a.n_duplicates + 1}</span>` : "";
+    const link = `<a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a>`;
+    if (!full) {
+      return `<div class="ns-tape-row">
+        <span class="ns-tape-time">${stamp}</span>
+        <span class="ns-tape-sym">${escapeHtml(a.symbol || "")}</span>
+        ${nsDualDots(a)}
+        <span class="ns-tape-head">${link}</span>
+        ${ev}${dup}
+        <span class="ns-src">${escapeHtml(a.source || "")}</span>
+      </div>`;
+    }
+    // Full-screen row: headline wraps, the displayed score becomes a real
+    // column instead of a dot tooltip, and the summary rides underneath.
+    const disp = nsDispArticleScore(a);
+    const sum = a.summary ? `<span class="ns-tape-sum">${escapeHtml(a.summary)}</span>` : "";
     return `<div class="ns-tape-row">
       <span class="ns-tape-time">${stamp}</span>
       <span class="ns-tape-sym">${escapeHtml(a.symbol || "")}</span>
-      ${nsScoreDot(nsDispArticleScore(a))}
-      <span class="ns-tape-head"><a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a></span>
+      ${nsDualDots(a)}
+      <span class="ns-tape-score" data-tip="Displayed signal (ML when scored, else AI)">${fmtSig(disp)}</span>
+      <span class="ns-tape-main"><span class="ns-tape-head">${link}</span>${sum}</span>
       ${ev}${dup}
       <span class="ns-src">${escapeHtml(a.source || "")}</span>
     </div>`;
   });
   body.innerHTML = rows.join("");
+}
+
+/* Full-screen tape. Clicking the card body opens it — links, the ticker
+ * select and the filter chips are excluded so the panel stays usable while
+ * collapsed (same guard idiom as the constituent row handler). */
+function openTapeFullscreen() {
+  const bg = $("#ns-tape-fs-bg");
+  if (!bg) return;
+  bg.classList.add("show");
+  document.body.dataset.tapePrevOverflow = document.body.style.overflow || "";
+  document.body.style.overflow = "hidden";
+  renderNsTape({ fullscreen: true });
+}
+
+function closeTapeFullscreen() {
+  const bg = $("#ns-tape-fs-bg");
+  if (!bg || !bg.classList.contains("show")) return;
+  bg.classList.remove("show");
+  document.body.style.overflow = document.body.dataset.tapePrevOverflow || "";
+  delete document.body.dataset.tapePrevOverflow;
+}
+
+function setupTapeFullscreen() {
+  const card = $("#ns-tape-card");
+  if (card) {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("a, select, button, input, label")) return;
+      openTapeFullscreen();
+    });
+  }
+  const closeBtn = $("#ns-tape-fs-close");
+  if (closeBtn) closeBtn.onclick = closeTapeFullscreen;
+  const bg = $("#ns-tape-fs-bg");
+  if (bg) bg.addEventListener("click", (e) => { if (e.target === bg) closeTapeFullscreen(); });
 }
 
 /* --- News Timeline (item 4) ---------------------------------------------
@@ -6112,12 +6250,18 @@ function renderNsTimeline() {
     const lv = nsTlLevel(ds);
     const dt = new Date(a.datetime * 1000);
     const stamp = `${fmtDateMD(dt)} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
-    const sc = (ds != null && isFinite(ds)) ? ` ${fmtSig(ds)}` : "";
     const head = (a.headline || "").slice(0, 110);
-    const tip = `${stamp} · ${a.symbol || ""}${sc} (${lv.lbl}) — ${head}`;
-    return `<a class="ns-tl-bar" href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener"
-      style="left:${x.toFixed(3)}%;height:${lv.h}%;background:${lv.color}"
-      data-tip="${escapeHtml(tip)}"></a>`;
+    // Paired bars: ML on the left, LLM on the right, sharing one anchor and
+    // one link. Where the two disagree the pair reads as a visible mismatch
+    // in height/color — the single coalesced bar hid exactly that.
+    const ml = nsArticleMlScore(a), llm = nsArticleLlmScore(a);
+    const lvMl = nsTlLevel(ml), lvAi = nsTlLevel(llm);
+    const part = (v, l, name) => `${name} ${(v != null && isFinite(v)) ? fmtSig(v) : "n/a"} (${v == null ? "not scored" : l.lbl})`;
+    const tip = `${stamp} · ${a.symbol || ""} — ${part(ml, lvMl, "ML")} · ${part(llm, lvAi, "AI")} — ${head}`;
+    return `<a class="ns-tl-pair" href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener"
+      style="left:${x.toFixed(3)}%" data-tip="${escapeHtml(tip)}"
+      ><i class="ns-tl-b ml" style="height:${ml == null ? 0 : lvMl.h}%;background:${lvMl.color}"></i
+      ><i class="ns-tl-b ai" style="height:${llm == null ? 0 : lvAi.h}%;background:${lvAi.color}"></i></a>`;
   }).join("");
   // Time axis: ~5 evenly spaced ticks with subtle grid lines.
   const nTicks = 5;
@@ -6235,6 +6379,8 @@ function renderPortfolioSentiment(symbols, _status) {
     { key: "company", label: "Company", cls: "",  align: "l", sv: (r) => (r.name || "").toLowerCase() },
     { key: "price",   label: "Price",   cls: "r", align: "r", sv: (r) => r.price },
     { key: "pct_1d",  label: "% 1D",    cls: "r", align: "r", sv: (r) => r.pct_1d },
+    { key: "pct_2d",  label: "% 2D",    cls: "r", align: "r", tip: "Return over the last two trading sessions", sv: (r) => r.pct_2d },
+    { key: "pct_1w",  label: "% 1W",    cls: "r", align: "r", tip: "Return over the last 7 calendar days", sv: (r) => r.pct_1w },
     { key: "beta",    label: "β",       cls: "r", align: "r", sv: (r) => r.beta },
     { key: "signal",  label: "Signal",  cls: "c", align: "c", tip: "Primary signal (v1.6.1): the return-trained ML model's tier. Falls back to the LLM when the model hasn't scored this stock.", sv: (r, s) => s ? s.score : null },
     { key: "ai",      label: "AI",      cls: "c", align: "c", tip: "Challenger: the legacy LLM total signal, kept for comparison", sv: (r, s) => s ? (s.llm_score != null ? s.llm_score : s.s_total) : null },
@@ -6270,6 +6416,15 @@ function renderPortfolioSentiment(symbols, _status) {
     const dataAttr = c.sortable !== false ? ` data-sortkey="${c.key}"` : "";
     return `<th class="${cls}"${tip}${dataAttr}>${c.label}${arrow}</th>`;
   };
+  // Red/green background tint, computed with the SAME helpers the main holdings
+  // table uses (cellStyleHeat -> colorDiverging/textOnHeat), so the identical
+  // stock reads the identical color in both tables. Anchors shrink with the
+  // horizon; the sentiment scores use ±0.5, matching nsEngineDot's "strong" cut.
+  const theme = getTheme();
+  const heatStyle = (value, anchor) =>
+    cellStyleHeat({ heat: { kind: "div", anchor } }, value, theme);
+  const HEAT_ANCHORS = { pct_1d: 5, pct_2d: 7, pct_1w: 20, score: 0.5 };
+
   let html = `<table class="ns-table">
     <thead><tr><th></th>${nsCols.map(th).join("")}</tr></thead><tbody>`;
   for (const sym of orderedSyms) {
@@ -6280,7 +6435,15 @@ function renderPortfolioSentiment(symbols, _status) {
     // AI (LLM) challenger tier for the comparison column.
     const llmTier = s ? (s.llm_tier || nsTierFromScore(s.llm_score != null ? s.llm_score : s.s_total)) : null;
     const aiColor = llmTier ? (NS_COLORS[llmTier] || "#94a3b8") : "var(--muted)";
-    const aiVal = s ? fmtSig(s.llm_score != null ? s.llm_score : s.s_total) : "—";
+    const aiScore = s ? (s.llm_score != null ? s.llm_score : s.s_total) : null;
+    const aiVal = s ? fmtSig(aiScore) : "—";
+    // Sentiment cells get the same diverging tint as the % columns. When the
+    // tint is present it also supplies the text color (textOnHeat), so the
+    // tier color is only applied on unscored rows where there is no background.
+    const signalTint = heatStyle(s ? s.score : null, HEAT_ANCHORS.score);
+    const aiTint = heatStyle(aiScore, HEAT_ANCHORS.score);
+    const signalHeat = signalTint || `color:${tierColor};`;
+    const aiHeat = aiTint || `color:${aiColor};`;
     const confVal = s ? (s.ml_confidence != null ? s.ml_confidence : s.confidence) : null;
     const events = s && s.events
       ? Object.entries(s.events).map(([ev, n]) =>
@@ -6295,10 +6458,12 @@ function renderPortfolioSentiment(symbols, _status) {
       <td class="sym">${sym}</td>
       <td class="name">${escapeHtml(r.name || "")}</td>
       <td class="r">${r.price != null ? fmtMoney(r.price, r.currency) : "—"}</td>
-      <td class="r">${r.pct_1d != null ? fmtPctSigned(r.pct_1d) : "—"}</td>
+      <td class="r" style="${heatStyle(r.pct_1d, HEAT_ANCHORS.pct_1d)}">${r.pct_1d != null ? fmtPctSigned(r.pct_1d) : "—"}</td>
+      <td class="r" style="${heatStyle(r.pct_2d, HEAT_ANCHORS.pct_2d)}">${r.pct_2d != null ? fmtPctSigned(r.pct_2d) : "—"}</td>
+      <td class="r" style="${heatStyle(r.pct_1w, HEAT_ANCHORS.pct_1w)}">${r.pct_1w != null ? fmtPctSigned(r.pct_1w) : "—"}</td>
       <td class="r">${r.beta != null ? r.beta.toFixed(2) : "—"}</td>
-      <td class="c" style="color:${tierColor};font-weight:600;font-size:11px">${s ? nsDot(s) + " " + tierLabel : "—"}</td>
-      <td class="c" style="color:${aiColor};font-size:11px">${s ? aiVal : "—"}</td>
+      <td class="c" style="${signalHeat}font-weight:600;font-size:11px">${s ? nsDot(s) + " " + tierLabel : "—"}</td>
+      <td class="c" style="${aiHeat}font-size:11px">${s ? aiVal : "—"}</td>
       <td class="r">${s ? fmtSig(s.s_idio) : "—"}</td>
       <td class="r">${s ? fmtSig(s.s_sys) : "—"}</td>
       <td class="c">${conf}</td>
@@ -6313,10 +6478,12 @@ function renderPortfolioSentiment(symbols, _status) {
         .slice()
         .sort((a, b) => absScore(b) - absScore(a))
         .slice(0, 6).map(a =>
-        `<div class="ns-brief-art">${nsScoreDot(nsDispArticleScore(a))} <a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a> <span class="ns-src">${escapeHtml(a.source || "")}</span></div>`).join("");
+        `<div class="ns-brief-art">${nsDualDots(a)} <a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a> <span class="ns-src">${escapeHtml(a.source || "")}</span></div>`).join("");
       const lm = s.s_lm != null ? ` · LM dictionary ${fmtSig(s.s_lm)}` : "";
       const fb = s.fallback ? " · single-call fallback" : "";
-      html += `<tr class="ns-brief-row"><td colspan="13">
+      // colspan = expander + every nsCols entry. Derived rather than hardcoded
+      // so adding a column can't silently shrink this row again.
+      html += `<tr class="ns-brief-row"><td colspan="${nsCols.length + 1}">
         <div class="ns-brief">${escapeHtml(s.summary || "")}</div>
         <div class="ns-brief-meta">${s.article_count || 0} articles${lm}${fb}</div>
         ${arts}
@@ -6415,6 +6582,24 @@ function renderNsDiagnostics(d) {
     panels are <b>live evidence</b> that accumulate as news is refreshed and realized returns land — the LLM is shown as a
     challenger. For how the model was built and its full backtest, open <b>Methodology</b>.</div>`);
 
+  // Is the model actually RUNNING? Without this the empty-state copy below is
+  // indistinguishable between "no history yet" and "the model never loaded" —
+  // and it used to guess, blaming a missing artifact when the real cause was a
+  // conda env with no lightgbm. ml_runtime comes straight from
+  // ml_sentiment.runtime_status() so the reason shown is the real exception.
+  const rt = d.ml_runtime;
+  if (rt && !rt.available) {
+    const why = rt.reason || "the model did not load";
+    const hint = /lightgbm|sklearn|scikit|ModuleNotFound|ImportError/i.test(why)
+      ? `The environment is missing a dependency. Run <code>./update.sh</code> to sync the conda env, then restart the app.`
+      : (rt.model_dir && !rt.model_dir_exists
+          ? `No artifact found at <code>${escapeHtml(rt.model_dir)}</code> — deploy the ${escapeHtml(rt.version || "mlsent")} bundle there.`
+          : `Check <b>Settings → Logs</b> for the full backend output.`);
+    parts.push(`<div class="ns-ml-banner"><b>ML model is not running.</b> Every panel below is
+      LLM-only and <code>ml_*</code> fields are being written as null.<br>
+      Reason: <code>${escapeHtml(why)}</code><br>${hint}</div>`);
+  }
+
   // 1) ML vs AI live IC scoreboard (ML primary). llm_ic_common re-scores the
   // LLM on the SAME records for an apples-to-apples comparison.
   if (d.ml && d.ml.n_records > 0) {
@@ -6428,7 +6613,10 @@ function renderNsDiagnostics(d) {
       <div class="ns-diag-note">Spearman IC of each signal vs the next 1d / 5d idiosyncratic return. Positive = predictive. ${d.ml.days} day${d.ml.days === 1 ? "" : "s"} of history (${d.ml.n_records} obs${d.ml.date_min ? `, since ${d.ml.date_min}` : ""}); small samples are indicative until they build up.</div>
     </div>`);
   } else {
-    parts.push('<div class="ns-diag-sec"><h5>Live rank IC — ML vs AI</h5><div class="ns-panel-empty">No ML-scored history yet — refresh news to start accumulating (requires the deployed mlsent artifact).</div></div>');
+    const emptyWhy = (rt && !rt.available)
+      ? "The ML model is not running (see the banner above) — refreshes are writing null ML scores."
+      : "No ML-scored history yet — refresh news to start accumulating.";
+    parts.push(`<div class="ns-diag-sec"><h5>Live rank IC — ML vs AI</h5><div class="ns-panel-empty">${emptyWhy}</div></div>`);
   }
 
   // 2) Rolling live IC — is the signal holding up as observations accrue?
@@ -8449,8 +8637,140 @@ function loadAppVersion() {
   }).catch(() => {});
 }
 
+/* --- Settings overlay ----------------------------------------------------
+ * Gear button -> 70% overlay with a left nav. "Logs" is the reason this
+ * exists: the whole backend logs via print(), and in the desktop app those
+ * writes go to a file descriptor with no terminal attached — so when the ML
+ * model failed to load, the one line explaining why was unreadable. The
+ * server tees stdout/stderr into a ring buffer (portfolio_tracker/logbuf.py)
+ * and this panel tails it.
+ *
+ * Polling only runs while the Logs section is visible; closing the overlay
+ * clears the timer so an idle dashboard makes no requests.
+ */
+const SETTINGS = {
+  section: localStorage.getItem("settings_section") || "logs",
+  lastSeq: 0,
+  timer: null,
+  showHttp: false,       // server.py logs every request — off by default
+  autoscroll: true,      // pauses itself when the user scrolls up to read
+  lines: [],
+};
+
+function openSettings() {
+  $("#settings-bg").classList.add("show");
+  document.body.dataset.settingsPrevOverflow = document.body.style.overflow || "";
+  document.body.style.overflow = "hidden";
+  renderSettings();
+}
+
+function closeSettings() {
+  const bg = $("#settings-bg");
+  if (!bg || !bg.classList.contains("show")) return;
+  bg.classList.remove("show");
+  document.body.style.overflow = document.body.dataset.settingsPrevOverflow || "";
+  delete document.body.dataset.settingsPrevOverflow;
+  stopLogPolling();
+}
+
+function renderSettings() {
+  document.querySelectorAll(".settings-nav-item").forEach(b => {
+    b.classList.toggle("active", b.dataset.section === SETTINGS.section);
+  });
+  const pane = $("#settings-pane");
+  if (SETTINGS.section === "general") {
+    stopLogPolling();
+    pane.innerHTML = `
+      <div class="settings-section-title">General</div>
+      <div class="settings-section-sub">Nothing here yet — app preferences will live in this section.</div>`;
+    return;
+  }
+  pane.innerHTML = `
+    <div class="settings-section-title">Logs</div>
+    <div class="settings-section-sub">Live tail of the backend console (stdout + stderr). This is the
+      only place these lines are visible in the desktop app.</div>
+    <div class="settings-log-controls">
+      <label><input type="checkbox" id="log-http" ${SETTINGS.showHttp ? "checked" : ""}> Show HTTP requests</label>
+      <span class="spacer" style="flex:1"></span>
+      <span id="log-status"></span>
+    </div>
+    <div class="settings-log-body" id="log-body"></div>`;
+  $("#log-http").onchange = (e) => { SETTINGS.showHttp = e.target.checked; renderLogLines(); };
+  const body = $("#log-body");
+  // Autoscroll sticks to the bottom, but pauses the moment the user scrolls up
+  // to read something — otherwise a busy refresh yanks the view away mid-line.
+  body.addEventListener("scroll", () => {
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+    SETTINGS.autoscroll = atBottom;
+    const st = $("#log-status");
+    if (st) st.innerHTML = atBottom ? "" : '<span class="settings-log-paused">autoscroll paused</span>';
+  });
+  renderLogLines();
+  startLogPolling();
+}
+
+function startLogPolling() {
+  stopLogPolling();
+  pollLogs();
+  SETTINGS.timer = setInterval(pollLogs, 1500);
+}
+
+function stopLogPolling() {
+  if (SETTINGS.timer) { clearInterval(SETTINGS.timer); SETTINGS.timer = null; }
+}
+
+function pollLogs() {
+  fetch(`/api/logs?since=${SETTINGS.lastSeq}`).then(r => r.json()).then(d => {
+    if (!d || !Array.isArray(d.lines)) return;
+    if (d.dropped && SETTINGS.lines.length) {
+      SETTINGS.lines.push({ _drop: true });
+    }
+    for (const ln of d.lines) SETTINGS.lines.push(ln);
+    // Client-side cap mirrors the server ring so a long session can't grow
+    // the DOM without bound.
+    if (SETTINGS.lines.length > 4000) SETTINGS.lines = SETTINGS.lines.slice(-4000);
+    SETTINGS.lastSeq = d.last_seq != null ? d.last_seq : SETTINGS.lastSeq;
+    if (d.lines.length || d.dropped) renderLogLines();
+  }).catch(() => {});
+}
+
+function renderLogLines() {
+  const body = $("#log-body");
+  if (!body) return;
+  const rows = SETTINGS.lines
+    .filter(l => l._drop || SETTINGS.showHttp || !l.http)
+    .map(l => {
+      if (l._drop) return '<div class="log-drop">… older lines dropped (buffer full)</div>';
+      const t = new Date(l.ts * 1000);
+      const stamp = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
+      const cls = l.stream === "stderr" ? "err" : (l.http ? "http" : "");
+      return `<div class="log-line ${cls}"><span class="log-ts">${stamp}</span>${escapeHtml(l.text)}</div>`;
+    });
+  body.innerHTML = rows.length ? rows.join("")
+    : '<div class="log-drop">No output yet — the console fills as the backend works.</div>';
+  if (SETTINGS.autoscroll) body.scrollTop = body.scrollHeight;
+}
+
+function setupSettings() {
+  const btn = $("#settings-btn");
+  if (btn) btn.onclick = openSettings;
+  const close = $("#settings-close");
+  if (close) close.onclick = closeSettings;
+  const bg = $("#settings-bg");
+  if (bg) bg.addEventListener("click", (e) => { if (e.target === bg) closeSettings(); });
+  document.querySelectorAll(".settings-nav-item").forEach(b => {
+    b.onclick = () => {
+      SETTINGS.section = b.dataset.section;
+      localStorage.setItem("settings_section", SETTINGS.section);
+      renderSettings();
+    };
+  });
+}
+
 setTheme(readTheme());
 fxInit();
 renderHeader();
+setupSettings();
+setupTapeFullscreen();
 loadAllAtStartup();
 loadAppVersion();

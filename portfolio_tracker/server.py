@@ -40,6 +40,7 @@ warnings.showwarning = _showwarning_filter
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 from portfolio_tracker import __version__, __version_date__, __version_display__
+from portfolio_tracker import logbuf
 from portfolio_tracker.analytics import (
     analyze_portfolio,
     analyze_portfolios_multi,
@@ -304,6 +305,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"articles": _ns.get_cached_articles(symbols)})
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/logs":
+            # Backend console tail for Settings -> Logs. Poll-based: the client
+            # passes the last seq it rendered and gets only what is newer, so
+            # an open panel costs one small response every ~1.5s and nothing at
+            # all when closed.
+            qs = parse_qs(parsed.query)
+            try:
+                since = int((qs.get("since") or ["0"])[0])
+            except ValueError:
+                since = 0
+            try:
+                limit = max(1, min(4000, int((qs.get("limit") or ["1000"])[0])))
+            except ValueError:
+                limit = 1000
+            self._send_json(200, logbuf.read(since=since, limit=limit))
             return
         if parsed.path == "/api/news-diagnostics":
             if _ns is None:
@@ -802,6 +819,11 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
     app (portfolio_tracker/desktop.py), which both need the same port-pick +
     construction but manage their own lifecycle.
     """
+    # Tee stdout/stderr into the in-memory ring FIRST, so the Settings -> Logs
+    # console captures startup output too (the ml_sentiment load line in
+    # particular). Idempotent; harmless in browser mode where a terminal
+    # already exists.
+    logbuf.install()
     port = _pick_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     # Per-connection handler threads (socketserver.ThreadingMixIn) default to

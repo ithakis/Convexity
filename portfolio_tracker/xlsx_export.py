@@ -62,6 +62,7 @@ HOLDINGS_PRIMARY_COLS: list[tuple[str, str]] = [
     ("price", "Price"),
     ("change_abs_1d", "Change ($)"),
     ("pct_1d", "% 1D"),
+    ("pct_2d", "% 2D"),
     ("pct_1w", "% 1W"),
     ("pct_1m", "% 1M"),
     ("pct_3m", "% 3M"),

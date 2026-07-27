@@ -45,6 +45,7 @@
     <i class="ts-icon" id="ts-moon">&#9790;</i>
   </button>
   <button class="info-btn" id="info-btn" title="How this works"><span class="info-icon-circle">i</span></button>
+  <button class="gear-btn" id="settings-btn" data-tip="Settings — app preferences and the backend console log." aria-label="Settings">&#9881;</button>
 </div>
 <div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
 
@@ -157,12 +158,14 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   </div>
   <!-- News timeline (item 4): when news landed, at what intensity. -->
   <div class="ns-card ns-tl-card" id="ns-tl-card">
-    <h4>News Timeline</h4>
+    <h4>News Timeline<span class="ns-dual-legend" data-tip="Paired bars per article: the return-trained ML model on the left, the LLM on the right."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>AI</span></h4>
     <div class="ns-tl-controls" id="ns-tl-controls"></div>
     <div class="ns-tl-body" id="ns-tl-body"><div class="ns-empty">Refresh to load the news timeline.</div></div>
   </div>
+  <!-- Click anywhere on this card (except a link or a filter control) to open
+       the 99%-viewport full-screen tape. See openTapeFullscreen in app.js. -->
   <div class="ns-card ns-tape-card" id="ns-tape-card">
-    <h4>Flash Tape</h4>
+    <h4>Flash Tape<span class="ns-dual-legend" data-tip="Two dots per article: the return-trained ML model first, the LLM second."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>AI</span><span class="ns-expand-hint">click to expand &#9974;</span></h4>
     <div class="ns-tape-filters" id="ns-tape-filters"></div>
     <div class="ns-tape-body" id="ns-tape-body"><div class="ns-empty">Refresh to load the headline tape.</div></div>
   </div>
@@ -756,6 +759,44 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
     </div>
     <div class="ns-prog-jobs" id="ns-prog-jobs"></div>
     <div class="ns-prog-foot" id="ns-prog-foot"></div>
+  </div>
+</div>
+
+<!-- Settings overlay (gear button): 70% of the viewport over a blurred
+     dashboard, left nav + content pane. "Logs" is the only functional section
+     today and exists because in desktop mode every backend print() goes to a
+     file descriptor nobody can read — this is the app's only console. -->
+<div class="settings-bg" id="settings-bg">
+  <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
+    <div class="settings-head">
+      <span class="settings-title">Settings</span>
+      <span class="spacer"></span>
+      <button class="settings-close" id="settings-close" aria-label="Close settings">&times;</button>
+    </div>
+    <div class="settings-body">
+      <nav class="settings-nav" id="settings-nav">
+        <button class="settings-nav-item" data-section="general">General</button>
+        <button class="settings-nav-item" data-section="logs">Logs</button>
+      </nav>
+      <div class="settings-pane" id="settings-pane"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Flash Tape full-screen (99% viewport). Same rows as the inline tape but
+     uncapped, with the numeric score and the article summary that don't fit
+     in the sidebar-width panel. Filters live in the sticky header. -->
+<div class="ns-tape-fs-bg" id="ns-tape-fs-bg">
+  <div class="ns-tape-fs-modal" role="dialog" aria-modal="true" aria-label="Flash Tape">
+    <div class="ns-tape-fs-head">
+      <span class="ns-tape-fs-title">Flash Tape</span>
+      <span class="ns-dual-legend" data-tip="Each article carries two signals: the return-trained ML model and the LLM. ML dot first, AI dot second."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>AI</span>
+      <div class="ns-tape-filters" id="ns-tape-fs-filters"></div>
+      <span class="spacer"></span>
+      <span class="ns-tape-fs-count" id="ns-tape-fs-count"></span>
+      <button class="settings-close" id="ns-tape-fs-close" aria-label="Close full-screen tape">&times;</button>
+    </div>
+    <div class="ns-tape-fs-body" id="ns-tape-fs-body"></div>
   </div>
 </div>
 

@@ -5,6 +5,65 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.10.0 — 2026-07-27
+**The ML sentiment model has been dead in every installed copy — plus a
+backend console, a full-screen tape, and dual-engine sentiment everywhere.**
+
+- **Fixed: ML news-sentiment never ran in the desktop app.** `environment.yml`
+  listed neither `lightgbm` nor `scikit-learn` — they were only in
+  `requirements.txt`, which `install.sh` never pip-installs — so the `pt` env
+  could not load the `mlsent-v1` artifact, while QF12 (where it was always
+  tested) could. The `ModuleNotFoundError` was swallowed by a bare
+  `except Exception` with no logging, so every sentiment-history record quietly
+  recorded `ml_sar: null`: **1 non-null row out of 172**. Both packages are now
+  conda-forge dependencies. **Run `./update.sh` once and restart the app** —
+  the failed load is cached for the process lifetime.
+- **The same failure can no longer hide.** `ml_sentiment.runtime_status()`
+  reports `{available, reason, model_dir, …}` on `/api/news-diagnostics`, and
+  Model Diagnostics renders an amber banner naming the actual cause and fix
+  instead of the old, wrong "no deployed artifact" copy. The exception is also
+  logged once per process. `_load()` now imports `scipy.sparse`/`sklearn` too,
+  so `available()` can't report True in an env where every scoring call
+  returns None.
+- **New: Settings overlay** (gear button, 70% viewport, blurred backdrop) with
+  `General` (empty placeholder) and **`Logs`** — a live tail of the backend
+  console. `portfolio_tracker/logbuf.py` tees `sys.stdout`/`sys.stderr` into a
+  4000-line ring behind `GET /api/logs`, capturing every existing `print()`
+  with no call-site changes. This is the only way to see backend output in the
+  desktop app, where the `.app` has no terminal. Autoscroll pauses when you
+  scroll up; HTTP request lines are hidden by default.
+- **Flash Tape expands to full screen** (99% viewport) on a click anywhere in
+  the card. The row cap goes from 120 to 1000, headlines wrap instead of
+  truncating, and each row gains a numeric score and a two-line summary. The
+  inline panel is unchanged; filters stay in sync between the two.
+- **Both engines are visible at once.** The flash tape, constituent briefs and
+  the main table's NS column now show two dots (ML first, AI second, each with
+  its own tooltip); the news timeline draws paired bars per article. Previously
+  the two were collapsed into one value, which hid exactly the interesting case
+  — on the test book, 108 of 654 articles carry opposite-sign ML and LLM scores.
+- **Constituent Breakdown: `% 2D` and `% 1W` added beside `% 1D`, all three
+  heat-tinted** red/green using the same `cellStyleHeat`/`colorDiverging`
+  helpers as the main holdings table (anchors 5 / 7 / 20), so a stock reads
+  identically in both. The Signal and AI cells get the same tint at anchor 0.5.
+  `pct_2d` is a new backend field (trading bars, not calendar days) — **existing
+  portfolios show `—` until a ↻ Refresh**. `pct_1d`/`pct_2d` are also registered
+  in the main column registry and the Excel export, but deliberately left out of
+  every built-in preset, so the holdings table is unchanged unless you add them.
+- **`ml_confidence` recalibrated twice** (`1 - exp(-wsum/SCALE)`) — first from
+  `/2.0` to `/0.35` because a real ticker rendered as "Confidence 6%", then
+  measured for real and moved to **`/3.0`**: `/0.35` was also a guess, and it
+  overcorrected — 95% of real ticker-days pinned to 90-100% confidence. `/3.0`
+  was chosen by computing the actual evidence-mass distribution across 124
+  real ticker-days and picking the scale that spreads it (p10/p50/p90 →
+  ~32%/67%/86%) instead of saturating it. Display-only; the trained artifact
+  is untouched.
+- **New `scripts/backfill_ml_history.py`** re-scores the history records left
+  null by the bug, from articles still in the news cache, so the diagnostics
+  panels have real data immediately instead of accumulating for weeks.
+  Idempotent, atomic, stamps `ml_backfilled: true`; `--force` recomputes
+  already-scored records too, which is how the confidence recalibration above
+  was applied to existing history.
+
 ## 1.9.1 — 2026-07-27
 **Trackpad discipline + keyboard zoom in the desktop app.** A dense financial
 dashboard should hold still; on a macOS trackpad it drifted sideways and

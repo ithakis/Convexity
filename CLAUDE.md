@@ -43,6 +43,7 @@ sub-decision.
 │   ├── mpt.py                   ← Optimization primitives: Black-Litterman + mean-CVaR numba solver — §12
 │   ├── persistence.py           ← JSON CRUD for views/watchlists/presets/MPT runs/column views — §4
 │   ├── cache.py                 ← Process-global TTL cache dicts shared across modules
+│   ├── logbuf.py                ← stdout/stderr tee → ring buffer behind /api/logs (Settings → Logs) — §16
 │   ├── resolver.py              ← resolve_symbol() pipeline (fuzzy input → Yahoo ticker) — §4
 │   ├── symbol_db.py             ← Local fuzzy ticker DB (provider-agnostic schema) — §6
 │   ├── helpers.py                ← Shared small utilities (dividend-yield normalisation, etc.)
@@ -378,6 +379,45 @@ trained on FNSPID (5.75M symbol-tagged articles, 2009–2023) via the pipeline i
   The frozen training/backtest story lives in the **Methodology** modal
   (`openMethodology` in `app.js`, a 90vw×90vh article with six SVG charts + a
   KaTeX SAR formula); Model Diagnostics stays "live evidence only."
+- **The ML model was silently dead in every installed copy (v1.10.0 fix — read
+  this before debugging "ML has not scored these holdings").** `environment.yml`
+  listed neither `lightgbm` nor `scikit-learn` (they were only in
+  `requirements.txt`, which `install.sh` never pip-installs), so the desktop
+  app's `pt` env could not load the artifact — while QF12, where every agent
+  tests, could. `news_sentiment.py`'s ML block swallowed the
+  `ModuleNotFoundError` in a bare `except Exception` with **no logging**, so
+  every history record quietly got `ml_sar: null` (1 non-null row out of 172)
+  and the UI just showed the LLM fallback. Three guardrails now:
+  (1) both packages are in `environment.yml`'s conda-forge list — an env sync
+  (`./update.sh`) is required after pulling this;
+  (2) `_load()` also imports `scipy.sparse` + `sklearn`, because `available()`
+  used to return True in an env where every `score_article` call returned None;
+  (3) `ml_sentiment.runtime_status()` → `{available, reason, model_dir,
+  model_dir_exists, version}` rides on `/api/news-diagnostics` as `ml_runtime`
+  and drives an amber banner in Model Diagnostics naming the real cause. The
+  failure is also logged once per process (`_warn_ml_once`). Note `_STATE`
+  caches a failed load for the process lifetime — **installing the dependency
+  requires an app restart** before `available()` flips.
+- `ml_confidence` decay is `1 - exp(-wsum/_CONF_SCALE)`, `_CONF_SCALE = 3.0`.
+  **Display only** — `ml_confidence` is never a model input, so retuning it
+  does not invalidate the artifact. Went through two bad guesses before being
+  measured: 2.0 rendered a real ticker as "Confidence 6%"; the first fix (0.35)
+  overcorrected and pinned 95% of real ticker-days to 90-100% confidence. The
+  current value was chosen by computing the real `wsum` distribution across
+  124 actual ticker-days (`p10=1.17 p50=3.34 p90=5.86`, ~20 articles/week for
+  an actively-covered name) and sweeping candidate scales for one that spreads
+  rather than saturates — 3.0 maps that same p10/p50/p90 to ~32%/67%/86%.
+  Re-derive it the same way (real wsum sweep, not a guess) if the news
+  volume/mix changes materially. `aggregate(scored, now=)` takes an optional
+  recency anchor so the backfill can weight an old record as of its own date.
+  `scripts/backfill_ml_history.py --force` recomputes already-scored history
+  records after a constant retune like this one.
+- `scripts/backfill_ml_history.py` re-scores history records left with
+  `ml_sar: null` from whatever is still in `.portfolio_tracker_news.json`
+  (30-day TTL, so only recent dates recover). Idempotent, atomic write, stamps
+  `ml_backfilled: true` so reconstructed scores stay distinguishable from live
+  ones. Run it once after fixing the env; without it the diagnostics panels stay
+  empty for weeks even though the model is working.
 - **Retraining gotcha (hard-won):** FLAML+LightGBM on the raw 262k-column
   sparse matrix re-bins per trial×fold and stalls (16h in
   `PushDataToMultiValBin`). Keep the df-pruning mask, `log_max_bin=5`, and the
@@ -465,6 +505,7 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/column-views`              — `{builtins, custom, active}`
 - `/api/weight-presets?view=…`     — `{presets: [...], active: name|null}` for a portfolio
 - `/api/mpt-runs?view=…`           — `{last: run|null, runs: [...]}` — newest run + the last-3 history (rendered under *Apply to Portfolio*)
+- `/api/logs?since=<seq>&limit=<n>` — backend console tail from `logbuf` (§16)
 - `/api/news-sentiment?symbols=…`  — batch per-ticker AI sentiment
 - `/api/news-market`               — market-wide sentiment + articles
 - `/api/news-articles?symbol=…`    — per-ticker articles + sentiment detail
@@ -560,6 +601,26 @@ columns).
   `Portfolio`, `Refresh`, `Export`, `Sort`, and `Fit to screen` uses the
   custom `data-tip` pseudo-element pattern, not native `title`, so the
   help text is consistently visible in-browser.
+- **Settings overlay** (`#settings-btn` gear, `openSettings`/`closeSettings`):
+  70vw × 70vh over a blurred backdrop, left nav (`General` — deliberately empty
+  placeholder — and `Logs`). Follows the `openMptOverlay` idiom exactly,
+  including the `document.body.style.overflow` lock + `dataset.*PrevOverflow`
+  restore, and registers in the global Esc handler. See §16 for why Logs exists.
+- **Flash Tape full-screen** (`openTapeFullscreen`, 99vw × 99vh): clicking the
+  `#ns-tape-card` body opens it; `e.target.closest("a, select, button, input,
+  label")` guards the links and filter controls. `renderNsTape({fullscreen})`
+  is ONE function serving both surfaces — the inline panel keeps its 120-row cap
+  and single-line ellipsised headlines, the overlay lifts the cap to 1000 and
+  adds a numeric score column plus a 2-line-clamped summary. Filter changes in
+  either view re-render the other so the two never diverge.
+- **Dual ML/AI display**: `nsArticleMlScore`/`nsArticleLlmScore` +
+  `nsDualDots(a)` render **two bare dots, ML first**, each with its own tooltip
+  naming the engine. Used by the flash tape, constituent briefs, and (as paired
+  bars, `.ns-tl-pair`) the timeline; `nsDot` does the per-holding equivalent in
+  the main table's NS column. `nsDispArticleScore` is deliberately KEPT — the
+  tier filter chips still key off the ML-primary coalesced value, so filtering
+  behaviour is unchanged. A missing engine renders a hollow dot rather than
+  collapsing the pair, so columns stay aligned.
 - **Fit to screen toggle** (`#cv-fit-toggle`): optional table compaction
   mode for dense presets. `applyTableFitMode()` computes a scale from the
   active columns' declared widths versus `.table-wrap` width and applies
@@ -1491,3 +1552,32 @@ PR (rare, but see `1.4.2`–`1.4.4` in history), tag that direct commit
 instead. A version bump with no changelog section of its own (e.g. `1.4.1`,
 whose content got folded into `1.4.2`'s writeup) gets no separate tag/release
 — never fabricate release notes to fill the gap.
+
+---
+
+## 16. `logbuf.py` — the backend console (Settings → Logs)
+
+The entire backend logs via bare `print()` (30+ call sites in news_sentiment,
+ml_sentiment, server). In browser mode those land in the launching terminal. In
+**desktop mode they land nowhere**: the `.app` has no terminal, and
+`desktop.py`'s `_setup_logging()` redirects the `logging` module, not
+`sys.stdout`. That is how the ML model stayed dead for weeks — the one line
+explaining why was written to a file descriptor no human could read (§4).
+
+`logbuf.install()` (called from `server.start_server()`, idempotent) wraps
+`sys.stdout`/`sys.stderr` in a write-through tee that also appends whole lines
+to a `deque(maxlen=4000)` of `{seq, ts, stream, text, http}`. Every existing
+`print()` is captured with **zero edits to the call sites** — do not "clean this
+up" by converting them to `logging` without keeping the tee, or desktop-mode
+output goes dark again.
+
+- `seq` is monotonic and never reset. `read(since, limit)` returns only newer
+  lines plus `dropped`, so the UI can show a "lines dropped" marker instead of
+  silently skipping output.
+- `http` tags `server.py`'s per-request log lines. The frontend hides them by
+  default — one per request drowns everything else.
+- Writes still reach the real stream, so the terminal and the launcher log file
+  behave exactly as before. This is purely additive.
+- The frontend polls `/api/logs?since=` every 1.5s **only while the Logs pane is
+  open** (`stopLogPolling` clears the timer in `closeSettings`). Autoscroll
+  pauses itself when the user scrolls up and resumes at the bottom.

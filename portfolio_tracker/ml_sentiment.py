@@ -11,6 +11,13 @@ available() False and every scoring call return None — the LLM path is never
 affected. The artifact lives OUTSIDE the repo at ~/.portfolio_tracker/ml_model/
 (override with MLSENT_MODEL_DIR); deploy = copy the mlsent-v1 bundle there.
 
+Graceful must not mean SILENT, which is what it was: the desktop app's `pt`
+conda env shipped without lightgbm/scikit-learn (environment.yml listed neither),
+so the model was dead in every installed copy while the UI merely showed the LLM
+fallback. runtime_status() now reports the real reason and the News tab surfaces
+it. Both packages are required at load time so available() cannot be True while
+every scoring call returns None.
+
 Artifact bundle (produced by ml/scripts/07+09+10):
     model.lgbm.txt        LightGBM Booster
     idf.npy               float32[2**18] idf vector (train-fitted)
@@ -31,10 +38,29 @@ from pathlib import Path
 ARTIFACT_VERSION = "mlsent-v1"
 
 _LOCK = threading.Lock()
-_STATE: dict = {"loaded": False, "ok": False}
+_STATE: dict = {"loaded": False, "ok": False, "reason": ""}
 
 # Recency half-life for aggregation (matches the app's default tau).
 _TAU_DAYS = 3.0
+
+# Evidence-mass -> confidence decay: conf = 1 - exp(-wsum / _CONF_SCALE).
+# DISPLAY ONLY — ml_confidence is never a model input and never touches the
+# trained artifact, so retuning this does not invalidate mlsent-v1.
+# History: was 2.0, calibrated from a guess ("a realistic 3-5 article ticker
+# has wsum ~0.2-0.5") that turned out to be off by an order of magnitude — a
+# real ticker rendered as "Confidence 6%". A same-day fix dropped it to 0.35,
+# but that guess was ALSO wrong in the other direction: measured directly
+# against 124 real ticker-days in this app's own history (7-day lookback,
+# recency/source/novelty/relevance weights as actually computed), wsum's
+# real distribution is p10=1.17 p50=3.34 p90=5.86 (median ~20 articles/week
+# for an actively-covered name) — under 0.35, 118/124 (95%) records pinned to
+# 90-100% confidence, including the thinnest-coverage ticker in the set.
+# 3.0 was chosen by sweeping candidate scales against that same measured
+# wsum distribution and picking the one with a real spread instead of a
+# ceiling: p10->=32%, p50->=67%, p90->=86%. Re-derive this the same way
+# (recompute wsum per real ticker-day, sweep SCALE, pick for spread) if the
+# news volume/mix in the cache changes meaningfully — don't re-guess it.
+_CONF_SCALE = 3.0
 
 # US/Eastern offset approximation for session classification. DST-correct
 # conversion needs zoneinfo — used when available, fixed -5 fallback otherwise.
@@ -64,6 +90,13 @@ def _load() -> dict:
         try:
             import numpy as np
             import lightgbm as lgb
+            # scipy + sklearn are imported here purely so available() is HONEST.
+            # score_article needs both (scipy.sparse.hstack; sklearn via
+            # ml_features.hash_counts/apply_idf) but used to import them lazily
+            # at call time — so an env with lightgbm but no sklearn reported
+            # available() == True and then returned None for every article.
+            import scipy.sparse  # noqa: F401
+            import sklearn  # noqa: F401
 
             from portfolio_tracker import ml_features as mf
 
@@ -80,9 +113,11 @@ def _load() -> dict:
             _STATE["mask"] = np.load(mask_p) if mask_p.exists() else None
             _STATE["cuts"] = json.loads((d / "tier_cuts.json").read_text())
             _STATE["ok"] = True
+            _STATE["reason"] = ""
             print(f"[ml_sentiment] loaded {ARTIFACT_VERSION} from {d}")
         except Exception as e:
             _STATE["ok"] = False
+            _STATE["reason"] = f"{type(e).__name__}: {e}"
             print(f"[ml_sentiment] model unavailable ({type(e).__name__}: {e}) "
                   f"— ml_* fields disabled")
         return _STATE
@@ -90,6 +125,24 @@ def _load() -> dict:
 
 def available() -> bool:
     return _load()["ok"]
+
+
+def runtime_status() -> dict:
+    """Why ML is (not) running — surfaced in the News tab's Model Diagnostics.
+
+    Without this the UI could only guess, and it guessed wrong: the old copy
+    blamed a missing artifact when the real cause was a conda env with no
+    lightgbm. Note the load is cached for the process lifetime (see _load), so
+    installing the dependency requires an app restart before this flips.
+    """
+    st = _load()
+    return {
+        "available": bool(st["ok"]),
+        "reason": st.get("reason") or "",
+        "model_dir": str(model_dir()),
+        "model_dir_exists": model_dir().exists(),
+        "version": ARTIFACT_VERSION,
+    }
 
 
 def _session_class(epoch: int | None, now: float | None = None) -> str:
@@ -172,11 +225,15 @@ def _tier(sar: float, cuts: list[float], tiers: list[str]) -> str:
     return tiers[i]
 
 
-def aggregate(scored: list[dict]) -> dict | None:
+def aggregate(scored: list[dict], now: float | None = None) -> dict | None:
     """Relevance/recency/source-weighted aggregate of per-article scores.
 
     `scored` items: {sar_pred, relevance, datetime?, source?, n_duplicates?}.
     Returns {ml_sar, ml_score, ml_tier, ml_confidence, ml_n} or None.
+
+    `now` pins the recency reference epoch. Live scoring leaves it None (=
+    wall clock); the history backfill passes the record's own date so an old
+    record is weighted as it would have been on the day it was written.
     """
     st = _load()
     if not st["ok"] or not scored:
@@ -184,7 +241,7 @@ def aggregate(scored: list[dict]) -> dict | None:
     try:
         from portfolio_tracker import ml_features as mf
 
-        now = time.time()
+        now = float(now) if now is not None else time.time()
         wsum = ssum = 0.0
         vals = []
         for a in scored:
@@ -203,7 +260,7 @@ def aggregate(scored: list[dict]) -> dict | None:
         ml_sar = ssum / wsum
         cuts_j = st["cuts"]
         tier = _tier(ml_sar, cuts_j["cuts"], cuts_j["tiers"])
-        conf = 1.0 - math.exp(-wsum / 2.0)
+        conf = 1.0 - math.exp(-wsum / _CONF_SCALE)
         return {
             "ml_sar": round(ml_sar, 4),
             "ml_score": round(math.tanh(ml_sar / 2.0), 4),

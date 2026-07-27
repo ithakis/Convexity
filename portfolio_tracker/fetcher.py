@@ -137,6 +137,11 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             out["price"] = last
             out["change_abs_1d"] = last - prev_close
             out["pct_1d"] = (last / prev_close - 1.0) * 100.0 if prev_close else None
+            # 2-day return: trading bars, not calendar days (unlike pct_1w and
+            # friends below, which are calendar offsets). Over a 2-bar horizon a
+            # calendar window would silently swallow weekends and holidays.
+            prev2 = float(close.iloc[-3]) if len(close) >= 3 else None
+            out["pct_2d"] = (last / prev2 - 1.0) * 100.0 if prev2 else None
             out["pct_1w"] = _pct_change(close, 7)
             out["pct_1m"] = _pct_change(close, 30)
             out["pct_3m"] = _pct_change(close, 91)
@@ -452,6 +457,8 @@ def fetch_detail(symbol: str) -> dict:
     out["prev_close"] = prev
     out["change_abs"] = last - prev
     out["pct_1d"] = (last / prev - 1.0) * 100.0 if prev else None
+    prev2 = float(close.iloc[-3]) if len(close) >= 3 else None
+    out["pct_2d"] = (last / prev2 - 1.0) * 100.0 if prev2 else None
 
     today = hist.iloc[-1]
     out["day_open"] = _safe_num(today.get("Open"))

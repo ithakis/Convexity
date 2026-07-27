@@ -1305,6 +1305,21 @@ def _score_articles(system_prompt: str, user_prompt: str,
     return merged, first[1], max(0.0, min(1.0, agreement))
 
 
+# ML scoring is per-symbol, so an unavailable model would log once per ticker
+# per refresh. One line per process is enough to diagnose it and keeps the
+# Settings -> Logs console readable.
+_ML_WARNED = False
+
+
+def _warn_ml_once(reason: str) -> None:
+    global _ML_WARNED
+    if _ML_WARNED:
+        return
+    _ML_WARNED = True
+    print(f"[news_sentiment] ML scoring unavailable ({reason}) — falling back "
+          f"to the LLM signal; ml_* fields will be null", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -1428,7 +1443,14 @@ def get_news_sentiment(symbol: str, context: dict | None = None,
                                       "source": a.get("source"),
                                       "n_duplicates": a.get("n_duplicates", 0)})
             ml_fields = _ml.aggregate(scored_ml)
-    except Exception:
+        else:
+            _warn_ml_once(_ml.runtime_status().get("reason") or "model not loaded")
+    except Exception as exc:
+        # This used to be a bare `except Exception: ml_fields = None` with no
+        # logging at all — which is how the model stayed dead in the shipped
+        # desktop app for weeks while every history record quietly recorded
+        # ml_sar: null. Never swallow this silently again.
+        _warn_ml_once(f"{type(exc).__name__}: {exc}")
         ml_fields = None
 
     if not brief:
@@ -1802,6 +1824,19 @@ def compute_diagnostics() -> dict:
                if r.get("symbol") != "__market__"
                and isinstance(r.get("s_idio"), (int, float))]
     out: dict[str, Any] = {"n_records": len(records)}
+
+    # Why the ML panels are (or are not) populated. Set before every early
+    # return below so the UI can always distinguish "model isn't running" from
+    # "model is running but hasn't accumulated history yet" — those look
+    # identical otherwise, and the old copy guessed wrong.
+    try:
+        from portfolio_tracker import ml_sentiment as _ml
+        out["ml_runtime"] = _ml.runtime_status()
+    except Exception as exc:
+        out["ml_runtime"] = {"available": False,
+                             "reason": f"{type(exc).__name__}: {exc}",
+                             "model_dir": "", "model_dir_exists": False,
+                             "version": ""}
 
     # Score distribution (last calibration window) — range-usage evidence.
     cutoff = (datetime.now(timezone.utc)
