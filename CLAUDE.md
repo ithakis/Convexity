@@ -1470,3 +1470,24 @@ a major (X, new feature) or minor (Y, polish/fix) bump per the scheme above
 — then ask the user to confirm before changing the file. Never bump silently,
 even for changes that look small; the user wants to make this call
 explicitly every time, not have it inferred.
+
+**GitHub Release per version (standing policy — do not skip).** The
+`CHANGELOG.md`-derived timeline lives on GitHub too, not just in the repo:
+every version from `v1.0.0` onward has a matching git tag + GitHub Release
+(`gh release list`), notes copied verbatim from that version's
+`CHANGELOG.md` section. **Once a version-bump PR merges to `main`, tag +
+release it in the same sitting — this is not a separate/optional step:**
+```bash
+git tag -a vX.Y.Z <merge-commit-sha> -m "vX.Y.Z — <date>"
+git push origin vX.Y.Z
+gh release create vX.Y.Z --title "vX.Y.Z — <date>" --notes-file <(sed -n '/^## X.Y.Z/,/^## /p' CHANGELOG.md | sed '1d;$d')
+```
+(the `sed` slice pulls just that version's section out of `CHANGELOG.md`
+between its own header and the next one — adjust the range if it's the
+newest entry with no following `## ` line). The merge commit is the tag
+target, i.e. what actually landed on `main`, not a branch-tip commit that
+may still get rebased. If a version was pushed straight to `main` without a
+PR (rare, but see `1.4.2`–`1.4.4` in history), tag that direct commit
+instead. A version bump with no changelog section of its own (e.g. `1.4.1`,
+whose content got folded into `1.4.2`'s writeup) gets no separate tag/release
+— never fabricate release notes to fill the gap.
