@@ -5200,6 +5200,43 @@ window.addEventListener("resize", () => {
   if (STATE.fitColumns) render();
 });
 
+/* --- Trackpad discipline ---------------------------------------------------
+   At 100% zoom a two-finger horizontal swipe has nowhere useful to go — it
+   just drifts the page sideways and rubber-bands, which makes a dense
+   dashboard feel loose. Suppress it.
+
+   The gates below are all deliberate, in order:
+     - ctrlKey    a desktop-Chrome trackpad PINCH arrives as a wheel event with
+                  ctrlKey=true. Pinch-to-zoom stays working, so hand it back to
+                  the browser untouched.
+     - zoomed in  once the user HAS pinch-zoomed, two-finger pan is the only way
+                  to reach the rest of the page. Get out of the way entirely.
+                  This is why the check is on visualViewport.scale rather than a
+                  blanket block.
+     - shiftKey   the deliberate escape hatch: Chrome already maps
+                  shift+vertical-wheel to horizontal scroll inside the nearest
+                  horizontal scroller, so this is how off-screen columns in a
+                  wide .table-wrap are reached when "Fit to screen" is off. We
+                  just have to not eat it.
+     - |dx|<=|dy| vertical intent. Hijacking diagonal-ish scrolls would make
+                  ordinary vertical scrolling feel sticky.
+
+   The listener MUST be registered { passive: false }: Chrome defaults
+   root-level wheel listeners to passive, where preventDefault() is a silent
+   no-op. */
+function isPinchZoomed() {
+  const vv = window.visualViewport;
+  return !!vv && vv.scale > 1.01;
+}
+
+window.addEventListener("wheel", (e) => {
+  if (e.ctrlKey) return;
+  if (isPinchZoomed()) return;
+  if (e.shiftKey) return;
+  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+  e.preventDefault();
+}, { passive: false });
+
 /* --- News & Sentiment panel --- */
 $("#news-btn").onclick = () => {
   const panel = $("#news-panel");

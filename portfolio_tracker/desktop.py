@@ -39,7 +39,16 @@ from pathlib import Path
 # keep every PySide6 import at module top even though the splash would appear
 # marginally sooner without them.
 from PySide6.QtCore import QElapsedTimer, QRect, QRectF, Qt, QTimer, QUrl, QStandardPaths
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineDownloadRequest
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QSplashScreen
@@ -53,6 +62,13 @@ _BUNDLE_ID = "com.ithakis.portfoliotracker"
 _MIN_SPLASH_MS = 6000
 _SPLASH_SAFETY_MS = 20000
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
+
+# Page-zoom steps for the desktop window. Mirrors Chrome's own zoom ladder so
+# stepping through it here feels identical to Cmd +/- in browser mode (which is
+# native Chrome zoom and cannot be intercepted from JS, hence no counterpart in
+# app.js). Deliberately NOT persisted — every launch starts at 100%.
+_ZOOM_LADDER = (0.67, 0.75, 0.80, 0.90, 1.00, 1.10, 1.25, 1.50, 1.75, 2.00)
+_ZOOM_DEFAULT_IDX = _ZOOM_LADDER.index(1.00)
 
 # Dashboard theme (portfolio_tracker/static/style.css [data-theme="dark"]) —
 # the splash mirrors the app's own look, including the accent used by the
@@ -270,9 +286,42 @@ class _MainWindow(QMainWindow):
         self.page.profile().downloadRequested.connect(
             lambda download: _handle_download(download, self)
         )
+        self._zoom_idx = _ZOOM_DEFAULT_IDX
+        self._install_zoom_shortcuts()
         # NB: deliberately does NOT load here — the caller connects
         # loadProgress/loadFinished first, then calls load(), so a load
         # that finishes early can't slip past before its handler is wired.
+
+    def _install_zoom_shortcuts(self) -> None:
+        """Wire Cmd/Ctrl +/-/0 page zoom.
+
+        QWebEngineView ships no zoom shortcuts of its own, so without this the
+        desktop app has no way to zoom at all (browser mode gets Chrome's own
+        for free).
+
+        The extra "Ctrl+=" binding is the non-obvious part: QKeySequence's
+        StandardKey.ZoomIn resolves to Cmd/Ctrl++, but on a US/most layouts "+"
+        is Shift+"=", so the key people actually press to zoom in is Cmd+= with
+        no shift. Every browser binds both; so do we. Qt maps Ctrl to Cmd on
+        macOS automatically, so these read correctly on both platforms.
+        """
+        for key in (QKeySequence.StandardKey.ZoomIn, QKeySequence("Ctrl+=")):
+            QShortcut(key, self, activated=lambda: self._step_zoom(1))
+        QShortcut(
+            QKeySequence.StandardKey.ZoomOut, self, activated=lambda: self._step_zoom(-1)
+        )
+        QShortcut(QKeySequence("Ctrl+0"), self, activated=self._reset_zoom)
+
+    def _apply_zoom(self) -> None:
+        self.view.setZoomFactor(_ZOOM_LADDER[self._zoom_idx])
+
+    def _step_zoom(self, delta: int) -> None:
+        self._zoom_idx = max(0, min(len(_ZOOM_LADDER) - 1, self._zoom_idx + delta))
+        self._apply_zoom()
+
+    def _reset_zoom(self) -> None:
+        self._zoom_idx = _ZOOM_DEFAULT_IDX
+        self._apply_zoom()
 
     def load(self) -> None:
         self.view.load(QUrl(self._url))

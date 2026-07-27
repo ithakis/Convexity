@@ -96,6 +96,15 @@
     background: var(--bg); color: var(--text); margin: 0;
     font-family: -apple-system, "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
     font-size: 13px;
+    /* A dense financial dashboard should hold still. This kills three pieces
+       of native trackpad slop at once: the vertical elastic bounce past the
+       page edges, the horizontal rubber-band, and Chrome's two-finger
+       swipe-to-go-back. It only stops scroll *chaining* out to the document,
+       so the real horizontal scrollers (.table-wrap, .an-table-wrap) still
+       scroll normally, and visual-viewport panning while pinch-zoomed is
+       unaffected. The 100%-zoom two-finger drift is handled separately by the
+       wheel listener in app.js. */
+    overscroll-behavior: none;
   }
 
   /* Top control bar */

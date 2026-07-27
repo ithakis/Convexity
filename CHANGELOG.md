@@ -5,6 +5,33 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.9.1 — 2026-07-27
+**Trackpad discipline + keyboard zoom in the desktop app.** A dense financial
+dashboard should hold still; on a macOS trackpad it drifted sideways and
+rubber-banded on every stray two-finger swipe. No zoom, wheel, gesture, or
+overscroll code existed anywhere in the app before this — all of it was native
+browser behaviour.
+- **No more elastic bounce or swipe-back.** `overscroll-behavior: none` on
+  `html, body` kills the vertical bounce past the page edges, the horizontal
+  rubber-band, and Chrome's two-finger swipe-to-go-back. It only stops scroll
+  *chaining* out to the document, so `.table-wrap` / `.an-table-wrap` still
+  scroll normally.
+- **Two-finger horizontal pan is dead at 100% zoom** — a non-passive `wheel`
+  listener in `app.js` `preventDefault()`s horizontal-dominant scrolls. It
+  deliberately stands down in three cases: while pinch-zoomed (checked via
+  `visualViewport.scale`, because panning is the only way to navigate a zoomed
+  page), on `ctrlKey` (that's how a trackpad pinch arrives — pinch-to-zoom
+  keeps working), and on `shiftKey`.
+- **Shift + scroll is the escape hatch** for reaching off-screen columns in a
+  wide table when "Fit to screen" is off.
+- **Cmd/Ctrl +, −, 0 zoom the desktop app.** `QWebEngineView` ships no zoom
+  shortcuts of its own, so the desktop app previously had no way to zoom at
+  all. `QShortcut`s now step a Chrome-matching ladder (67→200%) via
+  `setZoomFactor`, with `Cmd+0` resetting to 100%. `Ctrl+=` is bound alongside
+  `StandardKey.ZoomIn` because "+" needs Shift on most layouts. Not persisted —
+  every launch starts at 100%. Browser mode is unchanged; Chrome's own Cmd +/−
+  already works there and cannot be intercepted from JS.
+
 ## 1.9.0 — 2026-07-27
 **Optimize tab: interpretable tail risk, a live-filling cloud, run history, and
 per-company context.** Six targeted improvements on top of the v1.8 mean-CVaR
