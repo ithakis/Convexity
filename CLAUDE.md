@@ -426,6 +426,12 @@ trained on FNSPID (5.75M symbol-tagged articles, 2009–2023) via the pipeline i
   fails. Also note `tests/test_ml_sentiment.py` no longer uses bare
   `importorskip`: missing deps fail unless `PT_ALLOW_MISSING_ML=1`, because the
   old skip meant the suite went quiet in exactly the broken environment.
+  (As of the QF12→pt standardization — see §3 above — agents now run and
+  test exclusively against `pt` too, so this specific two-env discrepancy is
+  structurally impossible going forward, not just guarded against by
+  envcheck. The commit-time pytest gates in `.pre-commit-config.yaml` and
+  `.claude/settings.json` were repointed at `pt` in the same change, so what
+  runs before a commit is the same env users actually run.)
 - `ml_confidence` decay is `1 - exp(-wsum/_CONF_SCALE)`, `_CONF_SCALE = 3.0`.
   **Display only** — `ml_confidence` is never a model input, so retuning it
   does not invalidate the artifact. Went through two bad guesses before being
