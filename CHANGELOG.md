@@ -5,6 +5,29 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.10.2 — 2026-07-28
+- **`symbol_db.py`'s local fuzzy ticker lookup was silently dead since the
+  package restructure (#9).** `_DB_PATH` pointed at
+  `portfolio_tracker/symbol_db.sqlite`, but the real 3.8MB database built by
+  `build_symbol_db.py` has always lived at the repo root — `sqlite3.connect()`
+  auto-creates an empty file at a missing path, so every lookup queried an
+  empty table and returned `[]`, falling through to the ~20x-slower
+  `yf.Search` fallback with no error or log line. Fixed by pointing `_DB_PATH`
+  at the repo root, matching both the on-disk build artifact and CLAUDE.md's
+  documented file layout — `"microsoft"` → `MSFT`, `"DaVita"` → `DVA`, and
+  typo correction are fast again.
+- **Flash Tape no longer hijacks page scrolling.** The inline card
+  (`.ns-tape-body`) had its own `overflow-y: auto` scrollport, so a two-finger
+  trackpad swipe or mouse wheel over it scrolled the headline list instead of
+  the page. It's now `overflow: hidden` — the inline card shows a fixed
+  preview slice, and scrolling only works in the fullscreen view (still
+  opened by clicking the card).
+- **QF12 is retired.** `pt` (originally the desktop app's env, §14) is now the
+  one conda env used to run and test this app; `CLAUDE.md`, `README.md`,
+  `Launch Dashboard.command`, `.pre-commit-config.yaml`,
+  `.claude/settings.json`, and a few script docstrings no longer point at
+  QF12.
+
 ## 1.10.1 — 2026-07-28
 **1.10.0 fixed the dependency *declaration*; this release makes the ML model
 actually run, and makes the failure impossible to miss next time.**

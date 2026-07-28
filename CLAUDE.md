@@ -59,7 +59,7 @@ sub-decision.
 ├── tests/                        ← pytest suite (test_metrics.py, test_news_sentiment.py)
 ├── docs/                         ← Reference/audit notes not needed to run the app day-to-day
 ├── scripts/                      ← Misc dev scripts (e.g. check_syntax.py)
-├── Launch Dashboard.command      ← macOS launcher (activates QF12 conda env, restarts cleanly)
+├── Launch Dashboard.command      ← macOS launcher (activates `pt` conda env, restarts cleanly)
 ├── requirements.txt
 ├── environment.yml               ← conda/mamba env spec for the desktop app (`pt`) — §14
 ├── install.sh / install.ps1      ← Desktop app bootstrap (macOS/Linux / Windows) — §14
@@ -103,15 +103,20 @@ this instead of assuming it's already handled.
 
 ```bash
 # Recommended (uses the conda env the user actually has):
-~/miniforge3/envs/QF12/bin/python dashboard.py
+~/miniforge3/envs/pt/bin/python dashboard.py
 
 # Or use the launcher (handles existing-pid cleanup, conda activation):
 ./"Launch Dashboard.command"
 ```
 
+**QF12 is retired.** The env formerly used to run/test this app has been
+replaced by `pt` (originally created for the desktop app, §14 — it is now
+the one general-purpose env for this project). Do not activate or
+recommend QF12; it may still exist on disk but is no longer maintained.
+
 **Critical gotchas when restarting:**
 
-1. **System Python is missing yfinance** — always use the QF12 env path
+1. **System Python is missing yfinance** — always use the `pt` env path
    above. `python dashboard.py` without env activation will crash on
    import.
 2. **TIME_WAIT on port 8765** — after a kill, 8765 sometimes stays in
@@ -1217,7 +1222,7 @@ picks that up by itself. Two separate steps, both required:
    `git status --branch` first to confirm it's actually behind — merging
    from a worktree never touches the root checkout's working tree).
 2. **Restart the live server.** Per §3: `pkill` the running
-   `dashboard.py` process, then relaunch it with the QF12 env python. A
+   `dashboard.py` process, then relaunch it with the `pt` env python. A
    long-lived process keeps serving whatever code was loaded at its own
    start time — Python doesn't hot-reload, so an old process will keep
    reporting the pre-merge `__version__` via `/api/health` and the footer

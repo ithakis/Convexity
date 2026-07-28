@@ -12,7 +12,7 @@ Run it after 2-4 weeks of shadow accumulation (the plan's test #9 gate:
 ML IC within noise of, or above, LLM IC before ml_tier is surfaced in UI).
 
 Usage:
-    <QF12 python> ml/scripts/11_shadow_compare_llm.py
+    <pt python> ml/scripts/11_shadow_compare_llm.py
 """
 from __future__ import annotations
 

@@ -54,7 +54,9 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 _PROVIDER = "yfinance"
-_DB_PATH = Path(__file__).resolve().parent / "symbol_db.sqlite"
+# Repo root, not the package dir — build_symbol_db.py writes the built DB
+# next to dashboard.py, and CLAUDE.md's file layout documents it there too.
+_DB_PATH = Path(__file__).resolve().parent.parent / "symbol_db.sqlite"
 _DB_LOCK = threading.Lock()
 _NAME_NORM_RE = re.compile(r"[^a-z0-9]+")
 

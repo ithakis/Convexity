@@ -32,7 +32,7 @@ repos:
       - id: pytest-metrics
         name: Metrics unit tests (pytest tests/)
         language: system
-        entry: ~/miniforge3/envs/QF12/bin/python -m pytest tests/ -q --tb=short
+        entry: ~/miniforge3/envs/pt/bin/python -m pytest tests/ -q --tb=short
         pass_filenames: false
         always_run: true
         stages: [pre-commit]

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Double-click this in Finder to launch the Portfolio Dashboard.
-# It activates the QF12 conda env if present, otherwise falls back to system python3.
+# It activates the pt conda env if present, otherwise falls back to system python3.
 
 set -e
 
@@ -46,15 +46,15 @@ trap cleanup EXIT
 if [ -f "$HOME/miniforge3/etc/profile.d/conda.sh" ]; then
     # shellcheck disable=SC1091
     source "$HOME/miniforge3/etc/profile.d/conda.sh"
-    conda activate QF12 2>/dev/null || true
+    conda activate pt 2>/dev/null || true
 elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
     # shellcheck disable=SC1091
     source "$HOME/miniconda3/etc/profile.d/conda.sh"
-    conda activate QF12 2>/dev/null || true
+    conda activate pt 2>/dev/null || true
 elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
     # shellcheck disable=SC1091
     source "$HOME/anaconda3/etc/profile.d/conda.sh"
-    conda activate QF12 2>/dev/null || true
+    conda activate pt 2>/dev/null || true
 fi
 
 # Make sure dependencies are present; install on first run if missing.

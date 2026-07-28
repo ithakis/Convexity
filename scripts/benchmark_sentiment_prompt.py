@@ -17,7 +17,7 @@ calls (~35s at the 60/min limiter). Use --n 0 for the full split (~450
 calls, ~8 min).
 
 Usage:
-    <QF12 python> scripts/benchmark_sentiment_prompt.py --data /tmp/fpb/FinancialPhraseBank-v1.0 [--n 300]
+    <pt python> scripts/benchmark_sentiment_prompt.py --data /tmp/fpb/FinancialPhraseBank-v1.0 [--n 300]
 """
 
 from __future__ import annotations

@@ -63,7 +63,7 @@ keep working exactly as before — the desktop app is purely additive.
 ### Option A — double-click (macOS)
 
 Double-click **`Launch Dashboard.command`** in Finder.  
-It activates your `QF12` conda environment (or falls back to system Python), installs any missing dependencies, and opens the browser automatically.
+It activates your `pt` conda environment (or falls back to system Python), installs any missing dependencies, and opens the browser automatically.
 
 ### Option B — terminal
 
@@ -80,7 +80,7 @@ python dashboard.py
 ### Option C — conda
 
 ```bash
-conda activate QF12          # or any env that has yfinance + pandas
+conda activate pt            # or any env that has yfinance + pandas
 python dashboard.py
 ```
 

@@ -21,7 +21,7 @@ of 2), the module's own token-bucket limiters pace Finnhub (55/min) and NIM
 a cold cache for ~100 names.
 
 Usage:
-    <QF12 python> scripts/kappa_sensitivity.py [--limit N]
+    <pt python> scripts/kappa_sensitivity.py [--limit N]
 Writes JSON results next to this script's stdout report.
 """
 
