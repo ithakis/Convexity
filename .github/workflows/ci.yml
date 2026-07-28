@@ -35,6 +35,15 @@ jobs:
         run: |
           python -m pyflakes portfolio_tracker/*.py build_symbol_db.py scripts/*.py 2>&1 || true
 
+      # The check that would have caught the v1.10.0 bug. requirements.txt (pip,
+      # what CI installs) and environment.yml (conda, what the desktop app's `pt`
+      # env is built from) were never compared, so lightgbm/scikit-learn lived
+      # only in the former — CI ran with a working ML model while every installed
+      # copy ran with a dead one. envcheck.REQUIRED is now the single manifest and
+      # this asserts both files cover it.
+      - name: Dependency manifests match envcheck.REQUIRED
+        run: python scripts/check_dependency_manifests.py
+
       # Verify the server module is importable (no top-level import errors).
       - name: Import smoke-test
         run: |

@@ -87,6 +87,13 @@ if [ ! -x "$ENV_PY" ]; then
     exit 1
 fi
 
+# Prove the env can actually import what the app needs, rather than trusting
+# that the solver did what environment.yml asked. A half-solved env used to
+# exit 0 here and the failure only surfaced weeks later as a silently dead ML
+# model inside the running app. envcheck exits non-zero on a critical miss.
+echo "==> Verifying runtime dependencies in '$ENV_NAME'..."
+"$ENV_PY" -m portfolio_tracker.envcheck
+
 # ---------------------------------------------------------------------------
 # 3. Generate icon.icns from icon.png (macOS only; regenerate only if stale).
 # ---------------------------------------------------------------------------

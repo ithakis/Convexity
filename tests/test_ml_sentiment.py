@@ -9,7 +9,9 @@ Covers the two contracts that matter in production:
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,8 +19,22 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-pytest.importorskip("lightgbm")
-pytest.importorskip("sklearn")
+# These were bare importorskip calls, which meant that in exactly the broken
+# environment — the one shipped for weeks with no lightgbm — this entire module
+# silently skipped instead of failing. A skip is only legitimate when someone
+# has deliberately opted into an ML-less env; anywhere else (CI, a synced `pt`)
+# a missing dependency is a bug the suite must report.
+_ALLOW_MISSING = os.environ.get("PT_ALLOW_MISSING_ML") == "1"
+for _mod in ("lightgbm", "sklearn"):
+    if importlib.util.find_spec(_mod) is None:
+        if _ALLOW_MISSING:
+            pytest.skip(f"{_mod} not installed (PT_ALLOW_MISSING_ML=1)",
+                        allow_module_level=True)
+        pytest.fail(
+            f"{_mod} is not installed — ML sentiment would be dead at runtime. "
+            f"Run ./update.sh to sync the conda env. Set PT_ALLOW_MISSING_ML=1 "
+            f"to skip these tests deliberately instead.",
+            pytrace=False)
 
 import numpy as np  # noqa: E402
 import scipy.sparse as sp  # noqa: E402

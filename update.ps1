@@ -53,5 +53,19 @@ Write-Host "==> Updating '$EnvName' env..."
 & $Solver env update -n $EnvName -f environment.yml --prune
 Assert-Success "env update"
 
+# Verify rather than assume — this script is the documented fix for a stale
+# env, so it must fail loudly if the sync did not actually deliver the
+# packages instead of reporting success over a degraded app.
+$EnvPython = "$CondaBase\envs\$EnvName\python.exe"
+if (Test-Path $EnvPython) {
+    Write-Host "==> Verifying runtime dependencies in '$EnvName'..."
+    & $EnvPython -m portfolio_tracker.envcheck
+    Assert-Success "dependency check"
+} else {
+    Write-Host "WARNING: interpreter not found at $EnvPython - skipping dependency check" -ForegroundColor Yellow
+}
+
 Write-Host ""
-Write-Host "==> Done. Relaunch Portfolio _App to pick up the update."
+Write-Host "==> Done. Fully quit and relaunch Portfolio _App to pick up the update."
+Write-Host "    (A failed model load is cached for the process lifetime, so an"
+Write-Host "     already-running app will not pick up new packages in place.)"

@@ -44,6 +44,7 @@ sub-decision.
 │   ├── persistence.py           ← JSON CRUD for views/watchlists/presets/MPT runs/column views — §4
 │   ├── cache.py                 ← Process-global TTL cache dicts shared across modules
 │   ├── logbuf.py                ← stdout/stderr tee → ring buffer behind /api/logs (Settings → Logs) — §16
+│   ├── envcheck.py              ← runtime dependency manifest + self-check; the v1.10.0 guardrail — §4
 │   ├── resolver.py              ← resolve_symbol() pipeline (fuzzy input → Yahoo ticker) — §4
 │   ├── symbol_db.py             ← Local fuzzy ticker DB (provider-agnostic schema) — §6
 │   ├── helpers.py                ← Shared small utilities (dividend-yield normalisation, etc.)
@@ -398,6 +399,28 @@ trained on FNSPID (5.75M symbol-tagged articles, 2009–2023) via the pipeline i
   failure is also logged once per process (`_warn_ml_once`). Note `_STATE`
   caches a failed load for the process lifetime — **installing the dependency
   requires an app restart** before `available()` flips.
+- **v1.10.0's fix was inert, and the lesson generalises: a dependency
+  declaration is not a dependency.** Adding the two packages to
+  `environment.yml` installs nothing. On the reference machine the `pt` env's
+  last solve (`~/miniforge3/envs/pt/conda-meta/history`) was 2026-07-07, twenty
+  days *before* the v1.10.0 commit — so the user pulled, restarted, and still
+  had no `lightgbm`, while QF12 (where agents test) did. Before concluding that
+  an ML/env fix works, run the check **with the `pt` interpreter**, not
+  whichever python is on PATH:
+  `~/miniforge3/envs/pt/bin/python -c "from portfolio_tracker import ml_sentiment as m; print(m.runtime_status())"`.
+  v1.10.1 added the guardrails so this cannot recur silently —
+  **`portfolio_tracker/envcheck.py` is now the single dependency manifest**
+  (`REQUIRED`, with the feature each package kills). It is enforced in four
+  places: `server.start_server()` logs a report at boot; `env_ok` on
+  `/api/health` drives a banner under the topbar; `install.sh`/`update.sh`
+  (+ `.ps1`) run `python -m portfolio_tracker.envcheck` against the freshly
+  solved env; and `scripts/check_dependency_manifests.py` asserts in CI that
+  every entry is declared in BOTH `requirements.txt` and `environment.yml`
+  (they were never compared before — that is the original root cause). Add a
+  new hard runtime dependency to `REQUIRED` **and** both manifest files, or CI
+  fails. Also note `tests/test_ml_sentiment.py` no longer uses bare
+  `importorskip`: missing deps fail unless `PT_ALLOW_MISSING_ML=1`, because the
+  old skip meant the suite went quiet in exactly the broken environment.
 - `ml_confidence` decay is `1 - exp(-wsum/_CONF_SCALE)`, `_CONF_SCALE = 3.0`.
   **Display only** — `ml_confidence` is never a model input, so retuning it
   does not invalidate the artifact. Went through two bad guesses before being
@@ -506,6 +529,12 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/weight-presets?view=…`     — `{presets: [...], active: name|null}` for a portfolio
 - `/api/mpt-runs?view=…`           — `{last: run|null, runs: [...]}` — newest run + the last-3 history (rendered under *Apply to Portfolio*)
 - `/api/logs?since=<seq>&limit=<n>` — backend console tail from `logbuf` (§16)
+- `/api/runtime-status`            — cheap ML availability + `envcheck.status()` +
+  provider-key booleans + version. Powers Settings → Models & Data. Deliberately
+  separate from `/api/news-diagnostics` (pandas + `_bulk_close`, possibly networked)
+  and from `/api/health` (which runs on every page load, while `runtime_status()`
+  triggers the LightGBM/artifact load). `/api/health` carries only the cheap
+  find_spec-based `env_ok` flag that drives the missing-dependency banner.
 - `/api/news-sentiment?symbols=…`  — batch per-ticker AI sentiment
 - `/api/news-market`               — market-wide sentiment + articles
 - `/api/news-articles?symbol=…`    — per-ticker articles + sentiment detail
@@ -602,10 +631,50 @@ columns).
   custom `data-tip` pseudo-element pattern, not native `title`, so the
   help text is consistently visible in-browser.
 - **Settings overlay** (`#settings-btn` gear, `openSettings`/`closeSettings`):
-  70vw × 70vh over a blurred backdrop, left nav (`General` — deliberately empty
-  placeholder — and `Logs`). Follows the `openMptOverlay` idiom exactly,
-  including the `document.body.style.overflow` lock + `dataset.*PrevOverflow`
-  restore, and registers in the global Esc handler. See §16 for why Logs exists.
+  78vw × 76vh over a blurred backdrop; search box at the top of the sidebar,
+  grouped nav below it, right pane titled + described. Follows the
+  `openMptOverlay` idiom (the `document.body.style.overflow` lock +
+  `dataset.*PrevOverflow` restore) and registers in the global Esc handler.
+  See §16 for why Logs exists. Rebuilt in v1.10.1 — five load-bearing rules:
+  1. **`SETTINGS_SECTIONS` is the only place a section is declared**
+     (`{id, group, label, icon, description, keywords, items, render}`).
+     `renderSettingsNav()` rebuilds the nav from it. Add a section there, never
+     back in `index.html`. Sections today: General, Models & Data, Logs, About.
+  2. **The search `<input>` stays static in `index.html`.** Only
+     `#settings-nav-list` is re-rendered; an input inside that subtree would be
+     destroyed mid-keystroke, blurring the field. For the same reason typing
+     re-renders the **nav only** — re-rendering the pane per keystroke would
+     tear down `#log-body` and restart the log poller ~10×/second.
+  3. **`renderSettingsPane()` calls `stopLogPolling()` unconditionally as its
+     first statement**; only `renderSettingsLogs` restarts it. A new section can
+     therefore never leak a 1.5s timer against `/api/logs`.
+  4. **Nav clicks are delegated** on `#settings-nav-list` — per-node handlers
+     would be bound to detached elements after the first search.
+  5. **Esc**: the search field clears a non-empty query and stops there; on an
+     empty query it must **bubble** to the global handler (`app.js` ~line 1999)
+     which closes seven overlays in one pass. Never `preventDefault` it.
+  Mirrored controls (theme, Fit to screen) follow a strict
+  **single-mutator / single-painter** rule: `setTheme()` and
+  `toggleFitColumns()` remain the only mutators; `syncThemeControls()` /
+  `syncFitControls()` paint *both* the topbar and the settings widgets. The
+  settings controls must never write `STATE.fitColumns` or the theme directly.
+  **Gotcha:** the theme segmented control uses `data-theme-opt`, NOT
+  `data-theme` — `style.css` themes via unscoped `[data-theme="dark"]` /
+  `[data-theme="bloomberg"]` attribute selectors, so a button carrying
+  `data-theme="bloomberg"` silently adopts the whole Bloomberg palette while
+  sitting inside a dark-theme page. Verified in all three themes.
+- **Topbar single-class overrides lose the cascade.** `.topbar button` is
+  (0,1,1) and sets `font-size: 12.5px`; a bare `.gear-btn` / `.info-btn` rule is
+  (0,1,0) and is silently ignored. The gear's declared `font-size: 15px` never
+  applied for that reason and it rendered at 12.5px until v1.10.1, which added
+  `.topbar button.gear-btn { font-size: 20px }`. Measure computed styles in the
+  browser rather than trusting a declaration.
+- **Terminology: the LLM engine is labelled "LLM", not "AI"** (v1.10.1). "AI"
+  is too general for what is specifically the challenger to the ML model. The
+  CSS class names are historical and deliberately unchanged (`.ns-lg-ai`,
+  `.ns-dot-ai`, `.ns-tl-b.ai`, and the constituent column's `key: "ai"`) — class
+  says `ai`, engine is the LLM. The Excel export's "hand it to an AI agent" copy
+  is a different meaning and must stay.
 - **Flash Tape full-screen** (`openTapeFullscreen`, 99vw × 99vh): clicking the
   `#ns-tape-card` body opens it; `e.target.closest("a, select, button, input,
   label")` guards the links and filter controls. `renderNsTape({fullscreen})`

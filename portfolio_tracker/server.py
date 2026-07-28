@@ -40,7 +40,7 @@ warnings.showwarning = _showwarning_filter
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 from portfolio_tracker import __version__, __version_date__, __version_display__
-from portfolio_tracker import logbuf
+from portfolio_tracker import envcheck, logbuf
 from portfolio_tracker.analytics import (
     analyze_portfolio,
     analyze_portfolios_multi,
@@ -151,9 +151,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if parsed.path == "/api/health":
+            # env_ok is find_spec-only (see envcheck._importable) — no imports,
+            # no I/O — so it is safe on this hot, every-page-load route. It is
+            # what drives the "a required package is missing" banner; the
+            # expensive detail lives on /api/runtime-status.
             self._send_json(200, {
                 "ok": True, "ts": datetime.now(timezone.utc).isoformat(),
                 "version": __version__, "version_date": __version_date__,
+                "env_ok": envcheck.status()["ok"],
             })
             return
         if parsed.path == "/api/watchlists":
@@ -321,6 +326,47 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 1000
             self._send_json(200, logbuf.read(since=since, limit=limit))
+            return
+        if parsed.path == "/api/runtime-status":
+            # Cheap counterpart to /api/news-diagnostics: "is the ML model
+            # running, and if not, why" plus the dependency self-check — with no
+            # history load and no price fetch. Settings -> Models & Data calls
+            # this on open; the News tab's heavy diagnostics panel keeps using
+            # compute_diagnostics().
+            #
+            # Deliberately NOT folded into /api/health: runtime_status() calls
+            # ml_sentiment._load(), which imports lightgbm/scipy/sklearn, reads a
+            # 2**18-float32 idf vector and constructs a Booster. /api/health runs
+            # on every page load, so that cost belongs on an opt-in route where
+            # it is paid once and then cached process-wide by _STATE.
+            try:
+                from portfolio_tracker import ml_sentiment as _ml
+                ml = _ml.runtime_status()
+            except Exception as exc:
+                # Same shape as compute_diagnostics()'s except-branch so the
+                # frontend renders one thing regardless of which route served it.
+                ml = {"available": False, "reason": f"{type(exc).__name__}: {exc}",
+                      "model_dir": "", "model_dir_exists": False, "version": ""}
+            keys = {}
+            if _ns is not None:
+                try:
+                    st = _ns.status()
+                    # Booleans only — never serve key material to the frontend.
+                    keys = {
+                        "finnhub_key_set": bool(st.get("finnhub_key_set")),
+                        "nvidia_key_set": bool(st.get("nvidia_key_set")),
+                        "llm_model": getattr(_ns, "_MODEL", ""),
+                        "lexicon_available": bool(st.get("lexicon_available")),
+                    }
+                except Exception:
+                    keys = {}
+            self._send_json(200, {
+                "ml": ml,
+                "env": envcheck.status(),
+                "keys": keys,
+                "version": __version__,
+                "version_date": __version_date__,
+            })
             return
         if parsed.path == "/api/news-diagnostics":
             if _ns is None:
@@ -824,6 +870,16 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
     # particular). Idempotent; harmless in browser mode where a terminal
     # already exists.
     logbuf.install()
+    # Dependency self-check, immediately after the tee so the report is visible
+    # in Settings -> Logs as well as the terminal. This is the guardrail for the
+    # v1.10.0 failure: environment.yml declared lightgbm/scikit-learn but the
+    # installed `pt` env was never re-solved, so the ML model was dead in the
+    # shipped app with no signal beyond one easily-missed line. Now a stale env
+    # announces itself at boot and via env_ok on /api/health (which the frontend
+    # turns into a banner). find_spec-only, so this costs no measurable time.
+    _missing = envcheck.check()
+    if _missing:
+        print(envcheck.format_report(_missing), file=sys.stderr)
     port = _pick_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     # Per-connection handler threads (socketserver.ThreadingMixIn) default to

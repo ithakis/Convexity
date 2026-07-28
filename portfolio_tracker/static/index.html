@@ -12,7 +12,7 @@
 
 <div class="topbar" id="topbar">
   <button id="edit-btn" class="tab-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
-  <button id="news-btn" class="tab-btn" data-tip="Open the News &amp; Sentiment dashboard: AI-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
+  <button id="news-btn" class="tab-btn" data-tip="Open the News &amp; Sentiment dashboard: ML- and LLM-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
   <button id="optimize" data-tip="Open the Portfolio Optimization workspace: trace the mean-CVaR efficient frontier from your holdings using Black-Litterman expected returns (market-cap equilibrium + analyst-target views), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
   <button id="refresh" data-tip="Pull fresh quotes from Yahoo Finance for the current portfolio and rebuild the derived metrics as rows stream back in.">↻ Refresh</button>
   <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
@@ -125,7 +125,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
       <button data-days="14" type="button">14D</button>
       <button data-days="30" type="button">30D</button>
     </div>
-    <button id="ns-refresh" class="ns-refresh-btn" data-tip="Staged refresh: market first, then constituents by portfolio weight. Two AI passes per stock (self-consistency). Uses the selected analysis window.">&#8635; Refresh</button>
+    <button id="ns-refresh" class="ns-refresh-btn" data-tip="Staged refresh: market first, then constituents by portfolio weight. Two LLM passes per stock (self-consistency). Uses the selected analysis window.">&#8635; Refresh</button>
     <span class="ns-updated" id="ns-updated"></span>
   </div>
   <!-- Resizable 2x2 quad (item 1): one grid, draggable gutters. The vertical
@@ -158,14 +158,14 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   </div>
   <!-- News timeline (item 4): when news landed, at what intensity. -->
   <div class="ns-card ns-tl-card" id="ns-tl-card">
-    <h4>News Timeline<span class="ns-dual-legend" data-tip="Paired bars per article: the return-trained ML model on the left, the LLM on the right."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>AI</span></h4>
+    <h4>News Timeline<span class="ns-dual-legend" data-tip="Paired bars per article: the return-trained ML model on the left, the LLM on the right."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>LLM</span></h4>
     <div class="ns-tl-controls" id="ns-tl-controls"></div>
     <div class="ns-tl-body" id="ns-tl-body"><div class="ns-empty">Refresh to load the news timeline.</div></div>
   </div>
   <!-- Click anywhere on this card (except a link or a filter control) to open
        the 99%-viewport full-screen tape. See openTapeFullscreen in app.js. -->
   <div class="ns-card ns-tape-card" id="ns-tape-card">
-    <h4>Flash Tape<span class="ns-dual-legend" data-tip="Two dots per article: the return-trained ML model first, the LLM second."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>AI</span><span class="ns-expand-hint">click to expand &#9974;</span></h4>
+    <h4>Flash Tape<span class="ns-dual-legend" data-tip="Two dots per article: the return-trained ML model first, the LLM second."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>LLM</span><span class="ns-expand-hint">click to expand &#9974;</span></h4>
     <div class="ns-tape-filters" id="ns-tape-filters"></div>
     <div class="ns-tape-body" id="ns-tape-body"><div class="ns-empty">Refresh to load the headline tape.</div></div>
   </div>
@@ -749,7 +749,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 <div class="modal-bg" id="methodology-bg"><div class="modal methodology-modal" id="methodology-modal" role="dialog" aria-modal="true" aria-label="News sentiment methodology"></div></div>
 
 <!-- News refresh progress modal: one job row per constituent + the market,
-     each with a bar that fills through fetch → AI pass 1 → pass 2 → done.
+     each with a bar that fills through fetch → LLM pass 1 → pass 2 → done.
      Two rows animate at once (the refresh runs a 2-worker pool). -->
 <div class="modal-bg" id="ns-prog-bg" hidden>
   <div class="modal ns-prog-modal" role="dialog" aria-modal="true" aria-label="Refreshing news sentiment">
@@ -774,9 +774,20 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
       <button class="settings-close" id="settings-close" aria-label="Close settings">&times;</button>
     </div>
     <div class="settings-body">
+      <!-- The search input is STATIC on purpose. renderSettingsNav() rebuilds
+           #settings-nav-list on every keystroke; if the input lived inside that
+           subtree it would be destroyed and recreated mid-type, blurring the
+           field and dropping the caret. Only the list below it is dynamic.
+           The nav items themselves come from SETTINGS_SECTIONS in app.js — add
+           a section there, not here. -->
       <nav class="settings-nav" id="settings-nav">
-        <button class="settings-nav-item" data-section="general">General</button>
-        <button class="settings-nav-item" data-section="logs">Logs</button>
+        <div class="settings-search-wrap">
+          <span class="settings-search-icon" aria-hidden="true">&#9906;</span>
+          <input class="settings-search" id="settings-search" type="text"
+                 placeholder="Search settings" autocomplete="off" spellcheck="false"
+                 aria-label="Search settings">
+        </div>
+        <div class="settings-nav-list" id="settings-nav-list"></div>
       </nav>
       <div class="settings-pane" id="settings-pane"></div>
     </div>
@@ -790,7 +801,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   <div class="ns-tape-fs-modal" role="dialog" aria-modal="true" aria-label="Flash Tape">
     <div class="ns-tape-fs-head">
       <span class="ns-tape-fs-title">Flash Tape</span>
-      <span class="ns-dual-legend" data-tip="Each article carries two signals: the return-trained ML model and the LLM. ML dot first, AI dot second."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>AI</span>
+      <span class="ns-dual-legend" data-tip="Each article carries two signals: the return-trained ML model and the LLM. ML dot first, LLM dot second."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>LLM</span>
       <div class="ns-tape-filters" id="ns-tape-fs-filters"></div>
       <span class="spacer"></span>
       <span class="ns-tape-fs-count" id="ns-tape-fs-count"></span>

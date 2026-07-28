@@ -93,8 +93,19 @@ if (Test-Path $EnvDir) {
     Assert-Success "env create"
 }
 
+# Prove the env can actually import what the app needs, rather than trusting
+# that the solver did what environment.yml asked. A half-solved env used to
+# pass silently here and only surfaced weeks later as a dead ML model inside
+# the running app. envcheck exits non-zero on a critical miss, and
+# Assert-Success is required because PowerShell does not fail on a native
+# command's exit code even under $ErrorActionPreference = "Stop".
 $EnvPythonw = "$EnvDir\pythonw.exe"
 $EnvPython = "$EnvDir\python.exe"
+if (Test-Path $EnvPython) {
+    Write-Host "==> Verifying runtime dependencies in '$EnvName'..."
+    & $EnvPython -m portfolio_tracker.envcheck
+    Assert-Success "dependency check"
+}
 if (-not (Test-Path $EnvPythonw)) {
     Write-Host "ERROR: expected interpreter not found at $EnvPythonw" -ForegroundColor Red
     exit 1

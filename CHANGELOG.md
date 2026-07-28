@@ -5,6 +5,60 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.10.1 — 2026-07-28
+**1.10.0 fixed the dependency *declaration*; this release makes the ML model
+actually run, and makes the failure impossible to miss next time.**
+
+- **The ML model was still dead after 1.10.0.** Adding `lightgbm` and
+  `scikit-learn` to `environment.yml` changes nothing until someone re-solves
+  the environment, and nothing in the app, the launcher, or CI ever said so.
+  On the reference machine the `pt` env's last solve was **2026-07-07 — twenty
+  days before the 1.10.0 commit**; pulling the fix and restarting could not
+  help, because the packages had never been installed. A dependency
+  declaration is not a dependency. **If you are upgrading from 1.10.0, run
+  `./update.sh` and fully relaunch the app.**
+- **New `portfolio_tracker/envcheck.py` — one manifest, three enforcement
+  points.** `REQUIRED` lists every runtime dependency with the feature it
+  kills. It is checked at server start (a loud report into the terminal *and*
+  Settings → Logs), served to the UI, and run by `install.sh`/`update.sh`
+  (and the PowerShell twins) against the freshly-solved env, so a half-built
+  environment fails the installer instead of exiting 0.
+- **New CI gate:** `scripts/check_dependency_manifests.py` asserts every
+  `REQUIRED` entry is declared in **both** `requirements.txt` (pip, what CI
+  installs) and `environment.yml` (conda, what the desktop app ships on). The
+  two were never compared before, which is the entire root cause of the
+  original bug. Verified to fail when a dependency is removed.
+- **A stale environment now announces itself.** `/api/health` carries a cheap
+  `env_ok` flag (import-spec probe only, no imports), which renders a banner
+  directly under the topbar instead of the app silently running degraded.
+  A new cheap `GET /api/runtime-status` serves ML availability, the dependency
+  check and provider-key status without the pandas/price-fetch cost of
+  `/api/news-diagnostics`.
+- **`tests/test_ml_sentiment.py` no longer skips itself into silence.** It used
+  bare `pytest.importorskip`, so in exactly the broken environment the entire
+  ML module skipped rather than failed. Missing deps are now a failure unless
+  `PT_ALLOW_MISSING_ML=1` is set deliberately.
+- **Settings overlay rebuilt** around a section registry: a search box at the
+  top of the sidebar, grouped nav categories below it, and a right pane that
+  titles and explains each section. `General` is no longer a placeholder — it
+  carries the theme picker (making the long-press-only **Bloomberg** theme
+  discoverable) and the "Fit to screen" toggle, both mirroring the topbar
+  controls through single-mutator/single-painter sync helpers. New
+  **Models & Data** section surfaces ML runtime state where someone would
+  actually look for it, plus **About**. Adding a section is now one array
+  entry, not an HTML edit.
+- **"AI" renamed to "LLM" throughout the news-sentiment UI** — the gauge badge,
+  all three dual-engine legends, tier tooltips, the constituent-table column,
+  Model Diagnostics headings and the Methodology prose. "AI" was too general
+  for what is specifically the LLM challenger to the ML model. The Excel
+  export's "hand it to an AI agent" copy is a different meaning and unchanged.
+- **The settings gear was never actually the size it claimed.** `.gear-btn`
+  declared `font-size: 15px` but `.topbar button` (higher specificity) won the
+  cascade, so it rendered at 12.5px. Now correctly specified and enlarged to
+  20px, with the 30×30 footprint and info-button pairing unchanged.
+- `requirements.txt` no longer calls `lightgbm`/`scikit-learn` "Optional",
+  which contradicted `environment.yml` and is how they became droppable.
+
 ## 1.10.0 — 2026-07-27
 **The ML sentiment model has been dead in every installed copy — plus a
 backend console, a full-screen tape, and dual-engine sentiment everywhere.**

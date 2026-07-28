@@ -35,5 +35,20 @@ fi
 echo "==> Updating '$ENV_NAME' env..."
 "$SOLVER" env update -n "$ENV_NAME" -f environment.yml --prune
 
+# Verify rather than assume. This script is the documented fix for a stale env,
+# so it must fail loudly if the sync did not actually deliver the packages —
+# otherwise it reports success and the app keeps running degraded, which is
+# exactly how the ML model stayed dead through v1.10.0.
+CONDA_BASE="$(conda info --base)"
+ENV_PY="$CONDA_BASE/envs/$ENV_NAME/bin/python"
+if [ -x "$ENV_PY" ]; then
+    echo "==> Verifying runtime dependencies in '$ENV_NAME'..."
+    "$ENV_PY" -m portfolio_tracker.envcheck
+else
+    echo "WARNING: interpreter not found at $ENV_PY — skipping dependency check" >&2
+fi
+
 echo ""
-echo "==> Done. Relaunch Portfolio _App to pick up the update."
+echo "==> Done. Fully quit and relaunch Portfolio _App to pick up the update."
+echo "    (A failed model load is cached for the process lifetime, so an"
+echo "     already-running app will not pick up new packages in place.)"

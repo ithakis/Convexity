@@ -27,9 +27,13 @@ lxml>=4.9.0
 # NIM endpoint for AI-powered news sentiment analysis (news_sentiment.py).
 # The lightweight nemotron model provides structured sentiment scoring.
 openai>=1.0.0
-# Optional — ML news-sentiment inference (ml_sentiment.py, MLNews pipeline).
-# Without these the app runs unchanged and the ml_* sentiment fields are
-# simply absent (graceful degradation, same pattern as finnhub_adapter).
+# Required — ML news-sentiment inference (ml_sentiment.py, MLNews pipeline).
+# These are the PRIMARY news-sentiment signal, not an extra: without them every
+# ml_* field is null and the app silently falls back to the LLM challenger.
+# They were labelled "Optional" here and omitted from environment.yml until
+# v1.10.1, which is precisely why the model was dead in every installed copy of
+# the desktop app. Both files must list them — enforced in CI by
+# scripts/check_dependency_manifests.py against portfolio_tracker/envcheck.py.
 # The trained artifact lives at ~/.portfolio_tracker/ml_model/mlsent-v1/.
 lightgbm>=4.0
 scikit-learn>=1.3

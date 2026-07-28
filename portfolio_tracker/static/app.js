@@ -220,7 +220,7 @@ const COL_INFO = {
   target_upside_pct: "Distance from current price to mean analyst price target, signed (positive = upside).",
   w52_high:      "Highest closing price over the trailing 52 weeks.",
   w52_low:       "Lowest closing price over the trailing 52 weeks.",
-  news_sentiment: "News sentiment signal over the selected analysis window (News tab → Window, default 7 days): per-article AI scores aggregated with recency/source/novelty/relevance weights, plus a β·market systematic tilt. Dot: green = bullish, gray = neutral, red = bearish. Hover for the Bloomberg-style brief. Finnhub + Yahoo news, NVIDIA NIM scoring.",
+  news_sentiment: "News sentiment signal over the selected analysis window (News tab → Window, default 7 days): per-article ML scores (LLM as the fallback) aggregated with recency/source/novelty/relevance weights, plus a β·market systematic tilt. Dot: green = bullish, gray = neutral, red = bearish. Hover for the Bloomberg-style brief. Finnhub + Yahoo news, NVIDIA NIM scoring.",
 };
 
 /* Short (~40-55 char) inline descriptions for the Customize Columns modal —
@@ -278,7 +278,7 @@ const COL_INFO_SHORT = {
   target_upside_pct: "Upside to mean price target",
   w52_high: "Highest close, trailing 52 weeks",
   w52_low: "Lowest close, trailing 52 weeks",
-  news_sentiment: "AI-assessed news sentiment",
+  news_sentiment: "ML- and LLM-assessed news sentiment",
 };
 
 /* Category grouping for the Customize Columns modal — purely a display
@@ -423,11 +423,40 @@ function isDarkTheme(t) { t = t || getTheme(); return t === "dark" || t === "blo
 function setTheme(name) {
   document.documentElement.dataset.theme = name;
   localStorage.setItem("theme", name);
+  syncThemeControls(name);
+  if (DATA.length) render();
+}
+
+/* Paint every control that DISPLAYS the current theme, from the one place that
+   changes it. The theme now has two surfaces — the topbar switch and the
+   Settings > General segmented control — and neither may read the other's DOM
+   or hold its own copy of the state: setTheme() is the single mutator and this
+   is the single painter. That is what keeps the long-press-for-Bloomberg
+   gesture and the settings picker in sync in both directions. Every lookup is
+   null-guarded so this no-ops when the overlay is closed. */
+function syncThemeControls(name) {
+  name = name || getTheme();
   const track = document.getElementById("ts-track");
   if (track) track.classList.toggle("on", name !== "light");
   const btn = document.getElementById("theme-switch");
   if (btn) btn.classList.toggle("bbg", name === "bloomberg");
-  if (DATA.length) render();
+  document.querySelectorAll(".settings-seg-opt[data-theme-opt]").forEach(o => {
+    o.classList.toggle("active", o.dataset.themeOpt === name);
+  });
+}
+
+/* Same contract as syncThemeControls, for the "Fit to screen" preference:
+   toggleFitColumns() is the only mutator, this paints the topbar pill and the
+   Settings > General checkbox. */
+function syncFitControls() {
+  const on = !!STATE.fitColumns;
+  const btn = document.getElementById("cv-fit-toggle");
+  if (btn) {
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  const box = document.getElementById("settings-fit");
+  if (box) box.checked = on;
 }
 function readTheme() {
   const saved = localStorage.getItem("theme");
@@ -837,6 +866,7 @@ function applyTableFitMode(columns = getActiveColumns()) {
 function toggleFitColumns() {
   STATE.fitColumns = !STATE.fitColumns;
   persistFitColumnsPreference(STATE.fitColumns);
+  syncFitControls();
   render();
 }
 function rgb(r, g, b) { return `rgb(${r|0},${g|0},${b|0})`; }
@@ -1243,7 +1273,7 @@ function nsTierDot(tier, score, engine, summary) {
   const color = NS_COLORS[tier] || NS_COLORS.neutral;
   const cls = engine === "ml" ? "ns-dot" : "ns-dot ns-dot-ai";
   const num = (score != null && isFinite(score)) ? ` (${score >= 0 ? "+" : ""}${score.toFixed(2)})` : "";
-  const tip = `${engine === "ml" ? "ML" : "AI"} · ${label}${num}${summary ? " — " + summary : ""}`;
+  const tip = `${engine === "ml" ? "ML" : "LLM"} · ${label}${num}${summary ? " — " + summary : ""}`;
   return `<span class="${cls}" style="background:${color}" data-tip="${escapeHtml(tip)}"></span>`;
 }
 function nsDot(ns) {
@@ -1254,7 +1284,7 @@ function nsDot(ns) {
     const mlDot = nsTierDot(ns.tier, ns.score, "ml", summary);
     const aiDot = llmTier
       ? nsTierDot(llmTier, ns.llm_score != null ? ns.llm_score : ns.s_total, "llm", "")
-      : `<span class="ns-dot ns-dot-ai ns-empty" data-tip="AI — not scored"></span>`;
+      : `<span class="ns-dot ns-dot-ai ns-empty" data-tip="LLM — not scored"></span>`;
     return `<span class="ns-dots">${mlDot}${aiDot}</span>`;
   }
   // LLM-only: one hollow ML slot keeps the pair aligned down the column.
@@ -1523,11 +1553,9 @@ function renderColumnViewBar() {
      to diverge from, so no pill. */
   const dirty = document.getElementById("cv-dirty");
   if (dirty) dirty.hidden = !builtinHasOverride(activeName);
-  const fitBtn = document.getElementById("cv-fit-toggle");
-  if (fitBtn) {
-    fitBtn.classList.toggle("active", !!STATE.fitColumns);
-    fitBtn.setAttribute("aria-pressed", STATE.fitColumns ? "true" : "false");
-  }
+  // Painting the fit pill lives in syncFitControls() so the topbar and the
+  // Settings > General checkbox can never disagree about the same preference.
+  syncFitControls();
 }
 
 /* Reset the active built-in to its factory definition by dropping its
@@ -5400,8 +5428,8 @@ const NS_PROG_STAGE = {
   queued:    { frac: 0.00, txt: "queued" },
   start:     { frac: 0.05, txt: "starting…" },
   fetch:     { frac: 0.35, txt: "fetched news…" },
-  score1:    { frac: 0.60, txt: "AI pass 1…" },
-  score2:    { frac: 0.85, txt: "AI pass 2…" },
+  score1:    { frac: 0.60, txt: "LLM pass 1…" },
+  score2:    { frac: 0.85, txt: "LLM pass 2…" },
   aggregate: { frac: 0.95, txt: "aggregating…" },
 };
 
@@ -5685,12 +5713,12 @@ function nsArticleLlmScore(a) {
   return (a.score != null && isFinite(a.score)) ? a.score : null;
 }
 
-/* Two bare dots, ML first then AI. Each carries its own tooltip naming the
+/* Two bare dots, ML first then LLM. Each carries its own tooltip naming the
  * engine, so the pair is self-explanatory without labels crowding the row.
  * A missing engine renders a hollow dot rather than collapsing the pair —
  * alignment across rows matters more than saving 10px. */
 function nsEngineDot(score, engine) {
-  const label = engine === "ml" ? "ML" : "AI";
+  const label = engine === "ml" ? "ML" : "LLM";
   const cls = engine === "ml" ? "ns-dot" : "ns-dot ns-dot-ai";
   if (score == null || !isFinite(score)) {
     return `<span class="${cls} ns-empty" data-tip="${label} — not scored"></span>`;
@@ -5843,7 +5871,7 @@ function svgHeat(matrix, rowLabels, colLabels, opts) {
       const v = matrix[r][c] || 0;
       const op = v ? (0.12 + 0.78 * (v / mx)) : 0.04;
       const x = padL + c * cell, y = padT + r * cell;
-      cells += `<rect x="${x}" y="${y}" width="${cell - 2}" height="${cell - 2}" rx="3" style="fill:${SVG_ACC};opacity:${op.toFixed(3)}"><title>ML ${svgEsc(rowLabels[r])} × AI ${svgEsc(colLabels[c])}: ${v}</title></rect>`;
+      cells += `<rect x="${x}" y="${y}" width="${cell - 2}" height="${cell - 2}" rx="3" style="fill:${SVG_ACC};opacity:${op.toFixed(3)}"><title>ML ${svgEsc(rowLabels[r])} × LLM ${svgEsc(colLabels[c])}: ${v}</title></rect>`;
       if (v) cells += `<text x="${(x + cell / 2 - 1).toFixed(1)}" y="${(y + cell / 2 + 2).toFixed(1)}" text-anchor="middle" style="fill:var(--text)" font-size="10" font-weight="600">${v}</text>`;
     }
     rlab += `<text x="${padL - 6}" y="${(padT + r * cell + cell / 2 + 2).toFixed(1)}" text-anchor="end" style="fill:var(--muted)" font-size="8.5">${svgEsc(rowLabels[r])}</text>`;
@@ -5927,7 +5955,7 @@ function renderNsGauge(symbols) {
         <span class="ns-gauge-metric"><span class="lbl">ML coverage</span><b>${nMl}/${nAssessed}</b> <span class="sub">(${covPct}%)</span></span>
       </div>
       <div class="ns-gauge-challenger" data-tip="Legacy LLM sentiment, kept as a challenger for comparison in Model Diagnostics.">
-        <span class="ns-eng-tag ns-eng-llm">AI</span>
+        <span class="ns-eng-tag ns-eng-llm">LLM</span>
         <span>challenger ${fmtSig(sTot)}</span>
         <span class="ns-tier-badge sm ${llmTier}">${escapeHtml(NS_LABELS[llmTier] || "Neutral")}</span>
       </div>
@@ -5942,7 +5970,7 @@ function renderNsGauge(symbols) {
     <div class="ns-gauge-top">
       <span class="ns-gauge-num">${fmtSig(sTot)}</span>
       <span class="ns-tier-badge ${tier}">${escapeHtml(NS_LABELS[tier] || "Neutral")}</span>
-      <span class="ns-eng-tag ns-eng-llm" data-tip="LLM sentiment — the ML model scored none of these holdings. Open Model Diagnostics for the reason (it names the actual cause: environment, artifact, or simply no coverage yet), or Settings → Logs for the raw backend output.">AI</span>
+      <span class="ns-eng-tag ns-eng-llm" data-tip="LLM sentiment — the ML model scored none of these holdings. Open Model Diagnostics for the reason (it names the actual cause: environment, artifact, or simply no coverage yet), or Settings → Logs for the raw backend output.">LLM</span>
     </div>
     ${barSeg(sSys, "sys")}
     ${barSeg(sIdio, "idio")}
@@ -6024,7 +6052,7 @@ function renderNsWatch(symbols) {
     const s = NS.sentiment[sym];
     if (!s) continue;
     if (s.disagreement) {
-      items.push(`<div class="ns-watch-row">⚑ <b>${sym}</b> — AI and dictionary sentiment disagree; treat the signal with caution.</div>`);
+      items.push(`<div class="ns-watch-row">⚑ <b>${sym}</b> — LLM and dictionary sentiment disagree; treat the signal with caution.</div>`);
     }
     if (s.tier === "very_bearish" || s.tier === "very_bullish") {
       const lbl = NS_LABELS[s.tier] || s.tier;
@@ -6135,7 +6163,7 @@ function renderNsTape(opts) {
       <span class="ns-tape-time">${stamp}</span>
       <span class="ns-tape-sym">${escapeHtml(a.symbol || "")}</span>
       ${nsDualDots(a)}
-      <span class="ns-tape-score" data-tip="Displayed signal (ML when scored, else AI)">${fmtSig(disp)}</span>
+      <span class="ns-tape-score" data-tip="Displayed signal (ML when scored, else LLM)">${fmtSig(disp)}</span>
       <span class="ns-tape-main"><span class="ns-tape-head">${link}</span>${sum}</span>
       ${ev}${dup}
       <span class="ns-src">${escapeHtml(a.source || "")}</span>
@@ -6257,7 +6285,7 @@ function renderNsTimeline() {
     const ml = nsArticleMlScore(a), llm = nsArticleLlmScore(a);
     const lvMl = nsTlLevel(ml), lvAi = nsTlLevel(llm);
     const part = (v, l, name) => `${name} ${(v != null && isFinite(v)) ? fmtSig(v) : "n/a"} (${v == null ? "not scored" : l.lbl})`;
-    const tip = `${stamp} · ${a.symbol || ""} — ${part(ml, lvMl, "ML")} · ${part(llm, lvAi, "AI")} — ${head}`;
+    const tip = `${stamp} · ${a.symbol || ""} — ${part(ml, lvMl, "ML")} · ${part(llm, lvAi, "LLM")} — ${head}`;
     return `<a class="ns-tl-pair" href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener"
       style="left:${x.toFixed(3)}%" data-tip="${escapeHtml(tip)}"
       ><i class="ns-tl-b ml" style="height:${ml == null ? 0 : lvMl.h}%;background:${lvMl.color}"></i
@@ -6383,12 +6411,12 @@ function renderPortfolioSentiment(symbols, _status) {
     { key: "pct_1w",  label: "% 1W",    cls: "r", align: "r", tip: "Return over the last 7 calendar days", sv: (r) => r.pct_1w },
     { key: "beta",    label: "β",       cls: "r", align: "r", sv: (r) => r.beta },
     { key: "signal",  label: "Signal",  cls: "c", align: "c", tip: "Primary signal (v1.6.1): the return-trained ML model's tier. Falls back to the LLM when the model hasn't scored this stock.", sv: (r, s) => s ? s.score : null },
-    { key: "ai",      label: "AI",      cls: "c", align: "c", tip: "Challenger: the legacy LLM total signal, kept for comparison", sv: (r, s) => s ? (s.llm_score != null ? s.llm_score : s.s_total) : null },
+    { key: "ai",      label: "LLM",      cls: "c", align: "c", tip: "Challenger: the legacy LLM total signal, kept for comparison", sv: (r, s) => s ? (s.llm_score != null ? s.llm_score : s.s_total) : null },
     { key: "idio",    label: "Idio",    cls: "r", align: "r", tip: "LLM idiosyncratic news score — company-specific signal only", sv: (r, s) => s ? s.s_idio : null },
     { key: "sys",     label: "Sys",     cls: "r", align: "r", tip: "LLM systematic tilt: κ·β·market sentiment", sv: (r, s) => s ? s.s_sys : null },
     { key: "conf",    label: "Conf",    cls: "c", align: "c", tip: "Confidence: evidence mass, article agreement, self-consistency", sv: (r, s) => s ? (s.ml_confidence != null ? s.ml_confidence : s.confidence) : null },
     { key: "events",  label: "Events",  cls: "",  align: "l", sortable: false },
-    { key: "flag",    label: "⚑",       cls: "c", align: "c", tip: "AI vs Loughran-McDonald dictionary disagreement flag", sv: (r, s) => (s && s.disagreement) ? 1 : 0 },
+    { key: "flag",    label: "⚑",       cls: "c", align: "c", tip: "LLM vs Loughran-McDonald dictionary disagreement flag", sv: (r, s) => (s && s.disagreement) ? 1 : 0 },
   ];
   const colByKey = Object.fromEntries(nsCols.map(c => [c.key, c]));
   // Sort the symbol order. Missing values always sink to the bottom regardless
@@ -6432,7 +6460,7 @@ function renderPortfolioSentiment(symbols, _status) {
     const s = NS.sentiment[sym];
     const tierLabel = s ? (NS_LABELS[s.tier] || s.tier) : "—";
     const tierColor = s ? (NS_COLORS[s.tier] || "#94a3b8") : "var(--muted)";
-    // AI (LLM) challenger tier for the comparison column.
+    // LLM challenger tier for the comparison column.
     const llmTier = s ? (s.llm_tier || nsTierFromScore(s.llm_score != null ? s.llm_score : s.s_total)) : null;
     const aiColor = llmTier ? (NS_COLORS[llmTier] || "#94a3b8") : "var(--muted)";
     const aiScore = s ? (s.llm_score != null ? s.llm_score : s.s_total) : null;
@@ -6468,7 +6496,7 @@ function renderPortfolioSentiment(symbols, _status) {
       <td class="r">${s ? fmtSig(s.s_sys) : "—"}</td>
       <td class="c">${conf}</td>
       <td>${events}</td>
-      <td class="c">${s && s.disagreement ? '<span data-tip="AI and LM dictionary disagree on polarity">⚑</span>' : ""}</td>
+      <td class="c">${s && s.disagreement ? '<span data-tip="LLM and LM dictionary disagree on polarity">⚑</span>' : ""}</td>
     </tr>`;
     if (isOpen && s) {
       // Order by |score| desc so the most material (bullish OR bearish) news
@@ -6520,18 +6548,18 @@ const NS_DIAG_ABOUT_HTML = `
   primary <b>return-trained ML model</b> is calibrated and actually predictive — not just
   plausible-looking. It is computed from <code>.portfolio_tracker_sentiment_history.json</code>,
   the append-only log of every score the model has produced, joined against realized returns.
-  The LLM ("AI") is shown alongside as a challenger. For how the ML model was built and its full
+  The LLM is shown alongside as a challenger. For how the ML model was built and its full
   backtest, use the <b>Methodology</b> link.</p>
-  <p><b>Live rank IC — ML vs AI.</b> For each past score we take the stock's <i>idiosyncratic</i>
+  <p><b>Live rank IC — ML vs LLM.</b> For each past score we take the stock's <i>idiosyncratic</i>
   forward return (its move with the market component <code>β·r_SPY</code> stripped out) over the
   next 1 and 5 trading days, then compute the <b>Spearman rank correlation</b> between score and
-  that return. Positive = predictive. The AI row is re-scored on the same records so the
+  that return. Positive = predictive. The LLM row is re-scored on the same records so the
   comparison is fair. Small samples are indicative until history builds up.</p>
   <p><b>Rolling live IC.</b> The same IC computed on an expanding window through each date — a
   stable line above zero means the signal is holding up in production, not just on backtest.</p>
   <p><b>Calibration.</b> Predicted-SAR bins vs the mean realized next-day return. An upward slope
   means higher predictions really do precede higher returns.</p>
-  <p><b>ML vs AI tier agreement.</b> A 5×5 grid of where the two engines land. Off-diagonal mass
+  <p><b>ML vs LLM tier agreement.</b> A 5×5 grid of where the two engines land. Off-diagonal mass
   means the ML model adds independent signal rather than echoing the LLM.</p>
   <p><b>Coverage &amp; confidence, and forward return by ML tier.</b> How much of the book the ML
   model scores and how confident it is, plus a monotonicity check that realized returns rise from
@@ -6589,46 +6617,40 @@ function renderNsDiagnostics(d) {
   // ml_sentiment.runtime_status() so the reason shown is the real exception.
   const rt = d.ml_runtime;
   if (rt && !rt.available) {
-    const why = rt.reason || "the model did not load";
-    const hint = /lightgbm|sklearn|scikit|ModuleNotFound|ImportError/i.test(why)
-      ? `The environment is missing a dependency. Run <code>./update.sh</code> to sync the conda env, then restart the app.`
-      : (rt.model_dir && !rt.model_dir_exists
-          ? `No artifact found at <code>${escapeHtml(rt.model_dir)}</code> — deploy the ${escapeHtml(rt.version || "mlsent")} bundle there.`
-          : `Check <b>Settings → Logs</b> for the full backend output.`);
     parts.push(`<div class="ns-ml-banner"><b>ML model is not running.</b> Every panel below is
       LLM-only and <code>ml_*</code> fields are being written as null.<br>
-      Reason: <code>${escapeHtml(why)}</code><br>${hint}</div>`);
+      Reason: <code>${escapeHtml(rt.reason || "the model did not load")}</code><br>${mlRuntimeHint(rt)}</div>`);
   }
 
-  // 1) ML vs AI live IC scoreboard (ML primary). llm_ic_common re-scores the
+  // 1) ML vs LLM live IC scoreboard (ML primary). llm_ic_common re-scores the
   // LLM on the SAME records for an apples-to-apples comparison.
   if (d.ml && d.ml.n_records > 0) {
     const icRow = (label, o, cls) => o
       ? `<tr class="${cls || ""}"><td>${label}</td><td class="r">${o["1d"] && o["1d"].ic != null ? fmtSig(o["1d"].ic, 3) : "—"}</td><td class="r">${o["5d"] && o["5d"].ic != null ? fmtSig(o["5d"].ic, 3) : "—"}</td><td class="r">${o["1d"] ? o["1d"].n : "—"}</td><td class="r">${o["1d"] && o["1d"].t_stat != null ? o["1d"].t_stat : "—"}</td></tr>`
       : "";
     parts.push(`<div class="ns-diag-sec">
-      <h5>Live rank IC — ML vs AI (same records)</h5>
+      <h5>Live rank IC — ML vs LLM (same records)</h5>
       <table class="ns-table ns-diag-table"><thead><tr><th>Signal</th><th class="r">IC 1d</th><th class="r">IC 5d</th><th class="r">n</th><th class="r">t 1d</th></tr></thead>
-      <tbody>${icRow("ML (LightGBM)", d.ml.ic, "ns-diag-primary")}${icRow("AI (LLM)", d.ml.llm_ic_common)}</tbody></table>
+      <tbody>${icRow("ML (LightGBM)", d.ml.ic, "ns-diag-primary")}${icRow("LLM", d.ml.llm_ic_common)}</tbody></table>
       <div class="ns-diag-note">Spearman IC of each signal vs the next 1d / 5d idiosyncratic return. Positive = predictive. ${d.ml.days} day${d.ml.days === 1 ? "" : "s"} of history (${d.ml.n_records} obs${d.ml.date_min ? `, since ${d.ml.date_min}` : ""}); small samples are indicative until they build up.</div>
     </div>`);
   } else {
     const emptyWhy = (rt && !rt.available)
       ? "The ML model is not running (see the banner above) — refreshes are writing null ML scores."
       : "No ML-scored history yet — refresh news to start accumulating.";
-    parts.push(`<div class="ns-diag-sec"><h5>Live rank IC — ML vs AI</h5><div class="ns-panel-empty">${emptyWhy}</div></div>`);
+    parts.push(`<div class="ns-diag-sec"><h5>Live rank IC — ML vs LLM</h5><div class="ns-panel-empty">${emptyWhy}</div></div>`);
   }
 
   // 2) Rolling live IC — is the signal holding up as observations accrue?
   if (Array.isArray(d.rolling) && d.rolling.length >= 2) {
     const idx = d.rolling.map((r, i) => ({ ...r, i }));
     const mlPts = idx.filter(r => r.ml_ic != null).map(r => ({ x: r.i, y: r.ml_ic, tip: `${r.date} · ML IC ${fmtSig(r.ml_ic, 3)} (n=${r.n_ml})` }));
-    const llmPts = idx.filter(r => r.llm_ic != null).map(r => ({ x: r.i, y: r.llm_ic, tip: `${r.date} · AI IC ${fmtSig(r.llm_ic, 3)} (n=${r.n})` }));
+    const llmPts = idx.filter(r => r.llm_ic != null).map(r => ({ x: r.i, y: r.llm_ic, tip: `${r.date} · LLM IC ${fmtSig(r.llm_ic, 3)} (n=${r.n})` }));
     const step = Math.max(1, Math.floor(idx.length / 5));
     const xLabels = idx.filter((_, i) => i % step === 0).map(r => ({ x: r.i, label: (r.date || "").slice(5) }));
     const chart = svgLine([
       { name: "ML", color: SVG_ACC, points: mlPts },
-      { name: "AI", color: SVG_MUT, points: llmPts },
+      { name: "LLM", color: SVG_MUT, points: llmPts },
     ], { y0: true, xLabels, fmt: v => v.toFixed(2) });
     parts.push(`<div class="ns-diag-sec"><h5>Rolling live IC (expanding window)</h5>${chart}
       <div class="ns-diag-note">Cumulative IC through each date. A stable line above zero is the "still working live" signal.</div></div>`);
@@ -6649,9 +6671,9 @@ function renderNsDiagnostics(d) {
   // 4) ML–LLM tier agreement grid.
   if (d.agreement && d.agreement.n > 0) {
     const chart = svgHeat(d.agreement.matrix, d.agreement.order.map(t => NS_TIER_SHORT[t] || t), d.agreement.order.map(t => NS_TIER_SHORT[t] || t), { cell: 32 });
-    parts.push(`<div class="ns-diag-sec"><h5>ML vs AI tier agreement</h5>
+    parts.push(`<div class="ns-diag-sec"><h5>ML vs LLM tier agreement</h5>
       <div class="ns-diag-grid-wrap"><div class="ns-diag-axis-y">ML tier ↓</div>${chart}</div>
-      <div class="ns-diag-note">Rows = ML tier, columns = AI tier. Diagonal = agreement (${d.agreement.agree_pct != null ? d.agreement.agree_pct + "%" : "—"} of ${d.agreement.n}); off-diagonal mass means the ML model is adding signal the LLM misses, not just echoing it.</div></div>`);
+      <div class="ns-diag-note">Rows = ML tier, columns = LLM tier. Diagonal = agreement (${d.agreement.agree_pct != null ? d.agreement.agree_pct + "%" : "—"} of ${d.agreement.n}); off-diagonal mass means the ML model is adding signal the LLM misses, not just echoing it.</div></div>`);
   }
 
   // 5) Coverage & confidence.
@@ -6693,7 +6715,7 @@ function renderNsDiagnostics(d) {
     const calNote = d.calibration_active
       ? `quantile calibration active (${d.calibration_n} obs)`
       : `fixed thresholds until ${100} obs (${d.calibration_n} so far)`;
-    parts.push(`<div class="ns-diag-sec"><h5>AI score distribution (90d, s_total)</h5>
+    parts.push(`<div class="ns-diag-sec"><h5>LLM score distribution (90d, s_total)</h5>
       <div class="ns-hist">${cols}</div>
       <div class="ns-hist-axis"><span>-1</span><span>0</span><span>+1</span></div>
       <div class="ns-diag-note">${calNote}</div></div>`);
@@ -6775,7 +6797,7 @@ function methodologyHtml() {
   <div class="mth-head">
     <div>
       <h2>How the News Sentiment Model Works</h2>
-      <div class="mth-sub">A return-trained signal — grounded in how stocks actually move on news, not an AI's opinion</div>
+      <div class="mth-sub">A return-trained signal — grounded in how stocks actually move on news, not a language model's opinion</div>
     </div>
     <button class="m-close" id="methodology-close" title="Close" aria-label="Close">×</button>
   </div>
@@ -8631,10 +8653,41 @@ function versionLabel() {
 
 function loadAppVersion() {
   fetch("/api/health").then(r => r.json()).then(d => {
-    if (!d || !d.version) return;
+    if (!d) return;
+    // env_ok is the cheap find_spec-only self-check from portfolio_tracker/
+    // envcheck.py. It rides on /api/health precisely so a stale environment
+    // announces itself on page load rather than waiting for the user to open
+    // the one panel that would have explained it.
+    if (d.env_ok === false) showEnvBanner();
+    if (!d.version) return;
     APP_VERSION = { version: d.version, date: d.version_date };
     document.querySelectorAll(".an-version").forEach(el => { el.textContent = versionLabel(); });
   }).catch(() => {});
+}
+
+/* A missing runtime package used to be invisible: the app just quietly ran
+   degraded (ML sentiment dead, LLM fallback shown) and the only clue was one
+   line in a log pane nobody opens. This is the loud version. Dismissal is
+   session-scoped on purpose — a broken environment should keep asking. */
+function showEnvBanner() {
+  if (document.getElementById("env-banner")) return;
+  const bar = document.createElement("div");
+  bar.id = "env-banner";
+  bar.className = "env-banner";
+  bar.innerHTML = `<span>A required package is missing, so part of the app is running
+    degraded (ML news sentiment falls back to the LLM). Run <code>./update.sh</code> and
+    relaunch.</span>
+    <button class="env-banner-link" id="env-banner-open">Details</button>
+    <button class="env-banner-x" id="env-banner-x" aria-label="Dismiss">&times;</button>`;
+  const topbar = document.getElementById("topbar");
+  if (topbar && topbar.parentNode) topbar.parentNode.insertBefore(bar, topbar.nextSibling);
+  else document.body.insertBefore(bar, document.body.firstChild);
+  document.getElementById("env-banner-x").onclick = () => bar.remove();
+  document.getElementById("env-banner-open").onclick = () => {
+    bar.remove();
+    selectSettingsSection("models");
+    openSettings();
+  };
 }
 
 /* --- Settings overlay ----------------------------------------------------
@@ -8648,8 +8701,95 @@ function loadAppVersion() {
  * Polling only runs while the Logs section is visible; closing the overlay
  * clears the timer so an idle dashboard makes no requests.
  */
+/* Section registry — the ONLY place a settings section is declared. The nav is
+ * rebuilt from this array on every render, so adding a section is one entry
+ * plus one render function; do not put nav markup back into index.html.
+ *
+ * `items` are the individual settings inside a section. They exist so search
+ * can match "bloomberg" or "lightgbm" and point at the right section, and so a
+ * matched row can be highlighted in the pane.
+ *
+ * app.js is a plain <script>, not a module, so the `render:` function
+ * references below resolve via hoisting regardless of definition order — keep
+ * those renderers as `function` declarations, not `const … = () =>`.
+ */
+const SETTINGS_SECTIONS = [
+  {
+    id: "general",
+    group: "Settings",
+    label: "General",
+    icon: "⚙",
+    description: "Appearance and table layout. These preferences are stored in this "
+               + "browser and apply to every portfolio tab.",
+    keywords: ["appearance", "preferences", "display", "theme", "colours", "colors", "layout"],
+    items: [
+      { id: "theme", label: "Theme",
+        keywords: ["dark", "light", "bloomberg", "terminal", "night mode", "colour scheme"] },
+      { id: "fit", label: "Fit to screen",
+        keywords: ["columns", "table width", "scale", "compact", "horizontal scroll"] },
+    ],
+    render: renderSettingsGeneral,
+  },
+  {
+    id: "models",
+    group: "Data & models",
+    label: "Models & Data",
+    icon: "◉",
+    description: "Whether the return-trained ML sentiment model is actually running, and "
+               + "which news providers are configured. If ML scores are missing, the reason is here.",
+    keywords: ["ml", "machine learning", "lightgbm", "sklearn", "model", "sentiment", "news",
+               "llm", "nvidia", "finnhub", "api key", "artifact", "not running", "broken",
+               "dependencies", "environment"],
+    items: [
+      { id: "ml-runtime", label: "ML sentiment model",
+        keywords: ["available", "reason", "artifact", "mlsent", "version", "lightgbm"] },
+      { id: "env", label: "Runtime dependencies",
+        keywords: ["packages", "missing", "conda", "update.sh", "environment"] },
+      { id: "providers", label: "News providers",
+        keywords: ["finnhub", "nvidia", "nim", "api key", "llm model", "lexicon"] },
+    ],
+    render: renderSettingsModels,
+  },
+  {
+    id: "logs",
+    group: "Diagnostics",
+    label: "Logs",
+    icon: "≡",
+    description: "Live tail of the backend console (stdout + stderr). In the desktop app this "
+               + "is the only place these lines are visible.",
+    keywords: ["console", "stdout", "stderr", "backend", "tail", "output", "errors",
+               "debug", "traceback", "http requests"],
+    items: [
+      { id: "log-http", label: "Show HTTP requests",
+        keywords: ["http", "requests", "noise", "server log"] },
+    ],
+    render: renderSettingsLogs,
+  },
+  {
+    id: "about",
+    group: "Diagnostics",
+    label: "About",
+    icon: "ⓘ",
+    description: "Version, where this app keeps its data, and how to update it.",
+    keywords: ["version", "release", "update", "changelog", "paths", "state files", "data"],
+    items: [{ id: "version", label: "Version", keywords: ["build", "release date"] }],
+    render: renderSettingsAbout,
+  },
+];
+
+function settingsSectionById(id) {
+  return SETTINGS_SECTIONS.find(s => s.id === id) || null;
+}
+
 const SETTINGS = {
-  section: localStorage.getItem("settings_section") || "logs",
+  // Validate the persisted id against the registry: a section that gets renamed
+  // or removed would otherwise leave a stale localStorage value rendering an
+  // empty pane forever, with no way out but clearing site data.
+  section: settingsSectionById(localStorage.getItem("settings_section"))
+    ? localStorage.getItem("settings_section") : "general",
+  query: "",
+  runtime: null,         // cached /api/runtime-status payload
+  runtimeBusy: false,
   lastSeq: 0,
   timer: null,
   showHttp: false,       // server.py logs every request — off by default
@@ -8661,7 +8801,13 @@ function openSettings() {
   $("#settings-bg").classList.add("show");
   document.body.dataset.settingsPrevOverflow = document.body.style.overflow || "";
   document.body.style.overflow = "hidden";
+  // Always open unfiltered — reopening into a stale query looks like missing
+  // settings rather than an active search.
+  SETTINGS.query = "";
+  const search = $("#settings-search");
+  if (search) search.value = "";
   renderSettings();
+  requestAnimationFrame(() => { const s = $("#settings-search"); if (s) s.focus(); });
 }
 
 function closeSettings() {
@@ -8671,24 +8817,267 @@ function closeSettings() {
   document.body.style.overflow = document.body.dataset.settingsPrevOverflow || "";
   delete document.body.dataset.settingsPrevOverflow;
   stopLogPolling();
+  // The overlay hides the page scrollbar, so anything measured while it was
+  // open (applyTableFitMode reads .table-wrap's width) was measured against a
+  // slightly wider wrap. Idempotent re-measure; does not rebuild rows.
+  if (STATE.fitColumns) applyTableFitMode();
 }
 
+/* ----- search ----- */
+
+function settingsHaystack(section) {
+  if (!section._hay) {
+    section._hay = [section.label, section.group, section.description,
+                    ...(section.keywords || []),
+                    ...(section.items || []).flatMap(i => [i.label, ...(i.keywords || [])])]
+      .join(" ").toLowerCase();
+  }
+  return section._hay;
+}
+
+function settingsItemHaystack(item) {
+  if (!item._hay) item._hay = [item.label, ...(item.keywords || [])].join(" ").toLowerCase();
+  return item._hay;
+}
+
+/* AND semantics across tokens — "ml model" must not also return Logs. Plain
+   substring, not fuzzy: with three sections and a handful of items, predictable
+   beats clever. */
+function settingsFilter(q) {
+  const tokens = (q || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const out = [];
+  for (const section of SETTINGS_SECTIONS) {
+    if (!tokens.length) { out.push({ section, matchedItemIds: [] }); continue; }
+    const hay = settingsHaystack(section);
+    if (!tokens.every(t => hay.includes(t))) continue;
+    const matchedItemIds = (section.items || [])
+      .filter(i => tokens.every(t => settingsItemHaystack(i).includes(t)))
+      .map(i => i.id);
+    out.push({ section, matchedItemIds });
+  }
+  return out;
+}
+
+/* ----- rendering ----- */
+
 function renderSettings() {
-  document.querySelectorAll(".settings-nav-item").forEach(b => {
-    b.classList.toggle("active", b.dataset.section === SETTINGS.section);
-  });
-  const pane = $("#settings-pane");
-  if (SETTINGS.section === "general") {
-    stopLogPolling();
-    pane.innerHTML = `
-      <div class="settings-section-title">General</div>
-      <div class="settings-section-sub">Nothing here yet — app preferences will live in this section.</div>`;
+  renderSettingsNav();
+  renderSettingsPane();
+}
+
+function renderSettingsNav() {
+  const list = $("#settings-nav-list");
+  if (!list) return;
+  const hits = settingsFilter(SETTINGS.query);
+  if (!hits.length) {
+    list.innerHTML = `<div class="settings-nav-empty">No settings match
+      “${escapeHtml(SETTINGS.query)}”.</div>`;
     return;
   }
+  const html = [];
+  let lastGroup = null;
+  for (const { section, matchedItemIds } of hits) {
+    if (section.group !== lastGroup) {
+      if (lastGroup !== null) html.push(`</div>`);
+      html.push(`<div class="settings-nav-group">
+        <div class="settings-nav-group-label">${escapeHtml(section.group)}</div>`);
+      lastGroup = section.group;
+    }
+    html.push(`<button class="settings-nav-item${section.id === SETTINGS.section ? " active" : ""}"
+        data-section="${section.id}">
+        <span class="settings-nav-icon" aria-hidden="true">${section.icon}</span>
+        <span>${escapeHtml(section.label)}</span>
+      </button>`);
+    // Only surface sub-lines when a query actually matched specific settings —
+    // otherwise the nav becomes a wall of text.
+    for (const id of matchedItemIds) {
+      const item = (section.items || []).find(i => i.id === id);
+      if (item) html.push(`<div class="settings-nav-sub">${escapeHtml(item.label)}</div>`);
+    }
+  }
+  if (lastGroup !== null) html.push(`</div>`);
+  list.innerHTML = html.join("");
+}
+
+function renderSettingsPane() {
+  // Unconditional, and deliberately the first statement: any section that is
+  // not Logs must leave no live poller behind. Restarting is renderSettingsLogs'
+  // job alone, so a future section can never leak a 1.5s timer against /api/logs.
+  stopLogPolling();
+  const pane = $("#settings-pane");
+  if (!pane) return;
+  const section = settingsSectionById(SETTINGS.section) || SETTINGS_SECTIONS[0];
   pane.innerHTML = `
-    <div class="settings-section-title">Logs</div>
-    <div class="settings-section-sub">Live tail of the backend console (stdout + stderr). This is the
-      only place these lines are visible in the desktop app.</div>
+    <div class="settings-pane-head">
+      <div class="settings-section-title">${escapeHtml(section.label)}</div>
+      <div class="settings-section-sub">${escapeHtml(section.description)}</div>
+    </div>
+    <div class="settings-pane-body${section.id === "logs" ? "" : " scroll"}" id="settings-pane-body"></div>`;
+  section.render($("#settings-pane-body"));
+}
+
+function selectSettingsSection(id) {
+  if (!settingsSectionById(id)) return;
+  SETTINGS.section = id;
+  try { localStorage.setItem("settings_section", id); } catch (e) {}
+  renderSettingsNav();
+  renderSettingsPane();
+}
+
+/* One row shape for every settings control, so General and Models look like one
+   surface rather than two ad-hoc panes. */
+function settingsRow({ id, label, help, control }) {
+  return `<div class="settings-row" data-item="${id || ""}">
+    <div class="settings-row-main">
+      <div class="settings-row-label">${label}</div>
+      ${help ? `<div class="settings-row-help">${help}</div>` : ""}
+    </div>
+    <div class="settings-row-control">${control || ""}</div>
+  </div>`;
+}
+
+function renderSettingsGeneral(el) {
+  const themeOpts = [
+    ["light", "Light"], ["dark", "Dark"], ["bloomberg", "Bloomberg"],
+  ].map(([v, lbl]) =>
+    `<button class="settings-seg-opt" data-theme-opt="${v}">${lbl}</button>`).join("");
+  el.innerHTML =
+    settingsRow({
+      id: "theme",
+      label: "Theme",
+      help: "Bloomberg is the terminal palette — amber labels on black, white data values. "
+          + "It is also reachable by long-pressing the topbar theme switch.",
+      control: `<div class="settings-seg">${themeOpts}</div>`,
+    }) +
+    settingsRow({
+      id: "fit",
+      label: "Fit to screen",
+      help: "Scale column widths and font size down just enough to keep the active view "
+          + "inside the window, instead of scrolling horizontally.",
+      control: `<label class="settings-check"><input type="checkbox" id="settings-fit"></label>`,
+    });
+  // These controls MUTATE nothing themselves — they call the same functions the
+  // topbar controls call, and the sync helpers paint both surfaces. Setting
+  // STATE.fitColumns directly here would skip the table re-scale in render().
+  // NOTE the attribute is data-theme-OPT, not data-theme: style.css themes via
+  // unscoped [data-theme="dark"] / [data-theme="bloomberg"] attribute selectors,
+  // so a button carrying data-theme="bloomberg" would silently adopt the entire
+  // Bloomberg palette (amber text) while sitting inside a dark-theme page.
+  el.querySelectorAll(".settings-seg-opt[data-theme-opt]").forEach(b => {
+    b.onclick = () => setTheme(b.dataset.themeOpt);
+  });
+  const fit = $("#settings-fit");
+  if (fit) fit.onchange = () => toggleFitColumns();
+  syncThemeControls();
+  syncFitControls();
+  highlightSettingsMatches(el);
+}
+
+/* Shared by the News tab's Model Diagnostics banner and Settings > Models, so
+   the two can never give different advice for the same failure. */
+function mlRuntimeHint(rt) {
+  const why = (rt && rt.reason) || "";
+  if (/lightgbm|sklearn|scikit|ModuleNotFound|ImportError/i.test(why)) {
+    return `The environment is missing a dependency. Run <code>./update.sh</code> to sync the
+      conda env, then fully quit and relaunch the app.`;
+  }
+  if (rt && rt.model_dir && !rt.model_dir_exists) {
+    return `No artifact found at <code>${escapeHtml(rt.model_dir)}</code> — deploy the
+      ${escapeHtml(rt.version || "mlsent")} bundle there.`;
+  }
+  return `Check <b>Settings → Logs</b> for the full backend output.`;
+}
+
+function loadRuntimeStatus(force) {
+  if (SETTINGS.runtimeBusy) return;
+  if (SETTINGS.runtime && !force) return;
+  SETTINGS.runtimeBusy = true;
+  fetch("/api/runtime-status").then(r => r.json()).then(d => {
+    SETTINGS.runtime = d || {};
+  }).catch(() => {
+    SETTINGS.runtime = { error: true };
+  }).finally(() => {
+    SETTINGS.runtimeBusy = false;
+    // Guard against a slow response clobbering a pane the user already left —
+    // if they moved to Logs, re-rendering here would also kill the poller.
+    if (SETTINGS.section === "models") renderSettingsPane();
+  });
+}
+
+function renderSettingsModels(el) {
+  const d = SETTINGS.runtime;
+  if (!d) {
+    // The first call pays for the LightGBM/sklearn import and the artifact load;
+    // after that _STATE caches it process-wide and the route is instant.
+    el.innerHTML = lcHtml("checking model runtime", { bar: true });
+    loadRuntimeStatus();
+    return;
+  }
+  if (d.error) {
+    el.innerHTML = `<div class="settings-row-help">Could not reach the backend.</div>`;
+    return;
+  }
+  const rt = d.ml || {};
+  const pill = rt.available
+    ? `<span class="settings-status-pill ok">Running</span>`
+    : `<span class="settings-status-pill bad">Not running</span>`;
+  const kv = (k, v) => `<div class="settings-kv-k">${k}</div><div class="settings-kv-v">${v}</div>`;
+  let mlBody = `<div class="settings-kv">
+      ${kv("Artifact", escapeHtml(rt.version || "—"))}
+      ${kv("Location", `${escapeHtml(rt.model_dir || "—")}${rt.model_dir && !rt.model_dir_exists ? " (missing)" : ""}`)}
+      ${rt.available ? "" : kv("Reason", `<span class="settings-bad-text">${escapeHtml(rt.reason || "unknown")}</span>`)}
+    </div>`;
+  if (!rt.available) {
+    mlBody += `<div class="settings-row-help">${mlRuntimeHint(rt)}</div>`;
+  }
+  mlBody += `<div class="settings-row-help">The model is loaded once per process and the
+    result is cached, so installing a missing package requires a full app restart before
+    this flips.</div>
+    <div class="settings-btn-row">
+      <button class="settings-btn" id="settings-recheck">Re-check</button>
+      <button class="settings-btn" id="settings-open-logs">Open Logs</button>
+    </div>`;
+
+  const env = d.env || {};
+  const missing = env.missing || [];
+  const envBody = missing.length
+    ? `<div class="settings-kv">` + missing.map(m =>
+        kv(escapeHtml(m.module),
+           `<span class="${m.critical ? "settings-bad-text" : ""}">missing — disables ${escapeHtml(m.feature)}</span>`)
+      ).join("") + `</div>
+       <div class="settings-row-help">Run <code>./update.sh</code> to sync the conda env
+         to <code>environment.yml</code>, then relaunch.</div>`
+    : `<div class="settings-kv">${kv("Status", "all runtime dependencies present")}
+        ${kv("Interpreter", escapeHtml(env.executable || "—"))}
+        ${kv("Python", escapeHtml(env.python || "—"))}</div>`;
+
+  const keys = d.keys || {};
+  const yn = (b) => b ? `<span class="settings-ok-text">configured</span>`
+                      : `<span class="settings-bad-text">not found</span>`;
+  const provBody = `<div class="settings-kv">
+      ${kv("Finnhub (news)", yn(keys.finnhub_key_set))}
+      ${kv("NVIDIA NIM (LLM)", yn(keys.nvidia_key_set))}
+      ${kv("LLM model", escapeHtml(keys.llm_model || "—"))}
+      ${kv("LM lexicon", keys.lexicon_available ? "loaded" : "unavailable")}
+    </div>
+    <div class="settings-row-help">Keys are read from environment variables or the
+      <code>.finnhub_key</code> / <code>.nvidia_key</code> files beside the app. Only
+      whether they were found is shown here — never their values.</div>`;
+
+  el.innerHTML =
+    settingsRow({ id: "ml-runtime", label: `ML sentiment model ${pill}`, control: "", help: mlBody }) +
+    settingsRow({ id: "env", label: "Runtime dependencies", help: envBody }) +
+    settingsRow({ id: "providers", label: "News providers", help: provBody });
+
+  const rc = $("#settings-recheck");
+  if (rc) rc.onclick = () => { SETTINGS.runtime = null; renderSettingsPane(); loadRuntimeStatus(true); };
+  const ol = $("#settings-open-logs");
+  if (ol) ol.onclick = () => selectSettingsSection("logs");
+  highlightSettingsMatches(el);
+}
+
+function renderSettingsLogs(el) {
+  el.innerHTML = `
     <div class="settings-log-controls">
       <label><input type="checkbox" id="log-http" ${SETTINGS.showHttp ? "checked" : ""}> Show HTTP requests</label>
       <span class="spacer" style="flex:1"></span>
@@ -8707,6 +9096,56 @@ function renderSettings() {
   });
   renderLogLines();
   startLogPolling();
+}
+
+function renderSettingsAbout(el) {
+  // APP_VERSION stays null until /api/health resolves, so guard it.
+  const v = (APP_VERSION && APP_VERSION.version)
+    ? `${APP_VERSION.version}${APP_VERSION.date ? ` (${fmtDateDMY(APP_VERSION.date)})` : ""}`
+    : "—";
+  const kv = (k, val) => `<div class="settings-kv-k">${k}</div><div class="settings-kv-v">${val}</div>`;
+  el.innerHTML =
+    settingsRow({
+      id: "version",
+      label: "Portfolio _App",
+      help: `<div class="settings-kv">
+          ${kv("Version", escapeHtml(v))}
+          ${kv("Server", "127.0.0.1 — local only, no accounts, no telemetry")}
+        </div>`,
+    }) +
+    settingsRow({
+      id: "data",
+      label: "Where your data lives",
+      help: `<div class="settings-kv">
+          ${kv("Portfolios", "<code>.portfolio_tracker_views.json</code>")}
+          ${kv("Watchlists", "<code>.portfolio_tracker_watchlists.json</code>")}
+          ${kv("Optimizer runs", "<code>.portfolio_tracker_mpt.json</code>")}
+          ${kv("News cache", "<code>.portfolio_tracker_news.json</code>")}
+          ${kv("ML model", "<code>~/.portfolio_tracker/ml_model/</code>")}
+        </div>
+        <div class="settings-row-help">All of these sit beside the app and stay on this
+          machine. They are excluded from git.</div>`,
+    }) +
+    settingsRow({
+      id: "update",
+      label: "Updating",
+      help: `Run <code>./update.sh</code> in the repo (<code>update.ps1</code> on Windows) to
+        pull the latest code and sync the conda environment, then relaunch the app. The
+        update script now verifies the environment and fails loudly if a required package
+        did not install.`,
+    });
+  highlightSettingsMatches(el);
+}
+
+/* Tint the rows a live search query matched, so jumping to a section from a
+   search result lands the eye on the right row. */
+function highlightSettingsMatches(el) {
+  const hit = settingsFilter(SETTINGS.query).find(h => h.section.id === SETTINGS.section);
+  if (!hit || !hit.matchedItemIds.length) return;
+  for (const id of hit.matchedItemIds) {
+    const row = el.querySelector(`.settings-row[data-item="${id}"]`);
+    if (row) row.classList.add("hit");
+  }
 }
 
 function startLogPolling() {
@@ -8758,13 +9197,48 @@ function setupSettings() {
   if (close) close.onclick = closeSettings;
   const bg = $("#settings-bg");
   if (bg) bg.addEventListener("click", (e) => { if (e.target === bg) closeSettings(); });
-  document.querySelectorAll(".settings-nav-item").forEach(b => {
-    b.onclick = () => {
-      SETTINGS.section = b.dataset.section;
-      localStorage.setItem("settings_section", SETTINGS.section);
-      renderSettings();
-    };
+
+  // Delegated: the nav list is rebuilt on every keystroke, so per-node handlers
+  // bound once at boot would be attached to detached elements after the first
+  // search.
+  const list = $("#settings-nav-list");
+  if (list) list.addEventListener("click", (e) => {
+    const item = e.target.closest(".settings-nav-item");
+    if (item) selectSettingsSection(item.dataset.section);
   });
+
+  const search = $("#settings-search");
+  if (search) {
+    // Typing re-renders the NAV ONLY. Re-rendering the pane per keystroke would
+    // tear down #log-body and restart the log poller ~10x/second.
+    search.addEventListener("input", () => {
+      SETTINGS.query = search.value;
+      renderSettingsNav();
+    });
+    search.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        // A non-empty query: Escape clears it and stops there. An empty one must
+        // BUBBLE to the global handler so Escape still closes the overlay. Never
+        // preventDefault it, and never stopPropagation when empty — that one
+        // listener closes seven overlays in a single pass.
+        if (search.value) {
+          search.value = "";
+          SETTINGS.query = "";
+          renderSettingsNav();
+          e.stopPropagation();
+        }
+        return;
+      }
+      if (e.key === "ArrowDown" || e.key === "Enter") {
+        const first = document.querySelector("#settings-nav-list .settings-nav-item");
+        if (first) {
+          e.preventDefault();
+          first.focus();
+          if (e.key === "Enter") first.click();
+        }
+      }
+    });
+  }
 }
 
 setTheme(readTheme());
