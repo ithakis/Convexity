@@ -13,7 +13,6 @@ import time
 import warnings
 import subprocess
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,7 +44,9 @@ from portfolio_tracker.analytics import (
     analyze_portfolio,
     analyze_portfolios_multi,
 )
-from portfolio_tracker.fetcher import fetch_detail, fetch_one, fetch_portfolio
+from portfolio_tracker import jobs
+from portfolio_tracker.fetcher import fetch_detail, fetch_portfolio, range_history
+from portfolio_tracker.fetcher import stream_quotes as fetcher_stream_quotes
 # NB: portfolio_tracker.frontier (and its numba/mpt dependency, ~1.7s to
 # import) is imported lazily at its two call sites below — the MPT/Optimize
 # feature is on-demand, so keeping it off the module-load path shaves that
@@ -84,7 +85,6 @@ from portfolio_tracker.persistence import (
     upsert_watchlist,
     upsert_weight_preset,
 )
-from portfolio_tracker.resolver import _ordered_resolve
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -113,6 +113,103 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _begin_ndjson(self) -> None:
+        """Headers shared by every NDJSON streaming route."""
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+    # ----------------------------- refresh jobs -----------------------------
+
+    def _handle_refresh_job_create(self) -> None:
+        try:
+            payload = self._read_json()
+        except Exception as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        scope = "all" if payload.get("scope") == "all" else "current"
+        phases = payload.get("phases") or ["quotes", "news"]
+        days = int(payload.get("days") or 7)
+        on_conflict = "supersede" if payload.get("on_conflict") == "supersede" else "reject"
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else None
+
+        if scope == "all":
+            # load_watchlists() IS the set of saved portfolios. Ordered
+            # most-recently-saved first so the user's likely-current tab lands
+            # first; the client-supplied view/entries/context are ignored.
+            watch = load_watchlists()
+            meta = (list_views() or {}).get("views") or {}
+            names = sorted(watch.keys(),
+                           key=lambda n: (meta.get(n) or {}).get("saved_at") or "",
+                           reverse=True)
+            entries_by_view = {n: watch[n] for n in names}
+            context = None
+        else:
+            view = (payload.get("view") or "").strip() or "__current__"
+            entries_by_view = {view: str(payload.get("entries") or "")}
+        if not any(v.strip() for v in entries_by_view.values()):
+            self._send_json(400, {"error": "nothing to refresh"})
+            return
+
+        job, outcome = jobs.submit(scope=scope, phases=phases, days=days,
+                                   entries_by_view=entries_by_view, context=context,
+                                   on_conflict=on_conflict)
+        if outcome == "rejected":
+            # 409 + the running job's id: the client attaches to it rather than
+            # starting a second one. See the single-flight note in jobs.py.
+            self._send_json(409, {"error": "a refresh is already running",
+                                  "job_id": job.id, "state": job.state,
+                                  "snapshot": job.snapshot()})
+            return
+        self._send_json(202, {"job_id": job.id, "state": job.state, "outcome": outcome})
+
+    def _handle_refresh_job_stream(self, job_id: str, since: int) -> None:
+        job = jobs.get(job_id)
+        if job is None:
+            self._send_json(404, {"error": "unknown job"})
+            return
+        self._begin_ndjson()
+        replay, dropped = job.events_since(since)
+        try:
+            # Connection frames carry seq 0 and are never replayed; the client
+            # must only advance its cursor on nonzero seqs.
+            self.wfile.write(_safe_json({
+                "type": "hello", "seq": 0, "job": job.snapshot(),
+                "dropped": dropped, "replay_from": since,
+                "last_seq": job.snapshot()["last_seq"],
+            }))
+            for frame in replay:
+                self.wfile.write(_safe_json(frame))
+                since = max(since, frame["seq"])
+            self.wfile.flush()
+            terminal_seen = any(f["type"] in ("done", "error") or
+                                (f["type"] == "job" and f.get("state") in ("cancelled",))
+                                for f in replay)
+            while not terminal_seen:
+                frames = job.wait(since, timeout=15.0)
+                if not frames:
+                    self.wfile.write(_safe_json({"type": "ping", "seq": 0}))
+                    self.wfile.flush()
+                    if job.is_terminal():
+                        break
+                    continue
+                for frame in frames:
+                    self.wfile.write(_safe_json(frame))
+                    since = max(since, frame["seq"])
+                    if frame["type"] in ("done", "error") or (
+                            frame["type"] == "job" and frame.get("state") == "cancelled"):
+                        terminal_seen = True
+                self.wfile.flush()
+            self.wfile.write(_safe_json({"type": "end", "seq": 0}))
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # A dead client is NOT a cancel — the job keeps running and the
+            # client reattaches at its last seq. (Contrast /api/news-refresh,
+            # which silenced writes but kept burning API quota unattended.)
+            return
 
     def _serve_static(self, rel_path: str) -> bool:
         fpath = (_STATIC_DIR / rel_path).resolve()
@@ -242,6 +339,42 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, payload)
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/history":
+            # Intraday half of the chart granularity ladder (1M/3M/6M). Kept off
+            # /api/detail on purpose: the modal must open instantly on the daily
+            # payload, and this is fetched lazily only when the user picks one of
+            # those tabs. `bench` is comma-separated because the client already
+            # knows which overlays it's showing and which sector ETF applies —
+            # asking it saves a Ticker.info round-trip here.
+            q = parse_qs(parsed.query)
+            sym = (q.get("symbol") or [""])[0].strip().upper()
+            rng = (q.get("range") or [""])[0].strip().upper()
+            bench = [b for b in (q.get("bench") or [""])[0].split(",") if b.strip()]
+            if not sym or not rng:
+                self._send_json(400, {"error": "symbol and range required"})
+                return
+            try:
+                self._send_json(200, range_history(sym, rng, bench))
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/refresh-job/current":
+            # One cheap call on page load answers "is something running that I
+            # should reattach to?" — which is what lets a job survive a full
+            # browser reload, not just a tab switch.
+            j = jobs.current()
+            self._send_json(200, {"job": j.snapshot() if j else None})
+            return
+        if (parsed.path.startswith("/api/refresh-job/")
+                and parsed.path.endswith("/stream")):
+            job_id = parsed.path[len("/api/refresh-job/"):-len("/stream")]
+            q = parse_qs(parsed.query)
+            try:
+                since = int((q.get("since") or ["0"])[0])
+            except ValueError:
+                since = 0
+            self._handle_refresh_job_stream(job_id, since)
             return
         if parsed.path == "/api/mpt-runs":
             # Last-3 run history per portfolio: `last` (newest, restored on open)
@@ -757,37 +890,55 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(exc)})
                 return
 
-            symbols = _ordered_resolve([str(e) for e in entries])
-            total = len(symbols)
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
+            self._begin_ndjson()
+            # Body extracted to fetcher.stream_quotes so this route, the legacy
+            # blocking path and the refresh job all run one implementation.
+            # gen.close() on disconnect is the pattern /api/efficient-frontier
+            # already uses: it raises GeneratorExit inside stream_quotes, whose
+            # finally de-queues every pending symbol. The old inline version's
+            # `return` left a `with ThreadPoolExecutor` block, which JOINED all
+            # in-flight futures — so an abandoned 150-symbol build kept hitting
+            # Yahoo for another ~30 s.
+            gen = fetcher_stream_quotes([str(e) for e in entries])
             try:
-                self.wfile.write(_safe_json({"type": "start", "total": total, "symbols": symbols}))
-                self.wfile.flush()
-                if total:
-                    workers = min(5, total)
-                    with ThreadPoolExecutor(max_workers=workers) as pool:
-                        futures = {pool.submit(fetch_one, s): s for s in symbols}
-                        done = 0
-                        for fut in as_completed(futures):
-                            row = fut.result()
-                            done += 1
-                            try:
-                                self.wfile.write(_safe_json({
-                                    "type": "row", "row": row,
-                                    "done": done, "total": total,
-                                }))
-                                self.wfile.flush()
-                            except (BrokenPipeError, ConnectionResetError):
-                                return
-                self.wfile.write(_safe_json({"type": "done", "total": total}))
-                self.wfile.flush()
+                for msg in gen:
+                    self.wfile.write(_safe_json(msg))
+                    self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
+                gen.close()
+            return
+
+        if parsed.path == "/api/refresh-job":
+            self._handle_refresh_job_create()
+            return
+
+        if parsed.path.startswith("/api/refresh-job/") and parsed.path.endswith("/cancel"):
+            job_id = parsed.path[len("/api/refresh-job/"):-len("/cancel")]
+            if jobs.cancel(job_id):
+                self._send_json(200, {"ok": True, "state": "cancelled"})
+            elif jobs.get(job_id) is None:
+                self._send_json(404, {"error": "unknown job"})
+            else:
+                self._send_json(200, {"ok": False, "state": jobs.get(job_id).state})
+            return
+
+        if parsed.path == "/api/news-rescore":
+            # Deliberately NOT a job: cache-only, sub-50 ms, no network and no
+            # LLM. Changing the News window must repaint immediately.
+            if _ns is None:
+                self._send_json(503, {"error": "news_sentiment module not available"})
                 return
+            try:
+                payload = self._read_json()
+                symbols = [str(s).strip().upper() for s in (payload.get("symbols") or []) if s]
+                days = int(payload.get("days") or 7)
+            except Exception as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            try:
+                self._send_json(200, _ns.rescore_window(symbols, days))
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
             return
 
         self.send_response(404)
@@ -880,6 +1031,23 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
     _missing = envcheck.check()
     if _missing:
         print(envcheck.format_report(_missing), file=sys.stderr)
+
+    def _warm_ml() -> None:
+        # Load the ML sentiment artifact off the request path. The load pulls in
+        # lightgbm + scipy + sklearn and takes ~3 s; doing it lazily meant the
+        # first news refresh raced against it. Warming here (rather than in
+        # main()) is deliberate: the desktop app calls start_server() straight
+        # from its boot worker and never runs main(), which is exactly why
+        # main()'s _warm_optimizer has never warmed numba for the desktop app.
+        # Best-effort — _load() never raises, and a failure just leaves the
+        # model unavailable with a real reason on /api/runtime-status.
+        try:
+            from portfolio_tracker import ml_sentiment as _mls
+            _mls.available()
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm_ml, name="pt-warm-ml", daemon=True).start()
     port = _pick_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     # Per-connection handler threads (socketserver.ThreadingMixIn) default to
@@ -906,6 +1074,13 @@ def shutdown_server(server: ThreadingHTTPServer) -> None:
     itself so a desktop-app quit can never hang. The OS reclaims the socket
     and threads either way.
     """
+    # Cancel background refresh jobs and give an in-flight save_view a moment
+    # to land. Persistence writes are atomic, but os._exit(0) below would
+    # otherwise abandon one mid-write and leave an orphan temp file beside it.
+    try:
+        jobs.shutdown(1.5)
+    except Exception:
+        pass
     server.shutdown()
     server.server_close()
     sys.stdout.flush()

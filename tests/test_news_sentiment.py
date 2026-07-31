@@ -43,7 +43,7 @@ def test_refresh_symbol_restores_previous_cache_on_transient_failure(monkeypatch
     ns._SENTIMENT_CACHE["sentiment|MSFT|7"] = (now, ns._SENTIMENT_TTL, prev_sentiment)
 
     monkeypatch.setattr(ns, "get_news_sentiment",
-                        lambda symbol, context=None, stage_cb=None: None)
+                        lambda symbol, context=None, stage_cb=None, cancel=None: None)
 
     result = ns._refresh_symbol_sentiment("MSFT")
 
@@ -72,9 +72,9 @@ def test_refresh_sentiment_returns_consistent_status_shape(monkeypatch):
     monkeypatch.setattr(ns, "FINNHUB_API_KEY", "fh-test")
     monkeypatch.setattr(ns, "NVIDIA_API_KEY", "nv-test")
     monkeypatch.setattr(ns, "_refresh_market_sentiment",
-                        lambda days=7, stage_cb=None: market)
+                        lambda days=7, stage_cb=None, cancel=None: market)
     monkeypatch.setattr(ns, "_refresh_symbol_sentiment",
-                        lambda symbol, context=None, stage_cb=None: sentiments[symbol])
+                        lambda symbol, context=None, stage_cb=None, cancel=None: sentiments[symbol])
 
     result = ns.refresh_sentiment(["MSFT", "TSLA"])
     status = result["status"]

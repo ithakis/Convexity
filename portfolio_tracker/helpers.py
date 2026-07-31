@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
+import threading
+import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -65,6 +69,112 @@ def _is_rate_limited_error(exc: Exception) -> bool:
     out of sync on what counts as "back off and retry" vs "fail fast"."""
     msg = str(exc).lower()
     return "rate" in msg or "429" in msg or "too many" in msg
+
+
+# ----------------------------- Rate limiting --------------------------------
+# The limiters live here rather than in news_sentiment because they are
+# PROCESS-GLOBAL budgets against shared upstream quotas, and more than one
+# module spends them: news_sentiment (company + market news, NIM scoring) and
+# finnhub_adapter (the MSPR / rec-trend columns on every quotes build). While
+# the adapter had no limiter of its own, a portfolio build and a news refresh
+# could each independently blow through Finnhub's free allowance.
+
+_RATE_LIMIT_BACKOFF_S = 65
+_RETRY_SLEEP_S = 5.0
+_MAX_RETRIES = 3
+
+
+class _RateLimiter:
+    """Sleeps (not fails) when at the per-minute budget. On 429 the caller
+    invokes `penalize()` to backfill the window so subsequent calls wait."""
+
+    def __init__(self, max_per_min: int, name: str):
+        self.max = max_per_min
+        self.name = name
+        self._calls: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self, cancel=None) -> None:
+        """Block until a slot is free.
+
+        `cancel` is any object with .is_set() (a threading.Event). Without it a
+        cancelled refresh job would still sit here for up to a minute per call,
+        which makes "cancel" a lie — this is one of the sleep gates that has to
+        be interruptible for cancellation to mean anything.
+        """
+        while True:
+            if cancel is not None and cancel.is_set():
+                raise Cancelled(f"{self.name} rate-limit wait cancelled")
+            with self._lock:
+                now = time.time()
+                while self._calls and now - self._calls[0] > 60.0:
+                    self._calls.popleft()
+                if len(self._calls) < self.max:
+                    self._calls.append(now)
+                    return
+                wait = 60.0 - (now - self._calls[0]) + 0.05
+            _notify_rate(provider=self.name, reason="budget",
+                         retry_in_s=round(min(max(wait, 0.05), 5.0), 2))
+            time.sleep(min(max(wait, 0.05), 5.0))
+
+    def penalize(self) -> None:
+        """Backfill the rolling window so further acquires block ~60s."""
+        with self._lock:
+            t = time.time()
+            slots = self.max - len(self._calls)
+            for _ in range(max(slots, 0)):
+                self._calls.append(t)
+
+    def snapshot(self) -> dict[str, int]:
+        with self._lock:
+            now = time.time()
+            while self._calls and now - self._calls[0] > 60.0:
+                self._calls.popleft()
+            return {"used": len(self._calls), "limit": self.max}
+
+
+class Cancelled(Exception):
+    """Raised inside a sleep gate when the owning job was cancelled."""
+
+
+_FH_LIMITER = _RateLimiter(max_per_min=55, name="finnhub")
+_NV_LIMITER = _RateLimiter(max_per_min=60, name="nvidia")
+# yfinance has no official rate limit and no app-level throttle anywhere else
+# in the codebase (price/analytics paths burst at 5-8 workers). Windowed news
+# fetches deeper per ticker AND for benchmark indices, so a full-portfolio
+# refresh could realistically burst Yahoo into a 429. This limiter caps just
+# the news calls; kept conservative because it shares Yahoo's backend with the
+# unthrottled price/analytics traffic.
+_YF_LIMITER = _RateLimiter(max_per_min=40, name="yfinance-news")
+_YF_MAX_RETRIES = 3
+
+
+# A single global observer, installed by jobs.py, that turns backoff events
+# into `rate_limited` progress frames on the running refresh job.
+#
+# Global rather than per-thread ON PURPOSE, and only correct because the job
+# registry is SINGLE-FLIGHT (jobs.submit rejects a second concurrent job). If
+# that guarantee is ever relaxed, rate events will start landing on the wrong
+# job and this needs a context-local binding propagated into every
+# ThreadPoolExecutor worker instead.
+_RATE_OBSERVER = None
+
+
+def set_rate_observer(fn) -> None:
+    """Install (or clear, with None) the rate-limit event sink."""
+    global _RATE_OBSERVER
+    _RATE_OBSERVER = fn
+
+
+def _notify_rate(**event) -> None:
+    """Best-effort. A broken observer must never take down a fetch."""
+    fn = _RATE_OBSERVER
+    if fn is None:
+        return
+    try:
+        fn(event)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[rate] observer failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 # ----------------------------- Numeric helpers ------------------------------

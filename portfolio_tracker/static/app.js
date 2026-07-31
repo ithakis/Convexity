@@ -904,6 +904,70 @@ function lcHide(target) {
   if (anchor) anchor.remove();
 }
 
+/* ─────────────────────── Overlays + body scroll lock ─────────────────────
+ * STANDING RULE: every full-screen overlay opens with showOverlay() and closes
+ * with hideOverlay(). Never touch document.body.style.overflow directly and
+ * never add/remove the "show" class by hand.
+ *
+ * Why a counter rather than a saved-previous-value per overlay: overlays nest
+ * (About-MPT sits on top of the MPT overlay; the inline name prompt on top of
+ * the weights popup) and the global Escape handler closes seven of them in one
+ * unconditional pass. Each overlay stashing its own "previous overflow" meant
+ * the inner one restored "hidden" — or, once its dataset key was deleted, ""
+ * — clobbering the outer one's lock. One counter, incremented only on a real
+ * open and decremented only on a real close, is the whole fix; that is also
+ * why both helpers are no-ops when the overlay is already in the requested
+ * state, which makes the seven-closer Escape pass safe by construction.
+ *
+ * Three overlays used to lock (MPT, settings, tape) and the rest — including
+ * the detail modal — did not, so the page scroll-chained behind them once the
+ * overlay's own scroller bottomed out. Scroll POSITION needs no saving:
+ * overflow:hidden on <body> freezes the viewport where it is. The padding
+ * compensation replaces the width the scrollbar was occupying, without which
+ * the whole page visibly jumps ~15px wider the instant anything opens. */
+const SCROLL_LOCK = { depth: 0, prevOverflow: "", prevPadRight: "" };
+
+function lockBodyScroll() {
+  if (SCROLL_LOCK.depth++ > 0) return;
+  const b = document.body;
+  SCROLL_LOCK.prevOverflow = b.style.overflow || "";
+  SCROLL_LOCK.prevPadRight = b.style.paddingRight || "";
+  const sbw = window.innerWidth - document.documentElement.clientWidth;
+  if (sbw > 0) {
+    const cur = parseFloat(getComputedStyle(b).paddingRight) || 0;
+    b.style.paddingRight = (cur + sbw) + "px";
+  }
+  b.style.overflow = "hidden";
+}
+
+function unlockBodyScroll() {
+  if (SCROLL_LOCK.depth === 0) return;      // unbalanced close — ignore, never go negative
+  if (--SCROLL_LOCK.depth > 0) return;      // an outer overlay is still open
+  const b = document.body;
+  b.style.overflow = SCROLL_LOCK.prevOverflow;
+  b.style.paddingRight = SCROLL_LOCK.prevPadRight;
+  SCROLL_LOCK.prevOverflow = SCROLL_LOCK.prevPadRight = "";
+}
+
+/* Both return whether they actually changed anything, so callers can skip
+ * side work (KaTeX render, poller start/stop) on a redundant call. */
+function showOverlay(el) {
+  const node = typeof el === "string" ? document.querySelector(el) : el;
+  if (!node || node.classList.contains("show")) return false;
+  node.hidden = false;
+  node.classList.add("show");
+  lockBodyScroll();
+  return true;
+}
+
+function hideOverlay(el) {
+  const node = typeof el === "string" ? document.querySelector(el) : el;
+  if (!node || !node.classList.contains("show")) return false;
+  node.classList.remove("show");
+  unlockBodyScroll();
+  return true;
+}
+
 /* ===========================================================================
  * FX (denomination) module
  * --------------------------------------------------------------------------- */
@@ -1645,8 +1709,7 @@ function openColumnPicker() {
     </div>
   `;
   renderColumnPickerList();
-  bg.hidden = false;
-  bg.classList.add("show");
+  showOverlay(bg);
   document.getElementById("cv-modal-cancel").onclick = closeColumnPicker;
   bg.onclick = (e) => { if (e.target === bg) closeColumnPicker(); };
   document.getElementById("cv-modal-save").onclick = () => saveColumnPicker({asNew: true});
@@ -1656,10 +1719,7 @@ function openColumnPicker() {
 
 function closeColumnPicker() {
   const bg = document.getElementById("cv-modal-bg");
-  if (bg) {
-    bg.classList.remove("show");
-    bg.hidden = true;
-  }
+  if (hideOverlay(bg)) bg.hidden = true;
   CV_MODAL_STATE = null;
 }
 
@@ -1991,6 +2051,28 @@ function render() {
 /* ===========================================================================
  * Modal detail view
  * --------------------------------------------------------------------------- */
+function readChartSma() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("chart_sma") || "{}");
+    return {20: !!raw[20], 50: !!raw[50], 200: !!raw[200]};
+  } catch { return {20: false, 50: false, 200: false}; }
+}
+/* ONE object, shared by both charts: DETAIL.sma and STATE.pfSma are the same
+   reference, persisted to localStorage.chart_sma. A shared KEY was not enough
+   — two copies read at different times clobbered each other (enable SMA 200 in
+   the modal, then click a portfolio pill, and the pill's stale page-load copy
+   was written back over it). Declared above DETAIL so the invariant holds from
+   load, not only from the first modal open. */
+const CHART_SMA = readChartSma();
+function writeChartSma(sma) {
+  try { localStorage.setItem("chart_sma", JSON.stringify(sma || CHART_SMA)); }
+  catch { /* private mode */ }
+}
+/* Repaint the portfolio chart's SMA pills after the modal's toggles change the
+   shared object, so the two surfaces never LOOK like they disagree either. */
+const SMA_PILL_SYNCS = [];
+function syncSmaPills() { for (const f of SMA_PILL_SYNCS) f(); }
+
 /* ----- Detail modal state ----- */
 const DETAIL = {
   data: null,           // detail payload from /api/detail
@@ -1999,41 +2081,139 @@ const DETAIL = {
   showSP: false,        // overlay S&P 500
   showSector: false,    // overlay sector ETF
   showVol: true,        // volume bars
+  sel: null,            // persistent drag-to-measure selection {t0, t1} in ms
+  brush: null,          // attachRangeBrush handle — destroyed before each re-attach
+  // Sub-daily payloads from /api/history, keyed by range. Fetched lazily the
+  // first time an intraday range is picked, so opening the modal stays instant.
+  intraday: {},
+  intraPending: {},     // range -> in-flight benchmark set, for de-duping fetches
+  // SMA overlays, off by default. THE shared CHART_SMA object — never replace
+  // it with a fresh copy, or the portfolio chart stops seeing modal toggles.
+  sma: CHART_SMA,
   // chart geometry — rebuilt every render
   geom: null,
 };
+
 const RANGES = ["1M","3M","6M","YTD","1Y","5Y","MAX"];
 
 function openModal(r) {
   if (r.error) return;
   DETAIL.data = null; DETAIL.row = r;
   DETAIL.range = "1Y"; DETAIL.showSP = false; DETAIL.showSector = false; DETAIL.showVol = true;
+  DETAIL.sel = null;
+  DETAIL.intraday = {}; DETAIL.intraPending = {};  // per-symbol; server caches the fetches
+  DETAIL.sma = CHART_SMA;       // shared reference — see CHART_SMA
   renderModalSkeleton();
-  $("#modal-bg").classList.add("show");
+  showOverlay("#modal-bg");
   fetch("/api/detail?symbol=" + encodeURIComponent(r.symbol))
     .then(res => res.json())
     .then(d => {
       if (d && !d.error) {
         DETAIL.data = d;
         renderModalFull();
+        // The user can pick 1M/3M/6M while this fetch is still in flight;
+        // ensureIntraday bails on !DETAIL.data, and the range-tab handler's
+        // same-range guard means re-clicking that tab does nothing — so the
+        // chart would stay on ~22 daily points with no way back. Kick the
+        // intraday fetch once the payload lands.
+        ensureIntraday(DETAIL.range);
       } else {
         $("#m-loading").textContent = "Failed to load detail: " + (d.error || "unknown");
       }
     })
     .catch(e => { $("#m-loading").textContent = "Network error: " + e.message; });
 }
-function closeModal() { $("#modal-bg").classList.remove("show"); DETAIL.data = null; }
+/* Tear the brush down on close. Its Escape handler is registered on `document`
+   in the CAPTURE phase and calls stopPropagation() whenever a selection exists,
+   so a live selection left behind after closing the modal by backdrop-click
+   silently swallowed the next global Escape — the one meant to close Settings
+   or the MPT overlay. */
+function closeModal() {
+  if (!hideOverlay("#modal-bg")) return;
+  if (DETAIL.brush) { DETAIL.brush.destroy(); DETAIL.brush = null; }
+  DETAIL.sel = null;
+  DETAIL.data = null;
+}
 $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") closeModal(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeInfo(); closeNsProgress(); closeMethodology(); closeExportPopup(); closeSettings(); closeTapeFullscreen(); } });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    closeModal(); closeInfo(); closeNsProgress(); closeMethodology();
+    closeExportPopup(); closeSettings(); closeTapeFullscreen();
+    return;
+  }
+  // R / Shift+R mirror a click / long-press on Refresh. Added to the EXISTING
+  // global handler rather than a sixth document-level listener. Guards: never
+  // while typing, never with a modifier that means something else, and never
+  // while an overlay is up (Esc is the only key those should answer to).
+  if (e.key !== "r" && e.key !== "R") return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target && e.target.closest("input, textarea, select, [contenteditable]")) return;
+  if (SCROLL_LOCK.depth > 0) return;
+  e.preventDefault();
+  rfStart(e.shiftKey ? "all" : "current");
+});
+
+/* Price + return for the modal header.
+ *
+ * The return shown is the ACTIVE RANGE's, not the 1-day figure this used to
+ * hardcode — with seven range tabs right below it, a number that never moved
+ * was actively misleading. `sel` (a live drag selection) wins over the range
+ * when present, so the header always states the period the chart is showing.
+ *
+ * It also renders from DETAIL.data when the detail payload has arrived and
+ * falls back to DETAIL.row before then. The old code read only the table row
+ * and the skeleton was never re-rendered after the fetch resolved, so the
+ * header kept the row's cached price for the modal's whole lifetime. */
+function modalPriceBlockHtml() {
+  const r = DETAIL.row || {};
+  const d = DETAIL.data;
+  const ccy = (d && d.currency) || r.currency;
+  const price = (d && d.price != null) ? d.price : r.price;
+
+  let pct = null, abs = null, label = DETAIL.range;
+  // Must be the series the CHART is drawing, not always the daily one — on an
+  // intraday range the two disagree about where the window starts (a 30m
+  // series' first bar of the month is not the daily bar's close), and a header
+  // that contradicts the summary line right beneath it is worse than no header.
+  const hist = d && d.history ? activeChartSeries().full : null;
+  if (hist && hist.length >= 2) {
+    const sel = DETAIL.sel;
+    let pts;
+    if (sel) {
+      pts = hist.filter(p => p[0] >= sel.t0 && p[0] <= sel.t1);
+      label = "selection";
+    } else {
+      pts = sliceHistory(hist, DETAIL.range);
+    }
+    if (pts && pts.length >= 2) {
+      const a = pts[0][1], b = pts[pts.length - 1][1];
+      if (a) { pct = (b / a - 1) * 100; abs = b - a; }
+    }
+  }
+  if (pct == null) {              // pre-fetch, or a range with too few points
+    pct = r.pct_1d;
+    abs = r.change_abs_1d;
+    label = "1D";
+  }
+
+  const cls = (pct != null && pct >= 0) ? "pos" : "neg";
+  const sign = (pct != null && pct >= 0) ? "▲" : "▼";
+  const change = (abs != null)
+    ? (abs >= 0 ? "+" : "−") + fmtMoney(Math.abs(abs), ccy)
+    : "—";
+  return `
+    <div class="p-now">${fmtMoney(price, ccy)}</div>
+    <div class="p-chg ${cls}">${sign} ${fmtPctSigned(pct)} <span style="opacity:0.7">(${change})</span>`
+    + ` <span class="p-range">${escapeHtml(label)}</span></div>`;
+}
+
+function renderModalPriceBlock() {
+  const el = $("#m-price-block");
+  if (el) el.innerHTML = modalPriceBlockHtml();
+}
 
 function renderModalSkeleton() {
   const r = DETAIL.row;
-  const pc = r.pct_1d;
-  const chgCls = (pc != null && pc >= 0) ? "pos" : "neg";
-  const sign = (pc != null && pc >= 0) ? "▲" : "▼";
-  const change = (r.change_abs_1d != null)
-    ? (r.change_abs_1d >= 0 ? "+" : "−") + fmtMoney(Math.abs(r.change_abs_1d), r.currency)
-    : "—";
   $("#modal").innerHTML = `
     <div class="m-head">
       ${logoImg(r.symbol)}
@@ -2044,10 +2224,7 @@ function renderModalSkeleton() {
           ${r.website ? ` · <a href="${escapeHtml(r.website)}" target="_blank" rel="noopener">website ↗</a>` : ""}
         </div>
       </div>
-      <div class="m-price-block">
-        <div class="p-now">${fmtMoney(r.price, r.currency)}</div>
-        <div class="p-chg ${chgCls}">${sign} ${fmtPctSigned(pc)} <span style="opacity:0.7">(${change})</span></div>
-      </div>
+      <div class="m-price-block" id="m-price-block">${modalPriceBlockHtml()}</div>
       <button class="m-close" onclick="closeModal()" title="Close">×</button>
     </div>
     <div class="m-chart-wrap">
@@ -2056,6 +2233,8 @@ function renderModalSkeleton() {
           ${RANGES.map(rg => `<button data-range="${rg}" class="${rg === DETAIL.range ? "active" : ""}">${rg}</button>`).join("")}
         </div>
         <span class="m-toolbar-spacer"></span>
+        ${SMA_PERIODS.map(n => `<button class="m-toolbar-btn m-sma-btn" id="m-toggle-sma${n}" data-sma="${n}" title="${n}-period simple moving average, computed on the chart's bar frequency"><span class="dot" style="background:${SMA_COLORS[n]}"></span>${n}</button>`).join("")}
+        <span class="m-toolbar-sep"></span>
         <button class="m-toolbar-btn" id="m-toggle-sp" title="Compare to S&P 500"><span class="dot sp"></span>S&amp;P 500</button>
         <button class="m-toolbar-btn" id="m-toggle-sec" title="Compare to sector ETF"><span class="dot sec"></span>Sector</button>
         <button class="m-toolbar-btn active" id="m-toggle-vol" title="Toggle volume bars">Volume</button>
@@ -2069,12 +2248,69 @@ function renderModalSkeleton() {
   `;
   $("#m-range-tabs").addEventListener("click", (e) => {
     const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.range === DETAIL.range) return;
     DETAIL.range = b.dataset.range;
+    DETAIL.sel = null;              // a selection is meaningless on a new window
     renderModalFull();
+    ensureIntraday(DETAIL.range);
   });
-  $("#m-toggle-sp").onclick = () => { DETAIL.showSP = !DETAIL.showSP; renderModalFull(); };
-  $("#m-toggle-sec").onclick = () => { DETAIL.showSector = !DETAIL.showSector; renderModalFull(); };
+  $("#m-toggle-sp").onclick = () => { DETAIL.showSP = !DETAIL.showSP; renderModalFull(); ensureIntraday(DETAIL.range); };
+  $("#m-toggle-sec").onclick = () => { DETAIL.showSector = !DETAIL.showSector; renderModalFull(); ensureIntraday(DETAIL.range); };
   $("#m-toggle-vol").onclick = () => { DETAIL.showVol = !DETAIL.showVol; renderModalFull(); };
+  for (const btn of document.querySelectorAll("#modal .m-sma-btn")) {
+    btn.onclick = () => {
+      const n = +btn.dataset.sma;
+      DETAIL.sma[n] = !DETAIL.sma[n];
+      writeChartSma(DETAIL.sma);
+      syncSmaPills();            // same object; keep the portfolio pills honest
+      renderModalFull();
+    };
+  }
+}
+
+/* Ranges 1M/3M/6M are drawn from a sub-daily payload; the rest slice the daily
+ * one. Fetched lazily on first use (and re-fetched when a benchmark overlay is
+ * switched on, since the overlay must be on the same bar frequency as the
+ * price line or it renders as a staircase against a smooth curve).
+ *
+ * `fallback: true` from the server — cap exceeded, no intraday data for this
+ * listing, or the fetch failed — leaves DETAIL.intraday[range] unset, so
+ * activeChartSeries() quietly uses the daily series and the legend says
+ * "daily". Never blank. */
+const INTRADAY_RANGES = new Set(["1M", "3M", "6M"]);
+
+async function ensureIntraday(range) {
+  if (!INTRADAY_RANGES.has(range) || !DETAIL.data) return;
+  const sym = DETAIL.data.symbol;
+  const bench = [];
+  if (DETAIL.showSP) bench.push("SPY");
+  if (DETAIL.showSector && DETAIL.data.sector_etf) bench.push(DETAIL.data.sector_etf);
+  const want = bench.slice().sort().join(",");
+  const have = DETAIL.intraday[range];
+  if (have && have._bench === want) return;         // already have exactly this
+  if (DETAIL.intraPending[range] === want) return;  // identical fetch in flight
+  DETAIL.intraPending[range] = want;
+
+  const tab = document.querySelector(`#m-range-tabs button[data-range="${range}"]`);
+  if (tab) lcShow(tab, "");
+  try {
+    const url = `/api/history?symbol=${encodeURIComponent(sym)}&range=${range}`
+              + (bench.length ? `&bench=${encodeURIComponent(bench.join(","))}` : "");
+    const r = await fetch(url);
+    const j = await r.json();
+    // The user may have tabbed away or closed the modal while this was in
+    // flight; dropping a stale payload beats repainting a chart nobody's on.
+    if (!DETAIL.data || DETAIL.data.symbol !== sym) return;
+    if (j && !j.fallback && j.history && j.history.length >= 2) {
+      j._bench = want;
+      DETAIL.intraday[range] = j;
+      if (DETAIL.range === range) { renderChart(); renderModalPriceBlock(); }
+    }
+  } catch { /* daily series already on screen; leave it */ }
+  finally {
+    delete DETAIL.intraPending[range];
+    if (tab) lcHide(tab);
+  }
 }
 
 function renderModalFull() {
@@ -2086,6 +2322,7 @@ function renderModalFull() {
   $("#m-toggle-sp")?.classList.toggle("active", DETAIL.showSP);
   $("#m-toggle-sec")?.classList.toggle("active", DETAIL.showSector);
   $("#m-toggle-vol")?.classList.toggle("active", DETAIL.showVol);
+  for (const n of SMA_PERIODS) $(`#m-toggle-sma${n}`)?.classList.toggle("active", !!DETAIL.sma[n]);
   // Hide sector toggle if no sector ETF data
   if (!DETAIL.data.benchmark_sector || !DETAIL.data.benchmark_sector.length) {
     $("#m-toggle-sec").style.display = "none";
@@ -2093,6 +2330,7 @@ function renderModalFull() {
   } else {
     $("#m-toggle-sec").title = "Compare to " + (DETAIL.data.sector_etf || "sector ETF");
   }
+  renderModalPriceBlock();
   renderChart();
   renderSections();
 }
@@ -2118,11 +2356,255 @@ function normalizedTo(pts, startVal) {
   return pts.map(p => [p[0], (p[1] / base) * startVal]);
 }
 
+/* ───────────────────── Shared chart helpers ─────────────────────────────
+ * These were duplicated verbatim between the detail chart and the portfolio
+ * chart (their own pxToData / nearestIdx / clientToSvgX / drag state, ~150
+ * lines each). One copy now; both charts call it. */
+
+/* Index of the point nearest `t`. Binary search — the series can be 1700+
+ * intraday bars and this runs on every mousemove. */
+function nearestPointIdx(pts, t) {
+  if (!pts || !pts.length) return -1;
+  let lo = 0, hi = pts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (pts[mid][0] < t) lo = mid + 1; else hi = mid;
+  }
+  if (lo > 0 && Math.abs(pts[lo - 1][0] - t) < Math.abs(pts[lo][0] - t)) return lo - 1;
+  return lo;
+}
+
+/* Simple moving average over `n` points.
+ *
+ * MUST be handed the FULL fetched series, not the visible slice — an SMA 200
+ * needs 200 bars of warm-up, so computing it on a 1M window (~280 intraday
+ * bars, or ~21 daily ones) yields a line that starts three-quarters of the way
+ * across or is empty entirely. Slice the RESULT to the window instead; that is
+ * also why fetcher._RANGE_INTRADAY fetches a much wider period than it shows. */
+function smaSeries(pts, n) {
+  if (!pts || pts.length < n || n < 2) return [];
+  const out = [];
+  let sum = 0;
+  for (let i = 0; i < pts.length; i++) {
+    sum += pts[i][1];
+    if (i >= n) sum -= pts[i - n][1];
+    if (i >= n - 1) out.push([pts[i][0], sum / n]);
+  }
+  return out;
+}
+
+/* Last-in-bucket downsample. A 45-year MAX window is ~11.5k daily closes; the
+ * SVG path string alone would be ~200KB and every mousemove would binary-search
+ * it. Taking the last point of each bucket (rather than averaging) keeps the
+ * series a real subset of real closes, so the endpoints — and therefore the
+ * period return in the header — stay exact. */
+function thinPoints(pts, maxN) {
+  if (!pts || pts.length <= maxN) return pts || [];
+  const step = pts.length / maxN;
+  const out = [];
+  for (let i = 0; i < maxN; i++) {
+    out.push(pts[Math.min(pts.length - 1, Math.ceil((i + 1) * step) - 1)]);
+  }
+  // Pin BOTH endpoints. The first bucket's last member is index ceil(step)-1,
+  // not 0 — on a 45-year MAX window that silently moved the start date forward
+  // ~7 trading days and changed the reported period return by tens of
+  // thousands of percent (+339417% -> +316048% on AAPL). The window the header
+  // and the chart report must be the window the user asked for.
+  out[0] = pts[0];
+  out[out.length - 1] = pts[pts.length - 1];
+  return out;
+}
+const MAX_CHART_POINTS = 1500;
+
+/* Drag-to-measure, shared by both charts.
+ *
+ * Replaces two near-identical implementations that each self-destructed 1.8s
+ * after mouseup — you could not read a measurement and then look at the chart.
+ * The selection now persists until you click elsewhere on the plot, press Esc,
+ * or change the range, and either edge can be dragged afterwards to nudge it.
+ *
+ * It also fixes a listener leak the old code had: the detail chart's 1.8s timer
+ * called renderChart(), which re-ran the attach and registered ANOTHER window
+ * mouseup handler every single drag — they accumulated for the page's lifetime,
+ * across modal opens, because window outlives the modal DOM. Everything here is
+ * scoped to one AbortController that the caller aborts before re-attaching.
+ *
+ * opts: {svg, overlay, selRect, geom{W,padL,padR,padT,chartH,t0,t1,xScale},
+ *        series, getSel, setSel, onUpdate}
+ * Returns {destroy, paint}. */
+const BRUSH_HANDLE_PX = 6;      // grab zone on each edge, in svg units
+const BRUSH_MIN_DRAG_PX = 3;    // below this a press counts as a click, not a drag
+
+function attachRangeBrush(opts) {
+  const { svg, overlay, selRect, geom: g, series, getSel, setSel, onUpdate } = opts;
+  if (!svg || !overlay || !selRect) return { destroy() {}, paint() {} };
+  const ac = new AbortController();
+  const on = { signal: ac.signal };
+
+  const clientToSvgX = (clientX) => {
+    const r = svg.getBoundingClientRect();
+    if (!r.width) return NaN;      // panel collapsed/hidden — nothing to measure
+    return (clientX - r.left) * (g.W / r.width);
+  };
+  /* Pointer capture keeps the drag alive when the cursor leaves the plot, but
+     it throws NotFoundError whenever the id isn't a live pointer — a released
+     pointer, a detached node, or a synthetic event. Never let that abort the
+     handler; capture is an enhancement, the drag works without it. */
+  const capture = (id, want) => {
+    try { want ? overlay.setPointerCapture?.(id) : overlay.releasePointerCapture?.(id); }
+    catch { /* not capturable; the drag still tracks via the overlay's events */ }
+  };
+  const svgXToTime = (px) => {
+    const clamped = Math.max(g.padL, Math.min(g.W - g.padR, px));
+    return g.t0 + (clamped - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
+  };
+  /* Snap to a real data point so the reported return is between two actual
+     closes, not an interpolation nobody traded at. */
+  const snap = (t) => {
+    const i = nearestPointIdx(series, t);
+    return i < 0 ? t : series[i][0];
+  };
+
+  /* Plot height. The detail chart's geom carries chartH; the portfolio chart's
+     does not, and setAttribute("height", undefined) writes the literal string
+     "undefined" — an invalid SVG length, which renders as height 0. That made
+     the portfolio chart's selection band completely invisible even though the
+     measurement text was correct. Derive it when it isn't supplied. */
+  const plotH = (g.chartH != null) ? g.chartH : (g.H - g.padT - g.padB);
+
+  function paint() {
+    const sel = getSel();
+    if (!sel) { selRect.style.display = "none"; return; }
+    const ax = g.xScale(sel.t0), bx = g.xScale(sel.t1);
+    selRect.style.display = "";
+    selRect.setAttribute("x", Math.min(ax, bx));
+    selRect.setAttribute("y", g.padT);
+    selRect.setAttribute("width", Math.max(1, Math.abs(bx - ax)));
+    selRect.setAttribute("height", plotH);
+  }
+
+  let mode = null;        // "new" | "t0" | "t1"
+  let anchorT = null;     // the edge held fixed while dragging
+  let downX = null;
+
+  overlay.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    downX = clientToSvgX(e.clientX);
+    const t = svgXToTime(downX);
+    const sel = getSel();
+    if (sel) {
+      // Grab an existing edge if the press is near one.
+      const d0 = Math.abs(downX - g.xScale(sel.t0));
+      const d1 = Math.abs(downX - g.xScale(sel.t1));
+      if (d0 <= BRUSH_HANDLE_PX && d0 <= d1) { mode = "t0"; anchorT = sel.t1; }
+      else if (d1 <= BRUSH_HANDLE_PX) { mode = "t1"; anchorT = sel.t0; }
+    }
+    if (!mode) { mode = "new"; anchorT = snap(t); }
+    capture(e.pointerId, true);
+    e.preventDefault();
+  }, on);
+
+  overlay.addEventListener("pointermove", (e) => {
+    if (!mode) return;
+    const x = clientToSvgX(e.clientX);
+    if (!isFinite(x)) return;
+    const t = snap(svgXToTime(x));
+    if (t === anchorT || anchorT == null) return;
+    setSel({ t0: Math.min(anchorT, t), t1: Math.max(anchorT, t) });
+    paint();
+    onUpdate(getSel());
+  }, on);
+
+  const finish = (e) => {
+    if (!mode) return;
+    const nowX = clientToSvgX(e.clientX);
+    const moved = (downX == null || !isFinite(nowX)) ? 0 : Math.abs(nowX - downX);
+    const wasNew = mode === "new";
+    mode = null; anchorT = null; downX = null;
+    capture(e.pointerId, false);
+    // A press that never moved is a click: clear the selection rather than
+    // leaving a 1px sliver behind (the old code left a stale rect here).
+    if (wasNew && moved < BRUSH_MIN_DRAG_PX) {
+      setSel(null); paint(); onUpdate(null);
+      return;
+    }
+    onUpdate(getSel());
+  };
+  overlay.addEventListener("pointerup", finish, on);
+  overlay.addEventListener("pointercancel", finish, on);
+
+  // Hovering an edge advertises that it can be dragged.
+  overlay.addEventListener("pointermove", (e) => {
+    if (mode) return;
+    const sel = getSel();
+    if (!sel) { overlay.style.cursor = "crosshair"; return; }
+    const x = clientToSvgX(e.clientX);
+    const near = Math.abs(x - g.xScale(sel.t0)) <= BRUSH_HANDLE_PX ||
+                 Math.abs(x - g.xScale(sel.t1)) <= BRUSH_HANDLE_PX;
+    overlay.style.cursor = near ? "ew-resize" : "crosshair";
+  }, on);
+
+  // Esc clears the selection without closing the modal — checked before the
+  // global handler by using capture, and only when a selection actually exists
+  // so Esc still closes overlays the rest of the time.
+  //
+  // THE TOPMOST SURFACE OWNS ESCAPE. Without the second guard, a stale
+  // selection on the page-level portfolio chart swallowed the Escape meant for
+  // an overlay stacked above it — reproduced: measure on the portfolio chart,
+  // open Settings, press Esc, and Settings stays open while the invisible
+  // selection is silently consumed instead. That chart is always mounted, so
+  // the block persisted for the life of the page.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !getSel()) return;
+    if (SCROLL_LOCK.depth > 0 && !svg.closest(".show")) return;
+    e.stopPropagation();
+    setSel(null); paint(); onUpdate(null);
+  }, { ...on, capture: true });
+
+  paint();
+  return { destroy: () => ac.abort(), paint };
+}
+
+/* Which series backs the active range.
+ *
+ * The granularity ladder: 1M/3M/6M come from /api/history at a sub-daily
+ * interval (everything was hardcoded interval="1d", so 1M was ~21 points for a
+ * chart 800px wide); YTD/1Y/5Y/MAX stay client-side slices of the one daily
+ * period="max" payload /api/detail already returns. `full` is deliberately the
+ * UNSLICED series — the moving averages are computed on it before slicing. */
+function activeChartSeries() {
+  const d = DETAIL.data;
+  const intra = DETAIL.intraday[DETAIL.range];
+  if (intra && intra.history && intra.history.length >= 2) {
+    const b = intra.benchmarks || {};
+    return {
+      full: intra.history, vol: intra.volume || [], interval: intra.interval,
+      spy: b.SPY || null, sec: (d.sector_etf && b[d.sector_etf]) || null,
+      intraday: true,
+    };
+  }
+  return {
+    full: d.history, vol: d.volume || [], interval: "1d",
+    spy: d.benchmark_spy || null, sec: d.benchmark_sector || null,
+    intraday: false,
+  };
+}
+
+const SMA_PERIODS = [20, 50, 200];
+const SMA_COLORS = { 20: "#38bdf8", 50: "#a78bfa", 200: "#fb923c" };
+
+/* Human label for a bar frequency — the MA legend must say what it was
+   computed on, since "SMA 50" means something very different on 30m bars. */
+function barLabel(interval) {
+  return interval === "1d" ? "daily" : interval + " bars";
+}
+
 function renderChart() {
   const d = DETAIL.data;
   const wrap = $("#m-chart");
   const range = DETAIL.range;
-  const stock = sliceHistory(d.history, range);
+  const src = activeChartSeries();
+  const stock = thinPoints(sliceHistory(src.full, range), MAX_CHART_POINTS);
   if (stock.length < 2) {
     wrap.innerHTML = `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);">No data for ${range}.</div>`;
     return;
@@ -2130,15 +2612,25 @@ function renderChart() {
 
   // Slice volume + benchmarks aligned to stock's window
   const t0 = stock[0][0], t1 = stock[stock.length - 1][0];
-  const vol = (d.volume || []).filter(p => p[0] >= t0 && p[0] <= t1);
+  const vol = thinPoints((src.vol || []).filter(p => p[0] >= t0 && p[0] <= t1), MAX_CHART_POINTS);
   let spy = null, sec = null;
-  if (DETAIL.showSP && d.benchmark_spy) {
-    const s = d.benchmark_spy.filter(p => p[0] >= t0 && p[0] <= t1);
-    if (s.length >= 2) spy = normalizedTo(s, stock[0][1]);
+  if (DETAIL.showSP && src.spy) {
+    const s = src.spy.filter(p => p[0] >= t0 && p[0] <= t1);
+    if (s.length >= 2) spy = normalizedTo(thinPoints(s, MAX_CHART_POINTS), stock[0][1]);
   }
-  if (DETAIL.showSector && d.benchmark_sector) {
-    const s = d.benchmark_sector.filter(p => p[0] >= t0 && p[0] <= t1);
-    if (s.length >= 2) sec = normalizedTo(s, stock[0][1]);
+  if (DETAIL.showSector && src.sec) {
+    const s = src.sec.filter(p => p[0] >= t0 && p[0] <= t1);
+    if (s.length >= 2) sec = normalizedTo(thinPoints(s, MAX_CHART_POINTS), stock[0][1]);
+  }
+
+  // Moving averages — computed over the FULL series, then sliced to the window
+  // (see smaSeries). Doing it the other way round is the classic bug: SMA 200
+  // would be empty on every range shorter than 200 bars.
+  const smas = [];
+  for (const n of SMA_PERIODS) {
+    if (!DETAIL.sma[n]) continue;
+    const s = smaSeries(src.full, n).filter(p => p[0] >= t0 && p[0] <= t1);
+    if (s.length >= 2) smas.push({ n, pts: thinPoints(s, MAX_CHART_POINTS) });
   }
 
   // Geometry
@@ -2153,6 +2645,7 @@ function renderChart() {
   for (const p of stock) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   if (spy) for (const p of spy) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   if (sec) for (const p of sec) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  for (const s of smas) for (const p of s.pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   const rng = (hi - lo) || 1;
   const padPct = 0.05;
   lo -= rng * padPct; hi += rng * padPct;
@@ -2202,6 +2695,8 @@ function renderChart() {
   }
   const fmtTickDate = (ts) => {
     const dt = new Date(ts);
+    // On a 30m/1h series a 1M window spans a few weeks, so day-level ticks are
+    // still the right granularity; the intraday detail lives in the crosshair.
     if (range === "1M" || range === "3M") return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
     if (range === "6M" || range === "YTD" || range === "1Y") return dt.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
     return dt.toLocaleDateString(undefined, { year: "numeric" });
@@ -2225,6 +2720,9 @@ function renderChart() {
 
   const spyPath = spy ? buildPath(spy) : null;
   const secPath = sec ? buildPath(sec) : null;
+  const smaSvg = smas.map(s =>
+    `<path d="${buildPath(s.pts)}" fill="none" stroke="${SMA_COLORS[s.n]}" stroke-width="1.3" opacity="0.9"/>`
+  ).join("");
 
   wrap.innerHTML = `
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" id="m-svg">
@@ -2240,6 +2738,7 @@ function renderChart() {
       <path d="${area}" fill="url(#g-area)"/>
       ${spyPath ? `<path d="${spyPath}" fill="none" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
       ${secPath ? `<path d="${secPath}" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
+      ${smaSvg}
       <path d="${stockPath}" fill="none" stroke="${stroke}" stroke-width="1.8"/>
       ${volSvg}
       <rect class="sel-rect" id="m-sel" x="0" y="0" width="0" height="${chartH}" style="display:none"/>
@@ -2254,12 +2753,25 @@ function renderChart() {
   `;
 
   // Save geometry + data for interaction
-  DETAIL.geom = { W, H, padL, padR, padT, padB, chartH, xScale, yScale, stock, spy, sec, t0, t1, fillRgb };
+  DETAIL.geom = { W, H, padL, padR, padT, padB, chartH, xScale, yScale, stock, spy, sec,
+                  t0, t1, fillRgb, interval: src.interval };
 
-  // Range return summary (when not dragging)
-  const sPct = ((stock[stock.length-1][1] / stock[0][1] - 1) * 100);
+  renderChartInfoDefault();
+  attachChartInteraction();
+}
+
+/* The chart's own summary line: range return, benchmark returns, bar frequency,
+ * MA legend. Split out of renderChart so the brush can swap it for a selection
+ * summary and put it back without a full redraw (the old code re-ran the entire
+ * renderChart to restore this, which is what leaked the mouseup listeners). */
+function renderChartInfoDefault() {
+  const g = DETAIL.geom;
+  if (!g) return;
+  const { stock, spy, sec, t0, t1, interval } = g;
+  const range = DETAIL.range;
+  const sPct = ((stock[stock.length - 1][1] / stock[0][1] - 1) * 100);
   const sCls = sPct >= 0 ? "pos" : "neg";
-  let parts = [`<span><b class="${sCls}">${(sPct>=0?"+":"")+sPct.toFixed(2)}%</b> · ${range} (${DETAIL.data.symbol})</span>`];
+  const parts = [`<span><b class="${sCls}">${(sPct>=0?"+":"")+sPct.toFixed(2)}%</b> · ${range} (${DETAIL.data.symbol})</span>`];
   if (spy) {
     const p = (spy[spy.length-1][1] / spy[0][1] - 1) * 100;
     parts.push(`<span><b class="${p>=0?"pos":"neg"}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · S&amp;P 500</span>`);
@@ -2268,13 +2780,40 @@ function renderChart() {
     const p = (sec[sec.length-1][1] / sec[0][1] - 1) * 100;
     parts.push(`<span><b class="${p>=0?"pos":"neg"}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · ${DETAIL.data.sector_etf || "Sector"}</span>`);
   }
-  parts.push(`<span style="margin-left:auto">${fmtDateMDY(t0)} → ${fmtDateMDY(t1)}</span>`);
+  for (const n of SMA_PERIODS) {
+    if (!DETAIL.sma[n]) continue;
+    parts.push(`<span class="m-sma-key"><i style="background:${SMA_COLORS[n]}"></i>SMA ${n} · ${barLabel(interval)}</span>`);
+  }
+  parts.push(`<span style="margin-left:auto">${fmtDateMDY(t0)} → ${fmtDateMDY(t1)} · ${barLabel(interval)}</span>`);
   const info = $("#m-range-info");
   info.innerHTML = parts.join("");
   info.style.display = "flex";
   info.dataset.default = "1";
+}
 
-  attachChartInteraction();
+/* Selection summary — the brush's onUpdate. Mirrors renderChartInfoDefault's
+ * shape so the line doesn't jump around as you drag. */
+function renderChartInfoSelection(sel) {
+  const g = DETAIL.geom;
+  if (!g) return;
+  if (!sel) { renderChartInfoDefault(); renderModalPriceBlock(); return; }
+  const iA = nearestPointIdx(g.stock, sel.t0), iB = nearestPointIdx(g.stock, sel.t1);
+  if (iA < 0 || iB < 0 || iA === iB) return;
+  const pct = (g.stock[iB][1] / g.stock[iA][1] - 1) * 100;
+  const parts = [`<span><b class="${pct>=0?"pos":"neg"}">${(pct>=0?"+":"")+pct.toFixed(2)}%</b> · selection</span>`];
+  for (const [pts, label] of [[g.spy, "S&amp;P"], [g.sec, DETAIL.data.sector_etf || "Sector"]]) {
+    if (!pts) continue;
+    const jA = nearestPointIdx(pts, sel.t0), jB = nearestPointIdx(pts, sel.t1);
+    if (jA < 0 || jB < 0 || jA === jB) continue;
+    const p = (pts[jB][1] / pts[jA][1] - 1) * 100;
+    parts.push(`<span><b class="${p>=0?"pos":"neg"}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · ${label}</span>`);
+  }
+  parts.push(`<span style="margin-left:auto">${fmtDateMDY(g.stock[iA][0])} → ${fmtDateMDY(g.stock[iB][0])}</span>`);
+  const info = $("#m-range-info");
+  info.innerHTML = parts.join("");
+  info.style.display = "flex";
+  delete info.dataset.default;
+  renderModalPriceBlock();
 }
 
 function attachChartInteraction() {
@@ -2285,30 +2824,29 @@ function attachChartInteraction() {
   const dotSp = $("#m-dot-sp"), dotSec = $("#m-dot-sec");
   const sel = $("#m-sel");
   const wrap = $("#m-chart");
-  const info = $("#m-range-info");
   const g = DETAIL.geom;
+
+  // The chart SVG is rebuilt on every render, so the previous attach's
+  // listeners must be torn down or they pile up on window/document.
+  if (DETAIL.brush) { DETAIL.brush.destroy(); DETAIL.brush = null; }
 
   function pxToData(px) {
     // px is in svg viewBox units → matches our coords
     const tx = g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
     return tx;
   }
-  function nearestIdx(pts, t) {
-    if (!pts.length) return -1;
-    let lo = 0, hi = pts.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (pts[mid][0] < t) lo = mid + 1; else hi = mid;
-    }
-    if (lo > 0 && Math.abs(pts[lo - 1][0] - t) < Math.abs(pts[lo][0] - t)) return lo - 1;
-    return lo;
-  }
+  const nearestIdx = nearestPointIdx;
   function clientToSvgX(clientX) {
     const r = svg.getBoundingClientRect();
     return (clientX - r.left) * (g.W / r.width);
   }
 
-  let dragging = false, dragStartT = null;
+  DETAIL.brush = attachRangeBrush({
+    svg, overlay, selRect: sel, geom: g, series: g.stock,
+    getSel: () => DETAIL.sel,
+    setSel: (s) => { DETAIL.sel = s; },
+    onUpdate: renderChartInfoSelection,
+  });
 
   overlay.addEventListener("mousemove", (e) => {
     const svgX = clientToSvgX(e.clientX);
@@ -2357,32 +2895,6 @@ function attachChartInteraction() {
     const maxX = wrap.clientWidth - ttRect.width - 6;
     tt.style.left = Math.min(lx, Math.max(6, maxX)) + "px";
     tt.style.top = Math.max(6, ly) + "px";
-
-    if (dragging && dragStartT != null) {
-      const a = Math.min(dragStartT, sp[0]), b = Math.max(dragStartT, sp[0]);
-      const ax = g.xScale(a), bx = g.xScale(b);
-      sel.style.display = "";
-      sel.setAttribute("x", ax);
-      sel.setAttribute("y", g.padT);
-      sel.setAttribute("width", Math.max(1, bx - ax));
-      // Update range-info to show drag return
-      const iA = nearestIdx(g.stock, a), iB = nearestIdx(g.stock, b);
-      if (iA >= 0 && iB >= 0 && iA !== iB) {
-        const va = g.stock[iA][1], vb = g.stock[iB][1];
-        const pct = (vb/va - 1) * 100;
-        const cls = pct >= 0 ? "pos" : "neg";
-        let drag = `<span><b class="${cls}">${(pct>=0?"+":"")+pct.toFixed(2)}%</b> · selection</span>`;
-        if (g.spy) {
-          const jA = nearestIdx(g.spy, a), jB = nearestIdx(g.spy, b);
-          if (jA >= 0 && jB >= 0 && jA !== jB) {
-            const p = (g.spy[jB][1]/g.spy[jA][1] - 1) * 100;
-            drag += `<span><b class="${p>=0?'pos':'neg'}">${(p>=0?'+':'')+p.toFixed(2)}%</b> · S&amp;P</span>`;
-          }
-        }
-        drag += `<span style="margin-left:auto">${fmtDateMDY(g.stock[iA][0])} → ${fmtDateMDY(g.stock[iB][0])}</span>`;
-        info.innerHTML = drag;
-      }
-    }
   });
   overlay.addEventListener("mouseleave", () => {
     cv.style.opacity = 0; ch.style.opacity = 0; dot.style.opacity = 0;
@@ -2390,22 +2902,10 @@ function attachChartInteraction() {
     if (dotSec) dotSec.style.opacity = 0;
     tt.classList.remove("show");
   });
-  overlay.addEventListener("mousedown", (e) => {
-    dragging = true;
-    const svgX = clientToSvgX(e.clientX);
-    dragStartT = pxToData(Math.max(g.padL, Math.min(g.W - g.padR, svgX)));
-    sel.style.display = "";
-  });
-  window.addEventListener("mouseup", () => {
-    if (!dragging) return;
-    dragging = false; dragStartT = null;
-    // Keep selection visible briefly, then revert range-info to defaults
-    setTimeout(() => {
-      sel.style.display = "none";
-      // Restore range summary
-      renderChart();
-    }, 1800);
-  });
+
+  // A selection survives a redraw (toggling an overlay or an MA), so restore
+  // its summary line too — renderChart() has just reset it to the default.
+  if (DETAIL.sel) renderChartInfoSelection(DETAIL.sel);
 }
 
 /* ---- Information sections ---- */
@@ -2828,6 +3328,11 @@ let STATE = {
   showNdx: false,
   showSec: false,
   showDd: true,
+  // Portfolio-chart SMA overlays and drag-to-measure selection. Both mirror the
+  // detail chart's DETAIL.sma / DETAIL.sel; the brush itself is shared code.
+  pfSma: CHART_SMA,     // same object as DETAIL.sma — see CHART_SMA
+  pfSel: null,
+  pfBrush: null,
   analytics: null,
   analyticsLoading: false,
   // {tabName: {"<mode>|<period>|<ccy>": result}} — persisted per tab so
@@ -3445,9 +3950,9 @@ function showConfirm({title, body, okLabel}) {
     $("#confirm-title").textContent = title || "Are you sure?";
     $("#confirm-body").innerHTML = body || "";
     $("#confirm-ok").textContent = okLabel || "Delete";
-    bg.classList.add("show");
+    showOverlay(bg);
     const cleanup = (val) => {
-      bg.classList.remove("show");
+      hideOverlay(bg);
       $("#confirm-ok").onclick = null;
       $("#confirm-cancel").onclick = null;
       bg.onclick = null;
@@ -3628,8 +4133,7 @@ async function exportXlsx() {
    we don't leak object URLs across repeated exports. */
 function closeExportPopup() {
   const bg = document.getElementById("export-bg");
-  if (!bg || !bg.classList.contains("show")) return;
-  bg.classList.remove("show");
+  if (!hideOverlay(bg)) return;
   if (bg._blobUrl) { URL.revokeObjectURL(bg._blobUrl); bg._blobUrl = null; }
 }
 function openExportPopup(fname, url) {
@@ -3639,7 +4143,7 @@ function openExportPopup(fname, url) {
   bg._blobUrl = url;
   const link = document.getElementById("export-file-link");
   if (link) { link.textContent = fname; link.href = url; link.download = fname; }
-  bg.classList.add("show");
+  showOverlay(bg);
   const done = document.getElementById("export-done");
   if (done) done.onclick = closeExportPopup;
   bg.onclick = (e) => { if (e.target === bg) closeExportPopup(); };
@@ -4470,6 +4974,18 @@ function drawPortfolioChart(a, hostEl, legendEl) {
   if (showSpy) for (const p of series.spy) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   if (showNdx) for (const p of series.nasdaq) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   if (showSec) for (const p of series.sector_mix) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  // Moving averages on the portfolio index itself. This series is always daily
+  // (analytics fetches interval="1d"), and it arrives already trimmed to the
+  // period, so unlike the detail chart there is no wider window to compute
+  // over — an SMA longer than the period simply has nothing to show, and is
+  // skipped rather than drawn as a stub.
+  const pfSmas = [];
+  for (const n of SMA_PERIODS) {
+    if (!STATE.pfSma[n]) continue;
+    const s = smaSeries(port, n);
+    if (s.length >= 2) pfSmas.push({ n, pts: s });
+  }
+  for (const s of pfSmas) for (const p of s.pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   const pad = (hi - lo) * 0.06 || 1;
   lo -= pad; hi += pad;
   const yScale = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
@@ -4499,6 +5015,7 @@ function drawPortfolioChart(a, hostEl, legendEl) {
     ${showSec ? `<path d="${path(series.sector_mix)}" fill="none" stroke="#f59e0b" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
     ${showNdx ? `<path d="${path(series.nasdaq)}" fill="none" stroke="#06b6d4" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
     ${showSpy ? `<path d="${path(series.spy)}" fill="none" stroke="#8b5cf6" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
+    ${pfSmas.map(s => `<path d="${path(s.pts)}" fill="none" stroke="${SMA_COLORS[s.n]}" stroke-width="1.2" opacity="0.9"/>`).join("")}
     <path d="${path(port)}" fill="none" stroke="${accent}" stroke-width="2"/>
     <rect class="pf-sel" id="pf-sel" x="0" y="${padT}" width="0" height="${H-padT-padB}" style="display:none"/>
     <line class="pf-cross" id="pf-cv" x1="0" x2="0" y1="${padT}" y2="${H-padB}"/>
@@ -4537,10 +5054,12 @@ function drawPortfolioChart(a, hostEl, legendEl) {
   if (showNdx) legend.push(`<span><i style="background:#06b6d4"></i> NASDAQ</span>`);
   if (showSec) legend.push(`<span><i style="background:#f59e0b"></i> Sector mix</span>`);
   if (showDd)  legend.push(`<span><i style="background:#f85149"></i> Drawdown</span>`);
+  for (const s of pfSmas) legend.push(`<span><i style="background:${SMA_COLORS[s.n]}"></i> SMA ${s.n} · daily</span>`);
   legendEl.innerHTML = legend.join("");
 
   attachPortfolioChartInteraction({
     W, H, padL, padR, padT, padB,
+    chartH: H - padT - padB,   // attachRangeBrush paints the selection to this
     t0, t1, xScale, yScale,
     port, spy: showSpy ? series.spy : null,
     ndx: showNdx ? series.nasdaq : null,
@@ -4584,28 +5103,49 @@ function attachPortfolioChartInteraction(g) {
       const p = (g.sec[g.sec.length-1][1] / g.sec[0][1] - 1) * 100;
       parts.push(`<span><b class="${p>=0?'pos':'neg'}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · Sector mix</span>`);
     }
-    parts.push(`<span class="selection-hint">drag on chart to measure a sub-period →</span>`);
+    parts.push(`<span class="selection-hint">drag on chart to measure a sub-period · Esc clears →</span>`);
     return parts.join("");
   };
-  info.innerHTML = defaultInfo();
 
-  const nearestIdx = (pts, t) => {
-    if (!pts || !pts.length) return -1;
-    let lo = 0, hi = pts.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (pts[mid][0] < t) lo = mid + 1; else hi = mid;
+  /* Selection summary. Kept as its own function (rather than inlined in a drag
+     handler like before) so the brush can call it on release and on redraw. */
+  const selectionInfo = (s) => {
+    if (!s) { info.innerHTML = defaultInfo(); return; }
+    const iA = nearestPointIdx(g.port, s.t0), iB = nearestPointIdx(g.port, s.t1);
+    if (iA < 0 || iB < 0 || iA === iB) return;
+    const pPct = (g.port[iB][1] / g.port[iA][1] - 1) * 100;
+    const parts = [`<span><b class="${pPct>=0?'pos':'neg'}">${(pPct>=0?'+':'')+pPct.toFixed(2)}%</b> · Portfolio (selection)</span>`];
+    for (const [pts, label] of [[g.spy, "SPY"], [g.ndx, "NASDAQ"], [g.sec, "Sector mix"]]) {
+      if (!pts) continue;
+      const jA = nearestPointIdx(pts, s.t0), jB = nearestPointIdx(pts, s.t1);
+      if (jA < 0 || jB < 0 || jA === jB) continue;
+      const p = (pts[jB][1] / pts[jA][1] - 1) * 100;
+      parts.push(`<span><b class="${p>=0?'pos':'neg'}">${(p>=0?'+':'')+p.toFixed(2)}%</b> · ${label}</span>`);
     }
-    if (lo > 0 && Math.abs(pts[lo - 1][0] - t) < Math.abs(pts[lo][0] - t)) return lo - 1;
-    return lo;
+    parts.push(`<span class="selection-hint">${fmtDateMDY(g.port[iA][0])} → ${fmtDateMDY(g.port[iB][0])}</span>`);
+    info.innerHTML = parts.join("");
   };
+
+  // renderAnalyticsBody() replaces the whole panel on every period change,
+  // mode change and overlay-pill toggle, so without this teardown each one
+  // leaked another set of listeners.
+  if (STATE.pfBrush) { STATE.pfBrush.destroy(); STATE.pfBrush = null; }
+  // A selection from a previous period no longer refers to visible dates.
+  if (STATE.pfSel && (STATE.pfSel.t0 < g.t0 || STATE.pfSel.t1 > g.t1)) STATE.pfSel = null;
+  STATE.pfBrush = attachRangeBrush({
+    svg, overlay, selRect: sel, geom: g, series: g.port,
+    getSel: () => STATE.pfSel,
+    setSel: (s) => { STATE.pfSel = s; },
+    onUpdate: selectionInfo,
+  });
+  selectionInfo(STATE.pfSel);
+
+  const nearestIdx = nearestPointIdx;
   const clientToSvgX = (clientX) => {
     const r = svg.getBoundingClientRect();
     return (clientX - r.left) * (g.W / r.width);
   };
   const pxToData = (px) => g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
-
-  let dragging = false, dragStartT = null;
 
   overlay.addEventListener("mousemove", (e) => {
     const svgX = clientToSvgX(e.clientX);
@@ -4661,43 +5201,6 @@ function attachPortfolioChartInteraction(g) {
     const maxX = wrap.clientWidth - ttRect.width - 6;
     tt.style.left = Math.min(lx, Math.max(6, maxX)) + "px";
     tt.style.top = Math.max(6, ly) + "px";
-
-    if (dragging && dragStartT != null) {
-      const a = Math.min(dragStartT, sp[0]), b = Math.max(dragStartT, sp[0]);
-      const ax = g.xScale(a), bx = g.xScale(b);
-      sel.style.display = "";
-      sel.setAttribute("x", ax);
-      sel.setAttribute("width", Math.max(1, bx - ax));
-      const iA = nearestIdx(g.port, a), iB = nearestIdx(g.port, b);
-      if (iA >= 0 && iB >= 0 && iA !== iB) {
-        const va = g.port[iA][1], vb = g.port[iB][1];
-        const pPct = (vb/va - 1) * 100;
-        let drag = `<span><b class="${pPct>=0?'pos':'neg'}">${(pPct>=0?'+':'')+pPct.toFixed(2)}%</b> · Portfolio (selection)</span>`;
-        if (g.spy) {
-          const jA = nearestIdx(g.spy, a), jB = nearestIdx(g.spy, b);
-          if (jA >= 0 && jB >= 0 && jA !== jB) {
-            const sp2 = (g.spy[jB][1]/g.spy[jA][1] - 1) * 100;
-            drag += `<span><b class="${sp2>=0?'pos':'neg'}">${(sp2>=0?'+':'')+sp2.toFixed(2)}%</b> · SPY</span>`;
-          }
-        }
-        if (g.ndx) {
-          const jA = nearestIdx(g.ndx, a), jB = nearestIdx(g.ndx, b);
-          if (jA >= 0 && jB >= 0 && jA !== jB) {
-            const nx = (g.ndx[jB][1]/g.ndx[jA][1] - 1) * 100;
-            drag += `<span><b class="${nx>=0?'pos':'neg'}">${(nx>=0?'+':'')+nx.toFixed(2)}%</b> · NASDAQ</span>`;
-          }
-        }
-        if (g.sec) {
-          const jA = nearestIdx(g.sec, a), jB = nearestIdx(g.sec, b);
-          if (jA >= 0 && jB >= 0 && jA !== jB) {
-            const sc = (g.sec[jB][1]/g.sec[jA][1] - 1) * 100;
-            drag += `<span><b class="${sc>=0?'pos':'neg'}">${(sc>=0?'+':'')+sc.toFixed(2)}%</b> · Sector mix</span>`;
-          }
-        }
-        drag += `<span class="selection-hint">${fmtDateMDY(g.port[iA][0])} → ${fmtDateMDY(g.port[iB][0])}</span>`;
-        info.innerHTML = drag;
-      }
-    }
   });
   overlay.addEventListener("mouseleave", () => {
     cv.style.opacity = 0; ch.style.opacity = 0; dot.style.opacity = 0;
@@ -4705,23 +5208,6 @@ function attachPortfolioChartInteraction(g) {
     if (dotNdx) dotNdx.style.opacity = 0;
     if (dotSec) dotSec.style.opacity = 0;
     tt.classList.remove("show");
-  });
-  overlay.addEventListener("mousedown", (e) => {
-    dragging = true;
-    const svgX = clientToSvgX(e.clientX);
-    dragStartT = pxToData(Math.max(g.padL, Math.min(g.W - g.padR, svgX)));
-    sel.style.display = "";
-    sel.setAttribute("x", g.xScale(dragStartT));
-    sel.setAttribute("width", 1);
-  });
-  window.addEventListener("mouseup", () => {
-    if (!dragging) return;
-    dragging = false; dragStartT = null;
-    // Keep selection visible briefly, then fade back to defaults
-    setTimeout(() => {
-      sel.style.display = "none";
-      info.innerHTML = defaultInfo();
-    }, 1800);
   });
 }
 
@@ -4792,11 +5278,11 @@ function openWeightsPopup(opts) {
     const b = document.getElementById(id); if (b) b.disabled = !saved;
   });
   renderWeightsRows();
-  $("#pf-weights-bg").classList.add("show");
+  showOverlay("#pf-weights-bg");
 }
 
 function closeWeightsPopup() {
-  $("#pf-weights-bg").classList.remove("show");
+  hideOverlay("#pf-weights-bg");
   hideInlinePrompt();
 }
 
@@ -5103,7 +5589,7 @@ function toast(msg) {
  * --------------------------------------------------------------------------- */
 let _katexRendered = false;
 function openInfo() {
-  $("#info-bg").classList.add("show");
+  showOverlay("#info-bg");
   if (!_katexRendered && window.renderMathInElement) {
     renderMathInElement(document.getElementById("info-bg"), {
       delimiters: [{ left: "$$", right: "$$", display: true }],
@@ -5112,7 +5598,7 @@ function openInfo() {
     _katexRendered = true;
   }
 }
-function closeInfo() { $("#info-bg").classList.remove("show"); }
+function closeInfo() { hideOverlay("#info-bg"); }
 $("#info-bg").addEventListener("click", (e) => { if (e.target.id === "info-bg") closeInfo(); });
 
 // About-MPT modal — layered on top of the MPT overlay (z-index 95 vs 90).
@@ -5120,8 +5606,7 @@ $("#info-bg").addEventListener("click", (e) => { if (e.target.id === "info-bg") 
 let _mptKatexRendered = false;
 function openMptInfo() {
   const bg = document.getElementById("pf-mpt-info-bg");
-  if (!bg) return;
-  bg.classList.add("show");
+  if (!showOverlay(bg)) return;
   if (!_mptKatexRendered && window.renderMathInElement) {
     renderMathInElement(bg, {
       delimiters: [{ left: "$$", right: "$$", display: true }],
@@ -5130,10 +5615,7 @@ function openMptInfo() {
     _mptKatexRendered = true;
   }
 }
-function closeMptInfo() {
-  const bg = document.getElementById("pf-mpt-info-bg");
-  if (bg) bg.classList.remove("show");
-}
+function closeMptInfo() { hideOverlay("#pf-mpt-info-bg"); }
 
 /* ===========================================================================
  * Wire up
@@ -5177,7 +5659,7 @@ function runPrimary() {
   }
 }
 $("#build").onclick = runPrimary;
-$("#refresh").onclick = () => build({keepPanelOpen: $("#input-panel").classList.contains("hidden") ? false : true});
+setupRefreshControl();          // #refresh is a state machine now — see REFRESH
 $("#save-as").onclick = saveAsNewWatchlist;
 $("#export").onclick = exportXlsx;
 // Action buttons (Refresh, Export) flash accent on click to confirm the
@@ -5199,9 +5681,10 @@ for (const id of ["refresh", "export"]) {
     if (e.animationName === "topbar-btn-flash") btn.classList.remove("flash");
   });
   btn.addEventListener("click", () => {
-    // Refresh refuses to run on an empty tickers box (build() early-returns
-    // with a toast) — don't flash "process fired" for a rejected click.
-    if (id === "refresh" && !$("#tickers").value.trim()) return;
+    // Refresh refuses to run on an empty portfolio — don't flash
+    // "process fired" for a rejected click. A long-press "all portfolios"
+    // refresh doesn't need a loaded tab, so it's exempt.
+    if (id === "refresh" && !DATA.length && !$("#tickers").value.trim()) return;
     flashBtn(btn);
   });
 }
@@ -5311,7 +5794,6 @@ $("#news-btn").onclick = () => {
   $("#news-btn").classList.toggle("active", willOpen);
   if (willOpen) loadNewsSentiment();
 };
-$("#ns-refresh").onclick = () => refreshNewsSentiment();
 $("#ns-diag-toggle").onclick = (e) => {
   // The (i) and Methodology buttons live inside the toggle header — let them
   // handle their own clicks without also collapsing/expanding the body.
@@ -5350,8 +5832,17 @@ const NS = {
   tlTiers: new Set(),  // timeline sentiment-tier filter (empty = all), independent of the tape
 };
 
-/* Lookback control wiring — active pill + persistence. The new window only
- * takes effect on Refresh (cache-bust path), which the tooltip explains. */
+/* Lookback control wiring — active pill + persistence + an INSTANT re-score.
+ *
+ * Changing the window used to do nothing until the next Refresh. It now posts
+ * to /api/news-rescore, which re-aggregates the already-scored cached articles
+ * under the new window's tau: no network, no LLM, ~10ms.
+ *
+ * The honest part: news is cached per window, so widening can only re-weight
+ * evidence some earlier fetch actually pulled — it cannot conjure articles
+ * that were never fetched. Narrowing is exact. The response's `coverage` says
+ * which case you're in and #ns-cov-hint reports it, because a "30D" reading
+ * built from 7 days of articles must not look like a real 30-day read. */
 (() => {
   const box = $("#ns-lookback");
   if (!box) return;
@@ -5363,10 +5854,47 @@ const NS = {
       localStorage.setItem("ns_lookback", String(NS.lookbackDays));
       sync();
       renderNsTimeline();
+      nsRescoreWindow();
     };
   });
   sync();
 })();
+
+async function nsRescoreWindow() {
+  const symbols = nsSymbols();
+  const hint = $("#ns-cov-hint");
+  if (!symbols.length) { if (hint) hint.hidden = true; return; }
+  try {
+    const r = await fetch("/api/news-rescore", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({symbols, days: NS.lookbackDays}),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.sentiment) return;
+    // Assign nulls too. A ticker with no scored articles inside the NEW window
+    // genuinely has no reading for it — keeping the previous window's value
+    // would show a 30D tier under a 3D pill, which is exactly the mixed-window
+    // display the honest-coverage design exists to prevent.
+    for (const [sym, s] of Object.entries(j.sentiment)) {
+      NS.sentiment[sym] = s || null;
+    }
+    if (j.market) NS.market = j.market;
+    renderNewsPanel(symbols);
+    patchRowSentiment(NS.sentiment);
+    if (hint) {
+      const short = Object.entries(j.coverage || {})
+        .filter(([, c]) => c.truncated_by_fetch).map(([s]) => s);
+      if (short.length) {
+        hint.hidden = false;
+        hint.textContent = `${NS.lookbackDays}D scored from a narrower cache for `
+          + `${short.length} ticker${short.length > 1 ? "s" : ""} — Refresh to fetch the full window`;
+        hint.title = short.join(", ");
+      } else {
+        hint.hidden = true;
+      }
+    }
+  } catch { /* the panel keeps whatever it had */ }
+}
 
 function nsSymbols() { return DATA.map(r => r.symbol).filter(Boolean); }
 
@@ -5474,8 +6002,7 @@ function openNsProgress(plan) {
     foot.classList.remove("ns-prog-err");
     foot.textContent = `Window ${plan.days || NS.lookbackDays}d · 2 workers in parallel`;
   }
-  bg.hidden = false;
-  bg.classList.add("show");
+  showOverlay(bg);
   if (!bg.dataset.wired) {  // backdrop-click close, attached once
     bg.addEventListener("click", e => { if (e.target === bg) closeNsProgress(); });
     bg.dataset.wired = "1";
@@ -5528,89 +6055,409 @@ function nsProgressError(message) {
 
 function closeNsProgress() {
   const bg = $("#ns-prog-bg");
-  if (!bg) return;
-  bg.classList.remove("show");
-  bg.hidden = true;
+  if (hideOverlay(bg)) bg.hidden = true;
 }
 
-async function refreshNewsSentiment() {
-  const btn = $("#ns-refresh");
-  btn.disabled = true;
-  const symbols = nsSymbols();
-  let done = 0;
-  btn.textContent = "Refreshing…";
+/* ===========================================================================
+ * Refresh — one control, one background job
+ * ---------------------------------------------------------------------------
+ * State machine: idle → quotes → news → done (timestamp) | cancelled | error.
+ * Progress renders INSIDE the #refresh button (a thin determinate bar plus the
+ * live phase as its label); the per-ticker modal is now opt-in behind the
+ * status chip rather than thrown in your face.
+ *
+ * The job lives on the server (jobs.py), so it survives switching tabs and a
+ * full page reload — {id, lastSeq} in sessionStorage plus
+ * GET /api/refresh-job/current is all the client needs to reattach. Closing
+ * the stream is NOT a cancel; only the chip's × is.
+ * ------------------------------------------------------------------------ */
+const REFRESH = {
+  id: null, lastSeq: 0, scope: null, state: "idle",
+  reader: null, abort: null, retry: 0,
+  counts: {quotes_done: 0, quotes_total: 0, news_done: 0, news_total: 0},
+  touchedViews: new Set(),
+};
+const REFRESH_LONG_MS = 600;
+const REFRESH_SS_KEY = "refresh_job";
 
+function rfSave() {
   try {
-    const resp = await fetch("/api/news-refresh", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({symbols, context: nsRefreshContext(symbols)}),
-    });
-    if (!resp.ok || !resp.body) {
-      const j = await resp.json().catch(() => ({}));
-      throw new Error(j.error || ("HTTP " + resp.status));
-    }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done: rDone, value } = await reader.read();
-      if (rDone) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
-        if (!line) continue;
-        let msg;
-        try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.type === "plan") {
-          openNsProgress(msg);
-        } else if (msg.type === "market_stage") {
-          updateNsProgressJob("__market__", { stage: msg.stage, frac: msg.frac });
-        } else if (msg.type === "symbol_stage") {
-          updateNsProgressJob(msg.symbol, { stage: msg.stage, frac: msg.frac });
-        } else if (msg.type === "market") {
-          NS.market = msg.sentiment || null;
-          renderMarketSentiment();
-          updateNsProgressJob("__market__", { done: true, sentiment: msg.sentiment });
-          btn.textContent = `Refreshing… market ✓ 0/${symbols.length}`;
-        } else if (msg.type === "symbol") {
-          done += 1;
-          if (msg.sentiment) NS.sentiment[msg.symbol] = msg.sentiment;
-          renderNsGauge(symbols);
-          renderPortfolioSentiment(symbols);
-          updateNsProgressJob(msg.symbol, { done: true, sentiment: msg.sentiment });
-          btn.textContent = `Refreshing… ${done}/${symbols.length}`;
-        } else if (msg.type === "done") {
-          NS.market = msg.market || NS.market;
-          NS.sentiment = msg.portfolio || NS.sentiment;
-          NS.status = msg.status || NS.status;
-        } else if (msg.type === "error") {
-          throw new Error(msg.error || "refresh failed");
-        }
-      }
-    }
-    // Tape articles now carry fresh per-article scores — reload them.
-    try {
-      const tape = await fetch(`/api/news-tape?symbols=${encodeURIComponent(symbols.join(","))}`).then(r => r.json());
-      NS.articles = tape.articles || [];
-    } catch (e) { /* tape is decorative — keep the stale one */ }
-    renderNewsPanel(symbols);
-    patchRowSentiment(NS.sentiment);
-    // Brief hold so the last bar's fill is visible, then dismiss. Tracked so a
-    // subsequent refresh can cancel it (see openNsProgress).
-    NS.progCloseTimer = setTimeout(closeNsProgress, 900);
-  } catch (e) {
-    const detail = escapeHtml(String(e.message || e));
-    $("#ns-market-body").innerHTML = `<div class="ns-panel-empty">Refresh failed. ${detail}</div>`;
-    // Keep the modal open showing the error (closeable via backdrop/Esc)
-    // rather than silently vanishing on failure.
-    nsProgressError(detail);
-  }
-  btn.disabled = false;
-  btn.textContent = "↻ Refresh";
+    if (REFRESH.id) sessionStorage.setItem(REFRESH_SS_KEY,
+      JSON.stringify({id: REFRESH.id, lastSeq: REFRESH.lastSeq}));
+    else sessionStorage.removeItem(REFRESH_SS_KEY);
+  } catch { /* private mode */ }
 }
+
+function rfRender() {
+  const label = $("#rf-label"), bar = $("#rf-bar"), chip = $("#rf-chip");
+  const text = $("#rf-chip-text"), btn = $("#refresh");
+  if (!label || !bar || !chip) return;
+  const c = REFRESH.counts;
+  const running = REFRESH.state === "quotes" || REFRESH.state === "news"
+                  || REFRESH.state === "queued";
+  btn.classList.toggle("running", running);
+  if (!running) {
+    bar.style.width = "0%";
+    chip.hidden = true;
+    label.textContent = REFRESH.state === "cancelled" ? "↻ Cancelled"
+                      : REFRESH.state === "error" ? "↻ Failed" : "↻ Refresh";
+    return;
+  }
+  // Two determinate phases weighted by their real item counts, so the bar
+  // doesn't jump backwards when news starts.
+  const qTot = Math.max(1, c.quotes_total), nTot = Math.max(0, c.news_total);
+  const total = qTot + nTot;
+  const done = Math.min(c.quotes_done, qTot) + Math.min(c.news_done, nTot);
+  bar.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`;
+  label.textContent = REFRESH.state === "news" ? "News…"
+                    : REFRESH.state === "quotes" ? "Quotes…" : "Starting…";
+  const parts = [];
+  if (c.quotes_total) parts.push(`Quotes ${Math.min(c.quotes_done, c.quotes_total)}/${c.quotes_total}`);
+  if (c.news_total) parts.push(`News ${Math.min(c.news_done, c.news_total)}/${c.news_total}`);
+  text.textContent = parts.join(" · ") || "starting";
+  chip.hidden = false;
+}
+
+function rfReset(state) {
+  REFRESH.state = state;
+  REFRESH.id = null;
+  REFRESH.lastSeq = 0;
+  REFRESH.reader = null;
+  if (REFRESH.abort) { try { REFRESH.abort.abort(); } catch (_) {} REFRESH.abort = null; }
+  rfSave();
+  rfRender();
+}
+
+/* Attach (or reattach) to a job's event stream.
+ *
+ * `since` is the client's cursor. Only frames with seq > 0 advance it —
+ * hello/ping/end are connection frames and are never replayed, so counting
+ * them would desync the cursor and create phantom gaps on reconnect. */
+async function rfAttach(jobId, since) {
+  REFRESH.id = jobId;
+  REFRESH.lastSeq = since || 0;
+  rfSave();
+  while (REFRESH.id === jobId) {
+    REFRESH.abort = new AbortController();
+    let clean = false;
+    try {
+      const r = await fetch(`/api/refresh-job/${jobId}/stream?since=${REFRESH.lastSeq}`,
+                            {signal: REFRESH.abort.signal});
+      // 404 means the job is GONE, not that the connection failed — the server
+      // was restarted mid-refresh, or the job aged out of the 15-minute
+      // retention. Retrying can never succeed, and retrying forever left
+      // REFRESH.id set, which wedged the button permanently: rfStart() bails on
+      // `if (REFRESH.id)`, so Refresh stayed dead for the life of the page.
+      if (r.status === 404 || r.status === 410) { rfReset("idle"); return; }
+      if (!r.ok || !r.body) throw new Error("HTTP " + r.status);
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, {stream: true});
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+          if (!line) continue;
+          let msg; try { msg = JSON.parse(line); } catch { continue; }
+          if (msg.type === "end") { clean = true; break; }
+          rfHandle(msg);
+        }
+        if (clean) break;
+      }
+      REFRESH.retry = 0;
+      if (clean) return;
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+    }
+    if (REFRESH.id !== jobId) return;
+    // Reconnect with backoff at the stored cursor. Never after a clean `end`.
+    REFRESH.retry = Math.min(REFRESH.retry + 1, 4);
+    await new Promise(res => setTimeout(res, Math.min(5000, 250 * 2 ** REFRESH.retry)));
+  }
+}
+
+function rfHandle(msg) {
+  if (msg.seq) {
+    // Only seq > 0 advances the cursor: hello/ping/end are connection frames
+    // and are never replayed, so counting them would desync it.
+    REFRESH.lastSeq = Math.max(REFRESH.lastSeq, msg.seq);
+    rfSave();      // persist per frame, or a reload resumes from seq 0
+  }
+  // Counts are ASSIGNED from the server, never accumulated here. A `phase`
+  // frame's `total` is per-view and the server has already folded it into the
+  // job's cumulative counts; adding it again double-counted (the chip read
+  // "Quotes 4/8" for a 4-symbol portfolio).
+  if (msg.counts) REFRESH.counts = msg.counts;
+  switch (msg.type) {
+    case "hello":
+      if (msg.job) {
+        REFRESH.scope = msg.job.scope;
+        if (msg.job.counts) REFRESH.counts = msg.job.counts;
+        REFRESH.state = msg.job.phase || msg.job.state;
+      }
+      if (msg.dropped) {
+        // The replay would have a hole, so nothing local can be trusted —
+        // re-read cold instead of stitching a partial history together.
+        toast("Reconnected mid-refresh — reloading from the server.");
+        loadViews().then(() => { if (STATE.activeView) activateTab(STATE.activeView); });
+      }
+      break;
+    case "job":
+      REFRESH.state = msg.state === "running" ? (REFRESH.state || "quotes") : msg.state;
+      // `cancelled` with drained:true is the TERMINAL frame for the cancel
+      // path (the earlier `cancelled` frame is the instant acknowledgement,
+      // emitted before the workers unwind). Without finishing here the client
+      // kept REFRESH.id set and sessionStorage populated, so the next page
+      // load would try to reattach to a job that had already ended.
+      if (msg.state === "cancelled") { rfFinish("cancelled"); return; }
+      break;
+    case "phase":
+      if (msg.state === "start") REFRESH.state = msg.phase;
+      if (msg.state === "end" && msg.view) REFRESH.touchedViews.add(msg.view);
+      if (msg.state === "end" && msg.reason === "degraded") {
+        toast(`${msg.view}: ${msg.failed} of ${msg.ok + msg.failed} symbols failed — kept the previous data.`);
+      }
+      break;
+    case "item":
+      if (msg.phase === "quotes") {
+        // Live row patch, but only for the portfolio actually on screen.
+        if (rfViewIsActive(msg.view) && msg.row && msg.row.symbol) rfPatchRow(msg.row);
+      } else {
+        if (msg.symbol === "__market__") {
+          if (msg.sentiment) { NS.market = msg.sentiment; renderMarketSentiment(); }
+        } else if (msg.sentiment && nsSymbols().includes(msg.symbol)) {
+          NS.sentiment[msg.symbol] = msg.sentiment;
+          patchRowSentiment({[msg.symbol]: msg.sentiment});
+          renderNsGauge(nsSymbols());
+        }
+        updateNsProgressJob(msg.symbol, {done: true, sentiment: msg.sentiment});
+      }
+      break;
+    case "item_stage":
+      updateNsProgressJob(msg.symbol, {stage: msg.stage, frac: msg.frac});
+      break;
+    case "rate_limited": {
+      const who = msg.provider || "provider";
+      const secs = msg.retry_in_s ? ` — retrying in ${Math.round(msg.retry_in_s)}s` : "";
+      $("#rf-chip-text").textContent = `waiting on ${who} rate limit${secs}`;
+      return;                      // don't let rfRender overwrite the notice
+    }
+    case "view_saved":
+      VIEWS[msg.view] = Object.assign(VIEWS[msg.view] || {}, {
+        saved_at: msg.saved_at, row_count: msg.rows, stale: false,
+      });
+      renderTabs();
+      break;
+    case "cancelled":
+      // Instant acknowledgement only — the terminal frame is the `job`
+      // {state: cancelled, drained: true} that follows once workers unwind.
+      REFRESH.state = "cancelled";
+      break;
+    case "done":
+      REFRESH.counts = msg.counts || REFRESH.counts;
+      rfFinish("done");
+      return;
+    case "error":
+      toast("Refresh failed: " + (msg.error || "unknown"));
+      rfFinish("error");
+      return;
+  }
+  rfRender();
+}
+
+function rfViewIsActive(view) {
+  return !view || view === STATE.activeView
+      || (view === AD_HOC_KEY && STATE.activeView === AD_HOC_KEY);
+}
+
+/* In-place row swap. Rebuilding DATA wholesale would lose the user's sort and
+   scroll position mid-refresh, which is exactly what a background job is
+   supposed to avoid. */
+function rfPatchRow(row) {
+  const i = DATA.findIndex(r => r.symbol === row.symbol);
+  if (i >= 0) DATA[i] = row; else DATA.push(row);
+  rfScheduleRender();
+}
+let _rfRenderRAF = 0;
+function rfScheduleRender() {
+  if (_rfRenderRAF) return;
+  _rfRenderRAF = requestAnimationFrame(() => { _rfRenderRAF = 0; render(); });
+}
+
+async function rfFinish(state) {
+  const touched = new Set(REFRESH.touchedViews);
+  rfReset(state);
+  closeNsProgress();
+  if (state === "cancelled") {
+    // A cancelled phase never saves, so there's nothing on disk to re-read.
+    // Any views that DID complete before the cancel were saved and are
+    // reloaded below like a normal finish.
+    if (touched.size) await loadViews();
+    REFRESH.touchedViews.clear();
+    return;
+  }
+  if (state === "done") {
+    $("#status").innerHTML =
+      `<span class="status-name">${escapeHtml(viewLabel(STATE.activeView))}</span>` +
+      `<span class="status-meta">updated ${new Date().toLocaleTimeString()}</span>`;
+    // The job wrote rows straight to disk; re-read so tab metadata, analytics
+    // and the news tape all reflect what actually landed.
+    await loadViews();
+    if (STATE.activeView && touched.has(STATE.activeView)) {
+      invalidateAnalyticsForTab(STATE.activeView);
+      requestAnalytics({force: true});
+    }
+    await nsReloadTape();
+  }
+  REFRESH.touchedViews.clear();
+}
+
+async function nsReloadTape() {
+  const syms = nsSymbols();
+  if (!syms.length) return;
+  try {
+    const tape = await fetch(`/api/news-tape?symbols=${encodeURIComponent(syms.join(","))}`)
+      .then(r => r.json());
+    NS.articles = tape.articles || [];
+    renderNewsPanel(syms);
+    setNewsUpdatedLabel();
+  } catch { /* tape is a nicety; the panel already has sentiment */ }
+}
+
+/* Cost dialog for the all-portfolios path. Stating N portfolios / M unique
+   symbols (deduplicated — a stock held three times is fetched once) and a real
+   call budget beats a generic "are you sure?". */
+async function rfConfirmAll() {
+  let names = Object.keys(WATCHLISTS || {});
+  const uniq = new Set();
+  for (const n of names) {
+    for (const e of entriesArr(WATCHLISTS[n] || "")) uniq.add(e.toUpperCase());
+  }
+  if (!names.length) { toast("No saved portfolios to refresh."); return false; }
+  const n = uniq.size;
+  // ~5 quote workers at ~1s each, then news at 2 workers x ~8s/symbol.
+  const mins = Math.max(1, Math.round((n / 5 + (n * 8) / 2) / 60));
+  return showConfirm({
+    title: "Refresh every saved portfolio?",
+    okLabel: "Refresh all",
+    body: `<p><b>${names.length}</b> portfolio${names.length > 1 ? "s" : ""} · `
+        + `<b>${n}</b> unique symbol${n > 1 ? "s" : ""} (deduplicated across portfolios).</p>`
+        + `<p>Roughly <b>${mins} min</b>. Budget: ~${n} Yahoo quote calls, `
+        + `~${n * 2} Finnhub calls, ~${(n + 1) * 2} LLM calls.</p>`
+        + `<p style="color:var(--muted)">Runs in the background — you can keep working, `
+        + `and cancel any time from the status chip.</p>`,
+  });
+}
+
+async function rfStart(scope) {
+  if (REFRESH.id) { toast("A refresh is already running."); return; }
+  const body = {scope, days: NS.lookbackDays, phases: ["quotes", "news"]};
+  if (scope === "all") {
+    if (!await rfConfirmAll()) return;
+    body.on_conflict = "supersede";
+  } else {
+    const view = STATE.activeView || AD_HOC_KEY;
+    const entries = ($("#tickers").value.trim())
+                 || (VIEWS[view] && VIEWS[view].entries) || DATA.map(r => r.symbol).join(", ");
+    if (!entries) { toast("Nothing to refresh — add some tickers first."); return; }
+    body.view = view;
+    body.entries = entries;
+    body.context = nsRefreshContext(nsSymbols());
+  }
+  REFRESH.counts = {quotes_done: 0, quotes_total: 0, news_done: 0, news_total: 0};
+  REFRESH.state = "queued";
+  REFRESH.touchedViews.clear();
+  rfRender();
+  try {
+    const r = await fetch("/api/refresh-job", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (r.status === 409) {
+      // Single-flight: attach to the job that IS running rather than starting
+      // a second one that would only fight it for the same API budget.
+      toast("Already refreshing — showing that job's progress.");
+      rfAttach(j.job_id, 0);
+      return;
+    }
+    if (!r.ok || !j.job_id) throw new Error(j.error || ("HTTP " + r.status));
+    rfAttach(j.job_id, 0);
+  } catch (e) {
+    toast("Could not start refresh: " + e.message);
+    rfReset("error");
+  }
+}
+
+/* Long-press gesture. Same idiom as setupThemeSwitch: pointer events cover
+   mouse and touch, and a `longFired` flag swallows the click that terminates
+   the hold so the short-press action can't also run. Releasing before the
+   threshold aborts silently — no accidental all-portfolios refresh. */
+function setupRefreshControl() {
+  const btn = $("#refresh"), hold = $("#rf-hold");
+  if (!btn) return;
+  let timer = null, longFired = false;
+  const startHold = (e) => {
+    if (e.button != null && e.button !== 0) return;
+    longFired = false;
+    hold.classList.add("arming");
+    timer = setTimeout(() => {
+      timer = null; longFired = true;
+      hold.classList.remove("arming");
+      rfStart("all");
+    }, REFRESH_LONG_MS);
+  };
+  const endHold = () => {
+    hold.classList.remove("arming");
+    if (timer) { clearTimeout(timer); timer = null; }
+  };
+  btn.addEventListener("pointerdown", startHold);
+  btn.addEventListener("pointerup", endHold);
+  btn.addEventListener("pointerleave", endHold);
+  btn.addEventListener("pointercancel", endHold);
+  btn.addEventListener("click", (e) => {
+    if (longFired) { longFired = false; e.preventDefault(); e.stopPropagation(); return; }
+    rfStart("current");
+  });
+
+  const chip = $("#rf-chip");
+  $("#rf-chip-cancel").onclick = (e) => {
+    e.stopPropagation();
+    if (REFRESH.id) fetch(`/api/refresh-job/${REFRESH.id}/cancel`, {method: "POST"});
+  };
+  // Clicking the chip body opens the detailed per-ticker view — opt-in now,
+  // rather than a modal thrown up on every refresh.
+  chip.addEventListener("click", () => {
+    openNsProgress({market: true, symbols: nsSymbols(), days: NS.lookbackDays});
+  });
+
+  // Reattach after a reload: ask the server what's running, then resume from
+  // the cursor we stored. This is what makes the job survive F5, not just a
+  // tab switch.
+  (async () => {
+    let saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(REFRESH_SS_KEY) || "null"); } catch { /* */ }
+    try {
+      const j = await fetch("/api/refresh-job/current").then(r => r.json());
+      if (j && j.job) {
+        REFRESH.counts = j.job.counts || REFRESH.counts;
+        REFRESH.state = j.job.phase || j.job.state;
+        rfRender();
+        rfAttach(j.job.id, (saved && saved.id === j.job.id) ? saved.lastSeq : 0);
+      } else if (saved) {
+        try { sessionStorage.removeItem(REFRESH_SS_KEY); } catch { /* */ }
+      }
+    } catch { /* server not up yet; nothing to reattach to */ }
+  })();
+}
+
+/* refreshNewsSentiment() was removed in v1.11.0 along with the News-panel
+ * Refresh button. News is now one phase of the topbar refresh job, which
+ * survives leaving this panel and is cancellable. The /api/news-refresh
+ * route itself stays on the wire for backward compatibility. */
 
 function renderNewsPanel(symbols) {
   symbols = symbols || nsSymbols();
@@ -5691,7 +6538,8 @@ function nsTierFromScore(s) {
  * the flash tape and news timeline consistent with the ML-first gauge/dots. */
 function nsDispArticleScore(a) {
   if (!a) return null;
-  const v = (a.ml_score != null && isFinite(a.ml_score)) ? a.ml_score : a.score;
+  const ml = nsMlScore(a);
+  const v = ml != null ? ml : a.score;
   return (v != null && isFinite(v)) ? v : null;
 }
 function nsDispArticleTier(a) {
@@ -5700,13 +6548,26 @@ function nsDispArticleTier(a) {
 }
 
 /* Both engines, separately. The two values have always ridden on every cached
- * article (the server stamps a.ml_score beside the LLM's a.score) — until now
+ * article (the server stamps the ML pair beside the LLM's a.score) — until now
  * the UI collapsed them and you could not see where they disagreed, which is
  * exactly the interesting case. nsDispArticleScore stays as-is because the
- * tier filter chips still key off the ML-primary value. */
-function nsArticleMlScore(a) {
-  if (!a) return null;
-  return (a.ml_score != null && isFinite(a.ml_score)) ? a.ml_score : null;
+ * tier filter chips still key off the ML-primary value.
+ *
+ * ml_score_disp first, ml_score only as a fallback: the raw ml_score is
+ * tanh(SAR/2), and the trained tier cuts confine SAR to roughly +/-0.02 — so
+ * every headline rendered "+0.00" and, worse, bucketed as `neutral` under
+ * nsTierFromScore's +/-0.15 thresholds, which made the ML tier filter chips
+ * inert. The server now also stamps ml_score_disp: the same SAR mapped THROUGH
+ * those cuts onto exactly these thresholds (ml_sentiment.display_score), so the
+ * number is legible and the client's bucketing matches the server's ml_tier.
+ * The fallback covers articles cached by a pre-1.11 build.
+ *
+ * The same key pair rides on article dicts and on ticker-level sentiment dicts,
+ * so one reader serves both. */
+function nsMlScore(o) {
+  if (!o) return null;
+  if (o.ml_score_disp != null && isFinite(o.ml_score_disp)) return o.ml_score_disp;
+  return (o.ml_score != null && isFinite(o.ml_score)) ? o.ml_score : null;
 }
 function nsArticleLlmScore(a) {
   if (!a) return null;
@@ -5729,7 +6590,7 @@ function nsEngineDot(score, engine) {
   return `<span class="${cls}" style="background:${color}" data-tip="${label} ${fmtSig(score)}"></span>`;
 }
 function nsDualDots(a) {
-  return `<span class="ns-dots">${nsEngineDot(nsArticleMlScore(a), "ml")}${nsEngineDot(nsArticleLlmScore(a), "llm")}</span>`;
+  return `<span class="ns-dots">${nsEngineDot(nsMlScore(a), "ml")}${nsEngineDot(nsArticleLlmScore(a), "llm")}</span>`;
 }
 
 /* Shared sentiment-tier filter chips (flash tape + news timeline). `activeSet`
@@ -5907,9 +6768,10 @@ function renderNsGauge(symbols) {
     nAssessed++;
     if (s.tier === "bearish" || s.tier === "very_bearish") nBear++;
     if (s.disagreement) nFlag++;
-    if (s.ml_score != null && isFinite(s.ml_score)) {
+    const mlS = nsMlScore(s);
+    if (mlS != null) {
       Wml += wi;
-      mlAgg += wi * s.ml_score;
+      mlAgg += wi * mlS;
       mlConf += wi * (s.ml_confidence || 0);
       nMl++;
     }
@@ -6178,19 +7040,11 @@ function renderNsTape(opts) {
 function openTapeFullscreen() {
   const bg = $("#ns-tape-fs-bg");
   if (!bg) return;
-  bg.classList.add("show");
-  document.body.dataset.tapePrevOverflow = document.body.style.overflow || "";
-  document.body.style.overflow = "hidden";
+  showOverlay(bg);
   renderNsTape({ fullscreen: true });
 }
 
-function closeTapeFullscreen() {
-  const bg = $("#ns-tape-fs-bg");
-  if (!bg || !bg.classList.contains("show")) return;
-  bg.classList.remove("show");
-  document.body.style.overflow = document.body.dataset.tapePrevOverflow || "";
-  delete document.body.dataset.tapePrevOverflow;
-}
+function closeTapeFullscreen() { hideOverlay("#ns-tape-fs-bg"); }
 
 function setupTapeFullscreen() {
   const card = $("#ns-tape-card");
@@ -6282,7 +7136,7 @@ function renderNsTimeline() {
     // Paired bars: ML on the left, LLM on the right, sharing one anchor and
     // one link. Where the two disagree the pair reads as a visible mismatch
     // in height/color — the single coalesced bar hid exactly that.
-    const ml = nsArticleMlScore(a), llm = nsArticleLlmScore(a);
+    const ml = nsMlScore(a), llm = nsArticleLlmScore(a);
     const lvMl = nsTlLevel(ml), lvAi = nsTlLevel(llm);
     const part = (v, l, name) => `${name} ${(v != null && isFinite(v)) ? fmtSig(v) : "n/a"} (${v == null ? "not scored" : l.lbl})`;
     const tip = `${stamp} · ${a.symbol || ""} — ${part(ml, lvMl, "ML")} · ${part(llm, lvAi, "LLM")} — ${head}`;
@@ -6742,9 +7596,9 @@ function openMethodology() {
       } catch { /* formula falls back to raw text */ }
     }
   }
-  bg.classList.add("show");
+  showOverlay(bg);
 }
-function closeMethodology() { const bg = $("#methodology-bg"); if (bg) bg.classList.remove("show"); }
+function closeMethodology() { hideOverlay("#methodology-bg"); }
 
 function mthPipelineSvg() {
   const stages = [
@@ -6931,6 +7785,31 @@ wireOverlayPill("#pf-show-ndx", "showNdx");
 wireOverlayPill("#pf-show-sec", "showSec");
 wireOverlayPill("#pf-show-dd", "showDd");
 
+/* SMA pills live one level down (STATE.pfSma[n]) and persist to the same
+   localStorage key the detail chart's toggles use, so turning SMA 50 on in one
+   place doesn't leave the other disagreeing about what you asked for. */
+function wireSmaPill(id, n) {
+  const el = $(id);
+  if (!el) return;
+  const sync = () => {
+    el.dataset.on = STATE.pfSma[n] ? "1" : "0";
+    el.setAttribute("aria-checked", STATE.pfSma[n] ? "true" : "false");
+  };
+  const toggle = () => {
+    STATE.pfSma[n] = !STATE.pfSma[n];
+    writeChartSma(STATE.pfSma);
+    sync();
+    renderAnalyticsBody();
+  };
+  el.addEventListener("click", (e) => { if (e.target.closest(".ovl-info")) return; toggle(); });
+  el.addEventListener("keydown", (e) => {
+    if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(); }
+  });
+  SMA_PILL_SYNCS.push(sync);
+  sync();
+}
+for (const n of SMA_PERIODS) wireSmaPill(`#pf-show-sma${n}`, n);
+
 /* --- Weights popup wiring --- */
 $("#pf-weights-bg").addEventListener("click", (e) => { if (e.target.id === "pf-weights-bg") closeWeightsPopup(); });
 $("#pf-weights-close").addEventListener("click", closeWeightsPopup);
@@ -6993,11 +7872,7 @@ async function openMptOverlay() {
       "Black-Litterman returns · mean-CVaR frontier · " + STATE.activeView;
   }
   MPT.view = STATE.activeView;
-  document.getElementById("pf-mpt-bg").classList.add("show");
-  // Lock body scroll while the overlay is open so the page underneath
-  // can't move. Inner sidebar still scrolls via its own overflow-y.
-  document.body.dataset.mptPrevOverflow = document.body.style.overflow || "";
-  document.body.style.overflow = "hidden";
+  showOverlay("#pf-mpt-bg");
   MPT.bounds = {};                       // start clean each open (mptRestoreLast may repopulate)
   mptRenderBounds();                     // per-position min/max editor for the active holdings
   // Sequence the two async writers of #pf-mpt-rf so the rate is deterministic:
@@ -7009,9 +7884,7 @@ async function openMptOverlay() {
 }
 function closeMptOverlay() {
   if (MPT.abort) { try { MPT.abort.abort(); } catch (_) {} MPT.abort = null; }
-  document.getElementById("pf-mpt-bg").classList.remove("show");
-  document.body.style.overflow = document.body.dataset.mptPrevOverflow || "";
-  delete document.body.dataset.mptPrevOverflow;
+  hideOverlay("#pf-mpt-bg");
   mptProgressHide();
 }
 
@@ -8798,9 +9671,7 @@ const SETTINGS = {
 };
 
 function openSettings() {
-  $("#settings-bg").classList.add("show");
-  document.body.dataset.settingsPrevOverflow = document.body.style.overflow || "";
-  document.body.style.overflow = "hidden";
+  showOverlay("#settings-bg");
   // Always open unfiltered — reopening into a stale query looks like missing
   // settings rather than an active search.
   SETTINGS.query = "";
@@ -8811,11 +9682,7 @@ function openSettings() {
 }
 
 function closeSettings() {
-  const bg = $("#settings-bg");
-  if (!bg || !bg.classList.contains("show")) return;
-  bg.classList.remove("show");
-  document.body.style.overflow = document.body.dataset.settingsPrevOverflow || "";
-  delete document.body.dataset.settingsPrevOverflow;
+  if (!hideOverlay("#settings-bg")) return;
   stopLogPolling();
   // The overlay hides the page scrollbar, so anything measured while it was
   // open (applyTableFitMode reads .table-wrap's width) was measured against a

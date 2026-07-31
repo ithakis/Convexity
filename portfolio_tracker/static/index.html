@@ -14,7 +14,21 @@
   <button id="edit-btn" class="tab-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
   <button id="news-btn" class="tab-btn" data-tip="Open the News &amp; Sentiment dashboard: ML- and LLM-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
   <button id="optimize" data-tip="Open the Portfolio Optimization workspace: trace the mean-CVaR efficient frontier from your holdings using Black-Litterman expected returns (market-cap equilibrium + analyst-target views), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
-  <button id="refresh" data-tip="Pull fresh quotes from Yahoo Finance for the current portfolio and rebuild the derived metrics as rows stream back in.">↻ Refresh</button>
+  <!-- One Refresh for the whole app (v1.11.0). Click (or R) refreshes the
+       current portfolio: quotes first, then news + sentiment. Long-press for
+       600ms (or Shift+R) refreshes EVERY saved portfolio, behind a dialog that
+       states the real cost first. Either way it runs as a background job that
+       survives switching tabs or reloading the page, and is cancellable from
+       the status chip. The bar and the radial fill live inside the button. -->
+  <button id="refresh" class="refresh-btn" data-tip="Refresh this portfolio: quotes, then news &amp; sentiment. Runs in the background — you can keep working, and cancel from the status chip. Press and hold (or Shift+R) to refresh every saved portfolio.">
+    <span class="rf-hold" id="rf-hold" aria-hidden="true"></span>
+    <span class="rf-bar" id="rf-bar" aria-hidden="true"></span>
+    <span class="rf-label" id="rf-label">↻ Refresh</span>
+  </button>
+  <span class="rf-chip" id="rf-chip" hidden>
+    <span class="rf-chip-text" id="rf-chip-text"></span>
+    <button class="rf-chip-x" id="rf-chip-cancel" title="Cancel this refresh">×</button>
+  </span>
   <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
        per portfolio. Each sheet must include EVERY column the app can show for a
        row (full column registry, not just the currently visible view) PLUS the
@@ -102,6 +116,18 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <span class="pf-overlay-pill" id="pf-show-dd" data-on="1" role="switch" aria-checked="true" tabindex="0">
           <span class="swatch dd"></span>Drawdown
         </span>
+        <!-- Simple moving averages on the portfolio index. Computed on the
+             daily series analytics returns; an SMA longer than the selected
+             period has no warm-up and is skipped rather than stubbed. -->
+        <span class="pf-overlay-pill" id="pf-show-sma20" data-on="0" role="switch" aria-checked="false" tabindex="0">
+          <span class="swatch sma20"></span>SMA 20
+        </span>
+        <span class="pf-overlay-pill" id="pf-show-sma50" data-on="0" role="switch" aria-checked="false" tabindex="0">
+          <span class="swatch sma50"></span>SMA 50
+        </span>
+        <span class="pf-overlay-pill" id="pf-show-sma200" data-on="0" role="switch" aria-checked="false" tabindex="0">
+          <span class="swatch sma200"></span>SMA 200
+        </span>
       </div>
     </div>
     <div class="pf-analytics-body" id="pf-analytics-body">
@@ -115,17 +141,25 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   <div class="ns-head">
     <h3 class="ns-title">News &amp; Sentiment</h3>
     <!-- Lookback control (item 3): how far back the news analysis reaches.
-         Applied on the next Refresh (the cache is keyed per symbol and only
-         busted by a refresh). The recency decay tau scales with the window
-         so long lookbacks actually use their older articles. -->
+         Changing it re-scores IMMEDIATELY from cached, already-scored articles
+         (POST /api/news-rescore — no network, no LLM). Narrowing is exact;
+         widening can only re-weight what some earlier fetch actually pulled,
+         so the response carries a coverage flag and the UI says so rather than
+         presenting it as a true 30-day read. The recency decay tau scales with
+         the window so long lookbacks actually use their older articles. -->
     <div class="ns-lookback" id="ns-lookback" role="group" aria-label="News analysis window">
-      <span class="ns-lb-label" data-tip="Analysis window: how far back the news fetch and scoring reach. Takes effect on the next Refresh. Articles are never equal-weighted — each is weighted by recency e^(−age/τ) (τ scales with the window: 7D → 3.0d, 30D → 12.9d), source credibility (Reuters/Bloomberg/WSJ 1.0 · CNBC/Barron's 0.8 · PR wires 0.5), novelty (syndicated copies discounted), and target relevance (primary subject 1.0 · co-subject 0.6 · passing mention 0.1).">Window</span>
+      <span class="ns-lb-label" data-tip="Analysis window: how far back the news fetch and scoring reach. Applies immediately — the already-scored articles are re-weighted from cache, with no network call. Narrowing is exact; widening can only re-weight what an earlier fetch actually pulled, and says so when it can't cover the window. Articles are never equal-weighted — each is weighted by recency e^(−age/τ) (τ scales with the window: 7D → 3.0d, 30D → 12.9d), source credibility (Reuters/Bloomberg/WSJ 1.0 · CNBC/Barron's 0.8 · PR wires 0.5), novelty (syndicated copies discounted), and target relevance (primary subject 1.0 · co-subject 0.6 · passing mention 0.1).">Window</span>
       <button data-days="3" type="button">3D</button>
       <button data-days="7" type="button" class="active">7D</button>
       <button data-days="14" type="button">14D</button>
       <button data-days="30" type="button">30D</button>
     </div>
-    <button id="ns-refresh" class="ns-refresh-btn" data-tip="Staged refresh: market first, then constituents by portfolio weight. Two LLM passes per stock (self-consistency). Uses the selected analysis window.">&#8635; Refresh</button>
+    <!-- The News-local Refresh button was removed in v1.11.0. There is one
+         Refresh, in the topbar: a click refreshes the current portfolio's
+         quotes and then its news; a long-press refreshes every saved
+         portfolio. Both run as a cancellable background job that survives
+         leaving this panel. -->
+    <span class="ns-cov-hint" id="ns-cov-hint" hidden></span>
     <span class="ns-updated" id="ns-updated"></span>
   </div>
   <!-- Resizable 2x2 quad (item 1): one grid, draggable gutters. The vertical

@@ -31,7 +31,9 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from portfolio_tracker.helpers import _load_local_secret, _safe_num
+from portfolio_tracker.helpers import (
+    _FH_LIMITER, _MAX_RETRIES, _RETRY_SLEEP_S, _load_local_secret, _notify_rate, _safe_num,
+)
 
 # Key resolution (env var, then a strictly-local ``.finnhub_key`` found by
 # walking upward from this module's directory) lives in
@@ -73,27 +75,50 @@ def _fh_call(path: str, params: dict[str, Any], symbol: str) -> Any | None:
     """Single GET against the Finnhub REST API.
 
     Returns the parsed JSON (dict or list) on HTTP 200, else ``None``.
-    Any exception is swallowed → ``None``. A 429 (rate limit) prints one
-    stderr line so the user knows why a column may be sparse; nothing
-    else is logged, so empty data for non-US tickers stays quiet.
+    Any exception is swallowed → ``None``, so empty data for non-US tickers
+    stays quiet.
+
+    Rate limiting (v1.11.0): this shares ``helpers._FH_LIMITER`` — and
+    therefore Finnhub's free per-minute allowance — with news_sentiment.
+    Before, it had no limiter and no retry at all: it printed one line on a
+    429 and gave up, so a quotes build and a news refresh each burned through
+    the same quota independently and ``Rec Δ6M`` / ``MSPR`` silently went
+    blank. Retries mirror news_sentiment's (3 attempts, 5 s apart) and emit
+    ``rate_limited`` events so a background refresh job can report the wait
+    instead of just looking stalled.
     """
     query = dict(params)
     query["token"] = FINNHUB_API_KEY
     url = _BASE_URL + path + "?" + urllib.parse.urlencode(query)
-    try:
-        with urllib.request.urlopen(url, timeout=6) as resp:
-            if resp.status != 200:
-                return None
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 429:
-            print(
-                f"[finnhub] rate limited on {symbol} — cached result will serve",
-                file=sys.stderr,
-            )
-        return None
-    except Exception:
-        return None
+    for attempt in range(_MAX_RETRIES):
+        _FH_LIMITER.acquire()
+        try:
+            with urllib.request.urlopen(url, timeout=6) as resp:
+                if resp.status != 200:
+                    return None
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < _MAX_RETRIES - 1:
+                _FH_LIMITER.penalize()
+                print(
+                    f"[finnhub] 429 on {symbol} (attempt {attempt+1}/{_MAX_RETRIES}) "
+                    f"— sleeping {_RETRY_SLEEP_S}s",
+                    file=sys.stderr,
+                )
+                _notify_rate(provider="finnhub", reason="http_429", symbol=symbol,
+                             attempt=attempt + 1, max_attempts=_MAX_RETRIES,
+                             retry_in_s=_RETRY_SLEEP_S)
+                time.sleep(_RETRY_SLEEP_S)
+                continue
+            if exc.code == 429:
+                print(
+                    f"[finnhub] rate limited on {symbol} — cached result will serve",
+                    file=sys.stderr,
+                )
+            return None
+        except Exception:
+            return None
+    return None
 
 
 def get_earnings_surprise(symbol: str) -> list[dict] | None:

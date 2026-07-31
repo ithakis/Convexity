@@ -79,13 +79,23 @@ def model_dir() -> Path:
 
 
 def _load() -> dict:
-    """Lazy singleton. Never raises — failure marks the model unavailable."""
+    """Lazy singleton. Never raises — failure marks the model unavailable.
+
+    `loaded` is published LAST, in a finally. It used to be set before the ~3 s
+    lightgbm/scipy/sklearn import, while the fast path below reads it without
+    the lock — so any thread arriving mid-load (the refresh pool's 2 workers vs.
+    /api/runtime-status, say) saw {loaded: True, ok: False, reason: ""} and quietly
+    fell back to the LLM. That published-but-uninitialized window is what produced
+    "model not loaded" in the log (news_sentiment's fallback string, not a real
+    failure — a real one populates `reason`) and ML coverage of N-1 out of N.
+    Publishing last means a late caller blocks on _LOCK until the load finishes
+    and then reads the true result.
+    """
     if _STATE["loaded"]:
         return _STATE
     with _LOCK:
         if _STATE["loaded"]:
             return _STATE
-        _STATE["loaded"] = True
         d = model_dir()
         try:
             import numpy as np
@@ -120,6 +130,9 @@ def _load() -> dict:
             _STATE["reason"] = f"{type(e).__name__}: {e}"
             print(f"[ml_sentiment] model unavailable ({type(e).__name__}: {e}) "
                   f"— ml_* fields disabled")
+        finally:
+            # Publish LAST — see the docstring. Never move this above the try.
+            _STATE["loaded"] = True
         return _STATE
 
 
@@ -225,6 +238,86 @@ def _tier(sar: float, cuts: list[float], tiers: list[str]) -> str:
     return tiers[i]
 
 
+# Display anchors for display_score(). These are EXACTLY the thresholds
+# app.js's nsTierFromScore() uses (-0.5 / -0.15 / +0.15 / +0.5), which is the
+# whole point: pinning cuts[i] -> _DISP_ANCHORS[i] makes the client's tier
+# bucketing of the displayed number agree with the server's ml_tier by
+# construction. Before this they could not agree — the client applied +/-0.15
+# to a number the trained cuts confined to about +/-0.008.
+_DISP_ANCHORS = (-0.5, -0.15, 0.15, 0.5)
+
+
+def display_score(sar: float | None, cuts: list[float] | None = None) -> float | None:
+    """Map a raw SAR prediction onto (-1, +1) through the TRAINED tier cuts.
+
+    Why this exists: the shipped cuts are [-0.0203, -0.0007, +0.0051, +0.0150],
+    so `tanh(sar/2)` — the old display transform — squeezed the model's whole
+    5th-to-95th-percentile range into under 0.02 of display width, and the
+    entire neutral band (45% of the mass by construction) rendered as a literal
+    "-0.00"/"0.00" while the tier label said something else entirely. This maps
+    the same value through the cuts themselves, so the number and the tier
+    label can never disagree and the full range is visible at 2 decimals.
+
+    Piecewise-linear between the cuts (cuts[i] lands exactly on
+    _DISP_ANCHORS[i]); outside them a saturating tail
+    `anchor +/- 0.5*tanh(slope*dist/0.5)` reusing the adjacent segment's slope,
+    which is C1-continuous at the boundary (tanh'(0) == 1) and monotone. The
+    tail approaches +/-1 asymptotically rather than clipping at a hard edge; it
+    does reach +/-1.0 exactly in float64 past roughly |SAR| > 0.29, about 20x
+    the 95th-percentile cut and so unreachable in practice.
+
+    DISPLAY ONLY. `ml_sar` and `ml_score` keep their raw values everywhere —
+    the sentiment history, and therefore compute_diagnostics' IC, calibration
+    curve and agreement grid, are untouched by this.
+
+    Approximation worth knowing: the cuts were fitted on GROUP-MEAN predictions
+    (ml/scripts/09_tier_cuts.py's group_frame averages `pred` per
+    symbol x d1 x session_class), which is exactly what `ml_sar` is. Passing a
+    single article's `sar_pred` through them — as news_sentiment does for the
+    per-headline tape/brief colors — reuses a group-calibrated scale on a more
+    dispersed quantity, so single-headline tiers skew more extreme than the
+    ticker-level tier. Acceptable for coloring headlines; a properly
+    article-level cut set would need a re-run of script 09.
+    """
+    if sar is None:
+        return None
+    try:
+        sar = float(sar)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(sar):
+        return None
+    if cuts is None:
+        st = _load()
+        if not st["ok"]:
+            return None
+        cuts = st["cuts"]["cuts"]
+    if not cuts or len(cuts) != len(_DISP_ANCHORS):
+        return None
+    c = [float(x) for x in cuts]
+    if any(c[i] >= c[i + 1] for i in range(len(c) - 1)):
+        return None  # non-monotone cuts — refuse rather than invert the scale
+
+    # Interior: linear interpolation between adjacent (cut, anchor) pairs.
+    for i in range(len(c) - 1):
+        if c[i] <= sar <= c[i + 1]:
+            span = c[i + 1] - c[i]
+            frac = (sar - c[i]) / span
+            v = _DISP_ANCHORS[i] + frac * (_DISP_ANCHORS[i + 1] - _DISP_ANCHORS[i])
+            return round(v, 4)
+
+    # Tails: extend with the adjacent segment's slope, softened by tanh so the
+    # curve stays monotone and never reaches the +/-1 rail.
+    if sar < c[0]:
+        slope = (_DISP_ANCHORS[1] - _DISP_ANCHORS[0]) / (c[1] - c[0])
+        v = _DISP_ANCHORS[0] - 0.5 * math.tanh(slope * (c[0] - sar) / 0.5)
+    else:
+        n = len(c) - 1
+        slope = (_DISP_ANCHORS[n] - _DISP_ANCHORS[n - 1]) / (c[n] - c[n - 1])
+        v = _DISP_ANCHORS[n] + 0.5 * math.tanh(slope * (sar - c[n]) / 0.5)
+    return round(v, 4)
+
+
 def aggregate(scored: list[dict], now: float | None = None) -> dict | None:
     """Relevance/recency/source-weighted aggregate of per-article scores.
 
@@ -263,7 +356,11 @@ def aggregate(scored: list[dict], now: float | None = None) -> dict | None:
         conf = 1.0 - math.exp(-wsum / _CONF_SCALE)
         return {
             "ml_sar": round(ml_sar, 4),
+            # Raw tanh transform — kept for the history record and the
+            # diagnostics that were built on it. NOT what the UI shows.
             "ml_score": round(math.tanh(ml_sar / 2.0), 4),
+            # What the UI shows. See display_score() for why tanh isn't legible.
+            "ml_score_disp": display_score(ml_sar, cuts_j["cuts"]),
             "ml_tier": tier,
             "ml_confidence": round(conf, 3),
             "ml_n": len(vals),
@@ -277,4 +374,4 @@ def reset_for_tests() -> None:
     """Test hook: forget the loaded model so a new MLSENT_MODEL_DIR applies."""
     with _LOCK:
         _STATE.clear()
-        _STATE.update({"loaded": False, "ok": False})
+        _STATE.update({"loaded": False, "ok": False, "reason": ""})

@@ -44,6 +44,7 @@ sub-decision.
 │   ├── persistence.py           ← JSON CRUD for views/watchlists/presets/MPT runs/column views — §4
 │   ├── cache.py                 ← Process-global TTL cache dicts shared across modules
 │   ├── logbuf.py                ← stdout/stderr tee → ring buffer behind /api/logs (Settings → Logs) — §16
+│   ├── jobs.py                  ← background refresh job registry (single-flight, cancellable, replayable) — §17
 │   ├── envcheck.py              ← runtime dependency manifest + self-check; the v1.10.0 guardrail — §4
 │   ├── resolver.py              ← resolve_symbol() pipeline (fuzzy input → Yahoo ticker) — §4
 │   ├── symbol_db.py             ← Local fuzzy ticker DB (provider-agnostic schema) — §6
@@ -551,7 +552,17 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/news-articles?symbol=…`    — per-ticker articles + sentiment detail
 
 **POST (also)**
-- `/api/news-refresh`              — `{symbols: [...]}` — force cache bust + re-analyze
+- `/api/news-refresh`              — `{symbols: [...]}` — force cache bust + re-analyze.
+  Still on the wire for backward compatibility, but **nothing in the UI calls it**
+  since v1.11.0 — news is a phase of the refresh job now.
+- `/api/refresh-job`               — `{scope: "current"|"all", view?, entries?, phases?, days, context?, on_conflict?}` → `202 {job_id}` or **`409`** with the running job (§17)
+- `/api/refresh-job/<id>/cancel`   — cancel; the `cancelled` frame is emitted synchronously
+- `/api/news-rescore`              — `{symbols, days}` → cache-only re-aggregation onto a new window. Sub-50 ms, no network, no LLM, no ML inference. Deliberately **not** a job (§17)
+
+**GET (also, v1.11.0)**
+- `/api/history?symbol=…&range=…&bench=SPY,XLK` — intraday half of the chart granularity ladder (§5)
+- `/api/refresh-job/current`       — `{job: snapshot|null}`; one cheap call on page load is what lets a job survive a full reload
+- `/api/refresh-job/<id>/stream?since=<seq>` — replayable NDJSON progress (§17)
 
 ---
 
@@ -693,14 +704,134 @@ columns).
   and single-line ellipsised headlines, the overlay lifts the cap to 1000 and
   adds a numeric score column plus a 2-line-clamped summary. Filter changes in
   either view re-render the other so the two never diverge.
-- **Dual ML/AI display**: `nsArticleMlScore`/`nsArticleLlmScore` +
+- **Dual ML/AI display**: `nsMlScore`/`nsArticleLlmScore` +
   `nsDualDots(a)` render **two bare dots, ML first**, each with its own tooltip
   naming the engine. Used by the flash tape, constituent briefs, and (as paired
   bars, `.ns-tl-pair`) the timeline; `nsDot` does the per-holding equivalent in
   the main table's NS column. `nsDispArticleScore` is deliberately KEPT — the
   tier filter chips still key off the ML-primary coalesced value, so filtering
   behaviour is unchanged. A missing engine renders a hollow dot rather than
-  collapsing the pair, so columns stay aligned.
+  collapsing the pair, so columns stay aligned. `nsMlScore` reads
+  **`ml_score_disp` first**, `ml_score` only as a pre-1.11 fallback (§4), and
+  serves both article dicts and ticker-level sentiment dicts — they carry the
+  same key pair.
+
+- **Overlays: `showOverlay()` / `hideOverlay()` are the ONLY way to open and
+  close one** (v1.11.0). They own `lockBodyScroll`/`unlockBodyScroll`, a single
+  **nesting counter** on `document.body`'s overflow. Never write
+  `body.style.overflow`, and never toggle the `show` class by hand — both are
+  enforced by `tests/test_frontend_overlays.py`, which also asserts the overlay
+  inventory in that test matches every `id="*-bg"` in `index.html`, so a new
+  backdrop can't skip the contract.
+  Why a counter: overlays nest (About-MPT over MPT, the inline prompt over the
+  weights popup) and the global Escape handler (`app.js` ~line 2087) closes
+  seven of them in one **unconditional** pass. The old design had three
+  overlays each stashing `dataset.<name>PrevOverflow` and the other nine
+  locking nothing at all — so the detail modal scroll-chained to the page, and
+  a nested pair could restore each other's value. Both helpers no-op when the
+  overlay is already in the requested state, which is what makes the
+  seven-closer pass safe.
+  Second half of the fix is CSS: the grouped `overscroll-behavior: contain`
+  rule in `style.css` (just above `/* ===== Detail modal ===== */`). **Every
+  new overlay scroll container goes in that list.** Both halves are needed —
+  the body lock alone still lets the trackpad's elastic bounce chain out, and
+  containment alone does nothing for a gesture starting on the backdrop.
+  Scroll *position* needs no saving: `overflow:hidden` on `<body>` freezes the
+  viewport where it is (it propagates because `html` is `overflow: visible`).
+  The `padding-right` compensation replaces the scrollbar's width, without
+  which the page visibly jumps ~15px wider the instant anything opens.
+
+- **Detail-modal header shows the ACTIVE RANGE's return**, not `pct_1d`
+  (v1.11.0). `modalPriceBlockHtml()` / `renderModalPriceBlock()` own
+  `#m-price-block`; a live drag selection (`DETAIL.sel`) wins over the range
+  tab, and the `.p-range` badge names whichever period is being reported. It
+  also reads price from `DETAIL.data` once the detail payload lands — the
+  skeleton is never re-rendered after the fetch resolves, so the old code kept
+  the table row's cached price for the modal's whole lifetime. It computes from
+  **`activeChartSeries().full`**, not `d.history`: on an intraday range those
+  two disagree about where the window starts, and a header contradicting the
+  summary line right beneath it is worse than no header.
+
+- **Chart granularity ladder** (v1.11.0). Everything was hardcoded
+  `interval="1d"`, so 1M was ~21 points on an 800px-wide chart.
+
+  | Range | Source | Fetch | Displayed |
+  |---|---|---|---|
+  | 1M | `GET /api/history` | `30m` / `60d` | last 1M (~280 of 780 bars) |
+  | 3M | `GET /api/history` | `1h` / `1y` | last 3M (~435 of 1749) |
+  | 6M | *same cached payload as 3M* | — | last 6M (~870) |
+  | YTD · 1Y · 5Y · MAX | the daily `period="max"` payload from `/api/detail` | — | client slice, thinned to ≤1500 |
+
+  **The fetch window is deliberately far wider than the display window, and
+  that is load-bearing, not waste** — an SMA 200 over 30m bars needs 200 bars of
+  warm-up, so computing on exactly the visible window leaves the line empty on
+  every short range. It also means a symbol costs at most **two** intraday
+  fetches no matter how the user tabs around. `fetcher._RANGE_INTRADAY` is the
+  table; `fetcher._INTERVAL_MAX_DAYS` holds Yahoo's own caps (`1m ≤ 7d`,
+  `2–90m ≤ 60d`, `1h ≤ 730d`). Exceeding a cap returns an **empty frame, not an
+  error**, which is why `_period_days()` returns 10 000 for anything it can't
+  parse — guessing small would let an over-cap request through and blank the
+  chart instead of falling back. `range_history()` returns `fallback: true` for
+  the daily ranges, for a cap violation, and for listings with no intraday data;
+  the client then just draws the daily series and the legend says "daily".
+  Benchmarks are fetched at the **same interval** (the client passes `bench=`,
+  since it already knows the sector ETF) or the overlay renders as a staircase
+  against a smooth line. Modal open stays instant: intraday is fetched lazily
+  only when 1M/3M/6M is picked, with a loading chip on the range tab.
+
+- **`attachRangeBrush()` is the one drag-to-measure implementation** (v1.11.0),
+  shared by the detail chart and the portfolio chart, which previously had
+  ~150 duplicated lines each. Selections **persist** until click-elsewhere, Esc,
+  or a range change (they used to self-destruct on a 1.8 s timer, so you could
+  not read a measurement and then look at the chart); either edge can be dragged
+  afterwards. State lives in `DETAIL.sel` / `STATE.pfSel`, the handle in
+  `DETAIL.brush` / `STATE.pfBrush`.
+  **Always `destroy()` the previous handle before re-attaching** — every listener
+  is scoped to one `AbortController`. The old code's 1.8 s timer called
+  `renderChart()`, which re-ran the attach and registered *another* `window`
+  mouseup handler on every single drag; they accumulated for the page's lifetime
+  and across modal opens, because `window` outlives the modal DOM. The portfolio
+  chart leaked one per period change, mode change and overlay-pill toggle.
+  `setPointerCapture` is wrapped in try/catch: it throws `NotFoundError`
+  whenever the id isn't a live pointer, and capture is an enhancement the drag
+  works without.
+  Two contracts the callers must honour, both of which broke in review:
+  **(1) the geom you pass needs `chartH`** — `paint()` writes it straight to the
+  rect, and `setAttribute("height", undefined)` stores the literal string
+  `"undefined"`, an invalid SVG length that renders as height 0. The portfolio
+  chart's geom omitted it, so its selection band was invisible while the
+  measurement text read correctly. There is now a `g.H - g.padT - g.padB`
+  fallback, but pass it explicitly.
+  **(2) the topmost surface owns Escape.** The brush's Escape listener is on
+  `document` in the **capture** phase and calls `stopPropagation()`, which is
+  what stops it reaching the seven-closer global handler. It therefore claims
+  Escape only when its own `svg.closest(".show")` is truthy or nothing is
+  locked (`SCROLL_LOCK.depth === 0`). Without that, a stale selection on the
+  always-mounted portfolio chart swallowed the Escape meant for any overlay
+  above it — reproduced with Settings, and it persisted for the life of the
+  page. `closeModal()` also destroys `DETAIL.brush` and nulls `DETAIL.sel`, or
+  a backdrop-click close leaves the same listener orphaned until the next
+  chart render.
+
+- **`thinPoints(pts, maxN)` must pin BOTH endpoints.** A 45-year MAX window is
+  ~11.5k daily closes. Last-in-bucket downsampling naturally starts at index
+  `ceil(step)-1`, which silently moved AAPL's MAX start date forward ~7 trading
+  days and changed the reported return from +339417% to +316048%. The window the
+  header and chart report must be the window the user asked for.
+
+- **SMAs (20/50/200)** are off by default and share **one object**, `CHART_SMA`
+  — `DETAIL.sma` and `STATE.pfSma` are both that same reference, persisted to
+  `localStorage.chart_sma`. A shared *key* was not enough: two independent
+  copies read at different times silently clobbered each other (enable SMA 200
+  in the modal, then click a portfolio pill, and the pill's stale page-load
+  copy was written back over it). Toggling from the modal calls
+  `syncSmaPills()` so the pills' `data-on` repaints too.
+  `smaSeries()` takes the **full** series and the caller slices the result —
+  never the other way round. Legends name the bar frequency ("SMA 50 · 30m
+  bars"), since the same period means something very different on 30m vs daily
+  bars. The portfolio index is always daily and arrives pre-trimmed to the
+  period, so an SMA longer than the period is skipped rather than stubbed.
+  `SMA_COLORS` in `app.js` and `.swatch.sma*` in `style.css` must stay in sync.
 - **Fit to screen toggle** (`#cv-fit-toggle`): optional table compaction
   mode for dense presets. `applyTableFitMode()` computes a scale from the
   active columns' declared widths versus `.table-wrap` width and applies
@@ -1661,3 +1792,117 @@ output goes dark again.
 - The frontend polls `/api/logs?since=` every 1.5s **only while the Logs pane is
   open** (`stopLogPolling` clears the timer in `closeSettings`). Autoscroll
   pauses itself when the user scrolls up and resumes at the bottom.
+
+---
+
+## 17. `jobs.py` — background refresh jobs (v1.11.0)
+
+Refreshing used to be two disconnected, blocking buttons (`#refresh` for
+quotes, `#ns-refresh` for news). Nothing survived a tab switch, nothing was
+cancellable, and there was no way to refresh the whole account. Now there is
+**one Refresh control** in the topbar:
+
+| Gesture | Scope | Blocking |
+|---|---|---|
+| Click, or `R` | Current portfolio: quotes → then news + sentiment | No |
+| Long-press ≥600 ms → confirm, or `Shift+R` | **Every** saved portfolio | No |
+
+`#ns-refresh` is gone (so is its client function `refreshNewsSentiment`);
+`/api/news-refresh` stays on the wire but nothing calls it.
+
+### Four rules that are load-bearing
+
+1. **Single-flight.** `submit()` rejects a second concurrent job with `409` and
+   the client attaches to the running one; only the long-press path (behind its
+   confirm dialog) may `on_conflict: "supersede"`. This is correctness, not
+   politeness: the Finnhub/NIM limiters are process-global, so two jobs spend
+   each other's budget, and `_refresh_symbol_sentiment`'s `_cache_take` /
+   restore-on-failure pair races destructively — A takes the entry, B takes
+   nothing, A fails and restores the STALE value over B's fresh one.
+   Single-flight is also what makes the single global
+   `helpers._RATE_OBSERVER` unambiguous; **relaxing it requires a context-local
+   binding propagated into every pool worker.**
+   The conflict check and the `_CURRENT` assignment are **one atomic step under
+   `_REG_LOCK`** — reading `current()` outside it was a TOCTOU that let two
+   simultaneous POSTs both start (10 of 80 trials on a `ThreadingHTTPServer`,
+   which a double-click or a second tab reaches). `_CURRENT` then named only
+   one, so the other was invisible to `current()`: uncancellable from the UI,
+   and billing its rate waits to the wrong job. `request_cancel` on a
+   superseded job is called **after** the lock is released — the stated lock
+   order is registry → job condvar, never held while emitting.
+2. **A dead client is not a cancel.** The stream handler returns on BrokenPipe
+   and never touches `job.cancel`. Only the chip's × cancels. (`/api/news-refresh`
+   did the opposite: it silenced writes while the work — and the API quota —
+   carried on unattended.)
+3. **Cancel actually stops work.** Queued items are de-queued by
+   `pool.shutdown(wait=False, cancel_futures=True)` — **never** use a `with`
+   block for these pools, `__exit__` joins everything. In-flight work checks a
+   duck-typed `cancel` token (`.is_set()`, so `news_sentiment` never imports
+   `jobs`) at five points, including the two sleep gates —
+   `helpers._RateLimiter.acquire` and `_wait_for_circuit_breaker`, which can
+   hold for 65 s and would otherwise make "cancelled" a lie for a full minute.
+   `helpers.Cancelled` (aliased `news_sentiment.RefreshCancelled`) is **control
+   flow, not failure** — `jobs._run` catches it separately, and a bare
+   `except Exception` around it reports a user cancel as "Refresh failed".
+4. **Counts are server-authoritative.** Every frame in `Job._COUNTED` carries
+   the job's cumulative counts and the client *assigns* them. A `phase` frame's
+   `total` is per-view and the server has already folded it in; accumulating
+   client-side double-counted (the chip read "Quotes 4/8" for a 4-symbol
+   portfolio).
+
+### Event stream
+
+`GET /api/refresh-job/<id>/stream?since=<seq>`. Job events carry monotonic
+`seq ≥ 1` and are replayed on reconnect; **connection frames (`hello`, `ping`,
+`end`) carry `seq: 0` and are never replayed** — advancing the cursor on them
+desyncs it. Types: `job`, `phase`, `item`, `item_stage`, `rate_limited` /
+`rate_cleared`, `view_saved`, and the terminals `done` / `error` / `job`
+{state: cancelled, drained: true}. `item_stage.stage` reuses the **existing**
+vocabulary (`start|fetch|score1|score2|aggregate`) so `NS_PROG_STAGE` in
+`app.js` and the per-ticker modal work verbatim — that modal is now opt-in
+behind the status chip. `dropped: true` (the `since` predates the 6000-frame
+ring, same contract as `logbuf.read`) ⇒ the client must cold-re-read.
+Client state is `REFRESH` + `{id, lastSeq}` in `sessionStorage`, saved per
+frame; `GET /api/refresh-job/current` on load is what makes a job survive F5.
+
+### Two save guards (both would silently destroy user data without them)
+
+- **Never save a degraded batch.** `save_view` overwrites `rows` wholesale, and
+  Yahoo answers an overloaded batch with `error` rows rather than an exception.
+  `>20%` errors (`_MAX_ERROR_FRACTION`) ⇒ skip the save, emit
+  `phase {saved: false, reason: "degraded"}`, keep the prior rows.
+- **Always `set_last=False`.** A background job must never repoint the
+  restore-on-launch target at whatever portfolio it happened to touch.
+
+Also: **all `persistence` writes are atomic now** (`_atomic_write`, tmp file in
+the same dir + `os.replace`). They were bare `write_text`, and the readers catch
+`JSONDecodeError` and return `{}` — so a truncated write made *every saved
+portfolio silently disappear*. Survivable when writes only followed an
+interactive build; not with an unattended job and `os._exit(0)` on quit
+(`shutdown_server` now calls `jobs.shutdown(1.5)` first).
+
+The all-scope quotes phase runs **one portfolio at a time** with a ~500 ms gap
+(5 workers *within* a portfolio) — `warmRecentTabs` established empirically that
+concurrent portfolio work makes yfinance return empty frames, i.e. exactly the
+degraded rows the guard above would then discard. Symbols shared across views
+are fetched once. Market sentiment is refreshed **once per job**
+(`refresh_market=False` + `market_sentiment=`): per-portfolio market reads would
+give the same stock a different `s_mkt` depending on which pass touched it last.
+
+### `rescore_window(symbols, days)` — instant News-window change
+
+Changing the window (3/7/14/30D) used to do nothing until the next Refresh. It
+now re-aggregates the **already-scored cached articles** under the new window's
+tau: zero network, zero LLM, zero ML inference (`ml_sentiment.aggregate` is a
+weighted mean over cached `ml_sar`, not a forward pass). ~10 ms.
+
+**The honest limitation, and it is surfaced rather than hidden.** News is cached
+per window (`news|{sym}|{days}`), so *widening cannot conjure articles that were
+never fetched* — narrowing is exact, widening re-weights the same evidence.
+`coverage[sym].truncated_by_fetch` is derived from **which windows were actually
+fetched** (`max(from_windows) < days`), not from how old the newest article is —
+a quiet ticker with no week-old news is not a truncated fetch, and an earlier
+timestamp heuristic flagged both. `#ns-cov-hint` renders it. The carried-forward
+LLM brief is stamped `brief_stale: true`; **never `_history_append`** from a
+rescore — it would double-count the day and skew the quantiles
+`_calibration_scores` feeds back into `calibrate_tier`.

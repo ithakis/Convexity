@@ -5,6 +5,102 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.11.0 — 2026-07-31
+
+### ML sentiment: readable, and actually populated
+
+- **The displayed ML score was unreadable by construction.** `score` was
+  `tanh(ml_sar/2)` while the trained tier cuts are
+  `[-0.0203, -0.0007, +0.0051, +0.0150]` — so the model's entire
+  5th-to-95th-percentile range spanned under 0.02 of display width and the whole
+  neutral band (45% of the mass by construction) rendered as a literal `-0.00`,
+  while the tier label next to it said something else. New
+  `ml_sentiment.display_score()` maps SAR through the trained cuts themselves
+  onto `(-1, +1)`, pinning each cut to `app.js`'s own tier thresholds
+  (`-0.5/-0.15/+0.15/+0.5`) so the number and the label can never disagree.
+  Measured on real cached articles: `ml_sar = -0.0143` rendered `-0.01` and
+  bucketed *neutral*; it now renders `-0.39` and buckets *bearish*, matching
+  `ml_tier`. Raw `ml_sar`/`ml_score` are untouched everywhere including the
+  sentiment history, so `compute_diagnostics`' IC, calibration curve and
+  agreement grid keep their exact semantics. Applied per-article too, so the
+  Flash Tape, briefs and timeline get real color and working tier filters.
+- **Publish-before-initialize race in `ml_sentiment._load()`.** The `loaded`
+  flag was set *before* the ~3 s lightgbm/scipy/sklearn import while the fast
+  path reads it outside the lock, so any thread arriving mid-load saw
+  `{loaded: True, ok: False, reason: ""}` and quietly fell back to the LLM. The
+  tell was the log line "model not loaded" — that is `news_sentiment`'s
+  fallback string for an *empty* reason, not a real failure, which always
+  populates `reason`. It is also what "ML coverage 14/15" was. The flag now
+  publishes in a `finally`. The model is additionally warmed on a daemon thread
+  from `start_server()` (not `main()` — the desktop app never runs `main()`,
+  which is why the numba warm has never applied there either).
+
+### Refresh: one cancellable background job
+
+- **One Refresh control.** Click (or `R`) refreshes the current portfolio —
+  quotes, then news + sentiment. Long-press 600 ms (or `Shift+R`) refreshes
+  every saved portfolio, behind a dialog stating real cost (portfolios, unique
+  symbols deduplicated across them, duration, API budget). Progress renders
+  inside the button; the per-ticker modal is now opt-in behind a status chip.
+  The News-panel Refresh button is gone.
+- **New `portfolio_tracker/jobs.py`.** Work runs on a daemon thread behind a
+  replayable NDJSON stream, so a refresh survives switching tabs *and* a full
+  page reload. Single-flight (a second submit gets `409` and attaches to the
+  running job), and genuinely cancellable — queued items are de-queued and
+  in-flight work checks a token at five points, including the two sleep gates
+  that could otherwise park a worker for 65 s after you hit cancel.
+- **News-window changes are instant.** `rescore_window` re-aggregates
+  already-scored cached articles under the new window's tau: no network, no
+  LLM, no ML inference, ~10 ms. Widening cannot conjure articles that were
+  never fetched, and the UI says so rather than presenting a re-weighting of 7
+  days of evidence as a 30-day read.
+- **Two latent data-loss bugs fixed on the way.** Every `persistence` write was
+  a bare `write_text` while the readers catch `JSONDecodeError` and return
+  `{}` — a truncated write made *every saved portfolio silently disappear*.
+  Writes are atomic now. And a background job will never overwrite good
+  holdings with a batch Yahoo mostly failed to answer (>20% error rows keeps
+  the prior data), nor repoint the restore-on-launch target.
+- `/api/quotes-stream`'s body is extracted to `fetcher.stream_quotes` and the
+  route rebuilt on it, which fixes a live bug: the old disconnect path left a
+  `with ThreadPoolExecutor` block that *joined* in-flight futures, so an
+  abandoned 150-symbol build kept hitting Yahoo for another ~30 s.
+  `finnhub_adapter` now shares the Finnhub limiter and retries on 429; it had
+  neither, so a quotes build and a news refresh each burned the same quota.
+  **Note the trade-off:** that limiter is a sleep gate, and `fetch_one` makes
+  two Finnhub calls per row, so a *cold* build of a large portfolio is now
+  paced by the 55/min budget (~5 min for 150 new symbols) instead of racing
+  ahead and getting 429s that blanked `Rec Δ6M` / `MSPR`. Warm builds are
+  unaffected — the adapter's own 30–60 min caches mean repeat symbols cost
+  nothing.
+
+### Charts
+
+- **Proportional granularity.** Every range was hardcoded `interval="1d"`, so
+  1M was ~21 points on an 800px chart. 1M now draws 30m bars (~280 points), 3M
+  and 6M share one 1h payload (~435 / ~870), and MAX is thinned to 1500. The
+  fetch window is deliberately much wider than the display window, which is
+  what lets SMA 200 cover a 1M chart instead of starting three-quarters across.
+- **Drag-to-measure persists.** It used to self-destruct 1.8 s after mouseup —
+  you could not read a measurement and then look at the chart. Selections now
+  survive until you click elsewhere, press Esc, or change the range, and either
+  edge can be dragged. One shared implementation replaces two ~150-line copies,
+  closing a listener leak that accumulated a `window` handler per drag.
+- **SMA 20/50/200** on both charts, off by default, with legends naming the bar
+  frequency ("SMA 50 · 30m bars").
+- **The detail modal header follows the active range**, not the 1-day return,
+  with a badge naming the period; a live selection wins over the range tab.
+- **Overlay scroll chaining fixed.** Twelve full-screen overlays, three of which
+  each stashed their own "previous body overflow" and nine of which — including
+  the detail modal — locked nothing. One `showOverlay`/`hideOverlay` pair over a
+  nesting counter, plus `overscroll-behavior: contain`, enforced statically by
+  `tests/test_frontend_overlays.py`.
+- **Contribution-table headers** are sticky and opaque; the topbar used to
+  scroll straight through them.
+
+**Honest flag:** the ML model's holdout metrics are unchanged (`r2 = -0.004`,
+`group_spearman_ic = 0.026`). These fixes make the signal readable and actually
+populated — they do not make it more predictive.
+
 ## 1.10.2 — 2026-07-28
 - **`symbol_db.py`'s local fuzzy ticker lookup was silently dead since the
   package restructure (#9).** `_DB_PATH` pointed at

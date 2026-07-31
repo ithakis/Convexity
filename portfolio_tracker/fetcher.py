@@ -331,6 +331,186 @@ def fetch_portfolio(entries: list[str]) -> list[dict]:
     return rows
 
 
+# ----------------------------- Quote streaming ------------------------------
+
+
+def stream_quotes(entries, *, workers: int = 5, cancel=None, resolve: bool = True):
+    """Yield the NDJSON message bodies /api/quotes-stream has always written:
+    ``{"type":"start", total, symbols}``, then one ``{"type":"row", row, done,
+    total}`` per symbol as it lands, then ``{"type":"done", total}``.
+
+    Extracted from the route handler in v1.11.0 so the streaming endpoint and
+    the background refresh job (jobs.py) run the SAME code rather than two
+    copies that drift.
+
+    `cancel` is any object with ``.is_set()`` — duck-typed so this module never
+    imports jobs.py.
+
+    The pool is deliberately NOT a ``with`` block. ``__exit__`` calls
+    ``shutdown(wait=True)``, which JOINS every queued future — so the old
+    handler's ``return`` on BrokenPipe still sat there finishing all 150
+    symbols, hammering Yahoo for ~30 s on a build the user had already
+    abandoned. ``shutdown(wait=False, cancel_futures=True)`` de-queues
+    everything untouched; only the <= `workers` already in flight run to
+    completion, and their results are discarded. The same ``finally`` runs on
+    ``GeneratorExit``, so a caller closing the generator gets the same
+    cancellation for free.
+    """
+    symbols = _ordered_resolve([str(e) for e in entries]) if resolve else list(entries)
+    total = len(symbols)
+    yield {"type": "start", "total": total, "symbols": symbols}
+    if total:
+        pool = ThreadPoolExecutor(max_workers=max(1, min(workers, total)))
+        try:
+            futures = {pool.submit(fetch_one, s): s for s in symbols}
+            done = 0
+            for fut in as_completed(futures):
+                if cancel is not None and cancel.is_set():
+                    break
+                row = fut.result()
+                done += 1
+                yield {"type": "row", "row": row, "done": done, "total": total}
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+    yield {"type": "done", "total": total}
+
+
+# ----------------------------- Intraday history -----------------------------
+
+# Yahoo's own hard caps on how far back each interval reaches, in days. Exceed
+# one and the request comes back empty rather than erroring, so we check first
+# and let the caller fall back to the daily payload instead of drawing nothing.
+_INTERVAL_MAX_DAYS = {
+    "1m": 7, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "90m": 60,
+    "60m": 730, "1h": 730,
+}
+
+# Range -> (interval, fetch period). Two entries in practice: 3M and 6M share
+# one payload, so a symbol costs at most two intraday fetches no matter how the
+# user tabs around.
+#
+# The fetch period is deliberately MUCH wider than the range being displayed.
+# That is not laziness — it is what makes the moving averages work. An SMA 200
+# over 30m bars needs 200 bars of warm-up; a 1M window only holds ~280 of them,
+# so computing on exactly the visible window would leave the line empty (or
+# nearly) on every short range. Fetching 60d of 30m bars gives ~780, of which
+# the last ~280 are shown, and the MA is fully populated across all of them.
+_RANGE_INTRADAY = {
+    "1M": ("30m", "60d"),
+    "3M": ("1h", "1y"),
+    "6M": ("1h", "1y"),
+}
+
+
+# Suffix -> days. Longest first: "mo" and "wk" must be tested before "d"/"y"
+# would match their tail.
+_PERIOD_UNITS = (("mo", 30.44), ("wk", 7.0), ("d", 1.0), ("y", 365.25))
+
+
+def _period_days(period: str) -> float:
+    """Rough calendar-day length of a yfinance period string.
+
+    Anything unrecognised returns a deliberately huge number so the caller's cap
+    check REJECTS it. Guessing small in the other direction would let an
+    over-cap request through, and Yahoo answers those with an empty frame rather
+    than an error — i.e. a blank chart instead of a graceful fall back to daily.
+    """
+    p = (period or "").strip().lower()
+    if p in ("max", "ytd"):
+        return 10_000.0
+    for suffix, mult in _PERIOD_UNITS:
+        if p.endswith(suffix):
+            try:
+                return float(p[:-len(suffix)]) * mult
+            except ValueError:
+                return 10_000.0
+    return 10_000.0
+
+
+def intraday_history(symbol: str, interval: str, period: str) -> dict | None:
+    """Sub-daily closes + volume for one symbol, or None if unavailable.
+
+    None is a normal outcome, not an error: the interval/period pair may exceed
+    Yahoo's cap, the symbol may not trade intraday (many non-US listings), or
+    the fetch may simply fail. Every caller falls back to the daily series, so
+    the chart degrades to what it drew before rather than going blank.
+
+    Cached under the default 300 s TTL — intraday bars go stale within the
+    trading day, unlike the daily `detail|` payload they supplement. Benchmark
+    symbols (SPY, sector ETFs) come through here too and are shared across every
+    holding, so their hit rate is ~100% after the first call.
+    """
+    cache_key = f"intraday|{symbol}|{interval}|{period}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached or None          # {} is the cached "no data" marker
+
+    cap = _INTERVAL_MAX_DAYS.get(interval)
+    if cap is not None and _period_days(period) > cap:
+        return None                    # caller's problem to fall back; don't cache
+
+    try:
+        hist = yf.Ticker(symbol).history(
+            period=period, interval=interval, auto_adjust=True, actions=False)
+    except Exception:
+        return None                    # transient — don't cache, retry next open
+    if hist is None or hist.empty or "Close" not in hist:
+        # Cache the miss so a symbol with no intraday data doesn't re-hit Yahoo
+        # on every range tab click. Short TTL via the default.
+        _cache_put(cache_key, {})
+        return None
+
+    close = hist["Close"].dropna()
+    if len(close) < 2:
+        _cache_put(cache_key, {})
+        return None
+    vol = hist["Volume"].dropna() if "Volume" in hist else pd.Series(dtype=float)
+    out = {
+        "interval": interval,
+        "period": period,
+        "history": _series_to_points(close),
+        "volume": _series_to_points(vol) if not vol.empty else [],
+    }
+    _cache_put(cache_key, out)
+    return out
+
+
+def range_history(symbol: str, rng: str, benchmarks: list[str] | None = None) -> dict:
+    """Payload for GET /api/history — the intraday half of the granularity ladder.
+
+    Only 1M/3M/6M route here; the longer ranges stay client-side slices of the
+    one daily `period="max"` payload /api/detail already returns. `fallback`
+    tells the client the intraday fetch didn't happen so it can draw the daily
+    series and say so in the legend.
+    """
+    spec = _RANGE_INTRADAY.get((rng or "").upper())
+    if spec is None:
+        return {"symbol": symbol, "range": rng, "fallback": True,
+                "reason": "range is served from the daily payload"}
+    interval, period = spec
+    main = intraday_history(symbol, interval, period)
+    if main is None:
+        return {"symbol": symbol, "range": rng, "interval": interval,
+                "fallback": True, "reason": "no intraday data"}
+
+    out = {
+        "symbol": symbol, "range": rng, "interval": interval, "period": period,
+        "fallback": False,
+        "history": main["history"], "volume": main["volume"],
+        "benchmarks": {},
+    }
+    # Benchmarks must be on the SAME bar frequency or the overlay steps against
+    # a smooth line. The client passes the ones it's actually showing.
+    for b in (benchmarks or []):
+        b = (b or "").strip().upper()
+        if not b or b == symbol.upper():
+            continue
+        got = intraday_history(b, interval, period)
+        if got:
+            out["benchmarks"][b] = got["history"]
+    return out
+
+
 # ----------------------------- Detail fetch ---------------------------------
 
 

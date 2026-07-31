@@ -3,11 +3,41 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from portfolio_tracker.helpers import _json_default, _repo_root
+
+
+def _atomic_write(path: Path, body: str) -> None:
+    """Write via a temp file in the same directory + os.replace.
+
+    Every state file here was a bare ``write_text``, and the readers catch
+    ``JSONDecodeError`` and return ``{}`` — so a write interrupted midway makes
+    EVERY SAVED PORTFOLIO SILENTLY DISAPPEAR rather than erroring. That was
+    survivable while writes only ever happened right after an interactive
+    build; a background refresh job writing views unattended, in a process
+    whose quit path is ``os._exit(0)`` (server.shutdown_server), widens the
+    window a lot. os.replace is atomic on the same filesystem, which is why
+    the temp file must be created beside the target, not in /tmp.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(body)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 # ----------------------------- File paths -----------------------------------
 
@@ -59,7 +89,7 @@ def _read_views_raw() -> dict:
                 "last_view": _CURRENT_KEY,
             }
             try:
-                path.write_text(json.dumps(views, indent=2) + "\n", encoding="utf-8")
+                _atomic_write(path, json.dumps(views, indent=2) + "\n")
                 legacy.unlink()
             except OSError:
                 pass
@@ -73,7 +103,7 @@ def _read_views_raw() -> dict:
 
 def _write_views_raw(raw: dict) -> None:
     body = json.dumps(raw, default=_json_default, ensure_ascii=True, indent=2)
-    _views_path().write_text(body + "\n", encoding="utf-8")
+    _atomic_write(_views_path(), body + "\n")
 
 
 def list_views() -> dict:
@@ -406,7 +436,7 @@ def save_watchlists(watchlists: dict[str, str]) -> dict[str, str]:
             cleaned[clean_name] = clean_entries
     payload = json.dumps(cleaned, ensure_ascii=True, indent=2, sort_keys=True)
     with _WATCHLISTS_LOCK:
-        watchlists_path.write_text(payload + "\n", encoding="utf-8")
+        _atomic_write(watchlists_path, payload + "\n")
     return cleaned
 
 
@@ -468,7 +498,7 @@ def _read_mpt_raw() -> dict:
 
 def _write_mpt_raw(raw: dict) -> None:
     body = json.dumps(raw, default=_json_default, ensure_ascii=True, indent=2)
-    Path(_MPT_FILE).write_text(body + "\n", encoding="utf-8")
+    _atomic_write(Path(_MPT_FILE), body + "\n")
 
 
 _MPT_MAX_RUNS = 3  # per-portfolio run history depth (user request)
@@ -617,7 +647,7 @@ def _read_column_views_raw() -> dict:
 
 def _write_column_views_raw(raw: dict) -> None:
     body = json.dumps(raw, ensure_ascii=True, indent=2, sort_keys=True)
-    _column_views_path().write_text(body + "\n", encoding="utf-8")
+    _atomic_write(_column_views_path(), body + "\n")
 
 
 def load_column_views() -> dict:

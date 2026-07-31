@@ -176,6 +176,51 @@
     from { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   }
   .topbar button.flash { animation: topbar-btn-flash 0.5s ease-out; }
+
+  /* ===== Refresh control (v1.11.0) =====================================
+     Progress renders INSIDE the button — a determinate fill behind the label
+     — so the normal path never needs a modal. The radial hold indicator is
+     the discoverability cue for the long-press "all portfolios" gesture: it
+     only appears once you start pressing, and releasing early aborts. */
+  .refresh-btn { position: relative; overflow: hidden; }
+  .refresh-btn .rf-label { position: relative; z-index: 2; }
+  .rf-bar {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+    background: var(--accent-soft); border-right: 1px solid var(--accent);
+    transition: width 0.25s ease-out; z-index: 1; pointer-events: none;
+  }
+  .refresh-btn.running { border-color: var(--accent); }
+  /* Sweeps a conic wedge around the button over the hold threshold. Driven by
+     one animation rather than JS so it can't drift from REFRESH_LONG_MS. */
+  .rf-hold {
+    position: absolute; inset: -1px; z-index: 1; pointer-events: none;
+    opacity: 0; border-radius: inherit;
+  }
+  .rf-hold.arming {
+    opacity: 1;
+    background: conic-gradient(var(--accent) 0deg, transparent 0deg);
+    animation: rf-hold-sweep 600ms linear forwards;
+  }
+  @keyframes rf-hold-sweep {
+    from { background: conic-gradient(rgba(0,0,0,0) 0deg, transparent 0deg); }
+    to   { background: conic-gradient(var(--accent) 360deg, transparent 360deg); }
+  }
+  .rf-chip {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+    border: 1px solid var(--border); border-radius: 999px; padding: 2px 4px 2px 9px;
+  }
+  .rf-chip:hover { border-color: var(--accent); color: var(--text); }
+  .rf-chip[hidden] { display: none; }
+  .rf-chip-x {
+    height: 16px; width: 16px; padding: 0; line-height: 1; border-radius: 50%;
+    border: none; background: transparent; color: var(--muted); cursor: pointer;
+    font-size: 13px;
+  }
+  .rf-chip-x:hover { background: var(--neg); color: #fff; }
+  /* Honest-coverage notice on the News window pills — see nsRescoreWindow. */
+  .ns-cov-hint { font-size: 10.5px; color: var(--neg); cursor: default; }
+  .ns-cov-hint[hidden] { display: none; }
   /* Danger style for delete buttons */
   .topbar button.danger, button.danger {
     color: var(--neg); border-color: rgba(248, 81, 73, 0.4);
@@ -712,6 +757,10 @@
   .pf-overlay-pill[data-on="1"] .swatch.ndx { background: #06b6d4; }
   .pf-overlay-pill[data-on="1"] .swatch.sec { background: #f59e0b; }
   .pf-overlay-pill[data-on="1"] .swatch.dd  { background: #f85149; }
+  /* Must match SMA_COLORS in app.js. */
+  .pf-overlay-pill[data-on="1"] .swatch.sma20  { background: #38bdf8; }
+  .pf-overlay-pill[data-on="1"] .swatch.sma50  { background: #a78bfa; }
+  .pf-overlay-pill[data-on="1"] .swatch.sma200 { background: #fb923c; }
   .pf-overlay-pill[data-on="0"] .swatch { opacity: 0.35; }
   .pf-overlay-pill .ovl-info {
     display: inline-flex; align-items: center; justify-content: center;
@@ -837,7 +886,18 @@
   .pf-bars .pf-bar-val { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
 
   .pf-contrib-table { width: 100%; border-collapse: collapse; font-size: 11.5px; font-variant-numeric: tabular-nums; }
-  .pf-contrib-table th { text-align: right; padding: 4px 6px; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 600; }
+  /* Sticky under the topbar (z 30) and .progress-wrap (z 25, top 50px), which
+     is where that 50px offset comes from — anything less and the header slides
+     under the toolbar instead of stopping below it. The background is the load-
+     bearing part: without it the rows scrolled straight through the transparent
+     header. z-index 20 keeps it below both of those and far below the overlay
+     floor of 50. */
+  .pf-contrib-table th {
+    text-align: right; padding: 4px 6px; color: var(--muted); font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 50px; z-index: 20;
+    background: var(--bg-canvas);
+  }
   .pf-contrib-table th:first-child, .pf-contrib-table td:first-child { text-align: left; }
   .pf-contrib-table td { padding: 3px 6px; border-bottom: 1px dashed var(--border); }
   .pf-contrib-table tr:last-child td { border-bottom: none; }
@@ -1933,6 +1993,36 @@
   }
   .an-not-covered b { color: var(--text); font-weight: 600; }
 
+  /* ===== Overlay scroll containment =====================================
+     Second half of the scroll-chaining fix (the first is app.js's
+     lockBodyScroll counter, which freezes <body> while any overlay is open).
+     `contain` stops a scroll gesture that has bottomed out inside an overlay
+     from handing the remaining delta to whatever is behind it. Belt and
+     braces on purpose: the body lock alone leaves the trackpad's elastic
+     bounce chaining out of the modal, and containment alone does nothing for
+     a gesture that starts on the backdrop.
+
+     STANDING RULE: every new overlay scroll container belongs in this list.
+     Grouped rather than inlined into each rule so the set is auditable in one
+     place — the detail modal is here precisely because it was the one
+     full-screen overlay everyone forgot. */
+  .modal-bg,
+  .info-modal,
+  .mth-body,
+  .pf-weights-body,
+  .pf-mpt-side,
+  .pf-mpt-weights,
+  .pf-mpt-bounds-grid,
+  .cv-list,
+  .ns-prog-jobs,
+  .ns-tape-fs-body,
+  .ns-quad.rows-fixed .ns-card,
+  .settings-nav-list,
+  .settings-pane-body.scroll,
+  .settings-log-body {
+    overscroll-behavior: contain;
+  }
+
   /* ===== Detail modal ===== */
   .modal-bg {
     position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: none;
@@ -2014,6 +2104,14 @@
   .m-price-block .p-chg { font-size: 13px; font-weight: 600; margin-top: 4px; }
   .m-price-block .p-chg.pos { color: var(--pos); }
   .m-price-block .p-chg.neg { color: var(--neg); }
+  /* Names the period the return covers. Without it a "+18.4%" that follows the
+     range tabs is ambiguous — the old header always meant 1D, this one doesn't. */
+  .m-price-block .p-range {
+    display: inline-block; margin-left: 4px; padding: 1px 5px;
+    border: 1px solid var(--border); border-radius: var(--r-xs);
+    font-size: 10px; font-weight: 600; letter-spacing: 0.03em;
+    color: var(--muted); vertical-align: 1px;
+  }
   .m-close {
     width: 32px; height: 32px; border-radius: var(--r-md); border: 1px solid var(--border);
     background: transparent; cursor: pointer; font-size: 18px; color: var(--muted);
@@ -2045,6 +2143,14 @@
   .m-toolbar-btn .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .dot.sp { background: #8b5cf6; }
   .dot.sec { background: #f59e0b; }
+  /* SMA toggles: tight, since three of them sit next to the benchmark buttons
+     and the number alone is the label. */
+  .m-sma-btn { padding: 4px 7px; gap: 4px; font-variant-numeric: tabular-nums; }
+  .m-toolbar-sep {
+    width: 1px; align-self: stretch; margin: 2px 4px; background: var(--border);
+  }
+  .m-sma-key { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+  .m-sma-key i { width: 9px; height: 2px; border-radius: 1px; display: inline-block; }
 
   .m-chart {
     position: relative; width: 100%; height: 320px;
@@ -2219,11 +2325,8 @@
     padding: 12px 0 8px; border-bottom: 1px solid var(--border); margin-bottom: 12px;
   }
   .ns-title { font-size: 13px; font-weight: 700; margin: 0; flex: 1; }
-  .ns-refresh-btn {
-    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-sm);
-    padding: 4px 10px; font-size: 11.5px; cursor: pointer; color: var(--text);
-  }
-  .ns-refresh-btn:hover { border-color: var(--accent); }
+  /* .ns-refresh-btn removed in v1.11.0 with the News-panel Refresh button —
+     there is one Refresh, in the topbar (.refresh-btn). */
   .ns-updated { font-size: 11px; color: var(--muted); }
   /* Analysis-window control (item 3). */
   .ns-lookback { display: inline-flex; align-items: center; gap: 4px; }
