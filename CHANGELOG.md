@@ -5,6 +5,52 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.11.1 — 2026-08-02
+
+### Column presets are first-class
+
+- **Custom presets are chips on the column bar**, appended after Momentum in the
+  order you created them and rendered in green so it stays obvious which ones
+  are yours (accent when selected, like any other chip). The `Custom ▾` dropdown
+  they used to hide behind is gone — `setActiveView` always treated the two
+  kinds identically, so there was no reason for one to be second-class.
+- **"Modified · Save · Reset"** replaces "Save as new view". Built-ins are
+  edited in place and saved the instant you change them, so the amber pill only
+  ever meant "this no longer matches the factory layout": **Save** now says
+  "yes, deliberate" and silences it (new `acked` flag, `POST
+  /api/column-views/builtin-ack`), while **Reset** still restores the factory
+  columns and colors. Editing the preset again — columns or colors — re-arms
+  the pill.
+- **New Settings → Column Presets.** Per-preset *Revert to default* for each
+  built-in, available whether or not you pressed Save and without switching to
+  that preset first, plus Delete for your own presets. Deleting moved here from
+  the old dropdown so the column bar carries nothing destructive.
+
+### Refresh progress is one honest bar
+
+- **The bar filled to 100% during quotes and then rewound when news started.**
+  `news_total` was only counted at the start of the news phase, so the client's
+  denominator was quotes-only until then; an all-portfolios run had the same
+  problem once per portfolio. `jobs._plan_totals` now seeds both totals from the
+  snapshotted entries **before any frame is emitted** — including the `queued`
+  frame and the snapshot a reattaching client reads — and each phase reconciles
+  its own figure to the real count. Skipped phases and empty views release their
+  reservation, so 100% is always reachable. The chip leads with the unified
+  percentage, and the client clamps it monotonically.
+
+### Visual fixes
+
+- **The cancel `×` on the status chip rendered as a bordered 30px square.**
+  Second instance of the `.topbar button` cascade trap: `.rf-chip-x` is `(0,1,0)`
+  and lost every declaration — including its own `border: none` — to
+  `.topbar button` `(0,1,1)`. Now `.topbar .rf-chip-x`, an SVG mark instead of a
+  font-dependent `×` glyph, and a soft `--neg` tint on hover rather than a solid
+  red fill. Verified in light, dark and Bloomberg.
+- **The Analyst Sentiment section lost its outer card.** Its four cards were
+  already boxed, so the wrapper was a border inside a border — and it cost 32px
+  of width the cards now use. Holdings has no outer card either, so the two
+  sections finally match.
+
 ## 1.11.0 — 2026-07-31
 
 ### ML sentiment: readable, and actually populated

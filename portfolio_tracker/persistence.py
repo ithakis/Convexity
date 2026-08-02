@@ -640,6 +640,12 @@ def _read_column_views_raw() -> dict:
         heat = _sanitize_heat(entry.get("heat"))
         if heat:
             ov["heat"] = heat
+        # `acked` = the user pressed Save on the "Modified" pill: keep the edit,
+        # stop flagging it. Only meaningful alongside a real delta, so it is read
+        # last and never on its own — an entry carrying nothing but `acked` still
+        # collapses to "no override", preserving the empty-entry-disappears rule.
+        if ov and entry.get("acked"):
+            ov["acked"] = True
         if ov:
             builtin_overrides[clean_name] = ov
     return {"custom_views": cleaned, "builtin_overrides": builtin_overrides, "active_view": active}
@@ -670,6 +676,8 @@ def upsert_column_view(name: str, columns: list, heat=None) -> dict:
     with _COLUMN_VIEWS_LOCK:
         raw = _read_column_views_raw()
         if clean_name in _BUILTIN_COLUMN_VIEW_NAMES:
+            # A fresh entry, so any prior `acked` is dropped: editing the columns
+            # again after acknowledging must re-arm the "Modified" pill.
             ov: dict = {"columns": clean_cols}
             if clean_heat:
                 ov["heat"] = clean_heat
@@ -700,6 +708,40 @@ def set_builtin_view_heat(name: str, key: str, mode: str) -> dict:
         heat = dict(ov.get("heat") or {})
         heat[key] = mode
         ov["heat"] = heat
+        # Unlike upsert_column_view this mutates an existing entry, so `acked`
+        # has to be cleared by hand — otherwise a colour change made after the
+        # user pressed Save would silently skip the "Modified" pill.
+        ov.pop("acked", None)
+        raw["builtin_overrides"][clean_name] = ov
+        _write_column_views_raw(raw)
+        return raw
+
+
+def set_builtin_view_acked(name: str, acked: bool = True) -> dict:
+    """Mark a built-in's override as acknowledged (or un-acknowledge it).
+
+    The built-in views are editable in place and every edit is already saved, so
+    the "Modified" pill is purely informational: it says "this no longer matches
+    the factory layout". Acking is the user answering "yes, that's deliberate" —
+    the edit stays exactly as it is and only the flag goes away. Reverting to
+    factory is still delete_column_view(), and Settings offers that per preset
+    for as long as an override exists, acked or not.
+
+    A no-op when the view has no override: there is nothing to acknowledge, and
+    writing a lone `acked` would be dropped on the next read anyway.
+    """
+    clean_name = _normalize_builtin_column_view_name(name)
+    if clean_name not in _BUILTIN_COLUMN_VIEW_NAMES:
+        raise ValueError(f"'{clean_name}' is not a built-in view")
+    with _COLUMN_VIEWS_LOCK:
+        raw = _read_column_views_raw()
+        ov = raw["builtin_overrides"].get(clean_name)
+        if not ov:
+            return raw
+        if acked:
+            ov["acked"] = True
+        else:
+            ov.pop("acked", None)
         raw["builtin_overrides"][clean_name] = ov
         _write_column_views_raw(raw)
         return raw

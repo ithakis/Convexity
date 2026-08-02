@@ -613,7 +613,31 @@ continuous 10th/90th-clipped blue. `favor:"low"` flips which end is best (e.g.
 `"quantile"` on read. New modes must also be whitelisted in
 `persistence._HEAT_MODES`. `BUILTIN_VIEWS` (just below COLS)
 maps each preset (`Default`, `Fundamentals`, `Momentum`) to an ordered
-list of column keys. Legacy names (`IB View`, `Trader View`) are still
+list of column keys.
+
+**The column bar is one flat row of chips (v1.11.1).** `renderColumnViewBar()`
+emits the three built-ins, a `.cv-seg-div` hairline, then every custom preset
+(`customViewNames()`, **creation order** so a new one lands at the end) as a
+`.cv-custom-chip` in `var(--pos)`. The `Custom ▾` dropdown is gone; deleting a
+preset lives in Settings → Column Presets (`deleteCustomView`), so the bar holds
+no destructive control. The two green rules must stay **below**
+`.cv-seg button.active` in `style.css` — the first is the same (0,2,1)
+specificity and source order is what breaks the tie.
+
+**Built-ins are edited in place and saved instantly**, so the amber pill is
+purely informational and the two predicates deliberately differ:
+`builtinIsModified()` (differs from factory — drives Settings' Revert, always)
+vs `builtinShowsDirtyPill()` (that, minus an `acked` flag — drives the pill).
+**Save = acknowledge**, not "write": `ackViewOverride` → `POST
+/api/column-views/builtin-ack` only sets `acked`. Any later edit must re-arm the
+pill, which is free in `upsert_column_view` (it rebuilds the entry) but has to be
+done **by hand** in `set_builtin_view_heat` (it mutates one). An override
+carrying only `acked` is dropped on read, preserving the
+empty-override-disappears invariant. Reset/Revert is still
+`DELETE /api/column-views/<name>`; `resetViewOverride(name)` takes an optional
+name so Settings can revert a preset without switching to it.
+**Wire these through arrow functions** — `onclick = resetViewOverride` passes
+the MouseEvent as the `name` argument. Legacy names (`IB View`, `Trader View`) are still
 accepted and normalised through the alias helpers so saved state migrates
 without user intervention. `COLS_BY_KEY` is the lookup table; rendering goes
 through `getActiveColumns()` which resolves the active view from
@@ -691,6 +715,21 @@ columns).
   applied for that reason and it rendered at 12.5px until v1.10.1, which added
   `.topbar button.gear-btn { font-size: 20px }`. Measure computed styles in the
   browser rather than trusting a declaration.
+  **This has now bitten twice — assume it, don't rediscover it.** The refresh
+  status chip's cancel button was the second case (fixed v1.11.1): `.rf-chip-x`
+  (0,1,0) lost *every* declaration to `.topbar button`, including its own
+  `border: none; background: transparent`, so it rendered as a bordered 30px
+  `--r-md` square with the canvas background inside a 999px pill. It is now
+  `.topbar .rf-chip-x` (0,2,0), draws an **inline SVG** mark rather than a `×`
+  glyph (whose size and baseline vary by system font), and hovers to
+  `rgba(var(--neg-rgb), 0.16)` instead of a solid red fill. Any new control
+  placed inside the topbar needs the `.topbar` prefix on its rules.
+  A cheap way to iterate on one of these without touching the app: build a
+  standalone lab page that inlines the real `:root`/`[data-theme]` variable
+  blocks plus the competing `.topbar button` rule, render the candidates side by
+  side in all three themes at 1× and 3×, and open it in the browser pane. Write
+  the losing/shipping variant at its **real** specificity or the lab will
+  "fix" the bug for you and prove nothing.
 - **Terminology: the LLM engine is labelled "LLM", not "AI"** (v1.10.1). "AI"
   is too general for what is specifically the challenger to the ML model. The
   CSS class names are historical and deliberately unchanged (`.ns-lg-ai`,
@@ -1849,6 +1888,23 @@ cancellable, and there was no way to refresh the whole account. Now there is
    `total` is per-view and the server has already folded it in; accumulating
    client-side double-counted (the chip read "Quotes 4/8" for a 4-symbol
    portfolio).
+5. **Both totals are planned before any frame exists** (v1.11.1).
+   `_plan_totals(job)` runs in `submit()` — *before* the `queued` emit and
+   before the worker thread, so the earliest frame and the reattach snapshot
+   both carry a whole-job denominator. Each phase then **reconciles** its own
+   figure (`Job.set_count`, never `bump`): quotes swaps each view's estimate for
+   its real count and re-derives `actual-where-known + planned-for-the-rest`;
+   news assigns the exact `len(symbols) + 1`. Every skip path — no
+   `news_sentiment`, no symbols, cancelled, a view that emitted no `start` —
+   must **release its reservation**, or the bar can never reach 100%.
+   `_parse_entries` is shared by the planner and the quotes phase and must stay
+   that way; if they disagree the denominator visibly corrects on the first
+   item, which is the whole thing this removes. Why it matters: `news_total`
+   used to be bumped at the news phase's start, so the client's denominator was
+   quotes-only until then and the bar filled completely and then rewound by
+   half (once per portfolio on an all-scope run). `rfRender` also clamps the
+   painted percentage monotonically (`REFRESH.pct`, reset in `rfStart`/
+   `rfReset`) so a late upward correction can't walk it backwards.
 
 ### Event stream
 

@@ -77,6 +77,7 @@ from portfolio_tracker.persistence import (
     save_mpt_run,
     save_view,
     set_active_column_view,
+    set_builtin_view_acked,
     set_builtin_view_heat,
     set_active_weight_preset,
     set_last_view,
@@ -616,6 +617,28 @@ class Handler(BaseHTTPRequestHandler):
                     str(payload.get("name") or ""),
                     str(payload.get("key") or ""),
                     str(payload.get("mode") or ""),
+                )
+                self._send_json(200, {
+                    "custom": raw.get("custom_views") or {},
+                    "builtin_overrides": raw.get("builtin_overrides") or {},
+                    "active": raw.get("active_view") or "Default",
+                })
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/column-views/builtin-ack":
+            # "Modified · Save" on the column bar. The edit is already saved (it
+            # was saved the moment it was made); this only records that the user
+            # meant it, so the pill stops nagging. Reverting to factory stays
+            # DELETE /api/column-views/<name>.
+            try:
+                payload = self._read_json()
+                raw = set_builtin_view_acked(
+                    str(payload.get("name") or ""),
+                    bool(payload.get("acked", True)),
                 )
                 self._send_json(200, {
                     "custom": raw.get("custom_views") or {},

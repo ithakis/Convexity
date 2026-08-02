@@ -27,7 +27,11 @@
   </button>
   <span class="rf-chip" id="rf-chip" hidden>
     <span class="rf-chip-text" id="rf-chip-text"></span>
-    <button class="rf-chip-x" id="rf-chip-cancel" title="Cancel this refresh">×</button>
+    <!-- An SVG mark, not a "×" character: the glyph's size and baseline vary by
+         system font, which is what made it sit off-centre in the pill. -->
+    <button class="rf-chip-x" id="rf-chip-cancel" title="Cancel this refresh" aria-label="Cancel this refresh">
+      <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 3.5 8.5 8.5 M8.5 3.5 3.5 8.5"/></svg>
+    </button>
   </span>
   <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
        per portfolio. Each sheet must include EVERY column the app can show for a
@@ -541,14 +545,21 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 <div class="section-anchor" id="anchor-holdings"><span class="sa-kicker">Holdings</span></div>
 
 <div class="cv-bar" id="cv-bar">
+  <!-- Every preset is a chip in this one row: the three built-ins, then your
+       own presets (green) in the order you created them. Deleting a preset
+       lives in Settings > Column Presets so the bar carries nothing
+       destructive. -->
   <div class="cv-seg" id="cv-builtins" role="tablist" aria-label="Column view"></div>
-  <div class="cv-custom-wrap" id="cv-custom-wrap"></div>
   <button class="cv-fit-toggle" id="cv-fit-toggle" type="button" data-tip="Shrink column widths, chart cells, and table text just enough to keep the active view on screen." aria-pressed="false">Fit to screen</button>
   <button class="cv-customize" id="cv-customize" type="button" title="Pick which columns to show">Customize…</button>
+  <!-- Built-in presets are edited in place and saved instantly, so "Modified"
+       is informational: Save accepts the divergence and silences the flag,
+       Reset restores the factory layout. Settings keeps the revert available
+       either way. -->
   <span class="cv-dirty" id="cv-dirty" hidden>
     <span class="cv-dirty-label">Modified</span>
-    <button class="cv-dirty-save" id="cv-dirty-save" type="button">Save as new view</button>
-    <button class="cv-dirty-reset" id="cv-dirty-reset" type="button">Reset</button>
+    <button class="cv-dirty-save" id="cv-dirty-save" type="button" title="Keep this layout and stop flagging it as modified">Save</button>
+    <button class="cv-dirty-reset" id="cv-dirty-reset" type="button" title="Restore this preset's factory columns and colors">Reset</button>
   </span>
 </div>
 

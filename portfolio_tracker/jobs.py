@@ -34,6 +34,15 @@ Design notes that are load-bearing:
   instant, and already-open sockets detach within ~30 s worst case
   (``_NV_TIMEOUT_S``).
 
+* **Totals are planned up front, then reconciled.** ``_run`` seeds
+  ``quotes_total`` and ``news_total`` from the snapshotted entries strings
+  BEFORE the first item runs, and each phase corrects its own total to the real
+  number once it knows it. Without this the client's denominator only existed
+  for the phase in flight, so the progress bar filled to 100% during quotes and
+  then rewound when news started (and again per portfolio on an all-scope run).
+  The estimate is allowed to be slightly wrong; what matters is that it is
+  never zero and never grows by a whole phase mid-run.
+
 * Worker threads are daemons — ``server.shutdown_server`` ends in
   ``os._exit(0)``, so nothing here may ever be able to block process exit.
 """
@@ -72,6 +81,17 @@ _REG_LOCK = threading.Lock()
 _CURRENT: "Job | None" = None
 
 
+def _parse_entries(entries: str) -> list[str]:
+    """Split a stored entries string into individual constituent entries.
+
+    Shared by the up-front planner and the quotes phase itself. They MUST agree:
+    if the planner counted differently from what actually gets fetched, the
+    progress denominator would visibly correct itself on the first item — which
+    is the exact behaviour the planning exists to remove.
+    """
+    return [e.strip() for e in (entries or "").replace("\n", ",").split(",") if e.strip()]
+
+
 class Job:
     """One refresh run. All mutable state is guarded by ``_cv``."""
 
@@ -90,6 +110,12 @@ class Job:
         self.error = None
         self.counts = {"quotes_done": 0, "quotes_total": 0,
                        "news_done": 0, "news_total": 0, "rate_waits": 0}
+        # Per-view symbol counts: the planner's estimate, and the real number
+        # each view reports at its own phase start. quotes_total is always
+        # actual-where-known + planned-for-the-rest, so it stays a whole-job
+        # denominator from the first frame instead of growing per portfolio.
+        self._planned_quotes: dict[str, int] = {}
+        self._actual_quotes: dict[str, int] = {}
         self.phase = None
         self.cancel = threading.Event()
         self.cancel_reason = None
@@ -159,6 +185,14 @@ class Job:
             self.counts[key] = self.counts.get(key, 0) + n
             return self.counts[key]
 
+    def set_count(self, key: str, n: int) -> int:
+        """Assign a count outright. Used for the two *_total keys, which are
+        planned up front and then corrected — accumulating them instead is what
+        made the denominator grow by a whole phase mid-run."""
+        with self._cv:
+            self.counts[key] = n
+            return n
+
     def request_cancel(self, reason: str = "user") -> bool:
         if self.is_terminal():
             return False
@@ -213,6 +247,10 @@ def submit(*, scope, phases, days, entries_by_view, context=None,
     """
     job = Job(scope=scope, phases=phases, views=list(entries_by_view.keys()),
               entries=entries_by_view, days=days, context=context)
+    # Before ANY frame is emitted — including the `queued` one below and the
+    # snapshot a late-attaching client reads — so the progress bar has a real
+    # denominator from the very first thing it ever sees.
+    _plan_totals(job)
     # The conflict check and the _CURRENT assignment MUST be one atomic step.
     # Reading current() outside the lock is a TOCTOU: the server is a
     # ThreadingHTTPServer, so two near-simultaneous POSTs (a double-click, or a
@@ -288,6 +326,26 @@ helpers.set_rate_observer(_on_rate_event)
 # ----------------------------- driver ---------------------------------------
 
 
+def _plan_totals(job: Job) -> None:
+    """Seed both denominators from the snapshotted entries, before any work.
+
+    Everything needed is already known at this point — the entries strings for
+    every view in the run were snapshotted at submit time — so there is no
+    reason to make the client watch the total appear one phase at a time. Each
+    phase corrects its own figure below once it has the authoritative count.
+    """
+    job._planned_quotes = {v: len(_parse_entries(job.entries.get(v) or "")) for v in job.views}
+    job.set_count("quotes_total", sum(job._planned_quotes.values()))
+    if "news" in job.phases:
+        # The news phase runs over the union of RESOLVED symbols, which we don't
+        # have yet; unique entries is the closest thing available and is exact
+        # whenever the user typed tickers. +1 for the market-wide read. Corrected
+        # in _run_news_phase, so an estimate that is off costs one small nudge.
+        planned_news = {e.upper() for v in job.views
+                        for e in _parse_entries(job.entries.get(v) or "")}
+        job.set_count("news_total", len(planned_news) + 1)
+
+
 def _run(job: Job) -> None:
     job.started_at = time.time()
     job.state = "running"
@@ -307,6 +365,7 @@ def _run(job: Job) -> None:
         if "news" in job.phases and not job.cancel.is_set():
             _run_news_phase(job, rows_by_symbol)
         elif "news" in job.phases:
+            job.set_count("news_total", 0)
             job.emit("phase", phase="news", state="skipped", reason="cancelled")
     except helpers.Cancelled:
         # Control flow, not failure. The sleep gates (rolling rate limiter, the
@@ -341,13 +400,18 @@ def _finish(job: Job, state: str) -> None:
 def _run_quotes_phase(job: Job, view: str, index: int, rows_by_symbol: dict) -> None:
     job.phase = "quotes"
     entries = job.entries.get(view) or ""
-    parts = [e.strip() for e in entries.replace("\n", ",").split(",") if e.strip()]
+    parts = _parse_entries(entries)
     rows: list[dict] = []
     started = False
     for msg in stream_quotes(parts, cancel=job.cancel):
         if msg["type"] == "start":
             started = True
-            job.bump("quotes_total", msg["total"])
+            # Reconcile rather than accumulate: swap this view's estimate for its
+            # real count and re-derive the whole-job total, so the denominator
+            # stays the whole job's and only ever nudges by the estimate's error.
+            job._actual_quotes[view] = msg["total"]
+            job.set_count("quotes_total", sum(job._actual_quotes.values()) + sum(
+                n for v, n in job._planned_quotes.items() if v not in job._actual_quotes))
             job.emit("phase", phase="quotes", state="start", view=view,
                      view_index=index, view_count=len(job.views),
                      total=msg["total"], symbols=msg["symbols"])
@@ -361,6 +425,12 @@ def _run_quotes_phase(job: Job, view: str, index: int, rows_by_symbol: dict) -> 
                      state="error" if row.get("error") else "ok",
                      done=msg["done"], total=msg["total"], row=row)
     if not started:
+        # Nothing was fetched for this view (empty entries, or cancelled before
+        # the first message). Drop its reservation or the denominator keeps
+        # counting symbols that will never arrive and the bar can't reach 100%.
+        job._actual_quotes[view] = 0
+        job.set_count("quotes_total", sum(job._actual_quotes.values()) + sum(
+            n for v, n in job._planned_quotes.items() if v not in job._actual_quotes))
         return
 
     failed = sum(1 for r in rows if r.get("error"))
@@ -388,16 +458,23 @@ def _run_quotes_phase(job: Job, view: str, index: int, rows_by_symbol: dict) -> 
 
 def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
     job.phase = "news"
+    # Every early return releases the planned reservation (_plan_totals seeded
+    # it before we knew whether news would run at all): a phase that is skipped
+    # must not leave items in the denominator that nothing will ever complete.
     if _ns is None:
+        job.set_count("news_total", 0)
         job.emit("phase", phase="news", state="skipped",
                  reason="news_sentiment unavailable")
         return
     symbols = sorted(rows_by_symbol.keys())
     if not symbols:
+        job.set_count("news_total", 0)
         job.emit("phase", phase="news", state="skipped", reason="no symbols")
         return
     context = job.context or _build_news_context(job, rows_by_symbol)
-    job.bump("news_total", len(symbols) + 1)      # +1 for the market read
+    # Assign, don't bump: this is the authoritative count replacing the plan's
+    # estimate (+1 for the market-wide read).
+    job.set_count("news_total", len(symbols) + 1)
     job.emit("phase", phase="news", state="start", view=None, market=True,
              days=job.days, total=len(symbols) + 1, symbols=symbols)
 

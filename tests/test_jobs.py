@@ -331,3 +331,124 @@ def test_closing_the_generator_dequeues(fake_quotes):
     gen.close()
     time.sleep(0.4)
     assert len(fake_quotes["calls"]) < 25
+
+
+# --------------------------- planned totals (v1.11.1) -----------------------
+#
+# The denominator used to exist only for the phase in flight: news_total was
+# bumped at the START of the news phase, so the client's bar filled to 100%
+# during quotes and then rewound by half. Same shape on an all-scope run, once
+# per portfolio. These pin the fix: both totals are known before the first item
+# runs, and the unified done/total ratio only ever moves forward.
+
+
+@pytest.fixture()
+def fake_news(monkeypatch):
+    """Stand-in for news_sentiment: reports the market read, then each symbol."""
+    def _refresh(symbols, context=None, progress_cb=None, cancel=None):
+        if progress_cb:
+            progress_cb("market", {"sentiment": {"tier": "neutral"}})
+            for s in symbols:
+                progress_cb("symbol", {"symbol": s, "sentiment": {"tier": "neutral"}})
+        return {"status": {"fetched": len(symbols)}}
+
+    fake = type("_NS", (), {"refresh_sentiment": staticmethod(_refresh)})
+    monkeypatch.setattr(jobs, "_ns", fake)
+    return fake
+
+
+def _unified_ratios(job):
+    """The exact quantity app.js's rfRender paints, per counted frame."""
+    out = []
+    for f in job.events_since(0)[0]:
+        c = f.get("counts")
+        if not c:
+            continue
+        q_tot, n_tot = max(1, c["quotes_total"]), max(0, c["news_total"])
+        done = min(c["quotes_done"], q_tot) + min(c["news_done"], n_tot)
+        out.append(done / max(1, q_tot + n_tot))
+    return out
+
+
+def test_both_totals_are_known_on_the_very_first_frame(fake_quotes, fake_news, isolated_state):
+    job, _ = jobs.submit(scope="current", phases=["quotes", "news"], days=7,
+                         entries_by_view={"Tech": "A,B,C"}, context={})
+    assert _run_to_completion(job)
+    first = job.events_since(0)[0][0]
+    # The `queued` frame, emitted by submit() before the worker thread starts —
+    # the earliest thing any client can see, including a late attach reading
+    # the snapshot.
+    assert first["type"] == "job" and first["state"] == "queued"
+    # 3 symbols, and 3 + 1 market read — before a single quote was fetched.
+    assert first["counts"]["quotes_total"] == 3
+    assert first["counts"]["news_total"] == 4
+    assert job.snapshot()["counts"]["quotes_total"] == 3
+
+
+def test_quotes_total_spans_every_view_from_the_start(fake_quotes, isolated_state):
+    """All-scope: the total is the whole account's, not the current portfolio's,
+    so the bar doesn't restart as each portfolio begins."""
+    job, _ = jobs.submit(scope="all", phases=["quotes"], days=7,
+                         entries_by_view={"A": "AA,AB", "B": "BA,BB,BC"})
+    assert _run_to_completion(job)
+    frames = job.events_since(0)[0]
+    assert frames[0]["counts"]["quotes_total"] == 5
+    # And it stays 5 for the whole run — reconciliation must not accumulate.
+    assert {f["counts"]["quotes_total"] for f in frames if f.get("counts")} == {5}
+    assert job.counts["quotes_done"] == 5
+
+
+def test_news_total_is_corrected_to_the_real_symbol_count(fake_quotes, fake_news, isolated_state):
+    """Two views share a symbol, so the news phase (which runs over the UNION of
+    resolved symbols) is smaller than a naive per-view sum. The plan already
+    de-duplicates; this pins that the phase then asserts the exact figure."""
+    job, _ = jobs.submit(scope="all", phases=["quotes", "news"], days=7,
+                         entries_by_view={"A": "AA,SHARED", "B": "BB,SHARED"},
+                         context={})
+    assert _run_to_completion(job)
+    assert job.counts["quotes_total"] == 4          # quotes still fetch per view
+    assert job.counts["news_total"] == 4            # 3 unique symbols + market
+    assert job.counts["news_done"] == 4
+
+
+def test_unified_progress_never_goes_backwards(fake_quotes, fake_news, isolated_state):
+    """The actual regression: run the client's own formula over every frame."""
+    job, _ = jobs.submit(scope="all", phases=["quotes", "news"], days=7,
+                         entries_by_view={"A": "AA,AB,AC", "B": "BA,BB"}, context={})
+    assert _run_to_completion(job)
+    ratios = _unified_ratios(job)
+    assert ratios, "no counted frames"
+    for prev, cur in zip(ratios, ratios[1:]):
+        assert cur >= prev - 1e-9, f"progress rewound: {prev} -> {cur}"
+    assert ratios[0] == 0.0 and ratios[-1] == pytest.approx(1.0)
+
+
+def test_skipped_news_phase_releases_its_reservation(fake_quotes, isolated_state, monkeypatch):
+    """news_sentiment unavailable: the planned news items are never coming, so
+    they must leave the denominator or the bar can never reach 100%."""
+    monkeypatch.setattr(jobs, "_ns", None)
+    job, _ = jobs.submit(scope="current", phases=["quotes", "news"], days=7,
+                         entries_by_view={"Tech": "A,B,C"}, context={})
+    assert _run_to_completion(job)
+    assert job.counts["news_total"] == 0
+    assert _unified_ratios(job)[-1] == pytest.approx(1.0)
+
+
+def test_empty_view_releases_its_quotes_reservation(fake_quotes, isolated_state):
+    job, _ = jobs.submit(scope="all", phases=["quotes"], days=7,
+                         entries_by_view={"A": "AA,AB", "Empty": ""})
+    assert _run_to_completion(job)
+    assert job.counts["quotes_total"] == 2
+    assert _unified_ratios(job)[-1] == pytest.approx(1.0)
+
+
+def test_parse_entries_matches_what_the_phase_fetches(fake_quotes, isolated_state):
+    """The planner and the quotes phase MUST split entries identically, or the
+    denominator visibly corrects itself on the first item."""
+    entries = "AA, AB\nAC,, AD "
+    assert jobs._parse_entries(entries) == ["AA", "AB", "AC", "AD"]
+    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7,
+                         entries_by_view={"Tech": entries})
+    assert _run_to_completion(job)
+    frames = job.events_since(0)[0]
+    assert {f["counts"]["quotes_total"] for f in frames if f.get("counts")} == {4}

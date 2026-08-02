@@ -124,3 +124,74 @@ def test_overrides_persist_to_disk(cv, tmp_path):
     # And a fresh read reconstructs the same structure.
     raw = cv.load_column_views()
     assert raw["builtin_overrides"]["Fundamentals"]["columns"] == ["symbol", "ev_ebitda"]
+
+
+# --------------------------------------------------------------------------
+# v1.11.1 — the `acked` flag behind "Modified · Save · Reset"
+#
+# Built-ins are edited in place and saved immediately, so the pill is purely
+# informational. Save acknowledges the divergence; any FURTHER edit has to
+# re-arm it, or a later change would slip in silently. Reverting stays delete.
+# --------------------------------------------------------------------------
+
+
+def test_ack_roundtrips_and_survives_disk(cv, tmp_path):
+    cv.upsert_column_view("Momentum", ["symbol", "pct_1d"])
+    raw = cv.set_builtin_view_acked("Momentum")
+    assert raw["builtin_overrides"]["Momentum"]["acked"] is True
+    on_disk = json.loads((tmp_path / "cv.json").read_text())
+    assert on_disk["builtin_overrides"]["Momentum"]["acked"] is True
+    assert cv.load_column_views()["builtin_overrides"]["Momentum"]["acked"] is True
+
+
+def test_ack_can_be_cleared(cv):
+    cv.upsert_column_view("Momentum", ["symbol", "pct_1d"])
+    cv.set_builtin_view_acked("Momentum")
+    raw = cv.set_builtin_view_acked("Momentum", False)
+    assert "acked" not in raw["builtin_overrides"]["Momentum"]
+    # The override itself is untouched — un-acking is not a revert.
+    assert raw["builtin_overrides"]["Momentum"]["columns"] == ["symbol", "pct_1d"]
+
+
+def test_column_edit_after_ack_rearms_the_pill(cv):
+    cv.upsert_column_view("Default", ["symbol", "price"])
+    cv.set_builtin_view_acked("Default")
+    raw = cv.upsert_column_view("Default", ["symbol", "price", "volume"])
+    assert "acked" not in raw["builtin_overrides"]["Default"]
+
+
+def test_heat_change_after_ack_rearms_the_pill(cv):
+    """The regression this guards: set_builtin_view_heat mutates an EXISTING
+    entry rather than rebuilding it, so it has to drop `acked` by hand."""
+    cv.upsert_column_view("Default", ["symbol", "price"])
+    cv.set_builtin_view_acked("Default")
+    raw = cv.set_builtin_view_heat("Default", "price", "quantile")
+    assert "acked" not in raw["builtin_overrides"]["Default"]
+
+
+def test_ack_without_an_override_is_a_noop(cv):
+    raw = cv.set_builtin_view_acked("Fundamentals")
+    assert raw["builtin_overrides"] == {}
+
+
+def test_lone_acked_entry_does_not_survive_a_read(cv, tmp_path):
+    """An `acked` with no columns/heat means nothing — the empty-override-
+    disappears invariant must still hold, however the file got that way."""
+    (tmp_path / "cv.json").write_text(json.dumps({
+        "custom_views": {}, "active_view": "Default",
+        "builtin_overrides": {"Default": {"acked": True}},
+    }))
+    assert cv.load_column_views()["builtin_overrides"] == {}
+
+
+def test_revert_drops_the_ack_too(cv):
+    cv.upsert_column_view("Momentum", ["symbol", "pct_1d"])
+    cv.set_builtin_view_acked("Momentum")
+    raw = cv.delete_column_view("Momentum")
+    assert "Momentum" not in raw["builtin_overrides"]
+
+
+def test_ack_rejects_non_builtin(cv):
+    cv.upsert_column_view("MyVal", ["symbol", "price"])
+    with pytest.raises(ValueError):
+        cv.set_builtin_view_acked("MyVal")

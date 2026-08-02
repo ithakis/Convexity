@@ -1443,9 +1443,22 @@ function cellStyleHeat(col, value, theme, ctx) {
  * whenever the active built-in differs from its factory definition.
  * --------------------------------------------------------------------------- */
 
-const CV_CUSTOM_KEY = "__cv_custom__";
-
 function isBuiltinView(name) { return Object.prototype.hasOwnProperty.call(BUILTIN_VIEWS, normalizeBuiltinViewName(name)); }
+
+/* Custom presets in bar order: creation order, so a newly saved preset always
+   lands at the END of the row rather than jumping into the middle of a list the
+   user has already learned the shape of. Alphabetical only breaks ties for
+   pre-1.11.1 entries saved before `created_at` was recorded. */
+function customViewNames() {
+  const cv = STATE.customViews || {};
+  return Object.keys(cv).sort((a, b) => {
+    const ta = (cv[a] || {}).created_at || "", tb = (cv[b] || {}).created_at || "";
+    if (ta && tb && ta !== tb) return ta < tb ? -1 : 1;
+    if (ta && !tb) return 1;
+    if (!ta && tb) return -1;
+    return a.localeCompare(b);
+  });
+}
 
 function sameColumnKeys(left, right) {
   if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
@@ -1455,15 +1468,26 @@ function sameColumnKeys(left, right) {
   return true;
 }
 
-/* Does the active built-in differ from its factory definition (columns OR an
-   explicit color override)? Drives the "Reset to default" pill. */
-function builtinHasOverride(name) {
+/* Does this built-in differ from its factory definition (columns OR an explicit
+   color override)? Drives the Settings > Column Presets "Revert" buttons, which
+   must stay available for as long as an override exists. */
+function builtinIsModified(name) {
   name = normalizeBuiltinViewName(name);
   if (!isBuiltinView(name)) return false;
   const ov = (STATE.builtinOverrides || {})[name];
   if (!ov) return false;
   if (Array.isArray(ov.columns) && ov.columns.length && !sameColumnKeys(ov.columns, factoryColumnsFor(name))) return true;
   return !!(ov.heat && Object.keys(ov.heat).length);
+}
+
+/* Should the amber "Modified" pill be showing? Same question as above, minus
+   the ones the user has explicitly accepted with Save. The edit itself was
+   saved the moment it was made — acking only silences the flag, so the two
+   predicates deliberately diverge and Settings keeps offering the revert. */
+function builtinShowsDirtyPill(name) {
+  name = normalizeBuiltinViewName(name);
+  if (!builtinIsModified(name)) return false;
+  return !((STATE.builtinOverrides || {})[name] || {}).acked;
 }
 
 function currentActiveKeys() {
@@ -1546,87 +1570,56 @@ function setActiveView(name, {persist = true} = {}) {
   if (persist) persistActiveView(name);
 }
 
+/* One flat row of preset chips: the three built-ins, then every saved custom
+   preset in creation order. Custom presets used to hide behind a "Custom ▾"
+   dropdown, which made them second-class for no reason — setActiveView has
+   always treated the two kinds identically. They render in green so it stays
+   obvious which of the chips are yours; the active one is accent-coloured like
+   any other. Deleting moved to Settings > Column Presets, so the bar itself
+   holds no destructive controls. */
 function renderColumnViewBar() {
   const seg = document.getElementById("cv-builtins");
   if (!seg) return;
   seg.innerHTML = "";
   const activeName = normalizeBuiltinViewName(STATE.activeViewName || "Default");
-  for (const name of BUILTIN_ORDER) {
+  const addChip = (name, isCustom) => {
     const b = document.createElement("button");
     b.type = "button";
     b.textContent = name;
     b.setAttribute("role", "tab");
+    if (isCustom) {
+      b.classList.add("cv-custom-chip");
+      b.title = `Your saved preset "${name}" — manage it in Settings > Column Presets`;
+    }
     if (name === activeName) b.classList.add("active");
     b.onclick = () => setActiveView(name);
     seg.appendChild(b);
-  }
-  /* Custom-view dropdown */
-  const wrap = document.getElementById("cv-custom-wrap");
-  wrap.innerHTML = "";
-  const customNames = Object.keys(STATE.customViews || {}).sort();
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "cv-custom-btn";
-  const isCustomActive = !isBuiltinView(activeName);
-  if (isCustomActive) btn.classList.add("active");
-  btn.innerHTML = `<span>${isCustomActive ? escapeHtml(activeName) : "Custom"}</span><span class="cv-caret">▾</span>`;
-  const dd = document.createElement("div");
-  dd.className = "cv-custom-dropdown";
-  if (!customNames.length) {
-    const e = document.createElement("div");
-    e.className = "cv-cv-empty";
-    e.textContent = "No saved views yet.";
-    dd.appendChild(e);
-  } else {
-    for (const name of customNames) {
-      const row = document.createElement("div");
-      row.className = "cv-cv-row" + (name === activeName ? " active" : "");
-      const lbl = document.createElement("span");
-      lbl.textContent = name;
-      lbl.style.flex = "1";
-      lbl.onclick = () => { dd.classList.remove("open"); setActiveView(name); };
-      const del = document.createElement("button");
-      del.className = "cv-cv-del"; del.type = "button"; del.textContent = "×";
-      del.title = "Delete view";
-      del.onclick = async (e) => {
-        e.stopPropagation();
-        if (!confirm(`Delete view "${name}"?`)) return;
-        try {
-          const r = await fetch(`/api/column-views/${encodeURIComponent(name)}`, {method: "DELETE"});
-          if (r.ok) {
-            const j = await r.json();
-            STATE.customViews = j.custom || {};
-            STATE.builtinOverrides = j.builtin_overrides || STATE.builtinOverrides;
-            if (STATE.activeViewName === name) STATE.activeViewName = j.active || "Default";
-            render();
-          }
-        } catch (err) {}
-      };
-      row.appendChild(lbl); row.appendChild(del);
-      dd.appendChild(row);
-    }
-  }
-  btn.onclick = (e) => {
-    e.stopPropagation();
-    dd.classList.toggle("open");
   };
-  document.addEventListener("click", () => dd.classList.remove("open"), {once: true});
-  wrap.appendChild(btn); wrap.appendChild(dd);
-  /* "Modified" pill — shown when the active built-in differs from factory,
-     exposing Save-as-new and Reset-to-default. Custom views have no factory
-     to diverge from, so no pill. */
+  for (const name of BUILTIN_ORDER) addChip(name, false);
+  const customNames = customViewNames();
+  if (customNames.length) {
+    const div = document.createElement("span");
+    div.className = "cv-seg-div";
+    seg.appendChild(div);
+    for (const name of customNames) addChip(name, true);
+  }
+  /* "Modified" pill — shown when the active built-in differs from factory and
+     the user hasn't accepted that with Save. Custom views have no factory to
+     diverge from, so no pill. */
   const dirty = document.getElementById("cv-dirty");
-  if (dirty) dirty.hidden = !builtinHasOverride(activeName);
+  if (dirty) dirty.hidden = !builtinShowsDirtyPill(activeName);
   // Painting the fit pill lives in syncFitControls() so the topbar and the
   // Settings > General checkbox can never disagree about the same preference.
   syncFitControls();
 }
 
-/* Reset the active built-in to its factory definition by dropping its
-   server-side override (columns + all color overrides). */
-async function resetViewOverride() {
-  const name = normalizeBuiltinViewName(STATE.activeViewName);
-  if (!isBuiltinView(name) || !builtinHasOverride(name)) return;
+/* Reset a built-in to its factory definition by dropping its server-side
+   override (columns + all color overrides + the acked flag). Defaults to the
+   active view for the column bar's Reset button; Settings passes a name so any
+   preset can be reverted without switching to it first. */
+async function resetViewOverride(name) {
+  name = normalizeBuiltinViewName(name || STATE.activeViewName);
+  if (!isBuiltinView(name) || !builtinIsModified(name)) return;
   try {
     const r = await fetch(`/api/column-views/${encodeURIComponent(name)}`, {method: "DELETE"});
     if (r.ok) {
@@ -1636,6 +1629,45 @@ async function resetViewOverride() {
     }
   } catch (e) {}
   render();
+}
+
+/* "Save" on the Modified pill. The layout is ALREADY saved — built-ins are
+   edited in place — so there is nothing to write here: this only records that
+   the divergence from factory is deliberate, and the pill goes away. Editing
+   the view again (columns or colors) clears the flag server-side and the pill
+   comes back. */
+async function ackViewOverride(name) {
+  name = normalizeBuiltinViewName(name || STATE.activeViewName);
+  if (!isBuiltinView(name) || !builtinIsModified(name)) return;
+  try {
+    const r = await fetch("/api/column-views/builtin-ack", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, acked: true}),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      STATE.builtinOverrides = j.builtin_overrides || STATE.builtinOverrides;
+    }
+  } catch (e) {}
+  render();
+}
+
+/* Delete a saved custom preset. Reached from Settings > Column Presets (the
+   column bar deliberately carries no destructive control). Falls back to
+   whatever view the server names active when the deleted one was in use. */
+async function deleteCustomView(name) {
+  if (isBuiltinView(name)) return false;      // built-ins are reset, never deleted
+  try {
+    const r = await fetch(`/api/column-views/${encodeURIComponent(name)}`, {method: "DELETE"});
+    if (!r.ok) return false;
+    const j = await r.json();
+    STATE.customViews = j.custom || {};
+    STATE.builtinOverrides = j.builtin_overrides || STATE.builtinOverrides;
+    if (STATE.activeViewName === name) STATE.activeViewName = j.active || "Default";
+    render();
+    return true;
+  } catch (e) { return false; }
 }
 
 async function promptAndSaveCurrentAsNew() {
@@ -1869,10 +1901,12 @@ function wireColumnViewBar() {
   if (cb && !cb._wired) { cb.onclick = openColumnPicker; cb._wired = true; }
   const fit = document.getElementById("cv-fit-toggle");
   if (fit && !fit._wired) { fit.onclick = toggleFitColumns; fit._wired = true; }
+  // Both handlers take an optional view name, so they MUST be wrapped: a bare
+  // `onclick = fn` hands the MouseEvent in as that first argument.
   const ds = document.getElementById("cv-dirty-save");
-  if (ds && !ds._wired) { ds.onclick = promptAndSaveCurrentAsNew; ds._wired = true; }
+  if (ds && !ds._wired) { ds.onclick = () => ackViewOverride(); ds._wired = true; }
   const dr = document.getElementById("cv-dirty-reset");
-  if (dr && !dr._wired) { dr.onclick = resetViewOverride; dr._wired = true; }
+  if (dr && !dr._wired) { dr.onclick = () => resetViewOverride(); dr._wired = true; }
 }
 
 /* ----- Header drag-and-drop reordering ----- */
@@ -6075,6 +6109,7 @@ const REFRESH = {
   id: null, lastSeq: 0, scope: null, state: "idle",
   reader: null, abort: null, retry: 0,
   counts: {quotes_done: 0, quotes_total: 0, news_done: 0, news_total: 0},
+  pct: 0,               // last painted percentage; the bar never walks backwards
   touchedViews: new Set(),
 };
 const REFRESH_LONG_MS = 600;
@@ -6103,18 +6138,24 @@ function rfRender() {
                       : REFRESH.state === "error" ? "↻ Failed" : "↻ Refresh";
     return;
   }
-  // Two determinate phases weighted by their real item counts, so the bar
-  // doesn't jump backwards when news starts.
+  // ONE bar across both phases. The server plans both denominators before the
+  // first item runs (jobs._plan_totals), so news is part of the total from 0% —
+  // it used to only appear once quotes finished, which made the bar fill
+  // completely and then rewind by half. The clamp below covers the remaining
+  // case: a planned total corrected upward mid-run would otherwise walk the
+  // bar back a few pixels, and this bar must only ever move forward.
   const qTot = Math.max(1, c.quotes_total), nTot = Math.max(0, c.news_total);
   const total = qTot + nTot;
   const done = Math.min(c.quotes_done, qTot) + Math.min(c.news_done, nTot);
-  bar.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`;
+  const pct = Math.max(REFRESH.pct, Math.round((done / Math.max(1, total)) * 100));
+  REFRESH.pct = pct;
+  bar.style.width = `${pct}%`;
   label.textContent = REFRESH.state === "news" ? "News…"
                     : REFRESH.state === "quotes" ? "Quotes…" : "Starting…";
-  const parts = [];
+  const parts = [`${pct}%`];
   if (c.quotes_total) parts.push(`Quotes ${Math.min(c.quotes_done, c.quotes_total)}/${c.quotes_total}`);
   if (c.news_total) parts.push(`News ${Math.min(c.news_done, c.news_total)}/${c.news_total}`);
-  text.textContent = parts.join(" · ") || "starting";
+  text.textContent = parts.join(" · ");
   chip.hidden = false;
 }
 
@@ -6122,6 +6163,7 @@ function rfReset(state) {
   REFRESH.state = state;
   REFRESH.id = null;
   REFRESH.lastSeq = 0;
+  REFRESH.pct = 0;        // or the next run's monotone clamp starts where this one ended
   REFRESH.reader = null;
   if (REFRESH.abort) { try { REFRESH.abort.abort(); } catch (_) {} REFRESH.abort = null; }
   rfSave();
@@ -6368,6 +6410,7 @@ async function rfStart(scope) {
     body.context = nsRefreshContext(nsSymbols());
   }
   REFRESH.counts = {quotes_done: 0, quotes_total: 0, news_done: 0, news_total: 0};
+  REFRESH.pct = 0;
   REFRESH.state = "queued";
   REFRESH.touchedViews.clear();
   rfRender();
@@ -9604,6 +9647,24 @@ const SETTINGS_SECTIONS = [
     render: renderSettingsGeneral,
   },
   {
+    id: "columns",
+    group: "Settings",
+    label: "Column Presets",
+    icon: "▤",
+    description: "The presets on the Holdings column bar. Built-in presets are edited in place "
+               + "and can be reverted to their factory layout here at any time; your own presets "
+               + "can be deleted.",
+    keywords: ["columns", "preset", "view", "default", "fundamentals", "momentum", "revert",
+               "reset", "factory", "delete", "custom", "layout", "table", "modified"],
+    items: [
+      { id: "builtins", label: "Built-in presets",
+        keywords: ["default", "fundamentals", "momentum", "revert", "factory", "reset"] },
+      { id: "customs", label: "Your presets",
+        keywords: ["custom", "saved", "delete", "remove", "green"] },
+    ],
+    render: renderSettingsColumnPresets,
+  },
+  {
     id: "models",
     group: "Data & models",
     label: "Models & Data",
@@ -9837,6 +9898,74 @@ function renderSettingsGeneral(el) {
   if (fit) fit.onchange = () => toggleFitColumns();
   syncThemeControls();
   syncFitControls();
+  highlightSettingsMatches(el);
+}
+
+/* Column Presets — the management surface for the chips on the Holdings bar.
+ *
+ * Two things live here rather than in the bar itself. Reverting a built-in,
+ * because it must be reachable for a preset you are not currently looking at
+ * and must survive pressing Save on the "Modified" pill (Save silences the
+ * flag; it does not make the edit un-revertable). And deleting a custom preset,
+ * because the bar is now a plain row of chips and putting a destructive × on a
+ * chip you click to select is asking for it.
+ *
+ * Re-renders itself after every mutation and calls render() so the bar repaints
+ * — both helpers already refresh STATE from the server's response. */
+function renderSettingsColumnPresets(el) {
+  const counted = (n) => `${n} column${n === 1 ? "" : "s"}`;
+  const builtins = BUILTIN_ORDER.map(name => {
+    const modified = builtinIsModified(name);
+    const acked = !!((STATE.builtinOverrides || {})[name] || {}).acked;
+    const state = !modified ? `<span class="settings-ok-text">Factory default</span>`
+      : acked ? `Modified &middot; saved by you`
+              : `Modified &middot; not yet saved`;
+    return settingsRow({
+      id: "builtins",
+      label: escapeHtml(name) + (name === normalizeBuiltinViewName(STATE.activeViewName)
+        ? ` <span class="settings-status-pill ok">Active</span>` : ""),
+      help: `${state} &middot; ${counted(getViewColumns(name).length)}`,
+      control: `<button class="settings-btn" data-revert="${escapeHtml(name)}"${modified ? "" : " disabled"}>Revert to default</button>`,
+    });
+  }).join("");
+
+  const customNames = customViewNames();
+  const customs = customNames.length ? customNames.map(name => {
+    const cv = (STATE.customViews || {})[name] || {};
+    const when = cv.created_at ? ` &middot; saved ${escapeHtml(fmtDateDMY(cv.created_at))}` : "";
+    return settingsRow({
+      id: "customs",
+      label: escapeHtml(name) + (name === STATE.activeViewName
+        ? ` <span class="settings-status-pill ok">Active</span>` : ""),
+      help: `${counted((cv.columns || []).length)}${when}`,
+      control: `<button class="settings-btn danger" data-delcv="${escapeHtml(name)}">Delete</button>`,
+    });
+  }).join("") : `<div class="settings-section-sub">No presets of your own yet. Open
+      <b>Customize…</b> on the column bar, arrange the columns you want, then use
+      <b>Save as new</b>.</div>`;
+
+  el.innerHTML =
+    `<div class="settings-subhead">Built-in presets</div>` + builtins +
+    `<div class="settings-subhead">Your presets</div>` + customs +
+    `<div class="settings-section-sub">Your presets appear as green chips on the column
+      bar, after Momentum, in the order you created them.</div>`;
+
+  el.querySelectorAll("[data-revert]").forEach(b => {
+    b.onclick = async () => {
+      const name = b.dataset.revert;
+      if (!confirm(`Restore "${name}" to its factory columns and colors?`)) return;
+      await resetViewOverride(name);
+      renderSettingsColumnPresets(el);
+    };
+  });
+  el.querySelectorAll("[data-delcv]").forEach(b => {
+    b.onclick = async () => {
+      const name = b.dataset.delcv;
+      if (!confirm(`Delete your preset "${name}"? This cannot be undone.`)) return;
+      await deleteCustomView(name);
+      renderSettingsColumnPresets(el);
+    };
+  });
   highlightSettingsMatches(el);
 }
 

@@ -206,18 +206,35 @@
     to   { background: conic-gradient(var(--accent) 360deg, transparent 360deg); }
   }
   .rf-chip {
-    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
     font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
-    border: 1px solid var(--border); border-radius: 999px; padding: 2px 4px 2px 9px;
+    border: 1px solid var(--border); border-radius: 999px; padding: 2px 3px 2px 10px;
+    /* A one-line status pill. Wrapped, the 999px radius turns it into a circle
+       and the cancel button slides under the text. */
+    white-space: nowrap;
   }
   .rf-chip:hover { border-color: var(--accent); color: var(--text); }
   .rf-chip[hidden] { display: none; }
-  .rf-chip-x {
-    height: 16px; width: 16px; padding: 0; line-height: 1; border-radius: 50%;
-    border: none; background: transparent; color: var(--muted); cursor: pointer;
-    font-size: 13px;
+  /* NOTE the `.topbar` prefix, and do not drop it. `.rf-chip-x` alone is (0,1,0)
+     and loses to `.topbar button` (0,1,1) above, which forces height:30px,
+     padding:0 12px, a border, a background and --r-md corners — so the cancel
+     control rendered as a bordered square inside the pill and none of the rules
+     here applied. Same cascade trap as .gear-btn; measure the COMPUTED style
+     rather than trusting the declaration. */
+  .topbar .rf-chip-x {
+    height: 18px; width: 18px; min-width: 0; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 0; background: transparent; border-radius: 50%;
+    color: var(--muted); cursor: pointer;
+    transition: background 0.12s, color 0.12s;
   }
-  .rf-chip-x:hover { background: var(--neg); color: #fff; }
+  .topbar .rf-chip-x svg { width: 9px; height: 9px; display: block; }
+  .topbar .rf-chip-x svg path {
+    stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; fill: none;
+  }
+  /* Soft tint, not a solid red fill — cancelling a refresh is routine, and the
+     old filled square read like an alarm. --neg-rgb keeps it right per theme. */
+  .topbar .rf-chip-x:hover { background: rgba(var(--neg-rgb), 0.16); color: var(--neg); }
   /* Honest-coverage notice on the News window pills — see nsRescoreWindow. */
   .ns-cov-hint { font-size: 10.5px; color: var(--neg); cursor: default; }
   .ns-cov-hint[hidden] { display: none; }
@@ -1482,7 +1499,7 @@
     flex-wrap: wrap;
   }
   .cv-seg {
-    display: inline-flex; align-items: center;
+    display: inline-flex; align-items: center; flex-wrap: wrap;
     background: var(--bg-subtle); border: 1px solid var(--border);
     border-radius: var(--r-md); padding: 2px;
   }
@@ -1496,37 +1513,16 @@
     background: var(--bg-canvas); color: var(--accent);
     font-weight: 700; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
   }
-  .cv-custom-wrap { position: relative; }
-  .cv-custom-btn {
-    background: var(--bg-canvas); border: 1px solid var(--border);
-    color: var(--text); font-size: 12px; padding: 5px 10px;
-    border-radius: var(--r-md); cursor: pointer; display: inline-flex;
-    align-items: center; gap: 6px;
-  }
-  .cv-custom-btn .cv-caret { color: var(--muted); font-size: 10px; }
-  .cv-custom-btn.active { color: var(--accent); font-weight: 600; }
-  .cv-custom-dropdown {
-    position: absolute; top: calc(100% + 4px); left: 0;
-    background: var(--bg-canvas); border: 1px solid var(--border);
-    border-radius: var(--r-md); padding: 4px; min-width: 180px;
-    box-shadow: 0 6px 18px rgba(0,0,0,0.12);
-    z-index: 20; display: none;
-  }
-  .cv-custom-dropdown.open { display: block; }
-  .cv-custom-dropdown .cv-cv-row {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 5px 8px; border-radius: var(--r-sm); cursor: pointer;
-    font-size: 12px; gap: 8px;
-  }
-  .cv-custom-dropdown .cv-cv-row:hover { background: var(--bg-subtle); }
-  .cv-custom-dropdown .cv-cv-row.active { color: var(--accent); font-weight: 600; }
-  .cv-custom-dropdown .cv-cv-del {
-    background: transparent; border: 0; color: var(--muted);
-    cursor: pointer; padding: 0 4px; font-size: 14px; line-height: 1;
-  }
-  .cv-custom-dropdown .cv-cv-del:hover { color: var(--neg); }
-  .cv-custom-dropdown .cv-cv-empty {
-    padding: 6px 8px; color: var(--muted); font-size: 11px; font-style: italic;
+  /* Your own presets, appended after the built-ins. Green marks them as yours
+     at a glance; selecting one makes it accent like any other active chip.
+     These two rules MUST stay below `.cv-seg button.active` — the first is the
+     same (0,2,1) specificity, so source order is what decides the tie, and the
+     second is (0,3,1) so the active state wins regardless. */
+  .cv-seg button.cv-custom-chip { color: var(--pos); }
+  .cv-seg button.cv-custom-chip.active { color: var(--accent); }
+  .cv-seg-div {
+    width: 1px; align-self: stretch; margin: 2px 5px;
+    background: var(--border); flex: 0 0 auto;
   }
   .cv-customize {
     background: transparent; border: 1px dashed var(--border);
@@ -1790,10 +1786,16 @@
      holdings anchor for the two section gaps to read as equal (item 9). */
   #anchor-analyst { margin-top: 4px; }
 
-  #analyst-dashboard {
-    margin: 10px 16px 16px; padding: 16px;
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-lg);
-  }
+  /* Deliberately NOT a card. The four .an-card children are already boxed, so
+     wrapping them in a fifth box was a border inside a border for no added
+     meaning — and it cost 32px of width the cards could use. Holdings has no
+     outer card either (.table-wrap is padding only), so this also brings the
+     two sections into line.
+     The 16px side margins are load-bearing and must stay: they are what keeps
+     this section's left edge aligned with .table-wrap's padding and
+     .section-anchor's margin. Without them the grid runs flush to the viewport
+     while the holdings table stays inset. */
+  #analyst-dashboard { margin: 10px 16px 16px; }
   .an-head {
     display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
     margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
@@ -2887,6 +2889,20 @@
     border-radius: var(--r-sm); font-family: inherit;
   }
   .settings-btn:hover { color: var(--text); border-color: var(--accent); }
+  .settings-btn:disabled { opacity: 0.45; cursor: default; }
+  .settings-btn:disabled:hover { color: var(--muted); border-color: var(--border); }
+  /* .danger is defined for topbar/generic buttons; restate colour here so the
+     .settings-btn base (which sets `color`) can't win on source order. */
+  .settings-btn.danger { color: var(--neg); border-color: rgba(248, 81, 73, 0.4); }
+  .settings-btn.danger:hover { color: var(--neg); background: rgba(248, 81, 73, 0.12); border-color: var(--neg); }
+  /* Sub-heading inside a settings pane, for sections that list two kinds of
+     thing (Column Presets: built-ins vs your own). */
+  .settings-subhead {
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--muted);
+    margin: 14px 0 2px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+  }
+  .settings-pane-body > .settings-subhead:first-child { margin-top: 2px; }
   .settings-kv {
     display: grid; grid-template-columns: auto 1fr; gap: 3px 14px;
     margin-top: 6px; font-size: 11px; align-items: baseline;
