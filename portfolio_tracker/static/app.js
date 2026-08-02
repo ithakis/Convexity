@@ -8191,10 +8191,21 @@ async function mptRun() {
     mptProgressHide("done");
     if (status) status.innerHTML = "";
     // Finalize on the same fixed domain the cloud filled into (no jump); the
-    // cloud canvas already holds every chunk, so skip repainting it. Falls back to
-    // a fresh full render if the frontier message never established a domain.
-    if (MPT._streamProj) mptRenderChart({fixedProj: MPT._streamProj, skipCloud: true});
-    else mptRender();
+    // cloud canvas already holds every chunk, so skip repainting it. But that
+    // domain was only a GUESS made from the frontier's own span before any cloud
+    // point existed (mptStreamFrontier's cloudRoom:true, 1.6x reservation) — a
+    // concentrated single-asset portfolio routinely sits well past that. If the
+    // final cloud actually overflows the guess, keeping it crops the scatter hard
+    // against the canvas edge instead of tapering off, which reads as "zoomed in"
+    // rather than as missing data. Verify the guess before trusting it; recompute
+    // from the real data (mptRender(), which also repaints the accumulated cloud)
+    // when it doesn't fit. Falls back the same way if the frontier message never
+    // established a domain at all.
+    if (MPT._streamProj && mptProjFits(MPT._streamProj, MPT.result)) {
+      mptRenderChart({fixedProj: MPT._streamProj, skipCloud: true});
+    } else {
+      mptRender();
+    }
     mptRenderSide();
     // The legend mptRenderSide() just wrote shortens the chart host; re-lock the
     // canvas height so the x-axis isn't left clipped for the life of the run.
@@ -8325,9 +8336,11 @@ function mptClearChart() {
    the canvas hanging past its container with the x-axis label (drawn at
    cssH − 6) clipped off the bottom. Re-measure and redraw once when that
    happened. It must be called from BOTH mptRender() and the streaming `done`
-   handler: that handler finalises with mptRenderChart({fixedProj}) to avoid the
-   cloud jumping mid-stream and so never reaches mptRender() at all — which is
-   precisely the path every completed run takes.
+   handler: that handler normally finalises with mptRenderChart({fixedProj}) to
+   avoid the cloud jumping mid-stream, rather than going through mptRender() —
+   unless mptProjFits() finds the streamed domain too small for the completed
+   cloud, in which case the done handler calls mptRender() itself and this pass
+   is a (harmless) no-op re-measure on top of that.
 
    A ResizeObserver would be the reflexive choice and is the wrong one here: its
    delivery is tied to the frame lifecycle, so it is throttled or dropped
@@ -8470,6 +8483,26 @@ function mptComputeProj(d, host, opts = {}) {
   const yToPx = r => cssH - pad.b - (r - yMin) / (yMax - yMin) * (cssH - pad.t - pad.b);
   return {xMin, xMax, yMin, yMax, pad, cssW, cssH, dpr,
           X: xToPx, Y: yToPx, toPx: (v, r) => [xToPx(v), yToPx(r)]};
+}
+
+// Does every real data point (cloud + frontier + anchors) fall inside proj's
+// domain? Used to sanity-check a domain that was fixed BEFORE the data it now
+// has to hold existed (the streaming cloudRoom guess) — a mismatch means
+// points are being silently clipped at the canvas edge rather than drawn.
+function mptProjFits(proj, d) {
+  const {xMin, xMax, yMin, yMax} = proj;
+  const inX = (v) => v == null || !isFinite(v) || (v >= xMin && v <= xMax);
+  const inY = (v) => v == null || !isFinite(v) || (v >= yMin && v <= yMax);
+  for (const p of (d.cloud || [])) {
+    if (!inX(p[0]) || !inY(p[1])) return false;
+  }
+  for (const p of (d.frontier || [])) {
+    if (!inX(mptCvar(p)) || !inX(mptCvarLo(p)) || !inX(mptCvarHi(p)) || !inY(p.ret)) return false;
+  }
+  for (const a of Object.values(d.anchors || {})) {
+    if (a && (!inX(mptCvar(a)) || !inY(a.ret))) return false;
+  }
+  return true;
 }
 
 // Return-gradient color factory (viridis-like) over the projection's y-domain —
