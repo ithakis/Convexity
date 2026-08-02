@@ -878,6 +878,135 @@ columns).
   remain readable, but the explicit goal is "keep the current preset on
   screen before falling back to horizontal overflow."
 
+- **The limits panel PUSHES the workspace down; it never takes height from it.**
+  `.pf-mpt-scroll` (wrapping `.pf-mpt-bounds` + `.pf-mpt-body`) is the single
+  scroll column under the controls strip. `mptPinBodyHeight(true)` — called
+  **before** `panel.hidden` flips, or it measures the already-pushed height —
+  freezes `.pf-mpt-body` at its current height via `--mpt-body-h`, which the CSS
+  reads as its `min-height`; `flex-shrink:0` is what makes the body refuse to
+  yield. The column then overflows by exactly the panel's height, so the chart,
+  slider and legend keep their **exact geometry** and simply move below the fold.
+  Measured across an open/close cycle: backing store, CSS box, host height and
+  `MPT._proj` all byte-identical; only `scrollHeight` changes.
+  Closing must still call `mptRender()` — releasing the pin is a no-op unless the
+  window was resized while the panel was up, in which case the body lands at a new
+  height and the chart has to be re-measured (verified: 531px pinned during a
+  860→1180px resize, correctly re-rendered at 851px on close).
+- **The canvases CROP, they never rescale** — the second line of defence, and
+  still load-bearing. They used to be `inset:0; width:100%; height:100%`, but
+  their backing stores are only resized inside `mptSizeCanvases()`. The limits
+  panel used to be a flow sibling in the `flex-column` modal, stole ~450px from
+  `.pf-mpt-chart`, and nothing re-measured — so the browser rescaled a stale
+  bitmap and the entire plot visibly squashed; `MPT._proj` also kept the old
+  `cssH`, so hover/click hit-testing silently drifted off the frontier.
+  The contract: `mptSizeCanvases` publishes the height it actually drew at
+  to `--mpt-chart-h`, the canvases read **that** rather than `100%`, and
+  `.pf-mpt-chart` is `min-height:0; overflow:hidden`. A shorter parent therefore
+  clips the canvas instead of stretching it, and it returns intact.
+  While the panel is open the height is **locked** (`MPT._chartH` +
+  `mptBoundsPanelOpen()`) so a reflow of the obstructed box (a window resize)
+  cannot re-measure it.
+  **`mptSettleChartHeight()` must be called after anything that paints the side
+  panel** — `mptRenderSide()` writes the legend *below* the chart, shrinking the
+  host ~22px after `mptRenderChart()` already locked it, which left the x-axis
+  label (drawn at `cssH − 6`) clipped. It is called from `mptRender()` **and**
+  from the streaming `done` handler, which finalises via
+  `mptRenderChart({fixedProj})` and so never reaches `mptRender()` — that is the
+  path every completed run takes, so missing it there fixes nothing.
+  **Do not "improve" this with a ResizeObserver.** RO delivery is tied to the
+  frame lifecycle and is throttled or dropped outright in a backgrounded window
+  — measured here as *zero* callbacks for a real 1185→735px change — so the
+  correction would fail exactly when the user tabs away and back. The settle
+  pass is synchronous and deterministic instead.
+
+- **`textOnHeat` measures contrast; it does not guess a threshold**.
+  It used to flip to white above a fixed `|t|` (0.55 light / 0.65 dark). That was
+  wrong: on the light theme's green ramp `--text` beats white at *every*
+  saturation (4.14:1 vs 3.82:1 even at full tint), so the rule went white
+  precisely where dark text was still winning 6-8:1 and a mid-range cell (a +20%
+  upside) rendered white-on-light-green at **2.2:1**. It now reproduces the
+  background `colorDiverging` will paint and keeps whichever of `--text` / white
+  / near-black actually measures best (`relLuminance` + `contrastRatio`, ~10
+  float ops per cell). Near-black is a candidate because a saturated tint on
+  dark/bloomberg is a *bright* green/red where both white and the near-white
+  `--text` fail — the same problem `--on-accent` solves with `#050505` (§8).
+  Two consequences: **`THEME_COLORS` now carries a `text` triple per theme and
+  it must stay in sync with `--text` in style.css**, and the `0.9` mix factor is
+  duplicated from `colorDiverging` — change one, change both. Measured floor
+  across the analyst table went 2.2 → 5.28 (light) / 4.7 (dark) / 4.04 (bbg).
+
+- **Per-position limits grid is a spreadsheet, not a form.** `.pf-mpt-bnd`
+  inputs are borderless/transparent with the spinners suppressed; `:focus` draws
+  an inset accent outline (Excel active-cell) and `.pf-mpt-bnd-row:focus-within`
+  tints the row — `:focus-within` so keyboard tabbing highlights without any JS.
+  `:not(:placeholder-shown)` colours a *set* constraint in `--accent`, which is
+  why the `0` / `100` placeholders are load-bearing, not decoration. Rows carry
+  `logoImg(sym)` + the company name pulled from `DATA`. Values and their column
+  headers are both centred, and `align-self:stretch` makes the input fill the
+  row's **full** height (the row is `align-items:center`, which otherwise leaves a
+  dead strip above and below) — verified by hit-testing a 96×23 cell on a 6×4 grid,
+  96/96 points resolve to the input, so a click anywhere in the column lands in the
+  number.
+  Focusing a cell **selects its value** (`focusin` on the grid + a rAF-deferred
+  `select()`), so typing over `25` yields `4`, not `254`. Three non-obvious bits:
+  `focusin` rather than `click` covers keyboard Tab and does not re-fire inside an
+  already-focused cell (which would wipe a deliberate caret placement mid-edit);
+  the rAF is required because the browser sets the caret from the click position
+  *after* focus and would undo a synchronous `select()`; and on `type="number"`
+  **`selectionStart` reads `null`** — that is an API limitation, not a failure, so
+  assert the behaviour by typing over the value, not by reading the selection.
+  **It is the only box left in the overlay, and that is deliberate** — a
+  transient editor dropped on the tool should read as a distinct sheet, whereas
+  `.pf-mpt-chartwrap` / `.pf-mpt-side` are the workspace itself and are now
+  boxless (transparent, no border; the side panel keeps a single hairline
+  `border-left` as a gutter rule). Padding on `.pf-mpt-bounds` is symmetric so
+  the head and the last row sit the same distance from the frame.
+  **Do NOT wire `mptWireAssetTips` to this grid, and do not give the rows
+  `data-mpt-sym`.** That tooltip fires on `mousemove` and each event rebuilds the
+  tip's `innerHTML` and calls `placeTip()` (a forced synchronous layout), i.e. a
+  parse + reflow per frame while the pointer rests over the list. The stats it
+  showed belong to the chart anyway.
+  **The grid is not a scroller.** It used to have its own `max-height` *and*
+  `overscroll-behavior: contain`, which is what made scrolling feel broken: a
+  short inner scroller hits its end after ~100px and then **stops dead** instead
+  of chaining to the parent, so getting down a 20-name book took a stack of
+  separate gestures. One surface (`.pf-mpt-scroll`), one gesture. `.pf-mpt-bnd-head`
+  is correspondingly non-sticky — `.pf-mpt-bounds` is `overflow:hidden`, so it is
+  the sticky containing block and never scrolls; sticky there would be inert
+  anyway, just with a promoted layer for nothing.
+
+- **Analyst consensus table** (`renderAnalystDashboard`): Weight uses the blue
+  quintile ramp, and Upside **and Upside (median)** share the diverging ramp
+  anchored at 30 — all via `cellStyleHeat` with a synthetic column literal, so
+  they read identically to the main grid's heat columns. The two upside columns
+  must keep the **same ramp and the same anchor**: they are the same quantity on
+  the same scale, and reading them as a pair is the point of the median column —
+  a visibly weaker median tint means the mean is being dragged up by one high
+  outlier. `setTheme()` re-renders this table, because
+  `render()` only rebuilds the main grid and the tints are baked into inline
+  styles at build time. **There is no true q25/q75 of analyst targets** — Yahoo
+  publishes only low/mean/median/high and no per-analyst data exists in the feed
+  — so nothing quartile-shaped is fabricated. The median and the low/high band
+  are reported **as upside, not as target price** (`Upside (median)` and
+  `Upside range`, both immediately right of `Upside`): upside is the decision
+  variable — a target of 768 means nothing until you know the price it is
+  measured against — and three upside figures side by side make the median-vs-mean
+  skew and the width of the band readable in one scan. Raw target prices stay in
+  the hover. `Upside range` sorts on `(high−low)/mean`, the same dispersion
+  `frontier.py` uses for BL view confidence. `quickAnalystPreview()` nulls the
+  trio (the streaming row payload has only the mean) so the optimistic paint
+  shows `—` and fills in. **Do not add them to `fetch_one`** — that is the hot
+  loop; they come from `analytics._analyst_for`.
+- **`_analyst_for`'s target trio needs its retry** (`analytics.py`). It runs on 8
+  pool threads, and Yahoo answers a burst of `.info` calls by handing some of them
+  an **empty dict** rather than an error — a throttle, not "this name publishes no
+  range". Verified directly: names that came back thin returned a full
+  low/median/high on a sequential call moments later. Without the retry the
+  biggest holdings rendered `—` in exactly the two columns above, and the 300 s
+  negative cache meant the next refresh usually failed the same way. Two jittered
+  escalating retries, **only** on the all-None path: one is not enough, because
+  the retries themselves collide. Live coverage went 10/15 → 15/15.
+
 ---
 
 ## 6. `symbol_db.py` + `build_symbol_db.py`

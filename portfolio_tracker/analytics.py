@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -147,6 +148,23 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
     return pd.concat(out, axis=1).sort_index()
 
 
+def _fetch_target_trio(symbol: str) -> dict:
+    """One bare `Ticker.info` reduced to the analyst target low/high/median.
+
+    Returns all-None on any failure, including the empty dict Yahoo hands back
+    when it is throttling — the caller distinguishes the two by retrying.
+    """
+    try:
+        info = yf.Ticker(symbol).info or {}
+    except Exception:
+        info = {}
+    return {
+        "target_low": _safe_num(info.get("targetLowPrice")),
+        "target_high": _safe_num(info.get("targetHighPrice")),
+        "target_median": _safe_num(info.get("targetMedianPrice")),
+    }
+
+
 def _analyst_for(symbol: str, row: dict | None = None) -> dict:
     """Analyst block for one symbol, reusing the fields `fetch_one` already put
     on the row instead of re-fetching them.
@@ -193,16 +211,25 @@ def _analyst_for(symbol: str, row: dict | None = None) -> dict:
                 if trio[k] is None:
                     trio[k] = hit.get(k)
         else:
-            info: dict = {}
-            try:
-                info = yf.Ticker(symbol).info or {}
-            except Exception:
-                info = {}
-            fetched = {
-                "target_low": _safe_num(info.get("targetLowPrice")),
-                "target_high": _safe_num(info.get("targetHighPrice")),
-                "target_median": _safe_num(info.get("targetMedianPrice")),
-            }
+            # This runs on 8 pool threads at once (see analyze_portfolios_multi),
+            # and Yahoo answers a burst of .info calls by handing some of them an
+            # EMPTY dict rather than an error. That is a throttle, not "this name
+            # has no published range" — verified directly: the mega-caps that came
+            # back thin here return a full low/median/high on a single sequential
+            # call moments later. Without the retry the whole batch of biggest
+            # holdings rendered "—" in the Upside (median) / Upside range columns,
+            # and the 300 s negative cache meant the next refresh usually failed
+            # the same way. Retries are jittered and escalating, and happen ONLY on
+            # the empty path — same shape as fx_index_history's bulk-then-
+            # sequential fallback. Two are needed, not one: with 8 workers a single
+            # retry still left roughly one name per batch thin, because the retries
+            # themselves collide.
+            fetched = _fetch_target_trio(symbol)
+            for attempt in range(2):
+                if not all(v is None for v in fetched.values()):
+                    break
+                time.sleep((0.5 + random.random()) * (attempt + 1))
+                fetched = _fetch_target_trio(symbol)
             for k in trio:
                 if trio[k] is None:
                     trio[k] = fetched[k]

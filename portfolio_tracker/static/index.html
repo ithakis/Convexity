@@ -297,7 +297,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         </div>
       </div>
       <div class="pf-mpt-ctl">
-        <label>CVaR confidence <span class="pf-mpt-rf-info" data-tip="Tail level α for Conditional Value-at-Risk (expected shortfall). CVaR is the average daily loss in the worst (1−α) of days, estimated on the daily return scenarios over the lookback. Higher α = deeper, rarer tail. Displayed annualized (×√252).">i</span></label>
+        <label>CVaR confidence <span class="pf-mpt-rf-info" data-tip="Tail level α for Conditional Value-at-Risk (expected shortfall) — the average loss in the worst (1−α) of outcomes. The optimizer minimises daily CVaR on the daily return scenarios over the lookback; what is displayed is the FRTB-style 30-day loss: empirical VaR/CVaR over overlapping 10-day compounded returns, scaled 10d→30d by √3. Higher α = deeper, rarer tail.">i</span></label>
         <div class="seg" id="pf-mpt-alpha">
           <button data-v="0.90">90%</button>
           <button data-v="0.95" class="active">95%</button>
@@ -361,6 +361,12 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         </div>
       </div>
     </div>
+    <!-- Everything below the controls scrolls as one column. That is what lets the
+         per-position limits panel PUSH the chart/slider/legend down (and out of
+         view) when it opens, instead of stealing their height and deforming the
+         plot. .pf-mpt-body's height is pinned by mptPinBodyHeight() at the moment
+         the panel opens, so the workspace below keeps its exact geometry. -->
+    <div class="pf-mpt-scroll" id="pf-mpt-scroll">
     <div class="pf-mpt-bounds" id="pf-mpt-bounds" hidden>
       <div class="pf-mpt-bounds-head">
         <span>Per-position weight limits (%) — blank = unconstrained (0–100)</span>
@@ -407,6 +413,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <div class="pf-mpt-runs" id="pf-mpt-runs"></div>
       </div>
     </div>
+    </div><!-- /.pf-mpt-scroll -->
   </div>
 </div>
 
@@ -472,8 +479,12 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
           (expected shortfall) instead measures only the left tail: the average loss
           on the worst <b>(1−α)</b> fraction of days. Scenarios are the raw
           <b>daily</b> FX-adjusted returns over the lookback (~750 for 3Y), so the tail
-          is empirical — no normality assumption. The X-axis is annualised (×√252) so
-          it is comparable to the return axis.
+          is empirical — no normality assumption. The X-axis reports that tail on a
+          <b>30-day horizon</b>, not annualised: empirical VaR/CVaR over
+          <b>overlapping 10-day compounded</b> returns (the FRTB liquidity-horizon
+          convention), scaled 10d→30d by <b>√3</b>. So a reading of 12% means
+          "a 12% loss over a month" — a number you can actually size a position
+          against, unlike the old ×√252 figure which routinely exceeded 100%.
         </div>
         <div class="info-card-desc">
           For a target expected return, the minimum-CVaR portfolio is the
@@ -502,8 +513,10 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <ul class="info-feature-list">
           <li><b>Expected return (BL)</b> — the posterior return of the selected
               portfolio, annualised.</li>
-          <li><b>CVaR<sub>95</sub></b> — the risk axis: annualised expected shortfall
-              at the chosen confidence.</li>
+          <li><b>CVaR<sub>95</sub></b> — the risk axis: <b>30-day</b> expected
+              shortfall at the chosen confidence (10-day overlapping, ×√3).</li>
+          <li><b>VaR<sub>95</sub></b> — the same 30-day horizon at the quantile itself:
+              the loss the tail starts at, where CVaR is its average.</li>
           <li><b>CDaR / Max drawdown</b> — the deepest and average-worst peak-to-trough
               declines of the selected weights over the lookback path. Shown, not
               optimised.</li>

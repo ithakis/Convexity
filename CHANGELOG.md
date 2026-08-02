@@ -5,6 +5,54 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.11.2 — 2026-08-02
+
+### Analyst consensus: upside, not price
+
+- **The median and range columns showed target *prices*, not upside.** Deleted
+  and replaced with two columns to the right of Upside: **Upside (median)**
+  (implied upside at the median analyst target — reads against the mean upside
+  beside it, so a visibly stronger or weaker tint says the mean is being
+  pulled by an outlier) and **Upside range** (low↔high, sorted by relative
+  spread). Both share the diverging heat ramp and the same 30% anchor as
+  Upside, since they're the same quantity on the same scale.
+- **10 of 15 largest holdings showed `—` for target low/median/high.**
+  `_analyst_for` fetches the target trio on 8 pool threads at once; Yahoo
+  answers a throttled burst with an empty dict rather than an error,
+  indistinguishable from "no published range" without a retry. Added two
+  jittered retries on the all-`None` path only. Live coverage went 10/15 →
+  15/15.
+
+### Optimization panel: scrolling, centering, click-to-edit
+
+- **Per-position limits scrolled ~100px and then stopped dead.** The grid had
+  its own `overscroll-behavior: contain` nested inside the panel's own
+  scroller — a short inner scroller hits its end and refuses to chain to the
+  parent. Collapsed to one scroll surface (`.pf-mpt-scroll`) for the whole
+  chart/side/limits column.
+- **The limits panel deformed the chart when it opened.** It was a normal flow
+  sibling of `.pf-mpt-body`, so opening it shrank the chart's box and the
+  canvases — sized only inside `mptSizeCanvases()` — rescaled a stale bitmap
+  into it (a visible squash, plus drifted hover/click hit-testing). The panel
+  now **pushes** the workspace down instead: `.pf-mpt-body`'s height is
+  measured and pinned (`--mpt-body-h`) the instant before the panel opens, so
+  the chart's geometry is untouched and the "Risk / Min-CVaR / Max-return" row
+  simply scrolls out of view. Closing re-renders only if the window was
+  resized while the panel was open.
+- **"Selected portfolio" and the cloud figure had their own boxed panels.**
+  Removed the backgrounds/borders so the workspace reads as one surface; the
+  side panel keeps a single hairline divider as a column gutter.
+- **Hovering a limits row showed a question-mark cursor and a stats tooltip.**
+  Removed — the tooltip's per-`mousemove` reflow was also a real (if minor)
+  contributor to the scroll slowness above.
+- **MIN % / MAX % values were off-center under their headers**, and clicking a
+  cell often landed on dead space around the input rather than the input
+  itself. Centered both; the input now stretches to fill its row
+  (`align-self: stretch`), so a click anywhere in the cell focuses it —
+  verified with a 96-point hit-test sweep, 96/96 resolve to the input.
+  Focusing a cell also now selects its value, so typing replaces it instead of
+  appending.
+
 ## 1.11.1 — 2026-08-02
 
 ### Column presets are first-class

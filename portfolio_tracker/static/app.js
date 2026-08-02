@@ -425,6 +425,14 @@ function setTheme(name) {
   localStorage.setItem("theme", name);
   syncThemeControls(name);
   if (DATA.length) render();
+  // The analyst table's Weight/Upside heat is baked into inline styles at build
+  // time (cellStyleHeat mixes from THEME_COLORS[theme].bg), and render() only
+  // rebuilds the main grid — so without this the consensus table keeps the old
+  // theme's tints until the next analytics response. Same one-line repaint the
+  // column-sort handler uses.
+  if (STATE.analytics && typeof renderAnalystDashboard === "function") {
+    renderAnalystDashboard(STATE.analytics);
+  }
 }
 
 /* Paint every control that DISPLAYS the current theme, from the one place that
@@ -525,10 +533,13 @@ function setHeatMode(key, mode) {
   }
 }
 
-/* Heat-map endpoint colors per theme. */
+/* Heat-map endpoint colors per theme. `text` mirrors the --text CSS variable and
+   exists so textOnHeat can MEASURE contrast rather than guess at a threshold —
+   keep it in sync with style.css if a theme's --text ever changes. */
 const THEME_COLORS = {
   light: {
     bg:   [255, 255, 255],
+    text: [31, 35, 40],      /* --text #1f2328 */
     pos:  [31, 136, 61],     /* #1f883d  github success.emphasis */
     neg:  [207, 34, 46],     /* #cf222e  github danger.emphasis  */
     warn: [249, 115, 22],    /* #f97316  vivid orange (Tailwind orange-500) */
@@ -536,6 +547,7 @@ const THEME_COLORS = {
   },
   dark: {
     bg:   [13, 17, 23],      /* #0d1117 */
+    text: [230, 237, 243],   /* --text #e6edf3 */
     pos:  [63, 185, 80],     /* #3fb950 */
     neg:  [248, 81, 73],     /* #f85149 */
     warn: [251, 146, 60],    /* #fb923c  orange-400, lighter on dark bg */
@@ -543,6 +555,7 @@ const THEME_COLORS = {
   },
   bloomberg: {
     bg:   [0, 0, 0],         /* #000000  pure-black terminal canvas */
+    text: [255, 255, 255],   /* --text #ffffff  (data values are WHITE — §8) */
     pos:  [51, 209, 122],    /* #33d17a  up/green */
     neg:  [255, 67, 61],     /* #ff433d  official Bloomberg down/red */
     warn: [245, 179, 1],     /* #f5b301  gold */
@@ -1121,12 +1134,47 @@ function colorOrangeBlue(t, theme) {
   const tgt = t >= 0 ? C.blue : C.warn;
   return rgbMix(C.bg, tgt, Math.abs(t) * 0.9);
 }
+/* Relative luminance (WCAG 2.x) of an [r,g,b] triple. */
+function relLuminance(c) {
+  const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+}
+function contrastRatio(a, b) {
+  const l1 = relLuminance(a), l2 = relLuminance(b);
+  const hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+  return (hi + 0.05) / (lo + 0.05);
+}
 function textOnHeat(t, theme) {
-  /* Switch to white text once tint is deep enough that the standard fg
-     would lose contrast.  Pick threshold per theme. */
-  const mag = Math.abs(t);
-  if (isDarkTheme(theme)) return mag > 0.65 ? "#ffffff" : "var(--text)";
-  return mag > 0.55 ? "#ffffff" : "var(--text)";
+  /* Foreground for a cell painted with colorDiverging(t, theme).
+
+     This used to switch to white above a fixed |t| (0.55 light / 0.65 dark), and
+     that threshold was simply wrong. Measured against the actual ramp: on the
+     LIGHT theme's positive (green) ramp, --text beats white at every saturation
+     — 4.14:1 vs 3.82:1 even at full tint — so the old rule flipped to white
+     exactly where dark text was still winning 6-8:1, and mid-range cells
+     (a +20% upside) rendered white-on-light-green at 2.2:1. Unreadable at 11.5px.
+
+     So pick by MEASUREMENT, not by threshold: reproduce the background this t
+     will produce and keep whichever foreground actually has more contrast. Costs
+     ~10 float ops per cell, self-corrects if THEME_COLORS is retuned or a fourth
+     theme lands, and cannot drift out of sync with colorDiverging the way a
+     hand-tuned constant did. The 0.9 factor must match colorDiverging's.
+
+     Near-black is a candidate because on the DARK and BLOOMBERG themes a
+     saturated tint is a *bright* green/red where white and the near-white --text
+     both fail (2.2:1 in Bloomberg). That is the same problem --on-accent solves
+     by going #050505 on Bloomberg's orange (§8), so it gets the same answer here.
+     --text wins ties by a 1.15× margin so the theme token stays in charge unless
+     switching away from it is a real, measurable improvement. */
+  const C = THEME_COLORS[theme] || THEME_COLORS.light;
+  const tgt = t >= 0 ? C.pos : C.neg;
+  const m = clamp(Math.abs(t), 0, 1) * 0.9;
+  const bg = [lerp(C.bg[0], tgt[0], m), lerp(C.bg[1], tgt[1], m), lerp(C.bg[2], tgt[2], m)];
+  const base = contrastRatio(bg, C.text) * 1.15;
+  const white = contrastRatio(bg, [255, 255, 255]);
+  const black = contrastRatio(bg, [5, 5, 5]);
+  if (white <= base && black <= base) return "var(--text)";
+  return white >= black ? "#ffffff" : "#050505";
 }
 function returnColor(pct, anchor = 6) {
   /* Magnitude-scaled TEXT color for a signed return: muted near 0, deepening
@@ -4621,6 +4669,11 @@ function quickAnalystPreview() {
       weight,
       price,
       target_mean: targetMean,
+      // The streaming row payload carries only the mean target (fetcher.py keeps
+      // low/median/high off the hot path), so the optimistic paint leaves these
+      // null and the Upside (median) / Upside range cells render "—" until the real
+      // analytics response lands and re-renders the table. Do NOT plug the gap
+      // by adding them to fetch_one — that is the per-row hot loop.
       target_median: null,
       target_low: null,
       target_high: null,
@@ -4765,9 +4818,27 @@ function renderAnalystDashboard(a) {
 
   // Per-holding table
   const sortKey = _AN_SORT.key, sortDir = _AN_SORT.dir;
+  /* The median and low/high columns report UPSIDE, not the target price. Upside
+     is the decision variable — a target of 768 means nothing until you know the
+     price it is measured against — and putting all three upside figures side by
+     side makes the median-vs-mean skew and the width of the range readable in
+     one horizontal scan.
+
+     upFrom() is the same (target/price − 1) the backend uses for upside_pct, so
+     the median/low/high columns are on exactly the same footing as the mean
+     column beside them. Currency cancels in the ratio, hence no fxConvert. */
+  const upFrom = (t, price) => (t != null && price) ? (t / price - 1) * 100 : null;
+  // Relative dispersion of the sell-side target range — the sort value behind the
+  // "Upside range" column, which has no single scalar of its own. Same quantity
+  // the MPT Black-Litterman view-confidence uses (frontier.py's `disp`), so the
+  // two surfaces rank dispersion identically.
+  const tgtDisp = (h) => (h.target_low != null && h.target_high != null && h.target_mean)
+    ? (h.target_high - h.target_low) / h.target_mean : null;
   holdings.sort((x, y) => {
     let av = x[sortKey], bv = y[sortKey];
     if (sortKey === "rec_key") { av = x.mean_rating; bv = y.mean_rating; }
+    if (sortKey === "upside_median") { av = upFrom(x.target_median, x.price); bv = upFrom(y.target_median, y.price); }
+    if (sortKey === "upside_range") { av = tgtDisp(x); bv = tgtDisp(y); }
     if (av == null && bv == null) return 0;
     if (av == null) return 1;
     if (bv == null) return -1;
@@ -4776,6 +4847,25 @@ function renderAnalystDashboard(a) {
   });
   const arrow = (k) => sortKey === k ? `<span class="arrow">${sortDir > 0 ? "▲" : "▼"}</span>` : "";
   const fmtUp = (v) => v == null ? "—" : ((v >= 0 ? "+" : "") + v.toFixed(2) + "%");
+  // Whole-percent for the compact low·high cell — two decimals on two numbers in
+  // one cell is noise, and the exact figures live in the hover title.
+  const fmtUp0 = (v) => v == null ? "—" : ((v >= 0 ? "+" : "") + v.toFixed(0) + "%");
+
+  /* Heat encoding for the two columns you actually scan for.
+
+     Weight → the same blue quintile ramp as the main holdings grid, so
+     concentration reads identically on both surfaces. Context is built over the
+     holdings currently in the table (they sum to ~100% by construction).
+
+     Upside → the diverging pos/neg ramp anchored at 30%, matching the main
+     grid's `target_upside_pct` column config, so a given tint means the same
+     thing wherever you see it. Both ramps mix from THEME_COLORS[theme].bg and
+     are therefore correct in light / dark / bloomberg without branching. */
+  const anTheme = getTheme();
+  const wSorted = holdings.map(h => h.weight).filter(v => v != null && isFinite(v)).sort((a, b) => a - b);
+  const wCtx = wSorted.length >= 2 ? { mode: "quantile", sorted: wSorted } : null;
+  const W_HEAT = { heat: { kind: "yo_dyn", favor: "high" } };
+  const UP_HEAT = { heat: { kind: "div", anchor: 30 } };
 
   const rowsHtml = holdings.map(h => {
     const upCls = h.upside_pct == null ? "" : (h.upside_pct >= 0 ? "pos" : "neg");
@@ -4795,15 +4885,44 @@ function renderAnalystDashboard(a) {
     } else {
       mini = `<span style="color:var(--muted);font-size:10.5px">—</span>`;
     }
+    const wStyle = cellStyleHeat(W_HEAT, h.weight, anTheme, wCtx);
+    const upStyle = cellStyleHeat(UP_HEAT, h.upside_pct, anTheme);
+    /* Median upside, and the compact low·high band around it. Yahoo publishes
+       only the four aggregates (low / mean / median / high) — there is no
+       per-analyst target anywhere in the feed, so a true q25/q75 is not
+       computable and is deliberately not faked. The hover spells out all four
+       levels in price terms, which is the only place the raw targets appear. */
+    const upMed = upFrom(h.target_median, h.price);
+    const upLo = upFrom(h.target_low, h.price);
+    const upHi = upFrom(h.target_high, h.price);
+    const medCls = upMed == null ? "" : (upMed >= 0 ? "pos" : "neg");
+    // Same ramp and the same 30% anchor as the mean-upside column beside it —
+    // they are the same quantity on the same scale, so a given tint has to mean
+    // the same thing in both. Reading them as a pair is the entire point of the
+    // column: where the median tint is visibly stronger than the mean's, the
+    // average is being dragged down by one low outlier (and vice versa).
+    const medStyle = cellStyleHeat(UP_HEAT, upMed, anTheme);
+    const hasRange = upLo != null && upHi != null;
+    const rangeTip = hasRange
+      ? `Implied upside at each published target — low ${fmtUp(upLo)} (${fmtMoney(h.target_low, h.currency)}) · `
+        + `median ${fmtUp(upMed)} (${fmtMoney(h.target_median, h.currency)}) · `
+        + `mean ${fmtUp(h.upside_pct)} (${fmtMoney(h.target_mean, h.currency)}) · `
+        + `high ${fmtUp(upHi)} (${fmtMoney(h.target_high, h.currency)})`
+        + (h.n_analysts ? ` · ${h.n_analysts} analysts` : "")
+      : "No published low/high targets";
     return `<tr>
       <td class="sym">${escapeHtml(h.symbol)}<span class="muted">${escapeHtml((h.name || "").length > 22 ? h.name.slice(0, 22) + "…" : (h.name || ""))}</span></td>
-      <td>${(h.weight*100).toFixed(2)}%</td>
+      <td style="${wStyle}">${(h.weight*100).toFixed(2)}%</td>
       <td><span class="rk ${cls}">${escapeHtml(lbl)}</span></td>
       <td>${h.mean_rating != null ? h.mean_rating.toFixed(2) : "—"}</td>
       <td>${h.n_analysts != null ? h.n_analysts : "—"}</td>
       <td>${h.price != null ? fmtMoney(h.price, h.currency) : "—"}</td>
       <td>${h.target_mean != null ? fmtMoney(h.target_mean, h.currency) : "—"}</td>
-      <td class="${upCls}">${fmtUp(h.upside_pct)}</td>
+      <td class="${upCls}" style="${upStyle}">${fmtUp(h.upside_pct)}</td>
+      <td class="${medCls}" style="${medStyle}">${fmtUp(upMed)}</td>
+      <td class="an-range" title="${escapeHtml(rangeTip)}">${hasRange
+        ? `${fmtUp0(upLo)}<span class="an-range-sep">·</span>${fmtUp0(upHi)}`
+        : "—"}</td>
       <td>${mini}</td>
     </tr>`;
   }).join("");
@@ -4837,6 +4956,8 @@ function renderAnalystDashboard(a) {
             <th data-k="price">Price${arrow("price")}</th>
             <th data-k="target_mean">Target (mean)${arrow("target_mean")}</th>
             <th data-k="upside_pct">Upside${arrow("upside_pct")}</th>
+            <th data-k="upside_median" title="Upside implied by the median analyst target. Above the mean upside means the average is being pulled down by a low outlier, and vice versa.">Upside (median)${arrow("upside_median")}</th>
+            <th data-k="upside_range" title="Upside implied by the lowest and highest published targets. Sorts by relative spread, (high − low) / mean.">Upside range${arrow("upside_range")}</th>
             <th>Distribution</th>
           </tr></thead>
           <tbody>${rowsHtml}</tbody>
@@ -7886,8 +8007,10 @@ renderModeBar();
  * Black-Litterman, risk from CVaR on daily scenarios), lets the user pick a
  * point along it with a single risk slider, and apply / save the resulting
  * weights as a named preset. Math lives in mpt.py; this code drives the UI and
- * renders the two-canvas chart. Chart axes: X = CVaR (annualized), Y = expected
- * return (BL). Frontier points carry {ret, cvar, vol, mdd, cdar, weights}.
+ * renders the two-canvas chart. Chart axes: X = CVaR on the displayed 30-day
+ * FRTB horizon (`cvar30`; the legacy annualized `cvar` is the fallback for
+ * pre-1.9 saved runs — see mptCvar), Y = expected return (BL, annualized).
+ * Frontier points carry {ret, cvar, var30, cvar30, vol, mdd, cdar, weights}.
  * --------------------------------------------------------------------------- */
 const MPT = {
   result: null,        // latest /api/efficient-frontier response
@@ -8073,6 +8196,9 @@ async function mptRun() {
     if (MPT._streamProj) mptRenderChart({fixedProj: MPT._streamProj, skipCloud: true});
     else mptRender();
     mptRenderSide();
+    // The legend mptRenderSide() just wrote shortens the chart host; re-lock the
+    // canvas height so the x-axis isn't left clipped for the life of the run.
+    mptSettleChartHeight();
     mptSaveRun({silent: true}).catch(() => {});  // persist onto this portfolio's run history
   } catch (e) {
     mptProgressHide("fail");
@@ -8141,6 +8267,11 @@ function mptRenderBounds() {
   const grid = document.getElementById("pf-mpt-bounds-grid");
   if (!grid) return;
   const syms = mptBoundsSymbols();
+  // Company names come straight off the rendered rows — no extra fetch. Paired
+  // with logoImg()'s existing FMP → parqet → initials chain, a row is
+  // identifiable at a glance instead of being a bare ticker.
+  const nameBySym = {};
+  for (const r of (DATA || [])) if (r && r.symbol) nameBySym[r.symbol] = r.name || "";
   const cell = (sym, k) => {
     const v = MPT.bounds?.[sym]?.[k];
     const val = v != null && isFinite(v) ? String(Math.round(v * 100)) : "";
@@ -8153,8 +8284,19 @@ function mptRenderBounds() {
     `<div class="pf-mpt-bnd-row pf-mpt-bnd-all"><span>All positions</span>` +
       `<input class="pf-mpt-bnd" type="number" min="0" max="100" step="1" data-all="min" placeholder="0" aria-label="min for all"/>` +
       `<input class="pf-mpt-bnd" type="number" min="0" max="100" step="1" data-all="max" placeholder="100" aria-label="max for all"/></div>` +
-    syms.map(s => `<div class="pf-mpt-bnd-row"><span data-mpt-sym="${escapeHtml(s)}" style="cursor:help">${escapeHtml(s)}</span>${cell(s, "min")}${cell(s, "max")}</div>`).join("");
-  mptWireAssetTips(grid);
+    syms.map(s => {
+      const nm = nameBySym[s] || "";
+      // Deliberately NO data-mpt-sym here, so mptWireAssetTips is not wired to
+      // this grid. Its tooltip fires on every `mousemove`, and each one rebuilds
+      // the tip's innerHTML and calls placeTip() (a forced synchronous layout) —
+      // with the pointer resting over the list that is one full parse + reflow
+      // per frame while scrolling, which is exactly why the grid felt sluggish.
+      // The stats it showed also belong to the chart, not to a constraint editor.
+      return `<div class="pf-mpt-bnd-row">` +
+        `<span class="pf-mpt-bnd-sym">` +
+          `${logoImg(s)}<b>${escapeHtml(s)}</b><i>${escapeHtml(nm)}</i>` +
+        `</span>${cell(s, "min")}${cell(s, "max")}</div>`;
+    }).join("");
 }
 function mptSetBound(sym, k, pctStr) {
   const b = (MPT.bounds[sym] = MPT.bounds[sym] || {});
@@ -8176,10 +8318,43 @@ function mptClearChart() {
   const leg = document.getElementById("pf-mpt-legend"); if (leg) leg.innerHTML = "";
 }
 
+/* One settle pass, run after anything that paints the side panel.
+
+   mptRenderSide() populates the legend BELOW the chart, so the chart host ends
+   up ~22px shorter than when mptRenderChart() measured and locked it — leaving
+   the canvas hanging past its container with the x-axis label (drawn at
+   cssH − 6) clipped off the bottom. Re-measure and redraw once when that
+   happened. It must be called from BOTH mptRender() and the streaming `done`
+   handler: that handler finalises with mptRenderChart({fixedProj}) to avoid the
+   cloud jumping mid-stream and so never reaches mptRender() at all — which is
+   precisely the path every completed run takes.
+
+   A ResizeObserver would be the reflexive choice and is the wrong one here: its
+   delivery is tied to the frame lifecycle, so it is throttled or dropped
+   entirely in a backgrounded window (verified — zero callbacks for a real
+   1185→735px change), making the correction unreliable exactly when the user
+   tabs away and back. This is synchronous and deterministic instead.
+
+   The redraw is a FULL mptRenderChart() with no fixedProj: the cloud is complete
+   by now and gets repainted from MPT.result.cloud against the same recomputed
+   projection, so chart and scatter cannot disagree. _settling bounds this to a
+   single extra pass; skipped while the limits panel is open, because that
+   shrinkage IS the intended crop. */
+function mptSettleChartHeight() {
+  if (MPT._settling || !MPT.result || mptBoundsPanelOpen()) return;
+  const host = document.getElementById("pf-mpt-chart");
+  if (!host) return;
+  const h = Math.max(280, Math.floor(host.getBoundingClientRect().height));
+  if (MPT._chartH == null || Math.abs(h - MPT._chartH) <= 1) return;
+  MPT._settling = true;
+  try { mptRenderChart(); } finally { MPT._settling = false; }
+}
+
 function mptRender() {
   const d = MPT.result; if (!d) return;
   mptRenderChart();
   mptRenderSide();
+  mptSettleChartHeight();
 }
 
 // MPT._proj is the shared projection used by every chart draw call and the
@@ -8199,16 +8374,49 @@ function mptCvarHi(p) { return p && p.cvar30_hi != null ? p.cvar30_hi : (p ? p.c
 function mptFmtLoss(v, dp = 1) { return (v == null || !isFinite(v)) ? "—" : (v * 100).toFixed(dp) + "%"; }
 
 // Resize both canvases identically through one helper so their backing
-// stores cannot drift apart. CSS controls the *display* size (inset:0 +
-// width/height:100%); we touch ONLY the backing store. Setting inline
+// stores cannot drift apart. CSS controls the *display* size (width:100% +
+// height:var(--mpt-chart-h)); we touch ONLY the backing store. Setting inline
 // width/height previously left the canvas stuck at its first measurement
 // even when the modal reflowed, causing axis labels to render below the
 // chart's visual box.
+//
+// The height is additionally LOCKED while the per-position limits panel is open,
+// as a second line of defence. Primary defence is mptPinBodyHeight() below: the
+// panel pushes the workspace down inside a scroll container instead of stealing
+// height from it, so .pf-mpt-chart does not actually change size. The lock still
+// matters because the browser can reflow the obstructed box for other reasons
+// (a window resize with the panel up), and re-measuring then would rescale a
+// stale bitmap — which is precisely what deformed the plot before any of this
+// existed: nothing called this on toggle at all, so the old bitmap was simply
+// stretched into the new box.
+function mptBoundsPanelOpen() {
+  const p = document.getElementById("pf-mpt-bounds");
+  return !!(p && !p.hidden);
+}
+/* Freeze / release .pf-mpt-body's height around the limits panel opening.
+   `--mpt-body-h` is read by the CSS as .pf-mpt-body's min-height; with the panel
+   open the scroll container overflows by exactly the panel's height and the user
+   scrolls down to the chart, rather than the chart being squeezed or clipped.
+   Must be called BEFORE `panel.hidden` flips, so the measurement is the
+   un-pushed height. */
+function mptPinBodyHeight(pin) {
+  const scroll = document.getElementById("pf-mpt-scroll");
+  const body = scroll?.querySelector(".pf-mpt-body");
+  if (!scroll || !body) return;
+  if (!pin) { scroll.style.removeProperty("--mpt-body-h"); return; }
+  const h = Math.round(body.getBoundingClientRect().height);
+  if (h > 0) scroll.style.setProperty("--mpt-body-h", h + "px");
+}
 function mptSizeCanvases(host) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const rect = host.getBoundingClientRect();
   const cssW = Math.max(360, Math.floor(rect.width));
-  const cssH = Math.max(280, Math.floor(rect.height));
+  const locked = mptBoundsPanelOpen() && MPT._chartH ? MPT._chartH : null;
+  const cssH = locked != null ? locked : Math.max(280, Math.floor(rect.height));
+  if (locked == null) MPT._chartH = cssH;
+  // Publish the drawn height to CSS so the canvas elements keep it even after the
+  // parent shrinks. Without this the CSS box would follow the parent and rescale.
+  host.style.setProperty("--mpt-chart-h", cssH + "px");
   const W = Math.floor(cssW * dpr), H = Math.floor(cssH * dpr);
   // NB: setting width/height CLEARS the canvas. The cloud canvas is sized here
   // only when we (re)build the projection — never during a streaming run, so its
@@ -9174,15 +9382,45 @@ document.getElementById("pf-mpt-bounds-btn")?.addEventListener("click", (e) => {
   const panel = document.getElementById("pf-mpt-bounds");
   if (!panel) return;
   const show = panel.hidden;
+  // The panel is a temporary editor, so it PUSHES the workspace down rather than
+  // stealing height from it: pin .pf-mpt-body to the height it has right now,
+  // then let .pf-mpt-scroll overflow. The chart, slider and legend keep their
+  // exact geometry and simply move below the fold — nothing is squashed and
+  // nothing is cropped, so MPT._proj stays valid and hover/click keep hitting the
+  // right frontier point. Measure BEFORE unhiding, or the panel is already in the
+  // flow and we would pin the post-push height.
+  mptPinBodyHeight(show);
   panel.hidden = !show;
   e.currentTarget.setAttribute("aria-expanded", show ? "true" : "false");
   if (show) mptRenderBounds();
+  // Closing releases the pin, so .pf-mpt-body grows back to fill the scroll
+  // column. That is a no-op unless the window was resized while the panel was up
+  // — in which case the body lands at a new height and the chart has to be
+  // re-measured. MPT.abort is non-null only while a run streams; re-rendering
+  // then would drop the streaming fixed projection and repaint a half-filled
+  // cloud, and the geometry is unchanged in the common case anyway.
+  else if (MPT.result && !MPT.abort) mptRender();
 });
 document.getElementById("pf-mpt-bounds-reset")?.addEventListener("click", mptResetBounds);
 const _mptBoundsGrid = document.getElementById("pf-mpt-bounds-grid");
 _mptBoundsGrid?.addEventListener("input", (e) => {
   const t = e.target;
   if (t.classList?.contains("pf-mpt-bnd") && t.dataset.sym) mptSetBound(t.dataset.sym, t.dataset.k, t.value);
+});
+/* Click a cell → the number is immediately selected, so typing replaces it
+   instead of appending to it. Spreadsheet behaviour: the common action on a
+   limit that already reads 25 is "make it 40", not "make it 254".
+
+   `focusin` (not `click`) is the right hook: it fires once per gaining focus,
+   so it covers keyboard Tab as well, and it does NOT re-fire when clicking
+   again inside an already-focused cell — which would otherwise wipe out a
+   deliberate caret placement or drag-selection mid-edit. The rAF defer is
+   needed because the browser sets the caret from the click position *after*
+   focus, and would undo a select() called synchronously here. */
+_mptBoundsGrid?.addEventListener("focusin", (e) => {
+  const t = e.target;
+  if (!t.classList?.contains("pf-mpt-bnd")) return;
+  requestAnimationFrame(() => { if (document.activeElement === t) t.select(); });
 });
 _mptBoundsGrid?.addEventListener("change", (e) => {
   const t = e.target;

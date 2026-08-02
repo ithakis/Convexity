@@ -1030,19 +1030,25 @@
   .pf-inline-prompt button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   .pf-inline-prompt .pf-ip-err { color: var(--neg); font-size: 11.5px; min-height: 14px; }
 
-  /* MPT overlay (Portfolio Optimization workspace) — sits above everything,
-     85% of viewport, backdrop blurs the dashboard so the user feels they're
-     "drilling deeper" into a dedicated quantitative tool. */
+  /* MPT overlay (Portfolio Optimization workspace) — sits above everything and
+     takes essentially the whole viewport (99vw × 99vh, no max cap): this is a
+     dedicated quantitative tool, and the frontier chart + weights panel + the
+     per-position limits grid all want vertical room simultaneously. Only a thin
+     blurred margin of the dashboard shows through, enough to signal "overlay,
+     press Esc" without stealing space. */
   .pf-mpt-bg {
     position: fixed; inset: 0; z-index: 90;
     background: rgba(6, 10, 18, 0.55); backdrop-filter: blur(6px);
     -webkit-backdrop-filter: blur(6px);
     display: none; align-items: stretch; justify-content: center;
-    padding: 32px;
+    padding: 8px;
   }
   .pf-mpt-bg.show { display: flex; }
   .pf-mpt-modal {
-    width: 92vw; max-width: 1480px; height: 88vh; max-height: 920px;
+    /* 100% of the backdrop's *content* box — the backdrop is inset:0 with an 8px
+       pad, so this lands at ~99vw × 99vh without the padding pushing it over the
+       viewport the way an explicit 99vh would. */
+    width: 100%; max-width: none; height: 100%; max-height: none;
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-lg);
     box-shadow: 0 24px 60px rgba(0,0,0,0.45);
     display: flex; flex-direction: column; overflow: hidden;
@@ -1114,41 +1120,104 @@
   }
   .pf-mpt-cancel:hover { background: var(--neg); color: var(--on-accent, #fff); }
   .pf-mpt-cancel[hidden] { display: none; }
-  /* Per-position weight-limits grid (Symbol | Min% | Max%), scrolls if long. */
+  /* Per-position weight-limits grid — a spreadsheet, not a form. The numbers sit
+     as bare text in their cell (no input chrome) until focused, at which point the
+     cell gets an Excel-style active outline and the whole row tints light blue so
+     you always know which company you are editing. Dense rows (24px) + a tall
+     scroll box are the point: seeing ~18 holdings at once beats seeing 7. */
+  /* This is the ONE surface in the workspace that still gets a box, and that is
+     the point: it is a transient editor dropped on top of the tool, so it should
+     read as a distinct sheet. It takes its natural height (flex:none) inside
+     .pf-mpt-scroll and pushes everything below it down — see .pf-mpt-scroll.
+     Padding is symmetric so the head and the last row sit the same distance from
+     the frame. */
   .pf-mpt-bounds {
-    margin: 0 16px 10px; padding: 10px 12px; background: var(--bg-canvas);
+    flex: none;
+    margin: 10px 16px; padding: 10px 12px; background: var(--bg-canvas);
     border: 1px solid var(--border); border-radius: var(--r-md);
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
   }
   .pf-mpt-bounds[hidden] { display: none; }
   .pf-mpt-bounds-head {
     display: flex; align-items: center; justify-content: space-between;
-    font-size: 11.5px; color: var(--muted); margin-bottom: 8px;
+    font-size: 11.5px; color: var(--muted); margin-bottom: 6px; flex: none;
   }
   .pf-mpt-bounds-reset {
     background: none; border: none; color: var(--accent); font: inherit;
     font-size: 11.5px; cursor: pointer; padding: 0;
   }
   .pf-mpt-bounds-reset:hover { text-decoration: underline; }
-  .pf-mpt-bounds-grid {
-    display: flex; flex-direction: column; gap: 3px;
-    max-height: 220px; overflow-y: auto;
-  }
+  /* NOT a scroller. The grid takes its natural height and .pf-mpt-scroll is the
+     single scroll surface for the whole workspace.
+
+     It used to be a nested scroller with its own max-height AND
+     overscroll-behavior: contain — which is what made scrolling feel broken.
+     A short inner scroller reaches its end after ~100px and then stops dead
+     rather than chaining to the parent, so getting down a 20-name book took a
+     stack of separate gestures. One surface, one gesture. */
+  .pf-mpt-bounds-grid { display: flex; flex-direction: column; }
   .pf-mpt-bnd-row {
-    display: grid; grid-template-columns: 1fr 72px 72px; gap: 8px; align-items: center;
-    font-size: 12px;
+    display: grid; grid-template-columns: minmax(0, 1fr) 96px 96px;
+    align-items: center; font-size: 12px; min-height: 24px;
+    border-bottom: 1px solid var(--border);
   }
+  .pf-mpt-bnd-row:last-child { border-bottom: none; }
+  /* The row currently being edited. :focus-within also covers keyboard tabbing
+     through the grid, so the highlight tracks the caret without any JS. */
+  .pf-mpt-bnd-row:focus-within { background: rgba(var(--accent-rgb), 0.10); }
   .pf-mpt-bnd-row > span:first-child {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 2px;
+  }
+  /* Deliberately NOT sticky any more. With the inner scroller gone the panel
+     scrolls as one block inside .pf-mpt-scroll, and sticky here would resolve
+     against .pf-mpt-bounds (overflow:hidden makes it the containing scroll box),
+     which never scrolls — so it would be inert anyway, just with a promoted
+     layer and a z-index for nothing. */
+  .pf-mpt-bnd-head {
+    background: var(--bg-canvas);
+    color: var(--muted); font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.05em; min-height: 20px;
+  }
+  /* Centred to sit directly over the centred cell values below them. */
+  .pf-mpt-bnd-head > span:not(:first-child) { text-align: center; }
+  .pf-mpt-bnd-all { color: var(--text); font-weight: 600;
+    border-bottom: 1px solid var(--border); }
+  /* Logo · ticker · company name. The logo makes the row identifiable at a glance
+     when you are scanning 20 constituents for the one you want to cap. */
+  .pf-mpt-bnd-sym { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .pf-mpt-bnd-sym .logo, .pf-mpt-bnd-sym .logo-fallback {
+    width: 14px; height: 14px; flex: none; font-size: 7px;
+  }
+  .pf-mpt-bnd-sym b { font-weight: 700; flex: none; }
+  .pf-mpt-bnd-sym i {
+    font-style: normal; color: var(--muted); min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .pf-mpt-bnd-head { color: var(--muted); font-size: 11px; padding-bottom: 2px; }
-  .pf-mpt-bnd-all { color: var(--text); font-weight: 600; padding-bottom: 4px;
-    border-bottom: 1px dashed var(--border); margin-bottom: 2px; }
+  /* align-self:stretch makes the input fill the row's FULL height (the row is
+     align-items:center, which would otherwise leave a dead strip above and below
+     it). That is what makes the whole cell clickable — anywhere in the MIN/MAX
+     column puts the caret in the number, exactly like a spreadsheet, instead of
+     the click landing on the row and doing nothing. */
   .pf-mpt-bnd {
-    width: 100%; height: 26px; box-sizing: border-box; text-align: center; padding: 0 4px;
-    background: var(--bg-subtle); color: var(--text);
-    border: 1px solid var(--border); border-radius: var(--r-xs); font: inherit; font-size: 12px;
+    width: 100%; align-self: stretch; box-sizing: border-box;
+    text-align: center; padding: 0 4px;
+    background: transparent; color: var(--text);
+    border: none; border-radius: 0; font: inherit; font-size: 12px;
+    font-variant-numeric: tabular-nums;
   }
-  .pf-mpt-bnd:focus { outline: none; border-color: var(--accent); }
+  /* Kill the spinners — they turn a cell back into a widget and eat 16px of width. */
+  .pf-mpt-bnd::-webkit-outer-spin-button,
+  .pf-mpt-bnd::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .pf-mpt-bnd { -moz-appearance: textfield; appearance: textfield; }
+  .pf-mpt-bnd::placeholder { color: var(--muted); opacity: 0.45; }
+  /* A cell that holds a value is a real constraint — make it read as one, so the
+     set of active limits is legible in one scan down the column. */
+  .pf-mpt-bnd:not(:placeholder-shown) { color: var(--accent); font-weight: 600; }
+  .pf-mpt-bnd:hover { background: rgba(var(--accent-rgb), 0.06); }
+  .pf-mpt-bnd:focus {
+    outline: none; background: var(--bg-canvas);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
   /* Analyst-trust dial: range slider + live percentage readout. */
   .pf-mpt-haircut-wrap {
     display: inline-flex; align-items: center; gap: 8px; min-width: 150px;
@@ -1298,23 +1367,51 @@
   }
   .pf-mpt-run:hover { filter: brightness(1.08); }
   .pf-mpt-run:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
+  /* The single scroll column under the controls strip. With the limits panel
+     closed .pf-mpt-body grows to fill it exactly, so nothing scrolls. When the
+     panel opens, JS pins --mpt-body-h to the height the body already had; the
+     column then overflows by the panel's height and the workspace is pushed
+     down rather than compressed. */
+  .pf-mpt-scroll {
+    flex: 1; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column;
+  }
+  /* flex-shrink:0 is what makes "push down" work — the body must refuse to give
+     up height to the panel above it. min-height carries the pinned value while
+     the panel is open, and falls back to a floor the chart stays usable at. */
   .pf-mpt-body {
-    flex: 1; display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+    flex: 1 0 auto; min-height: var(--mpt-body-h, 260px);
+    display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
     gap: 14px; padding: 14px 18px; overflow: hidden;
   }
   @media (max-width: 980px) { .pf-mpt-body { grid-template-columns: 1fr; } }
+  /* No box. The chart and the stats panel are the workspace itself, not cards
+     dropped onto it — a frame and a tinted fill around each one just chopped a
+     single tool into three competing rectangles. The only surviving box is
+     .pf-mpt-bounds, which earns it by being transient. */
   .pf-mpt-chartwrap {
     display: flex; flex-direction: column; gap: 8px;
-    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-md);
-    padding: 10px; overflow: hidden;
+    background: transparent; border: none; padding: 0; overflow: hidden;
   }
-  .pf-mpt-chart { position: relative; flex: 1; min-height: 320px; }
+  /* min-height:0 + overflow:hidden is what makes the "crop, never squash"
+     contract below work: the box is free to shrink when the per-position limits
+     panel opens, and whatever no longer fits is clipped rather than rescaled. */
+  .pf-mpt-chart { position: relative; flex: 1; min-height: 0; overflow: hidden; }
   /* Two stacked canvases: base (axes + cloud + frontier) and overlay
      (selection ring + hover ghost). Both share the same backing-store size
      so nothing drifts. The overlay sits on top and is the only interactive
-     surface for click + mousemove hit-testing. */
+     surface for click + mousemove hit-testing.
+
+     Height comes from --mpt-chart-h (written by mptSizeCanvases), NOT from
+     100% of the parent. That is deliberate: the canvases' *backing stores* are
+     only resized when we rebuild the projection, so letting CSS stretch them to
+     a parent that just got shorter would rescale a stale bitmap — the whole plot
+     visibly squashes and the hit-test drifts out of sync with what's drawn.
+     Pinning the CSS height to the pixel height the canvas was actually drawn at
+     means a shorter parent simply crops it, and it comes back intact on close. */
   .pf-mpt-cv {
-    position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+    position: absolute; top: 0; left: 0; right: 0;
+    width: 100%; height: var(--mpt-chart-h, 100%); display: block;
   }
   .pf-mpt-cv-cloud { z-index: 0; pointer-events: none; }
   .pf-mpt-cv-base { z-index: 1; pointer-events: none; }
@@ -1394,9 +1491,11 @@
   .pf-mpt-legend .lg-swatch {
     display: inline-block; width: 14px; height: 12px; vertical-align: middle; flex-shrink: 0;
   }
+  /* Also boxless (see .pf-mpt-chartwrap). A single hairline on the left is all
+     the separation the two columns need — it reads as a gutter rule, not a card. */
   .pf-mpt-side {
-    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-md);
-    padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto;
+    background: transparent; border: none; border-left: 1px solid var(--border);
+    padding: 0 0 0 14px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto;
   }
   .pf-mpt-side h4 {
     margin: 0; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text);
@@ -1943,8 +2042,17 @@
   .an-table tr:last-child td { border-bottom: none; }
   .an-table td.sym { font-weight: 700; }
   .an-table td .muted { color: var(--muted); font-size: 10.5px; margin-left: 4px; }
+  /* Upside carries an inline diverging-heat background + text colour from
+     cellStyleHeat; the inline style wins over these, so pos/neg survive here
+     only for their weight. Both columns keep their own padding so the heat
+     block reads as a cell, not a stripe running into its neighbours. */
   .an-table td.pos { color: var(--pos); font-weight: 600; }
   .an-table td.neg { color: var(--neg); font-weight: 600; }
+  /* Compact low·high upside band — secondary to the mean/median upside beside it,
+     and muted on purpose so the two signed figures stay the ones you read first. */
+  .an-table td.an-range { color: var(--muted); font-size: 11px; cursor: default;
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .an-table td.an-range .an-range-sep { padding: 0 4px; opacity: 0.6; }
   .an-table td .rk {
     display: inline-block; padding: 1px 7px; border-radius: 999px;
     font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
@@ -2014,7 +2122,7 @@
   .pf-weights-body,
   .pf-mpt-side,
   .pf-mpt-weights,
-  .pf-mpt-bounds-grid,
+  .pf-mpt-scroll,
   .cv-list,
   .ns-prog-jobs,
   .ns-tape-fs-body,
