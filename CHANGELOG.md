@@ -5,6 +5,41 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.11.3 — 2026-08-02
+
+### The cloud and the frontier now share one feasible set
+
+- **The scatter cloud ignored the per-position limits the optimizer respects.**
+  `cvar_return_cloud` sampled the bare simplex (pure Dirichlet, no `w_min`/
+  `w_max` parameter at all) while `mean_cvar_frontier` solved inside the box, so
+  with limits set the two were drawn from different feasible sets. Measured on a
+  book whose mins summed to 80% across four names: **52.7% of 20,000 cloud
+  points sat at a lower CVaR than the frontier's own min-CVaR portfolio**. The
+  frontier floated in the middle of the cloud instead of hugging its upper-left
+  edge, and the axis stretched to a risk level nothing feasible could reach
+  (cloud 10.6–35.8% vs frontier 20.4–25.7%). The cloud is now sampled inside the
+  same box, cash rule, and rf the frontier was solved under — cloud 20.2–25.7%,
+  left-of-frontier down to 0.6%, which is the pre-existing daily-vs-30-day
+  estimator gap rather than a sampling error (the *unconstrained* control's min
+  sits 3.6% below its own frontier, relatively worse).
+- Sampling is `w = w_min + free_budget × Dirichlet` followed by a water-fill of
+  the overflow into remaining headroom — not rejection sampling, whose
+  acceptance rate collapses to nothing under a tight box. With no box the free
+  budget is 1 and the mixture passes through untouched, so unconstrained runs
+  are bit-identical to before.
+
+### Chart framing
+
+- **The rf floor no longer owns the frame.** Flooring the y-domain at rf spent
+  ~85% of the height on empty space once every feasible portfolio sat between
+  25% and 29% return against a 4.5% rf. rf may now pull the floor down by at
+  most half the data's own span; past that the reference line is simply not
+  drawn. Wide unconstrained runs still show it, unchanged.
+- **A finished run always re-measures its own domain.** The streaming handler
+  reused a frame fixed from the frontier before any cloud point existed, which
+  is wrong in both directions — too small clips the scatter flat against the
+  canvas edge ("zoomed in"), too large strands the plot in an empty frame.
+
 ## 1.11.2 — 2026-08-02
 
 ### Analyst consensus: upside, not price

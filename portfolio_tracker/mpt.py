@@ -1255,14 +1255,57 @@ def _cloud_kernel(W, R, mu_ann, alpha, h):
     return out
 
 
+def _project_into_box(W: np.ndarray, lo: np.ndarray, hi: np.ndarray,
+                      iters: int = 32) -> np.ndarray:
+    """Water-fill rows of ``W`` back under ``hi`` without changing their sums.
+
+    ``W`` arrives already at or above ``lo`` and with the right row sums; only the
+    upper bounds can still be violated. Clip the overflow and redistribute it into
+    whatever headroom the row's other assets still have, proportionally, until
+    nothing pokes out. Each pass strictly reduces the excess, so a couple of
+    passes normally suffice and ``iters`` is only a safety stop.
+
+    Rejection sampling would be the obvious alternative and is unusable here: with
+    a tight box (the reported case pinned 80% of the book across four names) the
+    acceptance rate collapses towards zero and the cloud would simply never fill.
+    """
+    for _ in range(iters):
+        over = W - hi
+        np.maximum(over, 0.0, out=over)
+        excess = over.sum(axis=1)
+        np.minimum(W, hi, out=W)
+        room = hi - W
+        tot = room.sum(axis=1)
+        live = (excess > 1e-12) & (tot > 1e-12)
+        if not live.any():
+            break
+        W[live] += (excess[live] / tot[live])[:, None] * room[live]
+    return W
+
+
 def cvar_return_cloud(returns: pd.DataFrame, mu: dict[str, float],
-                      alpha: float = 0.95, n: int = 4000, seed: int = 42) -> list:
+                      alpha: float = 0.95, n: int = 4000, seed: int = 42,
+                      w_min=0.0, w_max=1.0, fully_invested: bool = True,
+                      rf: float = 0.0) -> list:
     """A light long-only cloud in (CVaR_30day, return_annual) space.
 
     Dirichlet mixture (concentrated + uniform + a few sparse-k) so the cloud
     spans corners without the old 15M-config machinery. The CVaR coordinate is
     the 10d→30d display CVaR (same estimator as the frontier points), so the
     scatter shares the chart's x-axis. Returns ``[[cvar30, ret_ann],…]``.
+
+    ``w_min``/``w_max``/``fully_invested``/``rf`` MUST be the same constraints the
+    frontier was solved under. The cloud is read as "the achievable set", so the
+    efficient frontier has to be its upper-left envelope; sampling the bare
+    simplex while the solver worked inside a per-position box put most of the
+    scatter outside the feasible set and left the frontier floating mid-cloud
+    (measured: with 80% of the book pinned, 52.7% of points landed at a lower
+    CVaR than the frontier's own min-CVaR portfolio, and the axis domain
+    stretched to a risk level nothing feasible could reach).
+
+    With no box (``lo=0``, ``hi=1``, fully invested) the free budget is 1 and the
+    mixture passes through untouched, so the unconstrained cloud is bit-identical
+    to the pre-box behaviour.
     """
     symbols = list(returns.columns)
     n_assets = len(symbols)
@@ -1270,24 +1313,48 @@ def cvar_return_cloud(returns: pd.DataFrame, mu: dict[str, float],
         return []
     R = np.ascontiguousarray(returns.values, dtype=np.float64)
     mu_ann = np.array([float(mu.get(s, 0.0)) for s in symbols], dtype=float)
+    lo = _as_bound_vec(w_min, n_assets, 0.0)
+    hi = np.maximum(_as_bound_vec(w_max, n_assets, 1.0), lo)
+    lo_sum = float(lo.sum())
+    # An infeasible floor (mins summing past the budget) would make the frontier
+    # solve fail long before we get here; scale it back rather than emit NaNs.
+    if lo_sum > 1.0:
+        lo = lo / lo_sum
+        hi = np.maximum(hi, lo)
+        lo_sum = 1.0
     rng = np.random.default_rng(seed)
     n = max(500, int(n))
     n_lo = n // 3
     n_hi = n // 3
     n_sp = n - n_lo - n_hi
-    W = np.empty((n, n_assets), dtype=np.float64)
-    W[:n_lo] = rng.dirichlet(np.full(n_assets, 0.15), size=n_lo)
-    W[n_lo:n_lo + n_hi] = rng.dirichlet(np.full(n_assets, 1.0), size=n_hi)
+    # D holds the *direction* the free budget is spread in (rows sum to 1); the
+    # box floor is added underneath it below.
+    D = np.empty((n, n_assets), dtype=np.float64)
+    D[:n_lo] = rng.dirichlet(np.full(n_assets, 0.15), size=n_lo)
+    D[n_lo:n_lo + n_hi] = rng.dirichlet(np.full(n_assets, 1.0), size=n_hi)
     # sparse-k rows
     base = n_lo + n_hi
     ks = np.clip(rng.choice(np.array([1, 2, 3, 5, 8]), size=n_sp), 1, n_assets)
-    W[base:] = 0.0
+    D[base:] = 0.0
     for r in range(n_sp):
         kk = int(ks[r])
         cols = rng.choice(n_assets, size=kk, replace=False)
-        W[base + r, cols] = rng.dirichlet(np.ones(kk))
+        D[base + r, cols] = rng.dirichlet(np.ones(kk))
+    # Fully invested => every row spends the whole free budget. With cash allowed
+    # the solver may hold any amount back, so sample the spend to match the set it
+    # actually optimizes over.
+    free = 1.0 - lo_sum
+    spend = np.full(n, free) if fully_invested else rng.uniform(0.0, free, size=n)
+    W = np.ascontiguousarray(lo + spend[:, None] * D)
+    if (hi < 1.0).any():
+        W = _project_into_box(W, lo, hi)
     arr = _cloud_kernel(W, R, mu_ann, float(alpha), int(LIQ_HORIZON))
     arr[:, 0] *= math.sqrt(float(DISP_HORIZON) / float(LIQ_HORIZON))  # 10d → 30d
+    # Cash earns rf. The kernel only sums w·mu, so a row holding cash would
+    # otherwise be reported below the return the same portfolio shows on the
+    # frontier, re-opening the mismatch this function exists to close.
+    if not fully_invested:
+        arr[:, 1] += (1.0 - W.sum(axis=1)) * float(rf)
     return arr.tolist()
 
 

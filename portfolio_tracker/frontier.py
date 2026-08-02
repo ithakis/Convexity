@@ -383,7 +383,13 @@ def compute_efficient_frontier_stream(
     g = 0
     while len(cloud) < cloud_n:
         take = min(5000, cloud_n - len(cloud))
-        pts = mpt.cvar_return_cloud(returns, mu, alpha=alpha, n=take, seed=1000 + g)
+        # Same box / cash rule / rf the frontier was solved under — the cloud is
+        # the achievable set the frontier has to be the upper-left envelope of,
+        # so sampling a wider one puts most of the scatter outside the feasible
+        # region and leaves the frontier floating in the middle of it.
+        pts = mpt.cvar_return_cloud(returns, mu, alpha=alpha, n=take, seed=1000 + g,
+                                    w_min=lo_b, w_max=hi_b,
+                                    fully_invested=fully_invested, rf=rf)
         cloud.extend(pts)
         g += 1
         yield {"type": "cloud", "points": pts}

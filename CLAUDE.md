@@ -1303,12 +1303,50 @@ mpt.mean_cvar_frontier(returns_df, mu, *, alpha, w_min, w_max, fully_invested, r
 mpt.bootstrap_cvar(R, ctx, seeds) -> cvar_ann[B,K]   # parallel (prange) frontier-stability
     # band: each seed resamples the T scenarios w/ replacement + re-solves at every target
 mpt.portfolio_risk_metrics(weights, mu, cov, returns, alpha, rf, fully_invested) -> {...}
-mpt.cvar_return_cloud(returns_df, mu, alpha, n, seed) -> [[cvar_30day, ret_ann], ...] # prange
+mpt.cvar_return_cloud(returns_df, mu, alpha, n, seed, w_min, w_max, fully_invested, rf)
+    # -> [[cvar_30day, ret_ann], ...]  # prange
+    # MUST receive the SAME constraints the frontier was solved under (frontier.py
+    # passes its own lo_b/hi_b/fully_invested/rf). The cloud is read as the
+    # achievable set, so the frontier has to be its upper-left envelope.
 mpt.cvar_of(port_ret, alpha) / max_drawdown(port_ret) / cdar(port_ret, beta)
 mpt.overlapping_h_returns(port_ret, h) -> overlapping h-day COMPOUNDED returns (len T−h+1)
 mpt.var_cvar_horizon(port_ret, alpha, h_base=10, h_target=30) -> (var30, cvar30)
 mpt.asset_risk_stats(returns_df, alpha) -> {sym: {ret_ann, ret_total, var30, cvar30}}
 ```
+
+### The cloud and the frontier must share one feasible set (v1.11.3)
+`cvar_return_cloud` sampled the bare simplex while `mean_cvar_frontier` solved
+inside the per-position box, so with limits set the scatter was drawn from a
+*different, larger* set than the frontier. Measured on the reported book (mins
+summing to 80% across four names): **52.7% of 20 000 cloud points sat at a lower
+CVaR than the frontier's own min-CVaR portfolio**, the frontier floated
+mid-cloud instead of hugging its edge, and the axis stretched to a risk level
+nothing feasible could reach (cloud 10.6–35.8% vs frontier 20.4–25.7%). After
+passing the box through: cloud 20.2–25.7%, 0.6% left-of-frontier. The residual
+is the **daily-vs-30-day estimator gap** (the LP minimises daily CVaR, the axis
+shows the 10d→30d one), not a sampling error — the *unconstrained* control's
+min sits 3.6% below its own frontier, relatively worse.
+
+Sampling is `w = w_min + free_budget × Dirichlet`, then `_project_into_box`
+water-fills the overflow into remaining headroom. **Not rejection sampling** —
+with a tight box the acceptance rate collapses and the cloud never fills. With
+no box, `free_budget = 1` and the mixture passes through untouched, so the
+unconstrained cloud stays bit-identical (asserted in the scratch harness by
+comparing a default call against an explicit `w_min=0, w_max=1` call).
+
+Two frontend consequences, both in `mptComputeProj`:
+- **The rf floor is bounded.** `yMin = min(yMin, rf)` alone spent ~85% of the
+  height on empty space once every feasible portfolio sat between 25% and 29%
+  return against a 4.5% rf. rf may now pull the floor down by at most half the
+  data's own span; past that the line simply isn't drawn (`drawAxes` already
+  guards on the domain). Wide unconstrained runs still show it, unchanged.
+- **The streaming `done` handler always re-measures** (`mptRender()`), never
+  reusing `_streamProj`. That domain is fixed from the frontier before any cloud
+  point exists and is wrong in *both* directions — too small clips the scatter
+  flat against the edge, too large strands the plot in an empty frame. Verifying
+  it instead needs a magic "close enough" threshold; one honest re-measure of a
+  finished cloud does not. `cloudRoom`'s reservation is correspondingly modest
+  (1.25×) since it is now only a transient frame.
 
 ### Displayed tail risk — 10d→30d (FRTB-style), v1.9
 The optimizer still minimises **daily** CVaR (the LP is unchanged). What the UI

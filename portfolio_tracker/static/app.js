@@ -8190,22 +8190,17 @@ async function mptRun() {
     slider.value = String(MPT.selectedIdx);
     mptProgressHide("done");
     if (status) status.innerHTML = "";
-    // Finalize on the same fixed domain the cloud filled into (no jump); the
-    // cloud canvas already holds every chunk, so skip repainting it. But that
-    // domain was only a GUESS made from the frontier's own span before any cloud
-    // point existed (mptStreamFrontier's cloudRoom:true, 1.6x reservation) — a
-    // concentrated single-asset portfolio routinely sits well past that. If the
-    // final cloud actually overflows the guess, keeping it crops the scatter hard
-    // against the canvas edge instead of tapering off, which reads as "zoomed in"
-    // rather than as missing data. Verify the guess before trusting it; recompute
-    // from the real data (mptRender(), which also repaints the accumulated cloud)
-    // when it doesn't fit. Falls back the same way if the frontier message never
-    // established a domain at all.
-    if (MPT._streamProj && mptProjFits(MPT._streamProj, MPT.result)) {
-      mptRenderChart({fixedProj: MPT._streamProj, skipCloud: true});
-    } else {
-      mptRender();
-    }
+    // Always finalize on a domain recomputed from the COMPLETE run. The frame the
+    // cloud streamed into is only a guess: mptStreamFrontier fixes it from the
+    // frontier's own span before a single cloud point exists, and that guess is
+    // wrong in both directions — too small and the scatter is clipped flat against
+    // the canvas edge (reads as "zoomed in"), too large and the whole plot sits in
+    // the corner of a mostly-empty frame. Neither is worth preserving once the real
+    // extent is known, and the alternative (keep the guess, verify it) needs a
+    // magic "close enough" threshold to decide. The cloud is complete here, so one
+    // honest re-measure is both cheaper to reason about and always right; the only
+    // cost is a single axis settle at the end of a multi-second run.
+    mptRender();
     mptRenderSide();
     // The legend mptRenderSide() just wrote shortens the chart host; re-lock the
     // canvas height so the x-axis isn't left clipped for the life of the run.
@@ -8335,12 +8330,9 @@ function mptClearChart() {
    up ~22px shorter than when mptRenderChart() measured and locked it — leaving
    the canvas hanging past its container with the x-axis label (drawn at
    cssH − 6) clipped off the bottom. Re-measure and redraw once when that
-   happened. It must be called from BOTH mptRender() and the streaming `done`
-   handler: that handler normally finalises with mptRenderChart({fixedProj}) to
-   avoid the cloud jumping mid-stream, rather than going through mptRender() —
-   unless mptProjFits() finds the streamed domain too small for the completed
-   cloud, in which case the done handler calls mptRender() itself and this pass
-   is a (harmless) no-op re-measure on top of that.
+   happened. mptRender() calls it directly; the streaming `done` handler gets it
+   for free by going through mptRender() too, and the extra pass is a no-op
+   re-measure whenever the legend did not actually change the host's height.
 
    A ResizeObserver would be the reflexive choice and is the wrong one here: its
    delivery is tied to the frame lifecycle, so it is throttled or dropped
@@ -8471,11 +8463,27 @@ function mptComputeProj(d, host, opts = {}) {
   if (!isFinite(xMin)) { xMin = 0; xMax = 0.3; yMin = 0; yMax = 0.2; }
   // Floor the y-domain at the rf that actually produced this frontier (from the
   // run payload), not the live control — the two can differ after a restore.
+  //
+  // Bounded, though: rf is a reference line, not data, and it must not be
+  // allowed to own the frame. A tightly-constrained book (the reported case
+  // pinned 80% of the weight, leaving every feasible portfolio between 25% and
+  // 29% return) against a 4.5% rf spent ~85% of the height on empty space and
+  // squeezed the whole frontier into a sliver at the top. Let rf pull the floor
+  // down by at most half the data's own span; past that it just isn't drawn —
+  // drawAxes already skips the line when it falls outside the domain. Wide
+  // unconstrained runs are unaffected: their span is large enough that rf still
+  // sits inside the allowance, exactly as before.
   const rf = Number(d.params?.rf) || 0;
-  yMin = Math.min(yMin, rf);
-  // Streaming: reserve x-space to the right for the cloud (concentrated single-
-  // asset portfolios sit at higher CVaR than the efficient frontier).
-  if (opts.cloudRoom) { const span = (xMax - xMin) || 0.01; xMax = xMin + span * 1.6; }
+  const ySpanData = (yMax - yMin) || 0.01;
+  yMin = Math.max(Math.min(yMin, rf), yMin - ySpanData * 0.5);
+  // Streaming: reserve a little x-space to the right for the cloud. Dominated
+  // corners (high CVaR, unremarkable return) can sit past the frontier's own
+  // max-CVaR point, so some headroom keeps the scatter from painting into the
+  // edge while it fills. It stays modest because the cloud is now sampled inside
+  // the same box the frontier was solved in, so the two spans are close; the
+  // `done` handler re-measures against the finished cloud regardless, making this
+  // purely a transient frame rather than the run's final geometry.
+  if (opts.cloudRoom) { const span = (xMax - xMin) || 0.01; xMax = xMin + span * 1.25; }
   const dx = (xMax - xMin) * 0.06 || 0.01;
   const dy = (yMax - yMin) * 0.08 || 0.01;
   xMin = Math.max(0, xMin - dx); xMax += dx; yMin -= dy; yMax += dy;
@@ -8483,26 +8491,6 @@ function mptComputeProj(d, host, opts = {}) {
   const yToPx = r => cssH - pad.b - (r - yMin) / (yMax - yMin) * (cssH - pad.t - pad.b);
   return {xMin, xMax, yMin, yMax, pad, cssW, cssH, dpr,
           X: xToPx, Y: yToPx, toPx: (v, r) => [xToPx(v), yToPx(r)]};
-}
-
-// Does every real data point (cloud + frontier + anchors) fall inside proj's
-// domain? Used to sanity-check a domain that was fixed BEFORE the data it now
-// has to hold existed (the streaming cloudRoom guess) — a mismatch means
-// points are being silently clipped at the canvas edge rather than drawn.
-function mptProjFits(proj, d) {
-  const {xMin, xMax, yMin, yMax} = proj;
-  const inX = (v) => v == null || !isFinite(v) || (v >= xMin && v <= xMax);
-  const inY = (v) => v == null || !isFinite(v) || (v >= yMin && v <= yMax);
-  for (const p of (d.cloud || [])) {
-    if (!inX(p[0]) || !inY(p[1])) return false;
-  }
-  for (const p of (d.frontier || [])) {
-    if (!inX(mptCvar(p)) || !inX(mptCvarLo(p)) || !inX(mptCvarHi(p)) || !inY(p.ret)) return false;
-  }
-  for (const a of Object.values(d.anchors || {})) {
-    if (a && (!inX(mptCvar(a)) || !inY(a.ret))) return false;
-  }
-  return true;
 }
 
 // Return-gradient color factory (viridis-like) over the projection's y-domain —
