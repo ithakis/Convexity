@@ -160,8 +160,9 @@ Results (fill after run): see `ml/data/reports/validation_report.json`.
 
 ## 9. Production (mlsent-v1.1)
 
-`convexity/ml_sentiment.py` loads `~/.convexity/ml_model/
-mlsent-v1.1/` (env `MLSENT_MODEL_DIR`) behind a schema gate. Per refresh, per
+`convexity/ml_sentiment.py` loads `<data>/models/mlsent-v1.1/` (the user data
+folder, `convexity/paths.py`; env `MLSENT_MODEL_DIR`; pre-1.14 location
+`~/.convexity/ml_model/` as a one-release fallback) behind a schema gate. Per refresh, per
 ticker: the 7-day window's articles, capped with `relevance.window_sample(60,
 15)`, go through the v1 encoder (one batched predict); the score is
 `ml_features.weighted_sar` — the recency (τ=3d) × source-tier × novelty ×

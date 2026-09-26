@@ -9,7 +9,7 @@ gates and has no export path: the app cannot serve it
 feature_schema.json is regenerated from convexity.ml_features here,
 so the bundle states the exact feature contract the app verifies on load.
 meta.json records provenance and the tier-cut verification. With --deploy the
-bundle is copied to ~/.convexity/ml_model/mlsent-v1.1/ (or
+bundle is copied to <data>/models/mlsent-v1.1/ (convexity/paths.py; or
 MLSENT_MODEL_DIR), where convexity.ml_sentiment loads it.
 
 Usage:
@@ -78,8 +78,9 @@ def main() -> None:
     print(json.dumps({"bundle": str(out), "files_mb": sizes}, indent=2), flush=True)
 
     if args.deploy:
+        from convexity import paths
         dst = Path(os.environ.get("MLSENT_MODEL_DIR")
-                   or Path.home() / ".convexity" / "ml_model" / version)
+                   or paths.models_dir() / version)
         dst.mkdir(parents=True, exist_ok=True)
         for f in required:
             shutil.copy2(out / f, dst / f)

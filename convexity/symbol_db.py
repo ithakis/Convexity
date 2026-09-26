@@ -44,6 +44,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from convexity import paths
+
 try:
     from rapidfuzz import fuzz, process as rf_process
     _HAS_RAPIDFUZZ = True
@@ -54,9 +56,9 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 _PROVIDER = "yfinance"
-# Repo root, not the package dir — build_symbol_db.py writes the built DB
-# next to dashboard.py, and CLAUDE.md's file layout documents it there too.
-_DB_PATH = Path(__file__).resolve().parent.parent / "symbol_db.sqlite"
+# In the user data dir (convexity/paths.py), not beside the code: an installed
+# package has no repo root. build_symbol_db.py writes it there by default.
+_DB_PATH = paths.symbol_db_file()
 _DB_LOCK = threading.Lock()
 _NAME_NORM_RE = re.compile(r"[^a-z0-9]+")
 
@@ -81,11 +83,27 @@ class LookupHit:
     score: float          # 0..100, higher is closer
 
 
-def db_path() -> Path:
-    """Resolve the SQLite path. ``PORTFOLIO_SYMBOL_DB`` env var overrides
-    the default location — useful for tests / alt providers."""
+def write_path() -> Path:
+    """Where the builder writes: ``PORTFOLIO_SYMBOL_DB`` or the data dir.
+    Never the legacy location, so a rebuild always lands in the new place."""
     env = os.environ.get("PORTFOLIO_SYMBOL_DB")
     return Path(env) if env else _DB_PATH
+
+
+def db_path() -> Path:
+    """Resolve the SQLite path to read. ``PORTFOLIO_SYMBOL_DB`` env var
+    overrides the default location — useful for tests / alt providers.
+
+    Falls back (logged once) to a pre-1.14 ``symbol_db.sqlite`` in the checkout
+    root while it has not been migrated yet; kept for one release."""
+    p = write_path()
+    if os.environ.get("PORTFOLIO_SYMBOL_DB") or p.exists():
+        return p
+    legacy = paths.legacy_root() / "symbol_db.sqlite"
+    if legacy.exists():
+        paths.note_legacy("symbol_db.sqlite", legacy)
+        return legacy
+    return p
 
 
 def _connect(path: Optional[Path] = None) -> sqlite3.Connection:
@@ -133,6 +151,7 @@ def normalize_name(s: str) -> str:
 
 def init_db(path: Optional[Path] = None) -> None:
     """Create the schema if missing. Idempotent."""
+    (path or db_path()).parent.mkdir(parents=True, exist_ok=True)
     with _connect(path) as conn:
         _ensure_schema(conn)
 

@@ -88,10 +88,10 @@ def _setup_logging() -> Path:
     """Timestamped boot log, overwritten each launch — the launcher runs
     windowless (no terminal), so this file is the only way to see what the
     app did and how long each boot stage took."""
-    if sys.platform == "darwin":
-        log_path = Path.home() / "Library" / "Logs" / "Convexity.log"
-    else:
-        log_path = Path.home() / ".convexity_desktop.log"
+    # <data>/logs/ on every OS (paths.py). It honours CONVEXITY_HOME, so a
+    # dev/test launch can never truncate a running app's log (filemode="w").
+    from convexity import paths
+    log_path = paths.logs_dir() / "desktop.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         filename=str(log_path),

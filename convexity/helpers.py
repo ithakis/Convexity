@@ -26,25 +26,57 @@ def _repo_root() -> Path:
     return current.parent
 
 
-def _load_local_secret(env_var: str, filename: str) -> str:
-    """Resolve a secret: env var first, then a strictly-local file.
+# config.json key for each env var. Phase 6 (Settings -> API keys) writes
+# this file; until then it can be created by hand (mode 0600).
+_CONFIG_KEYS = {
+    "FINNHUB_API_KEY": "finnhub_api_key",
+    "NVIDIA_API_KEY": "nvidia_api_key",
+}
 
-    Order: ``env_var`` first, then ``filename`` found by walking upward from
-    this module's directory (NOT via ``_repo_root()`` — a worktree run needs
-    the key from the worktree checkout itself, which ``_repo_root()``'s
-    ``.git``-boundary search would skip past). Shared by finnhub_adapter.py
-    and news_sentiment.py so both modules resolve secrets identically instead
-    of maintaining two independently-drifting copies of this walk-up loop.
+
+def _config_secret(env_var: str) -> str:
+    key = _CONFIG_KEYS.get(env_var)
+    if not key:
+        return ""
+    from convexity import paths
+    try:
+        data = json.loads(paths.config_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    val = data.get(key) if isinstance(data, dict) else None
+    return val.strip() if isinstance(val, str) else ""
+
+
+def _load_local_secret(env_var: str, filename: str) -> str:
+    """Resolve a secret: env var, then ``config.json`` in the data dir, then a
+    legacy key file.
+
+    The legacy step finds ``filename`` by walking upward from this module's
+    directory (NOT via ``_repo_root()`` — a worktree run needs the key from
+    the worktree checkout itself, which ``_repo_root()``'s ``.git``-boundary
+    search would skip past). It is kept for one release (1.14) and logged when
+    used — by name only, never the value. Shared by finnhub_adapter.py and
+    news_sentiment.py so both resolve secrets identically.
     """
     env = os.environ.get(env_var, "").strip()
     if env:
         return env
+    cfg = _config_secret(env_var)
+    if cfg:
+        return cfg
     search = Path(__file__).resolve().parent
     for _ in range(6):
         try:
             p = search / filename
             if p.is_file():
-                return p.read_text(encoding="utf-8").strip()
+                val = p.read_text(encoding="utf-8").strip()
+                if val:
+                    from convexity import paths
+                    paths.note_legacy(
+                        f"key file {filename}", p,
+                        f"move it to {paths.config_file().name} "
+                        f"(\"{_CONFIG_KEYS.get(env_var, '?')}\") or set {env_var}")
+                return val
         except Exception:
             pass
         search = search.parent

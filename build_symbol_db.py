@@ -41,8 +41,9 @@ def main() -> int:
              f"Available: {','.join(sdb.SOURCES.keys())}. Default: all.",
     )
     ap.add_argument(
-        "--db", default=str(sdb.db_path()),
-        help="Output SQLite path. Default: ./symbol_db.sqlite",
+        "--db", default=str(sdb.write_path()),
+        help="Output SQLite path. Default: symbol_db.sqlite in the Convexity "
+             "data folder (CONVEXITY_HOME / PORTFOLIO_SYMBOL_DB override).",
     )
     args = ap.parse_args()
 

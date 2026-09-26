@@ -30,7 +30,7 @@ available() False and every call return None — the News read is unaffected.
 Graceful must not mean SILENT: runtime_status() reports the real reason and
 the Track record surfaces it.
 
-Artifact bundle (ml/scripts/07 + 09 + 10), ~/.convexity/ml_model/<ver>/:
+Artifact bundle (ml/scripts/07 + 09 + 10), <data>/models/<ver>/ (paths.py):
     model.lgbm.txt        encoder Booster
     idf.npy, col_mask.npy train-fitted idf + df-pruning column mask
     feature_schema.json   must equal ml_features.feature_schema()
@@ -46,6 +46,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from convexity import paths
 
 ARTIFACT_VERSION = "mlsent-v1.1"
 
@@ -74,10 +76,22 @@ except Exception:  # pragma: no cover
 
 
 def model_dir() -> Path:
+    """``MLSENT_MODEL_DIR``, else ``<data>/models/<version>`` (paths.py).
+
+    One-release fallback (logged once): the pre-1.14 ``~/.convexity/ml_model``
+    location, until migrate.py has moved it. When neither exists the data-dir
+    path is returned, so the "missing artifact" reason names the new place."""
     env = os.environ.get("MLSENT_MODEL_DIR")
     if env:
         return Path(env)
-    return Path.home() / ".convexity" / "ml_model" / ARTIFACT_VERSION
+    new = paths.models_dir() / ARTIFACT_VERSION
+    if new.exists():
+        return new
+    legacy = paths.legacy_model_root() / ARTIFACT_VERSION
+    if legacy.exists():
+        paths.note_legacy("ML model dir", legacy)
+        return legacy
+    return new
 
 
 def _load() -> dict:

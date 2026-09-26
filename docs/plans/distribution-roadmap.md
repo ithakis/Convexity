@@ -120,7 +120,52 @@ Done when: `uv run pytest` passes locally and in CI; the app runs from
 Goal: an installed package never writes next to its own code. Required before
 `uv tool install` can work. Depends on: Phase 2.
 
-- [ ] New `convexity/paths.py` — single source of truth:
+**Done 2026-09-26** — committed on the `distribution` branch, no version bump.
+Your real data is **not** migrated yet (see the last bullet). Deviations and
+findings:
+- Names (your choice): `state/views.json` etc. — dot **and** `convexity_`
+  prefix dropped. The desktop log moved to `<data>/logs/desktop.log` on every
+  OS (was `~/Library/Logs/Convexity.log`), so a test launch can never truncate
+  a running app's log. `symbol_db.sqlite` moved to the data folder.
+- Migration is stricter than "never overwrite a newer file": it never
+  overwrites **any** existing destination. Identical ⇒ the old copy is removed
+  (a crash between copy and remove); different ⇒ both kept, logged CONFLICT.
+  The source is re-hashed right before removal, so a write that lands during
+  migration is never lost. Model dirs are staged and renamed in one step.
+- **Incident during development (fixed):** migration first ran on *any*
+  `import convexity`. `scripts/check_dependency_manifests.py`, run without
+  `CONVEXITY_HOME`, migrated the real data while the two `pt` apps (old code)
+  were running. Everything was SHA-256 verified; I copied it all back
+  (19 files, byte-identical to a snapshot taken minutes earlier) and removed
+  the data folder ~3 minutes later; the apps wrote nothing in between. Now only
+  an app launch migrates (`convexity._launched_as_app`), covered by a test.
+- Gate (not in the plan): with `CONVEXITY_HOME` set, nothing migrates unless
+  `CONVEXITY_LEGACY_ROOT` / `CONVEXITY_LEGACY_HOME` name the source. Without it
+  a temp-dir dev run would have emptied the real checkout. Added
+  `python -m convexity.migrate --dry-run`.
+- Keys are **not** migrated into `config.json` (Phase 6 writes it); the old key
+  files are never deleted and remain a logged fallback. Same for
+  `~/.convexity/ml_model` and a checkout-root `symbol_db.sqlite` while not
+  migrated.
+- `tests/conftest.py` also sets `PORTFOLIO_SYMBOL_DB`: the symbol-DB fallback
+  otherwise opened the checkout's real DB (SQLite touches `-shm` even
+  read-only). Tests still *read* `~/.convexity/ml_model` so the model tests run.
+- Known bug fixed and verified: a wheel installed with `uv pip install` wrote
+  `.convexity_watchlists.json` into `site-packages/convexity/` (reproduced on
+  the pre-change build); now it lands in the data folder, and the migration
+  rescues the stray file (its "legacy root" is the package dir).
+- Verified at runtime: fresh clone + `uv run convexity` with a temp
+  `CONVEXITY_HOME` (a saved portfolio lands in `state/`; `git status --ignored`
+  gains only `convexity/__pycache__/`); the wheel check; the migration on a
+  **copy** of the real state (19 files, 0 SHA-256 mismatches, second run a
+  no-op, all 10 portfolios in the UI, model loaded from `models/`);
+  `uv run convexity-app` boots, ML available.
+- [ ] **Still to do, with the user:** migrate the real data. Stop both `pt`
+      processes, back up the checkout's `.convexity_*.json` + `symbol_db.sqlite`
+      + `~/.convexity/ml_model`, launch once, verify. The next launch of this
+      code without `CONVEXITY_HOME` does it automatically.
+
+- [x] New `convexity/paths.py` — single source of truth:
   - data dir: macOS `~/Library/Application Support/Convexity/`,
     Windows `%APPDATA%\Convexity\`, Linux `$XDG_DATA_HOME/convexity`
     (default `~/.local/share/convexity`). Env override `CONVEXITY_HOME`.
@@ -128,20 +173,22 @@ Goal: an installed package never writes next to its own code. Required before
     `models/` (replaces `~/.convexity/ml_model/`), `symbol_db.sqlite`,
     `config.json` (API keys), `logs/`.
   - Stdlib only (no `platformdirs` dependency needed).
-- [ ] Point every consumer at it: `persistence.py` (`_repo_root()` uses),
+- [x] Point every consumer at it: `persistence.py` (`_repo_root()` uses),
       `news_sentiment.py` cache/history files, `symbol_db.py._DB_PATH`,
       `relevance.py`, `ml_sentiment.py` model dir (keep `MLSENT_MODEL_DIR`
       override), `desktop.py` log path, `build_symbol_db.py` default output.
-- [ ] Keys: `helpers._load_local_secret` order becomes env var → `config.json`
+      Also `ml/scripts/10_export_artifact.py --deploy` and the key-missing
+      messages in the UI.
+- [x] Keys: `helpers._load_local_secret` order becomes env var → `config.json`
       in the data dir → legacy key file found by walking up (keep for one
       release).
-- [ ] Extend `migrate.py`: on first launch, **copy then verify then remove**
+- [x] Extend `migrate.py`: on first launch, **copy then verify then remove**
       repo-root state files and `~/.convexity/ml_model/` into the new
       locations. Never overwrite a newer file. Log every move. Add tests in
       `tests/test_migrate.py` (tmp dirs only).
-- [ ] Tests must never touch the real data dir: a pytest fixture sets
+- [x] Tests must never touch the real data dir: a pytest fixture sets
       `CONVEXITY_HOME` to a tmp path (autouse, in `tests/conftest.py`).
-- [ ] Update CLAUDE.md §2 (file layout), §4 (persistence), §18.
+- [x] Update CLAUDE.md §2 (file layout), §4 (persistence), §18.
 
 Done when: a fresh checkout + `uv run convexity` creates the data dir, your
 existing portfolios appear after migration, and the repo folder stays clean

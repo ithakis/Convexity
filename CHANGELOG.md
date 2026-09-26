@@ -15,6 +15,11 @@ Distribution work, roadmap Phases 2–4 (`distribution` branch). The version is 
 - `scripts/check_dependency_manifests.py` checks `envcheck.REQUIRED` against `pyproject.toml`, plus the deprecated files while they exist.
 - `requirements.txt` / `environment.yml` are deprecated and kept for one release so existing conda installs can still `./update.sh`. Nothing changes for them.
 - Documented: lightgbm from PyPI needs Homebrew `libomp` on macOS (conda-forge's build does not).
+- **User data moved out of the repo folder** (Phase 3). New `convexity/paths.py`: a per-user data folder — macOS `~/Library/Application Support/Convexity/`, Windows `%APPDATA%\Convexity\`, Linux `$XDG_DATA_HOME/convexity/`; `CONVEXITY_HOME` overrides. Inside: `state/*.json` (views, watchlists, mpt, column_views, news, sentiment_history — the old `.convexity_*.json`), `models/<version>/` (was `~/.convexity/ml_model/`), `symbol_db.sqlite`, `config.json` (API keys) and `logs/desktop.log` (was `~/Library/Logs/Convexity.log`).
+- Fixes: an installed wheel (`uv pip install`) wrote the user's watchlists into `site-packages/convexity/`, where an upgrade would delete them. The migration rescues such a file.
+- **Automatic migration on first launch of the app** (`convexity/migrate.py`; a plain `import convexity` never migrates): copy → verify size + SHA-256 → remove the old file. Never overwrites an existing destination, safe to interrupt and to re-run, never fatal. `python -m convexity.migrate --dry-run` shows what it would move. With `CONVEXITY_HOME` set it migrates nothing unless `CONVEXITY_LEGACY_ROOT` / `CONVEXITY_LEGACY_HOME` name the source.
+- API keys: environment variable → `config.json` (`finnhub_api_key`, `nvidia_api_key`) → the old `.finnhub_key` / `.nvidia_key` files, which keep working for this release (logged when used, never deleted). The old model folder and a checkout-root `symbol_db.sqlite` also stay readable as logged fallbacks.
+- Tests always run against a temp data folder (`tests/conftest.py`).
 
 ## 1.13.1 — 2026-09-26
 

@@ -6590,8 +6590,8 @@ function setNewsUpdatedLabel(marketSentiment, portfolioSentiment) {
 /* Why a card is empty — names the real cause instead of "check API keys". */
 function nsKeyDiagnostic(status) {
   if (!status) return "Refresh to read the news.";
-  if (!status.finnhub_key_set) return "Finnhub key missing — add .finnhub_key beside dashboard.py.";
-  if (!status.nvidia_key_set) return "NVIDIA key missing — add .nvidia_key beside dashboard.py.";
+  if (!status.finnhub_key_set) return "Finnhub key missing — add finnhub_api_key to config.json in the data folder (or FINNHUB_API_KEY).";
+  if (!status.nvidia_key_set) return "NVIDIA key missing — add nvidia_api_key to config.json in the data folder (or NVIDIA_API_KEY).";
   if (status.llm_ok === false) return `News read unavailable: ${status.llm_error || "unknown"}.`;
   if (status.finnhub_backoff_s > 0) {
     return `Finnhub rate-limited — retry in ~${status.finnhub_backoff_s}s.`;
@@ -10064,7 +10064,9 @@ function renderSettingsModels(el) {
       ${kv("NVIDIA NIM (News read)", yn(keys.nvidia_key_set))}
       ${kv("LM lexicon (Market read feature)", keys.lexicon_available ? "loaded" : "unavailable")}
     </div>
-    <div class="settings-row-help">Keys are read from environment variables or the
+    <div class="settings-row-help">Keys are read from environment variables, then
+      <code>config.json</code> in the data folder (<code>finnhub_api_key</code>,
+      <code>nvidia_api_key</code>), then — for this release only — the legacy
       <code>.finnhub_key</code> / <code>.nvidia_key</code> files beside the app. Only
       whether they were found is shown here — never their values.</div>`;
 

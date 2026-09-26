@@ -155,12 +155,12 @@ def window_sample(articles: list[dict], cap: int, min_recent: int) -> list[dict]
 
 # ------------------------------------------------------------------ company names
 def _find_symbol_db() -> Path | None:
-    here = Path(__file__).resolve().parent
-    for base in (here.parent, *here.parent.parents):
-        p = base / "symbol_db.sqlite"
-        if p.exists():
-            return p
-    return None
+    # Same resolution as the resolver (data dir, PORTFOLIO_SYMBOL_DB, legacy
+    # checkout-root fallback). Location only — the table's content, and so
+    # train/serve parity, is unaffected.
+    from convexity import symbol_db
+    p = symbol_db.db_path()
+    return p if p.exists() else None
 
 
 @lru_cache(maxsize=1)

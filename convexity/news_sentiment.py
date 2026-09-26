@@ -15,7 +15,7 @@ it and derives the `divergence` between the two engines.
 
 The two are peers. There is no blended score and no primary/challenger.
 
-Caches are disk-backed (`.convexity_news.json`) and refresh is
+Caches are disk-backed (`<data>/state/news.json`) and refresh is
 user-driven only (the refresh job, jobs.py). Nothing fails silently any more:
 the last LLM outcome is tracked (`llm_status()`), rides on /api/health as
 `llm_ok`, and a failed refresh keeps the previous News read but marks it
@@ -38,10 +38,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from convexity import paths
 from convexity.helpers import (
     _FH_LIMITER, _MAX_RETRIES, _NV_LIMITER, _RATE_LIMIT_BACKOFF_S, _RETRY_SLEEP_S,
     _YF_LIMITER, _YF_MAX_RETRIES, Cancelled, _is_rate_limited_error,
-    _load_local_secret, _notify_rate, _repo_root,
+    _load_local_secret, _notify_rate,
 )
 from convexity.relevance import (DEDUP_SIMILARITY, norm_title, relevance_score,
                                          window_sample)
@@ -180,10 +181,10 @@ def _cache_restore(cache: dict, key: str, entry: tuple[float, float, Any] | None
 
 
 # ---------------------------------------------------------------------------
-# Disk persistence — `.convexity_news.json`
+# Disk persistence — `<data>/state/news.json` (convexity/paths.py)
 # ---------------------------------------------------------------------------
 
-_PERSIST_FILE = _repo_root() / ".convexity_news.json"
+_PERSIST_FILE = paths.state_file("news")
 _PERSIST_LOCK = threading.Lock()
 _persist_timer: threading.Timer | None = None
 _PERSIST_DEBOUNCE_S = 1.0
@@ -222,6 +223,7 @@ def _save_persisted_caches() -> None:
             "llm_status": dict(_LLM_STATUS),
         }, ensure_ascii=True, indent=2)
         with _PERSIST_LOCK:
+            _PERSIST_FILE.parent.mkdir(parents=True, exist_ok=True)
             _PERSIST_FILE.write_text(body + "\n", encoding="utf-8")
     except Exception as exc:
         print(f"[news] failed to persist caches: {exc}", file=sys.stderr)
@@ -752,7 +754,7 @@ def compute_divergence(news: dict | None, market: dict | None,
 # One record per symbol per refresh; same-day re-refresh overwrites.
 # ---------------------------------------------------------------------------
 
-_HISTORY_FILE = _repo_root() / ".convexity_sentiment_history.json"
+_HISTORY_FILE = paths.state_file("sentiment_history")
 _HISTORY_LOCK = threading.Lock()
 _HISTORY_MAX_DAYS = 400
 
@@ -782,6 +784,7 @@ def _history_append(record: dict) -> None:
             cutoff = (datetime.now(timezone.utc)
                       - timedelta(days=_HISTORY_MAX_DAYS)).strftime("%Y-%m-%d")
             records = [r for r in records if (r.get("date") or "") >= cutoff]
+            _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
             _HISTORY_FILE.write_text(
                 json.dumps({"version": 2, "records": records}) + "\n",
                 encoding="utf-8")
@@ -830,7 +833,7 @@ def llm_status() -> dict:
         st = dict(_LLM_STATUS)
     if not NVIDIA_API_KEY:
         st.update({"ok": False, "permanent": True,
-                   "error": "NVIDIA key missing (.nvidia_key or NVIDIA_API_KEY)"})
+                   "error": "NVIDIA key missing (config.json nvidia_api_key or NVIDIA_API_KEY)"})
     return st
 
 
@@ -915,7 +918,7 @@ def _nvidia_call(system_prompt: str, user_content: str, lens_enum: tuple[str, ..
     key: no retry, recorded in llm_status for the banner."""
     global _nv_rate_limit_until
     if not NVIDIA_API_KEY:
-        _llm_record(False, "NVIDIA key missing (.nvidia_key or NVIDIA_API_KEY)", permanent=True)
+        _llm_record(False, "NVIDIA key missing (config.json nvidia_api_key or NVIDIA_API_KEY)", permanent=True)
         return None
     _ck(cancel)
     _wait_for_circuit_breaker("NVIDIA NIM", "_nv_rate_limit_until", cancel=cancel)

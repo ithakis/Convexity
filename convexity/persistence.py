@@ -9,7 +9,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from convexity.helpers import _dedupe_rows_by_symbol, _json_default, _repo_root
+from convexity import paths
+from convexity.helpers import _dedupe_rows_by_symbol, _json_default
 
 
 def _atomic_write(path: Path, body: str) -> None:
@@ -41,11 +42,13 @@ def _atomic_write(path: Path, body: str) -> None:
 
 # ----------------------------- File paths -----------------------------------
 
-_WATCHLISTS_FILE = _repo_root() / ".convexity_watchlists.json"
-_VIEWS_FILE = _repo_root() / ".convexity_views.json"
-_LEGACY_SESSION_FILE = _repo_root() / ".convexity_session.json"
-_MPT_FILE = _repo_root() / ".convexity_mpt.json"
-_COLUMN_VIEWS_FILE = _repo_root() / ".convexity_column_views.json"
+# All under <data>/state/ (convexity/paths.py) — never next to the code. The
+# pre-1.14 repo-root ``.convexity_*.json`` files are moved here by migrate.py.
+_WATCHLISTS_FILE = paths.state_file("watchlists")
+_VIEWS_FILE = paths.state_file("views")
+_LEGACY_SESSION_FILE = paths.state_file("session")
+_MPT_FILE = paths.state_file("mpt")
+_COLUMN_VIEWS_FILE = paths.state_file("column_views")
 
 # ----------------------------- Locks ----------------------------------------
 
