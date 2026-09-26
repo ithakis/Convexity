@@ -43,41 +43,40 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: "3.11"
+          enable-cache: true
 
-      # Install only the deps needed for static analysis (fast).
-      # Full yfinance / numba stack is skipped here — it's slow to install
-      # and not needed for syntax/import checks.
-      - name: Install analysis dependencies
-        run: pip install pyflakes
+      # No `uv sync` here: the full yfinance / numba stack is not needed for
+      # syntax/manifest checks. --no-project runs on the pinned .python-version
+      # interpreter without installing the project.
 
       # Hard gate: AST parse every Python file. Catches syntax errors that
       # would crash the server on startup. No interpreter quirks — pure grammar.
       - name: Python syntax check (all .py files)
-        run: python scripts/check_syntax.py
+        run: uv run --no-project python scripts/check_syntax.py
 
       # Pyflakes catches undefined names, unused imports, etc.
       - name: Pyflakes on package modules
         run: |
-          python -m pyflakes convexity/*.py build_symbol_db.py scripts/*.py 2>&1 || true
+          uvx pyflakes convexity/*.py build_symbol_db.py scripts/*.py 2>&1 || true
 
-      # The check that would have caught the v1.10.0 bug. requirements.txt (pip,
-      # what CI installs) and environment.yml (conda, what the desktop app's `pt`
-      # env is built from) were never compared, so lightgbm/scikit-learn lived
-      # only in the former — CI ran with a working ML model while every installed
-      # copy ran with a dead one. envcheck.REQUIRED is now the single manifest and
-      # this asserts both files cover it.
+      # The check that would have caught the v1.10.0 bug: two manifests that
+      # were never compared, so lightgbm/scikit-learn lived only in the one CI
+      # used and every installed copy ran with a dead ML model.
+      # envcheck.REQUIRED is the single list; this asserts pyproject.toml covers
+      # it (plus the deprecated requirements.txt/environment.yml while they exist).
       - name: Dependency manifests match envcheck.REQUIRED
-        run: python scripts/check_dependency_manifests.py
+        run: uv run --no-project python scripts/check_dependency_manifests.py
 
-      # Verify the server module is importable (no top-level import errors).
-      - name: Import smoke-test
+      # uv.lock must be solved from the current pyproject.toml.
+      - name: Lockfile is up to date
+        run: uv lock --check
+
+      - name: dashboard.py shim parses
         run: |
-          python -c "import ast; ast.parse(open('dashboard.py').read()); print('dashboard.py shim: parseable')"
-          python -c "from convexity import mpt" 2>&1 | grep -v "numba\|llvmlite\|NumbaPendingDeprecation" || true
+          uv run --no-project python -c "import ast; ast.parse(open('dashboard.py').read()); print('dashboard.py shim: parseable')"
 
       # install.ps1/update.ps1 are a file type this project didn't have
       # before (Windows bootstrap scripts) — CLAUDE.md's own convention says
@@ -108,16 +107,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: "3.11"
+          enable-cache: true
 
-      - name: Install test dependencies
-        run: pip install pytest -r requirements.txt
+      # --locked: install exactly uv.lock; fail if it is stale vs pyproject.toml.
+      - name: Install dependencies (locked)
+        run: uv sync --locked --extra dev
 
       - name: Run pytest
-        run: pytest tests/ -v --tb=short
+        run: uv run pytest tests/ -v --tb=short
 
   server-smoke:
     name: Server smoke test (real HTTP requests, not just imports)
@@ -127,19 +127,19 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: "3.11"
+          enable-cache: true
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install dependencies (locked)
+        run: uv sync --locked
 
       # Actually starts the HTTP server (same start_server() the browser and
       # desktop apps use) and hits real routes — proves the app boots and
       # serves, not just that the files parse. See scripts/smoke_test_server.py.
       - name: Start server and hit real routes
-        run: python scripts/smoke_test_server.py
+        run: uv run python scripts/smoke_test_server.py
 
   desktop-import-smoke:
     name: Desktop app import (PySide6 + QtWebEngine, headless)
@@ -149,13 +149,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: "3.11"
+          enable-cache: true
 
-      - name: Install dependencies (+ PySide6)
-        run: pip install -r requirements.txt PySide6
+      - name: Install dependencies (locked, + desktop extra)
+        run: uv sync --locked --extra desktop
 
       # The bare ubuntu-latest runner has no GPU/graphics stack at all — not
       # even libEGL, which Qt6 needs to construct a QApplication regardless
@@ -190,7 +190,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          python -c "
+          uv run python -c "
           from PySide6.QtWidgets import QApplication
           app = QApplication([])
           import convexity.desktop

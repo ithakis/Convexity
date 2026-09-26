@@ -5,6 +5,17 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `convexity/__init__.py`
 when merging a PR and add a line here.
 
+## Unreleased (1.14.0)
+
+Distribution work, roadmap Phases 2–4 (`distribution` branch). The version is bumped when Phase 4 lands.
+
+- **`pyproject.toml` is the dependency manifest** (hatchling, version read from `convexity/__init__.py`), with a committed `uv.lock`. Extras: `desktop` (PySide6), `dev` (pytest, ruff, pyflakes), `train` (duckdb, flaml). Python 3.11–3.14 (the test suite passes on 3.11 and 3.14).
+- **Entry points:** `convexity` (browser mode) and `convexity-app` (desktop window) — `uv sync --extra desktop && uv run convexity-app`.
+- CI installs through uv from the lockfile (`uv sync --locked`) and fails when `uv.lock` is stale.
+- `scripts/check_dependency_manifests.py` checks `envcheck.REQUIRED` against `pyproject.toml`, plus the deprecated files while they exist.
+- `requirements.txt` / `environment.yml` are deprecated and kept for one release so existing conda installs can still `./update.sh`. Nothing changes for them.
+- Documented: lightgbm from PyPI needs Homebrew `libomp` on macOS (conda-forge's build does not).
+
 ## 1.13.1 — 2026-09-26
 
 Housekeeping before the distribution work (roadmap Phase 1, `distribution` branch). No app behaviour changes.

@@ -62,7 +62,27 @@ Done when: CI green, no references to the retired wishlist file remain.
 Goal: one dependency manifest, a lockfile, and real entry-point commands.
 Depends on: Phase 1.
 
-- [ ] Add `pyproject.toml` (PEP 621, build backend `hatchling`):
+**Done 2026-09-26** — committed on the `distribution` branch, no version bump
+(1.14.0 is cut when Phase 4 lands; CHANGELOG has an "Unreleased" section).
+Findings:
+- Upper bound is `<3.15`, not `<3.14`: numba 0.67 / llvmlite 0.49 ship cp314
+  wheels, lightgbm is `py3`, PySide6 is abi3. The full suite passes on 3.11
+  and 3.14. `.python-version` pins 3.11 for dev and CI.
+- `dev` extra omits scipy: it is a runtime dependency (`envcheck.REQUIRED`,
+  scipy.sparse in the ML featurizer), so it is already in `dependencies`.
+- The manifest check still also checks requirements.txt/environment.yml while
+  they exist (update.sh still builds `pt` from them); it drops them
+  automatically once Phase 4 deletes the files.
+- **libomp: yes, needed.** The PyPI lightgbm wheel loads `@rpath/libomp.dylib`
+  from Homebrew/MacPorts rpaths only; sklearn's bundled copy does not satisfy
+  it. Tested by pointing the rpaths at a nonexistent path, since this Mac has
+  Homebrew libomp installed. Documented in CLAUDE.md §4. Today's conda
+  install.sh is unaffected (conda-forge bundles llvm-openmp), so the check
+  moves to Phase 4.
+- Gotcha hit once: `.venv` files flagged macOS-`hidden` made Qt skip its
+  cocoa plugin (CLAUDE.md §3).
+
+- [x] Add `pyproject.toml` (PEP 621, build backend `hatchling`):
   - `name = "convexity"`, dynamic version read from `convexity/__init__.py`.
   - `requires-python = ">=3.11"` (verify numba/lightgbm/PySide6 wheels for the
     upper bound and pin it, e.g. `<3.14`).
@@ -74,19 +94,19 @@ Depends on: Phase 1.
   - `[project.gui-scripts] convexity-app = "convexity.desktop:main"`
     (add a `main()` to `desktop.py` if it has none).
   - Package data: `convexity/static/*`, `convexity/data/*` (lm_lexicon.json).
-- [ ] `uv lock` and commit `uv.lock`.
-- [ ] `scripts/check_dependency_manifests.py`: check `envcheck.REQUIRED`
+- [x] `uv lock` and commit `uv.lock`.
+- [x] `scripts/check_dependency_manifests.py`: check `envcheck.REQUIRED`
       against `pyproject.toml` instead of requirements.txt/environment.yml.
-- [ ] CI: `astral-sh/setup-uv` pinned to a commit SHA; jobs use
+- [x] CI: `astral-sh/setup-uv` pinned to a commit SHA; jobs use
       `uv sync --locked --extra dev` and `uv run pytest`. Desktop smoke job
       adds `--extra desktop`.
-- [ ] Keep `requirements.txt` / `environment.yml` for **one** release with a
+- [x] Keep `requirements.txt` / `environment.yml` for **one** release with a
       header comment "deprecated, see pyproject.toml" (so existing installs can
       still `update.sh`), then delete in Phase 4.
-- [ ] Verify on this Mac: `uv sync --extra desktop && uv run convexity-app`
+- [x] Verify on this Mac: `uv sync --extra desktop && uv run convexity-app`
       opens the app, ML runtime status is OK
       (`uv run python -c "from convexity import ml_sentiment as m; print(m.runtime_status())"`).
-- [ ] **Check lightgbm on macOS**: confirm the PyPI wheel works without
+- [x] **Check lightgbm on macOS**: confirm the PyPI wheel works without
       Homebrew `libomp` on a clean machine/user account. If it needs libomp,
       document it and have `install.sh` check for it.
 
@@ -139,6 +159,9 @@ Depends on: Phases 2–3.
      (pinned to the latest release tag, not `main`);
   3. build `Convexity.app` whose launcher execs the `convexity-app` command;
      generate `icon.icns` as today (icon is shipped as package data).
+- [ ] `install.sh` (macOS): check for Homebrew `libomp` before installing
+      (the PyPI lightgbm wheel needs it; found in Phase 2) and tell the user to
+      `brew install libomp`, or offer to run it, when it is missing.
 - [ ] `install.ps1`: same with the PowerShell uv installer, shortcuts point at
       `convexity-app.exe`. Keep `Assert-Success` after every native call.
 - [ ] `update.sh` / `update.ps1` → `uv tool upgrade convexity` (or reinstall at

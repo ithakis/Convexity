@@ -1,3 +1,9 @@
+# DEPRECATED — see pyproject.toml (the single dependency manifest since v1.14,
+# locked in uv.lock; dev setup: `uv sync --extra dev`). Kept for one release so
+# existing installs can still ./update.sh; removed in Phase 4 of
+# docs/plans/distribution-roadmap.md. Keep in sync until then —
+# scripts/check_dependency_manifests.py still checks it.
+#
 yfinance>=1.0.0
 pandas>=2.0.0
 numpy>=1.24.0

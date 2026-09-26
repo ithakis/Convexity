@@ -68,8 +68,11 @@ sub-decision.
 ├── scripts/                      ← Dev scripts (check_syntax.py, smoke_test_server.py, benchmark_news_read.py, …)
 ├── ml/                           ← FNSPID training pipeline for the Market read — docs/ml_sentiment_design.md
 ├── Launch Dashboard.command      ← macOS launcher (activates `pt` conda env, restarts cleanly)
-├── requirements.txt
-├── environment.yml               ← conda/mamba env spec for the desktop app (`pt`) — §14
+├── pyproject.toml                ← THE dependency manifest + entry points (`convexity`, `convexity-app`) — §3, §4
+├── uv.lock                       ← uv lockfile solved from pyproject.toml (CI installs exactly this) — §13
+├── .python-version               ← 3.11, the interpreter `uv` uses for this checkout
+├── requirements.txt              ← DEPRECATED copy of pyproject deps, kept one release (removed in roadmap Phase 4)
+├── environment.yml               ← DEPRECATED conda env spec for the desktop app (`pt`), same — §14
 ├── install.sh / install.ps1      ← Desktop app bootstrap (macOS/Linux / Windows) — §14
 ├── update.sh / update.ps1        ← `git pull` + env sync for an existing desktop-app checkout — §14
 ├── README.md
@@ -113,7 +116,27 @@ committed now can be taken back — see §18 before every commit.
 
 # Or use the launcher (handles existing-pid cleanup, conda activation):
 ./"Launch Dashboard.command"
+
+# uv (v1.14+, the path the distribution roadmap is moving to):
+uv sync --extra dev --extra desktop   # .venv/ from uv.lock
+uv run convexity                      # browser mode (convexity.server:main)
+uv run convexity-app                  # desktop window (convexity.desktop:main)
+uv run pytest
 ```
+
+`pt` stays valid until roadmap Phase 4 retires conda; both envs are built from
+the same dependency list (§4). After editing `pyproject.toml` run `uv lock` —
+CI's `uv sync --locked` and `uv lock --check` fail on a stale lockfile.
+
+**`.venv` files flagged `hidden` break the desktop app.** Seen once on this Mac
+(2026-09-26, cause not identified — fresh `uv sync`s never reproduced it):
+~4k files inside `.venv` carried the macOS `UF_HIDDEN` flag while the uv cache
+copies did not. Qt's plugin loader skips hidden files, so `uv run convexity-app`
+died with `Could not find the Qt platform plugin "cocoa"` although
+`libqcocoa.dylib` was there. Diagnose with `ls -lO` (look for `hidden`) or
+`find .venv -flags +hidden | wc -l`; fix with `rm -rf .venv && uv sync ...`
+(or `chflags -R nohidden .venv`). `QT_DEBUG_PLUGINS=1` shows Qt scanning the
+right directory and finding nothing.
 
 **QF12 is retired.** The env formerly used to run/test this app has been
 replaced by `pt` (originally created for the desktop app, §14 — it is now
@@ -436,9 +459,21 @@ not reintroduce one; the engines answer different questions.
   `convexity/envcheck.py` is the single runtime-dependency manifest,
   enforced at boot, on `/api/health` (`env_ok` → banner), by
   `install.sh`/`update.sh`, and in CI by `scripts/check_dependency_manifests.py`
-  (every `REQUIRED` entry must be in BOTH `requirements.txt` and
-  `environment.yml`). Verify env fixes **with the `pt` interpreter**:
-  `~/miniforge3/envs/pt/bin/python -c "from convexity import ml_sentiment as m; print(m.runtime_status())"`.
+  (every `REQUIRED` entry must be in `pyproject.toml`'s `[project].dependencies`
+  — not an extra — and, while the deprecated files still exist, in
+  `requirements.txt` and `environment.yml` too). Verify env fixes **with the
+  interpreter that runs the app** — `pt`:
+  `~/miniforge3/envs/pt/bin/python -c "from convexity import ml_sentiment as m; print(m.runtime_status())"`,
+  or `uv run python -c ...` for the uv venv.
+- **lightgbm from PyPI needs Homebrew `libomp` on macOS** (verified
+  2026-09-26, lightgbm 4.7.0): `lib_lightgbm.dylib` loads `@rpath/libomp.dylib`
+  with rpaths `/opt/homebrew/opt/libomp/lib` and `/opt/local/lib/libomp` only.
+  With those rpaths pointed elsewhere the load fails even after importing
+  sklearn, whose bundled `.dylibs/libomp.dylib` does not satisfy it. conda-forge
+  lightgbm (the `pt` env) bundles llvm-openmp and is unaffected. `envcheck`
+  can't see this (it uses `find_spec`), but `ml_sentiment.runtime_status()`
+  reports the failed load. Fix: `brew install libomp`. The uv installer
+  (roadmap Phase 4) must check for it.
   `tests/test_ml_sentiment.py` fails (not skips) on missing deps unless
   `PT_ALLOW_MISSING_ML=1`.
 - Training-only dependencies stay out of `envcheck` and the manifests: DuckDB
@@ -1516,15 +1551,18 @@ is stripped client-side before saving and re-sampled on load.
 ### GitHub Actions (`.github/workflows/ci.yml`)
 
 Runs on every push to `main` or `claude/**` branches and on every PR to
-`main`. Seven jobs, all fast (each well under a couple of minutes) — the
+`main`. Python jobs install through `astral-sh/setup-uv` (SHA-pinned, cache
+on) and `uv sync --locked` from `uv.lock`; `server-smoke` uses the base deps,
+`desktop-import-smoke` adds `--extra desktop`. Only the Windows icon job still
+uses `setup-python` + pip (Pillow is installer-only, not a project dependency). Seven jobs, all fast (each well under a couple of minutes) — the
 first two gate the rest (`needs: [lint, test]`), so a trivial syntax error
 fails in seconds instead of waiting on the platform-specific jobs first:
 
 | Job | Runner | What it proves |
 |---|---|---|
 | `secrets` | ubuntu | gitleaks (checksum-pinned binary) over the **full history**, plus a filename check that no runtime-state / key / `settings.local.json` file exists in any commit — §18. Independent of the others so a leak fails fast |
-| `lint` | ubuntu | Every `.py` parses (`scripts/check_syntax.py`); `pyflakes` on all `convexity/*.py` + `build_symbol_db.py` + `scripts/*.py` (non-blocking); `dashboard.py`/`mpt.py` importable; `install.ps1`/`update.ps1` parse via PowerShell Core's own `Parser.ParseFile` |
-| `test` | ubuntu | `pytest tests/` — the metrics/news-sentiment unit suite |
+| `lint` | ubuntu | Every `.py` parses (`scripts/check_syntax.py`); `pyflakes` on all `convexity/*.py` + `build_symbol_db.py` + `scripts/*.py` (non-blocking); dependency manifests cover `envcheck.REQUIRED`; `uv lock --check` (lockfile matches pyproject); `dashboard.py` parses; `install.ps1`/`update.ps1` parse via PowerShell Core's own `Parser.ParseFile`. Runs `uv run --no-project` — no dependency install |
+| `test` | ubuntu | `uv sync --locked --extra dev` then `uv run pytest tests/` — the full unit suite |
 | `server-smoke` | ubuntu | Real HTTP requests against a real running server (`scripts/smoke_test_server.py`) — `/`, `/api/watchlists`, `/api/views`, `/static/*` must return real 200s with real bodies. This is the answer to "is the app actually working," not just "does it import." |
 | `desktop-import-smoke` | ubuntu | `convexity.desktop` imports cleanly under a real (headless, `QT_QPA_PLATFORM=offscreen`) `QApplication` — catches PySide6/QtWebEngine API breakage the plain lint job can't see, since lint never installs PySide6. Needs a handful of system graphics libraries (`libegl1`, `libgl1`, etc.) installed via `apt-get` first — the bare runner has none, not even for the offscreen platform plugin |
 | `macos-icon-smoke` | **macos-latest** | Runs the exact `sips`/`iconutil` commands `install.sh` uses against the real `icon.png` and confirms a non-empty `.icns` comes out |
@@ -2245,7 +2283,7 @@ GitHub's side needs a GitHub Support request by the owner.
 ### Periodic check (before each release, or when the user asks "is it secure?")
 ```bash
 gitleaks git --redact .                                   # full history
-~/miniforge3/envs/pt/bin/python -m pip_audit -r requirements.txt   # known CVEs (pip install pip-audit)
+uvx pip-audit --disable-pip -r <(uv export --frozen --no-emit-project --all-extras)   # known CVEs in uv.lock
 gh api repos/ithakis/Convexity/secret-scanning/alerts --jq length
 gh api repos/ithakis/Convexity/dependabot/alerts --jq '[.[]|select(.state=="open")]|length'
 ```

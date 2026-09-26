@@ -13,7 +13,9 @@ desktop app installs), and the import sites themselves. They drifted, and
 nothing compared them. REQUIRED below is now the single source of truth:
 
   * scripts/check_dependency_manifests.py asserts (in CI) that every entry here
-    is declared in BOTH requirements.txt and environment.yml.
+    is declared in pyproject.toml's [project].dependencies (the manifest since
+    v1.14 — uv.lock is solved from it), and in the deprecated
+    requirements.txt / environment.yml while those still exist.
   * server.start_server() calls check() at boot and logs a loud block naming
     each missing package and the feature it kills.
   * /api/runtime-status serves check() to the UI (Settings -> Models & Data,
@@ -39,8 +41,8 @@ class Requirement(NamedTuple):
 
     module   — what `import` name to probe (may differ from the package name,
                e.g. scikit-learn -> sklearn).
-    conda    — spec as it must appear in environment.yml.
-    pip      — spec as it must appear in requirements.txt.
+    conda    — spec as it must appear in environment.yml (deprecated).
+    pip      — spec as it must appear in pyproject.toml / requirements.txt.
     feature  — what breaks without it, in the user's language. This is what the
                startup log and the in-app banner show, so keep it concrete.
     critical — True: a core surface is dead without it. False: degraded but the
@@ -143,6 +145,7 @@ def format_report(missing: list[Requirement]) -> str:
         "",
         f"  Interpreter: {sys.executable}",
         "  Fix: run ./update.sh (syncs the conda env to environment.yml),",
+        "       or `uv sync` in a development checkout,",
         "       then fully quit and relaunch the app — a failed model load is",
         "       cached for the process lifetime and will not retry in place.",
         "=" * 72,
