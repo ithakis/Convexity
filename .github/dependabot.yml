@@ -1,0 +1,16 @@
+# Dependabot version updates. Every PR it opens is reviewed by hand like any
+# other change and is never auto-merged (CLAUDE.md §18).
+# The pip entry reads requirements.txt; switch it to the uv ecosystem once
+# pyproject.toml + uv.lock replace it (distribution roadmap, Phase 2).
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

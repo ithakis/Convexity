@@ -43,14 +43,17 @@ Goal: nothing irreplaceable exists in only one place.
 
 Goal: remove stale/public-unfriendly bits before the bigger changes.
 
-- [ ] README: remove "opens the browser automatically" (removed in v1.12.3).
-- [ ] Move `TODO.txt` items into GitHub Issues (labels: `feature`, `idea`),
-      then `git rm TODO.txt` and drop its references in CLAUDE.md §2/§10.
-- [ ] Rename `docs/Finance & Market Data APIs.md` → `docs/market-data-apis.md`
-      (fix links).
-- [ ] Add `.github/dependabot.yml` (pip + github-actions, weekly).
+**Done 2026-09-26** (v1.13.1) — committed on the `distribution` branch.
 
-Done when: CI green, no references to `TODO.txt` remain.
+- [x] README: remove "opens the browser automatically" (removed in v1.12.3).
+- [x] Move the root wishlist file's open items into GitHub Issues (labels
+      `feature`, `idea` — issues #1–#8), then `git rm` it and drop its
+      references in CLAUDE.md §2/§10. Items already shipped were not filed.
+- [x] Rename the market-data API comparison doc → `docs/market-data-apis.md`
+      (no inbound links existed).
+- [x] Add `.github/dependabot.yml` (pip + github-actions, weekly).
+
+Done when: CI green, no references to the retired wishlist file remain.
 
 ---
 

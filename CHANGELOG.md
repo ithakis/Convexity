@@ -5,6 +5,15 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `convexity/__init__.py`
 when merging a PR and add a line here.
 
+## 1.13.1 — 2026-09-26
+
+Housekeeping before the distribution work (roadmap Phase 1, `distribution` branch). No app behaviour changes.
+
+- README no longer claims the launcher opens a browser (removed in v1.12.3); it prints the URL.
+- The root wishlist file is retired: its still-open items are now GitHub Issues (labels `feature` / `idea`); the shipped ones were dropped.
+- `docs/Finance & Market Data APIs.md` renamed to `docs/market-data-apis.md`.
+- `.github/dependabot.yml`: weekly version updates for pip and GitHub Actions (reviewed by hand, never auto-merged).
+
 ## 1.13.0 — 2026-09-26
 
 - **Public repository: `ithakis/Convexity`.** History was rewritten before publication so no runtime state (holdings, watchlists, weights, optimizer runs), local settings or personal email is in any commit; the old private repo is archived.

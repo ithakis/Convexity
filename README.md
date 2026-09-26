@@ -83,7 +83,7 @@ keep working exactly as before — the desktop app is purely additive.
 ### Option A — double-click (macOS)
 
 Double-click **`Launch Dashboard.command`** in Finder.  
-It activates your `pt` conda environment (or falls back to system Python), installs any missing dependencies, and opens the browser automatically.
+It activates your `pt` conda environment (or falls back to system Python), installs any missing dependencies, and starts the server — open the URL it prints.
 
 ### Option B — terminal
 
@@ -94,7 +94,7 @@ pip install -r requirements.txt
 
 # run
 python dashboard.py
-# → opens http://localhost:8765
+# → prints http://127.0.0.1:8765 (open it in any browser)
 ```
 
 ### Option C — conda

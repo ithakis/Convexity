@@ -73,7 +73,6 @@ sub-decision.
 ├── install.sh / install.ps1      ← Desktop app bootstrap (macOS/Linux / Windows) — §14
 ├── update.sh / update.ps1        ← `git pull` + env sync for an existing desktop-app checkout — §14
 ├── README.md
-├── TODO.txt                      ← User's product wishlist (read for context, don't edit)
 ├── CLAUDE.md                     ← This file
 ├── LICENSE
 ├── icon.png                      ← Source icon (512×512 RGBA, transparent glyph) — §14
@@ -1254,10 +1253,12 @@ Two places have the contract documented; keep them in sync:
 
 ## 10. Open work + design intent for upcoming passes
 
-### Open items from user's TODO.txt
-- Natural-language search for companies (would build on `symbol_db.py`)
-- Per-metric tooltips on hover (more analytics now have these; extend further)
-- Improvements to the "contribution by 3y returns" table
+### Open work
+Tracked as GitHub Issues on `ithakis/Convexity` — label `feature` (planned) or
+`idea` (not yet scoped): `gh issue list --label feature` / `--label idea`. The
+old root wishlist file was retired in v1.13.1; file new wishlist items as
+issues, never back into a file. Distribution/packaging work follows
+`docs/plans/distribution-roadmap.md`.
 
 ### Done / archived (don't redo)
 - News v2 (v1.12) — two peer engines (News read with five lenses, Market read
@@ -2231,6 +2232,7 @@ GitHub's side needs a GitHub Support request by the owner.
   artifact, future reference packs) is verified against a SHA-256 pinned in code.
 - Dependencies: only well-known packages, declared in both manifests (§4
   envcheck rule). Review Dependabot PRs like any other change; never auto-merge.
+  Version updates are configured in `.github/dependabot.yml` (pip + github-actions, weekly).
 
 ### GitHub Actions
 - Workflow default `permissions: contents: read`; grant more per job only when
