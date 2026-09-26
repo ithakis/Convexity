@@ -5,6 +5,31 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.12.1 — 2026-09-26
+
+### Repeated tickers no longer break portfolio analytics
+
+- **Portfolio analytics returned HTTP 500 for any portfolio whose saved rows
+  named a ticker twice** (`float() argument must be ... not 'Series'`). The
+  duplicates came from the frontend: `build()` appended streamed rows while a
+  background refresh job was also patching the table, and Cmd/Ctrl+Enter could
+  start a second build past the disabled button. The build then saved the
+  polluted table ("Data Center Builders": 20 rows, 16 names), so the portfolio
+  broke on every load after.
+- **One row per symbol, at every layer.** A new
+  `helpers._dedupe_rows_by_symbol` (keeps the first position; the later row
+  wins; a good row is never replaced by an error row) runs in `save_view`,
+  `load_view` (portfolios already saved with repeats load clean) and the
+  view list's row count. It runs again at the top of the analytics and
+  optimizer entry points, which receive rows straight from the browser.
+  `_bulk_close` and the refresh job's entry parsing drop repeats too.
+- **Only the newest build writes the table.** `build()` now replaces rows by
+  symbol, and a build started after it takes over the table, the save and
+  the analytics request. Refresh-job rows are ignored while a build is
+  filling the table.
+- **Analytics 500s are diagnosable.** Both analytics routes now log the full
+  traceback plus a "rows vs distinct symbols" summary to Settings → Logs.
+
 ## 1.12.0 — 2026-09-26
 
 ### News v2: two reads of the same headlines, never blended

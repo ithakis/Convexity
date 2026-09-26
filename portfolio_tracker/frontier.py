@@ -24,6 +24,7 @@ from portfolio_tracker.cache import _cache_get, _cache_put
 from portfolio_tracker.fx import (
     _apply_fx_to_closes, _fx_latest_close, _norm_ccy_for_fx, fx_rates,
 )
+from portfolio_tracker.helpers import _dedupe_rows_by_symbol
 
 _MPT_LOOKBACK_YF = {"1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}
 _COV_MODELS = ("sample", "ledoit", "ewma")
@@ -282,7 +283,10 @@ def compute_efficient_frontier_stream(
     haircut = float(min(max(haircut, 0.0), 1.0))
     display_ccy = _norm_ccy_for_fx(display_ccy or "USD")
 
-    rows = [r for r in (rows or []) if r and r.get("symbol")]
+    # Deduped before the 2-symbol gate: two rows for one ticker would pass it
+    # and then fail later with a misleading "1 assets" data error (see
+    # helpers._dedupe_rows_by_symbol for why repeats reach us at all).
+    rows = _dedupe_rows_by_symbol([r for r in (rows or []) if r and r.get("symbol")])
     symbols = [str(r["symbol"]) for r in rows]
     if len(symbols) < 2:
         yield {"type": "error", "error": "need at least 2 symbols with price history"}

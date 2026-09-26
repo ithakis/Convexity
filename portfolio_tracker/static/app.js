@@ -3750,11 +3750,31 @@ let LAST_VIEW = null;
 function viewIsAdhoc(name) { return !name || name === AD_HOC_KEY; }
 function entriesArr(raw) { return String(raw || "").split(/[\n,]+/).map(s => s.trim()).filter(Boolean); }
 
+/* Only the newest build() may write DATA. build() has five call sites, and
+   Cmd/Ctrl+Enter reaches it straight past the disabled #build button, so two
+   builds can overlap — and a refresh job's row frames can land mid-build too.
+   All of them wrote the same DATA array and the build appended with push(), so
+   an overlap left symbols in DATA twice; persistView then saved the repeats,
+   and /api/portfolio-analytics-multi 500'd for that portfolio on every load
+   after ("Data Center Builders": 20 rows, 16 names). BUILD_STREAMING tells the
+   refresh-job handler to keep its rows out while a build repopulates DATA. */
+let BUILD_GEN = 0;
+let BUILD_STREAMING = false;
+
+/* Replace-by-symbol, else append — the one way a row enters DATA outside a
+   full reload. Shared by the build stream and the refresh job's live patch. */
+function upsertDataRow(row) {
+  const i = row && row.symbol ? DATA.findIndex(r => r.symbol === row.symbol) : -1;
+  if (i >= 0) DATA[i] = row; else DATA.push(row);
+}
+
 async function build(opts) {
   opts = opts || {};
   const raw = $("#tickers").value.trim();
   if (!raw) { toast("Enter at least one ticker or company name."); return; }
   const entries = entriesArr(raw);
+  const gen = ++BUILD_GEN;
+  BUILD_STREAMING = true;
   $("#build").disabled = true; $("#refresh").disabled = true;
   $("#status").innerHTML = lcHtml("resolving symbols", {bar: true, meta: `0·${entries.length}`});
   showProgress(2);
@@ -3792,6 +3812,9 @@ async function build(opts) {
     let buf = "";
     while (true) {
       const { done: rDone, value } = await reader.read();
+      // Superseded by a newer build(): stop reading, and leave DATA, the save
+      // and the analytics request to it (see BUILD_GEN).
+      if (gen !== BUILD_GEN) { reader.cancel().catch(() => {}); return; }
       if (rDone) break;
       buf += decoder.decode(value, { stream: true });
       let idx;
@@ -3806,7 +3829,7 @@ async function build(opts) {
           showProgress(3);
         } else if (msg.type === "row") {
           done = msg.done || (done + 1);
-          DATA.push(msg.row);
+          upsertDataRow(msg.row);
           scheduleRender();
           showProgress((done / Math.max(1, total)) * 100);
           $("#status").innerHTML = lcHtml("streaming quotes", {bar: true, meta: `${done}·${total}`});
@@ -3839,8 +3862,12 @@ async function build(opts) {
     toast("Error: " + e.message);
     $("#status").textContent = "Error.";
   } finally {
-    hideProgress();
-    $("#build").disabled = false; $("#refresh").disabled = false;
+    // A superseded build must not end the newer one's progress/disabled state.
+    if (gen === BUILD_GEN) {
+      BUILD_STREAMING = false;
+      hideProgress();
+      $("#build").disabled = false; $("#refresh").disabled = false;
+    }
   }
 }
 
@@ -6538,8 +6565,11 @@ function rfHandle(msg) {
       break;
     case "item":
       if (msg.phase === "quotes") {
-        // Live row patch, but only for the portfolio actually on screen.
-        if (rfViewIsActive(msg.view) && msg.row && msg.row.symbol) rfPatchRow(msg.row);
+        // Live row patch, but only for the portfolio actually on screen — and
+        // not while build() is repopulating DATA, possibly from different
+        // entries: a job row for a symbol the user just removed would be
+        // re-inserted and then saved alongside the new list (see BUILD_GEN).
+        if (rfViewIsActive(msg.view) && msg.row && msg.row.symbol && !BUILD_STREAMING) rfPatchRow(msg.row);
       } else {
         if (msg.symbol === "__market__") {
           if (msg.sentiment) { NS.market = msg.sentiment; renderMarketSentiment(); }
@@ -6593,8 +6623,7 @@ function rfViewIsActive(view) {
    scroll position mid-refresh, which is exactly what a background job is
    supposed to avoid. */
 function rfPatchRow(row) {
-  const i = DATA.findIndex(r => r.symbol === row.symbol);
-  if (i >= 0) DATA[i] = row; else DATA.push(row);
+  upsertDataRow(row);
   rfScheduleRender();
 }
 let _rfRenderRAF = 0;

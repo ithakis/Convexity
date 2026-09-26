@@ -177,6 +177,41 @@ def _notify_rate(**event) -> None:
         print(f"[rate] observer failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
+# ----------------------------- Row helpers ----------------------------------
+
+def _dedupe_rows_by_symbol(rows) -> list:
+    """One row per symbol: first position, latest row — upsert semantics.
+
+    Every consumer of a rows list treats `symbol` as a key (analytics and the
+    frontier index a price frame by it), and a repeated one breaks them in ways
+    that look unrelated to the cause: `closes[[...list with a repeat...]]`
+    returns duplicate COLUMNS, so `closes[s]` is a DataFrame and a later
+    float() raises "not 'Series'" — a 500 on /api/portfolio-analytics-multi.
+    Under equal weight a duplicate also silently doubles that holding.
+
+    Position of the FIRST occurrence is kept so the table order doesn't jump;
+    the LATER row wins, mirroring the frontend's rfPatchRow — except that a
+    good row is never traded for an error row (a failed re-fetch must not erase
+    a price we already have). Entries without a symbol pass through untouched:
+    this helper dedupes, it doesn't validate.
+    """
+    out: list = []
+    pos: dict[str, int] = {}
+    for r in rows or []:
+        sym = r.get("symbol") if isinstance(r, dict) else None
+        if not sym:
+            out.append(r)
+            continue
+        key = str(sym)
+        i = pos.get(key)
+        if i is None:
+            pos[key] = len(out)
+            out.append(r)
+        elif not r.get("error") or out[i].get("error"):
+            out[i] = r
+    return out
+
+
 # ----------------------------- Numeric helpers ------------------------------
 
 def _safe_num(v) -> float | None:

@@ -173,6 +173,23 @@ Renaming a portfolio touches BOTH files (`rename_watchlist` +
 `rename_view`) — see `/api/portfolio/rename` handler. Failure on the
 view side rolls back the watchlist rename.
 
+**One row per symbol, everywhere.** A repeated `symbol` in a
+rows list turns `closes[[...]]` into a frame with duplicate columns, so
+`closes[s]` is a DataFrame and `analyze_portfolios_multi` 500s with
+`float() argument must be ... not 'Series'` (it also doubles the holding under
+equal weight). The repeats came from the frontend (`build()` appending while a
+refresh job patched `DATA`, see §5) and `save_view` persisted them, so the
+portfolio broke on every load. `helpers._dedupe_rows_by_symbol` (first
+position, later row wins, never a good row for an error row) now runs in
+`save_view`, `load_view` (heals already-corrupted views on read) and
+`list_views`' `row_count`, **and again** at the top of
+`analyze_portfolios_multi` and `compute_efficient_frontier_stream`, because
+rows reach those straight from the client. `_bulk_close` also dedupes its
+input. Resolved-ticker repeats (`microsoft` + `MSFT`) were already collapsed
+by `resolver._ordered_resolve` at build time; row-level dedupe covers any that
+slip through. Any new consumer that indexes a price frame by `symbol` should
+go through the same helper.
+
 ### Symbol resolution pipeline (`resolver.resolve_symbol`, ~line 164)
 Tries each layer in order, short-circuiting on first hit:
 
@@ -656,6 +673,14 @@ columns).
 - **Smart primary button**: `#build` swaps label between "Build
   Dashboard" / "Update Portfolio" based on `primaryButtonMode()`.
   `runPrimary()` routes to the right handler; Cmd/Ctrl+Enter triggers it.
+  **Cmd/Ctrl+Enter bypasses the disabled button**, so `build()` calls can
+  overlap. `BUILD_GEN` means only the newest build writes `DATA`, saves and
+  requests analytics; a superseded one cancels its reader and leaves
+  progress/disabled state alone. `BUILD_STREAMING` keeps refresh-job row
+  frames out while a build repopulates `DATA`. Both write through
+  `upsertDataRow()`, never `push()`. Before this, overlapping writers left
+  symbols in `DATA` twice and the build persisted them (§4 "One row per
+  symbol").
 - **Inline tab rename**: double-click a `.pf-tab-label` →
   `beginTabRename()` swaps the span for an input; Enter commits, Esc
   cancels, blur commits. Calls `/api/portfolio/rename`.

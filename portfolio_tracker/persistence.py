@@ -9,7 +9,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from portfolio_tracker.helpers import _json_default, _repo_root
+from portfolio_tracker.helpers import _dedupe_rows_by_symbol, _json_default, _repo_root
 
 
 def _atomic_write(path: Path, body: str) -> None:
@@ -118,7 +118,9 @@ def list_views() -> dict:
         out[name] = {
             "entries": entry.get("entries") or "",
             "saved_at": entry.get("saved_at"),
-            "row_count": len(rows) if isinstance(rows, list) else 0,
+            # Counted the way load_view returns them, so a view saved with
+            # repeated symbols before the dedupe doesn't report phantom rows.
+            "row_count": len(_dedupe_rows_by_symbol(rows)) if isinstance(rows, list) else 0,
             "stale": bool(entry.get("stale")),
         }
     return {"views": out, "last_view": raw.get("last_view")}
@@ -133,6 +135,11 @@ def load_view(name: str) -> dict:
     entry = views_map.get(name)
     if not isinstance(entry, dict):
         return {}
+    if isinstance(entry.get("rows"), list):
+        # Heals views written before save_view deduped (e.g. a 20-row, 16-name
+        # "Data Center Builders"): the table, analytics and the Excel export all
+        # read rows through here. The file itself is fixed on the next save.
+        entry = {**entry, "rows": _dedupe_rows_by_symbol(entry["rows"])}
     return entry
 
 
@@ -140,7 +147,11 @@ def save_view(name: str, entries: str, rows: list, *, set_last: bool = True) -> 
     clean_name = (name or "").strip() or _CURRENT_KEY
     payload = {
         "entries": str(entries or "").strip(),
-        "rows": rows or [],
+        # One row per symbol. The client can hand us repeats (build()'s
+        # streaming append racing a refresh job's row patches), and this is the
+        # single write path for rows, so it is where they stop — a persisted
+        # repeat re-breaks analytics on every later load.
+        "rows": _dedupe_rows_by_symbol(rows),
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "stale": False,
     }

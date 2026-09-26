@@ -19,6 +19,7 @@ from portfolio_tracker.cache import (
 from portfolio_tracker.fetcher import _SECTOR_ETF
 from portfolio_tracker.fx import _apply_fx_to_closes, _norm_ccy_for_fx
 from portfolio_tracker.helpers import (
+    _dedupe_rows_by_symbol,
     _safe_num,
     _series_to_points,
 )
@@ -68,7 +69,10 @@ def _mcap_bucket(mcap: float | None) -> str:
 def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
     """Close prices indexed by date, columns = symbols (those that returned data).
 
-    Caches per-symbol. Retries missing symbols individually with backoff."""
+    Caches per-symbol. Retries missing symbols individually with backoff.
+    A repeated symbol is fetched once (the result is keyed by symbol anyway,
+    so a repeat would only cost a wasted download and a doubled retry sleep)."""
+    symbols = list(dict.fromkeys(symbols or []))
     if not symbols:
         return pd.DataFrame()
     period_yf = _PERIOD_YF.get(period.upper(), "1y")
@@ -258,7 +262,11 @@ def analyze_portfolios_multi(
 
     display_ccy = _norm_ccy_for_fx(display_ccy or "USD")
 
-    rows = [r for r in (rows or []) if r and r.get("symbol")]
+    # Deduped here even though save_view/load_view already do it: rows reach
+    # this function straight from the client's DATA array, and one repeated
+    # symbol turns `closes[[...]]` below into a frame with duplicate columns —
+    # a "float() ... not 'Series'" 500 rather than a wrong number.
+    rows = _dedupe_rows_by_symbol([r for r in (rows or []) if r and r.get("symbol")])
     symbols = [str(r["symbol"]) for r in rows]
     if not symbols:
         return {"error": "no symbols"}

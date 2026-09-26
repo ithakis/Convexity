@@ -88,8 +88,14 @@ def _parse_entries(entries: str) -> list[str]:
     if the planner counted differently from what actually gets fetched, the
     progress denominator would visibly correct itself on the first item — which
     is the exact behaviour the planning exists to remove.
+
+    Literal repeats are dropped (order kept) — an entries string pasted from two
+    overlapping lists names some tickers twice, and stream_quotes would fetch
+    each only once anyway. Only exact repeats: "abc" and "ABC" can resolve to
+    different tickers, so collapsing those is left to resolution.
     """
-    return [e.strip() for e in (entries or "").replace("\n", ",").split(",") if e.strip()]
+    parts = (e.strip() for e in (entries or "").replace("\n", ",").split(","))
+    return list(dict.fromkeys(e for e in parts if e))
 
 
 class Job:

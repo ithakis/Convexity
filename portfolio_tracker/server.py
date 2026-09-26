@@ -10,6 +10,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 import warnings
 import subprocess
 import webbrowser
@@ -90,6 +91,16 @@ from portfolio_tracker.persistence import (
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _rows_summary(rows, period=None) -> str:
+    """One-line shape of a rows payload for an error log: row count vs distinct
+    symbols (so a repeated-symbol payload is obvious at a glance) and period."""
+    if not isinstance(rows, list):
+        return f"rows={type(rows).__name__}"
+    syms = [r.get("symbol") for r in rows if isinstance(r, dict) and r.get("symbol")]
+    out = f"{len(rows)} rows, {len(set(syms))} distinct symbols"
+    return out + (f", period={period}" if period else "")
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         msg = format % args
@@ -105,6 +116,18 @@ class Handler(BaseHTTPRequestHandler):
         400/500 response — external behavior is unchanged."""
         length = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(length) or b"{}")
+
+    def _log_exception(self, route: str, detail: str = "") -> None:
+        """Print the in-flight exception's traceback to stderr (→ logbuf, so it
+        shows in Settings → Logs even in the desktop app). Call from an
+        ``except`` block before answering 500: the response body carries only
+        ``str(exc)``, and for a pandas shape error ("float() argument must be
+        ... not 'Series'") that names neither the line nor the input — the
+        duplicate-symbol 500 was undiagnosable from the log for exactly that
+        reason."""
+        print(f"[{self.log_date_time_string()}] {route} failed"
+              + (f" ({detail})" if detail else ""), file=sys.stderr)
+        traceback.print_exc()
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, default=_json_default).encode("utf-8")
@@ -711,6 +734,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/portfolio-analytics":
+            rows, period = [], None
             try:
                 payload = self._read_json()
                 rows = payload.get("rows") or []
@@ -723,10 +747,12 @@ class Handler(BaseHTTPRequestHandler):
                 result = analyze_portfolio(rows, weights, period, display_ccy=display_ccy)
                 self._send_json(200, result)
             except Exception as exc:
+                self._log_exception("/api/portfolio-analytics", _rows_summary(rows, period))
                 self._send_json(500, {"error": str(exc)})
             return
 
         if parsed.path == "/api/portfolio-analytics-multi":
+            rows, period = [], None
             try:
                 payload = self._read_json()
                 rows = payload.get("rows") or []
@@ -739,6 +765,7 @@ class Handler(BaseHTTPRequestHandler):
                 results = analyze_portfolios_multi(rows, weight_sets, period, display_ccy=display_ccy)
                 self._send_json(200, {"results": results} if "error" not in results else results)
             except Exception as exc:
+                self._log_exception("/api/portfolio-analytics-multi", _rows_summary(rows, period))
                 self._send_json(500, {"error": str(exc)})
             return
 
