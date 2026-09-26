@@ -108,8 +108,9 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <button data-p="MAX">Max</button>
       </div>
       <div class="pf-overlay-toggles" id="pf-overlay-toggles" role="group" aria-label="Chart overlays">
-        <span class="pf-overlay-pill" id="pf-show-spy" data-on="1" role="switch" aria-checked="true" tabindex="0">
-          <span class="swatch spy"></span>SPY
+        <!-- The benchmark picked in Risk & Return; its label is filled in on render. -->
+        <span class="pf-overlay-pill" id="pf-show-bench" data-on="1" role="switch" aria-checked="true" tabindex="0">
+          <span class="swatch spy"></span><span id="pf-bench-pill-label">S&amp;P 500</span>
         </span>
         <span class="pf-overlay-pill" id="pf-show-ndx" data-on="0" role="switch" aria-checked="false" tabindex="0">
           <span class="swatch ndx"></span>NASDAQ
@@ -121,9 +122,8 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <span class="pf-overlay-pill" id="pf-show-dd" data-on="1" role="switch" aria-checked="true" tabindex="0">
           <span class="swatch dd"></span>Drawdown
         </span>
-        <!-- Simple moving averages on the portfolio index. Computed on the
-             daily series analytics returns; an SMA longer than the selected
-             period has no warm-up and is skipped rather than stubbed. -->
+        <!-- Simple moving averages on the portfolio index, computed server-side
+             over a window wider than the period so each spans the whole chart. -->
         <span class="pf-overlay-pill" id="pf-show-sma20" data-on="0" role="switch" aria-checked="false" tabindex="0">
           <span class="swatch sma20"></span>SMA 20
         </span>

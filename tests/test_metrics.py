@@ -7,8 +7,7 @@ Each test documents:
   - Source code location being exercised
 
 No network calls, no yfinance, no HTTP server required.
-The analytics _stats() closure (dashboard.py:2502-2524) is replicated
-inline below because it is a local function inside analyze_portfolios_multi.
+The analytics _stats() and _relative() helpers are imported and tested directly.
 _normalize_dividend_yield is importable at module level from dashboard.py.
 """
 
@@ -56,45 +55,8 @@ def _require_dashboard():
         pytest.skip(f"dashboard.py not importable: {_DASHBOARD_IMPORT_ERROR}")
 
 
-# ---------------------------------------------------------------------------
-# Replicated _stats logic from dashboard.py:2502-2524
-# (inner closure — cannot be imported directly)
-# ---------------------------------------------------------------------------
-
-def _stats(ret: pd.Series, val: pd.Series) -> dict:
-    """
-    Replicated from dashboard.py:2502-2524 (_stats inner closure inside
-    analyze_portfolios_multi).  Kept in sync manually; the companion test
-    catches drift.
-
-    Inputs
-    ------
-    ret : daily return series (pct-change)
-    val : equity curve (rebased to 100 at t=0)
-    """
-    if ret.empty or val.empty:
-        return {}
-    n_days = (val.index[-1] - val.index[0]).days or 1
-    years = max(n_days / 365.25, 1e-6)
-    total_return = float(val.iloc[-1] / val.iloc[0] - 1.0) * 100.0
-    ann_return = float((val.iloc[-1] / val.iloc[0]) ** (1.0 / years) - 1.0) * 100.0
-    ann_vol = float(ret.std() * math.sqrt(252)) * 100.0
-    sharpe = float((ret.mean() * 252) / (ret.std() * math.sqrt(252))) if ret.std() else None
-    # Standard semi-deviation: sqrt(mean(min(r_i, 0)²)) over ALL N periods.
-    downside = math.sqrt((ret.clip(upper=0) ** 2).mean())
-    sortino = float((ret.mean() * 252) / (downside * math.sqrt(252))) if downside > 0 else None
-    run_mx = val.cummax()
-    max_dd = float((val / run_mx - 1.0).min() * 100.0)
-    calmar = (ann_return / abs(max_dd)) if max_dd < 0 else None
-    return {
-        "total_return": total_return,
-        "ann_return": ann_return,
-        "ann_vol": ann_vol,
-        "sharpe": sharpe,
-        "sortino": sortino,
-        "max_dd": max_dd,
-        "calmar": calmar,
-    }
+# The real analytics stats helpers (ret = daily returns, val = equity curve).
+from portfolio_tracker.analytics import _relative, _stats  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -257,86 +219,29 @@ def test_calmar_from_stats():
 
 
 # ===========================================================================
-# 5. Beta
+# 5. Beta, R², tracking error (analytics._relative)
 # ===========================================================================
 
-def test_beta():
+def test_relative_exact_leverage():
     """
-    Formula: β = Cov(r_p, r_m) / Var(r_m)
-    Source:  dashboard.py:2614-2615
-
-    rp = 2 * rb  exactly  →  β = Cov(2rb, rb) / Var(rb) = 2*Var(rb) / Var(rb) = 2.0
+    analytics._relative: β = Cov/Var, R² = Corr², TE = √252·σ(rp − rb)·100.
+    rp = 2·rb exactly  →  β = 2, R² = 1, rp − rb = rb  →  TE = √252·σ(rb)·100.
     """
-    rb_vals = [0.005, 0.010, -0.005, 0.015, 0.002, -0.008]
-    rp_vals = [2 * x for x in rb_vals]
-    rp = pd.Series(rp_vals)
-    rb = pd.Series(rb_vals)
-    beta = rp.cov(rb) / rb.var()
-    assert abs(beta - 2.0) < 1e-12
+    rb = pd.Series(np.random.default_rng(0).normal(0, 0.01, 60), index=_bday_index(60))
+    rel = _relative(2 * rb, rb)
+    assert abs(rel["beta"] - 2.0) < 1e-12
+    assert abs(rel["r2"] - 1.0) < 1e-12
+    assert abs(rel["te"] - rb.std() * math.sqrt(252) * 100.0) < 1e-9
 
 
-# ===========================================================================
-# 6. R² (coefficient of determination vs benchmark)
-# ===========================================================================
-
-def test_r_squared():
-    """
-    Formula: R² = Corr(r_p, r_m)²
-    Source:  dashboard.py:2616-2617
-
-    rp = 2 * rb  →  Corr = 1.0  →  R² = 1.0
-    """
-    rb_vals = [0.005, 0.010, -0.005, 0.015, 0.002, -0.008]
-    rp_vals = [2 * x for x in rb_vals]
-    rp = pd.Series(rp_vals)
-    rb = pd.Series(rb_vals)
-    corr = rp.corr(rb)
-    r2 = corr * corr
-    assert abs(r2 - 1.0) < 1e-12
-
-
-def test_r_squared_partial():
-    """R² < 1 when portfolio has idiosyncratic component."""
-    np.random.seed(42)
-    rb = pd.Series(np.random.randn(100) * 0.01)
-    noise = pd.Series(np.random.randn(100) * 0.005)
-    rp = rb + noise
-    corr = rp.corr(rb)
-    r2 = corr * corr
-    assert 0.0 < r2 < 1.0
-
-
-# ===========================================================================
-# 7. Tracking Error
-# ===========================================================================
-
-def test_tracking_error():
-    """
-    Formula: TE = √252 * σ(r_p - r_m)
-    Source:  dashboard.py:2618-2619
-
-    diff = rp - rb = rb  (since rp = 2*rb)
-    σ(rb) = sample std of rb_vals
-    TE = σ(rb) * √252
-    """
-    rb_vals = [0.005, 0.010, -0.005, 0.015, 0.002, -0.008]
-    rp_vals = [2 * x for x in rb_vals]
-    rp = pd.Series(rp_vals)
-    rb = pd.Series(rb_vals)
-    diff = rp - rb   # = rb_vals exactly
-    te_expected = diff.std() * math.sqrt(252) * 100.0
-    # Replicate the computation from dashboard.py:2618-2619
-    te = (rp - rb).std()
-    te_computed = float(te * math.sqrt(252) * 100.0)
-    assert abs(te_computed - te_expected) < 1e-12
-
-
-def test_tracking_error_identical_series():
-    """TE = 0 when portfolio == benchmark (used for SPY vs itself)."""
-    rb = pd.Series([0.01, -0.005, 0.02, 0.0])
-    rp = rb.copy()
-    te = (rp - rb).std()
-    assert te == 0.0
+def test_relative_partial_and_identity():
+    """R² < 1 with idiosyncratic noise; TE = 0 against itself; <30 days → {}."""
+    rng = np.random.default_rng(42)
+    rb = pd.Series(rng.normal(0, 0.01, 100), index=_bday_index(100))
+    rp = rb + rng.normal(0, 0.005, 100)
+    assert 0.0 < _relative(rp, rb)["r2"] < 1.0
+    assert _relative(rb, rb)["te"] == 0.0
+    assert _relative(rb[:20], rb[:20]) == {}
 
 
 # ===========================================================================

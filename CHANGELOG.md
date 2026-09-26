@@ -5,6 +5,31 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.12.2 — 2026-09-26
+
+### Portfolio chart: correct moving averages, TradingView-style measure, benchmark picker
+
+- **Moving averages now span the whole chart.** Analytics fetches at least 200
+  trading days before the displayed period and computes SMA 20/50/200 on that
+  wider window, so an SMA no longer starts a third of the way across the
+  chart. Only where truly no earlier data exists (MAX range, a recently
+  listed holding) does an average start on fewer bars.
+- **Drag-to-measure is transient, like TradingView.** While the button is
+  held, a shaded band and a floating badge show every plotted line's return
+  over the span; both vanish on release. Replaces the old design where a
+  selection persisted until Esc or a click elsewhere, and its bottom summary
+  bar (now removed).
+- **Benchmark picker.** "vs SPY" in Risk & Return is now a dropdown — S&P 500,
+  Nasdaq-100, Sector mix, Euro Stoxx 50, Nikkei 225, KOSPI — driving the
+  comparison column, Beta/R²/Tracking error and the chart's comparison line.
+  Nasdaq / Sector-mix overlays now list their period return under Risk &
+  Return instead of the chart legend.
+- Non-USD holdings and the Sector-mix blend are now FX-converted in a display
+  currency other than USD (previously left in native currency).
+- License changed from MIT to all-rights-reserved / viewing-only.
+- Internal: both charts now share one crosshair/tooltip and one drag handler;
+  `analytics._stats`/`_relative` are importable and directly unit-tested.
+
 ## 1.12.1 — 2026-09-26
 
 ### Repeated tickers no longer break portfolio analytics

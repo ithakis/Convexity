@@ -487,11 +487,13 @@ flat strings except metadata):
 ```
 period, display_ccy,           ← scalar metadata
 weights_applied, active_symbols, missing_symbols,
-series,                        ← time-series (skip in exports)
-stats {total_return, ann_return, ann_vol, sharpe, sortino, calmar,
-       max_dd, beta_spy, r2_spy, te_spy},
-spy_stats {…same keys, vs SPY benchmark…},
-nasdaq_stats {…same keys, vs NASDAQ benchmark…},
+series {portfolio, drawdown, sma {"20","50","200"}},  ← time-series (skip in exports)
+stats {total_return, ann_return, ann_vol, sharpe, sortino, calmar, max_dd},
+benchmarks {SPY, QQQ, STOXX50, N225, KOSPI, SECTOR: {
+    label, series,
+    stats {…same keys + beta, r2, te vs SPY…},
+    rel {beta, r2, te}          ← the PORTFOLIO measured against this benchmark
+}},
 weighted, contribution,        ← per-holding breakdowns
 analyst {mean_rating, rating_coverage_weight, weighted_target_upside_pct,
          target_coverage_weight, n_analysts_total,
@@ -503,6 +505,19 @@ exposure {by_sector, by_industry, by_country, by_currency},
 concentration {top5, herfindahl, effective_n},
 warnings
 ```
+
+**One wide fetch, then slice.** `_bulk_close` pulls holdings + every
+benchmark + the sector ETFs over `_WARMUP_YF[period]` (≥200 trading days
+before the period start), FX-converts all of it (`_apply_fx_to_closes` — the
+indices quote in EUR/JPY/KRW, and a USD display still converts non-USD
+holdings), then slices to `_period_start()` for every stat. Only the SMAs use
+the warm-up, which is why SMA 200 spans the whole chart; `min_periods=1` means
+an average starts on fewer bars only where nothing earlier exists (MAX, a
+young holding). The calendar is days *a holding* traded — foreign indices are
+ffilled onto it, never allowed to add their own holidays as zero-return days.
+Same-day beta vs Nikkei/KOSPI is understated (they close before the US
+opens); the Beta tooltip says so. `_stats` / `_relative` are module-level and
+tested directly in `tests/test_metrics.py`.
 
 The `analyst.holdings` list is a HUGE win for Excel export — it means we
 don't need a separate parallel `Ticker.info` fetch when analytics
@@ -816,8 +831,8 @@ columns).
 
 - **Detail-modal header shows the ACTIVE RANGE's return**, not `pct_1d`
   (v1.11.0). `modalPriceBlockHtml()` / `renderModalPriceBlock()` own
-  `#m-price-block`; a live drag selection (`DETAIL.sel`) wins over the range
-  tab, and the `.p-range` badge names whichever period is being reported. It
+  `#m-price-block`; a drag in progress (the brush's `onUpdate(sel)`) wins over
+  the range tab, and the `.p-range` badge names whichever period is being reported. It
   also reads price from `DETAIL.data` once the detail payload lands — the
   skeleton is never re-rendered after the fetch resolves, so the old code kept
   the table row's cached price for the modal's whole lifetime. It computes from
@@ -852,39 +867,28 @@ columns).
   against a smooth line. Modal open stays instant: intraday is fetched lazily
   only when 1M/3M/6M is picked, with a loading chip on the range tab.
 
-- **`attachRangeBrush()` is the one drag-to-measure implementation** (v1.11.0),
-  shared by the detail chart and the portfolio chart, which previously had
-  ~150 duplicated lines each. Selections **persist** until click-elsewhere, Esc,
-  or a range change (they used to self-destruct on a 1.8 s timer, so you could
-  not read a measurement and then look at the chart); either edge can be dragged
-  afterwards. State lives in `DETAIL.sel` / `STATE.pfSel`, the handle in
-  `DETAIL.brush` / `STATE.pfBrush`.
-  **Always `destroy()` the previous handle before re-attaching** — every listener
-  is scoped to one `AbortController`. The old code's 1.8 s timer called
-  `renderChart()`, which re-ran the attach and registered *another* `window`
-  mouseup handler on every single drag; they accumulated for the page's lifetime
-  and across modal opens, because `window` outlives the modal DOM. The portfolio
-  chart leaked one per period change, mode change and overlay-pill toggle.
-  `setPointerCapture` is wrapped in try/catch: it throws `NotFoundError`
-  whenever the id isn't a live pointer, and capture is an enhancement the drag
-  works without.
-  Two contracts the callers must honour, both of which broke in review:
-  **(1) the geom you pass needs `chartH`** — `paint()` writes it straight to the
-  rect, and `setAttribute("height", undefined)` stores the literal string
-  `"undefined"`, an invalid SVG length that renders as height 0. The portfolio
-  chart's geom omitted it, so its selection band was invisible while the
-  measurement text read correctly. There is now a `g.H - g.padT - g.padB`
-  fallback, but pass it explicitly.
-  **(2) the topmost surface owns Escape.** The brush's Escape listener is on
-  `document` in the **capture** phase and calls `stopPropagation()`, which is
-  what stops it reaching the seven-closer global handler. It therefore claims
-  Escape only when its own `svg.closest(".show")` is truthy or nothing is
-  locked (`SCROLL_LOCK.depth === 0`). Without that, a stale selection on the
-  always-mounted portfolio chart swallowed the Escape meant for any overlay
-  above it — reproduced with Settings, and it persisted for the life of the
-  page. `closeModal()` also destroys `DETAIL.brush` and nulls `DETAIL.sel`, or
-  a backdrop-click close leaves the same listener orphaned until the next
-  chart render.
+- **Both charts share their interaction code**: `attachChartHover()`
+  (crosshair + tooltip) and `attachRangeBrush()` (drag-to-measure), each fed
+  `lines: [{label, pts, dot}]` with `lines[0]` the main series. The measure is
+  **TradingView-style and transient** (the user's call): while the button
+  is held a band and a floating `.chart-measure` badge show every line's return
+  over the span; both vanish on release. There is deliberately no persisted
+  selection state, no Escape handler and nothing to `destroy()` — every
+  listener sits on the chart's own overlay element, rebuilt each render. (The
+  earlier persistent design needed an AbortController, a capture-phase Escape
+  handler with a `SCROLL_LOCK` guard, and teardown in `closeModal()`; all of
+  that went with it.) The `.sel`/`.pf-sel` rect carries its own `y`/`height` in
+  the markup. `setPointerCapture` stays in try/catch — it throws for a dead
+  pointer id.
+
+- **Benchmark picker.** "vs <select>" in the Risk & Return header is a native
+  `<select>` (`benchSelectHtml`) — keyboard/Esc/outside-click for free, no
+  popover code. `STATE.bench` (localStorage `pf_bench`) drives the "/ x"
+  column, Beta/R²/TE (the portfolio's `rel` against it) and the chart's purple
+  comparison line; `activeBench(a)` falls back to SPY. The Nasdaq / Sector-mix
+  pills add extra lines (`pfBenchLines`, deduped), and their period returns
+  are listed *under* Risk & Return, not in the chart legend. The first overlay
+  pill (`#pf-show-bench`) is relabelled with the chosen benchmark on render.
 
 - **`thinPoints(pts, maxN)` must pin BOTH endpoints.** A 45-year MAX window is
   ~11.5k daily closes. Last-in-bucket downsampling naturally starts at index
@@ -902,8 +906,9 @@ columns).
   `smaSeries()` takes the **full** series and the caller slices the result —
   never the other way round. Legends name the bar frequency ("SMA 50 · 30m
   bars"), since the same period means something very different on 30m vs daily
-  bars. The portfolio index is always daily and arrives pre-trimmed to the
-  period, so an SMA longer than the period is skipped rather than stubbed.
+  bars. The portfolio chart's SMAs are computed **server-side** (`series.sma`,
+  see §4 "One wide fetch") since the client only ever has the period slice.
+  At the true start of a series `smaSeries` averages what exists so far.
   `SMA_COLORS` in `app.js` and `.swatch.sma*` in `style.css` must stay in sync.
 - **Fit to screen toggle** (`#cv-fit-toggle`): optional table compaction
   mode for dense presets. `applyTableFitMode()` computes a scale from the

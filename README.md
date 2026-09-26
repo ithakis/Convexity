@@ -139,4 +139,6 @@ Yahoo Finance is an unofficial API. To avoid 429 errors:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+All rights reserved — the source is published for viewing only. No use, copying,
+modification, redistribution or commercial use without written permission.
+See [LICENSE](LICENSE).

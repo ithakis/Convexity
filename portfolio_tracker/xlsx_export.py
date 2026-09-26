@@ -165,9 +165,9 @@ STATS_KEYS: list[tuple[str, str]] = [
     ("sortino",      "Sortino Ratio"),
     ("calmar",       "Calmar Ratio"),
     ("max_dd",       "Max Drawdown (%)"),
-    ("beta_spy",     "Beta vs SPY"),
-    ("r2_spy",       "R² vs SPY"),
-    ("te_spy",       "Tracking Error vs SPY (%)"),
+    ("beta",         "Beta vs SPY"),
+    ("r2",           "R² vs SPY"),
+    ("te",           "Tracking Error vs SPY (%)"),
 ]
 
 EXPORT_STATS_PERIODS: tuple[str, ...] = ("1Y", "5Y")
@@ -318,11 +318,16 @@ def _first_available_analytics(analytics_by_period: dict[str, dict], periods: li
     return {}
 
 
+def _bench(analytics: dict, key: str) -> dict:
+    """One benchmark block from analytics["benchmarks"], or {}."""
+    return (analytics.get("benchmarks") or {}).get(key) or {}
+
+
 def _excess_vs_spy(analytics: dict) -> Optional[float]:
     if not isinstance(analytics, dict):
         return None
     port_tr = _maybe_num((analytics.get("stats") or {}).get("total_return"))
-    spy_tr = _maybe_num((analytics.get("spy_stats") or {}).get("total_return"))
+    spy_tr = _maybe_num(_bench(analytics, "SPY").get("stats", {}).get("total_return"))
     if port_tr is None or spy_tr is None:
         return None
     return port_tr - spy_tr
@@ -464,16 +469,15 @@ def _write_portfolio_sheet(
                 ws.cell(row=r, column=1, value=f"(analytics unavailable: {analytics['error']})").font = Font(italic=True, color="9CA3AF")
                 r += 2
                 continue
-            stats = analytics.get("stats") or {}
-            spy_stats = analytics.get("spy_stats") or {}
-            ndx_stats = analytics.get("nasdaq_stats") or {}
+            spy = _bench(analytics, "SPY")
+            columns = [{**(analytics.get("stats") or {}), **(spy.get("rel") or {})},
+                       spy.get("stats") or {}, _bench(analytics, "QQQ").get("stats") or {}]
             _write_header_cells(ws, r, ["Metric", "Portfolio", "SPY", "NASDAQ"])
             r += 1
             for key, label in STATS_KEYS:
                 ws.cell(row=r, column=1, value=label).font = Font(bold=True)
-                ws.cell(row=r, column=2, value=_maybe_num(stats.get(key)))
-                ws.cell(row=r, column=3, value=_maybe_num(spy_stats.get(key)))
-                ws.cell(row=r, column=4, value=_maybe_num(ndx_stats.get(key)))
+                for col, stats in enumerate(columns, start=2):
+                    ws.cell(row=r, column=col, value=_maybe_num(stats.get(key)))
                 r += 1
             r += 1
 

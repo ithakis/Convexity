@@ -2308,8 +2308,6 @@ const DETAIL = {
   showSP: false,        // overlay S&P 500
   showSector: false,    // overlay sector ETF
   showVol: true,        // volume bars
-  sel: null,            // persistent drag-to-measure selection {t0, t1} in ms
-  brush: null,          // attachRangeBrush handle — destroyed before each re-attach
   // Sub-daily payloads from /api/history, keyed by range. Fetched lazily the
   // first time an intraday range is picked, so opening the modal stays instant.
   intraday: {},
@@ -2327,7 +2325,6 @@ function openModal(r) {
   if (r.error) return;
   DETAIL.data = null; DETAIL.row = r;
   DETAIL.range = "1Y"; DETAIL.showSP = false; DETAIL.showSector = false; DETAIL.showVol = true;
-  DETAIL.sel = null;
   DETAIL.intraday = {}; DETAIL.intraPending = {};  // per-symbol; server caches the fetches
   DETAIL.sma = CHART_SMA;       // shared reference — see CHART_SMA
   renderModalSkeleton();
@@ -2350,16 +2347,8 @@ function openModal(r) {
     })
     .catch(e => { $("#m-loading").textContent = "Network error: " + e.message; });
 }
-/* Tear the brush down on close. Its Escape handler is registered on `document`
-   in the CAPTURE phase and calls stopPropagation() whenever a selection exists,
-   so a live selection left behind after closing the modal by backdrop-click
-   silently swallowed the next global Escape — the one meant to close Settings
-   or the MPT overlay. */
 function closeModal() {
-  if (!hideOverlay("#modal-bg")) return;
-  if (DETAIL.brush) { DETAIL.brush.destroy(); DETAIL.brush = null; }
-  DETAIL.sel = null;
-  DETAIL.data = null;
+  if (hideOverlay("#modal-bg")) DETAIL.data = null;
 }
 $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") closeModal(); });
 document.addEventListener("keydown", (e) => {
@@ -2384,14 +2373,14 @@ document.addEventListener("keydown", (e) => {
  *
  * The return shown is the ACTIVE RANGE's, not the 1-day figure this used to
  * hardcode — with seven range tabs right below it, a number that never moved
- * was actively misleading. `sel` (a live drag selection) wins over the range
- * when present, so the header always states the period the chart is showing.
+ * was actively misleading. `sel` (a drag in progress) wins over the range, so
+ * the header always states the period the chart is showing.
  *
  * It also renders from DETAIL.data when the detail payload has arrived and
  * falls back to DETAIL.row before then. The old code read only the table row
  * and the skeleton was never re-rendered after the fetch resolved, so the
  * header kept the row's cached price for the modal's whole lifetime. */
-function modalPriceBlockHtml() {
+function modalPriceBlockHtml(sel) {
   const r = DETAIL.row || {};
   const d = DETAIL.data;
   const ccy = (d && d.currency) || r.currency;
@@ -2404,14 +2393,8 @@ function modalPriceBlockHtml() {
   // that contradicts the summary line right beneath it is worse than no header.
   const hist = d && d.history ? activeChartSeries().full : null;
   if (hist && hist.length >= 2) {
-    const sel = DETAIL.sel;
-    let pts;
-    if (sel) {
-      pts = hist.filter(p => p[0] >= sel.t0 && p[0] <= sel.t1);
-      label = "selection";
-    } else {
-      pts = sliceHistory(hist, DETAIL.range);
-    }
+    const pts = sel ? hist.filter(p => p[0] >= sel.t0 && p[0] <= sel.t1) : sliceHistory(hist, DETAIL.range);
+    if (sel) label = "selection";
     if (pts && pts.length >= 2) {
       const a = pts[0][1], b = pts[pts.length - 1][1];
       if (a) { pct = (b / a - 1) * 100; abs = b - a; }
@@ -2434,9 +2417,9 @@ function modalPriceBlockHtml() {
     + ` <span class="p-range">${escapeHtml(label)}</span></div>`;
 }
 
-function renderModalPriceBlock() {
+function renderModalPriceBlock(sel) {
   const el = $("#m-price-block");
-  if (el) el.innerHTML = modalPriceBlockHtml();
+  if (el) el.innerHTML = modalPriceBlockHtml(sel);
 }
 
 function renderModalSkeleton() {
@@ -2477,7 +2460,6 @@ function renderModalSkeleton() {
     const b = e.target.closest("button"); if (!b) return;
     if (b.dataset.range === DETAIL.range) return;
     DETAIL.range = b.dataset.range;
-    DETAIL.sel = null;              // a selection is meaningless on a new window
     renderModalFull();
     ensureIntraday(DETAIL.range);
   });
@@ -2603,19 +2585,18 @@ function nearestPointIdx(pts, t) {
 
 /* Simple moving average over `n` points.
  *
- * MUST be handed the FULL fetched series, not the visible slice — an SMA 200
- * needs 200 bars of warm-up, so computing it on a 1M window (~280 intraday
- * bars, or ~21 daily ones) yields a line that starts three-quarters of the way
- * across or is empty entirely. Slice the RESULT to the window instead; that is
- * also why fetcher._RANGE_INTRADAY fetches a much wider period than it shows. */
+ * Hand it the FULL fetched series and slice the RESULT to the window — an SMA
+ * 200 needs 200 bars of warm-up, which is why every chart fetches far wider
+ * than it shows. Only at the true start of a series (a MAX range, a young
+ * listing) is there nothing earlier to average; there the first n-1 points
+ * average what exists so far instead of leaving the line blank. */
 function smaSeries(pts, n) {
-  if (!pts || pts.length < n || n < 2) return [];
   const out = [];
   let sum = 0;
-  for (let i = 0; i < pts.length; i++) {
+  for (let i = 0; i < (pts || []).length; i++) {
     sum += pts[i][1];
     if (i >= n) sum -= pts[i - n][1];
-    if (i >= n - 1) out.push([pts[i][0], sum / n]);
+    out.push([pts[i][0], sum / Math.min(i + 1, n)]);
   }
   return out;
 }
@@ -2643,153 +2624,79 @@ function thinPoints(pts, maxN) {
 }
 const MAX_CHART_POINTS = 1500;
 
-/* Drag-to-measure, shared by both charts.
- *
- * Replaces two near-identical implementations that each self-destructed 1.8s
- * after mouseup — you could not read a measurement and then look at the chart.
- * The selection now persists until you click elsewhere on the plot, press Esc,
- * or change the range, and either edge can be dragged afterwards to nudge it.
- *
- * It also fixes a listener leak the old code had: the detail chart's 1.8s timer
- * called renderChart(), which re-ran the attach and registered ANOTHER window
- * mouseup handler every single drag — they accumulated for the page's lifetime,
- * across modal opens, because window outlives the modal DOM. Everything here is
- * scoped to one AbortController that the caller aborts before re-attaching.
- *
- * opts: {svg, overlay, selRect, geom{W,padL,padR,padT,chartH,t0,t1,xScale},
- *        series, getSel, setSel, onUpdate}
- * Returns {destroy, paint}. */
-const BRUSH_HANDLE_PX = 6;      // grab zone on each edge, in svg units
-const BRUSH_MIN_DRAG_PX = 3;    // below this a press counts as a click, not a drag
+/* Edge x-axis labels anchor inward so the first and last dates aren't clipped. */
+const tickAnchor = (i, n) => i === 0 ? "start" : i === n - 1 ? "end" : "middle";
 
-function attachRangeBrush(opts) {
-  const { svg, overlay, selRect, geom: g, series, getSel, setSel, onUpdate } = opts;
-  if (!svg || !overlay || !selRect) return { destroy() {}, paint() {} };
-  const ac = new AbortController();
-  const on = { signal: ac.signal };
-
-  const clientToSvgX = (clientX) => {
+/* Drag-to-measure, shared by both charts — TradingView-style: while the
+ * button is held, a shaded band and a floating badge show the return of every
+ * plotted line over the dragged span; both vanish on release.
+ *
+ * Every listener lives on the chart's own overlay element, which is rebuilt on
+ * each render, so there is nothing to tear down. Pointer capture keeps a drag
+ * that leaves the plot tracking (it throws for a dead pointer id, hence the try).
+ *
+ * opts: {svg, overlay, selRect, badge, geom{W,padL,padR,t0,t1,xScale},
+ *        lines: [{label, pts}] — lines[0] is the main series, bars snap to it,
+ *        onUpdate(sel|null)?} */
+function attachRangeBrush({ svg, overlay, selRect, badge, geom: g, lines, onUpdate }) {
+  const main = lines[0].pts;
+  const host = badge.parentElement;
+  const toTime = (clientX) => {
     const r = svg.getBoundingClientRect();
-    if (!r.width) return NaN;      // panel collapsed/hidden — nothing to measure
-    return (clientX - r.left) * (g.W / r.width);
+    const px = Math.max(g.padL, Math.min(g.W - g.padR, (clientX - r.left) * (g.W / r.width)));
+    const t = g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
+    return main[nearestPointIdx(main, t)][0];    // snap to a real bar
   };
-  /* Pointer capture keeps the drag alive when the cursor leaves the plot, but
-     it throws NotFoundError whenever the id isn't a live pointer — a released
-     pointer, a detached node, or a synthetic event. Never let that abort the
-     handler; capture is an enhancement, the drag works without it. */
-  const capture = (id, want) => {
-    try { want ? overlay.setPointerCapture?.(id) : overlay.releasePointerCapture?.(id); }
-    catch { /* not capturable; the drag still tracks via the overlay's events */ }
-  };
-  const svgXToTime = (px) => {
-    const clamped = Math.max(g.padL, Math.min(g.W - g.padR, px));
-    return g.t0 + (clamped - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
-  };
-  /* Snap to a real data point so the reported return is between two actual
-     closes, not an interpolation nobody traded at. */
-  const snap = (t) => {
-    const i = nearestPointIdx(series, t);
-    return i < 0 ? t : series[i][0];
-  };
-
-  /* Plot height. The detail chart's geom carries chartH; the portfolio chart's
-     does not, and setAttribute("height", undefined) writes the literal string
-     "undefined" — an invalid SVG length, which renders as height 0. That made
-     the portfolio chart's selection band completely invisible even though the
-     measurement text was correct. Derive it when it isn't supplied. */
-  const plotH = (g.chartH != null) ? g.chartH : (g.H - g.padT - g.padB);
-
-  function paint() {
-    const sel = getSel();
-    if (!sel) { selRect.style.display = "none"; return; }
-    const ax = g.xScale(sel.t0), bx = g.xScale(sel.t1);
-    selRect.style.display = "";
-    selRect.setAttribute("x", Math.min(ax, bx));
-    selRect.setAttribute("y", g.padT);
-    selRect.setAttribute("width", Math.max(1, Math.abs(bx - ax)));
-    selRect.setAttribute("height", plotH);
-  }
-
-  let mode = null;        // "new" | "t0" | "t1"
-  let anchorT = null;     // the edge held fixed while dragging
-  let downX = null;
+  let anchor = null;
 
   overlay.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    downX = clientToSvgX(e.clientX);
-    const t = svgXToTime(downX);
-    const sel = getSel();
-    if (sel) {
-      // Grab an existing edge if the press is near one.
-      const d0 = Math.abs(downX - g.xScale(sel.t0));
-      const d1 = Math.abs(downX - g.xScale(sel.t1));
-      if (d0 <= BRUSH_HANDLE_PX && d0 <= d1) { mode = "t0"; anchorT = sel.t1; }
-      else if (d1 <= BRUSH_HANDLE_PX) { mode = "t1"; anchorT = sel.t0; }
-    }
-    if (!mode) { mode = "new"; anchorT = snap(t); }
-    capture(e.pointerId, true);
+    anchor = toTime(e.clientX);
+    try { overlay.setPointerCapture(e.pointerId); } catch { /* drag still works */ }
     e.preventDefault();
-  }, on);
-
+  });
   overlay.addEventListener("pointermove", (e) => {
-    if (!mode) return;
-    const x = clientToSvgX(e.clientX);
-    if (!isFinite(x)) return;
-    const t = snap(svgXToTime(x));
-    if (t === anchorT || anchorT == null) return;
-    setSel({ t0: Math.min(anchorT, t), t1: Math.max(anchorT, t) });
-    paint();
-    onUpdate(getSel());
-  }, on);
-
-  const finish = (e) => {
-    if (!mode) return;
-    const nowX = clientToSvgX(e.clientX);
-    const moved = (downX == null || !isFinite(nowX)) ? 0 : Math.abs(nowX - downX);
-    const wasNew = mode === "new";
-    mode = null; anchorT = null; downX = null;
-    capture(e.pointerId, false);
-    // A press that never moved is a click: clear the selection rather than
-    // leaving a 1px sliver behind (the old code left a stale rect here).
-    if (wasNew && moved < BRUSH_MIN_DRAG_PX) {
-      setSel(null); paint(); onUpdate(null);
-      return;
-    }
-    onUpdate(getSel());
+    if (anchor == null) return;
+    const t = toTime(e.clientX);
+    if (t === anchor) return;
+    const sel = { t0: Math.min(anchor, t), t1: Math.max(anchor, t) };
+    const x0 = g.xScale(sel.t0), x1 = g.xScale(sel.t1);
+    selRect.setAttribute("x", x0);
+    selRect.setAttribute("width", Math.max(1, x1 - x0));
+    selRect.style.display = "";
+    badge.innerHTML = measureBadgeHtml(sel, lines);
+    host.classList.add("measuring");
+    // Centre the badge over the band, clamped inside the chart.
+    const sr = svg.getBoundingClientRect(), hr = host.getBoundingClientRect();
+    const mid = sr.left - hr.left + (x0 + x1) / 2 * (sr.width / g.W);
+    const half = badge.offsetWidth / 2;
+    badge.style.left = Math.max(half + 4, Math.min(host.clientWidth - half - 4, mid)) + "px";
+    badge.style.top = (sr.top - hr.top + 6) + "px";
+    onUpdate?.(sel);
+  });
+  const release = () => {
+    if (anchor == null) return;
+    anchor = null;
+    selRect.style.display = "none";
+    host.classList.remove("measuring");
+    onUpdate?.(null);
   };
-  overlay.addEventListener("pointerup", finish, on);
-  overlay.addEventListener("pointercancel", finish, on);
+  overlay.addEventListener("pointerup", release);
+  overlay.addEventListener("pointercancel", release);
+}
 
-  // Hovering an edge advertises that it can be dragged.
-  overlay.addEventListener("pointermove", (e) => {
-    if (mode) return;
-    const sel = getSel();
-    if (!sel) { overlay.style.cursor = "crosshair"; return; }
-    const x = clientToSvgX(e.clientX);
-    const near = Math.abs(x - g.xScale(sel.t0)) <= BRUSH_HANDLE_PX ||
-                 Math.abs(x - g.xScale(sel.t1)) <= BRUSH_HANDLE_PX;
-    overlay.style.cursor = near ? "ew-resize" : "crosshair";
-  }, on);
-
-  // Esc clears the selection without closing the modal — checked before the
-  // global handler by using capture, and only when a selection actually exists
-  // so Esc still closes overlays the rest of the time.
-  //
-  // THE TOPMOST SURFACE OWNS ESCAPE. Without the second guard, a stale
-  // selection on the page-level portfolio chart swallowed the Escape meant for
-  // an overlay stacked above it — reproduced: measure on the portfolio chart,
-  // open Settings, press Esc, and Settings stays open while the invisible
-  // selection is silently consumed instead. That chart is always mounted, so
-  // the block persisted for the life of the page.
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !getSel()) return;
-    if (SCROLL_LOCK.depth > 0 && !svg.closest(".show")) return;
-    e.stopPropagation();
-    setSel(null); paint(); onUpdate(null);
-  }, { ...on, capture: true });
-
-  paint();
-  return { destroy: () => ac.abort(), paint };
+/* Badge body: each line's return between the two snapped bars, then the span. */
+function measureBadgeHtml(sel, lines) {
+  const rows = [];
+  for (const { label, pts } of lines) {
+    const a = nearestPointIdx(pts, sel.t0), b = nearestPointIdx(pts, sel.t1);
+    if (a < 0 || b <= a) continue;
+    const p = (pts[b][1] / pts[a][1] - 1) * 100;
+    rows.push(`<div class="cm-row"><span>${escapeHtml(label)}</span><b class="${p >= 0 ? "pos" : "neg"}">${fmtPctSigned(p)}</b></div>`);
+  }
+  const main = lines[0].pts;
+  const bars = nearestPointIdx(main, sel.t1) - nearestPointIdx(main, sel.t0);
+  return rows.join("") + `<div class="cm-foot">${fmtDateMDY(sel.t0)} → ${fmtDateMDY(sel.t1)} · ${bars} bars</div>`;
 }
 
 /* Which series backs the active range.
@@ -2961,14 +2868,14 @@ function renderChart() {
       </defs>
       ${ticks.map(t => `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>`).join("")}
       ${ticks.map(t => `<text x="${padL-6}" y="${t.y+3}" font-size="10" fill="var(--muted)" text-anchor="end">${fmtTickVal(t.v)}</text>`).join("")}
-      ${xTicks.map(t => `<text x="${t.x}" y="${H-padB+12}" font-size="10" fill="var(--muted)" text-anchor="middle">${fmtTickDate(t.t)}</text>`).join("")}
+      ${xTicks.map((t, i) => `<text x="${t.x}" y="${H-padB+12}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtTickDate(t.t)}</text>`).join("")}
       <path d="${area}" fill="url(#g-area)"/>
       ${spyPath ? `<path d="${spyPath}" fill="none" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
       ${secPath ? `<path d="${secPath}" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
       ${smaSvg}
       <path d="${stockPath}" fill="none" stroke="${stroke}" stroke-width="1.8"/>
       ${volSvg}
-      <rect class="sel-rect" id="m-sel" x="0" y="0" width="0" height="${chartH}" style="display:none"/>
+      <rect class="sel-rect" id="m-sel" x="0" y="${padT}" width="0" height="${chartH}" style="display:none"/>
       <line class="crosshair-line" id="m-cross-v" x1="0" y1="${padT}" x2="0" y2="${padT+chartH}"/>
       <line class="crosshair-line" id="m-cross-h" x1="${padL}" y1="0" x2="${W-padR}" y2="0"/>
       <circle class="crosshair-dot" id="m-dot" r="4" cx="0" cy="0"/>
@@ -2977,6 +2884,7 @@ function renderChart() {
       <rect id="m-overlay" x="${padL}" y="${padT}" width="${W-padL-padR}" height="${chartH}" fill="transparent" style="cursor:crosshair"/>
     </svg>
     <div class="m-tooltip" id="m-tt"></div>
+    <div class="chart-measure" id="m-measure"></div>
   `;
 
   // Save geometry + data for interaction
@@ -2988,9 +2896,7 @@ function renderChart() {
 }
 
 /* The chart's own summary line: range return, benchmark returns, bar frequency,
- * MA legend. Split out of renderChart so the brush can swap it for a selection
- * summary and put it back without a full redraw (the old code re-ran the entire
- * renderChart to restore this, which is what leaked the mouseup listeners). */
+ * MA legend. */
 function renderChartInfoDefault() {
   const g = DETAIL.geom;
   if (!g) return;
@@ -3015,124 +2921,58 @@ function renderChartInfoDefault() {
   const info = $("#m-range-info");
   info.innerHTML = parts.join("");
   info.style.display = "flex";
-  info.dataset.default = "1";
-}
-
-/* Selection summary — the brush's onUpdate. Mirrors renderChartInfoDefault's
- * shape so the line doesn't jump around as you drag. */
-function renderChartInfoSelection(sel) {
-  const g = DETAIL.geom;
-  if (!g) return;
-  if (!sel) { renderChartInfoDefault(); renderModalPriceBlock(); return; }
-  const iA = nearestPointIdx(g.stock, sel.t0), iB = nearestPointIdx(g.stock, sel.t1);
-  if (iA < 0 || iB < 0 || iA === iB) return;
-  const pct = (g.stock[iB][1] / g.stock[iA][1] - 1) * 100;
-  const parts = [`<span><b class="${pct>=0?"pos":"neg"}">${(pct>=0?"+":"")+pct.toFixed(2)}%</b> · selection</span>`];
-  for (const [pts, label] of [[g.spy, "S&amp;P"], [g.sec, DETAIL.data.sector_etf || "Sector"]]) {
-    if (!pts) continue;
-    const jA = nearestPointIdx(pts, sel.t0), jB = nearestPointIdx(pts, sel.t1);
-    if (jA < 0 || jB < 0 || jA === jB) continue;
-    const p = (pts[jB][1] / pts[jA][1] - 1) * 100;
-    parts.push(`<span><b class="${p>=0?"pos":"neg"}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · ${label}</span>`);
-  }
-  parts.push(`<span style="margin-left:auto">${fmtDateMDY(g.stock[iA][0])} → ${fmtDateMDY(g.stock[iB][0])}</span>`);
-  const info = $("#m-range-info");
-  info.innerHTML = parts.join("");
-  info.style.display = "flex";
-  delete info.dataset.default;
-  renderModalPriceBlock();
 }
 
 function attachChartInteraction() {
-  const svg = $("#m-svg");
-  const overlay = $("#m-overlay");
-  const tt = $("#m-tt");
-  const cv = $("#m-cross-v"), ch = $("#m-cross-h"), dot = $("#m-dot");
-  const dotSp = $("#m-dot-sp"), dotSec = $("#m-dot-sec");
-  const sel = $("#m-sel");
-  const wrap = $("#m-chart");
   const g = DETAIL.geom;
-
-  // The chart SVG is rebuilt on every render, so the previous attach's
-  // listeners must be torn down or they pile up on window/document.
-  if (DETAIL.brush) { DETAIL.brush.destroy(); DETAIL.brush = null; }
-
-  function pxToData(px) {
-    // px is in svg viewBox units → matches our coords
-    const tx = g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
-    return tx;
-  }
-  const nearestIdx = nearestPointIdx;
-  function clientToSvgX(clientX) {
-    const r = svg.getBoundingClientRect();
-    return (clientX - r.left) * (g.W / r.width);
-  }
-
-  DETAIL.brush = attachRangeBrush({
-    svg, overlay, selRect: sel, geom: g, series: g.stock,
-    getSel: () => DETAIL.sel,
-    setSel: (s) => { DETAIL.sel = s; },
-    onUpdate: renderChartInfoSelection,
+  const lines = [
+    { label: DETAIL.data.symbol, pts: g.stock, dot: $("#m-dot") },
+    g.spy && { label: "S&P 500", pts: g.spy, dot: $("#m-dot-sp") },
+    g.sec && { label: DETAIL.data.sector_etf || "Sector", pts: g.sec, dot: $("#m-dot-sec") },
+  ].filter(Boolean);
+  const common = { svg: $("#m-svg"), overlay: $("#m-overlay"), geom: g, lines };
+  attachChartHover({
+    ...common, tt: $("#m-tt"), cv: $("#m-cross-v"), ch: $("#m-cross-h"),
+    head: (p) => `<div class="tt-row"><span>Price</span><b>${fmtMoney(p[1], DETAIL.data.currency)}</b></div>`,
   });
+  attachRangeBrush({ ...common, selRect: $("#m-sel"), badge: $("#m-measure"), onUpdate: renderModalPriceBlock });
+}
 
+/* Crosshair + tooltip, shared by both charts. lines[0] is the main series (the
+ * crosshair follows it); every line gets a dot and its return since the
+ * window's first bar. `head(point)` adds rows above them (e.g. price). */
+function attachChartHover({ svg, overlay, tt, cv, ch, geom: g, lines, head }) {
+  const host = tt.parentElement;
+  const main = lines[0].pts;
   overlay.addEventListener("mousemove", (e) => {
-    const svgX = clientToSvgX(e.clientX);
-    const t = pxToData(Math.max(g.padL, Math.min(g.W - g.padR, svgX)));
-    const i = nearestIdx(g.stock, t);
+    const r = svg.getBoundingClientRect();
+    const px = Math.max(g.padL, Math.min(g.W - g.padR, (e.clientX - r.left) * (g.W / r.width)));
+    const i = nearestPointIdx(main, g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0));
     if (i < 0) return;
-    const sp = g.stock[i];
-    const x = g.xScale(sp[0]);
-    const y = g.yScale(sp[1]);
-    cv.setAttribute("x1", x); cv.setAttribute("x2", x); cv.style.opacity = 1;
-    ch.setAttribute("y1", y); ch.setAttribute("y2", y); ch.style.opacity = 1;
-    dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.style.opacity = 1;
-    let extra = "";
-    if (dotSp && g.spy) {
-      const j = nearestIdx(g.spy, sp[0]);
-      if (j >= 0) {
-        const px = g.xScale(g.spy[j][0]); const py = g.yScale(g.spy[j][1]);
-        dotSp.setAttribute("cx", px); dotSp.setAttribute("cy", py); dotSp.style.opacity = 1;
-        const pct = (g.spy[j][1] / g.spy[0][1] - 1) * 100;
-        extra += `<div class="tt-row"><span class="tt-label"><span class="dot sp" style="width:8px;height:8px;background:#8b5cf6;border-radius:50%;display:inline-block"></span>S&amp;P</span><b class="${pct>=0?'pos':'neg'}" style="color:${pct>=0?'var(--pos)':'var(--neg)'}">${(pct>=0?'+':'')+pct.toFixed(2)}%</b></div>`;
-      }
+    const t = main[i][0], x = g.xScale(t), y = g.yScale(main[i][1]);
+    cv.setAttribute("x1", x); cv.setAttribute("x2", x);
+    ch.setAttribute("y1", y); ch.setAttribute("y2", y);
+    cv.style.opacity = ch.style.opacity = 1;
+    let rows = head ? head(main[i]) : "";
+    for (const { label, pts, dot } of lines) {
+      const j = nearestPointIdx(pts, t);
+      if (j < 0) continue;
+      dot.setAttribute("cx", g.xScale(pts[j][0]));
+      dot.setAttribute("cy", g.yScale(pts[j][1]));
+      dot.style.opacity = 1;
+      const p = (pts[j][1] / pts[0][1] - 1) * 100;
+      rows += `<div class="tt-row"><span>${escapeHtml(label)}</span><b class="${p >= 0 ? "pos" : "neg"}">${fmtPctSigned(p)}</b></div>`;
     }
-    if (dotSec && g.sec) {
-      const j = nearestIdx(g.sec, sp[0]);
-      if (j >= 0) {
-        const px = g.xScale(g.sec[j][0]); const py = g.yScale(g.sec[j][1]);
-        dotSec.setAttribute("cx", px); dotSec.setAttribute("cy", py); dotSec.style.opacity = 1;
-        const pct = (g.sec[j][1] / g.sec[0][1] - 1) * 100;
-        extra += `<div class="tt-row"><span class="tt-label"><span style="width:8px;height:8px;background:#f59e0b;border-radius:50%;display:inline-block"></span>${DETAIL.data.sector_etf||'Sector'}</span><b style="color:${pct>=0?'var(--pos)':'var(--neg)'}">${(pct>=0?'+':'')+pct.toFixed(2)}%</b></div>`;
-      }
-    }
-    const stockPct = (sp[1] / g.stock[0][1] - 1) * 100;
-    const dt = new Date(sp[0]);
-    tt.innerHTML = `
-      <div class="tt-date">${fmtDateMDY(dt)}</div>
-      <div class="tt-row"><span class="tt-label">Price</span><b>${fmtMoney(sp[1], DETAIL.data && DETAIL.data.currency)}</b></div>
-      <div class="tt-row"><span class="tt-label">${DETAIL.data.symbol}</span><b style="color:${stockPct>=0?'var(--pos)':'var(--neg)'}">${(stockPct>=0?'+':'')+stockPct.toFixed(2)}%</b></div>
-      ${extra}
-    `;
+    tt.innerHTML = `<div class="tt-date">${fmtDateMDY(t)}</div>${rows}`;
     tt.classList.add("show");
-    // Position tooltip near cursor
-    const wrapRect = wrap.getBoundingClientRect();
-    const lx = e.clientX - wrapRect.left + 12;
-    const ly = e.clientY - wrapRect.top - 8;
-    const ttRect = tt.getBoundingClientRect();
-    const maxX = wrap.clientWidth - ttRect.width - 6;
-    tt.style.left = Math.min(lx, Math.max(6, maxX)) + "px";
-    tt.style.top = Math.max(6, ly) + "px";
+    const hr = host.getBoundingClientRect();
+    tt.style.left = Math.min(e.clientX - hr.left + 12, Math.max(6, host.clientWidth - tt.offsetWidth - 6)) + "px";
+    tt.style.top = Math.max(6, e.clientY - hr.top - 8) + "px";
   });
   overlay.addEventListener("mouseleave", () => {
-    cv.style.opacity = 0; ch.style.opacity = 0; dot.style.opacity = 0;
-    if (dotSp) dotSp.style.opacity = 0;
-    if (dotSec) dotSec.style.opacity = 0;
+    for (const el of [cv, ch, ...lines.map(l => l.dot)]) el.style.opacity = 0;
     tt.classList.remove("show");
   });
-
-  // A selection survives a redraw (toggling an overlay or an MA), so restore
-  // its summary line too — renderChart() has just reset it to the default.
-  if (DETAIL.sel) renderChartInfoSelection(DETAIL.sel);
 }
 
 /* ---- Information sections ---- */
@@ -3546,20 +3386,22 @@ function hideProgress() {
  * Portfolio state — per-portfolio views, tabs, and analytics
  * --------------------------------------------------------------------------- */
 const AD_HOC_KEY = "__current__";
+function readBench() {
+  try { return localStorage.getItem("pf_bench") || "SPY"; } catch { return "SPY"; }
+}
 let STATE = {
   activeView: null,        // current view name (or AD_HOC_KEY for ad-hoc input, or null = none yet)
   mode: "cap",             // "equal" | "cap" | "custom" | "preset:<name>"
   customWeights: null,     // {symbol: fraction}, set after user applies the popup
   period: "1Y",
-  showSpy: true,
+  // Portfolio-chart overlays. `bench` is the benchmark Risk & Return compares
+  // against and the chart's main comparison line (a key of a.benchmarks).
+  bench: readBench(),
+  showBench: true,
   showNdx: false,
   showSec: false,
   showDd: true,
-  // Portfolio-chart SMA overlays and drag-to-measure selection. Both mirror the
-  // detail chart's DETAIL.sma / DETAIL.sel; the brush itself is shared code.
   pfSma: CHART_SMA,     // same object as DETAIL.sma — see CHART_SMA
-  pfSel: null,
-  pfBrush: null,
   analytics: null,
   analyticsLoading: false,
   // {tabName: {"<mode>|<period>|<ccy>": result}} — persisted per tab so
@@ -3718,16 +3560,14 @@ async function loadAnalyticsCacheForView(name) {
   } catch (_) { /* ignore — fall back to in-memory + fresh fetch */ }
 }
 
-// Slim a full analytics payload to the fields worth persisting.
-// `series` (the whole-portfolio cumulative curve, plus SPY/NASDAQ/drawdown
-// overlays) is now kept so the performance chart survives a reload — otherwise
-// a reopened portfolio shows "Not enough data to plot" until a live re-fetch.
-// It is the largest field, but persisting it is what makes the graph durable.
+// Slim a full analytics payload to the fields worth persisting. `series` and
+// `benchmarks` (the chart lines) are the largest fields, but keeping them is
+// what lets a reopened portfolio paint its chart before any re-fetch.
 function _slimAnalyticsForCache(a) {
   if (!a || typeof a !== "object" || a.error) return null;
   const out = {};
   const keep = ["period", "display_ccy", "weights_applied", "active_symbols",
-                "missing_symbols", "stats", "spy_stats", "nasdaq_stats",
+                "missing_symbols", "stats", "benchmarks",
                 "weighted", "contribution", "analyst", "exposure",
                 "concentration", "warnings", "series"];
   for (const k of keep) if (k in a) out[k] = a[k];
@@ -4454,15 +4294,13 @@ async function requestAnalytics(opts) {
   const key = analyticsCacheKey(mode, period);
   const tabMap = currentAnalyticsMap();
 
-  // Cache hit → instant. A payload cached before series-persistence (older
-  // saved views) has no chart series on disk; in that case paint the panel from
-  // cache immediately but fall through to a live fetch that backfills series —
-  // without the loading spinner, so the instant-panel UX is preserved. Once
-  // series is present the normal short-circuit below takes over, so a backfilled
-  // (or freshly-built) tab never refetches in a loop.
+  // Cache hit → instant. A payload cached in an older shape (no `benchmarks`)
+  // paints from cache immediately but falls through to a silent live fetch that
+  // backfills it — no spinner. Once the new shape is stored the short-circuit
+  // below takes over, so a tab never refetches in a loop.
   const cached = tabMap[key];
-  const backfillSeries = !!(cached && !opts.force && !cached.series);
-  if (cached && !opts.force && !backfillSeries) {
+  const backfill = !!(cached && !opts.force && !cached.benchmarks);
+  if (cached && !opts.force && !backfill) {
     STATE.analytics = cached;
     STATE.analyticsLoading = false;
     renderAnalyticsBody();
@@ -4470,8 +4308,8 @@ async function requestAnalytics(opts) {
   }
 
   const reqId = ++_analyticsReqId;
-  if (backfillSeries) STATE.analytics = cached;   // keep the cached panel on screen during the silent backfill
-  STATE.analyticsLoading = !backfillSeries;
+  if (backfill) STATE.analytics = cached;   // keep the cached panel on screen during the silent backfill
+  STATE.analyticsLoading = !backfill;
   renderAnalyticsBody();
 
   // Build the weight_sets we'll request. Always include the *active* mode;
@@ -4508,15 +4346,10 @@ async function requestAnalytics(opts) {
     }
     STATE.analytics = tabMap[key] || results[mode] || null;
   } catch (e) {
-    // On a silent series-backfill the cached panel is already on screen; a fetch
+    // On a silent backfill the cached panel is already on screen; a fetch
     // failure (yfinance rate-limit / network blip) must LEAVE it intact rather
-    // than replacing it with an error state. Otherwise reopening an older saved
-    // view during a blip would wipe the stats/analyst panel — and, since the
-    // failed fetch never persists `series`, re-wipe it on every subsequent
-    // reopen until one fetch happens to succeed. Only a genuine cache miss
-    // (nothing already shown) surfaces the error; the backfill keeps
-    // STATE.analytics === cached (set before the fetch), chart simply absent.
-    if (!backfillSeries) STATE.analytics = {error: e.message};
+    // than wiping it with an error — on every reopen, until a fetch succeeds.
+    if (!backfill) STATE.analytics = {error: e.message};
   } finally {
     if (reqId === _analyticsReqId) STATE.analyticsLoading = false;
     renderAnalyticsBody();
@@ -4550,7 +4383,7 @@ function renderAnalyticsBody() {
         <div class="pf-chart-legend" id="pf-chart-legend"></div>
       </div>
       <div class="pf-card">
-        <h4>Risk &amp; return <span class="sub">vs SPY · ${escapeHtml(a.display_ccy || FX_QUOTE)}</span></h4>
+        <h4>Risk &amp; return <span class="sub">vs ${benchSelectHtml(a)} · ${escapeHtml(a.display_ccy || FX_QUOTE)}</span></h4>
         ${renderStatsHtml(a)}
       </div>
       <div class="pf-card">
@@ -4576,6 +4409,12 @@ function renderAnalyticsBody() {
     </div>
   `;
   drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
+  $("#pf-bench").onchange = (e) => {
+    STATE.bench = e.target.value;
+    try { localStorage.setItem("pf_bench", STATE.bench); } catch { /* private mode */ }
+    renderAnalyticsBody();
+  };
+  $("#pf-bench-pill-label").textContent = ((a.benchmarks || {})[activeBench(a)] || {}).label || "Benchmark";
   renderStatTipsKatex();
   renderAnalystDashboard(a);
 }
@@ -4627,7 +4466,7 @@ const METRIC_INFO = {
   "Period return": {
     formula: String.raw`R = \dfrac{V_T}{V_0} - 1`,
     desc: "Total return of the portfolio over the chosen period, FX-adjusted to the display currency.",
-    range: "Compare to SPY in the same period. A positive read with low volatility is the cleanest win."
+    range: "Compare to the benchmark in the same period. A positive read with low volatility is the cleanest win."
   },
   "Ann. return": {
     formula: String.raw`R_{ann} = \left(\dfrac{V_T}{V_0}\right)^{\frac{1}{y}} - 1`,
@@ -4659,19 +4498,19 @@ const METRIC_INFO = {
     desc: "Annualised return divided by max drawdown — return per unit of worst-case pain.",
     range: ">0.5 acceptable · >1.0 good · >2.0 exceptional. Penalises managers who run wild during crashes."
   },
-  "Beta (SPY)": {
+  "Beta": {
     formula: String.raw`\beta = \dfrac{\mathrm{Cov}(r_p, r_m)}{\mathrm{Var}(r_m)}`,
-    desc: "Sensitivity to SPY moves. β=1 means it moves with the market; β=1.3 means 30% more responsive.",
+    desc: "Sensitivity to the selected benchmark. β=1 means it moves with it; β=1.3 means 30% more responsive. Nikkei and KOSPI close before the US opens, so same-day β and R² against them understate the real co-movement.",
     range: "0.6–0.8 defensive · 0.9–1.1 market-like · >1.3 high-beta growth. Negative is rare and means inverse exposure."
   },
-  "R² (SPY)": {
+  "R²": {
     formula: String.raw`R^2 = \mathrm{Corr}(r_p, r_m)^2`,
-    desc: "Share of portfolio variance explained by SPY. Tells you whether beta is a meaningful description of behaviour.",
-    range: ">0.85 → portfolio is essentially SPY+leverage. <0.4 → diversification/idiosyncratic exposure. <0.1 → unrelated."
+    desc: "Share of portfolio variance explained by the selected benchmark. Tells you whether beta is a meaningful description of behaviour.",
+    range: ">0.85 → portfolio is essentially the benchmark plus leverage. <0.4 → diversification/idiosyncratic exposure. <0.1 → unrelated."
   },
   "Tracking err": {
     formula: String.raw`\mathrm{TE} = \sqrt{252}\cdot\sigma\!\left(r_p - r_m\right)`,
-    desc: "Annualised standard deviation of the portfolio’s return *minus* SPY’s — how far you wander from the benchmark.",
+    desc: "Annualised standard deviation of the portfolio’s return *minus* the benchmark’s — how far you wander from the benchmark.",
     range: "Index funds <2%. Active managers 4–8% typical. Concentrated stock picks 10–20%+. Pair with information ratio."
   },
   /* --- Valuation & analyst (weighted) --- */
@@ -4743,34 +4582,47 @@ const METRIC_INFO = {
   },
 };
 
+/* "vs <select>" in the Risk & Return header — a native select is the whole
+   dropdown: keyboard, Esc and outside-click come for free. */
+function benchSelectHtml(a) {
+  const cur = activeBench(a);
+  const opts = Object.entries(a.benchmarks || {}).map(([k, b]) =>
+    `<option value="${escapeHtml(k)}"${k === cur ? " selected" : ""}>${escapeHtml(b.label)}</option>`).join("");
+  return `<select class="bench-select" id="pf-bench" title="Benchmark to compare against">${opts}</select>`;
+}
+
+/* Portfolio vs the selected benchmark ("/ x" is the benchmark's own value).
+   Beta, R² and tracking error are relative measures, so they have no "/ x".
+   Below: the period return of every extra line switched on in the chart. */
 function renderStatsHtml(a) {
   const s = a.stats || {};
-  const sp = a.spy_stats || {};
+  const b = (a.benchmarks || {})[activeBench(a)] || {};
+  const bs = b.stats || {}, rel = b.rel || {};
   const cls = (v) => v == null ? "" : (v >= 0 ? "pos" : "neg");
   const rows = [
-    ["Period return", fmtPctSigned(s.total_return), cls(s.total_return), fmtPctSigned(sp.total_return)],
-    ["Ann. return", fmtPctSigned(s.ann_return), cls(s.ann_return), fmtPctSigned(sp.ann_return)],
-    ["Ann. vol", fmtPctPlain(s.ann_vol), "", fmtPctPlain(sp.ann_vol)],
-    ["Sharpe", fmtNumOr(s.sharpe, 2), "", fmtNumOr(sp.sharpe, 2)],
-    ["Sortino", fmtNumOr(s.sortino, 2), "", fmtNumOr(sp.sortino, 2)],
-    ["Max drawdown", fmtPctSigned(s.max_dd), cls(s.max_dd), fmtPctSigned(sp.max_dd)],
-    ["Calmar", fmtNumOr(s.calmar, 2), "", fmtNumOr(sp.calmar, 2)],
-    ["Beta (SPY)", fmtNumOr(s.beta_spy, 2), "", fmtNumOr(sp.beta_spy, 2)],
-    ["R² (SPY)", fmtNumOr(s.r2_spy, 2), "", fmtNumOr(sp.r2_spy, 2)],
-    ["Tracking err", fmtPctPlain(s.te_spy), "", fmtPctPlain(sp.te_spy)],
+    ["Period return", fmtPctSigned(s.total_return), cls(s.total_return), fmtPctSigned(bs.total_return)],
+    ["Ann. return", fmtPctSigned(s.ann_return), cls(s.ann_return), fmtPctSigned(bs.ann_return)],
+    ["Ann. vol", fmtPctPlain(s.ann_vol), "", fmtPctPlain(bs.ann_vol)],
+    ["Sharpe", fmtNumOr(s.sharpe, 2), "", fmtNumOr(bs.sharpe, 2)],
+    ["Sortino", fmtNumOr(s.sortino, 2), "", fmtNumOr(bs.sortino, 2)],
+    ["Max drawdown", fmtPctSigned(s.max_dd), cls(s.max_dd), fmtPctSigned(bs.max_dd)],
+    ["Calmar", fmtNumOr(s.calmar, 2), "", fmtNumOr(bs.calmar, 2)],
+    ["Beta", fmtNumOr(rel.beta, 2), ""],
+    ["R²", fmtNumOr(rel.r2, 2), ""],
+    ["Tracking err", fmtPctPlain(rel.te), ""],
   ];
-  const html = rows.map(r => {
-    const info = METRIC_INFO[r[0]];
-    const dataAttr = info ? ` data-info="1" data-metric="${escapeHtml(r[0])}"` : "";
-    const tip = metricTipHtml(r[0], info);
-    return `
-    <div class="pf-stat-row"${dataAttr} title="${info ? '' : 'Portfolio vs SPY'}">
-      <span class="l">${r[0]}</span>
-      <span class="v ${r[2]}">${r[1]} <span style="color:var(--muted); font-weight:400">/ ${r[3]}</span></span>
-      ${tip}
-    </div>`;
-  }).join("");
-  return `<div class="pf-stats">${html}</div>`;
+  const html = rows.map(([label, v, c, bv]) => `
+    <div class="pf-stat-row" data-info="1" data-metric="${escapeHtml(label)}">
+      <span class="l">${label}</span>
+      <span class="v ${c}">${v}${bv != null ? ` <span class="bench-v">/ ${bv}</span>` : ""}</span>
+      ${metricTipHtml(label, METRIC_INFO[label])}
+    </div>`).join("");
+  const extras = pfBenchLines(a).filter(l => l.key !== activeBench(a)).map(l => `
+    <div class="pf-stat-row">
+      <span class="l"><i class="bench-swatch" style="background:${l.color}"></i>${escapeHtml(l.label)} return</span>
+      <span class="v ${cls(l.ret)}">${fmtPctSigned(l.ret)}</span>
+    </div>`).join("");
+  return `<div class="pf-stats">${html}</div>` + (extras ? `<div class="pf-stats pf-bench-extra">${extras}</div>` : "");
 }
 
 /* ---------------------------- Analyst sentiment dashboard ---------------------------- */
@@ -5283,259 +5135,101 @@ function renderContribHtml(a) {
   </table>`;
 }
 
+/* The benchmark key Risk & Return and the chart compare against: the user's
+   pick when this payload has it, else SPY. */
+function activeBench(a) {
+  const B = a.benchmarks || {};
+  return B[STATE.bench] ? STATE.bench : "SPY";
+}
+
+/* Comparison lines on the portfolio chart: the selected benchmark plus the
+   Nasdaq / Sector-mix overlays when switched on, without duplicates. */
+const BENCH_LINES = [[null, "showBench", "#8b5cf6"], ["QQQ", "showNdx", "#06b6d4"], ["SECTOR", "showSec", "#f59e0b"]];
+function pfBenchLines(a) {
+  const out = [];
+  for (const [k, flag, color] of BENCH_LINES) {
+    const key = k || activeBench(a);
+    const b = (a.benchmarks || {})[key];
+    if (STATE[flag] && b && b.series.length >= 2 && !out.some(l => l.key === key)) {
+      out.push({ key, label: b.label, pts: b.series, color, ret: b.stats.total_return });
+    }
+  }
+  return out;
+}
+
 function drawPortfolioChart(a, hostEl, legendEl) {
   const series = a.series || {};
   const port = series.portfolio || [];
   if (port.length < 2) { hostEl.innerHTML = `<div class="pf-empty">Not enough data to plot.</div>`; return; }
-  const showSpy = STATE.showSpy && series.spy && series.spy.length;
-  const showNdx = STATE.showNdx && series.nasdaq && series.nasdaq.length;
-  const showSec = STATE.showSec && series.sector_mix && series.sector_mix.length;
-  const showDd  = STATE.showDd && series.drawdown && series.drawdown.length;
+  const benches = pfBenchLines(a);
+  // SMAs arrive computed server-side over a wider window than the period, so
+  // each one spans the whole chart (see analytics._WARMUP_YF).
+  const smas = SMA_PERIODS.filter(n => STATE.pfSma[n] && ((series.sma || {})[n] || []).length >= 2)
+                          .map(n => ({ n, pts: series.sma[n] }));
+  const dd = STATE.showDd ? (series.drawdown || []) : [];
 
-  const W = 720, H = 220;
-  const padL = 36, padR = 12, padT = 8, padB = 22;
-  const t0 = port[0][0], t1 = port[port.length-1][0];
-  const xScale = (t) => padL + ((t - t0) / Math.max(1, (t1 - t0))) * (W - padL - padR);
+  const W = 720, H = 220, padL = 36, padR = 12, padT = 8, padB = 22;
+  const t0 = port[0][0], t1 = port[port.length - 1][0];
+  const xScale = (t) => padL + ((t - t0) / Math.max(1, t1 - t0)) * (W - padL - padR);
   let lo = Infinity, hi = -Infinity;
-  for (const p of port) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
-  if (showSpy) for (const p of series.spy) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
-  if (showNdx) for (const p of series.nasdaq) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
-  if (showSec) for (const p of series.sector_mix) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
-  // Moving averages on the portfolio index itself. This series is always daily
-  // (analytics fetches interval="1d"), and it arrives already trimmed to the
-  // period, so unlike the detail chart there is no wider window to compute
-  // over — an SMA longer than the period simply has nothing to show, and is
-  // skipped rather than drawn as a stub.
-  const pfSmas = [];
-  for (const n of SMA_PERIODS) {
-    if (!STATE.pfSma[n]) continue;
-    const s = smaSeries(port, n);
-    if (s.length >= 2) pfSmas.push({ n, pts: s });
+  for (const pts of [port, ...benches.map(b => b.pts), ...smas.map(s => s.pts)]) {
+    for (const p of pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   }
-  for (const s of pfSmas) for (const p of s.pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   const pad = (hi - lo) * 0.06 || 1;
   lo -= pad; hi += pad;
   const yScale = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
-  const path = (pts) => {
-    let s = "";
-    for (let i = 0; i < pts.length; i++) {
-      const x = xScale(pts[i][0]).toFixed(1), y = yScale(pts[i][1]).toFixed(1);
-      s += (i === 0 ? "M" : "L") + x + "," + y + " ";
-    }
-    return s;
-  };
-  const ticks = [];
-  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * (i/4); ticks.push({v, y: yScale(v)}); }
-  const N_XT = 5; const xt = [];
-  for (let i = 0; i <= N_XT; i++) { const t = t0 + (t1-t0)*(i/N_XT); xt.push({t, x: xScale(t)}); }
+  const path = (pts, y = yScale) => pts.map((p, i) => (i ? "L" : "M") + xScale(p[0]).toFixed(1) + "," + y(p[1]).toFixed(1)).join(" ");
+  const yTicks = [0, 1, 2, 3, 4].map(i => lo + (hi - lo) * i / 4);
+  const xTicks = [0, 1, 2, 3, 4, 5].map(i => t0 + (t1 - t0) * i / 5);
   const fmtT = (ts) => {
     const d = new Date(ts);
-    if (STATE.period === "3M" || STATE.period === "6M") return d.toLocaleDateString(undefined, {month:"short", day:"numeric"});
-    if (STATE.period === "YTD" || STATE.period === "1Y") return d.toLocaleDateString(undefined, {month:"short", year:"2-digit"});
-    return d.toLocaleDateString(undefined, {year:"numeric"});
+    if (STATE.period === "3M" || STATE.period === "6M") return d.toLocaleDateString(undefined, {month: "short", day: "numeric"});
+    if (STATE.period === "YTD" || STATE.period === "1Y") return d.toLocaleDateString(undefined, {month: "short", year: "2-digit"});
+    return d.toLocaleDateString(undefined, {year: "numeric"});
   };
-  const accent = "var(--accent)";
   const svg = `<svg id="pf-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    ${ticks.map(t => `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>`).join("")}
-    ${ticks.map(t => `<text x="${padL-6}" y="${(t.y+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${t.v.toFixed(0)}</text>`).join("")}
-    ${xt.map(t => `<text x="${t.x.toFixed(1)}" y="${(H-padB+12).toFixed(0)}" font-size="10" fill="var(--muted)" text-anchor="middle">${fmtT(t.t)}</text>`).join("")}
-    ${showSec ? `<path d="${path(series.sector_mix)}" fill="none" stroke="#f59e0b" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
-    ${showNdx ? `<path d="${path(series.nasdaq)}" fill="none" stroke="#06b6d4" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
-    ${showSpy ? `<path d="${path(series.spy)}" fill="none" stroke="#8b5cf6" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
-    ${pfSmas.map(s => `<path d="${path(s.pts)}" fill="none" stroke="${SMA_COLORS[s.n]}" stroke-width="1.2" opacity="0.9"/>`).join("")}
-    <path d="${path(port)}" fill="none" stroke="${accent}" stroke-width="2"/>
+    ${yTicks.map(v => `<line x1="${padL}" y1="${yScale(v).toFixed(1)}" x2="${W-padR}" y2="${yScale(v).toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>
+      <text x="${padL-6}" y="${(yScale(v)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${v.toFixed(0)}</text>`).join("")}
+    ${xTicks.map((t, i) => `<text x="${xScale(t).toFixed(1)}" y="${H-padB+12}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtT(t)}</text>`).join("")}
+    ${benches.map(b => `<path d="${path(b.pts)}" fill="none" stroke="${b.color}" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>`).join("")}
+    ${smas.map(s => `<path d="${path(s.pts)}" fill="none" stroke="${SMA_COLORS[s.n]}" stroke-width="1.2" opacity="0.9"/>`).join("")}
+    <path d="${path(port)}" fill="none" stroke="var(--accent)" stroke-width="2"/>
     <rect class="pf-sel" id="pf-sel" x="0" y="${padT}" width="0" height="${H-padT-padB}" style="display:none"/>
     <line class="pf-cross" id="pf-cv" x1="0" x2="0" y1="${padT}" y2="${H-padB}"/>
     <line class="pf-cross" id="pf-ch" y1="0" y2="0" x1="${padL}" x2="${W-padR}"/>
-    <circle class="pf-dot" id="pf-dot" r="4" cx="0" cy="0"/>
-    ${showSpy ? `<circle class="pf-dot spy" id="pf-dot-spy" r="3.5" cx="0" cy="0"/>` : ""}
-    ${showNdx ? `<circle class="pf-dot ndx" id="pf-dot-ndx" r="3.5" cx="0" cy="0"/>` : ""}
-    ${showSec ? `<circle class="pf-dot sec" id="pf-dot-sec" r="3.5" cx="0" cy="0"/>` : ""}
+    <circle class="pf-dot" id="pf-dot" r="4"/>
+    ${benches.map((b, i) => `<circle class="pf-dot" id="pf-dot-${i}" r="3.5" style="fill:${b.color}"/>`).join("")}
     <rect id="pf-overlay" x="${padL}" y="${padT}" width="${W-padL-padR}" height="${H-padT-padB}" fill="transparent" style="cursor:crosshair"/>
   </svg>`;
   let ddSvg = "";
-  if (showDd) {
-    const dd = series.drawdown;
-    const W2 = W, H2 = 80, padT2 = 4, padB2 = 12;
-    const minDd = Math.min(...dd.map(p => p[1])); const maxDd = 0;
-    const yS2 = (v) => padT2 + (1 - (v - minDd) / Math.max(1e-9, (maxDd - minDd))) * (H2 - padT2 - padB2);
-    const path2 = (pts) => {
-      let s = "";
-      for (let i = 0; i < pts.length; i++) {
-        const x = xScale(pts[i][0]).toFixed(1), y = yS2(pts[i][1]).toFixed(1);
-        s += (i === 0 ? "M" : "L") + x + "," + y + " ";
-      }
-      return s + ` L ${xScale(dd[dd.length-1][0]).toFixed(1)},${yS2(0).toFixed(1)} L ${xScale(dd[0][0]).toFixed(1)},${yS2(0).toFixed(1)} Z`;
-    };
-    ddSvg = `<svg class="pf-dd-svg" viewBox="0 0 ${W2} ${H2}" preserveAspectRatio="none">
-      <line x1="${padL}" y1="${yS2(0).toFixed(1)}" x2="${W-padR}" y2="${yS2(0).toFixed(1)}" stroke="var(--border)" stroke-width="0.5"/>
-      <path d="${path2(dd)}" fill="rgba(248,81,73,0.18)" stroke="#f85149" stroke-width="1.3"/>
-      <text x="${padL-6}" y="${(yS2(minDd)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${minDd.toFixed(0)}%</text>
-      <text x="${padL-6}" y="${(yS2(0)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">0</text>
+  if (dd.length) {
+    const H2 = 80, padT2 = 4, padB2 = 12;
+    const minDd = Math.min(...dd.map(p => p[1]));
+    const y2 = (v) => padT2 + (1 - (v - minDd) / Math.max(1e-9, -minDd)) * (H2 - padT2 - padB2);
+    const area = path(dd, y2) + ` L${xScale(t1).toFixed(1)},${y2(0).toFixed(1)} L${xScale(dd[0][0]).toFixed(1)},${y2(0).toFixed(1)} Z`;
+    ddSvg = `<svg class="pf-dd-svg" viewBox="0 0 ${W} ${H2}" preserveAspectRatio="none">
+      <line x1="${padL}" y1="${y2(0).toFixed(1)}" x2="${W-padR}" y2="${y2(0).toFixed(1)}" stroke="var(--border)" stroke-width="0.5"/>
+      <path d="${area}" fill="rgba(248,81,73,0.18)" stroke="#f85149" stroke-width="1.3"/>
+      <text x="${padL-6}" y="${(y2(minDd)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${minDd.toFixed(0)}%</text>
+      <text x="${padL-6}" y="${(y2(0)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">0</text>
     </svg>`;
   }
-  hostEl.innerHTML = svg + ddSvg + `<div class="pf-tt" id="pf-tt"></div>` + `<div class="pf-chart-info" id="pf-chart-info"></div>`;
-  const legend = [];
-  legend.push(`<span><i style="background:#2f81f7"></i> Portfolio</span>`);
-  if (showSpy) legend.push(`<span><i style="background:#8b5cf6"></i> SPY</span>`);
-  if (showNdx) legend.push(`<span><i style="background:#06b6d4"></i> NASDAQ</span>`);
-  if (showSec) legend.push(`<span><i style="background:#f59e0b"></i> Sector mix</span>`);
-  if (showDd)  legend.push(`<span><i style="background:#f85149"></i> Drawdown</span>`);
-  for (const s of pfSmas) legend.push(`<span><i style="background:${SMA_COLORS[s.n]}"></i> SMA ${s.n} · daily</span>`);
-  legendEl.innerHTML = legend.join("");
+  hostEl.innerHTML = svg + ddSvg + `<div class="pf-tt" id="pf-tt"></div><div class="chart-measure" id="pf-measure"></div>`;
 
-  attachPortfolioChartInteraction({
-    W, H, padL, padR, padT, padB,
-    chartH: H - padT - padB,   // attachRangeBrush paints the selection to this
-    t0, t1, xScale, yScale,
-    port, spy: showSpy ? series.spy : null,
-    ndx: showNdx ? series.nasdaq : null,
-    sec: showSec ? series.sector_mix : null,
-    hostEl,
-  });
-}
+  // The Nasdaq / Sector-mix entries are listed under Risk & Return instead.
+  const bench = benches.find(b => b.key === activeBench(a));
+  legendEl.innerHTML = [
+    `<span><i style="background:var(--accent)"></i> Portfolio</span>`,
+    bench && `<span><i style="background:${bench.color}"></i> ${escapeHtml(bench.label)}</span>`,
+    dd.length && `<span><i style="background:#f85149"></i> Drawdown</span>`,
+    ...smas.map(s => `<span><i style="background:${SMA_COLORS[s.n]}"></i> SMA ${s.n} · daily</span>`),
+  ].filter(Boolean).join("");
 
-function attachPortfolioChartInteraction(g) {
-  const svg = document.getElementById("pf-svg");
-  const overlay = document.getElementById("pf-overlay");
-  if (!svg || !overlay) return;
-  const tt = document.getElementById("pf-tt");
-  const cv = document.getElementById("pf-cv");
-  const ch = document.getElementById("pf-ch");
-  const dot = document.getElementById("pf-dot");
-  const dotSpy = document.getElementById("pf-dot-spy");
-  const dotNdx = document.getElementById("pf-dot-ndx");
-  const dotSec = document.getElementById("pf-dot-sec");
-  const sel = document.getElementById("pf-sel");
-  const info = document.getElementById("pf-chart-info");
-  const wrap = g.hostEl;
-
-  const defaultInfo = () => {
-    const port = g.port;
-    if (!port.length) return "";
-    const pct = (port[port.length-1][1] / port[0][1] - 1) * 100;
-    const cls = pct >= 0 ? "pos" : "neg";
-    const parts = [
-      `<span><b class="${cls}">${(pct>=0?"+":"")+pct.toFixed(2)}%</b> · Portfolio</span>`,
-    ];
-    if (g.spy) {
-      const p = (g.spy[g.spy.length-1][1] / g.spy[0][1] - 1) * 100;
-      parts.push(`<span><b class="${p>=0?'pos':'neg'}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · SPY</span>`);
-    }
-    if (g.ndx) {
-      const p = (g.ndx[g.ndx.length-1][1] / g.ndx[0][1] - 1) * 100;
-      parts.push(`<span><b class="${p>=0?'pos':'neg'}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · NASDAQ</span>`);
-    }
-    if (g.sec) {
-      const p = (g.sec[g.sec.length-1][1] / g.sec[0][1] - 1) * 100;
-      parts.push(`<span><b class="${p>=0?'pos':'neg'}">${(p>=0?"+":"")+p.toFixed(2)}%</b> · Sector mix</span>`);
-    }
-    parts.push(`<span class="selection-hint">drag on chart to measure a sub-period · Esc clears →</span>`);
-    return parts.join("");
-  };
-
-  /* Selection summary. Kept as its own function (rather than inlined in a drag
-     handler like before) so the brush can call it on release and on redraw. */
-  const selectionInfo = (s) => {
-    if (!s) { info.innerHTML = defaultInfo(); return; }
-    const iA = nearestPointIdx(g.port, s.t0), iB = nearestPointIdx(g.port, s.t1);
-    if (iA < 0 || iB < 0 || iA === iB) return;
-    const pPct = (g.port[iB][1] / g.port[iA][1] - 1) * 100;
-    const parts = [`<span><b class="${pPct>=0?'pos':'neg'}">${(pPct>=0?'+':'')+pPct.toFixed(2)}%</b> · Portfolio (selection)</span>`];
-    for (const [pts, label] of [[g.spy, "SPY"], [g.ndx, "NASDAQ"], [g.sec, "Sector mix"]]) {
-      if (!pts) continue;
-      const jA = nearestPointIdx(pts, s.t0), jB = nearestPointIdx(pts, s.t1);
-      if (jA < 0 || jB < 0 || jA === jB) continue;
-      const p = (pts[jB][1] / pts[jA][1] - 1) * 100;
-      parts.push(`<span><b class="${p>=0?'pos':'neg'}">${(p>=0?'+':'')+p.toFixed(2)}%</b> · ${label}</span>`);
-    }
-    parts.push(`<span class="selection-hint">${fmtDateMDY(g.port[iA][0])} → ${fmtDateMDY(g.port[iB][0])}</span>`);
-    info.innerHTML = parts.join("");
-  };
-
-  // renderAnalyticsBody() replaces the whole panel on every period change,
-  // mode change and overlay-pill toggle, so without this teardown each one
-  // leaked another set of listeners.
-  if (STATE.pfBrush) { STATE.pfBrush.destroy(); STATE.pfBrush = null; }
-  // A selection from a previous period no longer refers to visible dates.
-  if (STATE.pfSel && (STATE.pfSel.t0 < g.t0 || STATE.pfSel.t1 > g.t1)) STATE.pfSel = null;
-  STATE.pfBrush = attachRangeBrush({
-    svg, overlay, selRect: sel, geom: g, series: g.port,
-    getSel: () => STATE.pfSel,
-    setSel: (s) => { STATE.pfSel = s; },
-    onUpdate: selectionInfo,
-  });
-  selectionInfo(STATE.pfSel);
-
-  const nearestIdx = nearestPointIdx;
-  const clientToSvgX = (clientX) => {
-    const r = svg.getBoundingClientRect();
-    return (clientX - r.left) * (g.W / r.width);
-  };
-  const pxToData = (px) => g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
-
-  overlay.addEventListener("mousemove", (e) => {
-    const svgX = clientToSvgX(e.clientX);
-    const t = pxToData(Math.max(g.padL, Math.min(g.W - g.padR, svgX)));
-    const i = nearestIdx(g.port, t);
-    if (i < 0) return;
-    const sp = g.port[i];
-    const x = g.xScale(sp[0]);
-    const y = g.yScale(sp[1]);
-    cv.setAttribute("x1", x); cv.setAttribute("x2", x); cv.style.opacity = 1;
-    ch.setAttribute("y1", y); ch.setAttribute("y2", y); ch.style.opacity = 1;
-    dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.style.opacity = 1;
-    const pct = (sp[1] / g.port[0][1] - 1) * 100;
-    let extra = "";
-    if (dotSpy && g.spy) {
-      const j = nearestIdx(g.spy, sp[0]);
-      if (j >= 0) {
-        const px = g.xScale(g.spy[j][0]); const py = g.yScale(g.spy[j][1]);
-        dotSpy.setAttribute("cx", px); dotSpy.setAttribute("cy", py); dotSpy.style.opacity = 1;
-        const sPct = (g.spy[j][1] / g.spy[0][1] - 1) * 100;
-        extra += `<div class="tt-row"><span>SPY</span><b class="${sPct>=0?'pos':'neg'}">${(sPct>=0?'+':'')+sPct.toFixed(2)}%</b></div>`;
-      }
-    }
-    if (dotNdx && g.ndx) {
-      const j = nearestIdx(g.ndx, sp[0]);
-      if (j >= 0) {
-        const px = g.xScale(g.ndx[j][0]); const py = g.yScale(g.ndx[j][1]);
-        dotNdx.setAttribute("cx", px); dotNdx.setAttribute("cy", py); dotNdx.style.opacity = 1;
-        const nPct = (g.ndx[j][1] / g.ndx[0][1] - 1) * 100;
-        extra += `<div class="tt-row"><span>NASDAQ</span><b class="${nPct>=0?'pos':'neg'}">${(nPct>=0?'+':'')+nPct.toFixed(2)}%</b></div>`;
-      }
-    }
-    if (dotSec && g.sec) {
-      const j = nearestIdx(g.sec, sp[0]);
-      if (j >= 0) {
-        const px = g.xScale(g.sec[j][0]); const py = g.yScale(g.sec[j][1]);
-        dotSec.setAttribute("cx", px); dotSec.setAttribute("cy", py); dotSec.style.opacity = 1;
-        const sPct = (g.sec[j][1] / g.sec[0][1] - 1) * 100;
-        extra += `<div class="tt-row"><span>Sector mix</span><b class="${sPct>=0?'pos':'neg'}">${(sPct>=0?'+':'')+sPct.toFixed(2)}%</b></div>`;
-      }
-    }
-    const dt = new Date(sp[0]);
-    tt.innerHTML = `
-      <div class="tt-date">${fmtDateMDY(dt)}</div>
-      <div class="tt-row"><span>Portfolio</span><b class="${pct>=0?'pos':'neg'}">${(pct>=0?'+':'')+pct.toFixed(2)}%</b></div>
-      ${extra}
-    `;
-    tt.classList.add("show");
-    const wrapRect = wrap.getBoundingClientRect();
-    const lx = e.clientX - wrapRect.left + 12;
-    const ly = e.clientY - wrapRect.top - 8;
-    const ttRect = tt.getBoundingClientRect();
-    const maxX = wrap.clientWidth - ttRect.width - 6;
-    tt.style.left = Math.min(lx, Math.max(6, maxX)) + "px";
-    tt.style.top = Math.max(6, ly) + "px";
-  });
-  overlay.addEventListener("mouseleave", () => {
-    cv.style.opacity = 0; ch.style.opacity = 0; dot.style.opacity = 0;
-    if (dotSpy) dotSpy.style.opacity = 0;
-    if (dotNdx) dotNdx.style.opacity = 0;
-    if (dotSec) dotSec.style.opacity = 0;
-    tt.classList.remove("show");
-  });
+  const lines = [{ label: "Portfolio", pts: port, dot: $("#pf-dot") },
+                 ...benches.map((b, i) => ({ label: b.label, pts: b.pts, dot: $(`#pf-dot-${i}`) }))];
+  const common = { svg: $("#pf-svg"), overlay: $("#pf-overlay"), geom: { W, padL, padR, t0, t1, xScale, yScale }, lines };
+  attachChartHover({ ...common, tt: $("#pf-tt"), cv: $("#pf-cv"), ch: $("#pf-ch") });
+  attachRangeBrush({ ...common, selRect: $("#pf-sel"), badge: $("#pf-measure") });
 }
 
 /* ===========================================================================
@@ -7920,7 +7614,7 @@ function wireOverlayPill(id, stateKey) {
   el.dataset.on = STATE[stateKey] ? "1" : "0";
   el.setAttribute("aria-checked", STATE[stateKey] ? "true" : "false");
 }
-wireOverlayPill("#pf-show-spy", "showSpy");
+wireOverlayPill("#pf-show-bench", "showBench");
 wireOverlayPill("#pf-show-ndx", "showNdx");
 wireOverlayPill("#pf-show-sec", "showSec");
 wireOverlayPill("#pf-show-dd", "showDd");

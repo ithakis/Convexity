@@ -1,21 +1,26 @@
-MIT License
+Copyright (c) 2026 Alexander Tsoskounoglou. All rights reserved.
 
-Copyright (c) 2026 ithakis
+This repository is published for viewing only.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+You may view the source code and documentation, including through the
+features of the hosting platform (for example, viewing and forking on GitHub,
+as its Terms of Service allow for public repositories).
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+No other rights are granted. Without the prior written permission of the
+copyright holder, you may not:
+
+  - use, run, install or deploy the software, in whole or in part;
+  - copy, modify, adapt, translate or create derivative works of it;
+  - distribute, publish, sublicense, rent, lease or otherwise make it
+    available to anyone else;
+  - use it, or any part of it, for any commercial purpose or to generate
+    revenue, directly or indirectly, including by offering it as a service.
+
+Any use not expressly permitted above is prohibited. To request permission,
+contact the copyright holder through GitHub.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT
+OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.

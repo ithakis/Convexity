@@ -842,14 +842,12 @@
   }
   .m-kv .metric-tip-host.tip-right .pf-metric-tip { left: auto; right: 0; }
 
-  /* Portfolio chart interaction (brush + crosshair tooltip) */
+  /* Chart interaction, shared by the portfolio and detail charts:
+     crosshair tooltip (.pf-tt / .m-tooltip) and the drag-to-measure badge. */
   .pf-chart-wrap svg .pf-cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; pointer-events: none; }
   .pf-chart-wrap svg .pf-dot   { fill: var(--accent); stroke: var(--bg-canvas); stroke-width: 2; opacity: 0; pointer-events: none; }
-  .pf-chart-wrap svg .pf-dot.spy { fill: #8b5cf6; }
-  .pf-chart-wrap svg .pf-dot.ndx { fill: #06b6d4; }
-  .pf-chart-wrap svg .pf-dot.sec { fill: #f59e0b; }
-  .pf-chart-wrap svg .pf-sel { fill: var(--accent); opacity: 0.10; pointer-events: none; }
-  .pf-chart-wrap .pf-tt {
+  .pf-chart-wrap svg .pf-sel { fill: var(--accent); opacity: 0.12; pointer-events: none; }
+  .pf-tt, .m-tooltip {
     position: absolute; pointer-events: none; z-index: 5;
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-md);
     padding: 7px 10px; font-size: 11.5px; line-height: 1.5; color: var(--text);
@@ -857,22 +855,33 @@
     opacity: 0; transition: opacity 0.08s;
     min-width: 140px; white-space: nowrap;
   }
-  .pf-chart-wrap .pf-tt.show { opacity: 1; }
-  .pf-chart-wrap .pf-tt .tt-date { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
-  .pf-chart-wrap .pf-tt .tt-row { display: flex; justify-content: space-between; gap: 10px; }
-  .pf-chart-wrap .pf-tt .tt-row b { font-weight: 700; font-variant-numeric: tabular-nums; }
-  .pf-chart-wrap .pf-tt .pos { color: var(--pos); }
-  .pf-chart-wrap .pf-tt .neg { color: var(--neg); }
-  .pf-chart-info {
-    margin-top: 6px; padding: 6px 10px;
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-sm);
-    font-size: 11.5px; color: var(--muted);
-    display: flex; gap: 14px; flex-wrap: wrap;
+  .pf-tt.show, .m-tooltip.show { opacity: 1; }
+  .measuring .pf-tt, .measuring .m-tooltip { opacity: 0; }
+  .tt-date { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+  .tt-row, .cm-row { display: flex; justify-content: space-between; gap: 12px; }
+  .tt-row b, .cm-row b { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pf-tt .pos, .m-tooltip .pos, .chart-measure .pos { color: var(--pos); }
+  .pf-tt .neg, .m-tooltip .neg, .chart-measure .neg { color: var(--neg); }
+  .chart-measure {
+    position: absolute; z-index: 6; pointer-events: none; display: none;
+    transform: translateX(-50%);
+    background: var(--bg-canvas); border: 1px solid var(--accent); border-radius: var(--r-md);
+    padding: 6px 10px; font-size: 11.5px; line-height: 1.5; color: var(--text);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.18); white-space: nowrap;
   }
-  .pf-chart-info b { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
-  .pf-chart-info .pos { color: var(--pos); }
-  .pf-chart-info .neg { color: var(--neg); }
-  .pf-chart-info .selection-hint { color: var(--muted); margin-left: auto; font-style: italic; }
+  .measuring .chart-measure { display: block; }
+  .cm-row:first-child b { font-size: 15px; }
+  .cm-foot { color: var(--muted); font-size: 10.5px; margin-top: 2px; }
+
+  /* Risk & Return: benchmark picker and the extra-overlay returns below it. */
+  .bench-select {
+    font: inherit; color: var(--accent); background: transparent;
+    border: none; border-bottom: 1px dashed var(--accent); padding: 0 2px; cursor: pointer;
+  }
+  .bench-select option { color: var(--text); background: var(--bg-canvas); }
+  .pf-stat-row .bench-v { color: var(--muted); font-weight: 400; }
+  .pf-bench-extra { margin-top: 10px; }
+  .bench-swatch { display: inline-block; width: 10px; height: 10px; border-radius: var(--r-xs); margin-right: 6px; vertical-align: middle; }
 
   .pf-analytics-body { padding: 12px; }
   .pf-empty {
@@ -2291,19 +2300,7 @@
   .m-chart .crosshair-dot { fill: var(--accent); stroke: var(--bg-canvas); stroke-width: 2; opacity: 0; pointer-events: none; }
   .m-chart .crosshair-dot.sp { fill: #8b5cf6; }
   .m-chart .crosshair-dot.sec { fill: #f59e0b; }
-  .m-chart .sel-rect { fill: var(--accent); opacity: 0.10; pointer-events: none; }
-  .m-tooltip {
-    position: absolute; pointer-events: none; z-index: 5;
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-md);
-    padding: 7px 10px; font-size: 11.5px; line-height: 1.5; color: var(--text);
-    box-shadow: 0 4px 14px rgba(0,0,0,0.15);
-    opacity: 0; transition: opacity 0.08s;
-    min-width: 130px; white-space: nowrap;
-  }
-  .m-tooltip.show { opacity: 1; }
-  .m-tooltip .tt-date { color: var(--muted); font-size: 11px; }
-  .m-tooltip .tt-row { display: flex; justify-content: space-between; gap: 10px; }
-  .m-tooltip .tt-label { display: inline-flex; align-items: center; gap: 5px; }
+  .m-chart .sel-rect { fill: var(--accent); opacity: 0.12; pointer-events: none; }
 
   .m-range-info {
     margin-top: 8px; padding: 8px 12px;

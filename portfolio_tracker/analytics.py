@@ -28,10 +28,76 @@ _PERIOD_YF = {
     "3M": "3mo", "6M": "6mo", "YTD": "ytd",
     "1Y": "1y", "3Y": "3y", "5Y": "5y", "MAX": "max",
 }
-_PERIOD_DAYS = {
-    "3M": 91, "6M": 182, "YTD": None, "1Y": 365,
-    "3Y": 365 * 3, "5Y": 365 * 5, "MAX": None,
+_PERIOD_MONTHS = {"3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60}
+
+# Analytics fetches this much wider window than it reports, so the moving
+# averages have 200 trading days of warm-up before the period's first bar —
+# computing them on the trimmed period left SMA 200 empty for its first
+# ~10 months. Stats are computed on the period slice only.
+_WARMUP_YF = {"3M": "2y", "6M": "2y", "YTD": "2y", "1Y": "2y", "3Y": "5y", "5Y": "10y", "MAX": "max"}
+_SMA_WINDOWS = (20, 50, 200)
+
+# Selectable benchmarks: key -> (Yahoo ticker, label, quote currency).
+# "SECTOR" (the portfolio's own sector-ETF blend) is added per weight set.
+_BENCHMARKS = {
+    "SPY": ("SPY", "S&P 500", "USD"),
+    "QQQ": ("QQQ", "Nasdaq-100", "USD"),
+    "STOXX50": ("^STOXX50E", "Euro Stoxx 50", "EUR"),
+    "N225": ("^N225", "Nikkei 225", "JPY"),
+    "KOSPI": ("^KS11", "KOSPI", "KRW"),
 }
+
+
+def _period_start(period_u: str, last: pd.Timestamp) -> pd.Timestamp | None:
+    """First date of the reported window, mirroring yfinance's own trimming."""
+    if period_u == "YTD":
+        return pd.Timestamp(year=last.year, month=1, day=1)
+    months = _PERIOD_MONTHS.get(period_u)
+    return last - pd.DateOffset(months=months) if months else None
+
+
+def _stats(ret: pd.Series, val: pd.Series) -> dict:
+    """Return/risk stats from daily returns `ret` and a value index `val`."""
+    if ret.empty or val.empty:
+        return {}
+    years = max(((val.index[-1] - val.index[0]).days or 1) / 365.25, 1e-6)
+    growth = float(val.iloc[-1] / val.iloc[0])
+    ann_return = (growth ** (1.0 / years) - 1.0) * 100.0
+    std = ret.std()
+    downside = math.sqrt((ret.clip(upper=0) ** 2).mean())
+    max_dd = float((val / val.cummax() - 1.0).min() * 100.0)
+    return {
+        "total_return": (growth - 1.0) * 100.0, "ann_return": ann_return,
+        "ann_vol": float(std * math.sqrt(252)) * 100.0,
+        "sharpe": float(ret.mean() * 252 / (std * math.sqrt(252))) if std else None,
+        "sortino": float(ret.mean() * 252 / (downside * math.sqrt(252))) if downside > 0 else None,
+        "max_dd": max_dd, "calmar": (ann_return / abs(max_dd)) if max_dd < 0 else None,
+    }
+
+
+def _relative(rp: pd.Series, rb: pd.Series) -> dict:
+    """Beta, R² and annualised tracking error (%) of daily returns `rp` vs `rb`."""
+    common = rp.index.intersection(rb.index)
+    if len(common) < 30:
+        return {}
+    rp, rb = rp.loc[common], rb.loc[common]
+    var_b, corr, te = rb.var(), rp.corr(rb), (rp - rb).std()
+    return {
+        "beta": float(rp.cov(rb) / var_b) if var_b else None,
+        "r2": float(corr * corr) if pd.notna(corr) else None,
+        "te": float(te * math.sqrt(252) * 100.0) if pd.notna(te) else None,
+    }
+
+
+def _bench_block(label: str, val: pd.Series, spy_ret: pd.Series | None, port_ret: pd.Series) -> dict:
+    """One benchmark: its stats (+ beta/R²/TE vs SPY) and the portfolio's
+    beta/R²/TE against it. `val` is its value index on the period."""
+    ret = val.pct_change().dropna()
+    stats = _stats(ret, val)
+    if spy_ret is not None:
+        stats.update(_relative(ret, spy_ret))
+    return {"label": label, "stats": stats, "rel": _relative(port_ret, ret),
+            "series": _series_to_points(100.0 * val / val.iloc[0])}
 
 
 def _normalize_weights(weights_in: dict, symbols: list[str]) -> dict[str, float]:
@@ -69,13 +135,14 @@ def _mcap_bucket(mcap: float | None) -> str:
 def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
     """Close prices indexed by date, columns = symbols (those that returned data).
 
+    `period` is an app label ("1Y") or a raw yfinance period ("2y", "10y").
     Caches per-symbol. Retries missing symbols individually with backoff.
     A repeated symbol is fetched once (the result is keyed by symbol anyway,
     so a repeat would only cost a wasted download and a doubled retry sleep)."""
     symbols = list(dict.fromkeys(symbols or []))
     if not symbols:
         return pd.DataFrame()
-    period_yf = _PERIOD_YF.get(period.upper(), "1y")
+    period_yf = _PERIOD_YF.get(period.upper(), period.lower())
 
     out: dict[str, pd.Series] = {}
     to_fetch: list[str] = []
@@ -291,83 +358,59 @@ def analyze_portfolios_multi(
     if len(cached_results) == len(normalized_sets):
         return cached_results
 
-    closes = _bulk_close(symbols + ["SPY", "QQQ"], period_u)
+    # One wide fetch covers holdings, benchmarks and sector ETFs; FX-convert it
+    # all to the display currency (indices quote in EUR/JPY/KRW, and a USD
+    # display still has to convert non-USD holdings).
+    warmup_yf = _WARMUP_YF[period_u]
+    sec_etfs = sorted({_SECTOR_ETF[sec] for r in rows
+                       if (sec := (r.get("sector") or "").strip()) in _SECTOR_ETF})
+    bench_tickers = [t for t, _, _ in _BENCHMARKS.values()]
+    wide = _bulk_close(list(dict.fromkeys(symbols + bench_tickers + sec_etfs)), warmup_yf)
     warnings: list[str] = []
-    missing = [s for s in symbols if s not in closes.columns]
+    missing = [s for s in symbols if s not in wide.columns]
     if missing:
         warnings.append(f"No price history for: {', '.join(missing)}")
-    spy = closes["SPY"].dropna() if "SPY" in closes.columns else None
-    ndx = closes["QQQ"].dropna() if "QQQ" in closes.columns else None
-    sym_closes = closes[[s for s in symbols if s in closes.columns]].dropna(how="all")
-    if sym_closes.empty:
-        return {"error": "no price history for portfolio", "warnings": warnings}
-
-    active = [s for s in symbols if s in sym_closes.columns]
+    active = [s for s in symbols if s in wide.columns]
     if not active:
         return {"error": "no price history for portfolio", "warnings": warnings}
+    ccy_by_sym = {**by_sym, **{t: {"currency": c} for t, _, c in _BENCHMARKS.values()}}
+    wide = _apply_fx_to_closes(wide, ccy_by_sym, display_ccy, warmup_yf)
 
-    period_yf = _PERIOD_YF.get(period_u, "1y")
-    if display_ccy != "USD":
-        combined = sym_closes.copy()
-        if spy is not None and not spy.empty:
-            combined = combined.join(spy.rename("__SPY__"), how="outer")
-        if ndx is not None and not ndx.empty:
-            combined = combined.join(ndx.rename("__QQQ__"), how="outer")
-        combined_by_sym = dict(by_sym)
-        combined_by_sym["__SPY__"] = {"currency": "USD"}
-        combined_by_sym["__QQQ__"] = {"currency": "USD"}
-        converted = _apply_fx_to_closes(combined, combined_by_sym, display_ccy, period_yf)
-        sym_closes = converted[[c for c in converted.columns if c not in ("__SPY__", "__QQQ__")]]
-        if "__SPY__" in converted.columns:
-            spy = converted["__SPY__"].dropna()
-        if "__QQQ__" in converted.columns:
-            ndx = converted["__QQQ__"].dropna()
-
-    sym_closes = sym_closes.ffill().dropna(how="any")
-    if sym_closes.empty or len(sym_closes) < 3:
+    # Trading calendar = days any holding traded (foreign indices must not
+    # inject their own holidays as zero-return days).
+    wide_sym = wide[active].dropna(how="all").ffill().dropna(how="any")
+    if len(wide_sym) < 3:
         return {"error": "insufficient overlapping history", "warnings": warnings}
-
-    daily_ret = sym_closes.pct_change().dropna(how="all").fillna(0.0)
+    start = _period_start(period_u, wide_sym.index[-1])
+    sym_closes = wide_sym if start is None else wide_sym[wide_sym.index >= start]
+    if len(sym_closes) < 3:
+        return {"error": "insufficient overlapping history", "warnings": warnings}
     common_index = sym_closes.index
+    wide_ret = wide_sym.pct_change().fillna(0.0)
 
-    spy_aligned_raw = None
-    spy_ret_full = None
-    if spy is not None and not spy.empty:
-        spy_aligned_raw = spy.reindex(common_index).ffill().dropna()
-        if len(spy_aligned_raw) >= 2:
-            spy_ret_full = spy_aligned_raw.pct_change().dropna()
-        else:
-            spy_aligned_raw = None
+    def _on_period(col: str) -> pd.Series | None:
+        """A benchmark column aligned to the portfolio's calendar, or None."""
+        if col not in wide.columns:
+            return None
+        ser = wide[col].ffill().reindex(common_index).dropna()
+        return ser if len(ser) >= 2 else None
 
-    ndx_aligned_raw = None
-    ndx_ret_full = None
-    if ndx is not None and not ndx.empty:
-        ndx_aligned_raw = ndx.reindex(common_index).ffill().dropna()
-        if len(ndx_aligned_raw) >= 2:
-            ndx_ret_full = ndx_aligned_raw.pct_change().dropna()
-        else:
-            ndx_aligned_raw = None
-
-    all_sectors = {(by_sym.get(s, {}).get("sector") or "").strip() for s in active}
-    all_sectors.discard("")
-    sec_etfs = list({_SECTOR_ETF.get(sec) for sec in all_sectors if _SECTOR_ETF.get(sec)})
+    shared_bench = {k: (label, v) for k, (t, label, _) in _BENCHMARKS.items()
+                    if (v := _on_period(t)) is not None}
+    spy_ret = shared_bench["SPY"][1].pct_change().dropna() if "SPY" in shared_bench else None
     sec_ret_df = None
-    if sec_etfs:
-        sec_closes_df = _bulk_close(sec_etfs, period_u)
-        if not sec_closes_df.empty:
-            sec_closes_df = sec_closes_df.reindex(common_index).ffill().dropna(how="any")
-            if not sec_closes_df.empty:
-                sec_ret_df = sec_closes_df.pct_change().fillna(0.0)
+    sec_cols = [e for e in sec_etfs if e in wide.columns]
+    if sec_cols:
+        sec_ret_df = wide[sec_cols].ffill().reindex(common_index).pct_change().fillna(0.0)
 
     analyst_blocks: dict[str, dict] = {}
-    if active:
-        with ThreadPoolExecutor(max_workers=min(8, max(1, len(active)))) as pool:
-            futs = {pool.submit(_analyst_for, s, by_sym.get(s, {})): s for s in active}
-            for fut in as_completed(futs):
-                try:
-                    analyst_blocks[futs[fut]] = fut.result()
-                except Exception:
-                    analyst_blocks[futs[fut]] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(active))) as pool:
+        futs = {pool.submit(_analyst_for, s, by_sym.get(s, {})): s for s in active}
+        for fut in as_completed(futs):
+            try:
+                analyst_blocks[futs[fut]] = fut.result()
+            except Exception:
+                analyst_blocks[futs[fut]] = {}
 
     pe_vals = {s: _safe_num(by_sym.get(s, {}).get("pe_ratio")) for s in active}
     ps_vals = {s: _safe_num(by_sym.get(s, {}).get("ps_ratio")) for s in active}
@@ -375,65 +418,8 @@ def analyze_portfolios_multi(
     div_vals = {s: analyst_blocks.get(s, {}).get("div_yield") for s in active}
     mcap_vals = {s: _safe_num(by_sym.get(s, {}).get("market_cap")) for s in active}
 
-    period_returns: dict[str, float] = {}
-    for s in active:
-        col = sym_closes[s]
-        period_returns[s] = float(col.iloc[-1] / col.iloc[0] - 1.0) * 100.0 if len(col) >= 2 else 0.0
-
-    def _stats(ret: pd.Series, val: pd.Series) -> dict:
-        if ret.empty or val.empty:
-            return {}
-        n_days = (val.index[-1] - val.index[0]).days or 1
-        years = max(n_days / 365.25, 1e-6)
-        total_return = float(val.iloc[-1] / val.iloc[0] - 1.0) * 100.0
-        ann_return = float((val.iloc[-1] / val.iloc[0]) ** (1.0 / years) - 1.0) * 100.0
-        ann_vol = float(ret.std() * math.sqrt(252)) * 100.0
-        sharpe = float((ret.mean() * 252) / (ret.std() * math.sqrt(252))) if ret.std() else None
-        downside = math.sqrt((ret.clip(upper=0) ** 2).mean())
-        sortino = float((ret.mean() * 252) / (downside * math.sqrt(252))) if downside > 0 else None
-        run_mx = val.cummax()
-        max_dd = float((val / run_mx - 1.0).min() * 100.0)
-        calmar = (ann_return / abs(max_dd)) if max_dd < 0 else None
-        return {
-            "total_return": total_return, "ann_return": ann_return,
-            "ann_vol": ann_vol, "sharpe": sharpe, "sortino": sortino,
-            "max_dd": max_dd, "calmar": calmar,
-        }
-
-    spy_stats_shared = {}
-    spy_aligned_rebased = None
-    if spy_aligned_raw is not None:
-        spy_aligned_rebased = 100.0 * spy_aligned_raw / spy_aligned_raw.iloc[0]
-        spy_stats_shared = _stats(spy_ret_full, spy_aligned_rebased)
-        spy_stats_shared.setdefault("beta_spy", 1.0)
-        spy_stats_shared.setdefault("r2_spy", 1.0)
-        spy_stats_shared.setdefault("te_spy", 0.0)
-    spy_points_shared = _series_to_points(spy_aligned_rebased) if spy_aligned_rebased is not None else []
-    spy_var_full = float(spy_ret_full.var()) if (spy_ret_full is not None and len(spy_ret_full) > 30) else None
-
-    ndx_stats_shared = {}
-    ndx_aligned_rebased = None
-    if ndx_aligned_raw is not None:
-        ndx_aligned_rebased = 100.0 * ndx_aligned_raw / ndx_aligned_raw.iloc[0]
-        ndx_stats_shared = _stats(ndx_ret_full, ndx_aligned_rebased)
-        if spy_ret_full is not None and spy_var_full and len(spy_ret_full) > 30:
-            common_n = ndx_ret_full.index.intersection(spy_ret_full.index)
-            if len(common_n) >= 30:
-                rp = ndx_ret_full.loc[common_n]
-                rb = spy_ret_full.loc[common_n]
-                cov = float(rp.cov(rb))
-                var_b = float(rb.var())
-                if var_b:
-                    ndx_stats_shared["beta_spy"] = cov / var_b
-                corr = rp.corr(rb)
-                if pd.notna(corr):
-                    ndx_stats_shared["r2_spy"] = float(corr * corr)
-                te = (rp - rb).std()
-                if te and pd.notna(te):
-                    ndx_stats_shared["te_spy"] = float(te * math.sqrt(252) * 100.0)
-    ndx_points_shared = _series_to_points(ndx_aligned_rebased) if ndx_aligned_rebased is not None else []
-
-    daily_ret_active = daily_ret[active]
+    period_returns = {s: float(sym_closes[s].iloc[-1] / sym_closes[s].iloc[0] - 1.0) * 100.0
+                      for s in active}
 
     results: dict[str, dict] = dict(cached_results)
     for name, weights in normalized_sets.items():
@@ -444,52 +430,34 @@ def analyze_portfolios_multi(
             weights = _normalize_weights({s: weights.get(s, 0.0) for s in active}, active)
 
         w_vec = pd.Series([weights[s] for s in active], index=active)
-        port_ret = (daily_ret_active * w_vec).sum(axis=1)
-        if not port_ret.empty:
-            port_growth = (1.0 + port_ret).cumprod()
-            port_val = pd.concat([
-                pd.Series([1.0], index=[common_index[0]]),
-                port_growth,
-            ]) * 100.0
-        else:
-            port_val = pd.Series(dtype=float)
+        # Daily-rebalanced index over the whole warm-up window; the reported
+        # series is its period slice rebased to 100.
+        port_ext = (1.0 + (wide_ret[active] * w_vec).sum(axis=1)).cumprod()
+        base = port_ext.loc[common_index[0]]
+        port_val = 100.0 * port_ext.loc[common_index] / base
+        port_ret = port_val.pct_change().dropna()
         drawdown = (port_val / port_val.cummax() - 1.0) * 100.0
+        # min_periods=1: only where no earlier data exists at all (MAX, or a
+        # young holding) does an average start on fewer than n bars.
+        sma = {str(n): _series_to_points(100.0 * port_ext.rolling(n, min_periods=1).mean()
+                                         .loc[common_index] / base)
+               for n in _SMA_WINDOWS}
 
-        sec_blend = None
+        benchmarks = {k: _bench_block(label, v, spy_ret, port_ret)
+                      for k, (label, v) in shared_bench.items()}
         if sec_ret_df is not None:
             sector_alloc: dict[str, float] = {}
             for s in active:
-                sec = (by_sym.get(s, {}).get("sector") or "").strip()
-                if sec:
-                    sector_alloc[sec] = sector_alloc.get(sec, 0.0) + weights[s]
-            if sector_alloc:
-                pairs = [(sec, _SECTOR_ETF.get(sec), w) for sec, w in sector_alloc.items() if _SECTOR_ETF.get(sec)]
-                sec_w_total = sum(w for _, _, w in pairs)
-                parts = [sec_ret_df[etf] * (w / sec_w_total)
-                         for _, etf, w in pairs
-                         if sec_w_total > 0 and etf in sec_ret_df.columns]
-                if parts:
-                    sec_blend_ret = sum(parts)
-                    sec_blend_growth = (1.0 + sec_blend_ret).cumprod()
-                    sec_blend = pd.concat([
-                        pd.Series([1.0], index=[common_index[0]]),
-                        sec_blend_growth,
-                    ]) * 100.0
+                etf = _SECTOR_ETF.get((by_sym.get(s, {}).get("sector") or "").strip())
+                if etf in sec_ret_df.columns:
+                    sector_alloc[etf] = sector_alloc.get(etf, 0.0) + weights[s]
+            total = sum(sector_alloc.values())
+            if total > 0:
+                blend = sum(sec_ret_df[etf] * (w / total) for etf, w in sector_alloc.items())
+                benchmarks["SECTOR"] = _bench_block("Sector mix", (1.0 + blend).cumprod(),
+                                                    spy_ret, port_ret)
 
         pf_stats = _stats(port_ret, port_val)
-
-        beta_spy = r2_spy = te_spy = None
-        if spy_ret_full is not None and spy_var_full and len(spy_ret_full) > 30:
-            common = port_ret.index.intersection(spy_ret_full.index)
-            if len(common) >= 30:
-                rp, rb = port_ret.loc[common], spy_ret_full.loc[common]
-                var_b = float(rb.var())
-                cov = float(rp.cov(rb))
-                beta_spy = cov / var_b if var_b else None
-                corr = rp.corr(rb)
-                r2_spy = float(corr * corr) if pd.notna(corr) else None
-                te = (rp - rb).std()
-                te_spy = float(te * math.sqrt(252) * 100.0) if te and pd.notna(te) else None
 
         def _w_avg(values, _w=weights):
             num = 0.0
@@ -611,12 +579,10 @@ def analyze_portfolios_multi(
             "missing_symbols": missing,
             "series": {
                 "portfolio": _series_to_points(port_val),
-                "spy": spy_points_shared, "nasdaq": ndx_points_shared,
-                "sector_mix": _series_to_points(sec_blend) if sec_blend is not None else [],
                 "drawdown": _series_to_points(drawdown),
+                "sma": sma,
             },
-            "stats": {**pf_stats, "beta_spy": beta_spy, "r2_spy": r2_spy, "te_spy": te_spy},
-            "spy_stats": spy_stats_shared, "nasdaq_stats": ndx_stats_shared,
+            "stats": pf_stats, "benchmarks": benchmarks,
             "weighted": weighted, "analyst": analyst,
             "exposure": {
                 "by_sector": by_sector, "by_industry": by_industry,
