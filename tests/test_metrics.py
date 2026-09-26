@@ -479,34 +479,6 @@ def test_dividend_yield_both_none_returns_none():
     assert result is None
 
 
-def test_dividend_yield_xlsx_copy_matches_dashboard():
-    """
-    xlsx_export.py has a local copy of _normalize_dividend_yield (using
-    _maybe_num instead of _safe_num). Verify both produce identical results
-    for the same inputs. Source: xlsx_export.py:238-258
-    """
-    _require_dashboard()
-    try:
-        from xlsx_export import _normalize_dividend_yield as xlsx_norm
-    except Exception:
-        pytest.skip("xlsx_export not importable (missing openpyxl/yfinance)")
-
-    test_cases = [
-        (0.035, {}, 0.035),
-        (3.5, {}, 0.035),
-        (None, {"price": 20.0, "dividend_rate": 1.0}, 0.05),
-        (None, {"trailing_yield": 2.5}, 0.025),
-        (0.0, {}, 0.0),
-    ]
-    for raw, kw, expected in test_cases:
-        dash_result = _normalize_dividend_yield(raw, **kw)
-        xlsx_result = xlsx_norm(raw, **kw)
-        assert dash_result == xlsx_result == pytest.approx(expected, abs=1e-12), (
-            f"Mismatch for raw={raw}, kw={kw}: "
-            f"dashboard={dash_result}, xlsx={xlsx_result}, expected={expected}"
-        )
-
-
 # ===========================================================================
 # 9. Annualised Return (CAGR)
 # ===========================================================================

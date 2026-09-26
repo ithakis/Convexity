@@ -105,6 +105,54 @@ def cluster_titles(titles: list[str]) -> tuple[list[int], list[int]]:
     return keep_idx, dup_counts
 
 
+def window_sample(articles: list[dict], cap: int, min_recent: int) -> list[dict]:
+    """Trim a newest-first article list to ~`cap` while spanning its window.
+
+    Shared by the app (the retained set the timeline, tape, News read and
+    Market read all see) and by ml/scripts/06's training panel, which applies
+    it to every ticker-day window so the Market read's per-window statistics
+    (max/min encoder score, shares) are computed over the same-shaped set in
+    training and in serving.
+
+    High-volume tickers publish enough that the newest N cluster within hours,
+    so a plain newest-N cut would show only "today". The newest `min_recent`
+    are kept verbatim (the News read scores exactly those) and the older
+    remainder is TIME-stratified: its span is split into `cap - min_recent`
+    equal buckets and the newest article of each non-empty bucket is kept.
+    Undated articles (datetime missing/0) carry no time signal, so they are
+    excluded from bucketing and merged back in with whatever slots remain.
+    Input and output are newest-first; the result may be smaller than `cap`
+    when older buckets are empty.
+    """
+    if len(articles) <= cap:
+        return articles
+    recent = articles[:min_recent]
+    rest = articles[min_recent:]
+    slots = cap - min_recent
+    if slots <= 0 or not rest:
+        return recent
+    dated = [a for a in rest if a.get("datetime")]
+    undated = [a for a in rest if not a.get("datetime")]
+    if not dated:
+        return recent + undated[:slots]
+    times = [a["datetime"] for a in dated]
+    tmin, tmax = min(times), max(times)
+    if tmax <= tmin:
+        sampled = dated[:slots]
+    else:
+        span = tmax - tmin
+        buckets: dict[int, dict] = {}
+        for a in dated:
+            t = a["datetime"]
+            idx = min(slots - 1, int((t - tmin) / span * slots))
+            if idx not in buckets or t > buckets[idx]["datetime"]:
+                buckets[idx] = a  # newest per time-bucket
+        sampled = list(buckets.values())
+    leftover = max(0, slots - len(sampled))
+    result = recent + sampled + undated[:leftover]
+    return sorted(result, key=lambda a: a.get("datetime") or 0, reverse=True)
+
+
 # ------------------------------------------------------------------ company names
 def _find_symbol_db() -> Path | None:
     here = Path(__file__).resolve().parent
@@ -157,6 +205,13 @@ def _ticker_hits(symbol: str, raw_text: str) -> bool:
 
 
 # ------------------------------------------------------------------ relevance
+def is_boilerplate(title) -> bool:
+    """Roundup/listicle headline — an article ABOUT many stocks, not this one.
+    Exposed on its own because the Market read counts the share of such items
+    in a ticker's window (ml_features.window_vector), train and serve alike."""
+    return bool(_BOILERPLATE_RE.search(title if isinstance(title, str) else ""))
+
+
 def relevance_score(
     title: str,
     summary: str | None,
@@ -200,7 +255,7 @@ def relevance_score(
 
     n_co = max(1, int(co_mention_count))
     p_co = 1.0 / (1.0 + 0.4 * (n_co - 1))
-    p_boiler = 0.45 if _BOILERPLATE_RE.search(title) else 1.0
+    p_boiler = 0.45 if is_boilerplate(title) else 1.0
     p_len = 0.85 if len(title) > 120 else 1.0
     p_pub = 0.75 + 0.25 * max(0.0, min(1.0, float(publisher_tier)))
 

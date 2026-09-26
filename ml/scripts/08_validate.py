@@ -25,14 +25,22 @@ Tests (numbering matches docs/ml_sentiment_design.md):
                                human labels (>= 0.65 floor); needs the dataset
                                at --phrasebank (not vendored, CC BY-NC-SA)
 
+--stage window runs the v2 Market read gates instead (holdout Jul-Dec 2023,
+date-clustered): daily IC >= 0.03 with t >= 3 (Newey-West for 5d), beats the
+dense ridge and v1.1, monotone decile ends, >= 7/9 walk-forward years
+positive, and a leakage spot-check of 40 panel rows recomputed from the raw
+sources. Results: ml/data/reports/window_validation_report.json.
+
 Usage:
     python ml/scripts/08_validate.py                     # 1,2,3,5,6,7
     python ml/scripts/08_validate.py --walk-forward      # adds 4
     python ml/scripts/08_validate.py --phrasebank /tmp/fpb/FinancialPhraseBank-v1.0
+    python ml/scripts/08_validate.py --stage window --horizons 1,5 --walk-forward
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 import time
@@ -40,8 +48,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from ml import config  # noqa: E402
+from ml.scripts.train_utils import daily_ic, load_panel  # noqa: E402
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+ENRICHED = config.PARQUET_DIR / "enriched.parquet"
 
 NULL_ROWS = 800_000
 NULL_REPS = 10
@@ -221,7 +230,6 @@ def test_baselines(results):
 
 
 def test_slices(results):
-    import numpy as np
     import pandas as pd
 
     hp = pd.read_parquet(config.FEATURES_DIR / "holdout_pred.parquet")
@@ -283,16 +291,16 @@ def test_calibration(results):
 def test_phrasebank(results, pb_dir):
     import numpy as np
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-    from importlib import import_module
-
-    bench = import_module("benchmark_sentiment_prompt")
     import lightgbm as lgb
 
     from portfolio_tracker import ml_features as mf
 
-    split = Path(pb_dir) / "Sentences_66Agree.txt"
-    rows = bench.load_split(split)
+    rows = []
+    for line in (Path(pb_dir) / "Sentences_66Agree.txt").read_text(encoding="latin-1").splitlines():
+        if "@" in line:
+            sent, label = line.rsplit("@", 1)
+            if label.strip().lower() in ("positive", "negative", "neutral"):
+                rows.append((sent.strip(), label.strip().lower()))
     out_art = config.ARTIFACTS_DIR / config.ARTIFACT_VERSION
     booster = lgb.Booster(model_file=str(out_art / "model.lgbm.txt"))
     idf = np.load(out_art / "idf.npy")
@@ -358,13 +366,153 @@ def test_walk_forward(results):
     }
 
 
+# ================================================================ v2 window gates
+WINDOW_REPORT = config.REPORTS_DIR / "window_validation_report.json"
+
+
+def _window_winner(h: int) -> dict:
+    rep = json.loads((config.REPORTS_DIR / "window_train_report.json").read_text())
+    return rep["horizons"][f"{h}d"]
+
+
+def window_holdout_gates(results: dict, h: int) -> None:
+    """Holdout (Jul-Dec 2023) gates read from 07's single holdout scoring."""
+    res = _window_winner(h)
+    ho = res["holdout"]
+    w = ho["winner"]
+    t = w["t_nw"] if h > 1 else w["t"]
+    d = ho["decile_means"]
+    mid = (d[4] + d[5]) / 2
+    results[f"{h}d_holdout"] = {
+        "winner": res["winner"], "daily_ic": w["mean"], "t": t, "n_days": w["n_days"],
+        "ridge_dense_ic": ho["ridge_dense"]["mean"], "regression_ic": ho["regression"]["mean"],
+        "v1_1_ic": ho["v1_1_recalibrated"]["mean"], "decile_means": d,
+        "gates": {
+            "ic_ge_0.03_and_t_ge_3": bool(w["mean"] >= 0.03 and t is not None and t >= 3),
+            "beats_dense_ridge": bool(w["mean"] > ho["ridge_dense"]["mean"]),
+            "beats_v1_1": bool(w["mean"] > ho["v1_1_recalibrated"]["mean"]),
+            "decile_ends_monotone": bool(d[9] > mid > d[0]),
+        },
+    }
+
+
+def window_walk_forward(results: dict, h: int) -> None:
+    """Yearly expanding-window refit of the winner's config: train < Y, test Y.
+    The encoder features for year Y were themselves produced by a booster
+    trained on d1 < Y (06 --stage encoder), so nothing here looks ahead."""
+    import numpy as np
+
+    from portfolio_tracker.ml_features import WINDOW_COLUMNS
+    spec = importlib.util.spec_from_file_location(
+        "train07", Path(__file__).resolve().parent / "07_train_flaml.py")
+    t07 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(t07)
+
+    win = _window_winner(h)["winner"]
+    panel = load_panel(["date", *WINDOW_COLUMNS, f"sar_{h}d"])
+    dates = panel["date"].astype("datetime64[ns]").to_numpy()
+    X = panel[WINDOW_COLUMNS].to_numpy("float32")
+    y = panel[f"sar_{h}d"].to_numpy("float32")
+    ok = np.isfinite(y)
+    yearly = {}
+    for year in range(2015, 2024):
+        lo, hi = np.datetime64(f"{year}-01-01"), np.datetime64(f"{year + 1}-01-01")
+        tr, te = ok & (dates < lo), ok & (dates >= lo) & (dates < hi)
+        if win["model"] == "ridge":
+            pred = t07._Ridge().fit(X[tr], y[tr]).predict(X[te])
+        else:
+            bst = t07._fit_lgb(win["model"], X[tr], y[tr], dates[tr], win["rounds"])
+            pred = bst.predict(X[te])
+        ic = daily_ic(dates[te], pred, y[te], horizon=h)
+        yearly[str(year)] = round(ic["mean"], 4)
+        print(f"  walk-forward {h}d {year}: IC {ic['mean']:.4f} ({ic['n_days']} days)", flush=True)
+    pos = sum(1 for v in yearly.values() if v > 0)
+    results[f"{h}d_walk_forward"] = {"yearly_ic": yearly, "positive_years": pos,
+                                     "n_years": len(yearly),
+                                     "gates": {"ge_7_of_9_positive": pos >= 7}}
+
+
+def window_leakage_spotcheck(results: dict, n: int = 40) -> None:
+    """Recompute 40 random panel rows from the raw sources and compare:
+    price context must use closes < D only, the label must start at close(D),
+    and the window must count only articles dated D-6..D."""
+    import duckdb
+    import numpy as np
+
+    from portfolio_tracker import ml_features as mf
+
+    con = duckdb.connect()
+    panel = config.FEATURES_DIR / "panel.parquet"
+    rows = con.execute(f"""
+        SELECT symbol, date, n_win, tkr_ret_1d, tkr_ret_5d, tkr_vol_20d, sar_1d
+        FROM read_parquet('{panel}') WHERE sar_1d IS NOT NULL AND tkr_vol_20d IS NOT NULL
+        USING SAMPLE {n} ROWS (reservoir, 7)
+    """).fetchall()
+    bad = []
+    for sym, d, n_win, r1, r5, vol, sar1 in rows:
+        px = con.execute(f"""
+            SELECT date, adj_close, sigma_cc, beta FROM read_parquet('{config.TICKER_STATS_PARQUET}')
+            WHERE symbol = ? AND date BETWEEN ? - INTERVAL 60 DAY AND ? + INTERVAL 15 DAY
+            ORDER BY date""", [sym, d, d]).df()
+        cal = dict(con.execute(f"SELECT date, m_cc FROM read_parquet('{config.CALENDAR_PARQUET}')"
+                               f" WHERE date BETWEEN ? - INTERVAL 60 DAY AND ? + INTERVAL 15 DAY",
+                               [d, d]).fetchall())
+        before = px[px["date"] < np.datetime64(d)]
+        at = px[px["date"] >= np.datetime64(d)]
+        c = before["adj_close"].to_numpy("float64")
+        r = np.diff(c) / c[:-1]
+        exp_r1 = c[-1] / c[-2] - 1
+        exp_r5 = c[-1] / c[-6] - 1
+        exp_vol = float(np.std(r[-20:], ddof=1))
+        nxt = at.iloc[1]
+        exp_sar = ((at["adj_close"].iloc[1] / at["adj_close"].iloc[0] - 1)
+                   - nxt["beta"] * cal[nxt["date"].date() if hasattr(nxt["date"], "date") else nxt["date"]]) \
+            / nxt["sigma_cc"]
+        exp_sar = float(np.clip(exp_sar, -config.SAR_WINSOR, config.SAR_WINSOR))
+        cnt = con.execute(f"""
+            SELECT count(*) FROM read_parquet('{ENRICHED}')
+            WHERE symbol = ? AND CAST(ts_et AS DATE) BETWEEN ? - INTERVAL {mf.WINDOW_DAYS - 1} DAY AND ?
+        """, [sym, d, d]).fetchone()[0]
+        checks = {"tkr_ret_1d": (r1, exp_r1), "tkr_ret_5d": (r5, exp_r5),
+                  "tkr_vol_20d": (vol, exp_vol), "sar_1d": (sar1, exp_sar),
+                  "n_win": (n_win, cnt)}
+        for k, (got, exp) in checks.items():
+            if not np.isclose(float(got), float(exp), rtol=1e-3, atol=1e-5):
+                bad.append({"symbol": sym, "date": str(d), "field": k,
+                            "panel": float(got), "recomputed": float(exp)})
+    results["leakage_spotcheck"] = {"checked": len(rows), "mismatches": bad[:10],
+                                    "n_mismatches": len(bad),
+                                    "gates": {"no_mismatch": not bad}}
+
+
+def main_window(horizons: list[int], walk_forward: bool) -> None:
+    results = json.loads(WINDOW_REPORT.read_text()) if WINDOW_REPORT.exists() else {}
+    t0 = time.time()
+    for h in horizons:
+        window_holdout_gates(results, h)
+        if walk_forward:
+            window_walk_forward(results, h)
+    window_leakage_spotcheck(results)
+    results["_minutes"] = round((time.time() - t0) / 60, 1)
+    WINDOW_REPORT.write_text(json.dumps(results, indent=2, default=str))
+    print(json.dumps(results, indent=2, default=str), flush=True)
+    fails = [f"{k}.{g}" for k, v in results.items() if isinstance(v, dict)
+             for g, ok in (v.get("gates") or {}).items() if not ok]
+    print(("FAILED gates: " + ", ".join(fails)) if fails else "ALL GATES PASS", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--stage", choices=["encoder", "window"], default="encoder")
+    ap.add_argument("--horizons", type=str, default="1,5")
     ap.add_argument("--walk-forward", action="store_true")
     ap.add_argument("--phrasebank", type=str, default=None)
     ap.add_argument("--only", type=str, default=None,
                     help="comma list of test numbers to run, e.g. 1,2,6")
     args = ap.parse_args()
+    if args.stage == "window":
+        main_window([int(h) for h in args.horizons.split(",")], args.walk_forward)
+        return
     only = set(args.only.split(",")) if args.only else None
 
     results = {}

@@ -12,7 +12,7 @@
 
 <div class="topbar" id="topbar">
   <button id="edit-btn" class="tab-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
-  <button id="news-btn" class="tab-btn" data-tip="Open the News &amp; Sentiment dashboard: ML- and LLM-assessed market conditions and per-stock sentiment for your portfolio holdings.">News</button>
+  <button id="news-btn" class="tab-btn" data-tip="Open the News &amp; Sentiment dashboard: for every holding, the News read (what the news says, lens by lens) beside the Market read (how prices have reacted to news like this).">News</button>
   <button id="optimize" data-tip="Open the Portfolio Optimization workspace: trace the mean-CVaR efficient frontier from your holdings using Black-Litterman expected returns (market-cap equilibrium + analyst-target views), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
   <!-- One Refresh for the whole app (v1.11.0). Click (or R) refreshes the
        current portfolio: quotes first, then news + sentiment. Long-press for
@@ -35,7 +35,8 @@
   </span>
   <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
        per portfolio. Each sheet must include EVERY column the app can show for a
-       row (full column registry, not just the currently visible view) PLUS the
+       row (full column registry, not just the currently visible view), the News
+       read and Market read (per lens, tier, z, divergence) PLUS the
        analyst recommendations and the portfolio analytics ratios shown in the
        Portfolio tab, with static 1Y and 5Y portfolio statistics but no exported
        time-series payloads. Intent: user feeds the file to an AI/chatbot for
@@ -144,15 +145,14 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 <div id="news-panel" class="hidden">
   <div class="ns-head">
     <h3 class="ns-title">News &amp; Sentiment</h3>
-    <!-- Lookback control (item 3): how far back the news analysis reaches.
-         Changing it re-scores IMMEDIATELY from cached, already-scored articles
+    <!-- Lookback control: how far back the News read reaches. Changing it
+         re-aggregates IMMEDIATELY from cached, already-read headlines
          (POST /api/news-rescore — no network, no LLM). Narrowing is exact;
          widening can only re-weight what some earlier fetch actually pulled,
-         so the response carries a coverage flag and the UI says so rather than
-         presenting it as a true 30-day read. The recency decay tau scales with
-         the window so long lookbacks actually use their older articles. -->
+         so the response carries a coverage flag and the UI says so. The
+         Market read always uses the 7-day window it was calibrated on. -->
     <div class="ns-lookback" id="ns-lookback" role="group" aria-label="News analysis window">
-      <span class="ns-lb-label" data-tip="Analysis window: how far back the news fetch and scoring reach. Applies immediately — the already-scored articles are re-weighted from cache, with no network call. Narrowing is exact; widening can only re-weight what an earlier fetch actually pulled, and says so when it can't cover the window. Articles are never equal-weighted — each is weighted by recency e^(−age/τ) (τ scales with the window: 7D → 3.0d, 30D → 12.9d), source credibility (Reuters/Bloomberg/WSJ 1.0 · CNBC/Barron's 0.8 · PR wires 0.5), novelty (syndicated copies discounted), and target relevance (primary subject 1.0 · co-subject 0.6 · passing mention 0.1).">Window</span>
+      <span class="ns-lb-label" data-tip="Analysis window of the News read. Applies immediately — the already-read headlines are re-weighted from cache, with no network call. Narrowing is exact; widening can only re-weight what an earlier fetch pulled, and says so. Headlines are weighted by recency e^(−age/τ) (τ scales with the window: 7D → 3.0d, 30D → 12.9d), source credibility (Reuters/Bloomberg/WSJ 1.0 · CNBC/Barron's 0.8 · PR wires 0.5) and novelty (syndicated copies discounted); headlines not about the company weigh nothing. The Market read always uses its 7-day training window.">Window</span>
       <button data-days="3" type="button">3D</button>
       <button data-days="7" type="button" class="active">7D</button>
       <button data-days="14" type="button">14D</button>
@@ -172,48 +172,47 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
        reset. Split persists in localStorage. -->
   <div class="ns-quad" id="ns-quad">
     <div class="ns-card ns-gauge" id="ns-gauge-card">
-      <h4>Portfolio Signal</h4>
+      <h4>Portfolio signal</h4>
       <div class="ns-gauge-body" id="ns-gauge-body">
-        <div class="ns-empty">Refresh to compute the portfolio signal.</div>
+        <div class="ns-panel-empty">Refresh to read the news for these holdings.</div>
       </div>
     </div>
     <div class="ns-qgut ns-qgut-v" id="ns-qgut-v" title="Drag to resize · double-click to reset"></div>
     <div class="ns-card ns-market" id="ns-market-card">
       <h4>Market &middot; Systematic Risk</h4>
       <div class="ns-market-body" id="ns-market-body">
-        <div class="ns-empty">Click Refresh or build the dashboard to load market sentiment.</div>
+        <div class="ns-panel-empty">Refresh to read the market news.</div>
       </div>
     </div>
     <div class="ns-qgut ns-qgut-h" id="ns-qgut-h" title="Drag to resize · double-click to reset"></div>
     <div class="ns-card" id="ns-movers-card">
       <h4>Movers</h4>
-      <div id="ns-movers-body"><div class="ns-empty">No data yet.</div></div>
+      <div id="ns-movers-body"><div class="ns-panel-empty">No data yet.</div></div>
     </div>
     <div class="ns-card" id="ns-watch-card">
       <h4>What to Watch</h4>
-      <div id="ns-watch-body"><div class="ns-empty">No data yet.</div></div>
+      <div id="ns-watch-body"><div class="ns-panel-empty">No data yet.</div></div>
     </div>
   </div>
   <!-- News timeline (item 4): when news landed, at what intensity. -->
   <div class="ns-card ns-tl-card" id="ns-tl-card">
-    <h4>News Timeline<span class="ns-dual-legend" data-tip="Paired bars per article: the return-trained ML model on the left, the LLM on the right."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>LLM</span></h4>
+    <h4>News Timeline<span class="ns-legend" data-tip="One bar per headline: its News read score (height = strength, color = direction). Thin grey ticks were judged not about the company.">News read per headline</span></h4>
     <div class="ns-tl-controls" id="ns-tl-controls"></div>
-    <div class="ns-tl-body" id="ns-tl-body"><div class="ns-empty">Refresh to load the news timeline.</div></div>
+    <div class="ns-tl-body" id="ns-tl-body"><div class="ns-panel-empty">Refresh to load the news timeline.</div></div>
   </div>
   <!-- Click anywhere on this card (except a link or a filter control) to open
        the 99%-viewport full-screen tape. See openTapeFullscreen in app.js. -->
   <div class="ns-card ns-tape-card" id="ns-tape-card">
-    <h4>Flash Tape<span class="ns-dual-legend" data-tip="Two dots per article: the return-trained ML model first, the LLM second."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>LLM</span><span class="ns-expand-hint">click to expand &#9974;</span></h4>
+    <h4>Flash Tape<span class="ns-legend" data-tip="Each headline carries its News read: the dot is its score, the tag its lens. A hollow dot was not read; a grey ring was judged not about the company.">News read + lens per headline</span><span class="ns-expand-hint">click to expand &#9974;</span></h4>
     <div class="ns-tape-filters" id="ns-tape-filters"></div>
-    <div class="ns-tape-body" id="ns-tape-body"><div class="ns-empty">Refresh to load the headline tape.</div></div>
+    <div class="ns-tape-body" id="ns-tape-body"><div class="ns-panel-empty">Refresh to load the headline tape.</div></div>
   </div>
   <div class="ns-portfolio" id="ns-portfolio">
-    <h4>Constituent Breakdown</h4>
+    <h4>Constituents</h4>
     <div class="ns-portfolio-body" id="ns-portfolio-body"></div>
   </div>
   <div class="ns-card ns-diag" id="ns-diag-card">
-    <h4 class="ns-diag-toggle" id="ns-diag-toggle">Model Diagnostics <span id="ns-diag-arrow">&#9656;</span><button type="button" class="ns-diag-info" id="ns-diag-info" title="What is this?" aria-label="About Model Diagnostics">i</button><button type="button" class="ns-methodology-link" id="ns-methodology-btn" data-tip="Full write-up: how the ML news-sentiment model was built, tested, and how to read it">Methodology</button></h4>
-    <div class="ns-diag-about hidden" id="ns-diag-about"></div>
+    <h4 class="ns-diag-toggle" id="ns-diag-toggle">Track record <span id="ns-diag-arrow">&#9656;</span><button type="button" class="ns-methodology-link" id="ns-methodology-btn" data-tip="How the News read and the Market read work, what each is good at, and where each is blind">Methodology</button></h4>
     <div class="ns-diag-body hidden" id="ns-diag-body"></div>
   </div>
 </div>
@@ -801,16 +800,15 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 
 <div class="modal-bg" id="modal-bg"><div class="modal" id="modal"></div></div>
 
-<!-- Methodology modal (90% viewport): the technical article on how the ML
-     news-sentiment model was built, validated, and how to read it. Content is
-     built once in JS (openMethodology) and cached. -->
-<div class="modal-bg" id="methodology-bg"><div class="modal methodology-modal" id="methodology-modal" role="dialog" aria-modal="true" aria-label="News sentiment methodology"></div></div>
+<!-- Methodology modal (90% viewport): how the two engines work — the News
+     read and the Market read side by side. Built once in JS (openMethodology). -->
+<div class="modal-bg" id="methodology-bg"><div class="modal methodology-modal" id="methodology-modal" role="dialog" aria-modal="true" aria-label="How the News read and the Market read work"></div></div>
 
 <!-- News refresh progress modal: one job row per constituent + the market,
-     each with a bar that fills through fetch → LLM pass 1 → pass 2 → done.
-     Two rows animate at once (the refresh runs a 2-worker pool). -->
+     each with a bar that fills through fetch → read (two concurrent passes) →
+     Market read → done. Two rows animate at once (a 2-worker pool). -->
 <div class="modal-bg" id="ns-prog-bg" hidden>
-  <div class="modal ns-prog-modal" role="dialog" aria-modal="true" aria-label="Refreshing news sentiment">
+  <div class="modal ns-prog-modal" role="dialog" aria-modal="true" aria-label="Refreshing the News read and Market read">
     <div class="ns-prog-head">
       <span class="ns-prog-title">Refreshing news &amp; sentiment</span>
       <span class="ns-prog-count" id="ns-prog-count"></span>
@@ -859,7 +857,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
   <div class="ns-tape-fs-modal" role="dialog" aria-modal="true" aria-label="Flash Tape">
     <div class="ns-tape-fs-head">
       <span class="ns-tape-fs-title">Flash Tape</span>
-      <span class="ns-dual-legend" data-tip="Each article carries two signals: the return-trained ML model and the LLM. ML dot first, LLM dot second."><i class="ns-dot ns-lg-ml"></i>ML<i class="ns-dot ns-lg-ai"></i>LLM</span>
+      <span class="ns-legend" data-tip="Each headline carries its News read: dot = score, number = −2…+2, tag = lens.">News read + lens per headline</span>
       <div class="ns-tape-filters" id="ns-tape-fs-filters"></div>
       <span class="spacer"></span>
       <span class="ns-tape-fs-count" id="ns-tape-fs-count"></span>

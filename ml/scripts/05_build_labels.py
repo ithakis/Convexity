@@ -253,7 +253,6 @@ def stage_b(sample: bool) -> None:
 def stage_c() -> None:
     import duckdb
     import numpy as np
-    import pandas as pd
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -359,19 +358,122 @@ def stage_c() -> None:
     print(json.dumps(report, indent=2), flush=True)
 
 
+# --------------------------------------------------------------------- stage D
+TICKER_DAY_PARQUET = config.PARQUET_DIR / "ticker_day.parquet"
+
+
+def stage_d() -> None:
+    """Ticker-day labels + point-in-time price context for the v2 Market read.
+
+    One row per (symbol, trading day D) for every symbol that has news:
+      sar_1d = (r(close D -> close D+1) - beta*m) / sigma_cc            (winsor +/-5)
+      sar_5d = (r(close D -> close D+5) - beta*m_5d) / (sigma_cc*sqrt5) (winsor +/-5)
+    beta/sigma are the stage-A values stored at D+1, i.e. computed from data
+    <= D (the same convention the per-article labels use). The label starts at
+    close(D), after every article dated <= D that the as-of-D window reads —
+    matching the app, which predicts the move from the last close onward.
+
+    Price context is as of D-1 (never D, which the app may be scoring intraday):
+    ticker 1d/5d/20d return and 20d vol of daily returns; SPY 5d return and 20d
+    vol from the calendar's m_cc.
+    """
+    import duckdb
+
+    t0 = time.time()
+    con = duckdb.connect()
+    con.execute("PRAGMA memory_limit='1500MB'")
+    tmp = config.DATA_DIR / "duckdb_tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    con.execute(f"PRAGMA temp_directory='{tmp}'")
+    con.execute("SET preserve_insertion_order=false")
+    first = f"{config.ENCODER_FIRST_YEAR - 1}-10-01"
+    w = config.SAR_WINSOR
+    con.execute(f"""
+        CREATE TEMP TABLE spy AS
+        SELECT date,
+               exp(sum(ln(1 + m_cc)) OVER w5) - 1 AS spy_ret_5d,
+               stddev_samp(m_cc) OVER w20       AS spy_vol_20d,
+               count(*) OVER w20                AS n20
+        FROM read_parquet('{config.CALENDAR_PARQUET}')
+        WINDOW w5  AS (ORDER BY date ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING),
+               w20 AS (ORDER BY date ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING)
+    """)
+    con.execute(f"""
+        CREATE TEMP TABLE st AS
+        SELECT t.symbol, t.date, CAST(t.adj_close AS DOUBLE) AS c,
+               CAST(t.sigma_cc AS DOUBLE) AS sig, CAST(t.beta AS DOUBLE) AS beta,
+               cal.m_cc,
+               CAST(t.adj_close AS DOUBLE)
+                 / lag(CAST(t.adj_close AS DOUBLE)) OVER (PARTITION BY t.symbol ORDER BY t.date)
+                 - 1 AS r_cc
+        FROM read_parquet('{config.TICKER_STATS_PARQUET}') t
+        JOIN (SELECT DISTINCT symbol FROM read_parquet('{config.LABELED_PARQUET}')) s
+             USING (symbol)
+        JOIN read_parquet('{config.CALENDAR_PARQUET}') cal ON cal.date = t.date
+        WHERE t.date >= DATE '{first}'
+    """)
+    con.execute(f"""
+        COPY (
+            SELECT symbol, date,
+                   -- DuckDB's greatest/least IGNORE NULLs, so a bare
+                   -- greatest(-5, least(5, NULL)) is 5, not NULL: clip explicitly.
+                   CASE WHEN isfinite(raw_1d) THEN greatest(-{w}, least({w}, raw_1d))
+                   END AS sar_1d,
+                   CASE WHEN isfinite(raw_5d) THEN greatest(-{w}, least({w}, raw_5d))
+                   END AS sar_5d,
+                   tkr_ret_1d, tkr_ret_5d, tkr_ret_20d, tkr_vol_20d,
+                   spy.spy_ret_5d, spy.spy_vol_20d
+            FROM (
+                SELECT symbol, date,
+                    (lead(c, 1) OVER w / c - 1 - lead(beta, 1) OVER w * lead(m_cc, 1) OVER w)
+                        / nullif(lead(sig, 1) OVER w, 0)                   AS raw_1d,
+                    CASE WHEN count(*) OVER f5 = 5 THEN
+                        (lead(c, 5) OVER w / c - 1
+                         - lead(beta, 1) OVER w * (exp(sum(ln(1 + m_cc)) OVER f5) - 1))
+                        / nullif(lead(sig, 1) OVER w * sqrt(5), 0)
+                    END                                                     AS raw_5d,
+                    lag(c, 1) OVER w / lag(c, 2) OVER w - 1                AS tkr_ret_1d,
+                    lag(c, 1) OVER w / lag(c, 6) OVER w - 1                AS tkr_ret_5d,
+                    lag(c, 1) OVER w / lag(c, 21) OVER w - 1               AS tkr_ret_20d,
+                    CASE WHEN count(r_cc) OVER p20 >= 15
+                         THEN stddev_samp(r_cc) OVER p20 END               AS tkr_vol_20d
+                FROM st
+                WINDOW w   AS (PARTITION BY symbol ORDER BY date),
+                       f5  AS (PARTITION BY symbol ORDER BY date
+                               ROWS BETWEEN 1 FOLLOWING AND 5 FOLLOWING),
+                       p20 AS (PARTITION BY symbol ORDER BY date
+                               ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING)
+            ) x
+            JOIN spy USING (date)
+            WHERE date >= DATE '{config.ENCODER_FIRST_YEAR}-01-01'
+            ORDER BY symbol, date
+        ) TO '{TICKER_DAY_PARQUET}' (FORMAT parquet, COMPRESSION zstd)
+    """)
+    n, n1, n5 = con.execute(f"""
+        SELECT count(*), count(sar_1d), count(sar_5d)
+        FROM read_parquet('{TICKER_DAY_PARQUET}')
+    """).fetchone()
+    report = {"rows": n, "with_sar_1d": n1, "with_sar_5d": n5,
+              "minutes": round((time.time() - t0) / 60, 1)}
+    (config.REPORTS_DIR / "labels_stage_d_report.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps(report, indent=2), flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=["A", "B", "C"], default=None)
+    ap.add_argument("--stage", choices=["A", "B", "C", "D"], default=None)
     ap.add_argument("--sample", action="store_true")
     args = ap.parse_args()
     config.ensure_dirs()
-    stages = [args.stage] if args.stage else ["A", "B", "C"]
+    stages = [args.stage] if args.stage else ["A", "B", "C", "D"]
     if "A" in stages:
         stage_a()
     if "B" in stages:
         stage_b(args.sample)
     if "C" in stages:
         stage_c()
+    if "D" in stages:
+        stage_d()
 
 
 if __name__ == "__main__":

@@ -101,12 +101,13 @@ Every locked pipeline choice below cites the evidence that motivated it.
 17. **Lopez-Lira & Tang (2023), "Can ChatGPT Forecast Stock Price Movements? Return
     Predictability and Large Language Models," SSRN 4412788 / arXiv 2304.07619.**
     LLM headline scores predict next-day returns (long-short Sharpe > 3 in-sample
-    window); the benchmark our existing NIM pipeline emulates and the comparison
-    target for ML-vs-LLM shadow testing.
+    window); the ancestor of the app's News read (the NIM LLM engine), which now
+    runs as a peer of the return-supervised Market read rather than its baseline.
 18. **Araci (2019), "FinBERT: Financial Sentiment Analysis with Pre-trained Language
     Models," arXiv 1908.10063.** Domain-adapted transformer baseline; PhraseBank
-    accuracy ~0.86 — context for our 0.900 LLM benchmark and the 0.65 polarity
-    sanity floor for the return-supervised model (different task, lower bar).
+    accuracy ~0.86 — context for the News read's 0.94 PhraseBank direction
+    accuracy and the 0.65 polarity sanity floor for the return-supervised model
+    (different task, lower bar).
 19. **Huang, Wang & Yang (2023), "FinBERT: A Large Language Model for Extracting
     Information from Financial Text," *Contemporary Accounting Research*.**
     Demonstrates fine-tuned finance LMs beat dictionaries on classification — but
@@ -116,12 +117,14 @@ Every locked pipeline choice below cites the evidence that motivated it.
     lexicons are surprisingly competitive on short financial text — supports LM
     lexicon features remaining in the model rather than TF-IDF alone.
 21. **Wu et al. (2023), "BloombergGPT: A Large Language Model for Finance," arXiv
-    2303.17564.** Frontier of finance-domain LMs; context for why a 9B NIM model +
-    calibration (not scale) is our production choice.
+    2303.17564.** Frontier of finance-domain LMs; context for why a hosted general
+    model with a strict per-headline schema (not a finance-specific LM) is the
+    News read's production choice.
 22. **Malo, Sinha, Korhonen, Wallenius & Takala (2014), "Good Debt or Bad Debt:
     Detecting Semantic Orientations in Economic Texts," *JASIST* 65(4).** The
-    Financial PhraseBank — already wired into `scripts/benchmark_sentiment_prompt.py`;
-    reused as the human-label polarity anchor for the ML model.
+    Financial PhraseBank — wired into `scripts/benchmark_news_read.py` (News
+    read certification) and reused as the human-label polarity anchor for the
+    ML model.
 23. **Dong, Yan, Zhao et al. (2024), "FNSPID: A Comprehensive Financial News Dataset
     in Time Series," KDD 2024.** doi:10.1145/3637528.3671629 / arXiv 2402.06698.
     The training corpus: 15.7M articles, 4,775 tickers, 1999–2023. Their own

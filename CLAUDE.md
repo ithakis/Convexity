@@ -12,7 +12,7 @@ new system or change an established pattern.
 Single-user, local-only portfolio dashboard. Runs as a Python HTTP server
 on `127.0.0.1:8765`, opens itself in the user's browser (or a native
 PySide6 window — §14). No accounts, no network calls except to yfinance
-(Yahoo Finance), Finnhub (news), and NVIDIA NIM (AI sentiment), no build
+(Yahoo Finance), Finnhub (news), and NVIDIA NIM (the News read), no build
 step. Almost all logic lives in the `portfolio_tracker/` package, split
 into focused modules (server, fetcher, analytics, fx, persistence, etc. —
 see the table below); `dashboard.py` at the repo root is a thin
@@ -51,15 +51,21 @@ sub-decision.
 │   ├── helpers.py                ← Shared small utilities (dividend-yield normalisation, etc.)
 │   ├── xlsx_export.py           ← One-sheet-per-portfolio Excel export — §7
 │   ├── finnhub_adapter.py       ← Optional Finnhub supplemental columns (MSPR, rec trend) — §4
-│   ├── news_sentiment.py        ← Finnhub news + NVIDIA NIM AI sentiment engine — §4
+│   ├── news_sentiment.py        ← News fetch/cache, the News read (LLM, five lenses), refresh orchestration — §4
+│   ├── ml_sentiment.py          ← The Market read (mlsent-v1.1 statistical model) — §4
+│   ├── ml_features.py           ← Featurizer shared by ml/ training and the Market read (train/serve parity) — §4
+│   ├── relevance.py             ← Deterministic relevance, title dedup, window_sample (shared with ml/) — §4
+│   ├── lexicon.py               ← Loughran-McDonald scorer (data/lm_lexicon.json), an encoder feature
+│   ├── news_diagnostics.py      ← Track record statistics (date-clustered IC, verdicts, hit rates) — §4
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
 │       ├── index.html           ← Main HTML template
 │       ├── app.js                ← All frontend JS (state, columns, rendering, panels) — §5
 │       └── style.css             ← CSS (themes, layout, components) — §8
-├── tests/                        ← pytest suite (test_metrics.py, test_news_sentiment.py)
+├── tests/                        ← pytest suite; tests/data/news_gold.jsonl is the News read gold set
 ├── docs/                         ← Reference/audit notes not needed to run the app day-to-day
-├── scripts/                      ← Misc dev scripts (e.g. check_syntax.py)
+├── scripts/                      ← Dev scripts (check_syntax.py, smoke_test_server.py, benchmark_news_read.py, …)
+├── ml/                           ← FNSPID training pipeline for the Market read — docs/ml_sentiment_design.md
 ├── Launch Dashboard.command      ← macOS launcher (activates `pt` conda env, restarts cleanly)
 ├── requirements.txt
 ├── environment.yml               ← conda/mamba env spec for the desktop app (`pt`) — §14
@@ -78,7 +84,9 @@ sub-decision.
 ├── .portfolio_tracker_column_views.json ← Custom column-view definitions (gitignored)
 ├── .finnhub_key                       ← Finnhub API key (gitignored, never committed)
 ├── .openrouter_key                    ← Legacy OpenRouter key (superseded by .nvidia_key, still gitignored)
-└── .nvidia_key                        ← NVIDIA NIM API key (gitignored, never committed)
+├── .nvidia_key                        ← NVIDIA NIM API key (gitignored, never committed)
+├── .portfolio_tracker_news.json       ← News + sentiment cache, LLM status (gitignored)
+└── .portfolio_tracker_sentiment_history.json ← One record per ticker-day read: Track record + live anchor (gitignored)
 ```
 
 `__pycache__/`, `*.sqlite`, and all `.portfolio_tracker_*.json` runtime
@@ -273,192 +281,184 @@ Non-US tickers return empty data silently; only HTTP 429 logs one line.
 The columns are `Rec Δ6M` and `MSPR` (Fundamentals preset). The third
 Finnhub-style column, `EPS Surp.`, is now yfinance-sourced (see above).
 
-**News & Sentiment (`portfolio_tracker/news_sentiment.py`):** Fetches
-per-ticker and market-wide news from Finnhub's free API (`/company-news`,
-`/news`), then scores each batch through `nvidia/nvidia-nemotron-nano-9b-v2`
-via NVIDIA's NIM endpoint (`integrate.api.nvidia.com`) to produce a 5-tier
-sentiment signal (very_bullish → very_bearish).
-Key architecture:
-- **Model gotcha:** the original `nvidia/llama-3.1-nemotron-nano-8b-v1` is
-  still in the NIM catalog but no longer actually served — chat completions
-  against it hang forever (verified: no response in 90s). Switched to
-  `nvidia-nemotron-nano-9b-v2` (0.79s). That model is a *hybrid reasoning*
-  model: on a complex prompt it spends the whole `max_tokens` budget on an
-  internal `<think>` pass and returns `content=None`, so `_nvidia_call`
-  prepends the **`/no_think`** control token to the system prompt to force a
-  direct JSON answer (`detailed thinking off` / `chat_template_kwargs` do
-  NOT work for this model — only the control token does). The OpenAI client
-  is built with `timeout=30s, max_retries=0` so a hung/deprecated model can
-  never block a warm-up worker for the SDK's 600s default.
-- API keys loaded via `_load_key()` — checks env vars first, then
-  `.finnhub_key` / `.nvidia_key` files next to the module or in the
-  parent directory. Same security model as `finnhub_adapter`.
-- Cache: `_NEWS_CACHE` + `_SENTIMENT_CACHE` with `_CACHE_LOCK`, 30-day TTL,
-  negative cache 1800s. Transient failures NOT cached. Disk-backed via
-  `.portfolio_tracker_news.json` — survives restarts; user-driven refresh only.
-- Token-bucket rate limiter: `_NV_LIMITER` (60/min), sleeps instead of
-  returning None. On 429: penalise + retry up to 3 times with 5s sleep.
-- `get_cached_sentiment(symbol)` — O(1) cache-only read, safe for `fetch_one`
-  hot path (never triggers API calls during streaming build).
-- `get_portfolio_sentiment(symbols)` — ThreadPoolExecutor(2) batch.
-- Graceful degradation: no Finnhub key → no news; no NVIDIA key → news
-  but no sentiment; all functions return None, UI shows hollow dots/dashes.
-- The NS column (10px colored dot) appears in Default and Momentum views,
-  NOT in Fundamentals. Background warm-up runs 2s after build completes.
-- **Redesigned engine (2026-07, full design record in
-  `docs/news_tab_redesign_plan.md`):** news is merged Finnhub + yfinance
-  `tk.news`, deduplicated (rapidfuzz title similarity, optional dep like
-  symbol_db) with syndication counts kept as a salience signal. Scoring is
-  per-article via ONE NIM call/ticker returning a JSON array
-  (`_ARRAY_SYSTEM_PROMPT`; the old blob prompt is the validated fallback),
-  run twice and averaged when `SELF_CONSISTENCY=True` (default).
-  Aggregation is deterministic math, not vibes: recency (τ=3d) ×
-  source-tier × novelty × relevance weights → `s_idio` + confidence.
-  `lexicon.py` (Loughran-McDonald word lists vendored in
-  `data/lm_lexicon.json`) scores every article for free in parallel;
-  strong opposite-sign LLM-vs-lexicon disagreement flags the ticker and
-  caps confidence at 0.5. Decomposition: `s_total = clip(KAPPA·β·s_mkt +
-  s_idio)` with **KAPPA=0.2 fixed by an S&P 100 sensitivity study**
-  (`scripts/kappa_sensitivity.py` + results JSON — re-run it before
-  changing KAPPA; idio scores are compressed (σ≈0.12) so larger κ lets the
-  market term dominate the cross-section). Tiers are calibrated to rolling
-  90d score quantiles from `.portfolio_tracker_sentiment_history.json`
-  (10/20/40/20/10 by construction; fixed thresholds until 100 obs).
-  Sentiment dicts keep legacy keys (`tier/score/summary`) plus
-  `s_idio/s_sys/s_total/s_lm/confidence/events/disagreement/fallback`.
-  Routes: `/api/news-refresh` streams NDJSON staged market-first-then-
-  symbols-by-weight and accepts a `context` payload (betas/weights/row
-  numbers → prompts + decomposition); `/api/news-tape` is a cache-only
-  merged article feed for the tape; `/api/news-diagnostics` computes
-  Spearman rank IC vs forward 1d/5d idiosyncratic returns, per-tier
-  forward-return monotonicity, and the score histogram.
-  `scripts/benchmark_sentiment_prompt.py` certifies the prompt on
-  Financial PhraseBank — run manually after any prompt/model change.
-- The News tab (topbar button, mutual exclusion with Portfolio panel):
-  portfolio signal gauge with a systematic/idiosyncratic split, compact
-  Market·Systematic-Risk card (cross-asset tape via yfinance injected into
-  the prompt), Movers with headline attribution, What to Watch
-  (disagreement flags, extreme tiers, earnings catalysts), a filterable
-  flash-headline tape, an expandable constituent table with Bloomberg Way
-  briefs (compressed four-paragraph lead, ≤60 words, banned-word list in
-  the prompt), and a collapsed Model Diagnostics section.
+**News & Sentiment — two engines, never blended (v1.12).** The News tab and
+the NS column show two independent reads of each holding's headlines as
+**peers**. There is no blended score, no "primary" and no "challenger" — do
+not reintroduce one; the engines answer different questions.
 
-**ML sentiment (`portfolio_tracker/ml_sentiment.py` + `relevance.py` +
-`ml_features.py`, added on branch MLNews):** a LightGBM model that predicts the
-vol-standardized, beta-adjusted abnormal return (SAR) implied by news text,
-trained on FNSPID (5.75M symbol-tagged articles, 2009–2023) via the pipeline in
-`ml/scripts/00…12` (design record: `docs/ml_sentiment_design.md`, lit review:
-`docs/ml_sentiment_lit_review.md`). Key contracts:
-- **Artifact** lives at `~/.portfolio_tracker/ml_model/mlsent-v1/`
-  (`MLSENT_MODEL_DIR` overrides): LightGBM booster + train-fitted idf vector +
-  df-pruning column mask + frozen tier cuts + feature schema. Missing/corrupt
-  artifact ⇒ `available()=False` and every call returns `None` — the LLM path
-  is untouched (same graceful-degradation model as `finnhub_adapter`).
-- **Train/serve parity is the invariant**: `ml_features.py` (hashed TF-IDF
-  2^18 uni+bi, `HASH_SUMMARY_MAX_CHARS=600`, ~33 dense cols) and
-  `relevance.py` (deterministic relevance heuristic + the shared title-dedup
-  used by `_dedup_articles`) are imported by BOTH `ml/` training and
-  production. Changing them invalidates the deployed artifact — parity tests
-  in `tests/test_ml_sentiment.py` guard this.
-- **Relevance stays hand-set** (never fitted on FNSPID) so a future ML
-  relevance model can be trained on that corpus without contamination.
-- `get_news_sentiment` adds `ml_sar / ml_score / ml_tier / ml_confidence /
-  ml_n` beside the LLM keys and persists `ml_sar`/`ml_tier`/`ml_score`/
-  `ml_confidence` into the sentiment history.
-- **ML is the PRIMARY displayed signal (v1.6.1).** When `ml_fields` are present,
-  `get_news_sentiment` promotes the canonical `tier`/`score` to the ML values and
-  preserves the LLM call as `llm_tier`/`llm_score` (with `disp_source="ml"`);
-  when absent it leaves the LLM values in place (`disp_source="llm"`). This
-  centralizes promotion so every consumer that reads `tier`/`score` (the main
-  holdings-table NS dot, xlsx export, the News-tab gauge/constituent table) shows
-  ML automatically, with a clean LLM fallback. Per-article ML scores are also
-  written back onto the cached article dicts (`a["ml_score"]`, `a["ml_sar"]`, the
-  same objects the flash tape / timeline read) so those surfaces color/filter by
-  ML too. Frontend display helpers: `nsDispArticleScore`/`nsDispArticleTier` in
-  `app.js` pick ML-first with LLM fallback.
-- `compute_diagnostics` returns, besides the legacy `ic`/`tiers`/`histogram`/`ml`
-  (ML vs LLM live IC + per-ML-tier forward returns), four v1.6.1 live panels:
-  `rolling` (expanding-window ML & LLM IC by date), `calibration_curve`
-  (predicted-SAR bins vs realized forward return), `agreement` (5×5 ML-tier ×
-  LLM-tier grid + `agree_pct`), and `coverage` (`n_ml`, `%`, confidence hist).
-  The News tab renders these via shared inline-SVG helpers (`svgBars`,
-  `svgGroupedBars`, `svgLine`, `svgHeat` — no chart lib, `<title>` hover tips).
-  The frozen training/backtest story lives in the **Methodology** modal
-  (`openMethodology` in `app.js`, a 90vw×90vh article with six SVG charts + a
-  KaTeX SAR formula); Model Diagnostics stays "live evidence only."
-- **The ML model was silently dead in every installed copy (v1.10.0 fix — read
-  this before debugging "ML has not scored these holdings").** `environment.yml`
-  listed neither `lightgbm` nor `scikit-learn` (they were only in
-  `requirements.txt`, which `install.sh` never pip-installs), so the desktop
-  app's `pt` env could not load the artifact — while QF12, where every agent
-  tests, could. `news_sentiment.py`'s ML block swallowed the
-  `ModuleNotFoundError` in a bare `except Exception` with **no logging**, so
-  every history record quietly got `ml_sar: null` (1 non-null row out of 172)
-  and the UI just showed the LLM fallback. Three guardrails now:
-  (1) both packages are in `environment.yml`'s conda-forge list — an env sync
-  (`./update.sh`) is required after pulling this;
-  (2) `_load()` also imports `scipy.sparse` + `sklearn`, because `available()`
-  used to return True in an env where every `score_article` call returned None;
-  (3) `ml_sentiment.runtime_status()` → `{available, reason, model_dir,
-  model_dir_exists, version}` rides on `/api/news-diagnostics` as `ml_runtime`
-  and drives an amber banner in Model Diagnostics naming the real cause. The
-  failure is also logged once per process (`_warn_ml_once`). Note `_STATE`
-  caches a failed load for the process lifetime — **installing the dependency
-  requires an app restart** before `available()` flips.
-- **v1.10.0's fix was inert, and the lesson generalises: a dependency
-  declaration is not a dependency.** Adding the two packages to
-  `environment.yml` installs nothing. On the reference machine the `pt` env's
-  last solve (`~/miniforge3/envs/pt/conda-meta/history`) was 2026-07-07, twenty
-  days *before* the v1.10.0 commit — so the user pulled, restarted, and still
-  had no `lightgbm`, while QF12 (where agents test) did. Before concluding that
-  an ML/env fix works, run the check **with the `pt` interpreter**, not
-  whichever python is on PATH:
+| | **News read** (`news_sentiment.py`) | **Market read** (`ml_sentiment.py`) |
+|---|---|---|
+| Question | what the news says | how prices have reacted to news like this |
+| Engine | LLM on NVIDIA NIM, `nvidia/nemotron-3-super-120b-a12b` | mlsent-v1.1: the v1 LightGBM encoder, weighted over the window |
+| Output | five lens scores on −2…+2, overall score, fixed tiers | expected next-day SAR, z, percentile, tier (tails only) |
+| Window | the user's 3/7/14/30D | always 7 days |
+
+*Fetch and cache (`news_sentiment.py`).*
+- Finnhub `/company-news` + yfinance `tk.news`, merged and deduplicated with
+  the title dedup in `relevance.py` (rapidfuzz optional, like symbol_db); the
+  syndication count survives as `n_duplicates` and every article gets a stable
+  `aid` (md5 of url, else normalised title) that lens reads link back to. The
+  retained set is `relevance.window_sample(60, min_recent=15)` — a
+  window-spanning sample, not newest-N.
+- `_NEWS_CACHE` / `_SENTIMENT_CACHE` (30-day TTL, 1800 s negative, transient
+  failures never cached) are disk-backed in `.portfolio_tracker_news.json`
+  (format v3, which also persists the LLM status). Sentiment entries without a
+  `news` key (pre-1.12 shape) are ignored on load. Refresh is user-driven only.
+  `get_cached_sentiment(symbol)` is the O(1) cache-only read `fetch_one` uses —
+  the streaming build never triggers a fetch.
+- Keys resolve through `helpers._load_local_secret` (env var, then
+  `.finnhub_key` / `.nvidia_key` found by walking up) **once, at import** —
+  changing a key needs a restart.
+- Finnhub 429: 3 attempts × 5 s, each `_FH_LIMITER.penalize()` backfills the
+  rolling window so the next acquire waits out the minute, then a 65 s breaker.
+  Measured: ~125 s inside one call. That is the budget working as designed, and
+  it degrades rather than blanks: the read proceeds on yfinance-only articles,
+  cached for 30 minutes instead of 30 days.
+
+*News read (LLM).*
+- Reads the **15 most relevant** headlines in the window (`_read_batch`:
+  `relevance_score` descending, newest first within a tie), presented newest
+  first — not the newest 15. Finnhub tags a mega-cap onto every listicle that
+  mentions it: on 2026-09-25 NVDA's newest 15 were all "not about NVDA" while
+  the headlines naming it sat just outside the cut. Recency still weights the
+  aggregate.
+- Each headline gets `{lens, score, fact}`: lens ∈ financials / outlook /
+  competition / regulation / street / other / none, an integer score −2…+2, a
+  fact ≤ 14 words. `other` (M&A, buybacks, dividends, financing, insiders)
+  counts toward the overall read but has no lens row; `none` (not about the
+  target — listicles, "X vs Y", market wraps) carries zero weight.
+- What makes the output reliable (measured, keep all three): thinking off via
+  `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` **plus**
+  the `/no_think` system prefix; `response_format` json_schema with
+  `strict: True` (`extra_body.nvext.guided_json` is rejected with a 400 on this
+  backend); a **flat per-headline schema** — nested per-lens JSON written by
+  the model came back malformed, so lens verdicts are computed in Python.
+- Two passes run concurrently. `merge_passes`: mean score; a headline counts
+  only if both passes attribute it to the target; `agreement` = share with the
+  same lens and |Δscore| ≤ 1 (shown on every card). A single surviving pass
+  gives agreement None and a 0.75 confidence factor. `validate_items` is
+  strict (every id exactly once, lens enum, finite integer score); a failed
+  pass is re-asked once.
+- `aggregate_items`: weight = recency (τ = 3 days on 7D, scaled with the
+  window) × source × novelty; lens score = weighted mean; overall = weighted
+  mean over everything not `none`. Tiers are **fixed semantic cuts**
+  (`tier_for`): ≤ −1.25 very bearish, ≤ −0.4 bearish, < 0.4 neutral (shown as
+  "Mixed"), < 1.25 bullish, else very bullish. Not quantile-calibrated, on
+  purpose — "Bullish" means the same thing every day.
+- Failure semantics: 404/410 ("model retired"), 401/403 ("key rejected") and a
+  missing key are **permanent** — `_LLM_STATUS.permanent` short-circuits every
+  later call with zero HTTP, and `llm_unblock()` at the start of each refresh
+  re-arms it. 503 → jittered 1.5–5 s retries with **no limiter penalty** (one
+  penalised 503 cost a single ticker 64 s). 429 → penalty + 5 s + breaker. A
+  failed read keeps the previous one with `stale: true` + `stale_reason` and
+  its ORIGINAL `assessed_at` (never re-dated). Per-ticker outcome is ok /
+  failed / empty; the refresh job counts them, `/api/health` carries
+  `llm_ok` / `llm_error`, and the topbar banner names the reason.
+- The same call returns the constituent **brief**, written to the Bloomberg
+  Way contract in `_NEWS_READ_PROMPT`: ≤ 60 words, a compressed lead (theme →
+  numbers vs expectations → what is at stake), ticker-first, active voice, a
+  banned-word list, every claim traceable to a headline or the QUANT CONTEXT
+  block, one sentence when coverage is thin. The market-wide read
+  (`_MARKET_READ_PROMPT`, lens enum `other`/`none` only) gets the cross-asset
+  tape (SPY, QQQ, ^TNX 1-day moves via yfinance, `_market_tape_context`)
+  injected and returns a 1–2 sentence risk line, not a wrap.
+- Budget: two NIM calls per ticker plus two for the market, behind the
+  60/min `_NV_LIMITER` — a 15-name portfolio's news phase takes ~1.5–2 min
+  at 2 workers.
+- NIM availability changes without notice: `nvidia-nemotron-nano-9b-v2` was
+  retired on 2026-08-26 and every call became a 410 while refreshes silently
+  kept August's reads. Probe a model before switching (`_MODEL`).
+- Certification: `scripts/benchmark_news_read.py` on
+  `tests/data/news_gold.jsonl` (149 hand-labelled headlines, 51 tickers) and
+  Financial PhraseBank. Current: lens 85.6%, none-precision 87.8%, direction
+  87.5%, two-pass agreement 96%, PhraseBank 94%, p95 9.6 s per ticker. **Re-run
+  after any prompt or model change**; the gates are in the script.
+
+*Market read (`ml_sentiment.py`, mlsent-v1.1).*
+- Per ticker: the 7-day articles → `window_sample(60, 15)` → the v1 encoder
+  predicts each headline's SAR (one batched predict: hashed TF-IDF + a dense
+  block with the LM lexicon, event flags and price context as of the article's
+  day; session class `dateonly_cc`, because FNSPID is 98.5% date-only) →
+  `ml_features.weighted_sar` (recency × source × novelty × relevance) →
+  `calibrate`. Horizon: the next trading day.
+- **The percentile is live-anchored.** Once the history holds
+  `MIN_LIVE_HISTORY = 200` scores from the running model in the last 90 days
+  (`_market_history`, excluding the ticker-day being scored), z and the
+  percentile are computed against those; until then against the Jul–Sep 2023
+  knots in `tier_cuts.json`. The dict carries `anchor` ("live" / "training")
+  and `n_history`, and the UI names the reference. Tiers by percentile: ≤ 5
+  very bearish, ≤ 15 bearish, 15–85 **No edge**, ≥ 85 bullish, ≥ 95 very
+  bullish. Fixed 2023 cut-points drifted into "93% bearish" live; that is why.
+- **No out-of-sample edge has been shown** (Oct–Dec 2023: daily IC 0.016,
+  t 2.2 over 59 days, both extreme tiers wrong-signed). The Methodology and
+  the Track record say so plainly — keep it that way. The v2 ticker-day
+  retrain failed its gates and is not shipped. Full record:
+  `docs/ml_sentiment_design.md` §11.
+- Artifact at `~/.portfolio_tracker/ml_model/mlsent-v1.1/` (`MLSENT_MODEL_DIR`
+  overrides): encoder booster, idf, df-pruning mask, `feature_schema.json`
+  (must equal `ml_features.feature_schema()`), `tier_cuts.json`, `meta.json`.
+  Build: `ml/scripts/09_tier_cuts.py --model v1.1`, then
+  `10_export_artifact.py --deploy`.
+- Graceful degradation is the contract: a missing artifact, missing
+  lightgbm / scikit-learn / scipy, or a schema mismatch ⇒ `available()` False,
+  every call `None`, the News read untouched. It must not be *silent*: the
+  reason is in `runtime_status()`, logged once (`_warn_ml_once`), and shown in
+  the Track record and Settings → Models & Data. `_STATE` caches a failed load
+  for the process lifetime — installing a dependency needs an app restart.
+- **Train/serve parity is the invariant.** `ml_features.py` (featurizer,
+  `weighted_sar`, window constants) and `relevance.py` (relevance heuristic,
+  title dedup, `window_sample`) are imported by both `ml/` and production;
+  changing them invalidates the artifact, and the parity tests in
+  `tests/test_ml_sentiment.py` guard it. Relevance stays hand-set — never
+  fitted on FNSPID — so a future relevance model can be trained on that corpus
+  cleanly. `window_vector` / `attention_shock` build the v2 research panel only.
+- `confidence = 1 − exp(−wsum/3.0)` (`_CONF_SCALE`, both engines) is display
+  only; 3.0 came from sweeping the real `wsum` distribution (p10/p50/p90 =
+  1.17/3.34/5.86 → ~32/67/86%). Re-derive it the same way if news volume
+  changes materially.
+- **A dependency declaration is not a dependency** (the v1.10 lesson: the ML
+  model was dead in every installed copy for weeks because `lightgbm` was only
+  in `requirements.txt`, and the fix then sat unsolved in the `pt` env).
+  `portfolio_tracker/envcheck.py` is the single runtime-dependency manifest,
+  enforced at boot, on `/api/health` (`env_ok` → banner), by
+  `install.sh`/`update.sh`, and in CI by `scripts/check_dependency_manifests.py`
+  (every `REQUIRED` entry must be in BOTH `requirements.txt` and
+  `environment.yml`). Verify env fixes **with the `pt` interpreter**:
   `~/miniforge3/envs/pt/bin/python -c "from portfolio_tracker import ml_sentiment as m; print(m.runtime_status())"`.
-  v1.10.1 added the guardrails so this cannot recur silently —
-  **`portfolio_tracker/envcheck.py` is now the single dependency manifest**
-  (`REQUIRED`, with the feature each package kills). It is enforced in four
-  places: `server.start_server()` logs a report at boot; `env_ok` on
-  `/api/health` drives a banner under the topbar; `install.sh`/`update.sh`
-  (+ `.ps1`) run `python -m portfolio_tracker.envcheck` against the freshly
-  solved env; and `scripts/check_dependency_manifests.py` asserts in CI that
-  every entry is declared in BOTH `requirements.txt` and `environment.yml`
-  (they were never compared before — that is the original root cause). Add a
-  new hard runtime dependency to `REQUIRED` **and** both manifest files, or CI
-  fails. Also note `tests/test_ml_sentiment.py` no longer uses bare
-  `importorskip`: missing deps fail unless `PT_ALLOW_MISSING_ML=1`, because the
-  old skip meant the suite went quiet in exactly the broken environment.
-  (As of the QF12→pt standardization — see §3 above — agents now run and
-  test exclusively against `pt` too, so this specific two-env discrepancy is
-  structurally impossible going forward, not just guarded against by
-  envcheck. The commit-time pytest gates in `.pre-commit-config.yaml` and
-  `.claude/settings.json` were repointed at `pt` in the same change, so what
-  runs before a commit is the same env users actually run.)
-- `ml_confidence` decay is `1 - exp(-wsum/_CONF_SCALE)`, `_CONF_SCALE = 3.0`.
-  **Display only** — `ml_confidence` is never a model input, so retuning it
-  does not invalidate the artifact. Went through two bad guesses before being
-  measured: 2.0 rendered a real ticker as "Confidence 6%"; the first fix (0.35)
-  overcorrected and pinned 95% of real ticker-days to 90-100% confidence. The
-  current value was chosen by computing the real `wsum` distribution across
-  124 actual ticker-days (`p10=1.17 p50=3.34 p90=5.86`, ~20 articles/week for
-  an actively-covered name) and sweeping candidate scales for one that spreads
-  rather than saturates — 3.0 maps that same p10/p50/p90 to ~32%/67%/86%.
-  Re-derive it the same way (real wsum sweep, not a guess) if the news
-  volume/mix changes materially. `aggregate(scored, now=)` takes an optional
-  recency anchor so the backfill can weight an old record as of its own date.
-  `scripts/backfill_ml_history.py --force` recomputes already-scored history
-  records after a constant retune like this one.
-- `scripts/backfill_ml_history.py` re-scores history records left with
-  `ml_sar: null` from whatever is still in `.portfolio_tracker_news.json`
-  (30-day TTL, so only recent dates recover). Idempotent, atomic write, stamps
-  `ml_backfilled: true` so reconstructed scores stay distinguishable from live
-  ones. Run it once after fixing the env; without it the diagnostics panels stay
-  empty for weeks even though the model is working.
+  `tests/test_ml_sentiment.py` fails (not skips) on missing deps unless
+  `PT_ALLOW_MISSING_ML=1`.
+- Training-only dependencies stay out of `envcheck` and the manifests: DuckDB
+  (all v2 parquet IO — `pt` has it), pyarrow (stages A–C only; deliberately
+  **not** in `pt`, it switches pandas 3's string backing), FLAML.
 - **Retraining gotcha (hard-won):** FLAML+LightGBM on the raw 262k-column
-  sparse matrix re-bins per trial×fold and stalls (16h in
-  `PushDataToMultiValBin`). Keep the df-pruning mask, `log_max_bin=5`, and the
-  capped search space in `07_train_flaml.py`; re-derive tier cuts (`09`) after
-  any retrain, and recalibrate cuts quarterly — holdout tier masses drift even
-  when tier-mean monotonicity holds.
+  sparse matrix re-bins per trial×fold and stalls (16 h in
+  `PushDataToMultiValBin`). Keep the df-pruning mask, `log_max_bin=5` and the
+  capped search space in `07_train_flaml.py`. After any retrain re-run `09`
+  (and re-verify the tier shares on a later window).
+
+*Divergence, history, Track record.*
+- `compute_divergence` emits one factual sentence when the engines disagree:
+  `good_news_weak_reaction` (News bullish+, Market bearish−),
+  `weak_news_strong_reaction` (the mirror), `sold_the_news` (News bullish+
+  while today's move is ≤ −2σ of 20-day vol). Rendered as ⇄.
+- `.portfolio_tracker_sentiment_history.json`: one record per (UTC date,
+  symbol) per refresh — news score/tier, lens scores, agreement,
+  `market_score/sar/z/pct/tier`, `market_model`, price, beta. It feeds both
+  the Market read's live anchor and the Track record.
+- `news_diagnostics.compute` (the Track record; `/api/news-diagnostics`) uses
+  **date-clustered statistics only**: daily cross-sectional Spearman IC vs the
+  forward idiosyncratic return, t from the daily series (Newey-West, lag h−1,
+  at horizons > 1), verdict < 40 days "Too early — N of ~60 trading days",
+  t ≥ 2 and mean > 0 "Evidence of an edge", 1 ≤ t < 2 "Weak evidence", else
+  "No evidence"; long-short curve; hit rates with Wilson CIs (also per lens);
+  two-pass agreement; a collapsed "For quants" block (daily IC, tier table,
+  Market calibration). The Market read is ranked on the raw `market_score` —
+  z is re-anchored when the anchor switches, the score never is.
+  `load_records` maps pre-1.12 `s_idio`/`ml_sar` records (a compat shim with a
+  delete-after date in its docstring).
+- The Excel export writes `SENTIMENT_COLS` (News read, one column per lens,
+  Market read, its z, divergence) via `xlsx_export._sentiment_value`; the raw
+  payload is in `HOLDINGS_SKIP_EXTRAS`.
 
 ### Analytics (`/api/portfolio-analytics-multi`)
 `analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
@@ -542,19 +542,18 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/mpt-runs?view=…`           — `{last: run|null, runs: [...]}` — newest run + the last-3 history (rendered under *Apply to Portfolio*)
 - `/api/logs?since=<seq>&limit=<n>` — backend console tail from `logbuf` (§16)
 - `/api/runtime-status`            — cheap ML availability + `envcheck.status()` +
-  provider-key booleans + version. Powers Settings → Models & Data. Deliberately
+  provider-key booleans + LLM model/status + version. Powers Settings → Models & Data. Deliberately
   separate from `/api/news-diagnostics` (pandas + `_bulk_close`, possibly networked)
   and from `/api/health` (which runs on every page load, while `runtime_status()`
   triggers the LightGBM/artifact load). `/api/health` carries only the cheap
-  find_spec-based `env_ok` flag that drives the missing-dependency banner.
-- `/api/news-sentiment?symbols=…`  — batch per-ticker AI sentiment
-- `/api/news-market`               — market-wide sentiment + articles
-- `/api/news-articles?symbol=…`    — per-ticker articles + sentiment detail
+  find_spec-based `env_ok` flag that drives the missing-dependency banner, plus
+  `llm_ok` / `llm_error` for the News-read banner.
+- `/api/news-sentiment?symbols=…&days=` — cache-only per-ticker reads (both engines)
+- `/api/news-market?days=`         — cache-only market-wide News read + tape
+- `/api/news-tape?symbols=…&days=` — cache-only merged article feed (lens, score, fact per headline)
+- `/api/news-diagnostics`          — the Track record (`news_diagnostics.compute`) + `market_runtime` / `news_runtime`
 
 **POST (also)**
-- `/api/news-refresh`              — `{symbols: [...]}` — force cache bust + re-analyze.
-  Still on the wire for backward compatibility, but **nothing in the UI calls it**
-  since v1.11.0 — news is a phase of the refresh job now.
 - `/api/refresh-job`               — `{scope: "current"|"all", view?, entries?, phases?, days, context?, on_conflict?}` → `202 {job_id}` or **`409`** with the running job (§17)
 - `/api/refresh-job/<id>/cancel`   — cancel; the `cancelled` frame is emitted synchronously
 - `/api/news-rescore`              — `{symbols, days}` → cache-only re-aggregation onto a new window. Sub-50 ms, no network, no LLM, no ML inference. Deliberately **not** a job (§17)
@@ -730,12 +729,26 @@ columns).
   side in all three themes at 1× and 3×, and open it in the browser pane. Write
   the losing/shipping variant at its **real** specificity or the lab will
   "fix" the bug for you and prove nothing.
-- **Terminology: the LLM engine is labelled "LLM", not "AI"** (v1.10.1). "AI"
-  is too general for what is specifically the challenger to the ML model. The
-  CSS class names are historical and deliberately unchanged (`.ns-lg-ai`,
-  `.ns-dot-ai`, `.ns-tl-b.ai`, and the constituent column's `key: "ai"`) — class
-  says `ai`, engine is the LLM. The Excel export's "hand it to an AI agent" copy
-  is a different meaning and must stay.
+- **Terminology (v1.12): the engines are the "News read" and the "Market
+  read"** in all UI copy. Engine names (LLM, statistical model) appear only in
+  the Methodology and Settings → Models & Data. The middle News tier is
+  labelled "Mixed" (`neutral` in data), the middle Market tier "No edge"
+  (`no_edge`). The shared vocabulary (`NS_COLORS` from the theme's `--ns-*`
+  variables, `NS_LABELS`, `NS_LENSES`, `nsTierDot`, `nsPill`, `nsScale`) sits
+  in one block near the top of `app.js`; the `--ns-*` colours are defined per
+  theme in `style.css` and must stay in all three.
+- **NS column + hover card.** `nsDot(s, sym)` renders two dots, **Market read
+  first, then News read**; faded = stale, hollow = no read. There is no
+  per-dot tooltip: one delegated handler opens a single `.ns-hc-tip` card
+  (`nsHoverCardHtml`, positioned by `placeTip`) with a lens row per lens (score
+  cells + the fact, "No news" when empty), two-pass agreement, the Market
+  tiles (expected move, percentile + what it is ranked against, tier), the
+  divergence sentence, the stale notice and both ages. Escape and scroll hide it.
+- **Timeline and Flash Tape show only headlines the News read read and found
+  to be about a holding** (`nsReadAbout`). Unread headlines (outside the 15 per
+  ticker) and "not about it" ones are half the feed on a mega-cap; the tape's
+  "Not about it" chip still shows the latter. One dot per headline (the News
+  score); tier chips filter on it, lens chips replace the old event chips.
 - **Flash Tape full-screen** (`openTapeFullscreen`, 99vw × 99vh): clicking the
   `#ns-tape-card` body opens it; `e.target.closest("a, select, button, input,
   label")` guards the links and filter controls. `renderNsTape({fullscreen})`
@@ -743,17 +756,13 @@ columns).
   and single-line ellipsised headlines, the overlay lifts the cap to 1000 and
   adds a numeric score column plus a 2-line-clamped summary. Filter changes in
   either view re-render the other so the two never diverge.
-- **Dual ML/AI display**: `nsMlScore`/`nsArticleLlmScore` +
-  `nsDualDots(a)` render **two bare dots, ML first**, each with its own tooltip
-  naming the engine. Used by the flash tape, constituent briefs, and (as paired
-  bars, `.ns-tl-pair`) the timeline; `nsDot` does the per-holding equivalent in
-  the main table's NS column. `nsDispArticleScore` is deliberately KEPT — the
-  tier filter chips still key off the ML-primary coalesced value, so filtering
-  behaviour is unchanged. A missing engine renders a hollow dot rather than
-  collapsing the pair, so columns stay aligned. `nsMlScore` reads
-  **`ml_score_disp` first**, `ml_score` only as a pre-1.11 fallback (§4), and
-  serves both article dicts and ticker-level sentiment dicts — they carry the
-  same key pair.
+- **Track record and Methodology.** "Model Diagnostics" is now the Track
+  record (`toggleTrackRecord` / `renderTrackRecord`): two verdict cards, a
+  long-short chart (`svgLine`), per-lens hit rates, consistency, and a
+  collapsed "For quants" block — all from `/api/news-diagnostics`. The
+  Methodology modal (`openMethodology`) is two side-by-side explainers with
+  frozen validation numbers and KaTeX formulas in collapsed `<details>`; live
+  numbers belong in the Track record, not there.
 
 - **Overlays: `showOverlay()` / `hideOverlay()` are the ONLY way to open and
   close one** (v1.11.0). They own `lockBodyScroll`/`unlockBodyScroll`, a single
@@ -1223,6 +1232,8 @@ Two places have the contract documented; keep them in sync:
 - Improvements to the "contribution by 3y returns" table
 
 ### Done / archived (don't redo)
+- News v2 (v1.12) — two peer engines (News read with five lenses, Market read
+  recalibrated and live-anchored), Track record, Methodology rewrite
 - News & Sentiment — Finnhub news + NVIDIA NIM AI sentiment, NS column, News tab, disk-backed cache, rate limiter
 - ★ Save Watchlist button removal
 - CSV → Excel export (Pass B)
@@ -1851,7 +1862,7 @@ before ever touching the real `pt` env / `/Applications` entry).
   contend with the main thread and visibly delays the splash. Two backend
   imports were made **lazy** to get `import portfolio_tracker.server` off the
   startup path from ~6s down to ~1–3s (warm): `openai` (deferred into
-  `news_sentiment._get_client()`, ~1.2s — AI sentiment is on-demand) and
+  `news_sentiment._get_client()`, ~1.2s — the News read is on-demand) and
   `portfolio_tracker.frontier`/`mpt`/`numba` (deferred to its two call sites
   in `server.py`, ~1.7s — the Optimize/MPT feature is on-demand). `pandas` +
   `yfinance` (~2.5s) stay eager since the first data render needs them. Net:
@@ -2010,11 +2021,10 @@ cancellable, and there was no way to refresh the whole account. Now there is
 
 | Gesture | Scope | Blocking |
 |---|---|---|
-| Click, or `R` | Current portfolio: quotes → then news + sentiment | No |
+| Click, or `R` | Current portfolio: quotes → then News read + Market read | No |
 | Long-press ≥600 ms → confirm, or `Shift+R` | **Every** saved portfolio | No |
 
-`#ns-refresh` is gone (so is its client function `refreshNewsSentiment`);
-`/api/news-refresh` stays on the wire but nothing calls it.
+There is no separate news refresh button or route — news is a phase of the job.
 
 ### Four rules that are load-bearing
 
@@ -2037,9 +2047,9 @@ cancellable, and there was no way to refresh the whole account. Now there is
    superseded job is called **after** the lock is released — the stated lock
    order is registry → job condvar, never held while emitting.
 2. **A dead client is not a cancel.** The stream handler returns on BrokenPipe
-   and never touches `job.cancel`. Only the chip's × cancels. (`/api/news-refresh`
-   did the opposite: it silenced writes while the work — and the API quota —
-   carried on unattended.)
+   and never touches `job.cancel`. Only the chip's × cancels. (The old news
+   route did the opposite: it silenced writes while the work — and the API
+   quota — carried on unattended.)
 3. **Cancel actually stops work.** Queued items are de-queued by
    `pool.shutdown(wait=False, cancel_futures=True)` — **never** use a `with`
    block for these pools, `__exit__` joins everything. In-flight work checks a
@@ -2080,10 +2090,11 @@ cancellable, and there was no way to refresh the whole account. Now there is
 `end`) carry `seq: 0` and are never replayed** — advancing the cursor on them
 desyncs it. Types: `job`, `phase`, `item`, `item_stage`, `rate_limited` /
 `rate_cleared`, `view_saved`, and the terminals `done` / `error` / `job`
-{state: cancelled, drained: true}. `item_stage.stage` reuses the **existing**
-vocabulary (`start|fetch|score1|score2|aggregate`) so `NS_PROG_STAGE` in
-`app.js` and the per-ticker modal work verbatim — that modal is now opt-in
-behind the status chip. `dropped: true` (the `since` predates the 6000-frame
+{state: cancelled, drained: true}. `item_stage.stage` is
+`start|fetch|pass1|pass2|market|aggregate` — `NS_PROG_STAGE` in `app.js` must
+match; the per-ticker modal is opt-in behind the status chip. Each news `item`
+carries its `outcome` (ok / failed / empty), and the counts include
+`news_scored` / `news_failed`; the chip reads "News x/y · n failed". `dropped: true` (the `since` predates the 6000-frame
 ring, same contract as `logbuf.read`) ⇒ the client must cold-re-read.
 Client state is `REFRESH` + `{id, lastSeq}` in `sessionStorage`, saved per
 frame; `GET /api/refresh-job/current` on load is what makes a job survive F5.
@@ -2108,16 +2119,15 @@ The all-scope quotes phase runs **one portfolio at a time** with a ~500 ms gap
 (5 workers *within* a portfolio) — `warmRecentTabs` established empirically that
 concurrent portfolio work makes yfinance return empty frames, i.e. exactly the
 degraded rows the guard above would then discard. Symbols shared across views
-are fetched once. Market sentiment is refreshed **once per job**
-(`refresh_market=False` + `market_sentiment=`): per-portfolio market reads would
-give the same stock a different `s_mkt` depending on which pass touched it last.
+are fetched once. The news phase runs **once per job** over the union of
+symbols, so the market-wide News read is refreshed once, not per portfolio.
 
 ### `rescore_window(symbols, days)` — instant News-window change
 
 Changing the window (3/7/14/30D) used to do nothing until the next Refresh. It
-now re-aggregates the **already-scored cached articles** under the new window's
-tau: zero network, zero LLM, zero ML inference (`ml_sentiment.aggregate` is a
-weighted mean over cached `ml_sar`, not a forward pass). ~10 ms.
+now re-aggregates the **already-read cached headlines** (their lens and score)
+under the new window's tau: zero network, zero LLM, zero ML inference. The
+Market read is carried unchanged — it is defined on its 7-day window. ~10 ms.
 
 **The honest limitation, and it is surfaced rather than hidden.** News is cached
 per window (`news|{sym}|{days}`), so *widening cannot conjure articles that were
@@ -2127,5 +2137,5 @@ fetched** (`max(from_windows) < days`), not from how old the newest article is �
 a quiet ticker with no week-old news is not a truncated fetch, and an earlier
 timestamp heuristic flagged both. `#ns-cov-hint` renders it. The carried-forward
 LLM brief is stamped `brief_stale: true`; **never `_history_append`** from a
-rescore — it would double-count the day and skew the quantiles
-`_calibration_scores` feeds back into `calibrate_tier`.
+rescore — it would double-count the day in the Track record and in the Market
+read's live-anchor reference.

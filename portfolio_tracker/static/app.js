@@ -161,8 +161,8 @@ const COLS = [
   { key: "w52_low",       label: "52W Low", w: 90,  align: "right", sortable: true,
     render: (r) => fmtMoney(r.w52_low, r.currency) },
   { key: "news_sentiment", label: "NS", w: 48, align: "center", sortable: true,
-    sortValue: (r) => r.news_sentiment?.score ?? null,
-    render: (r) => nsDot(r.news_sentiment) },
+    sortValue: (r) => r.news_sentiment?.news?.score ?? null,
+    render: (r) => nsDot(r.news_sentiment, r.symbol) },
 ];
 
 /* Short hover descriptions for the column-header info icons.
@@ -220,7 +220,7 @@ const COL_INFO = {
   target_upside_pct: "Distance from current price to mean analyst price target, signed (positive = upside).",
   w52_high:      "Highest closing price over the trailing 52 weeks.",
   w52_low:       "Lowest closing price over the trailing 52 weeks.",
-  news_sentiment: "News sentiment signal over the selected analysis window (News tab → Window, default 7 days): per-article ML scores (LLM as the fallback) aggregated with recency/source/novelty/relevance weights, plus a β·market systematic tilt. Dot: green = bullish, gray = neutral, red = bearish. Hover for the Bloomberg-style brief. Finnhub + Yahoo news, NVIDIA NIM scoring.",
+  news_sentiment: "Two dots, two independent reads of the same headlines. Left: the Market read — how prices have historically reacted to news like this, as a percentile of its own history (only the tails are called; the middle is \"No edge\"). Right: the News read — what the news says, lens by lens (Financials, Outlook, Competition, Regulation, Street view). Green = bullish, grey = mixed / no edge, red = bearish, hollow = no read. Hover for the full card. Sorts by the News read.",
 };
 
 /* Short (~40-55 char) inline descriptions for the Customize Columns modal —
@@ -278,7 +278,7 @@ const COL_INFO_SHORT = {
   target_upside_pct: "Upside to mean price target",
   w52_high: "Highest close, trailing 52 weeks",
   w52_low: "Lowest close, trailing 52 weeks",
-  news_sentiment: "ML- and LLM-assessed news sentiment",
+  news_sentiment: "Market read and News read, side by side",
 };
 
 /* Category grouping for the Customize Columns modal — purely a display
@@ -1359,50 +1359,195 @@ function msprBadge(o) {
   return `<span style="color:${color}" data-tip="${tip}">${label}</span>`;
 }
 
+/* ===== News read / Market read — the shared display vocabulary ===========
+ * Two engines, presented as PEERS: there is no blended score, no "primary".
+ *   News read   (LLM)          what the news says — five lenses on a −2…+2
+ *                              scale, fixed semantic tiers (news_sentiment.tier_for).
+ *   Market read (statistical)  how prices have reacted to news like this — a
+ *                              percentile vs the app's recent reads (the 2023
+ *                              backtest until it has enough); the middle 70% is
+ *                              "No edge" because only the tails speak.
+ * Colors are theme variables (--ns-*), set for light / dark / bloomberg. */
 const NS_COLORS = {
-  /* Deep saturated endpoints for the "very" tiers vs pale plain tiers, so the
-     two steps read clearly apart on the timeline, dots, and badges. */
-  very_bullish: "#16a34a",
-  bullish:      "#86efac",
-  neutral:      "#94a3b8",
-  bearish:      "#fca5a5",
-  very_bearish: "#dc2626",
+  very_bullish: "var(--ns-vbull)", bullish: "var(--ns-bull)",
+  neutral: "var(--ns-flat)", no_edge: "var(--ns-flat)",
+  bearish: "var(--ns-bear)", very_bearish: "var(--ns-vbear)",
 };
 const NS_LABELS = {
-  very_bullish: "Very Bullish",
-  bullish:      "Bullish",
-  neutral:      "Neutral",
-  bearish:      "Bearish",
-  very_bearish: "Very Bearish",
+  very_bullish: "Very bullish", bullish: "Bullish", neutral: "Mixed",
+  no_edge: "No edge", bearish: "Bearish", very_bearish: "Very bearish",
+};
+const NS_LENSES = [
+  ["financials", "Financials"], ["outlook", "Outlook"], ["competition", "Competition"],
+  ["regulation", "Regulation"], ["street", "Street view"],
+];
+const NS_LENS_TAG = {
+  financials: "Financials", outlook: "Outlook", competition: "Competition",
+  regulation: "Regulation", street: "Street", other: "Other", none: "Not about it",
 };
 
-/* Per-holding sentiment dot(s). Both engines are shown side by side, ML first:
- * the server promotes ML into the canonical tier/score and preserves the LLM
- * as llm_tier/llm_score, so `ns` normally carries both. Rows the ML model
- * never scored fall back to a single LLM dot. */
-function nsTierDot(tier, score, engine, summary) {
-  const label = NS_LABELS[tier] || "Neutral";
-  const color = NS_COLORS[tier] || NS_COLORS.neutral;
-  const cls = engine === "ml" ? "ns-dot" : "ns-dot ns-dot-ai";
-  const num = (score != null && isFinite(score)) ? ` (${score >= 0 ? "+" : ""}${score.toFixed(2)})` : "";
-  const tip = `${engine === "ml" ? "ML" : "LLM"} · ${label}${num}${summary ? " — " + summary : ""}`;
-  return `<span class="${cls}" style="background:${color}" data-tip="${escapeHtml(tip)}"></span>`;
+/* Mirrors news_sentiment.tier_for — fixed cuts on the −2…+2 scale. */
+function nsNewsTier(score) {
+  if (score == null || !isFinite(score)) return null;
+  if (score <= -1.25) return "very_bearish";
+  if (score <= -0.4) return "bearish";
+  if (score < 0.4) return "neutral";
+  if (score < 1.25) return "bullish";
+  return "very_bullish";
 }
-function nsDot(ns) {
-  if (!ns || !ns.tier) return `<span class="ns-dot ns-empty" data-tip="News sentiment not yet loaded"></span>`;
-  const summary = ns.summary || "";
-  if (ns.disp_source === "ml") {
-    const llmTier = ns.llm_tier || (ns.llm_score != null ? nsTierFromScore(ns.llm_score) : null);
-    const mlDot = nsTierDot(ns.tier, ns.score, "ml", summary);
-    const aiDot = llmTier
-      ? nsTierDot(llmTier, ns.llm_score != null ? ns.llm_score : ns.s_total, "llm", "")
-      : `<span class="ns-dot ns-dot-ai ns-empty" data-tip="LLM — not scored"></span>`;
-    return `<span class="ns-dots">${mlDot}${aiDot}</span>`;
+function fmtSig(v, digits = 2) {
+  if (v == null || !isFinite(v)) return "—";
+  return `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(digits)}`;
+}
+function nsAge(iso) {
+  if (!iso) return null;
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!isFinite(ms)) return null;
+  const h = ms / 3600e3;
+  if (h < 1) return `${Math.max(1, Math.round(ms / 60e3))}m ago`;
+  if (h < 48) return `${Math.round(h)}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+/* Past its own lookback window, or flagged by the server because the last
+ * refresh could not produce a fresh read. Stale values fade in the UI. */
+function nsNewsStale(news) {
+  if (!news) return false;
+  if (news.stale) return true;
+  const days = news.lookback_days || 7;
+  return !!news.assessed_at
+    && (Date.now() - new Date(news.assessed_at).getTime()) > days * 86400e3;
+}
+function nsMarketStale(market) {
+  if (!market) return false;
+  return !!market.stale || (!!market.assessed_at
+    && (Date.now() - new Date(market.assessed_at).getTime()) > 7 * 86400e3);
+}
+function nsTierDot(tier, cls = "") {
+  if (!tier) return `<span class="ns-dot ns-empty ${cls}"></span>`;
+  return `<span class="ns-dot ${cls}" style="background:${NS_COLORS[tier]}"></span>`;
+}
+function nsPill(tier, extra = "") {
+  if (!tier) return `<span class="ns-pill ns-pill-none">No read</span>`;
+  return `<span class="ns-pill" style="--pill:${NS_COLORS[tier]}">${escapeHtml(NS_LABELS[tier])}${extra}</span>`;
+}
+
+/* Main-table NS cell: Market dot, then News dot. The cell hover opens the
+ * full card (nsHoverCardHtml) — the dots carry no tooltip of their own. */
+function nsDot(s, sym) {
+  const m = s && s.market, n = s && s.news;
+  const mCls = nsMarketStale(m) ? "ns-stale" : "", nCls = nsNewsStale(n) ? "ns-stale" : "";
+  return `<span class="ns-dots ns-hover" data-ns-sym="${escapeHtml(sym || "")}"
+      aria-label="Market read ${m ? NS_LABELS[m.tier] : "none"}, News read ${n && n.tier ? NS_LABELS[n.tier] : "none"}">`
+    + nsTierDot(m && m.tier, mCls) + nsTierDot(n && n.tier, nCls) + `</span>`;
+}
+
+/* 5-cell −2…+2 scale; the cell nearest the score is filled. Hollow = no news. */
+function nsScale(score, cls = "") {
+  if (score == null || !isFinite(score)) {
+    return `<span class="ns-scale ns-scale-empty ${cls}">${"<i></i>".repeat(5)}</span>`;
   }
-  // LLM-only: one hollow ML slot keeps the pair aligned down the column.
-  return `<span class="ns-dots"><span class="ns-dot ns-empty" data-tip="ML — not scored"></span>`
-       + `${nsTierDot(ns.tier, ns.score, "llm", summary)}</span>`;
+  const at = Math.max(-2, Math.min(2, Math.round(score)));
+  const tier = nsNewsTier(score);
+  const cells = [-2, -1, 0, 1, 2].map(v =>
+    v === at ? `<i class="on" style="background:${NS_COLORS[tier]}"></i>` : "<i></i>").join("");
+  return `<span class="ns-scale ${cls}" data-v="${fmtSig(score, 1)}">${cells}</span>`;
 }
+function nsMarketMove(m) {
+  if (!m || m.sar == null) return "—";
+  return `${fmtSig(m.sar, 2)}σ`;
+}
+/* What the Market read's percentile is ranked against (ml_sentiment.calibrate). */
+function nsMarketAnchor(m) {
+  return m && m.anchor === "live"
+    ? `vs the app's last ${m.n_history} reads`
+    : "vs the 2023 backtest";
+}
+function nsOrdinal(p) {
+  const n = Math.round(p);
+  const s = (n % 100 >= 11 && n % 100 <= 13) ? "th" : ({1: "st", 2: "nd", 3: "rd"}[n % 10] || "th");
+  return `${n}${s}`;
+}
+const NS_DIV_LABEL = {
+  good_news_weak_reaction: "Good news, weak expected reaction",
+  weak_news_strong_reaction: "Weak news, strong expected reaction",
+  sold_the_news: "Sold the news",
+};
+
+function nsHoverCardHtml(sym, s, row) {
+  row = row || {};
+  const n = (s && s.news) || null, m = (s && s.market) || null;
+  const move = row.pct_1d != null
+    ? `<span class="ns-hc-move" style="color:${returnColor(row.pct_1d, 5)}">${fmtPctSigned(row.pct_1d)} 1D</span>` : "";
+  const nRead = n ? (n.n_items || 0) : 0;
+  const sub = n
+    ? `${n.lookback_days || 7}d · ${nRead} headline${nRead === 1 ? "" : "s"} read`
+      + (n.n_none ? ` · ${n.n_none} not about ${escapeHtml(sym)}` : "")
+    : "No news read yet";
+  let newsHtml;
+  if (n) {
+    const rows = NS_LENSES.map(([k, label]) => {
+      const L = (n.lenses || {})[k];
+      if (!L) return `<div class="ns-hc-lens ns-hc-lens-empty"><span class="ns-hc-ll">${label}</span>${nsScale(null)}<span class="ns-hc-fact">No news</span></div>`;
+      return `<div class="ns-hc-lens"><span class="ns-hc-ll">${label}</span>${nsScale(L.score)}`
+        + `<span class="ns-hc-fact">${escapeHtml(L.fact || "")}<span class="ns-hc-n"> · ${L.n} headline${L.n === 1 ? "" : "s"}</span></span></div>`;
+    }).join("");
+    const agree = n.agreement != null ? `2-pass agreement ${Math.round(n.agreement * 100)}%` : "single pass";
+    const other = n.other_n ? `<div class="ns-hc-note">+ ${n.other_n} corporate item${n.other_n === 1 ? "" : "s"} (M&amp;A, financing, insiders) in the overall read</div>` : "";
+    newsHtml = `<div class="ns-hc-sec"><span class="ns-hc-title">News read</span>${nsPill(n.tier)}<span class="ns-hc-meta">${agree}</span></div>${rows}${other}`;
+  } else {
+    newsHtml = `<div class="ns-hc-sec"><span class="ns-hc-title">News read</span>${nsPill(null)}</div>`;
+  }
+  const mHtml = m
+    ? `<div class="ns-hc-sec"><span class="ns-hc-title">Market read</span><span class="ns-hc-meta">${(m.horizon_days || 1) === 1 ? "next trading day" : `${m.horizon_days}-day horizon`}</span></div>
+       <div class="ns-hc-tiles">
+         <div class="ns-hc-tile"><b>${nsMarketMove(m)}</b><span>expected move</span></div>
+         <div class="ns-hc-tile"><b>${m.pct != null ? nsOrdinal(m.pct) : "—"}</b><span>percentile ${nsMarketAnchor(m)}</span></div>
+         <div class="ns-hc-tile"><b style="color:${NS_COLORS[m.tier] || "var(--muted)"}">${escapeHtml(NS_LABELS[m.tier] || "—")}</b><span>tier</span></div>
+       </div>`
+    : `<div class="ns-hc-sec"><span class="ns-hc-title">Market read</span><span class="ns-hc-meta">not available</span></div>`;
+  const div = s && s.divergence
+    ? `<div class="ns-hc-div"><b>${escapeHtml(NS_DIV_LABEL[s.divergence.kind] || "Divergence")}</b> — ${escapeHtml(s.divergence.text)}</div>` : "";
+  const stale = n && n.stale
+    ? `<div class="ns-hc-stale">News read could not refresh: ${escapeHtml(n.stale_reason || "unknown")}. Showing the previous read.</div>` : "";
+  const age = n && n.assessed_at ? `News read ${nsAge(n.assessed_at)}` : "";
+  const mAge = m && m.assessed_at ? `Market read ${nsAge(m.assessed_at)}` : "";
+  const staleCls = (nsNewsStale(n) ? " ns-hc-news-stale" : "") + (nsMarketStale(m) ? " ns-hc-market-stale" : "");
+  return `<div class="ns-hc${staleCls}">
+    <div class="ns-hc-head"><span class="ns-hc-sym">${escapeHtml(sym)}</span><span class="ns-hc-name">${escapeHtml(row.name || "")}</span>${move}</div>
+    <div class="ns-hc-sub">${sub}</div>
+    <div class="ns-hc-news">${newsHtml}</div>
+    <div class="ns-hc-market">${mHtml}</div>
+    ${div}${stale}
+    <div class="ns-hc-foot">${[age, mAge].filter(Boolean).join(" · ")}</div>
+  </div>`;
+}
+
+/* One floating card for the whole page, positioned by placeTip (viewport-
+ * clamped). Delegated so re-rendered table cells need no re-wiring. */
+(() => {
+  let tip = null, anchor = null;
+  const hide = () => { if (tip) tip.classList.remove("show"); anchor = null; };
+  document.addEventListener("mouseover", (e) => {
+    const host = e.target.closest && e.target.closest(".ns-hover[data-ns-sym]");
+    if (!host) { if (anchor && !(tip && tip.contains(e.target))) hide(); return; }
+    if (host === anchor) return;
+    anchor = host;
+    const sym = host.dataset.nsSym;
+    const row = DATA.find(r => r.symbol === sym) || {};
+    const s = NS.sentiment[sym] || row.news_sentiment;
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.className = "ns-hc-tip";
+      tip.setAttribute("role", "tooltip");
+      document.body.appendChild(tip);
+    }
+    tip.innerHTML = nsHoverCardHtml(sym, s, row);
+    tip.classList.add("show");
+    placeTip(tip, host.getBoundingClientRect(), { preferred: "below", offset: 6 });
+  });
+  window.addEventListener("scroll", hide, true);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") hide(); });
+})();
 
 /* Per-month analyst consensus score; null if no votes that month. */
 function fhConsensus(m) {
@@ -5950,54 +6095,49 @@ $("#news-btn").onclick = () => {
   if (willOpen) loadNewsSentiment();
 };
 $("#ns-diag-toggle").onclick = (e) => {
-  // The (i) and Methodology buttons live inside the toggle header — let them
-  // handle their own clicks without also collapsing/expanding the body.
-  if (e.target.closest("#ns-diag-info")) return;
+  // The Methodology button lives inside the toggle header — let it handle its
+  // own click without also collapsing/expanding the body.
   if (e.target.closest("#ns-methodology-btn")) return;
-  toggleNsDiagnostics();
+  toggleTrackRecord();
 };
-$("#ns-diag-info").onclick = (e) => { e.stopPropagation(); toggleNsDiagAbout(); };
 $("#ns-methodology-btn").onclick = (e) => { e.stopPropagation(); openMethodology(); };
 $("#methodology-bg").addEventListener("click", (e) => { if (e.target.id === "methodology-bg") closeMethodology(); });
 
-/* Panel-local state: sentiment dicts are the enriched backend shape
- * (s_idio / s_sys / s_total / confidence / events / disagreement + legacy
- * tier/score/summary). Articles come from the cache-only tape route and
- * carry per-article score/event/relevance after an array-scored refresh. */
+/* Panel-local state. Sentiment dicts are the two-engine backend shape
+ * {news, market, divergence, article_count, assessed_at}; articles come from
+ * the cache-only tape route and carry lens / llm_score / fact once the News
+ * read has scored them. */
 const NS = {
   market: null,
   sentiment: {},
   articles: [],
   status: null,
   filterSym: "",
-  filterEvent: "",
-  tapeTiers: new Set(),  // sentiment-tier filter for the flash tape (empty = all)
-  sortKey: "signal",  // constituent-table sort column (ML-primary signal)
-  sortDir: -1,        // 1 asc, -1 desc
-  expanded: null,     // symbol whose brief row is expanded in the table
-  diagLoaded: false,
-  // Analysis window (item 3): how far back the news fetch/scoring reaches.
-  // Applied on the next Refresh; persisted per user.
+  filterLens: "",
+  tapeTiers: new Set(),  // News-score tier filter for the flash tape (empty = all)
+  sortKey: "news",       // constituent-table sort column
+  sortDir: -1,           // 1 asc, -1 desc
+  expanded: null,        // symbol whose brief row is expanded in the table
+  // Analysis window: how far back the News read reaches. Persisted per user.
   lookbackDays: (() => {
     const v = parseInt(localStorage.getItem("ns_lookback") || "7", 10);
     return [3, 7, 14, 30].includes(v) ? v : 7;
   })(),
   tlSym: "",         // timeline ticker filter ("" = all)
   tlPeriod: "1W",    // timeline window
-  tlTiers: new Set(),  // timeline sentiment-tier filter (empty = all), independent of the tape
+  tlTiers: new Set(),  // timeline tier filter (empty = all), independent of the tape
 };
 
 /* Lookback control wiring — active pill + persistence + an INSTANT re-score.
  *
- * Changing the window used to do nothing until the next Refresh. It now posts
- * to /api/news-rescore, which re-aggregates the already-scored cached articles
- * under the new window's tau: no network, no LLM, ~10ms.
+ * Changing the window posts to /api/news-rescore, which re-aggregates the
+ * already-read headlines into lens scores under the new window's recency tau:
+ * no network, no LLM, ~10ms. The Market read is carried unchanged — it is
+ * defined on the 7-day window its model was trained on.
  *
  * The honest part: news is cached per window, so widening can only re-weight
- * evidence some earlier fetch actually pulled — it cannot conjure articles
- * that were never fetched. Narrowing is exact. The response's `coverage` says
- * which case you're in and #ns-cov-hint reports it, because a "30D" reading
- * built from 7 days of articles must not look like a real 30-day read. */
+ * evidence some earlier fetch actually pulled. Narrowing is exact. The
+ * response's `coverage` says which case you're in and #ns-cov-hint reports it. */
 (() => {
   const box = $("#ns-lookback");
   if (!box) return;
@@ -6026,10 +6166,9 @@ async function nsRescoreWindow() {
     });
     const j = await r.json();
     if (!r.ok || !j.sentiment) return;
-    // Assign nulls too. A ticker with no scored articles inside the NEW window
-    // genuinely has no reading for it — keeping the previous window's value
-    // would show a 30D tier under a 3D pill, which is exactly the mixed-window
-    // display the honest-coverage design exists to prevent.
+    // Assign nulls too: a ticker with no read headlines inside the NEW window
+    // genuinely has no News read for it, and keeping the previous window's
+    // would show a 30D read under a 3D pill.
     for (const [sym, s] of Object.entries(j.sentiment)) {
       NS.sentiment[sym] = s || null;
     }
@@ -6041,7 +6180,7 @@ async function nsRescoreWindow() {
         .filter(([, c]) => c.truncated_by_fetch).map(([s]) => s);
       if (short.length) {
         hint.hidden = false;
-        hint.textContent = `${NS.lookbackDays}D scored from a narrower cache for `
+        hint.textContent = `${NS.lookbackDays}D read from a narrower cache for `
           + `${short.length} ticker${short.length > 1 ? "s" : ""} — Refresh to fetch the full window`;
         hint.title = short.join(", ");
       } else {
@@ -6053,20 +6192,19 @@ async function nsRescoreWindow() {
 
 function nsSymbols() { return DATA.map(r => r.symbol).filter(Boolean); }
 
+/* Everything here is a cache read — opening the tab never spends NIM quota.
+ * Reads are produced by the refresh job only. */
 async function loadNewsSentiment() {
   const symbols = nsSymbols();
-  $("#ns-market-body").innerHTML = '<div class="ns-loading">Loading market sentiment...</div>';
-  $("#ns-portfolio-body").innerHTML = '<div class="ns-loading">Loading constituent sentiment...</div>';
-
-  const mktP = fetch("/api/news-market").then(r => r.json());
-  const pfP = symbols.length
-    ? fetch(`/api/news-sentiment?symbols=${encodeURIComponent(symbols.join(","))}`).then(r => r.json())
-    : Promise.resolve(null);
-  const tapeP = symbols.length
-    ? fetch(`/api/news-tape?symbols=${encodeURIComponent(symbols.join(","))}`).then(r => r.json())
-    : Promise.resolve(null);
-  const [mktRes, pfRes, tapeRes] = await Promise.allSettled([mktP, pfP, tapeP]);
-
+  const q = encodeURIComponent(symbols.join(","));
+  const days = NS.lookbackDays;
+  const [mktRes, pfRes, tapeRes] = await Promise.allSettled([
+    fetch(`/api/news-market?days=${days}`).then(r => r.json()),
+    symbols.length ? fetch(`/api/news-sentiment?symbols=${q}&days=${days}`).then(r => r.json())
+                   : Promise.resolve(null),
+    symbols.length ? fetch(`/api/news-tape?symbols=${q}`).then(r => r.json())
+                   : Promise.resolve(null),
+  ]);
   if (mktRes.status === "fulfilled") {
     NS.market = mktRes.value.sentiment || null;
     NS.status = mktRes.value.status || NS.status;
@@ -6083,9 +6221,10 @@ async function loadNewsSentiment() {
 }
 
 function nsRefreshContext(symbols) {
-  /* Quant context shipped to the backend: betas + row numbers feed the
-   * decomposition and the Bloomberg briefs; weights drive staged order
-   * and let the server know the active weighting. */
+  /* Context shipped to the backend: row numbers feed the brief's QUANT
+   * CONTEXT (and today's move the "sold the news" divergence check); betas
+   * ride into the history record for the Track record's idio returns;
+   * weights drive the staged order, biggest positions first. */
   const weights = weightsForMode(STATE.mode) || {};
   const betas = {}, rows = {};
   for (const r of DATA) {
@@ -6105,14 +6244,16 @@ function nsRefreshContext(symbols) {
 
 /* ---- News refresh progress modal ---------------------------------------
  * One job row per constituent + the market. Each bar fills through the
- * backend stage events (start → fetch → score1 → score2 → aggregate → done);
- * two rows animate at once because the refresh runs a 2-worker pool. */
+ * backend stage events (start → fetch → pass1 → pass2 → market → aggregate);
+ * two rows animate at once because the refresh runs a 2-worker pool, and each
+ * row's two LLM passes run concurrently. */
 const NS_PROG_STAGE = {
   queued:    { frac: 0.00, txt: "queued" },
   start:     { frac: 0.05, txt: "starting…" },
-  fetch:     { frac: 0.35, txt: "fetched news…" },
-  score1:    { frac: 0.60, txt: "LLM pass 1…" },
-  score2:    { frac: 0.85, txt: "LLM pass 2…" },
+  fetch:     { frac: 0.25, txt: "fetched news…" },
+  pass1:     { frac: 0.50, txt: "reading (pass 1)…" },
+  pass2:     { frac: 0.75, txt: "reading (pass 2)…" },
+  market:    { frac: 0.85, txt: "Market read…" },
   aggregate: { frac: 0.95, txt: "aggregating…" },
 };
 
@@ -6181,13 +6322,18 @@ function updateNsProgressJob(id, patch) {
     job.frac = 1;
     job.el.classList.remove("active");
     job.el.classList.add("done");
-    const s = patch.sentiment;
-    if (s && (s.tier || s.score != null)) {
-      const tier = s.tier || "neutral";
-      job.fill.style.background = NS_COLORS[tier] || "var(--accent)";
-      const lbl = NS_LABELS[tier] || "done";
-      job.status.textContent = s.score != null ? `${lbl} ${fmtSig(s.score)}` : lbl;
-      job.status.style.color = NS_COLORS[tier] || "";
+    const n = patch.sentiment && patch.sentiment.news;
+    const m = patch.sentiment && patch.sentiment.market;
+    if (patch.state === "failed") {
+      // The LLM produced nothing: say so, even when a previous read is kept.
+      job.el.classList.add("failed");
+      job.status.textContent = "News read failed" + (m ? ` · Market ${NS_LABELS[m.tier] || "—"}` : "");
+    } else if (n && n.tier) {
+      job.fill.style.background = NS_COLORS[n.tier];
+      job.status.textContent = `News ${NS_LABELS[n.tier]}`
+        + (m ? ` · Market ${NS_LABELS[m.tier] || "—"}` : "");
+    } else if (n) {
+      job.status.textContent = "nothing about it";
     } else {
       job.el.classList.add("empty");
       job.status.textContent = "no news";
@@ -6229,7 +6375,9 @@ function closeNsProgress() {
 const REFRESH = {
   id: null, lastSeq: 0, scope: null, state: "idle",
   reader: null, abort: null, retry: 0,
-  counts: {quotes_done: 0, quotes_total: 0, news_done: 0, news_total: 0},
+  counts: {quotes_done: 0, quotes_total: 0, news_done: 0, news_total: 0,
+           news_scored: 0, news_failed: 0},
+  newsEnd: null,        // the news phase's end frame: {scored, failed, total, llm_error}
   pct: 0,               // last painted percentage; the bar never walks backwards
   touchedViews: new Set(),
 };
@@ -6275,7 +6423,10 @@ function rfRender() {
                     : REFRESH.state === "quotes" ? "Quotes…" : "Starting…";
   const parts = [`${pct}%`];
   if (c.quotes_total) parts.push(`Quotes ${Math.min(c.quotes_done, c.quotes_total)}/${c.quotes_total}`);
-  if (c.news_total) parts.push(`News ${Math.min(c.news_done, c.news_total)}/${c.news_total}`);
+  if (c.news_total) {
+    parts.push(`News ${Math.min(c.news_done, c.news_total)}/${c.news_total}`
+      + (c.news_failed ? ` · ${c.news_failed} failed` : ""));
+  }
   text.textContent = parts.join(" · ");
   chip.hidden = false;
 }
@@ -6379,6 +6530,7 @@ function rfHandle(msg) {
       break;
     case "phase":
       if (msg.state === "start") REFRESH.state = msg.phase;
+      if (msg.state === "end" && msg.phase === "news") REFRESH.newsEnd = msg;
       if (msg.state === "end" && msg.view) REFRESH.touchedViews.add(msg.view);
       if (msg.state === "end" && msg.reason === "degraded") {
         toast(`${msg.view}: ${msg.failed} of ${msg.ok + msg.failed} symbols failed — kept the previous data.`);
@@ -6394,9 +6546,10 @@ function rfHandle(msg) {
         } else if (msg.sentiment && nsSymbols().includes(msg.symbol)) {
           NS.sentiment[msg.symbol] = msg.sentiment;
           patchRowSentiment({[msg.symbol]: msg.sentiment});
-          renderNsGauge(nsSymbols());
+          renderNsSignal(nsSymbols());
         }
-        updateNsProgressJob(msg.symbol, {done: true, sentiment: msg.sentiment});
+        updateNsProgressJob(msg.symbol, {done: true, sentiment: msg.sentiment,
+                                         state: msg.state});
       }
       break;
     case "item_stage":
@@ -6463,9 +6616,25 @@ async function rfFinish(state) {
     return;
   }
   if (state === "done") {
+    // "12/15 scored", never a plain "done" when the News read failed: the
+    // engine once died silently (a retired model) and refreshes kept serving
+    // August's reads for a month.
+    const ne = REFRESH.newsEnd;
+    REFRESH.newsEnd = null;
+    let newsNote = "";
+    if (ne && ne.total) {
+      const failed = ne.failed || 0, scored = ne.scored || 0;
+      newsNote = `<span class="status-meta${failed ? " status-warn" : ""}">News read ${scored}/${ne.total} scored</span>`;
+      if (failed && !scored) {
+        toast(`News read failed for every holding${ne.llm_error ? ": " + ne.llm_error : ""}. Previous reads are kept and marked stale.`);
+      } else if (failed) {
+        toast(`News read: ${scored}/${ne.total} scored, ${failed} failed${ne.llm_error ? " (" + ne.llm_error + ")" : ""}.`);
+      }
+      checkLlmHealth();
+    }
     $("#status").innerHTML =
       `<span class="status-name">${escapeHtml(viewLabel(STATE.activeView))}</span>` +
-      `<span class="status-meta">updated ${new Date().toLocaleTimeString()}</span>`;
+      `<span class="status-meta">updated ${new Date().toLocaleTimeString()}</span>` + newsNote;
     // The job wrote rows straight to disk; re-read so tab metadata, analytics
     // and the news tape all reflect what actually landed.
     await loadViews();
@@ -6509,7 +6678,7 @@ async function rfConfirmAll() {
     body: `<p><b>${names.length}</b> portfolio${names.length > 1 ? "s" : ""} · `
         + `<b>${n}</b> unique symbol${n > 1 ? "s" : ""} (deduplicated across portfolios).</p>`
         + `<p>Roughly <b>${mins} min</b>. Budget: ~${n} Yahoo quote calls, `
-        + `~${n * 2} Finnhub calls, ~${(n + 1) * 2} LLM calls.</p>`
+        + `~${n * 3} Finnhub calls, ~${(n + 1) * 2} LLM calls.</p>`
         + `<p style="color:var(--muted)">Runs in the background — you can keep working, `
         + `and cancel any time from the status chip.</p>`,
   });
@@ -6530,7 +6699,9 @@ async function rfStart(scope) {
     body.entries = entries;
     body.context = nsRefreshContext(nsSymbols());
   }
-  REFRESH.counts = {quotes_done: 0, quotes_total: 0, news_done: 0, news_total: 0};
+  REFRESH.counts = {quotes_done: 0, quotes_total: 0, news_done: 0, news_total: 0,
+                    news_scored: 0, news_failed: 0};
+  REFRESH.newsEnd = null;
   REFRESH.pct = 0;
   REFRESH.state = "queued";
   REFRESH.touchedViews.clear();
@@ -6618,14 +6789,9 @@ function setupRefreshControl() {
   })();
 }
 
-/* refreshNewsSentiment() was removed in v1.11.0 along with the News-panel
- * Refresh button. News is now one phase of the topbar refresh job, which
- * survives leaving this panel and is cancellable. The /api/news-refresh
- * route itself stays on the wire for backward compatibility. */
-
 function renderNewsPanel(symbols) {
   symbols = symbols || nsSymbols();
-  renderNsGauge(symbols);
+  renderNsSignal(symbols);
   renderMarketSentiment();
   renderNsMovers();
   renderNsWatch(symbols);
@@ -6642,10 +6808,8 @@ function renderNewsPanel(symbols) {
 function latestNewsAssessment(marketSentiment, portfolioSentiment) {
   const stamps = [];
   if (marketSentiment && marketSentiment.assessed_at) stamps.push(marketSentiment.assessed_at);
-  if (portfolioSentiment) {
-    for (const value of Object.values(portfolioSentiment)) {
-      if (value && value.assessed_at) stamps.push(value.assessed_at);
-    }
+  for (const value of Object.values(portfolioSentiment || {})) {
+    if (value && value.assessed_at) stamps.push(value.assessed_at);
   }
   if (!stamps.length) return null;
   stamps.sort();
@@ -6656,119 +6820,34 @@ function setNewsUpdatedLabel(marketSentiment, portfolioSentiment) {
   const updated = $("#ns-updated");
   if (!updated) return;
   const stamp = latestNewsAssessment(marketSentiment, portfolioSentiment);
-  if (!stamp) {
-    updated.textContent = "";
-    return;
-  }
+  if (!stamp) { updated.textContent = ""; return; }
   const dt = new Date(stamp);
   const time = dt.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
   updated.textContent = `As of ${fmtDateMDY(dt)}, ${time}`;
 }
 
+/* Why a card is empty — names the real cause instead of "check API keys". */
 function nsKeyDiagnostic(status) {
-  if (!status) return "Check API keys.";
-  if (!status.finnhub_key) return "Finnhub key missing — add .finnhub_key beside dashboard.py.";
-  if (!status.nvidia_key) return "NVIDIA key missing — add .nvidia_key beside dashboard.py.";
+  if (!status) return "Refresh to read the news.";
+  if (!status.finnhub_key_set) return "Finnhub key missing — add .finnhub_key beside dashboard.py.";
+  if (!status.nvidia_key_set) return "NVIDIA key missing — add .nvidia_key beside dashboard.py.";
+  if (status.llm_ok === false) return `News read unavailable: ${status.llm_error || "unknown"}.`;
   if (status.finnhub_backoff_s > 0) {
-    const used = status.finnhub_calls_used ?? "?";
-    const limit = status.finnhub_calls_limit ?? "?";
-    return `Finnhub rate-limited — ${used}/${limit} calls used, retry in ~${status.finnhub_backoff_s}s.`;
+    return `Finnhub rate-limited — retry in ~${status.finnhub_backoff_s}s.`;
   }
-  if (status.nvidia_backoff_s > 0) {
-    const used = status.nvidia_calls_used ?? "?";
-    const limit = status.nvidia_calls_limit ?? "?";
-    return `NVIDIA rate-limited — ${used}/${limit} calls used, retry in ~${status.nvidia_backoff_s}s.`;
-  }
-  return "Rate-limited or temporarily unavailable — try again in ~60s.";
+  return "Refresh to read the news.";
 }
 
-function fmtSig(v, digits = 2) {
-  if (v == null || !isFinite(v)) return "—";
-  return `${v >= 0 ? "+" : ""}${v.toFixed(digits)}`;
-}
-
-function nsTierFromScore(s) {
-  /* Client-side label for aggregate numbers (portfolio gauge). Fixed
-   * thresholds — per-stock tiers come calibrated from the server. */
-  if (s <= -0.5) return "very_bearish";
-  if (s <= -0.15) return "bearish";
-  if (s < 0.15) return "neutral";
-  if (s < 0.5) return "bullish";
-  return "very_bullish";
-}
-
-/* Per-article displayed signal (v1.6.1 ML-primary): the ML per-headline
- * score when the model scored it, else the LLM per-article idio score. Keeps
- * the flash tape and news timeline consistent with the ML-first gauge/dots. */
-function nsDispArticleScore(a) {
-  if (!a) return null;
-  const ml = nsMlScore(a);
-  const v = ml != null ? ml : a.score;
-  return (v != null && isFinite(v)) ? v : null;
-}
-function nsDispArticleTier(a) {
-  const v = nsDispArticleScore(a);
-  return v == null ? null : nsTierFromScore(v);
-}
-
-/* Both engines, separately. The two values have always ridden on every cached
- * article (the server stamps the ML pair beside the LLM's a.score) — until now
- * the UI collapsed them and you could not see where they disagreed, which is
- * exactly the interesting case. nsDispArticleScore stays as-is because the
- * tier filter chips still key off the ML-primary value.
- *
- * ml_score_disp first, ml_score only as a fallback: the raw ml_score is
- * tanh(SAR/2), and the trained tier cuts confine SAR to roughly +/-0.02 — so
- * every headline rendered "+0.00" and, worse, bucketed as `neutral` under
- * nsTierFromScore's +/-0.15 thresholds, which made the ML tier filter chips
- * inert. The server now also stamps ml_score_disp: the same SAR mapped THROUGH
- * those cuts onto exactly these thresholds (ml_sentiment.display_score), so the
- * number is legible and the client's bucketing matches the server's ml_tier.
- * The fallback covers articles cached by a pre-1.11 build.
- *
- * The same key pair rides on article dicts and on ticker-level sentiment dicts,
- * so one reader serves both. */
-function nsMlScore(o) {
-  if (!o) return null;
-  if (o.ml_score_disp != null && isFinite(o.ml_score_disp)) return o.ml_score_disp;
-  return (o.ml_score != null && isFinite(o.ml_score)) ? o.ml_score : null;
-}
-function nsArticleLlmScore(a) {
-  if (!a) return null;
-  return (a.score != null && isFinite(a.score)) ? a.score : null;
-}
-
-/* Two bare dots, ML first then LLM. Each carries its own tooltip naming the
- * engine, so the pair is self-explanatory without labels crowding the row.
- * A missing engine renders a hollow dot rather than collapsing the pair —
- * alignment across rows matters more than saving 10px. */
-function nsEngineDot(score, engine) {
-  const label = engine === "ml" ? "ML" : "LLM";
-  const cls = engine === "ml" ? "ns-dot" : "ns-dot ns-dot-ai";
-  if (score == null || !isFinite(score)) {
-    return `<span class="${cls} ns-empty" data-tip="${label} — not scored"></span>`;
-  }
-  let color = "#94a3b8";
-  if (score > 0.15) color = score > 0.5 ? "#16a34a" : "#86efac";
-  else if (score < -0.15) color = score < -0.5 ? "#dc2626" : "#fca5a5";
-  return `<span class="${cls}" style="background:${color}" data-tip="${label} ${fmtSig(score)}"></span>`;
-}
-function nsDualDots(a) {
-  return `<span class="ns-dots">${nsEngineDot(nsMlScore(a), "ml")}${nsEngineDot(nsArticleLlmScore(a), "llm")}</span>`;
-}
-
-/* Shared sentiment-tier filter chips (flash tape + news timeline). `activeSet`
- * is the live Set of enabled tiers (empty = All). Returns the chip markup;
- * callers wire the click handlers (they toggle their own Set + re-render). */
+/* News-score tier chips (flash tape + timeline) and lens chips (tape). */
 const NS_TIER_CHIP_DEFS = [
-  ["very_bullish", "Very Bullish"], ["bullish", "Bullish"], ["neutral", "Neutral"],
-  ["bearish", "Bearish"], ["very_bearish", "Very Bearish"],
+  ["very_bullish", "Very bullish"], ["bullish", "Bullish"], ["neutral", "Mixed"],
+  ["bearish", "Bearish"], ["very_bearish", "Very bearish"],
 ];
 function nsTierChips(activeSet) {
   const allOn = activeSet.size === 0;
   return `<button class="ns-tier-chip ${allOn ? "on" : ""}" data-tier="__all__">All</button>` +
     NS_TIER_CHIP_DEFS.map(([t, lbl]) =>
-      `<button class="ns-tier-chip t-${t} ${activeSet.has(t) ? "on" : ""}" data-tier="${t}">${lbl}</button>`).join("");
+      `<button class="ns-tier-chip ${activeSet.has(t) ? "on" : ""}" data-tier="${t}" style="--chip:${NS_COLORS[t]}">${lbl}</button>`).join("");
 }
 function nsWireTierChips(container, activeSet, rerender) {
   container.querySelectorAll(".ns-tier-chip").forEach(btn => {
@@ -6781,8 +6860,21 @@ function nsWireTierChips(container, activeSet, rerender) {
     };
   });
 }
+/* A headline's own News score, or null if it was never read / not about it. */
+function nsArticleScore(a) {
+  return a && a.lens && a.lens !== "none" && isFinite(a.llm_score) ? a.llm_score : null;
+}
+function nsArticleDot(a) {
+  if (!a || !a.lens) return `<span class="ns-dot ns-empty" aria-label="not read"></span>`;
+  if (a.lens === "none") return `<span class="ns-dot ns-dot-none" aria-label="not about the target"></span>`;
+  return nsTierDot(nsNewsTier(a.llm_score));
+}
+function nsLensTag(a) {
+  if (!a || !a.lens) return "";
+  return `<span class="ns-lens-tag${a.lens === "none" ? " ns-lens-none" : ""}">${NS_LENS_TAG[a.lens] || a.lens}</span>`;
+}
 
-/* ===== Shared inline-SVG chart helpers (Model Diagnostics + Methodology) =====
+/* ===== Shared inline-SVG chart helpers (Track record + Methodology) =====
  * Self-contained (no chart lib — house rule), theme-aware (colors via CSS vars
  * in style=), interactive via native <title> hover + CSS :hover highlight. */
 function svgEsc(s) {
@@ -6790,58 +6882,37 @@ function svgEsc(s) {
 }
 const SVG_POS = "var(--pos)", SVG_NEG = "var(--neg)", SVG_ACC = "var(--accent)", SVG_MUT = "var(--muted)", SVG_BRD = "var(--border)";
 
-/* Signed single-series bar chart. data: [{label, value, color?, tip?}]. */
+/* Signed single-series bar chart. data: [{label, value, color?, tip?, lo?, hi?}]
+ * — lo/hi draw a whisker (confidence interval) over the bar. */
 function svgBars(data, opts) {
   opts = opts || {};
   const W = opts.w || 460, H = opts.h || 190, padL = 32, padR = 8, padT = 10, padB = 30;
   const iw = W - padL - padR, ih = H - padT - padB;
-  const vals = data.map(d => d.value).filter(v => v != null && isFinite(v));
+  const vals = data.flatMap(d => [d.value, d.lo, d.hi]).filter(v => v != null && isFinite(v));
   let vmax = Math.max(0, ...vals, opts.vmax != null ? opts.vmax : -Infinity);
   let vmin = Math.min(0, ...vals, opts.vmin != null ? opts.vmin : Infinity);
   if (!isFinite(vmax)) vmax = 1; if (!isFinite(vmin)) vmin = 0;
   if (vmax === vmin) vmax = vmin + 1;
   const span = vmax - vmin;
   const yOf = v => padT + ((vmax - v) / span) * ih;
-  const y0 = yOf(0), gap = iw / data.length, bw = Math.min(38, gap * 0.6);
+  const base = opts.base != null ? opts.base : 0;
+  const y0 = yOf(base), gap = iw / data.length, bw = Math.min(38, gap * 0.6);
   let bars = "", labels = "";
   data.forEach((d, i) => {
     const cx = padL + gap * i + gap / 2;
-    const v = (d.value != null && isFinite(d.value)) ? d.value : 0;
+    const v = (d.value != null && isFinite(d.value)) ? d.value : base;
     const yv = yOf(v), top = Math.min(yv, y0), hgt = Math.max(0.6, Math.abs(yv - y0));
-    const col = d.color || (v >= 0 ? SVG_POS : SVG_NEG);
+    const col = d.color || (v >= base ? SVG_POS : SVG_NEG);
     bars += `<rect class="svg-bar" x="${(cx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" rx="1.5" style="fill:${col}"><title>${svgEsc(d.tip || (d.label + ": " + (opts.fmt ? opts.fmt(v) : v)))}</title></rect>`;
+    if (d.lo != null && d.hi != null) {
+      bars += `<line x1="${cx.toFixed(1)}" y1="${yOf(d.lo).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yOf(d.hi).toFixed(1)}" style="stroke:var(--text)" stroke-width="1.2"/>`
+        + `<line x1="${(cx - 4).toFixed(1)}" y1="${yOf(d.lo).toFixed(1)}" x2="${(cx + 4).toFixed(1)}" y2="${yOf(d.lo).toFixed(1)}" style="stroke:var(--text)" stroke-width="1.2"/>`
+        + `<line x1="${(cx - 4).toFixed(1)}" y1="${yOf(d.hi).toFixed(1)}" x2="${(cx + 4).toFixed(1)}" y2="${yOf(d.hi).toFixed(1)}" style="stroke:var(--text)" stroke-width="1.2"/>`;
+    }
     labels += `<text x="${cx.toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${svgEsc(d.label)}</text>`;
   });
   const zero = `<line x1="${padL}" y1="${y0.toFixed(1)}" x2="${W - padR}" y2="${y0.toFixed(1)}" style="stroke:${SVG_BRD}" stroke-width="1"/>`;
   return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${zero}${bars}${labels}</svg>`;
-}
-
-/* Grouped bars. cats: [labels]; seriesList: [{name,color,values:[]}]. */
-function svgGroupedBars(cats, seriesList, opts) {
-  opts = opts || {};
-  const W = opts.w || 460, H = opts.h || 200, padL = 34, padR = 8, padT = 10, padB = 40;
-  const iw = W - padL - padR, ih = H - padT - padB;
-  let all = [];
-  seriesList.forEach(s => s.values.forEach(v => { if (v != null && isFinite(v)) all.push(v); }));
-  let vmax = Math.max(0, ...all), vmin = Math.min(0, ...all);
-  if (vmax === vmin) vmax = vmin + 1;
-  const span = vmax - vmin, yOf = v => padT + ((vmax - v) / span) * ih, y0 = yOf(0);
-  const gap = iw / cats.length, ns = seriesList.length, bw = Math.min(20, gap * 0.72 / ns);
-  let bars = "", labels = "";
-  cats.forEach((c, i) => {
-    const cx = padL + gap * i + gap / 2;
-    seriesList.forEach((s, j) => {
-      const v = (s.values[i] != null && isFinite(s.values[i])) ? s.values[i] : 0;
-      const x = cx - (ns * bw) / 2 + j * bw;
-      const yv = yOf(v), top = Math.min(yv, y0), hgt = Math.max(0.6, Math.abs(yv - y0));
-      bars += `<rect class="svg-bar" x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${(bw - 1).toFixed(1)}" height="${hgt.toFixed(1)}" rx="1.2" style="fill:${s.color}"><title>${svgEsc(s.name + " · " + c + ": " + (opts.fmt ? opts.fmt(v) : v))}</title></rect>`;
-    });
-    labels += `<text x="${cx.toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="8.5">${svgEsc(c)}</text>`;
-  });
-  const zero = `<line x1="${padL}" y1="${y0.toFixed(1)}" x2="${W - padR}" y2="${y0.toFixed(1)}" style="stroke:${SVG_BRD}" stroke-width="1"/>`;
-  const leg = seriesList.map((s, j) =>
-    `<g transform="translate(${padL + j * 120},${H - 10})"><rect width="9" height="9" rx="2" style="fill:${s.color}"/><text x="13" y="8" style="fill:var(--text)" font-size="9">${svgEsc(s.name)}</text></g>`).join("");
-  return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${zero}${bars}${labels}${leg}</svg>`;
 }
 
 /* Multi-line chart. series: [{name,color,points:[{x,y,tip?}]}]. x numeric.
@@ -6863,7 +6934,6 @@ function svgLine(series, opts) {
   const yOf = y => padT + ((ymax - y) / (ymax - ymin)) * ih;
   let out = "";
   if (opts.y0) out += `<line x1="${padL}" y1="${yOf(0).toFixed(1)}" x2="${W - padR}" y2="${yOf(0).toFixed(1)}" style="stroke:${SVG_BRD}" stroke-dasharray="3 3" stroke-width="1"/>`;
-  // y axis labels (min / 0 / max)
   const yt = opts.y0 ? [ymin, 0, ymax] : [ymin, (ymin + ymax) / 2, ymax];
   yt.forEach(v => { out += `<text x="2" y="${(yOf(v) + 3).toFixed(1)}" style="fill:var(--muted)" font-size="8">${(opts.fmt ? opts.fmt(v) : v.toFixed(2))}</text>`; });
   series.forEach(s => {
@@ -6881,140 +6951,76 @@ function svgLine(series, opts) {
   return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${out}${leg}</svg>`;
 }
 
-/* Heatmap grid (agreement matrix). matrix[r][c] counts; rowLabels/colLabels. */
-function svgHeat(matrix, rowLabels, colLabels, opts) {
-  opts = opts || {};
-  const cell = opts.cell || 34, padL = 74, padT = 20, padB = 16;
-  const nr = rowLabels.length, nc = colLabels.length;
-  const W = padL + nc * cell + 8, H = padT + nr * cell + padB;
-  let mx = 0;
-  matrix.forEach(row => row.forEach(v => { if (v > mx) mx = v; }));
-  mx = mx || 1;
-  let cells = "", rlab = "", clab = "";
-  for (let r = 0; r < nr; r++) {
-    for (let c = 0; c < nc; c++) {
-      const v = matrix[r][c] || 0;
-      const op = v ? (0.12 + 0.78 * (v / mx)) : 0.04;
-      const x = padL + c * cell, y = padT + r * cell;
-      cells += `<rect x="${x}" y="${y}" width="${cell - 2}" height="${cell - 2}" rx="3" style="fill:${SVG_ACC};opacity:${op.toFixed(3)}"><title>ML ${svgEsc(rowLabels[r])} × LLM ${svgEsc(colLabels[c])}: ${v}</title></rect>`;
-      if (v) cells += `<text x="${(x + cell / 2 - 1).toFixed(1)}" y="${(y + cell / 2 + 2).toFixed(1)}" text-anchor="middle" style="fill:var(--text)" font-size="10" font-weight="600">${v}</text>`;
-    }
-    rlab += `<text x="${padL - 6}" y="${(padT + r * cell + cell / 2 + 2).toFixed(1)}" text-anchor="end" style="fill:var(--muted)" font-size="8.5">${svgEsc(rowLabels[r])}</text>`;
-  }
-  for (let c = 0; c < nc; c++) {
-    clab += `<text x="${(padL + c * cell + cell / 2 - 1).toFixed(1)}" y="${padT - 6}" text-anchor="middle" style="fill:var(--muted)" font-size="8.5">${svgEsc(colLabels[c])}</text>`;
-  }
-  return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${cells}${rlab}${clab}</svg>`;
-}
-
-const NS_TIER_SHORT = { very_bearish: "V.Bear", bearish: "Bear", neutral: "Neut", bullish: "Bull", very_bullish: "V.Bull" };
-
-const NS_EVENT_LABELS = {
-  earnings: "Earnings", guidance: "Guidance", ma: "M&A", analyst: "Analyst",
-  legal_regulatory: "Legal/Reg", product: "Product", insider: "Insider",
-  macro: "Macro", other: "Other",
-};
-
-function renderNsGauge(symbols) {
+/* Portfolio signal: the two engines side by side, never blended.
+ * News read  — a weighted portfolio strip: per lens, the weighted mean over the
+ *              holdings that have news on that lens, and how many do.
+ * Market read — the weighted mean z and the tier counts. */
+function renderNsSignal(symbols) {
   const body = $("#ns-gauge-body");
+  if (!body) return;
   const weights = weightsForMode(STATE.mode) || {};
-  // Two parallel weighted aggregates: ML (primary, v1.6.1) and LLM (challenger).
-  let W = 0, sTot = 0, sSys = 0, sIdio = 0, nAssessed = 0, nBear = 0, nFlag = 0;
-  let Wml = 0, mlAgg = 0, mlConf = 0, nMl = 0;
-  for (const sym of symbols) {
-    const s = NS.sentiment[sym];
-    if (!s || s.s_total == null) continue;
-    const wi = weights[sym] != null ? weights[sym] : 1 / Math.max(1, symbols.length);
-    W += wi;
-    sTot += wi * s.s_total;
-    sSys += wi * (s.s_sys || 0);
-    sIdio += wi * (s.s_idio || 0);
-    nAssessed++;
-    if (s.tier === "bearish" || s.tier === "very_bearish") nBear++;
-    if (s.disagreement) nFlag++;
-    const mlS = nsMlScore(s);
-    if (mlS != null) {
-      Wml += wi;
-      mlAgg += wi * mlS;
-      mlConf += wi * (s.ml_confidence || 0);
-      nMl++;
-    }
-  }
-  if (!W || !nAssessed) {
-    body.innerHTML = `<div class="ns-panel-empty">No assessed holdings yet. ${escapeHtml(nsKeyDiagnostic(NS.status))}</div>`;
+  const w = sym => (weights[sym] != null ? weights[sym] : 1 / Math.max(1, symbols.length));
+  const reads = symbols.map(sym => [sym, NS.sentiment[sym]]).filter(([, s]) => s);
+  if (!reads.length) {
+    body.innerHTML = `<div class="ns-panel-empty">No reads for these holdings yet. ${escapeHtml(nsKeyDiagnostic(NS.status))}</div>`;
     return;
   }
-  sTot /= W; sSys /= W; sIdio /= W;
-  const barSeg = (v, cls) => {
-    const pct = Math.min(100, Math.abs(v) * 100);
-    return `<div class="ns-decomp-row">
-      <span class="ns-decomp-label">${cls === "sys" ? "Systematic (β·mkt)" : "Stock-specific"}</span>
-      <span class="ns-decomp-track"><span class="ns-decomp-fill ${cls} ${v >= 0 ? "pos" : "neg"}" style="width:${pct}%"></span></span>
-      <span class="ns-decomp-val">${fmtSig(v)}</span>
-    </div>`;
+  const wmean = (pairs) => {
+    const W = pairs.reduce((a, [wi]) => a + wi, 0);
+    return W > 0 ? pairs.reduce((a, [wi, v]) => a + wi * v, 0) / W : null;
   };
-  const flagNote = nFlag ? ` · ${nFlag} flagged ⚑` : "";
-  // Analysis-window transparency: surface the lookback + recency tau the
-  // assessed signals were actually computed with.
-  const anyS = symbols.map(s => NS.sentiment[s]).find(s => s && s.lookback_days);
-  const windowNote = anyS
-    ? ` · window ${anyS.lookback_days}d (recency τ ${anyS.recency_tau_days ?? "3"}d)` : "";
-
-  if (Wml && nMl) {
-    // ML-primary readout. ml_sar is already β-adjusted (idiosyncratic by
-    // construction), so there is no systematic/idiosyncratic split to show;
-    // instead we surface confidence + coverage and keep the LLM as a small
-    // muted challenger line.
-    const mlScore = mlAgg / Wml;
-    const conf = mlConf / Wml;
-    const tier = nsTierFromScore(mlScore);
-    const llmTier = nsTierFromScore(sTot);
-    const covPct = Math.round(nMl / nAssessed * 100);
-    body.innerHTML = `
-      <div class="ns-gauge-top">
-        <span class="ns-gauge-num">${fmtSig(mlScore)}</span>
-        <span class="ns-tier-badge ${tier}">${escapeHtml(NS_LABELS[tier] || "Neutral")}</span>
-        <span class="ns-eng-tag ns-eng-ml" data-tip="Return-trained LightGBM model — the primary signal (v1.6.1). See Methodology.">ML</span>
-      </div>
-      <div class="ns-gauge-metrics">
-        <span class="ns-gauge-metric"><span class="lbl">Confidence</span><b>${Math.round(conf * 100)}%</b></span>
-        <span class="ns-gauge-metric"><span class="lbl">ML coverage</span><b>${nMl}/${nAssessed}</b> <span class="sub">(${covPct}%)</span></span>
-      </div>
-      <div class="ns-gauge-challenger" data-tip="Legacy LLM sentiment, kept as a challenger for comparison in Model Diagnostics.">
-        <span class="ns-eng-tag ns-eng-llm">LLM</span>
-        <span>challenger ${fmtSig(sTot)}</span>
-        <span class="ns-tier-badge sm ${llmTier}">${escapeHtml(NS_LABELS[llmTier] || "Neutral")}</span>
-      </div>
-      <div class="ns-gauge-foot">${nAssessed} of ${symbols.length} holdings assessed · ${nBear} bearish${flagNote}${windowNote}</div>
-    `;
-    return;
-  }
-
-  // Fallback: no ML coverage -> the original LLM decomposition gauge.
-  const tier = nsTierFromScore(sTot);
+  const lensRows = NS_LENSES.map(([k, label]) => {
+    const pairs = reads.map(([sym, s]) => [w(sym), (((s.news || {}).lenses || {})[k] || {}).score])
+      .filter(([, v]) => v != null && isFinite(v));
+    const v = wmean(pairs);
+    return `<div class="ns-sig-lens"><span class="ns-sig-ll">${label}</span>${nsScale(v)}
+      <span class="ns-sig-v">${v != null ? fmtSig(v, 1) : "—"}</span>
+      <span class="ns-sig-n">${pairs.length} of ${symbols.length}</span></div>`;
+  }).join("");
+  const newsPairs = reads.map(([sym, s]) => [w(sym), (s.news || {}).score])
+    .filter(([, v]) => v != null && isFinite(v));
+  const newsAll = wmean(newsPairs);
+  const mkt = reads.map(([sym, s]) => [sym, s.market]).filter(([, m]) => m);
+  const zAll = wmean(mkt.map(([sym, m]) => [w(sym), m.z]).filter(([, v]) => v != null && isFinite(v)));
+  const count = (tiers) => mkt.filter(([, m]) => tiers.includes(m.tier)).length;
+  const nBull = count(["bullish", "very_bullish"]), nBear = count(["bearish", "very_bearish"]);
+  const nNone = count(["no_edge"]);
+  const tot = Math.max(1, nBull + nBear + nNone);
+  const seg = (n, tier, lbl) => n
+    ? `<span class="ns-sig-seg" style="flex:${n};background:${NS_COLORS[tier]}" data-tip="${n} ${lbl}"></span>` : "";
+  const days = (reads.find(([, s]) => s.news && s.news.lookback_days) || [, {news: {}}])[1].news.lookback_days || NS.lookbackDays;
   body.innerHTML = `
-    <div class="ns-gauge-top">
-      <span class="ns-gauge-num">${fmtSig(sTot)}</span>
-      <span class="ns-tier-badge ${tier}">${escapeHtml(NS_LABELS[tier] || "Neutral")}</span>
-      <span class="ns-eng-tag ns-eng-llm" data-tip="LLM sentiment — the ML model scored none of these holdings. Open Model Diagnostics for the reason (it names the actual cause: environment, artifact, or simply no coverage yet), or Settings → Logs for the raw backend output.">LLM</span>
-    </div>
-    ${barSeg(sSys, "sys")}
-    ${barSeg(sIdio, "idio")}
-    <div class="ns-gauge-foot">${nAssessed} of ${symbols.length} holdings assessed · ${nBear} bearish${flagNote}${windowNote}</div>
-  `;
+    <div class="ns-sig">
+      <div class="ns-sig-half">
+        <div class="ns-sig-head"><span class="ns-sig-title">News read</span>${nsPill(nsNewsTier(newsAll))}
+          <span class="ns-sig-meta">${newsAll != null ? fmtSig(newsAll, 2) + " on −2…+2" : ""}</span></div>
+        ${lensRows}
+        <div class="ns-sig-foot">Weighted by the active portfolio weights · ${newsPairs.length} of ${symbols.length} holdings read · ${days}d window</div>
+      </div>
+      <div class="ns-sig-half">
+        <div class="ns-sig-head"><span class="ns-sig-title">Market read</span>
+          <span class="ns-sig-meta">${mkt.length} of ${symbols.length} holdings</span></div>
+        <div class="ns-sig-z"><b>${zAll != null ? fmtSig(zAll, 2) + "σ" : "—"}</b><span>weighted mean z ${nsMarketAnchor(mkt.length ? mkt[0][1] : null)}</span></div>
+        <div class="ns-sig-bar">${seg(nBear, "bearish", "bearish or very bearish")}${seg(nNone, "no_edge", "no edge")}${seg(nBull, "bullish", "bullish or very bullish")}</div>
+        <div class="ns-sig-counts">
+          <span><i style="background:${NS_COLORS.bearish}"></i>${nBear} bearish</span>
+          <span><i style="background:${NS_COLORS.no_edge}"></i>${nNone} no edge</span>
+          <span><i style="background:${NS_COLORS.bullish}"></i>${nBull} bullish</span>
+        </div>
+        <div class="ns-sig-foot">By design ~70% of reads land in "No edge" — the model only speaks in its tails (${Math.round(100 * (nBull + nBear) / tot)}% called here).</div>
+      </div>
+    </div>`;
 }
 
+/* The market-wide News read (same engine, market-risk scale). */
 function renderMarketSentiment() {
   const body = $("#ns-market-body");
   const s = NS.market;
-  if (!s) {
-    body.innerHTML = `<div class="ns-panel-empty">No market sentiment available. ${escapeHtml(nsKeyDiagnostic(NS.status))}</div>`;
+  const n = s && s.news;
+  if (!n) {
+    body.innerHTML = `<div class="ns-panel-empty">No market read yet. ${escapeHtml(nsKeyDiagnostic(NS.status))}</div>`;
     return;
   }
-  const tierLabel = NS_LABELS[s.tier] || "Neutral";
-  const tierCls = NS_COLORS[s.tier] ? s.tier : "neutral";
-  // Structured cross-asset tape: label muted, return magnitude-colored. Falls
-  // back to the legacy pre-formatted string when tape_items is absent.
   let tape = "";
   if (Array.isArray(s.tape_items) && s.tape_items.length) {
     const items = s.tape_items.map(it =>
@@ -7022,26 +7028,25 @@ function renderMarketSentiment() {
       `<span class="ns-mkt-val" style="color:${returnColor(it.pct, 2.5)}">${fmtPctSigned(it.pct)} 1d</span></span>`
     ).join('<span class="ns-mkt-sep">·</span>');
     tape = `<div class="ns-mkt-tape">${items}</div>`;
-  } else if (s.tape) {
-    tape = `<div class="ns-mkt-tape">${escapeHtml(s.tape)}</div>`;
   }
-  const conf = s.confidence != null ? ` · conf ${(s.confidence * 100).toFixed(0)}%` : "";
+  const agree = n.agreement != null ? ` · 2-pass agreement ${Math.round(n.agreement * 100)}%` : "";
+  const stale = n.stale ? `<div class="ns-stale-note">Could not refresh (${escapeHtml(n.stale_reason || "unknown")}) — showing the previous read.</div>` : "";
   body.innerHTML = `
-    <div class="ns-market-summary">${escapeHtml(s.summary)}</div>
-    ${tape}
-    <span class="ns-tier-badge ${tierCls}">${escapeHtml(tierLabel)}</span>
-    <span class="ns-score">${fmtSig(s.score)} | ${s.article_count || 0} articles${conf}</span>
+    <div class="ns-market-summary${nsNewsStale(n) ? " ns-faded" : ""}">${escapeHtml(n.brief || "")}</div>
+    ${tape}${stale}
+    <div class="ns-market-foot">${nsPill(n.tier)}
+      <span class="ns-score">${n.score != null ? fmtSig(n.score, 2) + " on −2…+2" : "no market-relevant headlines"} · ${s.article_count || 0} headlines${agree} · ${nsAge(n.assessed_at) || ""}</span></div>
   `;
 }
 
 function nsBestArticle(sym) {
-  /* Attribution pick for Movers: the highest-|score| high/med-relevance
-   * article, else the most recent one. */
+  /* Attribution pick for Movers: the read headline with the largest |score|
+   * that is actually about the ticker, else the most recent one. */
   const arts = NS.articles.filter(a => a.symbol === sym);
   if (!arts.length) return null;
-  const scored = arts.filter(a => nsDispArticleScore(a) != null && a.relevance !== "low");
+  const scored = arts.filter(a => nsArticleScore(a) != null);
   if (scored.length) {
-    scored.sort((a, b) => Math.abs(nsDispArticleScore(b)) - Math.abs(nsDispArticleScore(a)));
+    scored.sort((a, b) => Math.abs(nsArticleScore(b)) - Math.abs(nsArticleScore(a)));
     return scored[0];
   }
   return arts[0];
@@ -7056,10 +7061,10 @@ function renderNsMovers() {
     body.innerHTML = '<div class="ns-panel-empty">Build the dashboard to see movers.</div>';
     return;
   }
-  const rows = movers.map(r => {
+  body.innerHTML = movers.map(r => {
     const art = nsBestArticle(r.symbol);
     const head = art
-      ? `<a href="${escapeHtml(art.url || "#")}" target="_blank" rel="noopener">${escapeHtml(art.headline || "")}</a>` +
+      ? `${nsArticleDot(art)}${nsLensTag(art)}<a href="${escapeHtml(art.url || "#")}" target="_blank" rel="noopener">${escapeHtml(art.headline || "")}</a>` +
         (art.source ? ` <span class="ns-src">${escapeHtml(art.source)}</span>` : "")
       : '<span class="ns-src">no recent coverage</span>';
     return `<div class="ns-mover-row">
@@ -7067,43 +7072,51 @@ function renderNsMovers() {
       <span class="ns-mover-pct" style="color:${returnColor(r.pct_1d, 6)}">${fmtPctSigned(r.pct_1d)}</span>
       <span class="ns-mover-head">${head}</span>
     </div>`;
-  });
-  body.innerHTML = rows.join("");
+  }).join("");
 }
 
+/* What to watch: divergences first (the two engines disagree, or the stock
+ * sold off on good news), then very bullish / very bearish lens calls with
+ * their fact, then upcoming earnings. */
 function renderNsWatch(symbols) {
   const body = $("#ns-watch-body");
-  const items = [];
+  const divs = [], calls = [], dates = [];
   for (const sym of symbols) {
     const s = NS.sentiment[sym];
     if (!s) continue;
-    if (s.disagreement) {
-      items.push(`<div class="ns-watch-row">⚑ <b>${sym}</b> — LLM and dictionary sentiment disagree; treat the signal with caution.</div>`);
+    if (s.divergence) {
+      divs.push(`<div class="ns-watch-row ns-watch-div"><span class="ns-div-icon" aria-hidden="true">⇄</span> <b>${sym}</b> — ${escapeHtml(NS_DIV_LABEL[s.divergence.kind] || "Divergence")}: ${escapeHtml(s.divergence.text)}</div>`);
     }
-    if (s.tier === "very_bearish" || s.tier === "very_bullish") {
-      const lbl = NS_LABELS[s.tier] || s.tier;
-      const color = NS_COLORS[s.tier] || "var(--muted)";
-      items.push(`<div class="ns-watch-row"><span style="color:${color};font-weight:600">●</span> <b>${sym}</b> — ${lbl}: ${escapeHtml(s.summary || "")}</div>`);
+    for (const [k, label] of NS_LENSES) {
+      const L = ((s.news || {}).lenses || {})[k];
+      if (L && (L.tier === "very_bullish" || L.tier === "very_bearish")) {
+        calls.push(`<div class="ns-watch-row">${nsTierDot(L.tier)} <b>${sym}</b> — ${label} ${NS_LABELS[L.tier].toLowerCase()}: ${escapeHtml(L.fact || "")}</div>`);
+      }
     }
   }
   const dataBySymbol = new Map(DATA.map(d => [d.symbol, d]));
   for (const sym of symbols) {
     const ne = (dataBySymbol.get(sym) || {}).next_earnings;
-    if (ne) items.push(`<div class="ns-watch-row">📅 <b>${sym}</b> — earnings ${escapeHtml(fmtDateMDY(ne))}</div>`);
+    if (ne) dates.push(`<div class="ns-watch-row"><span class="ns-watch-cal" aria-hidden="true">◷</span> <b>${sym}</b> — earnings ${escapeHtml(fmtDateMDY(ne))}</div>`);
   }
-  body.innerHTML = items.length ? items.slice(0, 10).join("")
-    : '<div class="ns-panel-empty">Nothing flagged — no strong signals, disagreements, or imminent catalysts.</div>';
+  const items = [...divs, ...calls, ...dates];
+  body.innerHTML = items.length ? items.slice(0, 12).join("")
+    : '<div class="ns-panel-empty">Nothing flagged — no divergences, strong lens calls, or imminent earnings.</div>';
 }
 
 /* The tape renders into either the inline card or the 99%-viewport overlay.
  * One function, one filter chain, one set of wired controls — the two views
  * differ only in row cap and per-row detail, and both re-render each other so
  * a filter change made in one is reflected in the other when it reopens.
- *
- * Inline stays deliberately dense (120 rows, single-line ellipsised headlines,
- * max-height 320px); the full-screen view is the reading surface. */
+ * Each headline carries ONE dot — its News read score — and its lens tag. */
 const NS_TAPE_CAP_INLINE = 120;
 const NS_TAPE_CAP_FULL = 1000;
+const NS_LENS_CHIPS = [...NS_LENSES.map(([k]) => k), "other", "none"];
+/* The timeline and the tape show what the News read read and found to be
+ * about a holding. Unread headlines (outside the 15 read per ticker) and the
+ * ones it tagged "not about it" are half the feed on a mega-cap and would
+ * drown the rest; the tape's "Not about it" chip still shows the latter. */
+function nsReadAbout(a) { return !!a.lens && a.lens !== "none"; }
 
 function renderNsTape(opts) {
   const full = !!(opts && opts.fullscreen);
@@ -7113,89 +7126,81 @@ function renderNsTape(opts) {
   const countEl = full ? $("#ns-tape-fs-count") : null;
   const rerender = () => {
     renderNsTape({ fullscreen: full });
-    // Keep the other view in sync so the filters don't diverge between them.
     if (full) { if ($("#ns-tape-body")) renderNsTape(); }
     else if ($("#ns-tape-fs-bg").classList.contains("show")) renderNsTape({ fullscreen: true });
   };
   if (!NS.articles.length) {
     filtBody.innerHTML = "";
     if (countEl) countEl.textContent = "";
-    body.innerHTML = '<div class="ns-panel-empty">No cached articles yet — refresh to fill the tape.</div>';
+    body.innerHTML = '<div class="ns-panel-empty">No cached headlines yet — refresh to fill the tape.</div>';
     return;
   }
   const syms = [...new Set(NS.articles.map(a => a.symbol))].sort();
-  const events = [...new Set(NS.articles.map(a => a.event).filter(Boolean))];
   const symOpts = ['<option value="">All tickers</option>']
     .concat(syms.map(s => `<option value="${s}" ${NS.filterSym === s ? "selected" : ""}>${s}</option>`)).join("");
-  // Sentiment-tier filter (multi-select). Empty set = All; any combination of
-  // the five tiers can be active. Tier comes from the DISPLAYED (ML-first)
-  // per-article score so it matches the gauge/dots. Shared with the timeline.
-  const tierChips = nsTierChips(NS.tapeTiers);
-  const evChips = events.map(ev =>
-    `<button class="ns-ev-chip ${NS.filterEvent === ev ? "on" : ""}" data-ev="${ev}">${NS_EVENT_LABELS[ev] || ev}</button>`).join("");
+  const lensChips = NS_LENS_CHIPS.map(k =>
+    `<button class="ns-lens-chip ${NS.filterLens === k ? "on" : ""}" data-lens="${k}">${NS_LENS_TAG[k]}</button>`).join("");
   const selId = full ? "ns-tape-fs-sym-filter" : "ns-tape-sym-filter";
   filtBody.innerHTML =
     `<select id="${selId}" class="ns-tape-select">${symOpts}</select>` +
-    `<span class="ns-tape-sep"></span><span class="ns-tape-grp">${tierChips}</span>` +
-    (evChips ? `<span class="ns-tape-sep"></span><span class="ns-tape-grp">${evChips}</span>` : "");
+    `<span class="ns-tape-sep"></span><span class="ns-tape-grp">${nsTierChips(NS.tapeTiers)}</span>` +
+    `<span class="ns-tape-sep"></span><span class="ns-tape-grp">${lensChips}</span>`;
   const sel = $("#" + selId);
   if (sel) sel.onchange = () => { NS.filterSym = sel.value; rerender(); };
   nsWireTierChips(filtBody, NS.tapeTiers, rerender);
-  filtBody.querySelectorAll(".ns-ev-chip").forEach(btn => {
+  filtBody.querySelectorAll(".ns-lens-chip").forEach(btn => {
     btn.onclick = () => {
-      NS.filterEvent = NS.filterEvent === btn.dataset.ev ? "" : btn.dataset.ev;
+      NS.filterLens = NS.filterLens === btn.dataset.lens ? "" : btn.dataset.lens;
       rerender();
     };
   });
 
   let arts = NS.articles;
   if (NS.filterSym) arts = arts.filter(a => a.symbol === NS.filterSym);
-  if (NS.filterEvent) arts = arts.filter(a => a.event === NS.filterEvent);
+  arts = NS.filterLens ? arts.filter(a => a.lens === NS.filterLens) : arts.filter(nsReadAbout);
   if (NS.tapeTiers.size) arts = arts.filter(a => {
-    const t = nsDispArticleTier(a);
+    const t = nsNewsTier(nsArticleScore(a));
     return t != null && NS.tapeTiers.has(t);
   });
   const total = arts.length;
   arts = arts.slice(0, full ? NS_TAPE_CAP_FULL : NS_TAPE_CAP_INLINE);
   if (countEl) {
     countEl.textContent = total > arts.length
-      ? `${arts.length} of ${total} articles` : `${total} article${total === 1 ? "" : "s"}`;
+      ? `${arts.length} of ${total} headlines` : `${total} headline${total === 1 ? "" : "s"}`;
   }
   if (!arts.length) {
-    body.innerHTML = '<div class="ns-panel-empty">No articles match the filter.</div>';
+    body.innerHTML = '<div class="ns-panel-empty">No read headlines match the filter.</div>';
     return;
   }
-  const rows = arts.map(a => {
+  body.innerHTML = arts.map(a => {
     const dt = a.datetime ? new Date(a.datetime * 1000) : null;
     const stamp = dt ? `${fmtDateMD(dt)} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}` : "—";
-    const ev = a.event ? `<span class="ns-ev-tag">${NS_EVENT_LABELS[a.event] || a.event}</span>` : "";
     const dup = a.n_duplicates ? `<span class="ns-dup" data-tip="${a.n_duplicates} syndicated copies collapsed">×${a.n_duplicates + 1}</span>` : "";
     const link = `<a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a>`;
     if (!full) {
       return `<div class="ns-tape-row">
         <span class="ns-tape-time">${stamp}</span>
         <span class="ns-tape-sym">${escapeHtml(a.symbol || "")}</span>
-        ${nsDualDots(a)}
+        ${nsArticleDot(a)}${nsLensTag(a)}
         <span class="ns-tape-head">${link}</span>
-        ${ev}${dup}
-        <span class="ns-src">${escapeHtml(a.source || "")}</span>
+        ${dup}<span class="ns-src">${escapeHtml(a.source || "")}</span>
       </div>`;
     }
-    // Full-screen row: headline wraps, the displayed score becomes a real
-    // column instead of a dot tooltip, and the summary rides underneath.
-    const disp = nsDispArticleScore(a);
-    const sum = a.summary ? `<span class="ns-tape-sum">${escapeHtml(a.summary)}</span>` : "";
+    // Full-screen row: the News score becomes a real column and the model's
+    // one-line fact rides under the headline (the summary when unread).
+    const sc = nsArticleScore(a);
+    const sub = a.fact ? `<span class="ns-tape-sum">${escapeHtml(a.fact)}</span>`
+      : (a.summary ? `<span class="ns-tape-sum">${escapeHtml(a.summary)}</span>` : "");
     return `<div class="ns-tape-row">
       <span class="ns-tape-time">${stamp}</span>
       <span class="ns-tape-sym">${escapeHtml(a.symbol || "")}</span>
-      ${nsDualDots(a)}
-      <span class="ns-tape-score" data-tip="Displayed signal (ML when scored, else LLM)">${fmtSig(disp)}</span>
-      <span class="ns-tape-main"><span class="ns-tape-head">${link}</span>${sum}</span>
-      ${ev}${dup}
-      <span class="ns-src">${escapeHtml(a.source || "")}</span>
+      ${nsArticleDot(a)}
+      <span class="ns-tape-score" data-tip="News read score for this headline, −2…+2">${sc != null ? fmtSig(sc, 1) : "—"}</span>
+      ${nsLensTag(a)}
+      <span class="ns-tape-main"><span class="ns-tape-head">${link}</span>${sub}</span>
+      ${dup}<span class="ns-src">${escapeHtml(a.source || "")}</span>
     </div>`;
-  });
-  body.innerHTML = rows.join("");
+  }).join("");
 }
 
 /* Full-screen tape. Clicking the card body opens it — links, the ticker
@@ -7224,23 +7229,19 @@ function setupTapeFullscreen() {
   if (bg) bg.addEventListener("click", (e) => { if (e.target === bg) closeTapeFullscreen(); });
 }
 
-/* --- News Timeline (item 4) ---------------------------------------------
- * x = time, one bar per cached article. Bar height encodes signal strength
- * (strong = very bullish/bearish, medium = bullish/bearish, short gray =
- * neutral/unscored); color encodes direction. Period tabs mirror the price
- * charts; the ticker select mirrors the Flash Tape filter. Pure HTML/CSS
- * bars (no canvas) so the shared [data-tip] tooltip system works per bar. */
+/* --- News Timeline --------------------------------------------------------
+ * x = time, one bar per cached headline. Bar height = the News score's
+ * magnitude (|2| tall, |1| medium, 0 short), color = its direction; headlines
+ * the News read judged not about the ticker are a thin grey tick. Pure
+ * HTML/CSS bars so the shared [data-tip] tooltip works per bar. */
 const NS_TL_PERIODS = [["1D", 1], ["3D", 3], ["1W", 7], ["2W", 14], ["1M", 30]];
 
-function nsTlLevel(score) {
-  /* 3-level magnitude ramp. "very" tiers use deep saturated green/red
-     (#16a34a / #dc2626); plain tiers use pale (#86efac / #fca5a5) so the two
-     are unmistakable on the timeline (was #22c55e vs #4ade80 — too close). */
-  if (score == null || !isFinite(score)) return { h: 22, color: "#94a3b8", lbl: "neutral" };
-  const a = Math.abs(score);
-  if (a > 0.5) return { h: 92, color: score > 0 ? "#16a34a" : "#dc2626", lbl: score > 0 ? "very bullish" : "very bearish" };
-  if (a > 0.15) return { h: 58, color: score > 0 ? "#86efac" : "#fca5a5", lbl: score > 0 ? "bullish" : "bearish" };
-  return { h: 22, color: "#94a3b8", lbl: "neutral" };
+function nsTlLevel(a) {
+  const sc = nsArticleScore(a);
+  if (sc == null) return { h: 18, color: NS_COLORS.neutral, lbl: "unscored" };
+  const tier = nsNewsTier(sc);
+  const h = Math.abs(sc) >= 1.25 ? 92 : Math.abs(sc) >= 0.4 ? 58 : 24;
+  return { h, color: NS_COLORS[tier], lbl: NS_LABELS[tier].toLowerCase() };
 }
 
 function renderNsTimeline() {
@@ -7249,25 +7250,22 @@ function renderNsTimeline() {
   if (!ctl || !body) return;
   if (!NS.articles.length) {
     ctl.innerHTML = "";
-    body.innerHTML = '<div class="ns-panel-empty">No cached articles yet — refresh to fill the timeline.</div>';
+    body.innerHTML = '<div class="ns-panel-empty">No cached headlines yet — refresh to fill the timeline.</div>';
     return;
   }
-  // Controls: ticker select (like the tape) + period tabs (like price charts).
   const syms = [...new Set(NS.articles.map(a => a.symbol))].sort();
   const symOpts = ['<option value="">All tickers</option>']
     .concat(syms.map(s => `<option value="${s}" ${NS.tlSym === s ? "selected" : ""}>${s}</option>`)).join("");
   const periodBtns = NS_TL_PERIODS.map(([p]) =>
     `<button class="ns-tl-p ${NS.tlPeriod === p ? "active" : ""}" data-p="${p}" type="button">${p}</button>`).join("");
-  // Sentiment-tier filter chips (same control as the Flash Tape, item: parity)
-  // but backed by NS.tlTiers so the two filters are independent.
   ctl.innerHTML =
     `<select id="ns-tl-sym" class="ns-tape-select">${symOpts}</select>` +
     `<span class="ns-tl-periods">${periodBtns}</span>` +
     `<span class="ns-tape-grp ns-tl-tiers">${nsTierChips(NS.tlTiers)}</span>` +
     `<span class="ns-tl-legend">` +
-    `<span class="ns-tl-lg"><i style="background:#16a34a;height:10px"></i>strong</span>` +
-    `<span class="ns-tl-lg"><i style="background:#86efac;height:7px"></i>moderate</span>` +
-    `<span class="ns-tl-lg"><i style="background:#94a3b8;height:4px"></i>neutral</span>` +
+    `<span class="ns-tl-lg"><i style="background:${NS_COLORS.very_bullish};height:10px"></i>strong</span>` +
+    `<span class="ns-tl-lg"><i style="background:${NS_COLORS.bullish};height:7px"></i>moderate</span>` +
+    `<span class="ns-tl-lg"><i style="background:${NS_COLORS.neutral};height:4px"></i>mixed</span>` +
     `<span class="ns-tl-lg">green bullish · red bearish</span></span>`;
   $("#ns-tl-sym").onchange = (e) => { NS.tlSym = e.target.value; renderNsTimeline(); };
   ctl.querySelectorAll(".ns-tl-p").forEach(b => {
@@ -7278,47 +7276,34 @@ function renderNsTimeline() {
   const days = (NS_TL_PERIODS.find(([p]) => p === NS.tlPeriod) || ["1W", 7])[1];
   const now = Date.now();
   const t0 = now - days * 86400e3;
-  let arts = NS.articles.filter(a => a.datetime && a.datetime * 1000 >= t0);
+  let arts = NS.articles.filter(a => a.datetime && a.datetime * 1000 >= t0 && nsReadAbout(a));
   if (NS.tlSym) arts = arts.filter(a => a.symbol === NS.tlSym);
   if (NS.tlTiers.size) arts = arts.filter(a => {
-    const t = nsDispArticleTier(a);
+    const t = nsNewsTier(nsArticleScore(a));
     return t != null && NS.tlTiers.has(t);
   });
   if (!arts.length) {
-    body.innerHTML = '<div class="ns-panel-empty">No articles in this window — widen the period or the analysis window, then refresh.</div>';
+    body.innerHTML = '<div class="ns-panel-empty">No read headlines in this window — widen the period, then refresh.</div>';
     return;
   }
-  // Bars, oldest→newest so later (newer) bars paint on top when overlapping.
   arts = arts.slice().sort((a, b) => a.datetime - b.datetime);
   const bars = arts.map(a => {
     const x = ((a.datetime * 1000 - t0) / (now - t0)) * 100;
-    const ds = nsDispArticleScore(a);
-    const lv = nsTlLevel(ds);
+    const lv = nsTlLevel(a);
     const dt = new Date(a.datetime * 1000);
     const stamp = `${fmtDateMD(dt)} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
-    const head = (a.headline || "").slice(0, 110);
-    // Paired bars: ML on the left, LLM on the right, sharing one anchor and
-    // one link. Where the two disagree the pair reads as a visible mismatch
-    // in height/color — the single coalesced bar hid exactly that.
-    const ml = nsMlScore(a), llm = nsArticleLlmScore(a);
-    const lvMl = nsTlLevel(ml), lvAi = nsTlLevel(llm);
-    const part = (v, l, name) => `${name} ${(v != null && isFinite(v)) ? fmtSig(v) : "n/a"} (${v == null ? "not scored" : l.lbl})`;
-    const tip = `${stamp} · ${a.symbol || ""} — ${part(ml, lvMl, "ML")} · ${part(llm, lvAi, "LLM")} — ${head}`;
-    return `<a class="ns-tl-pair" href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener"
-      style="left:${x.toFixed(3)}%" data-tip="${escapeHtml(tip)}"
-      ><i class="ns-tl-b ml" style="height:${ml == null ? 0 : lvMl.h}%;background:${lvMl.color}"></i
-      ><i class="ns-tl-b ai" style="height:${llm == null ? 0 : lvAi.h}%;background:${lvAi.color}"></i></a>`;
+    const sc = nsArticleScore(a);
+    const tip = `${stamp} · ${a.symbol || ""} — ${NS_LENS_TAG[a.lens]}`
+      + `${sc != null ? " " + fmtSig(sc, 1) : ""} (${lv.lbl}) — ${(a.headline || "").slice(0, 110)}`;
+    return `<a class="ns-tl-bar" href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener"
+      style="left:${x.toFixed(3)}%;height:${lv.h}%;background:${lv.color}" data-tip="${escapeHtml(tip)}"></a>`;
   }).join("");
-  // Time axis: ~5 evenly spaced ticks with subtle grid lines.
   const nTicks = 5;
   let ticks = "";
   for (let i = 0; i <= nTicks; i++) {
     const frac = i / nTicks;
-    const t = t0 + frac * (now - t0);
-    const d = new Date(t);
-    const lbl = days <= 3
-      ? `${fmtDateMD(d)} ${String(d.getHours()).padStart(2, "0")}:00`
-      : fmtDateMD(d);
+    const d = new Date(t0 + frac * (now - t0));
+    const lbl = days <= 3 ? `${fmtDateMD(d)} ${String(d.getHours()).padStart(2, "0")}:00` : fmtDateMD(d);
     ticks += `<span class="ns-tl-tick" style="left:${(frac * 100).toFixed(2)}%"><i></i>${lbl}</span>`;
   }
   body.innerHTML = `<div class="ns-tl-plot">${ticks}${bars}<div class="ns-tl-baseline"></div></div>`;
@@ -7409,39 +7394,40 @@ function renderNsTimeline() {
   gh.addEventListener("dblclick", () => reset("h"));
 })();
 
-function renderPortfolioSentiment(symbols, _status) {
+/* Five mini lens cells + the overall pill — the News read at table density. */
+function nsLensCells(news) {
+  const cells = NS_LENSES.map(([k, label]) => {
+    const L = ((news || {}).lenses || {})[k];
+    if (!L) return `<i class="ns-lc ns-lc-empty" data-tip="${label}: no news"></i>`;
+    return `<i class="ns-lc" style="background:${NS_COLORS[L.tier]}" data-tip="${escapeHtml(`${label} ${fmtSig(L.score, 1)} — ${L.fact || ""}`)}"></i>`;
+  }).join("");
+  return `<span class="ns-lcs">${cells}</span>`;
+}
+
+function renderPortfolioSentiment(symbols) {
   const pBody = $("#ns-portfolio-body");
   symbols = symbols || nsSymbols();
   if (!symbols.length) {
-    pBody.innerHTML = '<div class="ns-panel-empty">Build the dashboard first to see per-stock sentiment.</div>';
+    pBody.innerHTML = '<div class="ns-panel-empty">Build the dashboard first to see per-stock reads.</div>';
     return;
   }
   const dataBySymbol = new Map(DATA.map(d => [d.symbol, d]));
-  // Sortable column registry. `sv(sym)` returns the sort value (numbers for
-  // numeric columns, lowercased strings for text). Events is intentionally
-  // absent — sorting a set of event tags is meaningless (item 3).
+  // Sortable column registry: `sv(row, sentiment)` is the sort value.
   const nsCols = [
-    { key: "ticker",  label: "Ticker",  cls: "",  align: "l", sv: (r) => (r.symbol || "").toLowerCase() },
-    { key: "company", label: "Company", cls: "",  align: "l", sv: (r) => (r.name || "").toLowerCase() },
-    { key: "price",   label: "Price",   cls: "r", align: "r", sv: (r) => r.price },
-    { key: "pct_1d",  label: "% 1D",    cls: "r", align: "r", sv: (r) => r.pct_1d },
-    { key: "pct_2d",  label: "% 2D",    cls: "r", align: "r", tip: "Return over the last two trading sessions", sv: (r) => r.pct_2d },
-    { key: "pct_1w",  label: "% 1W",    cls: "r", align: "r", tip: "Return over the last 7 calendar days", sv: (r) => r.pct_1w },
-    { key: "beta",    label: "β",       cls: "r", align: "r", sv: (r) => r.beta },
-    { key: "signal",  label: "Signal",  cls: "c", align: "c", tip: "Primary signal (v1.6.1): the return-trained ML model's tier. Falls back to the LLM when the model hasn't scored this stock.", sv: (r, s) => s ? s.score : null },
-    { key: "ai",      label: "LLM",      cls: "c", align: "c", tip: "Challenger: the legacy LLM total signal, kept for comparison", sv: (r, s) => s ? (s.llm_score != null ? s.llm_score : s.s_total) : null },
-    { key: "idio",    label: "Idio",    cls: "r", align: "r", tip: "LLM idiosyncratic news score — company-specific signal only", sv: (r, s) => s ? s.s_idio : null },
-    { key: "sys",     label: "Sys",     cls: "r", align: "r", tip: "LLM systematic tilt: κ·β·market sentiment", sv: (r, s) => s ? s.s_sys : null },
-    { key: "conf",    label: "Conf",    cls: "c", align: "c", tip: "Confidence: evidence mass, article agreement, self-consistency", sv: (r, s) => s ? (s.ml_confidence != null ? s.ml_confidence : s.confidence) : null },
-    { key: "events",  label: "Events",  cls: "",  align: "l", sortable: false },
-    { key: "flag",    label: "⚑",       cls: "c", align: "c", tip: "LLM vs Loughran-McDonald dictionary disagreement flag", sv: (r, s) => (s && s.disagreement) ? 1 : 0 },
+    { key: "ticker",  label: "Ticker",  cls: "",  sv: (r) => (r.symbol || "").toLowerCase() },
+    { key: "company", label: "Company", cls: "",  sv: (r) => (r.name || "").toLowerCase() },
+    { key: "price",   label: "Price",   cls: "r", sv: (r) => r.price },
+    { key: "pct_1d",  label: "% 1D",    cls: "r", sv: (r) => r.pct_1d },
+    { key: "pct_1w",  label: "% 1W",    cls: "r", tip: "Return over the last 7 calendar days", sv: (r) => r.pct_1w },
+    { key: "news",    label: "News read", cls: "c", tip: "What the news says: one cell per lens (Financials, Outlook, Competition, Regulation, Street view) and the overall read. Hollow = no news on that lens. Sorts by the overall −2…+2 score.", sv: (r, s) => s && s.news ? s.news.score : null },
+    { key: "market",  label: "Market read", cls: "c", tip: "How prices have reacted to news like this: tier and z vs the app's recent reads (the 2023 backtest until it has enough). Sorts by z.", sv: (r, s) => s && s.market ? s.market.z : null },
+    { key: "div",     label: "⇄",      cls: "c", tip: "Divergence: the two reads disagree, or the stock sold off on good news. Hover the icon for the facts.", sv: (r, s) => (s && s.divergence) ? 1 : 0 },
+    { key: "age",     label: "Age",     cls: "r", tip: "Time since the News read was assessed. Faded past the lookback window.", sv: (r, s) => s && s.news && s.news.assessed_at ? -new Date(s.news.assessed_at).getTime() : null },
   ];
   const colByKey = Object.fromEntries(nsCols.map(c => [c.key, c]));
-  // Sort the symbol order. Missing values always sink to the bottom regardless
-  // of direction, so unassessed holdings never crowd the top.
-  const sortCol = colByKey[NS.sortKey] && colByKey[NS.sortKey].sortable !== false
-    ? colByKey[NS.sortKey] : colByKey.signal;
+  const sortCol = colByKey[NS.sortKey] || colByKey.news;
   const dir = NS.sortDir;
+  // Missing values always sink to the bottom, whatever the direction.
   const orderedSyms = symbols.slice().sort((sa, sb) => {
     const va = sortCol.sv(dataBySymbol.get(sa) || {}, NS.sentiment[sa]);
     const vb = sortCol.sv(dataBySymbol.get(sb) || {}, NS.sentiment[sb]);
@@ -7450,89 +7436,70 @@ function renderPortfolioSentiment(symbols, _status) {
     if (na && nb) return 0;
     if (na) return 1;
     if (nb) return -1;
-    if (va < vb) return -1 * dir;
-    if (va > vb) return 1 * dir;
-    return 0;
+    return va < vb ? -dir : va > vb ? dir : 0;
   });
   const th = (c) => {
-    const arrow = (c.sortable !== false && NS.sortKey === c.key)
-      ? `<span class="ns-sort-arr">${NS.sortDir < 0 ? "▾" : "▴"}</span>` : "";
-    const cls = [c.cls, c.sortable !== false ? "ns-sortable" : ""].filter(Boolean).join(" ");
-    const tip = c.tip ? ` data-tip="${c.tip}"` : "";
-    const dataAttr = c.sortable !== false ? ` data-sortkey="${c.key}"` : "";
-    return `<th class="${cls}"${tip}${dataAttr}>${c.label}${arrow}</th>`;
+    const arrow = NS.sortKey === c.key ? `<span class="ns-sort-arr">${NS.sortDir < 0 ? "▾" : "▴"}</span>` : "";
+    const tip = c.tip ? ` data-tip="${escapeHtml(c.tip)}"` : "";
+    return `<th class="${[c.cls, "ns-sortable"].filter(Boolean).join(" ")}"${tip} data-sortkey="${c.key}">${c.label}${arrow}</th>`;
   };
-  // Red/green background tint, computed with the SAME helpers the main holdings
-  // table uses (cellStyleHeat -> colorDiverging/textOnHeat), so the identical
-  // stock reads the identical color in both tables. Anchors shrink with the
-  // horizon; the sentiment scores use ±0.5, matching nsEngineDot's "strong" cut.
+  // Same heat helpers as the main table, so a return reads the same color in both.
   const theme = getTheme();
-  const heatStyle = (value, anchor) =>
-    cellStyleHeat({ heat: { kind: "div", anchor } }, value, theme);
-  const HEAT_ANCHORS = { pct_1d: 5, pct_2d: 7, pct_1w: 20, score: 0.5 };
+  const heatStyle = (value, anchor) => cellStyleHeat({ heat: { kind: "div", anchor } }, value, theme);
 
-  let html = `<table class="ns-table">
-    <thead><tr><th></th>${nsCols.map(th).join("")}</tr></thead><tbody>`;
+  let html = `<table class="ns-table"><thead><tr><th></th>${nsCols.map(th).join("")}</tr></thead><tbody>`;
   for (const sym of orderedSyms) {
     const r = dataBySymbol.get(sym) || {};
     const s = NS.sentiment[sym];
-    const tierLabel = s ? (NS_LABELS[s.tier] || s.tier) : "—";
-    const tierColor = s ? (NS_COLORS[s.tier] || "#94a3b8") : "var(--muted)";
-    // LLM challenger tier for the comparison column.
-    const llmTier = s ? (s.llm_tier || nsTierFromScore(s.llm_score != null ? s.llm_score : s.s_total)) : null;
-    const aiColor = llmTier ? (NS_COLORS[llmTier] || "#94a3b8") : "var(--muted)";
-    const aiScore = s ? (s.llm_score != null ? s.llm_score : s.s_total) : null;
-    const aiVal = s ? fmtSig(aiScore) : "—";
-    // Sentiment cells get the same diverging tint as the % columns. When the
-    // tint is present it also supplies the text color (textOnHeat), so the
-    // tier color is only applied on unscored rows where there is no background.
-    const signalTint = heatStyle(s ? s.score : null, HEAT_ANCHORS.score);
-    const aiTint = heatStyle(aiScore, HEAT_ANCHORS.score);
-    const signalHeat = signalTint || `color:${tierColor};`;
-    const aiHeat = aiTint || `color:${aiColor};`;
-    const confVal = s ? (s.ml_confidence != null ? s.ml_confidence : s.confidence) : null;
-    const events = s && s.events
-      ? Object.entries(s.events).map(([ev, n]) =>
-          `<span class="ns-ev-tag">${NS_EVENT_LABELS[ev] || ev}${n > 1 ? " ×" + n : ""}</span>`).join(" ")
-      : "";
-    const conf = confVal != null
-      ? `<span class="ns-conf-track"><span class="ns-conf-fill" style="width:${(confVal * 100).toFixed(0)}%"></span></span>`
-      : "—";
+    const n = s && s.news, m = s && s.market;
+    const nStale = nsNewsStale(n);
     const isOpen = NS.expanded === sym;
-    html += `<tr class="ns-row" data-sym="${sym}">
+    const div = s && s.divergence
+      ? `<span class="ns-div-icon" data-tip="${escapeHtml((NS_DIV_LABEL[s.divergence.kind] || "Divergence") + " — " + s.divergence.text)}">⇄</span>` : "";
+    const mkt = m
+      ? `${nsTierDot(m.tier, nsMarketStale(m) ? "ns-stale" : "")}<span class="ns-mkt-t">${escapeHtml(NS_LABELS[m.tier] || "—")}</span> <span class="ns-mkt-z">${fmtSig(m.z, 1)}σ</span>`
+      : `<span class="ns-muted">—</span>`;
+    html += `<tr class="ns-row${nStale ? " ns-row-stale" : ""}" data-sym="${sym}">
       <td class="c ns-expander">${s ? (isOpen ? "▾" : "▸") : ""}</td>
-      <td class="sym">${sym}</td>
+      <td class="sym ns-hover" data-ns-sym="${sym}">${sym}</td>
       <td class="name">${escapeHtml(r.name || "")}</td>
       <td class="r">${r.price != null ? fmtMoney(r.price, r.currency) : "—"}</td>
-      <td class="r" style="${heatStyle(r.pct_1d, HEAT_ANCHORS.pct_1d)}">${r.pct_1d != null ? fmtPctSigned(r.pct_1d) : "—"}</td>
-      <td class="r" style="${heatStyle(r.pct_2d, HEAT_ANCHORS.pct_2d)}">${r.pct_2d != null ? fmtPctSigned(r.pct_2d) : "—"}</td>
-      <td class="r" style="${heatStyle(r.pct_1w, HEAT_ANCHORS.pct_1w)}">${r.pct_1w != null ? fmtPctSigned(r.pct_1w) : "—"}</td>
-      <td class="r">${r.beta != null ? r.beta.toFixed(2) : "—"}</td>
-      <td class="c" style="${signalHeat}font-weight:600;font-size:11px">${s ? nsDot(s) + " " + tierLabel : "—"}</td>
-      <td class="c" style="${aiHeat}font-size:11px">${s ? aiVal : "—"}</td>
-      <td class="r">${s ? fmtSig(s.s_idio) : "—"}</td>
-      <td class="r">${s ? fmtSig(s.s_sys) : "—"}</td>
-      <td class="c">${conf}</td>
-      <td>${events}</td>
-      <td class="c">${s && s.disagreement ? '<span data-tip="LLM and LM dictionary disagree on polarity">⚑</span>' : ""}</td>
+      <td class="r" style="${heatStyle(r.pct_1d, 5)}">${r.pct_1d != null ? fmtPctSigned(r.pct_1d) : "—"}</td>
+      <td class="r" style="${heatStyle(r.pct_1w, 20)}">${r.pct_1w != null ? fmtPctSigned(r.pct_1w) : "—"}</td>
+      <td class="c">${n ? nsLensCells(n) + nsPill(n.tier, n.stale ? " ⟲" : "") : "—"}</td>
+      <td class="c ns-mkt-cell">${mkt}</td>
+      <td class="c">${div}</td>
+      <td class="r ns-age">${n && n.assessed_at ? nsAge(n.assessed_at) : "—"}</td>
     </tr>`;
     if (isOpen && s) {
-      // Order by |score| desc so the most material (bullish OR bearish) news
-      // leads; neutral/unscored articles sink to the bottom (item 9).
-      const absScore = a => { const v = nsDispArticleScore(a); return v != null ? Math.abs(v) : -1; };
-      const arts = NS.articles.filter(a => a.symbol === sym)
-        .slice()
-        .sort((a, b) => absScore(b) - absScore(a))
-        .slice(0, 6).map(a =>
-        `<div class="ns-brief-art">${nsDualDots(a)} <a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a> <span class="ns-src">${escapeHtml(a.source || "")}</span></div>`).join("");
-      const lm = s.s_lm != null ? ` · LM dictionary ${fmtSig(s.s_lm)}` : "";
-      const fb = s.fallback ? " · single-call fallback" : "";
-      // colspan = expander + every nsCols entry. Derived rather than hardcoded
-      // so adding a column can't silently shrink this row again.
+      const arts = NS.articles.filter(a => a.symbol === sym);
+      const byAid = new Map(arts.map(a => [a.aid, a]));
+      const lensBlocks = n ? NS_LENSES.map(([k, label]) => {
+        const L = (n.lenses || {})[k];
+        if (!L) return "";
+        const listed = (L.ids || []).map(id => byAid.get(id)).filter(Boolean).slice(0, 4);
+        const heads = listed.map(a =>
+          `<div class="ns-brief-art">${nsArticleDot(a)}<a href="${escapeHtml(a.url || "#")}" target="_blank" rel="noopener">${escapeHtml(a.headline || "")}</a> <span class="ns-src">${escapeHtml(a.source || "")}</span></div>`).join("");
+        // The model sometimes returns the headline itself as the fact (no
+        // summary to condense); it is listed right below, so don't say it twice.
+        const norm = t => (t || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const fact = L.fact && !listed.some(a => norm(a.headline) === norm(L.fact))
+          ? ` · ${escapeHtml(L.fact)}` : "";
+        return `<div class="ns-brief-lens"><div class="ns-brief-lens-h">${nsScale(L.score)}<b>${label}</b> ${fmtSig(L.score, 1)}${fact}</div>${heads}</div>`;
+      }).join("") : "";
+      const meta = n ? [
+        `${n.n_items || 0} headlines read`,
+        n.n_none ? `${n.n_none} not about ${sym}` : "",
+        n.other_n ? `${n.other_n} corporate` : "",
+        n.agreement != null ? `2-pass agreement ${Math.round(n.agreement * 100)}%` : "single pass",
+        n.brief_stale ? `brief written for the ${n.brief_window || "?"}D window` : "",
+      ].filter(Boolean).join(" · ") : "";
+      const staleNote = n && n.stale
+        ? `<div class="ns-stale-note">News read could not refresh (${escapeHtml(n.stale_reason || "unknown")}) — showing the previous read.</div>` : "";
       html += `<tr class="ns-brief-row"><td colspan="${nsCols.length + 1}">
-        <div class="ns-brief">${escapeHtml(s.summary || "")}</div>
-        <div class="ns-brief-meta">${s.article_count || 0} articles${lm}${fb}</div>
-        ${arts}
+        <div class="ns-brief">${escapeHtml((n && n.brief) || "No News read yet.")}</div>
+        <div class="ns-brief-meta">${meta}</div>${staleNote}
+        <div class="ns-brief-lenses">${lensBlocks || '<span class="ns-muted">No lens has news in this window.</span>'}</div>
       </td></tr>`;
     }
   }
@@ -7541,11 +7508,9 @@ function renderPortfolioSentiment(symbols, _status) {
   pBody.querySelectorAll("th.ns-sortable").forEach(thEl => {
     thEl.onclick = () => {
       const key = thEl.dataset.sortkey;
-      if (NS.sortKey === key) {
-        NS.sortDir = -NS.sortDir;         // same column → flip direction
-      } else {
+      if (NS.sortKey === key) NS.sortDir = -NS.sortDir;
+      else {
         NS.sortKey = key;
-        // Text columns default ascending (A→Z); numeric default descending.
         NS.sortDir = (key === "ticker" || key === "company") ? 1 : -1;
       }
       renderPortfolioSentiment(symbols);
@@ -7561,190 +7526,157 @@ function renderPortfolioSentiment(symbols, _status) {
   });
 }
 
-const NS_DIAG_ABOUT_HTML = `
-  <p><b>What this panel is.</b> Model Diagnostics is the <i>live</i> evidence that the
-  primary <b>return-trained ML model</b> is calibrated and actually predictive — not just
-  plausible-looking. It is computed from <code>.portfolio_tracker_sentiment_history.json</code>,
-  the append-only log of every score the model has produced, joined against realized returns.
-  The LLM is shown alongside as a challenger. For how the ML model was built and its full
-  backtest, use the <b>Methodology</b> link.</p>
-  <p><b>Live rank IC — ML vs LLM.</b> For each past score we take the stock's <i>idiosyncratic</i>
-  forward return (its move with the market component <code>β·r_SPY</code> stripped out) over the
-  next 1 and 5 trading days, then compute the <b>Spearman rank correlation</b> between score and
-  that return. Positive = predictive. The LLM row is re-scored on the same records so the
-  comparison is fair. Small samples are indicative until history builds up.</p>
-  <p><b>Rolling live IC.</b> The same IC computed on an expanding window through each date — a
-  stable line above zero means the signal is holding up in production, not just on backtest.</p>
-  <p><b>Calibration.</b> Predicted-SAR bins vs the mean realized next-day return. An upward slope
-  means higher predictions really do precede higher returns.</p>
-  <p><b>ML vs LLM tier agreement.</b> A 5×5 grid of where the two engines land. Off-diagonal mass
-  means the ML model adds independent signal rather than echoing the LLM.</p>
-  <p><b>Coverage &amp; confidence, and forward return by ML tier.</b> How much of the book the ML
-  model scores and how confident it is, plus a monotonicity check that realized returns rise from
-  the Very Bearish to the Very Bullish tier.</p>
-  <p class="ns-diag-about-foot">Primary signal: hashed TF-IDF + lexicon + event/meta features →
-  LightGBM → vol-standardized, market-adjusted abnormal return (SAR) → 5 tiers by calibrated
-  quantiles. The LLM path (recency×source×novelty×relevance weighted, κ=0.2) is retained as the
-  challenger. See <b>Methodology</b> for the full write-up.</p>`;
-
-function toggleNsDiagAbout() {
-  const about = $("#ns-diag-about");
-  const btn = $("#ns-diag-info");
-  const willOpen = about.classList.contains("hidden");
-  if (willOpen && !about.innerHTML) about.innerHTML = NS_DIAG_ABOUT_HTML;
-  about.classList.toggle("hidden");
-  if (btn) btn.classList.toggle("on", willOpen);
-}
-
-async function toggleNsDiagnostics() {
+/* ===== Track record ======================================================
+ * Has either engine predicted anything? Date-clustered statistics only
+ * (portfolio_tracker/news_diagnostics.py): one date is one observation, and
+ * no verdict is given before ~40 trading days exist. */
+async function toggleTrackRecord() {
   const body = $("#ns-diag-body");
   const arrow = $("#ns-diag-arrow");
   const willOpen = body.classList.contains("hidden");
   body.classList.toggle("hidden");
   arrow.innerHTML = willOpen ? "&#9662;" : "&#9656;";
   if (!willOpen) return;
-  body.innerHTML = '<div class="ns-loading">Computing diagnostics…</div>';
+  body.innerHTML = lcHtml("scoring the history against realized returns", { bar: true });
   try {
-    const d = await fetch("/api/news-diagnostics").then(r => r.json());
-    renderNsDiagnostics(d);
-  } catch (e) {
-    body.innerHTML = '<div class="ns-panel-empty">Diagnostics unavailable.</div>';
+    renderTrackRecord(await fetch("/api/news-diagnostics").then(r => r.json()));
+  } catch {
+    body.innerHTML = '<div class="ns-panel-empty">Track record unavailable.</div>';
   }
 }
 
-function renderNsDiagnostics(d) {
+function nsPct(x, digits = 0) { return x == null ? "—" : `${(x * 100).toFixed(digits)}%`; }
+
+function trackVerdictCard(title, eng, explain, portfolioCov) {
+  const v = (eng && eng.verdict) || { key: "too_early", text: "Too early" };
+  const ic = (eng && eng.ic && eng.ic[`${eng.horizon_days}d`]) || {};
+  const days = ic.n_days || 0;
+  const hr = (eng && eng.hit_rate && eng.hit_rate.all) || {};
+  const hrTxt = hr.n ? `${nsPct(hr.rate)} <span class="ns-muted">(${hr.k}/${hr.n}; 95% CI ${nsPct(hr.lo)}–${nsPct(hr.hi)})</span>` : `<span class="ns-muted">no matured calls yet</span>`;
+  const cov = (eng && eng.coverage) || {};
+  return `<div class="ns-tr-card ns-tr-${v.key}">
+    <div class="ns-tr-title">${title}</div>
+    <div class="ns-tr-verdict">${escapeHtml(v.text)}</div>
+    <div class="ns-tr-days"><span style="width:${Math.min(100, days / 60 * 100).toFixed(0)}%"></span></div>
+    <div class="ns-tr-kv"><span>Trading days scored</span><b>${days}</b></div>
+    <div class="ns-tr-kv"><span>Daily IC (${eng ? eng.horizon_days : 1}d)</span><b>${ic.mean != null ? fmtSig(ic.mean, 3) : "—"}${ic.t != null ? ` <span class="ns-muted">t ${ic.t.toFixed(1)}</span>` : ""}</b></div>
+    <div class="ns-tr-kv"><span>Hit rate (5d)</span><b>${hrTxt}</b></div>
+    <div class="ns-tr-kv"><span>Coverage</span><b>${portfolioCov}<span class="ns-muted"> · ${cov.n_records || 0} records</span></b></div>
+    <div class="ns-tr-explain">${explain}</div>
+  </div>`;
+}
+
+function renderTrackRecord(d) {
   const body = $("#ns-diag-body");
   if (!d || d.error) {
-    body.innerHTML = '<div class="ns-panel-empty">Diagnostics unavailable.</div>';
+    body.innerHTML = '<div class="ns-panel-empty">Track record unavailable.</div>';
     return;
   }
   const parts = [];
-  const tierOrder = ["very_bearish", "bearish", "neutral", "bullish", "very_bullish"];
-  const shortLabels = tierOrder.map(t => NS_TIER_SHORT[t] || t);
-
-  // Intro — ML is the primary signal; these panels track it live. The frozen
-  // training/backtest story lives in the Methodology popup.
-  parts.push(`<div class="ns-diag-intro">The <b>return-trained ML model</b> is the primary signal (v1.6.1). These
-    panels are <b>live evidence</b> that accumulate as news is refreshed and realized returns land — the LLM is shown as a
-    challenger. For how the model was built and its full backtest, open <b>Methodology</b>.</div>`);
-
-  // Is the model actually RUNNING? Without this the empty-state copy below is
-  // indistinguishable between "no history yet" and "the model never loaded" —
-  // and it used to guess, blaming a missing artifact when the real cause was a
-  // conda env with no lightgbm. ml_runtime comes straight from
-  // ml_sentiment.runtime_status() so the reason shown is the real exception.
-  const rt = d.ml_runtime;
-  if (rt && !rt.available) {
-    parts.push(`<div class="ns-ml-banner"><b>ML model is not running.</b> Every panel below is
-      LLM-only and <code>ml_*</code> fields are being written as null.<br>
-      Reason: <code>${escapeHtml(rt.reason || "the model did not load")}</code><br>${mlRuntimeHint(rt)}</div>`);
+  const mr = d.market_runtime, nr = d.news_runtime;
+  if (mr && !mr.available) {
+    parts.push(`<div class="ns-ml-banner"><b>Market read is not running.</b>
+      Reason: <code>${escapeHtml(mr.reason || "the model did not load")}</code><br>${mlRuntimeHint(mr)}</div>`);
   }
+  if (nr && nr.ok === false) {
+    parts.push(`<div class="ns-ml-banner"><b>News read is unavailable.</b>
+      Reason: <code>${escapeHtml(nr.error || "unknown")}</code></div>`);
+  }
+  // Portfolio-level coverage + age from what is on screen now.
+  const syms = nsSymbols();
+  const covOf = (pick) => {
+    const got = syms.filter(s => pick(NS.sentiment[s]));
+    return `${got.length}/${syms.length} holdings`;
+  };
+  parts.push(`<div class="ns-tr-cards">
+    ${trackVerdictCard("News read", d.news,
+      "Daily rank correlation between the News read and each stock's next-day move net of the market. One day = one observation.",
+      covOf(s => s && s.news && s.news.score != null))}
+    ${trackVerdictCard("Market read", d.market,
+      `Same test on the Market read${(d.market_horizon_days || 1) > 1 ? `, over its ${d.market_horizon_days}-day horizon (Newey-West t for the overlapping days)` : ""}. Its backtest showed no out-of-sample edge, so this card is the test of whether it has one.`,
+      covOf(s => s && s.market))}
+  </div>`);
 
-  // 1) ML vs LLM live IC scoreboard (ML primary). llm_ic_common re-scores the
-  // LLM on the SAME records for an apples-to-apples comparison.
-  if (d.ml && d.ml.n_records > 0) {
-    const icRow = (label, o, cls) => o
-      ? `<tr class="${cls || ""}"><td>${label}</td><td class="r">${o["1d"] && o["1d"].ic != null ? fmtSig(o["1d"].ic, 3) : "—"}</td><td class="r">${o["5d"] && o["5d"].ic != null ? fmtSig(o["5d"].ic, 3) : "—"}</td><td class="r">${o["1d"] ? o["1d"].n : "—"}</td><td class="r">${o["1d"] && o["1d"].t_stat != null ? o["1d"].t_stat : "—"}</td></tr>`
-      : "";
-    parts.push(`<div class="ns-diag-sec">
-      <h5>Live rank IC — ML vs LLM (same records)</h5>
-      <table class="ns-table ns-diag-table"><thead><tr><th>Signal</th><th class="r">IC 1d</th><th class="r">IC 5d</th><th class="r">n</th><th class="r">t 1d</th></tr></thead>
-      <tbody>${icRow("ML (LightGBM)", d.ml.ic, "ns-diag-primary")}${icRow("LLM", d.ml.llm_ic_common)}</tbody></table>
-      <div class="ns-diag-note">Spearman IC of each signal vs the next 1d / 5d idiosyncratic return. Positive = predictive. ${d.ml.days} day${d.ml.days === 1 ? "" : "s"} of history (${d.ml.n_records} obs${d.ml.date_min ? `, since ${d.ml.date_min}` : ""}); small samples are indicative until they build up.</div>
-    </div>`);
+  // Long-short: bullish-or-better minus bearish-or-worse, next-day idio return.
+  const ls = (eng) => ((d[eng] || {}).long_short || []);
+  const lsN = ls("news"), lsM = ls("market");
+  if (lsN.length || lsM.length) {
+    const dates = [...new Set([...lsN, ...lsM].map(p => p.date))].sort();
+    const ix = new Map(dates.map((dt, i) => [dt, i]));
+    const pts = (arr, name) => arr.map(p => ({ x: ix.get(p.date), y: p.cum_pct,
+      tip: `${p.date} · ${name}: ${fmtSig(p.cum_pct, 2)}% cumulative (${p.n_long} long / ${p.n_short} short)` }));
+    const step = Math.max(1, Math.floor(dates.length / 5));
+    const xLabels = dates.filter((_, i) => i % step === 0).map(dt => ({ x: ix.get(dt), label: dt.slice(5) }));
+    parts.push(`<div class="ns-diag-sec"><h5>Long-short, cumulative</h5>
+      ${svgLine([{ name: "News read", color: SVG_ACC, points: pts(lsN, "News read") },
+                 { name: "Market read", color: "var(--ns-vbull)", points: pts(lsM, "Market read") }],
+                { y0: true, xLabels, fmt: v => v.toFixed(1) + "%" })}
+      <div class="ns-diag-note">Each day: the average next-day market-neutral return of names rated bullish or better, minus names rated bearish or worse. A line that climbs is an edge; a flat or falling one is not.</div></div>`);
   } else {
-    const emptyWhy = (rt && !rt.available)
-      ? "The ML model is not running (see the banner above) — refreshes are writing null ML scores."
-      : "No ML-scored history yet — refresh news to start accumulating.";
-    parts.push(`<div class="ns-diag-sec"><h5>Live rank IC — ML vs LLM</h5><div class="ns-panel-empty">${emptyWhy}</div></div>`);
+    parts.push(`<div class="ns-diag-sec"><h5>Long-short, cumulative</h5><div class="ns-panel-empty">Needs days with both a bullish and a bearish call and a realized next-day return.</div></div>`);
   }
 
-  // 2) Rolling live IC — is the signal holding up as observations accrue?
-  if (Array.isArray(d.rolling) && d.rolling.length >= 2) {
-    const idx = d.rolling.map((r, i) => ({ ...r, i }));
-    const mlPts = idx.filter(r => r.ml_ic != null).map(r => ({ x: r.i, y: r.ml_ic, tip: `${r.date} · ML IC ${fmtSig(r.ml_ic, 3)} (n=${r.n_ml})` }));
-    const llmPts = idx.filter(r => r.llm_ic != null).map(r => ({ x: r.i, y: r.llm_ic, tip: `${r.date} · LLM IC ${fmtSig(r.llm_ic, 3)} (n=${r.n})` }));
-    const step = Math.max(1, Math.floor(idx.length / 5));
-    const xLabels = idx.filter((_, i) => i % step === 0).map(r => ({ x: r.i, label: (r.date || "").slice(5) }));
-    const chart = svgLine([
-      { name: "ML", color: SVG_ACC, points: mlPts },
-      { name: "LLM", color: SVG_MUT, points: llmPts },
-    ], { y0: true, xLabels, fmt: v => v.toFixed(2) });
-    parts.push(`<div class="ns-diag-sec"><h5>Rolling live IC (expanding window)</h5>${chart}
-      <div class="ns-diag-note">Cumulative IC through each date. A stable line above zero is the "still working live" signal.</div></div>`);
-  } else {
-    parts.push('<div class="ns-diag-sec"><h5>Rolling live IC</h5><div class="ns-panel-empty">Needs at least two days of history — check back after a few refreshes.</div></div>');
-  }
+  // Per-lens hit rates for the News read.
+  const lh = (d.news || {}).lens_hit_rate || {};
+  const lensBars = NS_LENSES.map(([k, label]) => {
+    const a = (lh[k] || {}).all || {};
+    return { label, value: a.rate != null ? a.rate * 100 : null, lo: a.lo != null ? a.lo * 100 : null,
+             hi: a.hi != null ? a.hi * 100 : null, color: SVG_ACC,
+             tip: a.n ? `${label}: ${nsPct(a.rate)} of ${a.n} calls right (95% CI ${nsPct(a.lo)}–${nsPct(a.hi)})` : `${label}: no matured calls` };
+  });
+  parts.push(`<div class="ns-diag-sec"><h5>News read hit rate by lens (5-day)</h5>
+    ${lensBars.some(b => b.value != null) ? svgBars(lensBars, { h: 170, vmin: 0, vmax: 100, base: 50, fmt: v => v.toFixed(0) + "%" })
+      : '<div class="ns-panel-empty">No lens call has a matured 5-day return yet.</div>'}
+    <div class="ns-diag-note">Share of bullish lens calls followed by a positive 5-day market-neutral return (and bearish by a negative one), with 95% Wilson intervals. The baseline is 50%.</div></div>`);
 
-  // 3) Calibration curve — predicted-SAR bins vs realized forward return.
-  if (Array.isArray(d.calibration_curve) && d.calibration_curve.length >= 2) {
-    const pts = d.calibration_curve.map(b => ({ x: b.pred_mean, y: b.realized_mean_pct, tip: `pred SAR ${fmtSig(b.pred_mean, 3)} → realized ${fmtSig(b.realized_mean_pct, 2)}% (n=${b.n})` }));
-    const chart = svgLine([{ name: "Realized", color: SVG_ACC, points: pts }], { y0: true, fmt: v => v.toFixed(2) });
-    parts.push(`<div class="ns-diag-sec"><h5>Calibration — predicted vs realized</h5>${chart}
-      <div class="ns-diag-note">Each point is a bin of predicted SAR (x) vs the mean realized next-day idiosyncratic return (y, %). An upward-sloping line means higher predictions really do precede higher returns.</div></div>`);
-  } else {
-    parts.push('<div class="ns-diag-sec"><h5>Calibration — predicted vs realized</h5><div class="ns-panel-empty">Needs ≥10 ML-scored observations with realized returns.</div></div>');
-  }
+  const cons = (d.news || {}).consistency || {};
+  parts.push(`<div class="ns-diag-sec"><h5>Consistency</h5>
+    <div class="ns-diag-note">Mean two-pass agreement of the News read: <b>${cons.mean != null ? nsPct(cons.mean) : "—"}</b> over ${cons.n || 0} reads — how often the model's two independent readings of the same headlines land on the same lens within one point.</div></div>`);
 
-  // 4) ML–LLM tier agreement grid.
-  if (d.agreement && d.agreement.n > 0) {
-    const chart = svgHeat(d.agreement.matrix, d.agreement.order.map(t => NS_TIER_SHORT[t] || t), d.agreement.order.map(t => NS_TIER_SHORT[t] || t), { cell: 32 });
-    parts.push(`<div class="ns-diag-sec"><h5>ML vs LLM tier agreement</h5>
-      <div class="ns-diag-grid-wrap"><div class="ns-diag-axis-y">ML tier ↓</div>${chart}</div>
-      <div class="ns-diag-note">Rows = ML tier, columns = LLM tier. Diagonal = agreement (${d.agreement.agree_pct != null ? d.agreement.agree_pct + "%" : "—"} of ${d.agreement.n}); off-diagonal mass means the ML model is adding signal the LLM misses, not just echoing it.</div></div>`);
-  }
-
-  // 5) Coverage & confidence.
-  if (d.coverage) {
-    const cv = d.coverage;
-    const confBars = (cv.conf_hist && cv.conf_hist.counts.some(c => c > 0))
-      ? svgBars(cv.conf_hist.counts.map((c, i) => ({ label: (i % 2 === 0) ? (i / 10).toFixed(1) : "", value: c, color: SVG_ACC, tip: `conf [${(i / 10).toFixed(1)}, ${((i + 1) / 10).toFixed(1)}): ${c}` })), { h: 130, fmt: v => v })
-      : "";
-    parts.push(`<div class="ns-diag-sec"><h5>ML coverage &amp; confidence</h5>
-      <div class="ns-diag-tiles">
-        <div class="ns-diag-tile"><b>${cv.n_ml}</b><span>ML-scored obs</span></div>
-        <div class="ns-diag-tile"><b>${cv.pct}%</b><span>of records</span></div>
-        <div class="ns-diag-tile"><b>${cv.conf_mean != null ? Math.round(cv.conf_mean * 100) + "%" : "—"}</b><span>mean confidence</span></div>
-      </div>
-      ${confBars ? `<div class="ns-diag-note" style="margin-top:4px">Confidence distribution</div>${confBars}` : ""}</div>`);
-  }
-
-  // 6) Mean forward 1d idio return by ML tier — live monotonicity check.
-  if (d.ml && d.ml.tiers && Object.keys(d.ml.tiers).length) {
-    const bars = tierOrder.filter(t => d.ml.tiers[t]).map(t => ({
-      label: NS_TIER_SHORT[t] || t,
-      value: d.ml.tiers[t].mean_fwd_1d_pct,
-      color: NS_COLORS[t] || "#94a3b8",
-      tip: `${NS_LABELS[t] || t}: ${fmtSig(d.ml.tiers[t].mean_fwd_1d_pct, 2)}% (n=${d.ml.tiers[t].n})`,
-    }));
-    parts.push(`<div class="ns-diag-sec"><h5>Mean forward 1d return by ML tier</h5>${svgBars(bars, { h: 160, fmt: v => v.toFixed(2) + "%" })}
-      <div class="ns-diag-note">Should rise left→right if the tiers are well-ordered.</div></div>`);
-  }
-
-  // 7) Score distribution (LLM s_total) — range-usage evidence (kept).
-  if (d.histogram && d.histogram.n > 0) {
-    const maxC = Math.max(...d.histogram.counts, 1);
-    const cols = d.histogram.counts.map((c, i) => {
-      const h = Math.round(c / maxC * 48);
-      const mid = -1 + (i + 0.5) * 0.1;
-      const color = mid > 0.15 ? "#4ade80" : (mid < -0.15 ? "#f87171" : "#94a3b8");
-      return `<div class="ns-hist-col" data-tip="[${(-1 + i * 0.1).toFixed(1)}, ${(-0.9 + i * 0.1).toFixed(1)}): ${c}" style="height:${Math.max(2, h)}px;background:${color}"></div>`;
-    }).join("");
-    const calNote = d.calibration_active
-      ? `quantile calibration active (${d.calibration_n} obs)`
-      : `fixed thresholds until ${100} obs (${d.calibration_n} so far)`;
-    parts.push(`<div class="ns-diag-sec"><h5>LLM score distribution (90d, s_total)</h5>
-      <div class="ns-hist">${cols}</div>
-      <div class="ns-hist-axis"><span>-1</span><span>0</span><span>+1</span></div>
-      <div class="ns-diag-note">${calNote}</div></div>`);
-  }
-  body.innerHTML = parts.join("") || '<div class="ns-panel-empty">No diagnostics data yet.</div>';
+  // For quants: the raw daily IC series, t-stats, tier table, calibration.
+  const icSeries = ((d.quants || {}).daily_ic || {});
+  const icPts = (eng) => ((icSeries[eng] || {})["1d"] || []);
+  const allDates = [...new Set([...icPts("news"), ...icPts("market")].map(p => p.date))].sort();
+  const ixd = new Map(allDates.map((dt, i) => [dt, i]));
+  const icChart = allDates.length ? svgLine([
+    { name: "News read", color: SVG_ACC, points: icPts("news").map(p => ({ x: ixd.get(p.date), y: p.ic, tip: `${p.date}: IC ${fmtSig(p.ic, 3)} (n=${p.n})` })) },
+    { name: "Market read", color: "var(--ns-vbull)", points: icPts("market").map(p => ({ x: ixd.get(p.date), y: p.ic, tip: `${p.date}: IC ${fmtSig(p.ic, 3)} (n=${p.n})` })) },
+  ], { y0: true, fmt: v => v.toFixed(2) }) : '<div class="ns-panel-empty">No dated IC yet.</div>';
+  const icRow = (name, eng) => ["1d", "5d"].map(h => {
+    const o = ((d[eng] || {}).ic || {})[h] || {};
+    return `<td class="r">${o.mean != null ? fmtSig(o.mean, 3) : "—"}</td><td class="r">${o.t != null ? o.t.toFixed(2) : "—"}</td><td class="r">${o.n_days || 0}</td>`;
+  }).join("");
+  const tierTable = (eng) => {
+    const t = ((d.quants || {}).tier_table || {})[eng] || {};
+    const order = ["very_bearish", "bearish", "neutral", "no_edge", "bullish", "very_bullish"].filter(k => t[k]);
+    if (!order.length) return '<div class="ns-panel-empty">No tiered records yet.</div>';
+    return `<table class="ns-table ns-diag-table"><thead><tr><th>Tier</th><th class="r">n</th><th class="r">days</th><th class="r">fwd 1d</th><th class="r">fwd 5d</th></tr></thead><tbody>${
+      order.map(k => `<tr><td>${nsTierDot(k)} ${NS_LABELS[k]}</td><td class="r">${t[k].n}</td><td class="r">${t[k].n_days}</td><td class="r">${t[k].fwd_1d_pct != null ? fmtSig(t[k].fwd_1d_pct, 2) + "%" : "—"}</td><td class="r">${t[k].fwd_5d_pct != null ? fmtSig(t[k].fwd_5d_pct, 2) + "%" : "—"}</td></tr>`).join("")}</tbody></table>`;
+  };
+  const cal = (d.quants || {}).market_calibration || [];
+  const calChart = cal.length >= 2
+    ? svgLine([{ name: "Realized", color: SVG_ACC, points: cal.map(b => ({ x: b.z_mean, y: b.realized_pct, tip: `z ${fmtSig(b.z_mean, 2)} → ${fmtSig(b.realized_pct, 2)}% (n=${b.n})` })) }], { y0: true, fmt: v => v.toFixed(2) })
+    : '<div class="ns-panel-empty">Needs 25+ Market reads with a realized return.</div>';
+  parts.push(`<details class="ns-quants"><summary>For quants</summary>
+    <div class="ns-diag-sec"><h5>Daily cross-sectional IC (1d)</h5>${icChart}</div>
+    <div class="ns-diag-sec"><h5>Date-clustered IC</h5>
+      <table class="ns-table ns-diag-table"><thead><tr><th>Engine</th><th class="r">IC 1d</th><th class="r">t</th><th class="r">days</th><th class="r">IC 5d</th><th class="r">t (NW)</th><th class="r">days</th></tr></thead>
+      <tbody><tr><td>News read</td>${icRow("News read", "news")}</tr><tr><td>Market read</td>${icRow("Market read", "market")}</tr></tbody></table>
+      <div class="ns-diag-note">Mean of each day's Spearman correlation across holdings; t from the daily series (Newey-West, lag 4, for the overlapping 5-day returns). Pre-v1.12 history is included through a two-field compatibility map.</div></div>
+    <div class="ns-diag-sec"><h5>Forward return by tier — News read</h5>${tierTable("news")}</div>
+    <div class="ns-diag-sec"><h5>Forward return by tier — Market read</h5>${tierTable("market")}</div>
+    <div class="ns-diag-sec"><h5>Market read calibration (z quintiles vs realized ${d.market_horizon_days || 1}d)</h5>${calChart}</div>
+  </details>`);
+  body.innerHTML = parts.join("");
 }
 
 /* ===== Methodology modal (90% viewport) ==================================
- * A plain-language-first technical write-up of how the ML news-sentiment model
- * was built, tested, and how to read it. Numbers are the frozen mlsent-v1
- * validation results. Charts reuse the shared inline-SVG helpers above. */
+ * Two one-page explainers side by side — how the News read and the Market
+ * read work, what each is good at, where each is blind, and the validation
+ * numbers behind each. Numbers are frozen: the News read's from the gold-set
+ * benchmark (scripts/benchmark_news_read.py), the Market read's from the
+ * mlsent-v1.1 calibration and the v2 retrain (docs/ml_sentiment_design.md).
+ * Live performance is the Track record's job, not this page's. */
 let _methodologyBuilt = false;
 function openMethodology() {
   const bg = $("#methodology-bg"), modal = $("#methodology-modal");
@@ -7764,144 +7696,159 @@ function openMethodology() {
 }
 function closeMethodology() { hideOverlay("#methodology-bg"); }
 
-function mthPipelineSvg() {
-  const stages = [
-    ["News", "Finnhub + yfinance"],
-    ["Features", "TF-IDF + lexicon + events"],
-    ["LightGBM", "gradient-boosted trees"],
-    ["SAR", "abnormal return"],
-    ["5 tiers", "V.Bear → V.Bull"],
-  ];
-  const W = 900, H = 96, bw = 150, bh = 54, gap = (W - bw * stages.length) / (stages.length - 1);
+function mthPipelineSvg(stages) {
+  const W = 560, H = 78, bw = 100, bh = 50, gap = (W - bw * stages.length) / (stages.length - 1);
   let out = "";
   stages.forEach((s, i) => {
     const x = i * (bw + gap), y = (H - bh) / 2;
-    out += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="8" style="fill:var(--bg-subtle);stroke:${SVG_ACC}" stroke-width="1.4"/>`;
-    out += `<text x="${x + bw / 2}" y="${y + 22}" text-anchor="middle" style="fill:var(--text)" font-size="14" font-weight="700">${svgEsc(s[0])}</text>`;
-    out += `<text x="${x + bw / 2}" y="${y + 39}" text-anchor="middle" style="fill:var(--muted)" font-size="9.5">${svgEsc(s[1])}</text>`;
+    out += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="6" style="fill:var(--bg-subtle);stroke:${SVG_ACC}" stroke-width="1.2"/>`;
+    out += `<text x="${x + bw / 2}" y="${y + 21}" text-anchor="middle" style="fill:var(--text)" font-size="12.5" font-weight="700">${svgEsc(s[0])}</text>`;
+    out += `<text x="${x + bw / 2}" y="${y + 37}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${svgEsc(s[1])}</text>`;
     if (i < stages.length - 1) {
       const a2 = x + bw + gap;
-      out += `<line x1="${x + bw + 2}" y1="${H / 2}" x2="${a2 - 7}" y2="${H / 2}" style="stroke:${SVG_MUT}" stroke-width="1.6"/>`;
-      out += `<path d="M${a2 - 7},${H / 2 - 4} L${a2 - 1},${H / 2} L${a2 - 7},${H / 2 + 4} z" style="fill:${SVG_MUT}"/>`;
+      out += `<line x1="${x + bw + 2}" y1="${H / 2}" x2="${a2 - 6}" y2="${H / 2}" style="stroke:${SVG_MUT}" stroke-width="1.4"/>`;
+      out += `<path d="M${a2 - 6},${H / 2 - 3.5} L${a2 - 1},${H / 2} L${a2 - 6},${H / 2 + 3.5} z" style="fill:${SVG_MUT}"/>`;
     }
   });
   return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${out}</svg>`;
 }
 
 function methodologyHtml() {
-  // Frozen mlsent-v1 numbers (ml/data/reports/*.json + design doc).
-  const wf = [["2015", 0.0236], ["2016", 0.0383], ["2017", 0.0384], ["2018", 0.0309], ["2019", 0.0205], ["2020", 0.0639], ["2021", 0.0117], ["2022", 0.0159], ["2023", 0.042]];
-  const tShort = ["V.Bear", "Bear", "Neut", "Bull", "V.Bull"];
-  const decile = [-0.0747, -0.0299, 0.0053, -0.0055, -0.0142, 0.0207, -0.0158, -0.0187, -0.0259, 0.1222];
-
-  const chartWF = svgBars(wf.map(([y, v]) => ({ label: y, value: v, color: SVG_ACC, tip: `${y}: IC ${v.toFixed(4)}` })), { h: 190, w: 520, fmt: v => v.toFixed(3) });
-  const chartTiers = svgGroupedBars(tShort, [
-    { name: "Calibration", color: SVG_MUT, values: [-0.2616, -0.048, -0.0305, -0.0058, 0.1971] },
-    { name: "Holdout", color: SVG_ACC, values: [-0.0862, -0.0063, 0.0027, 0.008, 0.4589] },
-  ], { h: 210, w: 520, fmt: v => v.toFixed(3) });
-  const chartShift = svgBars([
-    { label: "real", value: 0.0263, color: SVG_ACC, tip: "Real IC 0.0263" },
-    { label: "+5d", value: -0.0122, color: SVG_NEG, tip: "+5d shifted −0.0122 — overreaction reversal, not leakage" },
-    { label: "−5d", value: 0.0051, color: SVG_MUT, tip: "−5d shifted 0.0051" },
-  ], { h: 170, w: 340, fmt: v => v.toFixed(4) });
-  const chartSel = svgGroupedBars(["Ridge (dense)", "Deployed LGBM"], [
-    { name: "Holdout window", color: SVG_MUT, values: [0.0418, 0.0263] },
-    { name: "Selection window", color: SVG_ACC, values: [0.005, 0.0336] },
-  ], { h: 190, w: 420, fmt: v => v.toFixed(3) });
-  const chartDecile = svgBars(decile.map((v, i) => ({ label: `D${i + 1}`, value: v, color: v >= 0 ? SVG_POS : SVG_NEG, tip: `Decile ${i + 1}: mean realized SAR ${v.toFixed(4)}` })), { h: 180, w: 520, fmt: v => v.toFixed(3) });
-
   const stat = (v, l) => `<div class="mth-stat"><b>${v}</b><span>${l}</span></div>`;
+  // mlsent-v1 encoder, per-headline walk-forward rank IC (frozen v1 validation).
+  const wf = [["2015", 0.0236], ["2016", 0.0383], ["2017", 0.0384], ["2018", 0.0309], ["2019", 0.0205],
+              ["2020", 0.0639], ["2021", 0.0117], ["2022", 0.0159], ["2023", 0.042]];
+  const chartWF = svgBars(wf.map(([y, v]) => ({ label: y, value: v, color: SVG_ACC, tip: `${y}: IC ${v.toFixed(4)}` })),
+    { h: 170, w: 520, fmt: v => v.toFixed(3) });
+  // mlsent-v1.1 tiers on Oct–Dec 2023 (tier_cuts.json holdout_verification).
+  const tiers = [["very_bearish", "V.Bear", 0.0365, 12.7, 5], ["bearish", "Bear", -0.0315, 10.7, 10],
+                 ["no_edge", "No edge", 0.0189, 65.7, 70], ["bullish", "Bull", -0.0285, 7.0, 10],
+                 ["very_bullish", "V.Bull", 0.0668, 4.0, 5]];
+  const chartTiers = svgBars(tiers.map(([k, l, v, m, d]) => ({ label: l, value: v, color: NS_COLORS[k],
+    tip: `${NS_LABELS[k]}: realized next-day SAR ${fmtSig(v, 3)}σ · ${m}% of reads (design ${d}%)` })),
+    { h: 170, w: 520, fmt: v => v.toFixed(3) });
+
   return `
   <div class="mth-head">
     <div>
-      <h2>How the News Sentiment Model Works</h2>
-      <div class="mth-sub">A return-trained signal — grounded in how stocks actually move on news, not a language model's opinion</div>
+      <h2>How the two reads work</h2>
+      <div class="mth-sub">Two independent engines read the same headlines. They answer different questions, so they are shown side by side and never blended.</div>
     </div>
     <button class="m-close" id="methodology-close" title="Close" aria-label="Close">×</button>
   </div>
   <div class="mth-body">
-    <div class="mth-stats">
-      ${stat("5.75M", "news articles trained on")}
-      ${stat("9 / 9", "years with positive signal")}
-      ${stat("+0.026", "holdout rank IC")}
-      ${stat("68%", "polarity sanity check")}
-    </div>
-
-    <section class="mth-sec">
-      <h3>1 · The idea</h3>
-      <p>Most sentiment tools ask a language model "does this headline sound good or bad?" We do something different: we teach a model what <b>the market itself</b> did after similar news in the past, so the score reflects likely price impact rather than tone.</p>
-      <ul>
-        <li>Ground truth is the stock's <b>own move right after the news</b>, with the market's move stripped out.</li>
-        <li>The model learns which words and events preceded real up- or down-moves — an evidence-based read, not a vibe.</li>
-        <li>Because it is trained on returns, the output is directly about "how much did this matter for the price?"</li>
-      </ul>
-      ${mthPipelineSvg()}
-    </section>
-
-    <section class="mth-sec">
-      <h3>2 · What "good news" means, numerically</h3>
-      <p>For every historical article we measure the stock's return over the first trading window that <i>starts after</i> the news (so we never peek at moves that already happened), remove the market's contribution, and divide by the stock's normal volatility. That gives a fair, comparable score called the <b>Standardized Abnormal Return (SAR)</b>.</p>
-      <ul>
-        <li><b>Timing-aware:</b> news after the close uses the overnight-to-next move; intraday news uses the next close-to-close.</li>
-        <li><b>Market-adjusted:</b> subtract <span class="mth-mono">β · index return</span> so a rising tide doesn't look like good news.</li>
-        <li><b>Volatility-standardized:</b> a 2% move means more for a calm stock than a jumpy one — dividing by volatility levels the field.</li>
-      </ul>
-      $$SAR = \\frac{r_{\\text{window}} - \\beta \\cdot m_{\\text{window}}}{\\sigma_{\\text{window}}}$$
-    </section>
-
-    <section class="mth-sec">
-      <h3>3 · The data</h3>
-      <p>Training used <b>FNSPID</b>, a public dataset of 5.75 million symbol-tagged US news articles from 2009–2023, joined to daily prices.</p>
-      <ul>
-        <li>The most recent six months were held out entirely as an <b>out-of-time test</b> — the model never saw them while learning.</li>
-        <li>Syndicated copies of the same story are collapsed so one press release doesn't count ten times.</li>
-        <li>All trailing statistics (volatility, beta) use only data available <i>before</i> each article — a strict no-look-ahead rule.</li>
-      </ul>
-    </section>
-
-    <section class="mth-sec">
-      <h3>4 · The model</h3>
-      <p>Headlines and summaries become numeric features; a <b>LightGBM</b> gradient-boosted-tree model maps them to a predicted SAR.</p>
-      <ul>
-        <li><b>Text features:</b> hashed word/phrase counts (TF-IDF) plus a finance dictionary (Loughran-McDonald) and ~16 event flags (earnings, M&A, guidance, legal…).</li>
-        <li><b>Relevance</b> — how much a story is really <i>about</i> the company — is a transparent hand-built rule, deliberately <i>not</i> machine-learned, so a future relevance model can be trained on the same data without contamination.</li>
-        <li>The model is intentionally small (56 trees) — on noisy financial text, bigger overfits. It is judged by rank correlation with returns, not by fit.</li>
-      </ul>
-    </section>
-
-    <section class="mth-sec">
-      <h3>5 · Does it work?</h3>
-      <p>A single news score is a weak predictor — but a small, <i>consistent</i> edge applied across hundreds of names is exactly how quant signals add value. The evidence below is from the untouched test period.</p>
-      <div class="mth-charts">
-        <div class="mth-chart"><h4>Signal every year (walk-forward rank IC)</h4>${chartWF}<p class="mth-cap">Positive in all 9 years, and no single year carries it (max 22% of the total). This is stability, not a one-year fluke.</p></div>
-        <div class="mth-chart"><h4>Higher tier → higher realized return</h4>${chartTiers}<p class="mth-cap">Average realized return rises from the Very Bearish to the Very Bullish tier on both the calibration and the untouched holdout set.</p></div>
-        <div class="mth-chart"><h4>No look-ahead leakage</h4>${chartShift}<p class="mth-cap">Shifting the label 5 days <i>forward</i> kills the signal (and even reverses — the classic overreaction bounce), exactly what a clean, non-leaking model should show.</p></div>
-        <div class="mth-chart"><h4>The honest-baseline test</h4>${chartSel}<p class="mth-cap">A simpler model looked better on one window (0.042) but collapsed on the next (0.005); the deployed model was the only one consistent across both — so it shipped.</p></div>
-        <div class="mth-chart"><h4>Prediction decile vs realized return</h4>${chartDecile}<p class="mth-cap">The top decile of predictions clearly precedes the strongest realized moves — the model concentrates its conviction where it counts.</p></div>
+   <div class="mth-cols">
+    <article class="mth-col">
+      <h3 class="mth-col-title">How the News read works</h3>
+      <p class="mth-lead"><b>What the news says.</b> A large language model reads each of the holding's recent headlines and says what it is about and whether it is good or bad for the company.</p>
+      ${mthPipelineSvg([["Headlines", "Finnhub + Yahoo"], ["Dedupe", "syndicated copies"],
+                        ["Read ×2", "lens · score · fact"], ["Lenses", "weighted means"], ["Tier", "fixed cuts"]])}
+      <div class="mth-stats">
+        ${stat("86%", "right lens (149 hand-labelled headlines)")}
+        ${stat("88%", "right direction")}
+        ${stat("96%", "two-pass agreement")}
       </div>
-      <p class="mth-note">Other gates passed too: the real signal is ~6σ above a shuffled-label null, a leakage spot-check found 0 violations in 44 samples, and on the Financial PhraseBank benchmark the model's sign matches human labels 68% of the time.</p>
-    </section>
+      <section class="mth-sec">
+        <h4>How it reads</h4>
+        <ul>
+          <li>Each headline gets one lens (<b>Financials, Outlook, Competition, Regulation, Street view</b>), a score from −2 to +2, and a one-line fact.</li>
+          <li>M&amp;A, buybacks, dividends, financing and insider news is tagged <i>other</i>: it counts toward the overall read but has no lens row. Headlines that are not about the company (listicles, "X vs. Y", market wraps) are tagged <i>none</i> and carry no weight.</li>
+          <li>The batch is read <b>twice</b>, independently. The two passes are averaged, a headline counts only if both passes say it is about the company, and the share of headlines on which they agree is shown on every card.</li>
+          <li>Lens and overall scores are weighted means: newer, better-sourced and less recycled headlines count more.</li>
+          <li>Tiers are <b>fixed</b> on the −2…+2 scale, so "Bullish" means the same thing every day and for every stock: ≥ 1.25 very bullish, ≥ 0.4 bullish, between ±0.4 mixed, ≤ −0.4 bearish, ≤ −1.25 very bearish.</li>
+        </ul>
+      </section>
+      <section class="mth-sec">
+        <h4>Worked example: Datadog</h4>
+        <p>The quarter Datadog beat and raised and the stock still fell 19%: the read put <b>Financials at +2</b> (the results) and <b>Outlook at −1</b> (what it said about the quarters ahead), the same on both passes. A single number would have averaged that into "mildly bullish" and hidden the story; the lenses keep both halves visible.</p>
+      </section>
+      <section class="mth-sec">
+        <h4>Good at</h4>
+        <ul>
+          <li>Explaining a move: every lens score links to the headlines behind it.</li>
+          <li>Separating a beat from a guide-down, and a lawsuit from an analyst downgrade.</li>
+          <li>Spotting that a headline is not about the company at all (96% recall on the gold set).</li>
+        </ul>
+        <h4>Blind spots</h4>
+        <ul>
+          <li>It only knows what was published, not what the market expected: a beat that missed the whisper number still reads as good news.</li>
+          <li>It can misattribute. A rival's news can land in Competition (a Samsung memory chip filed under Nvidia is on the gold set's miss list).</li>
+          <li>It does not see the price. That is what the Market read and the ⇄ divergence flag are for.</li>
+        </ul>
+      </section>
+      <section class="mth-sec">
+        <h4>Validation</h4>
+        <p class="mth-small">Gold set of 149 headlines across 51 tickers, labelled by hand: lens 85.6% (92.9% on the 111 unambiguous ones), "not about the company" precision 87.8% / recall 95.6%, direction 87.5% of 96 directional headlines. Financial PhraseBank: direction 94% of 200 sentences. JSON valid 100%, p95 latency 9.6 s per ticker. Model <code>nvidia/nemotron-3-super-120b-a12b</code> on NVIDIA NIM.</p>
+      </section>
+      <details class="mth-formula"><summary>Formulas</summary>
+        <p>Weight of headline <i>i</i> (age in days, τ scaled with the window; 3 days on 7D):</p>
+        $$w_i = e^{-\\text{age}_i/\\tau}\\;\\cdot\\;q_{\\text{source}(i)}\\;\\cdot\\;\\frac{1}{1 + \\tfrac12\\ln(1+\\text{dup}_i)}$$
+        <p>Score of lens <i>k</i> (and the overall read, over every headline not tagged <i>none</i>), with <i>s</i> the mean of the two passes:</p>
+        $$L_k = \\frac{\\sum_{i \\in k} w_i\\, s_i}{\\sum_{i \\in k} w_i}, \\qquad s_i = \\tfrac12\\left(s_i^{(1)} + s_i^{(2)}\\right)$$
+        <p>Agreement is the share of headlines given the same lens by both passes with scores at most 1 apart.</p>
+      </details>
+    </article>
 
-    <section class="mth-sec">
-      <h3>6 · The five tiers</h3>
-      <p>Predicted SARs are turned into the five familiar labels using calibrated cut-points, so each tier means the same thing over time.</p>
-      <ul>
-        <li>Cuts are set on out-of-sample predictions, not the test set, and require the middle "neutral" band to carry essentially no directional signal.</li>
-        <li>The tier averages must increase in order and stay stable under resampling before the cuts are frozen.</li>
-        <li>Tier populations drift as markets change, so the cuts are <b>recalibrated quarterly</b>.</li>
-      </ul>
-    </section>
-
-    <section class="mth-sec">
-      <h3>7 · Limitations &amp; what's next</h3>
-      <ul>
-        <li>This is a <b>probabilistic edge, not a crystal ball</b> — any single call can be wrong; the value is in the average across many.</li>
-        <li>It reads text, so it can't know a number the market already expected — genuine surprise is what it captures best.</li>
-        <li>The legacy LLM signal is kept as a live <b>challenger</b> in Model Diagnostics; where the two disagree is often the most interesting place to look.</li>
-        <li>As of v1.6.1 the ML model is the <b>primary</b> displayed signal; its live performance is tracked in the diagnostics panels below and reviewed on an ongoing basis.</li>
-      </ul>
-    </section>
-    <div class="mth-foot">Model <code>mlsent-v1</code> · trained on FNSPID 2009–2023 · held-out test Jul–Dec 2023. Numbers shown are the frozen validation results; live performance is in Model Diagnostics.</div>
+    <article class="mth-col">
+      <h3 class="mth-col-title">How the Market read works</h3>
+      <p class="mth-lead"><b>How prices have reacted to news like this.</b> A statistical model trained on 4.3 million historical headlines against what the stocks did next, turned into an expected move and a percentile.</p>
+      ${mthPipelineSvg([["Headlines", "last 7 days"], ["Encoder", "LightGBM, text"],
+                        ["Per headline", "predicted SAR"], ["Weighted", "ticker score"], ["Percentile", "tails only"]])}
+      <div class="mth-stats">
+        ${stat("4.3M", "headlines trained on (FNSPID 2009–2023)")}
+        ${stat("0.026", "per-headline rank IC, 2023 holdout")}
+        ${stat("None", "out-of-sample edge shown per ticker")}
+      </div>
+      <section class="mth-sec">
+        <h4>How it reads</h4>
+        <ul>
+          <li>Ground truth is each stock's own next-day move after the news, net of the market and divided by its normal volatility (the standardized abnormal return, SAR).</li>
+          <li>An encoder (gradient-boosted trees on word and phrase counts, a finance dictionary and ~16 event flags) predicts each headline's SAR. The ticker's score is the recency × source × novelty × relevance weighted mean over its last 7 days.</li>
+          <li>The score is placed as a <b>percentile</b>: against the app's own last 90 days of Market reads once it has 200 of them, and against the Jul–Sep 2023 backtest until then. Every card says which.</li>
+          <li>Only the tails speak: ≤ 5th percentile very bearish, ≤ 15th bearish, ≥ 85th bullish, ≥ 95th very bullish. The middle 70% is <b>No edge</b>.</li>
+        </ul>
+      </section>
+      <section class="mth-sec">
+        <h4>Good at</h4>
+        <ul>
+          <li>A base rate from history that does not depend on a language model's judgement, and is the same every time for the same headlines.</li>
+          <li>A second opinion to hold against the News read: the ⇄ flag marks where they disagree.</li>
+        </ul>
+        <h4>Blind spots</h4>
+        <ul>
+          <li><b>Weak on average.</b> Per headline, rank IC 0.026 on the 2023 holdout. Per ticker per day, the score's IC was 0.016 on Oct–Dec 2023 (t 2.2, 59 days), but both extreme tiers realized the <i>wrong</i> sign. No out-of-sample edge has been shown; the Track record is the live test.</li>
+          <li>Blind to nuance: it counts words, so "beat but guided down" and "beat and raised" look alike.</li>
+          <li>Its output level drifts with the news mix. That is why the percentile is anchored to recent live reads rather than fixed cut-points.</li>
+        </ul>
+      </section>
+      <section class="mth-sec">
+        <h4>Validation</h4>
+        <div class="mth-chart"><h4>Encoder, per headline: walk-forward rank IC</h4>${chartWF}
+          <p class="mth-cap">Positive in all 9 years. This is the per-headline encoder that ships.</p></div>
+        <div class="mth-chart"><h4>Ticker tiers, Oct–Dec 2023: realized next-day SAR</h4>${chartTiers}
+          <p class="mth-cap">Calibrated on Jul–Sep 2023, verified on the next quarter. The tails did not hold their sign, and the tier shares drifted (12.7% landed in very bearish against 5% by design) — the reason for live anchoring.</p></div>
+        <table class="mth-table">
+          <thead><tr><th>Ticker-day score</th><th>Window</th><th>Daily IC</th><th>t</th><th>Gate</th></tr></thead>
+          <tbody>
+            <tr><td>v2 retrain, 1 day</td><td>Jul–Dec 2023</td><td>0.0095</td><td>1.4</td><td>fail (needs ≥ 0.03, t ≥ 3)</td></tr>
+            <tr><td>v2 retrain, 5 days</td><td>Jul–Dec 2023</td><td>0.0065</td><td>0.7</td><td>fail</td></tr>
+            <tr><td>v1.1, 1 day</td><td>Jul–Dec 2023</td><td>0.0072</td><td>—</td><td>baseline</td></tr>
+            <tr><td>v1.1, 1 day (shipped)</td><td>Oct–Dec 2023</td><td>0.0157</td><td>2.2</td><td>tier shares &amp; tail signs fail</td></tr>
+          </tbody>
+        </table>
+        <p class="mth-small">The v2 retrain learned a second model over 17 ticker-day features (the encoder's scores plus attention and price context). Its best candidate was a plain ridge regression (the boosted trees never beat it), positive in all 9 walk-forward years at 1 day, but far below the gate, so v2 was not shipped. Leakage spot-check: 0 of 40 mismatches.</p>
+      </section>
+      <details class="mth-formula"><summary>Formulas</summary>
+        <p>Label: next-day return net of β × market, over trailing volatility (winsorized at ±5):</p>
+        $$\\text{SAR} = \\frac{r_{t+1} - \\beta\\, m_{t+1}}{\\sigma_{t}}$$
+        <p>Ticker score over the 7-day window, with <i>ŝ<sub>i</sub></i> the encoder's prediction and <i>ρ<sub>i</sub></i> relevance:</p>
+        $$S = \\frac{\\sum_i w_i\\, \\rho_i\\, \\hat s_i}{\\sum_i w_i\\, \\rho_i}$$
+        <p>Percentile against the reference set <i>H</i> (live reads, or the 2023 backtest):</p>
+        $$p = 100 \\cdot \\frac{\\#\\{h \\in H : h < S\\} + \\tfrac12 \\#\\{h \\in H : h = S\\}}{|H|}$$
+      </details>
+    </article>
+   </div>
+   <div class="mth-foot">News read: <code>nvidia/nemotron-3-super-120b-a12b</code>. Market read: <code>mlsent-v1.1</code> (encoder trained on FNSPID 2009–2023). Numbers here are frozen validation results; live performance is in the Track record.</div>
   </div>`;
 }
 
@@ -9834,6 +9781,7 @@ function loadAppVersion() {
     // announces itself on page load rather than waiting for the user to open
     // the one panel that would have explained it.
     if (d.env_ok === false) showEnvBanner();
+    syncLlmBanner(d);
     if (!d.version) return;
     APP_VERSION = { version: d.version, date: d.version_date };
     document.querySelectorAll(".an-version").forEach(el => { el.textContent = versionLabel(); });
@@ -9841,7 +9789,7 @@ function loadAppVersion() {
 }
 
 /* A missing runtime package used to be invisible: the app just quietly ran
-   degraded (ML sentiment dead, LLM fallback shown) and the only clue was one
+   degraded (the statistical model dead for weeks) and the only clue was one
    line in a log pane nobody opens. This is the loud version. Dismissal is
    session-scoped on purpose — a broken environment should keep asking. */
 function showEnvBanner() {
@@ -9850,7 +9798,7 @@ function showEnvBanner() {
   bar.id = "env-banner";
   bar.className = "env-banner";
   bar.innerHTML = `<span>A required package is missing, so part of the app is running
-    degraded (ML news sentiment falls back to the LLM). Run <code>./update.sh</code> and
+    degraded (the Market read is off). Run <code>./update.sh</code> and
     relaunch.</span>
     <button class="env-banner-link" id="env-banner-open">Details</button>
     <button class="env-banner-x" id="env-banner-x" aria-label="Dismiss">&times;</button>`;
@@ -9863,6 +9811,40 @@ function showEnvBanner() {
     selectSettingsSection("models");
     openSettings();
   };
+}
+
+/* The News read once died silently: NVIDIA retired its model, every call
+   returned 410, and refreshes kept serving August's reads for a month. The
+   server now records the last LLM outcome (news_sentiment.llm_status) and
+   /api/health carries it; this turns it into the same loud banner a missing
+   package gets. It clears itself on the next health check that reads ok. */
+function syncLlmBanner(health) {
+  const old = document.getElementById("llm-banner");
+  if (!health || health.llm_ok !== false) { if (old) old.remove(); return; }
+  if (old) {
+    old.querySelector(".llm-banner-reason").textContent = health.llm_error || "unknown reason";
+    return;
+  }
+  const bar = document.createElement("div");
+  bar.id = "llm-banner";
+  bar.className = "env-banner";
+  bar.innerHTML = `<span>News read unavailable: <b class="llm-banner-reason"></b>. The Market
+    read and cached reads still work; News reads are marked stale until this clears.</span>
+    <button class="env-banner-link" id="llm-banner-open">Details</button>
+    <button class="env-banner-x" id="llm-banner-x" aria-label="Dismiss">&times;</button>`;
+  bar.querySelector(".llm-banner-reason").textContent = health.llm_error || "unknown reason";
+  const topbar = document.getElementById("topbar");
+  if (topbar && topbar.parentNode) topbar.parentNode.insertBefore(bar, topbar.nextSibling);
+  else document.body.insertBefore(bar, document.body.firstChild);
+  document.getElementById("llm-banner-x").onclick = () => bar.remove();
+  document.getElementById("llm-banner-open").onclick = () => {
+    bar.remove();
+    selectSettingsSection("models");
+    openSettings();
+  };
+}
+function checkLlmHealth() {
+  fetch("/api/health").then(r => r.json()).then(syncLlmBanner).catch(() => {});
 }
 
 /* --- Settings overlay ----------------------------------------------------
@@ -9928,18 +9910,21 @@ const SETTINGS_SECTIONS = [
     group: "Data & models",
     label: "Models & Data",
     icon: "◉",
-    description: "Whether the return-trained ML sentiment model is actually running, and "
-               + "which news providers are configured. If ML scores are missing, the reason is here.",
+    description: "Whether the two news engines are actually running — the News read (LLM) "
+               + "and the Market read (statistical model) — and which news providers are "
+               + "configured. If reads are missing or stale, the reason is here.",
     keywords: ["ml", "machine learning", "lightgbm", "sklearn", "model", "sentiment", "news",
                "llm", "nvidia", "finnhub", "api key", "artifact", "not running", "broken",
-               "dependencies", "environment"],
+               "dependencies", "environment", "news read", "market read", "stale", "retired"],
     items: [
-      { id: "ml-runtime", label: "ML sentiment model",
+      { id: "llm-runtime", label: "News read (LLM)",
+        keywords: ["llm", "nvidia", "nim", "model", "retired", "410", "stale"] },
+      { id: "ml-runtime", label: "Market read (statistical model)",
         keywords: ["available", "reason", "artifact", "mlsent", "version", "lightgbm"] },
       { id: "env", label: "Runtime dependencies",
         keywords: ["packages", "missing", "conda", "update.sh", "environment"] },
       { id: "providers", label: "News providers",
-        keywords: ["finnhub", "nvidia", "nim", "api key", "llm model", "lexicon"] },
+        keywords: ["finnhub", "nvidia", "nim", "api key", "lexicon"] },
     ],
     render: renderSettingsModels,
   },
@@ -10276,6 +10261,11 @@ function renderSettingsModels(el) {
   const pill = rt.available
     ? `<span class="settings-status-pill ok">Running</span>`
     : `<span class="settings-status-pill bad">Not running</span>`;
+  const keys = d.keys || {};
+  const llmPill = keys.llm_ok === false
+    ? `<span class="settings-status-pill bad">Unavailable</span>`
+    : keys.llm_ok === true ? `<span class="settings-status-pill ok">Running</span>`
+    : `<span class="settings-status-pill">Not called yet</span>`;
   const kv = (k, v) => `<div class="settings-kv-k">${k}</div><div class="settings-kv-v">${v}</div>`;
   let mlBody = `<div class="settings-kv">
       ${kv("Artifact", escapeHtml(rt.version || "—"))}
@@ -10306,21 +10296,27 @@ function renderSettingsModels(el) {
         ${kv("Interpreter", escapeHtml(env.executable || "—"))}
         ${kv("Python", escapeHtml(env.python || "—"))}</div>`;
 
-  const keys = d.keys || {};
   const yn = (b) => b ? `<span class="settings-ok-text">configured</span>`
                       : `<span class="settings-bad-text">not found</span>`;
   const provBody = `<div class="settings-kv">
       ${kv("Finnhub (news)", yn(keys.finnhub_key_set))}
-      ${kv("NVIDIA NIM (LLM)", yn(keys.nvidia_key_set))}
-      ${kv("LLM model", escapeHtml(keys.llm_model || "—"))}
-      ${kv("LM lexicon", keys.lexicon_available ? "loaded" : "unavailable")}
+      ${kv("NVIDIA NIM (News read)", yn(keys.nvidia_key_set))}
+      ${kv("LM lexicon (Market read feature)", keys.lexicon_available ? "loaded" : "unavailable")}
     </div>
     <div class="settings-row-help">Keys are read from environment variables or the
       <code>.finnhub_key</code> / <code>.nvidia_key</code> files beside the app. Only
       whether they were found is shown here — never their values.</div>`;
 
+  const llmBody = `<div class="settings-kv">
+      ${kv("Model", escapeHtml(keys.llm_model || "—"))}
+      ${keys.llm_ok === false ? kv("Reason", `<span class="settings-bad-text">${escapeHtml(keys.llm_error || "unknown")}</span>`) : ""}
+    </div>
+    <div class="settings-row-help">Reads each holding's headlines through five lenses, twice.
+      Its status is the outcome of the last call; a failed refresh keeps the previous read and
+      marks it stale.</div>`;
   el.innerHTML =
-    settingsRow({ id: "ml-runtime", label: `ML sentiment model ${pill}`, control: "", help: mlBody }) +
+    settingsRow({ id: "llm-runtime", label: `News read (LLM) ${llmPill}`, control: "", help: llmBody }) +
+    settingsRow({ id: "ml-runtime", label: `Market read (statistical model) ${pill}`, control: "", help: mlBody }) +
     settingsRow({ id: "env", label: "Runtime dependencies", help: envBody }) +
     settingsRow({ id: "providers", label: "News providers", help: provBody });
 

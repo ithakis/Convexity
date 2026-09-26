@@ -195,3 +195,118 @@ def feature_schema() -> dict:
         "event_patterns_md5": hashlib.md5(patterns_blob.encode()).hexdigest(),
         "session_classes": list(SESSION_CLASSES),
     }
+
+
+# ------------------------------------------------------------------ ticker-day window
+# The Market read scores a TICKER on an as-of day from its trailing window —
+# the unit the app shows. SERVED (ml_sentiment.market_read, mlsent-v1.1):
+# the window constants, article_weight and weighted_sar — the v1.1 score is
+# the weighted mean of the encoder's per-article predictions. ml/scripts/06
+# computes the calibration panel's `enc_wmean` through the same functions, so
+# the tier cuts are fitted on exactly the number the app produces.
+#
+# window_vector / attention_shock / WINDOW_COLUMNS build the richer panel the
+# v2 window model was trained on (ml/scripts/07-08). v2 failed its gates and
+# is not served; they stay here only because 06 builds one panel for both
+# (docs/ml_sentiment_design.md has the v2 evidence). No raw article count is
+# in that panel: live Finnhub volume for a large cap is 10-50x what FNSPID
+# tags per ticker; attn_shock is the scale-free version.
+RECENCY_TAU_DAYS = 3.0
+WINDOW_DAYS = 7            # articles dated D-6..D (ET calendar days)
+ATTN_BASE_DAYS = 60        # attention baseline: the 60 days before the window
+# The window's article set is capped exactly like the app's retained set
+# (relevance.window_sample(articles, WINDOW_CAP, WINDOW_MIN_RECENT)) in both
+# training and serving: max/min/share statistics depend on how many articles
+# they range over, and live volume for a large cap dwarfs FNSPID's.
+WINDOW_CAP = 60
+WINDOW_MIN_RECENT = 15
+WINDOW_COLUMNS: list[str] = [
+    "enc_mean", "enc_max", "enc_min", "enc_wmean",
+    "lm_mean", "unc_mean",
+    "attn_shock",
+    "share_tier1", "mean_log_dup", "share_boiler",
+    "fresh_days",
+    "tkr_ret_1d", "tkr_ret_5d", "tkr_ret_20d", "tkr_vol_20d",
+    "spy_ret_5d", "spy_vol_20d",
+]
+PRICE_COLUMNS = WINDOW_COLUMNS[-6:]
+
+
+def _num(v) -> float:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return math.nan
+    return v if math.isfinite(v) else math.nan
+
+
+def article_weight(a: dict, now: float, tau: float = RECENCY_TAU_DAYS) -> float:
+    """recency x source x novelty x relevance — the evidence weight of one
+    article in a ticker's window. Articles carry either a numeric
+    `publisher_tier` (training rows) or a raw `source` string (live)."""
+    age_d = max(0.0, (now - float(a.get("datetime") or now)) / 86400.0)
+    tier = a.get("publisher_tier")
+    w_src = float(tier) if tier is not None else publisher_tier(a.get("source"))
+    w_nov = 1.0 / (1.0 + 0.5 * math.log1p(float(a.get("n_duplicates", 0) or 0)))
+    rel = a.get("relevance")
+    return math.exp(-age_d / tau) * w_src * w_nov * float(0.5 if rel is None else rel)
+
+
+def weighted_sar(articles: list[dict], now: float, key: str = "sar_pred"):
+    """(weighted mean of a[key], total weight) over articles that carry it,
+    or (None, 0.0). The v1.1 Market read IS this number."""
+    wsum = ssum = 0.0
+    for a in articles:
+        v = a.get(key)
+        if v is None or not math.isfinite(float(v)):
+            continue
+        w = article_weight(a, now)
+        wsum += w
+        ssum += w * float(v)
+    if wsum <= 0:
+        return None, 0.0
+    return ssum / wsum, wsum
+
+
+def attention_shock(rate_window: float, rate_base: float) -> float:
+    """log of (7-day article rate) vs (the ticker's prior-60-day rate), both in
+    articles/day, add-one smoothed per 7 days so a first-ever article is a
+    finite, large shock rather than an infinity."""
+    return math.log((7.0 * max(0.0, rate_window) + 1.0) / (7.0 * max(0.0, rate_base) + 1.0))
+
+
+def window_vector(articles: list[dict], now: float, rate_window: float,
+                  rate_base: float, price: dict | None = None) -> list[float]:
+    """One v2 window-panel feature row (training only). `articles` are the window's deduped items:
+    {sar_pred, lm, unc, publisher_tier|source, n_duplicates, relevance,
+    boiler, datetime}. `price` holds PRICE_COLUMNS as of the last completed
+    session BEFORE the as-of day. Missing values are NaN (LightGBM routes
+    them; never impute here or train and serve drift apart)."""
+    preds = [float(a["sar_pred"]) for a in articles
+             if a.get("sar_pred") is not None and math.isfinite(float(a["sar_pred"]))]
+    lms = [float(a["lm"]) for a in articles
+           if a.get("lm") is not None and math.isfinite(float(a["lm"]))]
+    n = len(articles)
+    wmean, _ = weighted_sar(articles, now)
+    ages = [max(0.0, (now - float(a.get("datetime") or now)) / 86400.0) for a in articles]
+    tiers = [float(a["publisher_tier"]) if a.get("publisher_tier") is not None
+             else publisher_tier(a.get("source")) for a in articles]
+    price = price or {}
+    row = [
+        sum(preds) / len(preds) if preds else math.nan,
+        max(preds) if preds else math.nan,
+        min(preds) if preds else math.nan,
+        wmean if wmean is not None else math.nan,
+        sum(lms) / len(lms) if lms else math.nan,
+        (sum(_num(a.get("unc")) if math.isfinite(_num(a.get("unc"))) else 0.0
+             for a in articles) / n) if n else math.nan,
+        attention_shock(rate_window, rate_base),
+        (sum(1.0 for t in tiers if t >= 1.0) / n) if n else math.nan,
+        (sum(math.log1p(float(a.get("n_duplicates", 0) or 0)) for a in articles) / n)
+        if n else math.nan,
+        (sum(1.0 for a in articles if a.get("boiler")) / n) if n else math.nan,
+        min(ages) if ages else math.nan,
+        *[_num(price.get(c)) for c in PRICE_COLUMNS],
+    ]
+    assert len(row) == len(WINDOW_COLUMNS)
+    return row

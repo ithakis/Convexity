@@ -13,7 +13,9 @@ dashboard.py — keep them in sync when extending):
              analyze_portfolios_multi). Time-series payloads are deliberately
              excluded from the workbook.
        3. Holdings table: one row per ticker, every field the row payload
-          carries, PLUS analyst recommendations fetched at export time.
+          carries, the two news reads (SENTIMENT_COLS: News read tier, one
+          column per lens, Market read tier and z, the divergence sentence),
+          PLUS analyst recommendations fetched at export time.
   • The first sheet ("Overview") lists every portfolio with the headline
     analytics side-by-side, for quick cross-portfolio comparison.
 
@@ -112,7 +114,46 @@ HOLDINGS_SKIP_EXTRAS = {
     # rendered in the dedicated ANALYST_COLS block; skip the auto-extras
     # pass so they don't duplicate.
     "forward_pe", "ev_ebitda", "recommendation_mean", "target_mean_price",
+    # Rendered as the dedicated SENTIMENT_COLS block below instead of a
+    # "[5 keys]" blob.
+    "news_sentiment",
 }
+
+# News read (LLM, five lenses) + Market read (statistical) — the two engines
+# the News tab shows, flattened for the sheet. Keys are resolved from the
+# row's `news_sentiment` payload by _sentiment_value().
+SENTIMENT_COLS: list[tuple[str, str]] = [
+    ("ns:news_tier",        "News read"),
+    ("ns:lens:financials",  "News · Financials (−2..+2)"),
+    ("ns:lens:outlook",     "News · Outlook (−2..+2)"),
+    ("ns:lens:competition", "News · Competition (−2..+2)"),
+    ("ns:lens:regulation",  "News · Regulation (−2..+2)"),
+    ("ns:lens:street",      "News · Street view (−2..+2)"),
+    ("ns:market_tier",      "Market read"),
+    ("ns:market_z",         "Market read z (σ)"),
+    ("ns:divergence",       "Divergence"),
+]
+
+
+def _sentiment_value(key: str, s) -> object:
+    """One SENTIMENT_COLS cell from a row's two-engine sentiment dict."""
+    if not isinstance(s, dict):
+        return None
+    news, market = s.get("news") or {}, s.get("market") or {}
+    if key == "ns:news_tier":
+        t = news.get("tier")
+        return t.replace("_", " ") + (" (stale)" if news.get("stale") else "") if t else None
+    if key.startswith("ns:lens:"):
+        lens = (news.get("lenses") or {}).get(key.split(":", 2)[2])
+        return lens.get("score") if isinstance(lens, dict) else None
+    if key == "ns:market_tier":
+        t = market.get("tier")
+        return t.replace("_", " ") if t else None
+    if key == "ns:market_z":
+        return market.get("z")
+    if key == "ns:divergence":
+        return (s.get("divergence") or {}).get("text")
+    return None
 
 # Stats keys (under analytics["stats"]) in display order — these are the
 # rows of the prominent "Portfolio Metrics" block.
@@ -489,7 +530,7 @@ def _write_portfolio_sheet(
     extra_keys = sorted(extra_keys_all - primary_keys - HOLDINGS_SKIP_EXTRAS)
     extra_cols = [(k, k) for k in extra_keys]
 
-    headers = HOLDINGS_PRIMARY_COLS + extra_cols + ANALYST_COLS
+    headers = HOLDINGS_PRIMARY_COLS + SENTIMENT_COLS + extra_cols + ANALYST_COLS
     _write_header_cells(ws, r, [label for _key, label in headers])
     header_row = r
 
@@ -527,6 +568,8 @@ def _write_portfolio_sheet(
                     # forward_pe, ev_ebitda, peg, beta_info, dividend_yield —
                     # not in the per-portfolio analyst block; rely on fallback.
                     v = fallback_row.get(key)
+            elif key.startswith("ns:"):
+                v = _sentiment_value(key, row_data.get("news_sentiment"))
             else:
                 v = row_data.get(key)
             ws.cell(row=r, column=col_idx, value=_flatten_value(v))

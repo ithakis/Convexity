@@ -7,11 +7,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import time
+
 from portfolio_tracker.relevance import (
     cluster_titles,
+    is_boilerplate,
     is_near_duplicate,
     norm_title,
     relevance_score,
+    window_sample,
 )
 
 
@@ -76,3 +80,43 @@ def test_relevance_bounds_and_determinism():
     s1, s2 = relevance_score(*args), relevance_score(*args)
     assert s1 == s2
     assert 0.05 <= s1 <= 1.0
+
+
+def test_is_boilerplate_flags_roundups_only():
+    assert is_boilerplate("Top 10 stocks to watch this week")
+    assert is_boilerplate("Market wrap: Dow slips")
+    assert not is_boilerplate("Acme raises full-year guidance")
+    assert not is_boilerplate(None)
+
+
+# window_sample is shared by the app's retained article set and the Market
+# read's training panel (ml/scripts/06), so its shape is a train/serve contract.
+def test_window_sample_spans_window_instead_of_collapsing_to_newest():
+    now = time.time()
+    arts = [{"headline": f"h{i}", "datetime": now - i * (7 * 86400 / 40), "url": f"u{i}"}
+            for i in range(40)]
+    out = window_sample(arts, cap=25, min_recent=10)
+    span_days = (out[0]["datetime"] - out[-1]["datetime"]) / 86400.0
+    assert span_days > 5.0  # a plain newest-25 cut would only span ~4.4 days
+    assert out[:10] == arts[:10]  # newest `min_recent` kept verbatim, in order
+
+
+def test_window_sample_zero_timestamp_does_not_collapse_the_window():
+    # A single datetime==0 article (unparsed yfinance pubDate) used to make
+    # tmin=0, so every dated article landed in the last bucket.
+    now = time.time()
+    dated = [{"headline": f"h{i}", "datetime": now - i * 3600, "url": f"u{i}"}
+             for i in range(40)]
+    out = window_sample(dated + [{"headline": "unparsed", "datetime": 0, "url": "uz"}],
+                        cap=30, min_recent=10)
+    assert len(out) > 20
+
+
+def test_window_sample_all_zero_timestamps_does_not_crash():
+    arts = [{"headline": f"z{i}", "datetime": 0, "url": f"u{i}"} for i in range(20)]
+    assert len(window_sample(arts, cap=15, min_recent=5)) == 15
+
+
+def test_window_sample_is_a_no_op_below_the_cap():
+    arts = [{"headline": "a", "datetime": 1}, {"headline": "b", "datetime": 0}]
+    assert window_sample(arts, cap=60, min_recent=15) is arts

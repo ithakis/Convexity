@@ -208,8 +208,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             # A dead client is NOT a cancel — the job keeps running and the
-            # client reattaches at its last seq. (Contrast /api/news-refresh,
-            # which silenced writes but kept burning API quota unattended.)
+            # client reattaches at its last seq. (The deleted standalone news
+            # refresh route silenced writes but kept burning API quota.)
             return
 
     def _serve_static(self, rel_path: str) -> bool:
@@ -253,10 +253,17 @@ class Handler(BaseHTTPRequestHandler):
             # no I/O — so it is safe on this hot, every-page-load route. It is
             # what drives the "a required package is missing" banner; the
             # expensive detail lives on /api/runtime-status.
+            # llm_ok is equally cheap: the News read's last recorded outcome,
+            # no network. False (with llm_error) drives "News read
+            # unavailable: <reason>" — the model was retired once and the app
+            # kept showing August's sentiment without a word.
+            llm = _ns.llm_status() if _ns is not None else {"ok": False,
+                                                            "error": "news module unavailable"}
             self._send_json(200, {
                 "ok": True, "ts": datetime.now(timezone.utc).isoformat(),
                 "version": __version__, "version_date": __version_date__,
                 "env_ok": envcheck.status()["ok"],
+                "llm_ok": llm.get("ok"), "llm_error": llm.get("error"),
             })
             return
         if parsed.path == "/api/watchlists":
@@ -404,6 +411,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"cache": get_analytics_cache(view)})
             return
         if parsed.path == "/api/news-sentiment":
+            # Cache-only: opening the News tab must never spend NIM quota.
+            # Scoring happens in the refresh job (jobs.py), nowhere else.
             if _ns is None:
                 self._send_json(503, {"error": "news_sentiment module not available"})
                 return
@@ -412,26 +421,20 @@ class Handler(BaseHTTPRequestHandler):
             if not symbols:
                 self._send_json(400, {"error": "symbols required"})
                 return
-            try:
-                result = _ns.get_portfolio_sentiment(symbols)
-                self._send_json(200, {"sentiment": result, "status": _ns.status()})
-            except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
+            days = (q.get("days") or [None])[0]
+            self._send_json(200, {"sentiment": _ns.get_cached_sentiments(symbols, days),
+                                  "status": _ns.status()})
             return
         if parsed.path == "/api/news-market":
             if _ns is None:
                 self._send_json(503, {"error": "news_sentiment module not available"})
                 return
-            try:
-                result = _ns.get_market_sentiment()
-                articles = _ns.fetch_market_news()
-                self._send_json(200, {
-                    "sentiment": result,
-                    "articles": articles,
-                    "status": _ns.status(),
-                })
-            except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
+            days = (parse_qs(parsed.query).get("days") or [None])[0]
+            self._send_json(200, {
+                "sentiment": _ns.get_cached_market(days),
+                "articles": _ns.get_cached_market_articles(days),
+                "status": _ns.status(),
+            })
             return
         if parsed.path == "/api/news-tape":
             if _ns is None:
@@ -486,11 +489,14 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     st = _ns.status()
                     # Booleans only — never serve key material to the frontend.
+                    from portfolio_tracker import lexicon as _lex
                     keys = {
                         "finnhub_key_set": bool(st.get("finnhub_key_set")),
                         "nvidia_key_set": bool(st.get("nvidia_key_set")),
-                        "llm_model": getattr(_ns, "_MODEL", ""),
-                        "lexicon_available": bool(st.get("lexicon_available")),
+                        "llm_model": st.get("llm_model", ""),
+                        "llm_ok": st.get("llm_ok"),
+                        "llm_error": st.get("llm_error"),
+                        "lexicon_available": _lex._load(),
                     }
                 except Exception:
                     keys = {}
@@ -507,23 +513,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(503, {"error": "news_sentiment module not available"})
                 return
             try:
-                self._send_json(200, _ns.compute_diagnostics())
-            except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
-            return
-        if parsed.path == "/api/news-articles":
-            if _ns is None:
-                self._send_json(503, {"error": "news_sentiment module not available"})
-                return
-            q = parse_qs(parsed.query)
-            sym = (q.get("symbol") or [""])[0].strip().upper()
-            if not sym:
-                self._send_json(400, {"error": "symbol required"})
-                return
-            try:
-                sentiment = _ns.get_news_sentiment(sym)
-                articles = _ns.fetch_company_news(sym)
-                self._send_json(200, {"symbol": sym, "articles": articles, "sentiment": sentiment})
+                from portfolio_tracker import ml_sentiment as _ml
+                from portfolio_tracker import news_diagnostics as _nd
+
+                ml = _ml._load()
+                horizon = int((ml.get("cal") or {}).get("horizon_days") or 1)
+                out = _nd.compute(_ns._history_load(), market_horizon=horizon)
+                # Why each engine is (not) producing reads — set on every
+                # response so the UI can tell "not running" from "too early".
+                out["market_runtime"] = _ml.runtime_status()
+                out["news_runtime"] = _ns.llm_status()
+                self._send_json(200, out)
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
@@ -860,49 +860,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"cache": out})
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
-            return
-
-        if parsed.path == "/api/news-refresh":
-            if _ns is None:
-                self._send_json(503, {"error": "news_sentiment module not available"})
-                return
-            try:
-                payload = self._read_json()
-                symbols = [str(s).strip().upper() for s in (payload.get("symbols") or []) if s]
-                context = payload.get("context") if isinstance(payload.get("context"), dict) else None
-            except Exception as exc:
-                self._send_json(400, {"error": str(exc)})
-                return
-            # NDJSON staged stream (mirrors /api/quotes-stream): market lands
-            # first, then constituents by weight — the panel fills as results
-            # arrive instead of blocking for the whole refresh.
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-            write_lock = threading.Lock()
-            aborted = threading.Event()
-
-            def _emit(kind: str, body: dict) -> None:
-                if aborted.is_set():
-                    return
-                try:
-                    with write_lock:
-                        self.wfile.write(_safe_json({"type": kind, **body}))
-                        self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    aborted.set()
-
-            try:
-                _emit("start", {"total": len(symbols)})
-                result = _ns.refresh_sentiment(symbols, context=context,
-                                               progress_cb=_emit)
-                _emit("done", result)
-            except (BrokenPipeError, ConnectionResetError):
-                return
-            except Exception as exc:
-                _emit("error", {"error": str(exc)})
             return
 
         if parsed.path == "/api/quotes-stream":

@@ -5,6 +5,73 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.12.0 — 2026-09-26
+
+### News v2: two reads of the same headlines, never blended
+
+- **The LLM engine had been dead for a month.** NVIDIA retired
+  `nvidia-nemotron-nano-9b-v2` on 2026-08-26; every call returned HTTP 410, the
+  failure was logged and swallowed, and refreshes kept serving August's reads
+  over new headlines. The News tab is rebuilt around two engines presented as
+  peers — no blended score, no "primary":
+- **News read (what the news says).** `nvidia/nemotron-3-super-120b-a12b` reads
+  each holding's 15 most relevant headlines through five lenses — Financials,
+  Outlook, Competition, Regulation, Street view (plus `other` for M&A,
+  buybacks, dividends, financing and insiders, and `none` for headlines not
+  about the company). One strict flat JSON schema, two concurrent passes with
+  their agreement shown, fixed tiers on a −2…+2 scale. Gold set of 149
+  hand-labelled headlines: lens 85.6%, direction 87.5%, "not about it"
+  precision 87.8%; Financial PhraseBank direction 94%; two-pass agreement 96%.
+- **Relevance-ranked reading.** The read takes the most relevant headlines in
+  the window, not the newest: NVDA's newest 15 were all listicles that merely
+  mentioned it (15/15 "not about NVDA", no read at all); now four lens reads.
+- **Market read (how prices reacted to news like this).** The per-headline
+  LightGBM encoder, weighted over the 7-day window and recalibrated as
+  `mlsent-v1.1`. The old frozen cut-points had drifted to labelling ~93% of
+  holding-days bearish; tiers now speak only in the tails (5/10/70/10/5) and the
+  percentile is anchored to the app's own last 90 days of reads once 200 exist.
+  The Methodology and the Track record say plainly that no out-of-sample edge
+  has been shown (Oct–Dec 2023 daily IC 0.016, both extreme tiers wrong-signed).
+  A retrained ticker-day model (v2) missed its gates at both horizons (holdout
+  IC 0.0095 / 0.0065 vs a 0.03 bar) and is not shipped.
+- **Divergence flag (⇄).** One factual sentence when the engines disagree, or
+  when a stock sells off ≥ 2σ on good news.
+
+### Surfaces
+
+- **NS column + hover card**: Market read then News read dots; one card with a
+  row per lens (fact + linked headlines), agreement, the Market read's expected
+  move, percentile (naming what it is ranked against) and tier, divergence,
+  staleness and ages.
+- **News tab**: two-half Portfolio signal, lens chips on the Flash Tape, the
+  timeline and tape limited to headlines the News read found are about a
+  holding, and a constituent table with per-lens cells.
+- **Track record** replaces Model Diagnostics: date-clustered statistics only
+  (daily cross-sectional IC, plain verdict — "Too early" under 40 trading
+  days), long-short, hit rates with Wilson intervals, per-lens hit rates.
+- **Methodology**: two side-by-side explainers with the real validation
+  numbers; formulas in collapsible sections.
+- **Excel export**: News read tier, one column per lens, Market read tier and
+  z, divergence.
+
+### Failure handling
+
+- A retired model (404/410), a rejected key (401/403) or a missing key blocks
+  the News read until the next refresh — zero further calls — and a banner
+  names the reason. NIM 503s retry with jitter but no rate-limit penalty. A
+  failed read keeps the previous one, faded and marked stale with its reason
+  and original timestamp, together with the headlines it was made from (the
+  tape and timeline keep their tags). The refresh chip counts "n failed".
+
+### Removed
+
+- Routes `GET /api/news-articles` and `POST /api/news-refresh`; the blended
+  systematic/idiosyncratic score and its κ, quantile tier calibration, the
+  LLM-vs-lexicon disagreement flag, ML-vs-LLM diagnostics panels; scripts
+  `kappa_sensitivity.py`, `backfill_ml_history.py`,
+  `benchmark_sentiment_prompt.py` (replaced by `benchmark_news_read.py`), and
+  `ml/scripts/11_shadow_compare_llm.py`, `12_model_selection.py`.
+
 ## 1.11.3 — 2026-08-02
 
 ### The cloud and the frontier now share one feasible set

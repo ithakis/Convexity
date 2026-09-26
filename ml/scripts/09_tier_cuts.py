@@ -1,33 +1,54 @@
-"""Optimize the 5-tier cuts on OUT-OF-SAMPLE calibration predictions.
+"""Calibrate the Market read onto its own LIVE-SHAPED history.
 
-Calibration set: a chronological refit — best_config trained on d1 < CAL_START
-(2023-01-01), predicting CAL_START..TEST_START (the last 6 months of train).
-The real holdout (>= TEST_START) is touched exactly once at the end, for a
-report-only verification. This avoids both in-sample optimism (train preds)
-and holdout contamination.
+Why this was rewritten: the v1 cuts were fitted on a calibration refit's
+per-(symbol, day, session) predictions, but the app shows a ticker-level
+7-day recency-weighted mean of ~15 articles. That aggregate is centred near
+-0.007 with sd 0.0035, so 93% of live holding-days fell in the "bearish" band
+(meta.json's own holdout check already showed 63%).
 
-Candidate grid: asymmetric quantile 4-tuples (p1, p2, p3, p4) with
-p1 in {.03,.05,.08,.10}, p2 in {.30,.35,.40,.45}, p3 = 1-p2 shifted by
-{-.05, 0, +.05} (skew allowance), p4 = 1-p1. Acceptance requires, at the
-(symbol, d1, session_class) group level:
-  (a) neutral band:   |Spearman(pred, y)| < 0.02 AND bootstrap-95% CI covers 0
-  (b) monotonicity:   tier mean realized SAR strictly increasing in >= 95% of
-                      1000 group-bootstrap resamples
-  (c) separation:     very_* mean SAR differs from the adjacent tier with
-                      non-overlapping 80% CIs
-  (d) mass:           every outer tier >= 3% of groups
-  (e) stability:      monotone point estimate holds in each 2-month sub-period
-Among survivors, maximize (mean SAR very_bullish - mean SAR very_bearish)
-minus 0.5x cut instability (bootstrap IQR of the threshold values).
-Zero survivors -> relax neutral tolerance once to 0.03; still zero -> exit 2
-(user decision needed, per plan).
+Now the calibration distribution is built exactly the way the app scores:
+one value per (ticker, as-of day) from ml/scripts/06's panel, whose features
+come from ml_features.window_vector / weighted_sar — the serving functions.
 
-Output: ml/data/artifacts/mlsent-v1/tier_cuts.json (score THRESHOLDS, not
-quantiles — production applies fixed cuts) + reports/tier_cuts_report.json.
+  --model v1.1   score = the v1 encoder's per-article predictions,
+                 recency/source/novelty/relevance-weighted over the 7-day
+                 window (panel column enc_wmean). Horizon 1d. Calibrated on
+                 Jul-Sep 2023 and verified on Oct-Dec 2023 — the only window
+                 where the DEPLOYED booster is out of sample. Two earlier
+                 attempts failed and are why: the deployed booster on Jan-Jun
+                 2023 is in-sample (~5x more dispersed than live: holdout
+                 tiers 2/13/81/1/2%), and the year-cross-fitted booster there
+                 is a different model whose output level differs (3/26/68/1/2%).
+                 Even this same-booster split misses the +/-3pp mass gate
+                 (the score level drifts with the news mix), which is why the
+                 app anchors the percentile to its own live history once it
+                 has one (ml_sentiment.calibrate); these knots bootstrap it.
+  --model v2     score = the window model (07 --stage window); horizon 5d
+                 unless --horizon says otherwise (plan: prefer 5d).
+
+Output, stored in <artifact>/tier_cuts.json:
+  z   = (score - mu) / sigma                     (mu, sigma on the window)
+  pct = percentile of z against 101 knots        (the live-shaped distribution)
+  tier by pct: <=5 very_bearish, <=15 bearish, 15-85 no_edge, >=85 bullish,
+      >=95 very_bullish — "no edge", not "neutral": the backtest's decile means
+      are noise except in the tails.
+  exp_sar: the realized mean SAR per 5-point percentile band in the
+      calibration window, made monotone by isotonic regression (PAV) — the
+      "expected move" the UI shows.
+
+Windows (CAL_WINDOWS): v2 calibrates on [SEL_START, TEST_START) = Jan-Jun
+2023 and verifies on the Jul-Dec 2023 holdout; v1.1 as described above. The
+verification rows run through ml_sentiment.calibrate — the production
+function — for the gates: every tier's mass within +/-3pp of design, and the
+tail tiers' realized mean SAR of the right sign.
+
+Usage:
+    python ml/scripts/09_tier_cuts.py --model v1.1
+    python ml/scripts/09_tier_cuts.py --model v2 [--horizon 1]
 """
 from __future__ import annotations
 
-import itertools
+import argparse
 import json
 import sys
 import time
@@ -35,174 +56,123 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from ml import config  # noqa: E402
-from ml.scripts.train_utils import load_split  # noqa: E402
+from ml.scripts.train_utils import daily_ic, load_panel  # noqa: E402
 
-CAL_START = "2023-01-01"
-TIERS = ["very_bearish", "bearish", "neutral", "bullish", "very_bullish"]
-N_BOOT = 1000
-NEUTRAL_IC_TOL = 0.02
+TIER_PCT = [5.0, 15.0, 85.0, 95.0]
+# (calibrate from, calibrate to / verify from). Verification runs to end of data.
+CAL_WINDOWS = {"v2": (config.SEL_START, config.TEST_START),
+               "v1.1": ("2023-07-01", "2023-10-01")}
+DESIGN_MASS = [0.05, 0.10, 0.70, 0.10, 0.05]
+PCT_EDGES = list(range(0, 101, 5))
 
 
-def calibration_predictions():
-    """Chronological refit -> OOS predictions on the last 6 months of train."""
-    import lightgbm as lgb
-    import numpy as np
-    import pandas as pd
-
-    cache = config.FEATURES_DIR / "calibration_pred.parquet"
-    if cache.exists():
-        return pd.read_parquet(cache)
-
-    cfg = json.loads((config.ARTIFACTS_DIR / config.ARTIFACT_VERSION /
-                      "train_metrics.json").read_text())["best_config"]
-    idf = np.load(config.FEATURES_DIR / "idf.npy")
-    X, y, w, meta = load_split("train", idf)
-    d1 = pd.to_datetime(meta["d1"])
-    tr = (d1 < CAL_START).to_numpy()
-    ca = ((d1 >= CAL_START) & (d1 < config.TEST_START)).to_numpy()
-    params = {k: v for k, v in cfg.items() if k != "n_estimators"}
-    params.update({"objective": "regression", "verbosity": -1,
-                   "num_threads": config.N_JOBS, "seed": config.SEED})
-    bst = lgb.train(params, lgb.Dataset(X[tr], y[tr], weight=w[tr]),
-                    num_boost_round=int(cfg.get("n_estimators", 300)))
-    out = meta[ca].assign(pred=bst.predict(X[ca]).astype("float32"))
-    out.to_parquet(cache, index=False)
+def _pav(y, w):
+    """Weighted pool-adjacent-violators: the non-decreasing fit to y."""
+    blocks = [[float(v), float(n), 1] for v, n in zip(y, w)]
+    i = 0
+    while i < len(blocks) - 1:
+        if blocks[i][0] > blocks[i + 1][0]:
+            a, b = blocks[i], blocks[i + 1]
+            n = a[1] + b[1]
+            blocks[i] = [(a[0] * a[1] + b[0] * b[1]) / n, n, a[2] + b[2]]
+            del blocks[i + 1]
+            i = max(0, i - 1)
+        else:
+            i += 1
+    out = []
+    for v, _, k in blocks:
+        out.extend([v] * k)
     return out
 
 
-def group_frame(df):
-    g = (df.groupby(["symbol", "d1", "session_class"], observed=True)
-           .agg(pred=("pred", "mean"), y=("sar", "first"), d1x=("d1", "first"))
-           .reset_index(drop=True))
-    return g.dropna()
+def _scores(model: str, horizon: int):
+    import duckdb
 
-
-def spearman(x, y):
-    import numpy as np
-
-    if len(x) < 5 or x.std() == 0 or y.std() == 0:
-        return float("nan")
-    rx = np.argsort(np.argsort(x)).astype("float64")
-    ry = np.argsort(np.argsort(y)).astype("float64")
-    return float(np.corrcoef(rx, ry)[0, 1])
+    if model == "v1.1":
+        df = load_panel(["symbol", "date", "enc_wmean AS score", f"sar_{horizon}d AS y"])
+    else:
+        df = duckdb.connect().execute(f"""
+            SELECT symbol, date, score_{horizon}d AS score, sar_{horizon}d AS y
+            FROM read_parquet('{config.FEATURES_DIR / 'window_pred.parquet'}')
+            ORDER BY date, symbol""").df()
+    return df.dropna(subset=["score"])
 
 
 def main() -> None:
     import numpy as np
-    import pandas as pd
 
+    from portfolio_tracker.ml_sentiment import calibrate
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", choices=["v1.1", "v2"], required=True)
+    ap.add_argument("--horizon", type=int, default=None)
+    args = ap.parse_args()
+    if args.horizon is None:
+        args.horizon = 1 if args.model == "v1.1" else 5
+    version = "mlsent-v1.1" if args.model == "v1.1" else "mlsent-v2"
     t0 = time.time()
-    cal = group_frame(calibration_predictions())
-    pred, ysar = cal["pred"].to_numpy("float64"), cal["y"].to_numpy("float64")
-    months = pd.to_datetime(cal["d1x"]).dt.month.to_numpy()
-    n = len(cal)
-    print(f"calibration groups: {n:,}", flush=True)
 
-    grid = []
-    for p1, p2, shift in itertools.product((.03, .05, .08, .10),
-                                           (.30, .35, .40, .45),
-                                           (-.05, 0.0, .05)):
-        p3, p4 = 1 - p2 + shift, 1 - p1
-        if p2 < p3 < p4 < 1:
-            grid.append((p1, p2, p3, p4))
+    df = _scores(args.model, args.horizon)
+    d = df["date"].astype("datetime64[ns]").to_numpy()
+    lo, hi = (np.datetime64(x) for x in CAL_WINDOWS[args.model])
+    cal_m = (d >= lo) & (d < hi)
+    ho_m = d >= hi
+    s_cal = df.loc[cal_m, "score"].to_numpy("float64")
+    y_cal = df.loc[cal_m, "y"].to_numpy("float64")
+    mu, sigma = float(s_cal.mean()), float(s_cal.std())
+    z_cal = (s_cal - mu) / sigma
+    knots = [float(v) for v in np.quantile(z_cal, np.linspace(0, 1, 101))]
 
-    rng = np.random.default_rng(config.SEED)
-    boot_idx = [rng.integers(0, n, n) for _ in range(N_BOOT)]
+    cal = {"version": version, "score": "enc_wmean" if args.model == "v1.1" else "window",
+           "horizon_days": args.horizon, "mu": mu, "sigma": sigma,
+           "pct_knots": knots, "tier_pct": TIER_PCT, "tiers": [
+               "very_bearish", "bearish", "no_edge", "bullish", "very_bullish"],
+           "calibration_window": list(CAL_WINDOWS[args.model]),
+           "n_calibration": int(cal_m.sum())}
 
-    def evaluate(q, tol):
-        cuts = np.quantile(pred, q)
-        tier = np.searchsorted(cuts, pred)          # 0..4
-        mass = np.bincount(tier, minlength=5) / n
-        if mass[0] < 0.03 or mass[4] < 0.03:
-            return None
-        means = np.array([ysar[tier == k].mean() for k in range(5)])
-        if not np.all(np.diff(means) > 0):
-            return None
-        neu = tier == 2
-        ic_neu = spearman(pred[neu], ysar[neu])
-        if not np.isfinite(ic_neu) or abs(ic_neu) > tol:
-            return None
-        # sub-period monotonicity (jan-feb / mar-apr / may-jun)
-        for lo, hi in ((1, 2), (3, 4), (5, 6)):
-            m = (months >= lo) & (months <= hi)
-            if m.sum() < 500:
-                continue
-            mm = [ysar[m & (tier == k)].mean() for k in range(5)]
-            if not (mm[4] > mm[2] > mm[0]):        # coarse monotone ends
-                return None
-        # bootstrap: monotonicity rate, CIs, cut instability, neutral IC CI
-        mono_ok = 0
-        tier_means_b = np.empty((N_BOOT, 5))
-        cuts_b = np.empty((N_BOOT, 4))
-        ic_neu_b = np.empty(min(400, N_BOOT))
-        cnt = np.zeros(5)
-        for b, idx in enumerate(boot_idx):
-            tb, yb = tier[idx], ysar[idx]
-            s = np.bincount(tb, weights=yb, minlength=5)
-            c = np.bincount(tb, minlength=5)
-            mb = s / np.maximum(c, 1)
-            tier_means_b[b] = mb
-            mono_ok += bool(np.all(np.diff(mb) > 0))
-            cuts_b[b] = np.quantile(pred[idx], q)
-            if b < len(ic_neu_b):
-                nb = idx[tb == 2]
-                ic_neu_b[b] = spearman(pred[nb], ysar[nb])
-        mono_rate = mono_ok / N_BOOT
-        if mono_rate < 0.95:
-            return None
-        lo95, hi95 = np.quantile(ic_neu_b, [0.025, 0.975])
-        if not (lo95 <= 0 <= hi95):
-            return None
-        lo80 = np.quantile(tier_means_b, 0.10, axis=0)
-        hi80 = np.quantile(tier_means_b, 0.90, axis=0)
-        if not (lo80[4] > hi80[3] and hi80[0] < lo80[1]):
-            return None
-        instab = float(np.mean(np.subtract(*np.quantile(cuts_b, [0.75, 0.25], axis=0))
-                               * -1.0))
-        spread = float(means[4] - means[0])
-        return {"q": list(q), "cuts": [float(c) for c in cuts],
-                "mass": [round(float(m), 4) for m in mass],
-                "tier_means": [round(float(m), 4) for m in means],
-                "neutral_ic": round(ic_neu, 4), "mono_rate": mono_rate,
-                "spread": spread, "instability": instab,
-                "objective": spread - 0.5 * instab}
+    # expected-SAR table: realized mean label per percentile band, isotonic
+    xs, idx = np.unique(np.asarray(knots), return_index=True)
+    pct_cal = np.interp(z_cal, xs, np.arange(101, dtype="float64")[idx])
+    ok = np.isfinite(y_cal)
+    band = np.clip(np.searchsorted(PCT_EDGES, pct_cal[ok], side="right") - 1, 0,
+                   len(PCT_EDGES) - 2)
+    means, counts = [], []
+    for k in range(len(PCT_EDGES) - 1):
+        yy = y_cal[ok][band == k]
+        means.append(float(yy.mean()) if len(yy) else 0.0)
+        counts.append(int(len(yy)))
+    cal["exp_sar"] = {"pct_edges": PCT_EDGES, "sar": [round(v, 4) for v in _pav(means, counts)],
+                      "raw": [round(v, 4) for v in means], "n": counts}
 
-    for tol in (NEUTRAL_IC_TOL, 0.03):
-        survivors = [r for q in grid if (r := evaluate(q, tol))]
-        if survivors:
-            break
-    if not survivors:
-        print("NO SURVIVORS even at relaxed tolerance — user decision needed",
-              flush=True)
-        sys.exit(2)
-
-    best = max(survivors, key=lambda r: r["objective"])
-    print(f"survivors: {len(survivors)}/{len(grid)} (tol={tol}); "
-          f"best q={best['q']} spread={best['spread']:.3f}", flush=True)
-
-    # ---- report-only holdout verification
-    hp = group_frame(pd.read_parquet(config.FEATURES_DIR / "holdout_pred.parquet"))
-    tier_h = np.searchsorted(np.array(best["cuts"]), hp["pred"].to_numpy())
-    hold = {
-        "mass": [round(float(x), 4) for x in np.bincount(tier_h, minlength=5) / len(hp)],
-        "tier_means": [round(float(hp["y"].to_numpy()[tier_h == k].mean()), 4)
-                       for k in range(5)],
+    # ---- holdout, through the production function
+    hs = df.loc[ho_m, "score"].to_numpy("float64")
+    hy = df.loc[ho_m, "y"].to_numpy("float64")
+    tiers = [calibrate(v, cal)["tier"] for v in hs]
+    names = cal["tiers"]
+    mass = [round(sum(1 for t in tiers if t == n) / max(1, len(tiers)), 4) for n in names]
+    tmeans = []
+    for n in names:
+        yy = np.array([y for y, t in zip(hy, tiers) if t == n and np.isfinite(y)])
+        tmeans.append(round(float(yy.mean()), 4) if len(yy) else None)
+    ic = daily_ic(df.loc[ho_m, "date"].to_numpy(), hs, hy, horizon=args.horizon)
+    gates = {
+        "mass_within_3pp": all(abs(m - dm) <= 0.03 for m, dm in zip(mass, DESIGN_MASS)),
+        "tail_signs": (tmeans[0] is not None and tmeans[0] < 0
+                       and tmeans[4] is not None and tmeans[4] > 0),
     }
-
-    out = config.ARTIFACTS_DIR / config.ARTIFACT_VERSION
+    cal["holdout_verification"] = {"mass": mass, "design_mass": DESIGN_MASS,
+                                   "tier_mean_sar": tmeans, "n": int(len(hs)),
+                                   "daily_ic": round(ic["mean"], 4), "t_nw": round(ic["t_nw"], 2),
+                                   "n_days": ic["n_days"], "gates": gates}
+    out = config.ARTIFACTS_DIR / version
     out.mkdir(parents=True, exist_ok=True)
-    (out / "tier_cuts.json").write_text(json.dumps({
-        "tiers": TIERS, "cuts": best["cuts"], "quantiles": best["q"],
-        "calibration_window": [CAL_START, config.TEST_START],
-        "neutral_ic": best["neutral_ic"], "mono_rate": best["mono_rate"],
-        "calibration_tier_means": best["tier_means"], "mass": best["mass"],
-        "holdout_verification": hold,
-    }, indent=2))
-    report = {"n_grid": len(grid), "n_survivors": len(survivors),
-              "tolerance_used": tol, "best": best, "holdout": hold,
+    (out / "tier_cuts.json").write_text(json.dumps(cal, indent=2))
+    report = {"model": args.model, "horizon": args.horizon, "mu": mu, "sigma": sigma,
+              "exp_sar": cal["exp_sar"], "holdout": cal["holdout_verification"],
               "minutes": round((time.time() - t0) / 60, 1)}
-    (config.REPORTS_DIR / "tier_cuts_report.json").write_text(json.dumps(report, indent=2))
+    (config.REPORTS_DIR / f"tier_cuts_{version}.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2), flush=True)
+    print("GATES PASS" if all(gates.values()) else f"GATES FAIL: {gates}", flush=True)
 
 
 if __name__ == "__main__":

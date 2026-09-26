@@ -21,9 +21,9 @@ Design notes that are load-bearing:
 
 * **A dead client is not a cancel.** The stream handler returns on BrokenPipe
   and never touches ``job.cancel``; the job keeps running and the client
-  reattaches at its last seq. This is the opposite of ``/api/news-refresh``,
-  which merely silenced writes while the work — and the API quota — carried on
-  with nobody watching.
+  reattaches at its last seq. (The old standalone news-refresh route did the
+  opposite: it silenced writes while the work — and the API quota — carried on
+  with nobody watching. It was deleted in v1.12.0.)
 
 * **Cancel actually stops work.** Queued items are de-queued via
   ``pool.shutdown(cancel_futures=True)``; in-flight ones check a token at every
@@ -108,8 +108,12 @@ class Job:
         self.ended_at = None
         self.state = "queued"
         self.error = None
+        # news_scored / news_failed split news_done by outcome: the chip says
+        # "12/15 scored", and a refresh where the News read failed for every
+        # ticker must never read as a plain "done".
         self.counts = {"quotes_done": 0, "quotes_total": 0,
-                       "news_done": 0, "news_total": 0, "rate_waits": 0}
+                       "news_done": 0, "news_total": 0,
+                       "news_scored": 0, "news_failed": 0, "rate_waits": 0}
         # Per-view symbol counts: the planner's estimate, and the real number
         # each view reports at its own phase start. quotes_total is always
         # actual-where-known + planned-for-the-rest, so it stays a whole-job
@@ -480,8 +484,10 @@ def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
 
     def _progress(kind: str, body: dict) -> None:
         # Translate news_sentiment's vocabulary into the job's. `stage` values
-        # pass through untouched so the existing per-ticker progress modal
-        # (NS_PROG_STAGE in app.js) keeps working verbatim.
+        # (start|fetch|pass1|pass2|market|aggregate) pass through untouched to
+        # NS_PROG_STAGE in app.js. An item's `state` is the News read outcome:
+        # ok (fresh read), failed (the LLM produced nothing — the previous read
+        # is kept, marked stale), empty (no news), cancelled.
         if kind == "plan":
             return
         if kind == "market_stage":
@@ -490,24 +496,24 @@ def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
         elif kind == "symbol_stage":
             job.emit("item_stage", phase="news", symbol=body.get("symbol"),
                      stage=body.get("stage"), frac=body.get("frac"))
-        elif kind == "market":
+        elif kind in ("market", "symbol"):
+            outcome = body.get("outcome") or ("ok" if body.get("sentiment") else "empty")
+            if kind == "symbol" and outcome == "ok":
+                job.bump("news_scored")
+            elif kind == "symbol" and outcome == "failed":
+                job.bump("news_failed")
             done = job.bump("news_done")
-            job.emit("item", phase="news", symbol="__market__",
-                     state="ok" if body.get("sentiment") else "empty",
-                     done=done, total=len(symbols) + 1,
-                     sentiment=body.get("sentiment"))
-        elif kind == "symbol":
-            done = job.bump("news_done")
-            job.emit("item", phase="news", symbol=body.get("symbol"),
-                     state="ok" if body.get("sentiment") else "empty",
-                     done=done, total=len(symbols) + 1,
+            job.emit("item", phase="news",
+                     symbol="__market__" if kind == "market" else body.get("symbol"),
+                     state=outcome, done=done, total=len(symbols) + 1,
                      sentiment=body.get("sentiment"))
 
     result = _ns.refresh_sentiment(symbols, context=context, progress_cb=_progress,
                                    cancel=job.cancel)
+    st = result.get("status") or {}
     job.emit("phase", phase="news", state="end",
-             ok=(result.get("status") or {}).get("fetched"),
-             total=len(symbols),
+             scored=st.get("scored"), failed=st.get("failed"), empty=st.get("empty"),
+             total=len(symbols), llm_error=st.get("llm_error") if st.get("failed") else None,
              reason="cancelled" if result.get("cancelled") else None)
 
 

@@ -8,12 +8,17 @@ so the app never depends on the ml/ tree.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 # ---------------------------------------------------------------- paths
 ML_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ML_DIR.parent
-DATA_DIR = ML_DIR / "data"
+# The 4.8 GB data tree is not in git and does not travel between worktrees.
+# MLNEWS_DATA_DIR points the pipeline at an existing copy in place instead of
+# duplicating it (it lives in whichever checkout first ran 00-06).
+DATA_DIR = Path(os.environ["MLNEWS_DATA_DIR"]) if os.environ.get("MLNEWS_DATA_DIR") \
+    else ML_DIR / "data"
 RAW_DIR = DATA_DIR / "raw"
 PARQUET_DIR = DATA_DIR / "parquet"
 FEATURES_DIR = DATA_DIR / "features"
@@ -58,6 +63,15 @@ TIME_BUDGET_S = 4 * 3600
 N_JOBS = 8
 SEED = 42
 ARTIFACT_VERSION = "mlsent-v1"
+
+# ---------------------------------------------------------------- v2 (ticker-day)
+# The Market read v2 predicts at the unit the app actually scores: one row per
+# (ticker, as-of trading day D). The window/attention lengths are NOT here:
+# they are serving constants too, so they live in portfolio_tracker.ml_features.
+ENCODER_FIRST_YEAR = 2011      # expanding-window encoders start once >=100k rows exist
+ENCODER_MAX_ROWS = 1_500_000   # per cross-fit (8 GB box; v1 config is 56 trees)
+SEL_START = "2023-01-01"       # model selection / tier calibration window start
+HORIZONS = (1, 5)              # next-1d and next-5d SAR labels
 
 
 def ensure_dirs() -> None:

@@ -1,10 +1,13 @@
-# MLNews — ML News-Sentiment Design Record (mlsent-v1)
+# MLNews — ML News-Sentiment Design Record (mlsent-v1 → v1.1)
 
 Frozen decisions + measured results for the return-supervised news-sentiment
-model. Companion documents: `docs/ml_sentiment_lit_review.md` (60-paper
-grounding), plan at `.claude/plans/` (approved 2026-07-13). Pipeline code:
-`ml/` (training) + `portfolio_tracker/{relevance,ml_features,ml_sentiment}.py`
-(shared/production).
+model. In the app it is the **Market read** — one of two peer engines on the
+News tab, beside the LLM **News read** (CLAUDE.md §4); the two are never
+blended. Sections 1–10 are the mlsent-v1 build (2026-07); §11 is the 2026-09
+recalibration (mlsent-v1.1, shipped) and the v2 retrain (not shipped).
+Companion document: `docs/ml_sentiment_lit_review.md` (60-paper grounding).
+Pipeline code: `ml/` (training) + `portfolio_tracker/{relevance,ml_features,
+ml_sentiment}.py` (shared/production).
 
 ## 1. Problem
 
@@ -40,10 +43,9 @@ SAR = abn / σ_win_type               252d daily beta vs SPY, clip [0,3]
   with a synthetic jump fixture, tests/test_ml_labels.py; spot-checked vs raw
   prices in 08_validate test 3).
 - Winsorized ±5σ. Raw `abn` (%) and `r_cc_baseline` stored alongside.
-- **Beta convention: daily (analytics.py style), NOT kappa_sensitivity's
-  weekly** — the hedge ratio must match the label frequency and be
-  computable point-in-time from the FNSPID panel itself. The two conventions
-  coexist deliberately; kappa's weekly beta serves its own study.
+- **Beta convention: daily (analytics.py style)** — the hedge ratio must
+  match the label frequency and be computable point-in-time from the FNSPID
+  panel itself.
 
 ## 3. Data (FNSPID) — audit results that shaped the build
 
@@ -151,22 +153,25 @@ looks degenerate.
 dense-only ridge; SAR label ≥ raw-label model on SAR IC) · 6 slices
 (session/dollar-vol/relevance terciles; relevance top > bottom) ·
 7 calibration deciles (monotone ends, CIs) · 8 PhraseBank sign accuracy
-≥0.65 · 9 live shadow vs LLM (11_shadow_compare_llm.py, 2–4 weeks, ML IC ≥
-LLM IC − noise before UI surfacing).
+≥0.65 · 9 live evidence: the app's Track record (date-clustered daily IC,
+long-short, hit rates — `portfolio_tracker/news_diagnostics.py`).
 
 Results (fill after run): see `ml/data/reports/validation_report.json`.
 
-## 9. Production
+## 9. Production (mlsent-v1.1)
 
-`portfolio_tracker/ml_sentiment.py`: lazy singleton loads
-`~/.portfolio_tracker/ml_model/mlsent-v1/` (env `MLSENT_MODEL_DIR`), schema
-gate, per-article predict ~1–3 ms, aggregate = recency(τ=3d) × source-tier ×
-novelty × continuous relevance weights → `ml_sar`, `ml_score=tanh(sar/2)`,
-`ml_tier` (frozen cuts), `ml_confidence`, `ml_n`. Wired additively into
-`get_news_sentiment()` and `_history_append` (fields `ml_sar`, `ml_tier`) —
-absent artifact ⇒ fields absent, LLM path untouched. Deploy = `python
-ml/scripts/10_export_artifact.py --deploy`. Optional deps `lightgbm`,
-`scikit-learn` documented in requirements.txt.
+`portfolio_tracker/ml_sentiment.py` loads `~/.portfolio_tracker/ml_model/
+mlsent-v1.1/` (env `MLSENT_MODEL_DIR`) behind a schema gate. Per refresh, per
+ticker: the 7-day window's articles, capped with `relevance.window_sample(60,
+15)`, go through the v1 encoder (one batched predict); the score is
+`ml_features.weighted_sar` — the recency (τ=3d) × source-tier × novelty ×
+relevance weighted mean of the per-article predictions; `calibrate()` turns it
+into z, a percentile, a tier and the band's expected next-day SAR. The raw
+score, z, pct, tier and `market_model` are appended to the sentiment history,
+which is both the live-anchoring reference (§11) and the Track record's input.
+Missing artifact / dependency / schema ⇒ `available()` False, every call
+`None`, the reason in `runtime_status()`; the News read is unaffected. Deploy
+= `python ml/scripts/10_export_artifact.py --deploy`.
 
 ## 10. Engineering notes (what actually bit)
 
@@ -184,17 +189,79 @@ ml/scripts/10_export_artifact.py --deploy`. Optional deps `lightgbm`,
   9.8M untagged rows.
 - Python's builtin `hash()` is process-salted — artifact schema hashes must
   use hashlib.
+- Training dependencies are not app dependencies and stay out of `envcheck`
+  and the manifests: DuckDB (all v2 parquet IO; present in `pt`), pyarrow
+  (stages A–C only — deliberately not in `pt`, because installing it switches
+  pandas 3's string backing), FLAML. `tests/test_ml_labels.py` skips without
+  pyarrow for that reason.
+- DuckDB's `greatest`/`least` ignore NULLs: stage D's winsorisation turned
+  every missing label into +5 until it became `CASE WHEN isfinite(raw) …`.
 
-## 11. Shadow → primary promotion (v1.6.1, 2026-07-16)
+## 11. Recalibration and the v2 retrain (2026-09, v1.12)
 
-Promoted the ML model from shadow to the **primary displayed signal** in the
-News tab. `get_news_sentiment` now sets the canonical `tier`/`score` to the ML
-values when available (LLM preserved as `llm_tier`/`llm_score`, `disp_source`
-flag), writes per-article ML scores onto the article feed, and persists
-`ml_score`/`ml_confidence` to history. `compute_diagnostics` gained four live
-panels (rolling IC, calibration curve, ML–LLM agreement grid, coverage &
-confidence); the frozen backtest write-up moved into a new in-app **Methodology**
-article. Graceful LLM fallback is unchanged (missing artifact ⇒ `disp_source=
-"llm"`, LLM drives the UI). No model/artifact/featurizer change — train/serve
-parity and all `tests/test_ml_*` remain intact. Live ML performance continues to
-accrue in Model Diagnostics; quarterly tier-cut recalibration still applies.
+**Why.** Live, the v1 tiers labelled ~93% of holding-days "bearish" (208 of
+223 records; 15/15 in one portfolio). The frozen score thresholds of §7 had
+drifted with the booster and the news mix. Two steps (plan D4): recalibrate
+v1 (v1.1), and retrain a ticker-day model (v2); ship v2 only if it passes.
+
+**Unit change.** Both now score a *ticker-day*, not an article: the 7-day
+window of articles as of day D, capped exactly like the app's retained set,
+labelled with the next 1-day / 5-day SAR from close(D). Price context is as of
+D−1 (the last completed session). Labels: `05_build_labels.py` stage D,
+15.14M rows (14.83M with a 1-day SAR, 14.80M with a 5-day one). FNSPID
+timestamps are 98.5% date-only, so live articles are encoded as
+`dateonly_cc` too. Encoder predictions for the panel are **cross-fitted by
+year** (each year scored by a booster that never saw it) to keep label
+leakage out of the window features; leakage spot-check 0 of 40.
+
+**v2 (not shipped).** A second model over 17 ticker-day features (encoder
+mean/max/min/weighted mean, lexicon, uncertainty, attention shock vs the
+ticker's 60-day baseline, source mix, recycled-news share, freshness, ticker
+and SPY return/vol context). Train [2011, 2023), select Jan–Jun 2023, holdout
+Jul–Dec 2023; 5.27M panel rows. LightGBM rankers and regressors never beat a
+dense ridge on the selection window (lambdarank@50 IC 0.0046 at 1d; negative
+at 5d), so the winner was the ridge:
+
+| Horizon | Holdout daily IC | t (NW) | Days | v1.1 on same holdout | Walk-forward years positive |
+|---|---|---|---|---|---|
+| 1 day | 0.0095 | 1.42 | 122 | 0.0072 | 9 / 9 (0.001–0.014) |
+| 5 days | 0.0065 | 0.68 | 120 | 0.0022 | 7 / 9 |
+
+Gates: IC ≥ 0.03 with t ≥ 3 — **fail** at both horizons; beat the dense
+ridge — fail (it *is* the ridge); 5-day decile ends monotone — fail. It beats
+v1.1 on the same days, but by less than the noise. Not shipped; the training
+and validation code (`07 --stage window`, `08`) stays so the evidence can be
+re-run, but there is no export path for it.
+
+**v1.1 (shipped).** Score = the v1 encoder's weighted mean over the window
+(panel column `enc_wmean`, the same `weighted_sar` the app runs). Calibrating
+its percentile knots was the hard part — a weak regressor's output *level*
+moves:
+
+| Calibrate on → verify on | Tier mass (vbear/bear/no edge/bull/vbull) | Why it failed |
+|---|---|---|
+| Jan–Jun 2023, deployed booster → Jul–Dec | 2 / 13 / 81 / 1 / 2 % | deployed booster is in-sample on Jan–Jun (~5× more dispersed than live) |
+| Jan–Jun 2023, cross-fitted booster → Jul–Dec | 3 / 26 / 68 / 1 / 2 % | a different booster; its output level differs |
+| Jul–Sep 2023, deployed booster → Oct–Dec | 12.7 / 10.7 / 65.7 / 7.0 / 4.0 % | shipped knots; still 7.6 pp off design |
+
+On Oct–Dec 2023 the shipped score has daily IC 0.0157 (t_NW 2.2, 59 days),
+but the tails realized the wrong sign (very bearish +0.037σ, very bullish
++0.067σ next day). **No out-of-sample edge has been shown**; the app says so
+in the Methodology and the Track record.
+
+**Live anchoring (the user's decision, 2026-09-25).** Because the level
+drifts, the percentile is computed against the app's own recent Market reads
+once there are `MIN_LIVE_HISTORY = 200` of them in the last 90 days (same
+model version, excluding the ticker-day being scored); until then against the
+Jul–Sep 2023 knots. Tiers are by percentile: ≤5 very bearish, ≤15 bearish,
+15–85 **no edge**, ≥85 bullish, ≥95 very bullish. The dict carries `anchor`
+("live" / "training") and `n_history`, and the UI names which one is in use.
+First live run (Hyper Scalers, training anchor): 13 of 15 no edge, 2 bullish,
+0 bearish — the live score sits above the 2023 mean, exactly the drift the
+live anchor corrects once it has history.
+
+**Superseded:** the v1.6.1 "ML is the primary displayed signal" promotion and
+its ML-vs-LLM diagnostics panels. The engines are now peers with different
+questions, and live evidence is the Track record (date-clustered statistics:
+daily cross-sectional Spearman IC, plain t at 1 day and Newey-West at longer
+horizons, Wilson CIs on hit rates, "Too early" under 40 trading days).

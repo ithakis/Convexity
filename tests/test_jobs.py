@@ -342,19 +342,49 @@ def test_closing_the_generator_dequeues(fake_quotes):
 # runs, and the unified done/total ratio only ever moves forward.
 
 
+def _make_fake_news(outcome_for=lambda s: "ok"):
+    """Stand-in for news_sentiment: reports the market read, then each symbol
+    with its News read outcome (ok | failed | empty)."""
+    def _refresh(symbols, context=None, progress_cb=None, cancel=None):
+        outcomes = {s: outcome_for(s) for s in symbols}
+        if progress_cb:
+            progress_cb("market", {"sentiment": {"news": {}}, "outcome": "ok"})
+            for s in symbols:
+                progress_cb("symbol", {"symbol": s, "outcome": outcomes[s],
+                                       "sentiment": {"news": {}} if outcomes[s] != "empty"
+                                       else None})
+        vals = list(outcomes.values())
+        return {"status": {"scored": vals.count("ok"), "failed": vals.count("failed"),
+                           "empty": vals.count("empty"), "total": len(symbols),
+                           "llm_error": "410 model retired" if "failed" in vals else None}}
+
+    return type("_NS", (), {"refresh_sentiment": staticmethod(_refresh)})
+
+
 @pytest.fixture()
 def fake_news(monkeypatch):
-    """Stand-in for news_sentiment: reports the market read, then each symbol."""
-    def _refresh(symbols, context=None, progress_cb=None, cancel=None):
-        if progress_cb:
-            progress_cb("market", {"sentiment": {"tier": "neutral"}})
-            for s in symbols:
-                progress_cb("symbol", {"symbol": s, "sentiment": {"tier": "neutral"}})
-        return {"status": {"fetched": len(symbols)}}
-
-    fake = type("_NS", (), {"refresh_sentiment": staticmethod(_refresh)})
+    fake = _make_fake_news()
     monkeypatch.setattr(jobs, "_ns", fake)
     return fake
+
+
+def test_failed_news_reads_are_counted_not_reported_as_done(fake_quotes, isolated_state,
+                                                            monkeypatch):
+    """The News read silently died once (a retired model); the job must now
+    carry scored/failed counts on every counted frame and say why."""
+    monkeypatch.setattr(jobs, "_ns", _make_fake_news(lambda s: "failed" if s == "B" else "ok"))
+    job, _ = jobs.submit(scope="current", phases=["quotes", "news"], days=7,
+                         entries_by_view={"Tech": "A,B,C"}, context={})
+    assert _run_to_completion(job)
+    assert job.counts["news_scored"] == 2 and job.counts["news_failed"] == 1
+    frames = job.events_since(0)[0]
+    items = {f["symbol"]: f["state"] for f in frames
+             if f["type"] == "item" and f.get("phase") == "news"}
+    assert items == {"__market__": "ok", "A": "ok", "B": "failed", "C": "ok"}
+    end = [f for f in frames if f["type"] == "phase" and f.get("phase") == "news"
+           and f.get("state") == "end"][0]
+    assert (end["scored"], end["failed"], end["total"]) == (2, 1, 3)
+    assert "retired" in end["llm_error"]
 
 
 def _unified_ratios(job):
