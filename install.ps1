@@ -103,7 +103,7 @@ $EnvPythonw = "$EnvDir\pythonw.exe"
 $EnvPython = "$EnvDir\python.exe"
 if (Test-Path $EnvPython) {
     Write-Host "==> Verifying runtime dependencies in '$EnvName'..."
-    & $EnvPython -m portfolio_tracker.envcheck
+    & $EnvPython -m convexity.envcheck
     Assert-Success "dependency check"
 }
 if (-not (Test-Path $EnvPythonw)) {
@@ -154,7 +154,7 @@ $CondaBatEscaped = $CondaExe -replace '"', '""'
 $VbsContent = @"
 Set shell = CreateObject("WScript.Shell")
 shell.CurrentDirectory = "$RepoDir"
-shell.Run "cmd /c ""$CondaBatEscaped"" run -n $EnvName --no-capture-output pythonw -m portfolio_tracker.desktop", 0, False
+shell.Run "cmd /c ""$CondaBatEscaped"" run -n $EnvName --no-capture-output pythonw -m convexity.desktop", 0, False
 "@
 Set-Content -Path $LauncherVbs -Value $VbsContent -Encoding ASCII
 

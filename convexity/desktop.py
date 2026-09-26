@@ -11,7 +11,7 @@ Startup is staged so the splash appears as fast as possible:
              QtWebEngine import MUST happen before QApplication is created,
              Qt enforces this)
     splash   shown immediately with a live progress bar
-    worker   `import portfolio_tracker.server` (pandas/yfinance/numba —
+    worker   `import convexity.server` (pandas/yfinance/numba —
              ~2.5s+) + start_server() run on a background thread so the
              splash stays responsive and animated the whole time
     load     QWebEngineView.loadProgress drives the top of the bar
@@ -21,7 +21,7 @@ Startup is staged so the splash appears as fast as possible:
              keeps the splash up longer, and a 20s safety timer reveals
              unconditionally
 
-Run via: python -m portfolio_tracker.desktop
+Run via: python -m convexity.desktop
 """
 
 from __future__ import annotations
@@ -53,12 +53,12 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineDownloadRequest
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QSplashScreen
 
-from portfolio_tracker import __version_display__
+from convexity import __version_display__
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ICON_PNG = _REPO_ROOT / "icon.png"
 _ICON_ICNS = _REPO_ROOT / "icon.icns"
-_BUNDLE_ID = "com.ithakis.portfoliotracker"
+_BUNDLE_ID = "com.ithakis.convexity"
 _MIN_SPLASH_MS = 6000
 _SPLASH_SAFETY_MS = 20000
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
@@ -70,7 +70,7 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 _ZOOM_LADDER = (0.67, 0.75, 0.80, 0.90, 1.00, 1.10, 1.25, 1.50, 1.75, 2.00)
 _ZOOM_DEFAULT_IDX = _ZOOM_LADDER.index(1.00)
 
-# Dashboard theme (portfolio_tracker/static/style.css [data-theme="dark"]) —
+# Dashboard theme (convexity/static/style.css [data-theme="dark"]) —
 # the splash mirrors the app's own look, including the accent used by the
 # in-app streaming progress bar.
 _BG = "#0d1117"
@@ -89,9 +89,9 @@ def _setup_logging() -> Path:
     windowless (no terminal), so this file is the only way to see what the
     app did and how long each boot stage took."""
     if sys.platform == "darwin":
-        log_path = Path.home() / "Library" / "Logs" / "PortfolioTracker.log"
+        log_path = Path.home() / "Library" / "Logs" / "Convexity.log"
     else:
-        log_path = Path.home() / ".portfolio_tracker_desktop.log"
+        log_path = Path.home() / ".convexity_desktop.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         filename=str(log_path),
@@ -369,13 +369,13 @@ def main() -> None:
     boot: dict = {"server": None, "port": None, "shutdown": None, "error": None, "done": False}
 
     def _boot_worker() -> None:
-        # `import portfolio_tracker.server` drags in pandas/yfinance — the
+        # `import convexity.server` drags in pandas/yfinance — the
         # single slowest boot step. Run it off the GUI thread so the splash
         # (already on screen by the time this starts) stays responsive; the
         # anim timer polls for completion (no cross-thread Qt calls — the
         # worker only writes plain fields).
         try:
-            from portfolio_tracker.server import shutdown_server, start_server
+            from convexity.server import shutdown_server, start_server
             log.info("server module imported (+%.2fs)", time.monotonic() - t0)
             server, port = start_server()
             boot["shutdown"] = shutdown_server

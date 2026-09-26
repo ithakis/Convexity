@@ -30,7 +30,7 @@ except ImportError:
     sys.stderr.write("error: the 'requests' package is required (pip install requests)\n")
     sys.exit(2)
 
-from portfolio_tracker import symbol_db as sdb
+from convexity import symbol_db as sdb
 
 
 def main() -> int:
@@ -58,7 +58,7 @@ def main() -> int:
     print(f"→ database: {db}")
 
     session = requests.Session()
-    session.headers.update({"User-Agent": "PortfolioTracker/symbol-db builder"})
+    session.headers.update({"User-Agent": "Convexity/symbol-db builder"})
 
     total = 0
     t0 = time.time()

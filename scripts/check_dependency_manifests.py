@@ -13,7 +13,7 @@ install.sh never pip-installs. So CI ran with the ML model working while every
 installed copy of the desktop app ran with it dead — and nothing anywhere
 noticed the two files disagreed.
 
-portfolio_tracker/envcheck.REQUIRED is the single source of truth; this script
+convexity/envcheck.REQUIRED is the single source of truth; this script
 asserts both manifests cover it. Run in CI (the `lint` job) and locally:
 
     python scripts/check_dependency_manifests.py
@@ -32,7 +32,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from portfolio_tracker.envcheck import REQUIRED  # noqa: E402
+from convexity.envcheck import REQUIRED  # noqa: E402
 
 
 def _base_name(spec: str) -> str:
@@ -102,7 +102,7 @@ def main() -> int:
 
     if problems:
         print("Dependency manifests are out of sync with "
-              "portfolio_tracker/envcheck.REQUIRED:\n", file=sys.stderr)
+              "convexity/envcheck.REQUIRED:\n", file=sys.stderr)
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
         print("\nAdd the missing specs, or drop the entry from REQUIRED if the "

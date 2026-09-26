@@ -27,6 +27,22 @@ if echo "$staged" | grep -qE '(^|/)\.finnhub_key$|(^|/)\.openrouter_key$|(^|/)\.
   exit 1
 fi
 
+# 1b) The repo is public (CLAUDE.md §18): runtime state holds real holdings,
+#     and settings.local.json holds machine-specific permissions/paths.
+if echo "$staged" | grep -qE '(^|/)\.(convexity|portfolio_tracker)_[a-z_]+\.json$|(^|/)settings\.local\.json$|(^|/)\.dashboard\.pid$|\.sqlite(-shm|-wal)?$'; then
+  echo "BLOCKED: runtime state / local settings are staged (holdings, watchlists, caches, settings.local.json)."
+  echo "These must never be published. Unstage:  git restore --staged <file>"
+  exit 1
+fi
+
+# 1c) No absolute home-directory paths in added lines — they leak the local
+#     username and machine layout. Use ~ / \$HOME / repo-relative paths.
+if git diff --cached -U0 2>/dev/null | grep -E '^\+[^+]' | grep -qE '/Users/[A-Za-z0-9._-]+/|/home/[a-z][a-z0-9._-]*/'; then
+  echo "BLOCKED: an absolute home-directory path (/Users/<name>/ or /home/<name>/) is in the staged diff."
+  git diff --cached -U0 | grep -nE '^\+[^+].*(/Users/[A-Za-z0-9._-]+/|/home/[a-z][a-z0-9._-]*/)' | head -5
+  exit 1
+fi
+
 # 2) Never let any key VALUE leak into any staged diff (even pasted elsewhere).
 root="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 staged_diff="$(git diff --cached -U0 2>/dev/null || true)"

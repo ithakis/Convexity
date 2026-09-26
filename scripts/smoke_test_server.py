@@ -20,12 +20,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Make `portfolio_tracker` importable regardless of cwd/invocation style
+# Make `convexity` importable regardless of cwd/invocation style
 # (running `python scripts/smoke_test_server.py` puts scripts/ on sys.path,
 # not the repo root).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from portfolio_tracker.server import shutdown_server, start_server  # noqa: E402
+from convexity.server import shutdown_server, start_server  # noqa: E402
 
 
 def _get(url: str, timeout: float = 5.0):

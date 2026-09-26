@@ -37,27 +37,27 @@ def _showwarning_filter(message, category, filename, lineno, file=None, line=Non
 warnings.showwarning = _showwarning_filter
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-from portfolio_tracker import __version__, __version_date__, __version_display__
-from portfolio_tracker import envcheck, logbuf
-from portfolio_tracker.analytics import (
+from convexity import __version__, __version_date__, __version_display__
+from convexity import envcheck, logbuf
+from convexity.analytics import (
     analyze_portfolio,
     analyze_portfolios_multi,
 )
-from portfolio_tracker import jobs
-from portfolio_tracker.fetcher import fetch_detail, fetch_portfolio, range_history
-from portfolio_tracker.fetcher import stream_quotes as fetcher_stream_quotes
-# NB: portfolio_tracker.frontier (and its numba/mpt dependency, ~1.7s to
+from convexity import jobs
+from convexity.fetcher import fetch_detail, fetch_portfolio, range_history
+from convexity.fetcher import stream_quotes as fetcher_stream_quotes
+# NB: convexity.frontier (and its numba/mpt dependency, ~1.7s to
 # import) is imported lazily at its two call sites below — the MPT/Optimize
 # feature is on-demand, so keeping it off the module-load path shaves that
 # cost off desktop-app startup. See the _configure_chromium note in desktop.py.
-from portfolio_tracker.fx import fx_index_history, fx_rates
-from portfolio_tracker.helpers import SUPPORTED_FX, _json_default, _safe_json
+from convexity.fx import fx_index_history, fx_rates
+from convexity.helpers import SUPPORTED_FX, _json_default, _safe_json
 
 try:
-    from portfolio_tracker import news_sentiment as _ns
+    from convexity import news_sentiment as _ns
 except ImportError:
     _ns = None
-from portfolio_tracker.persistence import (
+from convexity.persistence import (
     _CURRENT_KEY,
     clear_analytics_cache,
     delete_column_view,
@@ -418,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
             ccy = (q.get("ccy") or ["USD"])[0].strip() or "USD"
             lb = (q.get("lookback") or ["3Y"])[0].strip() or "3Y"
             try:
-                from portfolio_tracker.frontier import _risk_free_history
+                from convexity.frontier import _risk_free_history
                 self._send_json(200, _risk_free_history(ccy, lb))
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
@@ -498,7 +498,7 @@ class Handler(BaseHTTPRequestHandler):
             # on every page load, so that cost belongs on an opt-in route where
             # it is paid once and then cached process-wide by _STATE.
             try:
-                from portfolio_tracker import ml_sentiment as _ml
+                from convexity import ml_sentiment as _ml
                 ml = _ml.runtime_status()
             except Exception as exc:
                 # Same shape as compute_diagnostics()'s except-branch so the
@@ -510,7 +510,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     st = _ns.status()
                     # Booleans only — never serve key material to the frontend.
-                    from portfolio_tracker import lexicon as _lex
+                    from convexity import lexicon as _lex
                     keys = {
                         "finnhub_key_set": bool(st.get("finnhub_key_set")),
                         "nvidia_key_set": bool(st.get("nvidia_key_set")),
@@ -534,8 +534,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(503, {"error": "news_sentiment module not available"})
                 return
             try:
-                from portfolio_tracker import ml_sentiment as _ml
-                from portfolio_tracker import news_diagnostics as _nd
+                from convexity import ml_sentiment as _ml
+                from convexity import news_diagnostics as _nd
 
                 ml = _ml._load()
                 horizon = int((ml.get("cal") or {}).get("horizon_days") or 1)
@@ -550,7 +550,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/export-xlsx":
             try:
-                from portfolio_tracker import xlsx_export
+                from convexity import xlsx_export
             except ImportError as exc:
                 self._send_json(500, {"error": f"openpyxl not installed: {exc}. Run: pip install openpyxl"})
                 return
@@ -569,7 +569,7 @@ class Handler(BaseHTTPRequestHandler):
                     period="1Y", display_ccy="USD",
                 )
                 stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-                fname = f"portfolio_tracker_export_{stamp}.xlsx"
+                fname = f"convexity_export_{stamp}.xlsx"
                 self.send_response(200)
                 self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
@@ -798,7 +798,7 @@ class Handler(BaseHTTPRequestHandler):
             bounds = _bounds if isinstance(_bounds, dict) else None
             budget = str(payload.get("budget") or payload.get("cloud_budget") or "standard")
 
-            from portfolio_tracker.frontier import compute_efficient_frontier_stream
+            from convexity.frontier import compute_efficient_frontier_stream
 
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -1018,7 +1018,7 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
     """Bind the dashboard server on a free loopback port and begin serving on
     a daemon background thread. Returns (server, port). Callers should stop
     it via shutdown_server() — shared by browser-mode main() and the desktop
-    app (portfolio_tracker/desktop.py), which both need the same port-pick +
+    app (convexity/desktop.py), which both need the same port-pick +
     construction but manage their own lifecycle.
     """
     # Tee stdout/stderr into the in-memory ring FIRST, so the Settings -> Logs
@@ -1047,7 +1047,7 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
         # Best-effort — _load() never raises, and a failure just leaves the
         # model unavailable with a real reason on /api/runtime-status.
         try:
-            from portfolio_tracker import ml_sentiment as _mls
+            from convexity import ml_sentiment as _mls
             _mls.available()
         except Exception:
             pass
@@ -1105,7 +1105,7 @@ def main() -> None:
         # while the user reads their dashboard. Best-effort; failure is harmless.
         try:
             import importlib
-            importlib.import_module("portfolio_tracker.mpt")  # import triggers _warm_jit()
+            importlib.import_module("convexity.mpt")  # import triggers _warm_jit()
         except Exception:
             pass
 

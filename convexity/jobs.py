@@ -54,11 +54,11 @@ import time
 import uuid
 from collections import OrderedDict, deque
 
-from portfolio_tracker import helpers, persistence
-from portfolio_tracker.fetcher import stream_quotes
+from convexity import helpers, persistence
+from convexity.fetcher import stream_quotes
 
 try:
-    from portfolio_tracker import news_sentiment as _ns
+    from convexity import news_sentiment as _ns
 except Exception:  # pragma: no cover - optional at runtime, like everywhere else
     _ns = None
 

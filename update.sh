@@ -43,7 +43,7 @@ CONDA_BASE="$(conda info --base)"
 ENV_PY="$CONDA_BASE/envs/$ENV_NAME/bin/python"
 if [ -x "$ENV_PY" ]; then
     echo "==> Verifying runtime dependencies in '$ENV_NAME'..."
-    "$ENV_PY" -m portfolio_tracker.envcheck
+    "$ENV_PY" -m convexity.envcheck
 else
     echo "WARNING: interpreter not found at $ENV_PY — skipping dependency check" >&2
 fi

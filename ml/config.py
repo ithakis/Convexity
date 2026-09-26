@@ -67,7 +67,7 @@ ARTIFACT_VERSION = "mlsent-v1"
 # ---------------------------------------------------------------- v2 (ticker-day)
 # The Market read v2 predicts at the unit the app actually scores: one row per
 # (ticker, as-of trading day D). The window/attention lengths are NOT here:
-# they are serving constants too, so they live in portfolio_tracker.ml_features.
+# they are serving constants too, so they live in convexity.ml_features.
 ENCODER_FIRST_YEAR = 2011      # expanding-window encoders start once >=100k rows exist
 ENCODER_MAX_ROWS = 1_500_000   # per cross-fit (8 GB box; v1 config is 56 trees)
 SEL_START = "2023-01-01"       # model selection / tier calibration window start

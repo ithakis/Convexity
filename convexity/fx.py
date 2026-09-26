@@ -9,12 +9,12 @@ from datetime import datetime, timezone
 import pandas as pd
 import yfinance as yf
 
-from portfolio_tracker.cache import (
+from convexity.cache import (
     _FX_CCY_HIST_CACHE, _FX_CCY_HIST_TTL,
     _FX_HIST_CACHE, _FX_HIST_TTL,
     _FX_RATES_CACHE, _FX_RATES_TTL,
 )
-from portfolio_tracker.helpers import SUPPORTED_FX
+from convexity.helpers import SUPPORTED_FX
 
 _FX_BASKET_MAJORS: list[str] = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD"]
 

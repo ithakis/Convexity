@@ -1,4 +1,4 @@
-"""Unit tests for portfolio_tracker.ml_features — the shared featurizer whose
+"""Unit tests for convexity.ml_features — the shared featurizer whose
 train/serve parity the deployed model depends on."""
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from portfolio_tracker import ml_features as mf
+from convexity import ml_features as mf
 
 pytest.importorskip("sklearn", reason="featurizer text side needs sklearn")
 import numpy as np  # noqa: E402
@@ -30,7 +30,7 @@ def test_publisher_tier_in_sync_with_news_sentiment():
     """publisher_tier is a copy of news_sentiment._source_weight tiering (kept
     separate so ml_features never imports the LLM stack) — this test IS the
     sync mechanism."""
-    from portfolio_tracker.news_sentiment import _source_weight
+    from convexity.news_sentiment import _source_weight
 
     for src in ("Reuters", "Bloomberg", "CNBC", "Motley Fool", "Benzinga",
                 "Random Blog", "GlobeNewswire", "MarketWatch", None, ""):

@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from portfolio_tracker import analytics as A
+from convexity import analytics as A
 
 
 def _closes(symbols, periods=520, seed=0):

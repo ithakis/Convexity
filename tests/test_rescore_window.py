@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from portfolio_tracker import news_sentiment as ns  # noqa: E402
+from convexity import news_sentiment as ns  # noqa: E402
 
 DAY = 86400
 

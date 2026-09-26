@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from portfolio_tracker import persistence
+from convexity import persistence
 
 
 @pytest.fixture

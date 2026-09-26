@@ -1,4 +1,4 @@
-"""Unit tests for portfolio_tracker.relevance — the deterministic relevance
+"""Unit tests for convexity.relevance — the deterministic relevance
 heuristic and the shared title-dedup primitives (train/serve contract)."""
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import time
 
-from portfolio_tracker.relevance import (
+from convexity.relevance import (
     cluster_titles,
     is_boilerplate,
     is_near_duplicate,

@@ -99,7 +99,7 @@ def dense_vector(article: dict) -> list[float]:
     tkr_ret_5d. Market-context values MUST be trailing-only (as of the window
     start) — passing anything contemporaneous with the label window is leakage.
     """
-    from portfolio_tracker.lexicon import lm_score, uncertainty_ratio
+    from convexity.lexicon import lm_score, uncertainty_ratio
 
     # NaN floats from pandas are truthy — isinstance, not `or`, is the guard.
     title = article.get("title")

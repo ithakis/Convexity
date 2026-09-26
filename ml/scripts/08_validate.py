@@ -207,7 +207,7 @@ def test_baselines(results):
     idf = np.load(config.FEATURES_DIR / "idf.npy")
     X, y, w, meta = _load("train", idf, NULL_ROWS)
     Xt, yt, wt, meta_t = _load("test", idf)
-    n_dense = len(__import__("portfolio_tracker.ml_features", fromlist=["x"]).DENSE_COLUMNS)
+    n_dense = len(__import__("convexity.ml_features", fromlist=["x"]).DENSE_COLUMNS)
 
     Xd, Xdt = X[:, -n_dense:].toarray(), Xt[:, -n_dense:].toarray()
     ridge = Ridge(alpha=1.0).fit(Xd, y, sample_weight=w)
@@ -293,7 +293,7 @@ def test_phrasebank(results, pb_dir):
 
     import lightgbm as lgb
 
-    from portfolio_tracker import ml_features as mf
+    from convexity import ml_features as mf
 
     rows = []
     for line in (Path(pb_dir) / "Sentences_66Agree.txt").read_text(encoding="latin-1").splitlines():
@@ -402,7 +402,7 @@ def window_walk_forward(results: dict, h: int) -> None:
     trained on d1 < Y (06 --stage encoder), so nothing here looks ahead."""
     import numpy as np
 
-    from portfolio_tracker.ml_features import WINDOW_COLUMNS
+    from convexity.ml_features import WINDOW_COLUMNS
     spec = importlib.util.spec_from_file_location(
         "train07", Path(__file__).resolve().parent / "07_train_flaml.py")
     t07 = importlib.util.module_from_spec(spec)
@@ -439,7 +439,7 @@ def window_leakage_spotcheck(results: dict, n: int = 40) -> None:
     import duckdb
     import numpy as np
 
-    from portfolio_tracker import ml_features as mf
+    from convexity import ml_features as mf
 
     con = duckdb.connect()
     panel = config.FEATURES_DIR / "panel.parquet"

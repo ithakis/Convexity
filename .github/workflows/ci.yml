@@ -6,16 +6,45 @@ on:
   pull_request:
     branches: ["main"]
 
+# The repo is public: the default token is read-only, third-party actions are
+# pinned to a commit SHA (a moved tag cannot change what runs here), and no
+# workflow uses pull_request_target. See CLAUDE.md §18.
+permissions:
+  contents: read
+
 jobs:
+  secrets:
+    name: Secret scan (gitleaks, full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks (checksum-verified)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          echo "${GITLEAKS_SHA256}  $f" | sha256sum -c -
+          tar xzf "$f" gitleaks
+      - name: Scan every commit
+        run: ./gitleaks git --redact --no-banner --exit-code 1 .
+      - name: No runtime state or local settings anywhere in history
+        run: |
+          bad=$(git log --all --pretty=format: --name-only | sort -u | grep -E '(^|/)\.(convexity|portfolio_tracker)_[a-z_]+\.json$|settings\.local\.json$|\.dashboard\.pid$|(^|/)\.(finnhub|nvidia|openrouter)_key$' || true)
+          if [ -n "$bad" ]; then echo "Forbidden files in history:"; echo "$bad"; exit 1; fi
+
   lint:
     name: Syntax & static checks
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -33,7 +62,7 @@ jobs:
       # Pyflakes catches undefined names, unused imports, etc.
       - name: Pyflakes on package modules
         run: |
-          python -m pyflakes portfolio_tracker/*.py build_symbol_db.py scripts/*.py 2>&1 || true
+          python -m pyflakes convexity/*.py build_symbol_db.py scripts/*.py 2>&1 || true
 
       # The check that would have caught the v1.10.0 bug. requirements.txt (pip,
       # what CI installs) and environment.yml (conda, what the desktop app's `pt`
@@ -48,7 +77,7 @@ jobs:
       - name: Import smoke-test
         run: |
           python -c "import ast; ast.parse(open('dashboard.py').read()); print('dashboard.py shim: parseable')"
-          python -c "from portfolio_tracker import mpt" 2>&1 | grep -v "numba\|llvmlite\|NumbaPendingDeprecation" || true
+          python -c "from convexity import mpt" 2>&1 | grep -v "numba\|llvmlite\|NumbaPendingDeprecation" || true
 
       # install.ps1/update.ps1 are a file type this project didn't have
       # before (Windows bootstrap scripts) — CLAUDE.md's own convention says
@@ -77,10 +106,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -96,10 +125,10 @@ jobs:
     needs: [lint, test]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -118,10 +147,10 @@ jobs:
     needs: [lint, test]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -133,7 +162,7 @@ jobs:
       # of platform plugin (offscreen still initializes the GL abstraction
       # layer). Without these, `QApplication([])` itself fails with
       # "ImportError: libEGL.so.1: cannot open shared object file" before
-      # portfolio_tracker.desktop is ever imported. Xvfb is NOT needed here
+      # convexity.desktop is ever imported. Xvfb is NOT needed here
       # (that's for the X11 platform plugin; offscreen avoids that entirely)
       # — only the underlying graphics libraries Qt dlopens.
       - name: Install system Qt runtime libraries
@@ -152,19 +181,19 @@ jobs:
             || true
 
       # Qt's "offscreen" platform plugin lets a QApplication (and therefore
-      # everything portfolio_tracker.desktop wires up at import time) be
+      # everything convexity.desktop wires up at import time) be
       # constructed with no real display — no Xvfb needed. This catches
       # import-time breakage in desktop.py (bad PySide6 API usage, missing
       # QtWebEngine sub-modules) that the plain lint job can't, since lint
       # never actually installs PySide6.
-      - name: Import portfolio_tracker.desktop under an offscreen QApplication
+      - name: Import convexity.desktop under an offscreen QApplication
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
           python -c "
           from PySide6.QtWidgets import QApplication
           app = QApplication([])
-          import portfolio_tracker.desktop
+          import convexity.desktop
           print('desktop module import OK under offscreen QApplication')
           "
 
@@ -180,7 +209,7 @@ jobs:
     # macOS built-ins, so this runs in seconds and still exercises the one
     # part of icon generation that's actually specific to this repo.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Generate icon.icns with sips + iconutil (same commands as install.sh)
         run: |
@@ -212,10 +241,10 @@ jobs:
     # Script Host API with no equivalent on macOS/Linux, not even under
     # PowerShell Core. Both run in well under a minute here.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -252,7 +281,7 @@ jobs:
           $WshShell = New-Object -ComObject WScript.Shell
           $Shortcut = $WshShell.CreateShortcut($lnkPath)
           $Shortcut.TargetPath = $dummyTarget
-          $Shortcut.Arguments = "-m portfolio_tracker.desktop"
+          $Shortcut.Arguments = "-m convexity.desktop"
           $Shortcut.WorkingDirectory = (Get-Location).Path
           $Shortcut.IconLocation = (Resolve-Path "icon.ico").Path
           $Shortcut.Save()
@@ -260,6 +289,6 @@ jobs:
           $verify = $WshShell.CreateShortcut($lnkPath)
           if (-not (Test-Path $verify.TargetPath)) { throw "TargetPath does not exist: $($verify.TargetPath)" }
           if ($verify.TargetPath -ne $dummyTarget) { throw "TargetPath mismatch: $($verify.TargetPath) (expected $dummyTarget)" }
-          if ($verify.Arguments -notmatch "portfolio_tracker\.desktop") { throw "Arguments mismatch: $($verify.Arguments)" }
+          if ($verify.Arguments -notmatch "convexity\.desktop") { throw "Arguments mismatch: $($verify.Arguments)" }
           Write-Host "WScript.Shell shortcut creation OK: $($verify.TargetPath) $($verify.Arguments)"
           Remove-Item -Force $dummyTarget, $lnkPath -ErrorAction SilentlyContinue

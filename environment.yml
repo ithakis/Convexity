@@ -36,7 +36,7 @@ dependencies:
   # pip-installs it, so every installed copy of the app ran with a dead ML
   # model and silently fell back to the LLM. conda-forge (not the pip: block)
   # so lightgbm's binary links against the same numpy that numba solved for.
-  - lightgbm>=4.0     # Booster inference in portfolio_tracker/ml_sentiment.py
+  - lightgbm>=4.0     # Booster inference in convexity/ml_sentiment.py
   - scikit-learn>=1.3 # HashingVectorizer/TfidfTransformer in ml_features.py
   - pytest
   - pip

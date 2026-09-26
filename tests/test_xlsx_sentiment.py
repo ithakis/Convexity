@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from portfolio_tracker import xlsx_export as xe  # noqa: E402
+from convexity import xlsx_export as xe  # noqa: E402
 
 S = {
     "news": {"tier": "bullish", "score": 0.9, "stale": False,

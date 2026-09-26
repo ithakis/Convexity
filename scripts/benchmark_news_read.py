@@ -46,7 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from portfolio_tracker import news_sentiment as ns  # noqa: E402
+from convexity import news_sentiment as ns  # noqa: E402
 
 GOLD = Path(__file__).resolve().parent.parent / "tests" / "data" / "news_gold.jsonl"
 

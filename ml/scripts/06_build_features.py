@@ -9,8 +9,8 @@ Pipeline (all deterministic, seed in ml/config.py):
    per-stratum floor, deterministic md5-hash ordering (re-runs pick the same
    rows). The holdout (d1 >= TEST_START) is NEVER sampled — every row kept.
 3. Shard featurization — 200k-row chunks ordered by d1: relevance heuristic
-   (portfolio_tracker.relevance), dense block + hashed term counts
-   (portfolio_tracker.ml_features), saved as counts_*.npz / dense_*.npy /
+   (convexity.relevance), dense block + hashed term counts
+   (convexity.ml_features), saved as counts_*.npz / dense_*.npy /
    meta_*.parquet under ml/data/features/{train,test}/.
 4. idf fitted on TRAIN shards only -> features/idf.npy (ships in the artifact).
 
@@ -86,8 +86,8 @@ def build_shards(sample: bool) -> None:
     import pandas as pd
     import scipy.sparse as sp
 
-    from portfolio_tracker import ml_features as mf
-    from portfolio_tracker.relevance import load_company_names, relevance_score
+    from convexity import ml_features as mf
+    from convexity.relevance import load_company_names, relevance_score
 
     con = duckdb.connect()
     con.execute("PRAGMA memory_limit='3GB'")
@@ -189,7 +189,7 @@ def build_idf() -> None:
     import numpy as np
     import scipy.sparse as sp
 
-    from portfolio_tracker import ml_features as mf
+    from convexity import ml_features as mf
 
     train_dir = config.FEATURES_DIR / "train"
     mats = (sp.load_npz(p) for p in sorted(train_dir.glob("counts_*.npz")))
@@ -254,8 +254,8 @@ def _articles_worker(args):
     import numpy as np
     import scipy.sparse as sp
 
-    from portfolio_tracker import ml_features as mf
-    from portfolio_tracker.relevance import (is_boilerplate, load_company_names,
+    from convexity import ml_features as mf
+    from convexity.relevance import (is_boilerplate, load_company_names,
                                              relevance_score)
 
     shard, df = args
@@ -370,7 +370,7 @@ def _shard_matrix(i: int, idf, mask, rows=None):
     import numpy as np
     import scipy.sparse as sp
 
-    from portfolio_tracker import ml_features as mf
+    from convexity import ml_features as mf
 
     counts = sp.load_npz(ARTICLES_DIR / f"counts_{i:04d}.npz")
     dense = np.load(ARTICLES_DIR / f"dense_{i:04d}.npy")
@@ -463,8 +463,8 @@ def _panel_worker(batch):
     """batch: list of (symbol, art_cols dict of arrays, day_cols dict of arrays)."""
     import numpy as np
 
-    from portfolio_tracker import ml_features as mf
-    from portfolio_tracker.relevance import window_sample
+    from convexity import ml_features as mf
+    from convexity.relevance import window_sample
 
     syms, nums = [], []
     for sym, A, Dd in batch:
@@ -508,7 +508,7 @@ def build_panel() -> None:
     import numpy as np
     import pandas as pd
 
-    from portfolio_tracker import ml_features as mf
+    from convexity import ml_features as mf
 
     t0 = time.time()
     frames = []

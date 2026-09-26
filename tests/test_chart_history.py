@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd  # noqa: E402
 
-from portfolio_tracker import cache as ptcache  # noqa: E402
-from portfolio_tracker import fetcher  # noqa: E402
+from convexity import cache as ptcache  # noqa: E402
+from convexity import fetcher  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

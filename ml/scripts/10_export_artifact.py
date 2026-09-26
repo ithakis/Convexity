@@ -6,11 +6,11 @@ recalibrated v1 score. The v2 window model (07 --stage window) failed its
 gates and has no export path: the app cannot serve it
 (docs/ml_sentiment_design.md).
 
-feature_schema.json is regenerated from portfolio_tracker.ml_features here,
+feature_schema.json is regenerated from convexity.ml_features here,
 so the bundle states the exact feature contract the app verifies on load.
 meta.json records provenance and the tier-cut verification. With --deploy the
-bundle is copied to ~/.portfolio_tracker/ml_model/mlsent-v1.1/ (or
-MLSENT_MODEL_DIR), where portfolio_tracker.ml_sentiment loads it.
+bundle is copied to ~/.convexity/ml_model/mlsent-v1.1/ (or
+MLSENT_MODEL_DIR), where convexity.ml_sentiment loads it.
 
 Usage:
     python ml/scripts/10_export_artifact.py [--deploy]
@@ -41,8 +41,8 @@ def main() -> None:
     ap.add_argument("--deploy", action="store_true")
     args = ap.parse_args()
 
-    from portfolio_tracker import ml_features as mf
-    from portfolio_tracker.ml_sentiment import ARTIFACT_VERSION as version
+    from convexity import ml_features as mf
+    from convexity.ml_sentiment import ARTIFACT_VERSION as version
 
     enc = config.ARTIFACTS_DIR / config.ARTIFACT_VERSION
     out = config.ARTIFACTS_DIR / version
@@ -79,7 +79,7 @@ def main() -> None:
 
     if args.deploy:
         dst = Path(os.environ.get("MLSENT_MODEL_DIR")
-                   or Path.home() / ".portfolio_tracker" / "ml_model" / version)
+                   or Path.home() / ".convexity" / "ml_model" / version)
         dst.mkdir(parents=True, exist_ok=True)
         for f in required:
             shutil.copy2(out / f, dst / f)

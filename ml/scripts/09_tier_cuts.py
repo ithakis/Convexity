@@ -101,7 +101,7 @@ def _scores(model: str, horizon: int):
 def main() -> None:
     import numpy as np
 
-    from portfolio_tracker.ml_sentiment import calibrate
+    from convexity.ml_sentiment import calibrate
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=["v1.1", "v2"], required=True)

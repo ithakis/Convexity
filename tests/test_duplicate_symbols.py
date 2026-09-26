@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from portfolio_tracker import analytics, helpers, jobs, persistence  # noqa: E402
+from convexity import analytics, helpers, jobs, persistence  # noqa: E402
 
 # The real repro, in the order the saved view actually held it.
 _DUP_SYMBOLS = ["IRM", "EQIX", "IREN", "DLR", "GDS", "ETN", "VRT", "POWL", "SMCI",
@@ -102,7 +102,7 @@ def test_single_weight_analytics_survives_duplicate_rows(fake_market):
 def test_frontier_dedupes_rows_before_counting_assets(monkeypatch):
     """Two rows for ONE ticker used to pass the `need at least 2 symbols` gate
     and then fail later with a confusing "1 assets" data error."""
-    from portfolio_tracker import frontier
+    from convexity import frontier
     seen = []
     monkeypatch.setattr(frontier, "_bulk_close",
                         lambda syms, period: seen.append(list(syms)) or pd.DataFrame())
@@ -175,7 +175,7 @@ def test_parse_entries_drops_literal_repeats_in_order():
 def test_stream_quotes_collapses_names_that_resolve_to_one_ticker(monkeypatch):
     """'microsoft' and 'MSFT' are one instrument: the build must fetch it once,
     or equal-weight silently doubles its allocation."""
-    from portfolio_tracker import fetcher, resolver
+    from convexity import fetcher, resolver
     monkeypatch.setattr(resolver, "resolve_symbol",
                         lambda e: {"microsoft": "MSFT"}.get(e.strip(), e.strip().upper()))
     monkeypatch.setattr(fetcher, "fetch_one", lambda s: {"symbol": s, "price": 1.0})

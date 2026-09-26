@@ -3412,7 +3412,7 @@ let STATE = {
   weightPresets: [],       // [{name, weights, saved_at}]
   // Pass D — column views. activeViewName is global (one selection
   // across all portfolios). customViews and builtinOverrides both mirror
-  // the server's .portfolio_tracker_column_views.json — built-in views are
+  // the server's .convexity_column_views.json — built-in views are
   // editable in place, their per-view deltas (columns + color modes) living
   // in builtinOverrides and persisting immediately (no transient state).
   activeViewName: "Default",
@@ -4200,7 +4200,7 @@ async function exportXlsx() {
     }
     const blob = await r.blob();
     // Pull the filename out of Content-Disposition (server picks the timestamp).
-    let fname = "portfolio_tracker_export.xlsx";
+    let fname = "convexity_export.xlsx";
     const cd = r.headers.get("content-disposition") || "";
     const m = cd.match(/filename="?([^";]+)"?/i);
     if (m) fname = m[1];
@@ -7289,7 +7289,7 @@ function renderPortfolioSentiment(symbols) {
 
 /* ===== Track record ======================================================
  * Has either engine predicted anything? Date-clustered statistics only
- * (portfolio_tracker/news_diagnostics.py): one date is one observation, and
+ * (convexity/news_diagnostics.py): one date is one observation, and
  * no verdict is given before ~40 trading days exist. */
 async function toggleTrackRecord() {
   const body = $("#ns-diag-body");
@@ -9537,7 +9537,7 @@ function versionLabel() {
 function loadAppVersion() {
   fetch("/api/health").then(r => r.json()).then(d => {
     if (!d) return;
-    // env_ok is the cheap find_spec-only self-check from portfolio_tracker/
+    // env_ok is the cheap find_spec-only self-check from convexity/
     // envcheck.py. It rides on /api/health precisely so a stale environment
     // announces itself on page load rather than waiting for the user to open
     // the one panel that would have explained it.
@@ -9613,7 +9613,7 @@ function checkLlmHealth() {
  * exists: the whole backend logs via print(), and in the desktop app those
  * writes go to a file descriptor with no terminal attached — so when the ML
  * model failed to load, the one line explaining why was unreadable. The
- * server tees stdout/stderr into a ring buffer (portfolio_tracker/logbuf.py)
+ * server tees stdout/stderr into a ring buffer (convexity/logbuf.py)
  * and this panel tails it.
  *
  * Polling only runs while the Logs section is visible; closing the overlay
@@ -10129,11 +10129,11 @@ function renderSettingsAbout(el) {
       id: "data",
       label: "Where your data lives",
       help: `<div class="settings-kv">
-          ${kv("Portfolios", "<code>.portfolio_tracker_views.json</code>")}
-          ${kv("Watchlists", "<code>.portfolio_tracker_watchlists.json</code>")}
-          ${kv("Optimizer runs", "<code>.portfolio_tracker_mpt.json</code>")}
-          ${kv("News cache", "<code>.portfolio_tracker_news.json</code>")}
-          ${kv("ML model", "<code>~/.portfolio_tracker/ml_model/</code>")}
+          ${kv("Portfolios", "<code>.convexity_views.json</code>")}
+          ${kv("Watchlists", "<code>.convexity_watchlists.json</code>")}
+          ${kv("Optimizer runs", "<code>.convexity_mpt.json</code>")}
+          ${kv("News cache", "<code>.convexity_news.json</code>")}
+          ${kv("ML model", "<code>~/.convexity/ml_model/</code>")}
         </div>
         <div class="settings-row-help">All of these sit beside the app and stay on this
           machine. They are excluded from git.</div>`,

@@ -34,7 +34,7 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 # Import mpt directly (pure numpy/pandas, no server deps).
-from portfolio_tracker import mpt
+from convexity import mpt
 
 # Import _normalize_dividend_yield from the package (module-level function,
 # importable once requirements.txt deps are installed). If the import fails
@@ -42,7 +42,7 @@ from portfolio_tracker import mpt
 # explicitly — do NOT silently fall back to a local copy, which would make
 # tests pass even when the package is broken or has diverged.
 try:
-    from portfolio_tracker.helpers import _normalize_dividend_yield  # noqa: E402
+    from convexity.helpers import _normalize_dividend_yield  # noqa: E402
     _DASHBOARD_IMPORT_ERROR = None
 except Exception as _exc:
     _DASHBOARD_IMPORT_ERROR = str(_exc)
@@ -56,7 +56,7 @@ def _require_dashboard():
 
 
 # The real analytics stats helpers (ret = daily returns, val = equity curve).
-from portfolio_tracker.analytics import _relative, _stats  # noqa: E402
+from convexity.analytics import _relative, _stats  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -834,7 +834,7 @@ def test_cloud_kernel_parallel_matches_serial():
 def test_frontier_stream_progress_then_done():
     """compute_efficient_frontier_stream yields progress msgs then one done payload
     with the bootstrap band attached; max_seconds keeps it fast."""
-    from portfolio_tracker import frontier
+    from convexity import frontier
     rng = np.random.default_rng(1)
     rows = []
     for i in range(6):
@@ -867,7 +867,7 @@ def test_frontier_stream_progress_then_done():
 
 def test_frontier_stream_error_too_few_symbols():
     """A single-symbol request yields exactly one error message, no crash."""
-    from portfolio_tracker import frontier
+    from convexity import frontier
     msgs = list(frontier.compute_efficient_frontier_stream([{"symbol": "AAA"}], budget="light"))
     assert msgs and msgs[-1]["type"] == "error"
 
@@ -907,7 +907,7 @@ def test_frontier_stream_cloud_frontier_messages_and_payload():
     """The stream emits a `frontier` msg then `cloud` chunks; `done` omits the bulk
     cloud but the blocking wrapper reassembles it; 30-day risk fields are present
     and the displayed frontier is monotone in cvar30."""
-    from portfolio_tracker import frontier
+    from convexity import frontier
     rng = np.random.default_rng(2)
     rows = [{"symbol": f"A{i}", "price": 100.0, "market_cap": 1e11 * (i + 1),
              "currency": "USD"} for i in range(6)]
@@ -944,7 +944,7 @@ def test_frontier_stream_cloud_frontier_messages_and_payload():
 def test_mpt_run_history_last_three(tmp_path, monkeypatch):
     """save_mpt_run keeps the last 3 runs newest-first, dedupes identical params,
     caps at 3; get_last_mpt_run/get_mpt_runs read them; legacy formats tolerated."""
-    from portfolio_tracker import persistence as P
+    from convexity import persistence as P
     monkeypatch.setattr(P, "_MPT_FILE", tmp_path / "mpt.json")
     for a in (0.90, 0.95, 0.975, 0.99):                       # 4 distinct params
         P.save_mpt_run("View1", {"params": {"alpha": a}, "symbols": ["A", "B"]})

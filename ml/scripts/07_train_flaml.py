@@ -220,7 +220,7 @@ def train_window(args) -> None:
     import duckdb
     import numpy as np
 
-    from portfolio_tracker.ml_features import WINDOW_COLUMNS
+    from convexity.ml_features import WINDOW_COLUMNS
 
     t0 = time.time()
     cols = ["symbol", "date", *WINDOW_COLUMNS, "v1_wmean", "sar_1d", "sar_5d"]

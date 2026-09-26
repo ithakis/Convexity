@@ -2,8 +2,15 @@
 
 Version scheme: `1.X.Y` — X bumps on a major new feature/release, Y bumps on
 smaller polish/fixes/infra in between. Inferred retroactively from merged PR
-history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
+history; going forward, bump `__version__` in `convexity/__init__.py`
 when merging a PR and add a line here.
+
+## 1.13.0 — 2026-09-26
+
+- **Public repository: `ithakis/Convexity`.** History was rewritten before publication so no runtime state (holdings, watchlists, weights, optimizer runs), local settings or personal email is in any commit; the old private repo is archived.
+- **Full internal rename** to Convexity: package `convexity/` (`python -m convexity`, `python -m convexity.desktop`), state files `.convexity_*.json`, model directory `~/.convexity/`, bundle ID `com.ithakis.convexity`, log `~/Library/Logs/Convexity.log`. Existing installs migrate automatically on first launch (`convexity/migrate.py`: atomic rename, never overwrites, never fatal). Re-run `install.sh` / `install.ps1` once to rebuild the launcher.
+- **Security hardening:** CI `secrets` job (gitleaks over full history + forbidden-file check), actions pinned to commit SHAs with a read-only default token, a stricter local commit guard (runtime state, `settings.local.json`, SQLite, absolute home paths), `SECURITY.md`, and CLAUDE.md §18 "Security & public-repo rules" for AI agents.
+- Removed hardcoded home-directory paths from docs and hooks.
 
 ## 1.12.3 — 2026-09-26
 

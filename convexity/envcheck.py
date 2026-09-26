@@ -19,7 +19,7 @@ nothing compared them. REQUIRED below is now the single source of truth:
   * /api/runtime-status serves check() to the UI (Settings -> Models & Data,
     plus a banner under the topbar) so a broken env is visible in the app.
   * install.sh / update.sh (and the PowerShell twins) run
-    `python -m portfolio_tracker.envcheck` against the freshly-solved env, so a
+    `python -m convexity.envcheck` against the freshly-solved env, so a
     half-built env fails the installer instead of exiting 0.
 
 Deliberately import-only: no version parsing, no pkg_resources, no network. The

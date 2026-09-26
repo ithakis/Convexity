@@ -28,12 +28,11 @@ ENV/
 # Runtime state — per-machine data (holdings, watchlists, caches, saved runs).
 # Regenerated at runtime; never meant to ship in the repo (a fresh clone
 # should start with an empty dashboard, not the previous owner's portfolio).
-.portfolio_tracker_news.json
-.portfolio_tracker_views.json
-.portfolio_tracker_watchlists.json
-.portfolio_tracker_mpt.json
-.portfolio_tracker_column_views.json
-.portfolio_tracker_session.json
+# The repo is PUBLIC: these files hold real holdings. Keep both name sets —
+# the legacy ones can still exist in a checkout until convexity/migrate.py
+# renames them on first launch.
+.convexity_*.json
+.portfolio_tracker_*.json
 .dashboard.pid
 
 # Conda
@@ -97,5 +96,4 @@ launch_desktop.vbs
 # OS
 Thumbs.db
 ehthumbs.db
-.portfolio_tracker_sentiment_history.json
 scripts/kappa_sensitivity_results.json

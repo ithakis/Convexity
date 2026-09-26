@@ -106,7 +106,7 @@ def _looks_like_ticker(s: str) -> bool:
 
 def _symbol_db_lookup(entry: str, min_score: float = 72.0) -> str | None:
     try:
-        from portfolio_tracker import symbol_db
+        from convexity import symbol_db
     except ImportError:
         return None
     try:

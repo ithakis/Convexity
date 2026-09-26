@@ -188,7 +188,7 @@ def hit_rates(rows: list[dict], tier_of) -> dict:
 def _news_tier(score: float | None) -> str | None:
     # Local import keeps this module free of the network-facing engine at
     # import time (the engine loads caches from disk on import).
-    from portfolio_tracker.news_sentiment import tier_for
+    from convexity.news_sentiment import tier_for
     return tier_for(score)
 
 
@@ -203,7 +203,7 @@ def compute(raw_records: list[dict], closes=None, market_horizon: int = 5) -> di
     if not records:
         return _empty(out)
     if closes is None:
-        from portfolio_tracker.analytics import _bulk_close
+        from convexity.analytics import _bulk_close
         try:
             closes = _bulk_close(sorted({r["symbol"] for r in records}) + ["SPY"], "1Y")
         except Exception:

@@ -30,7 +30,7 @@ available() False and every call return None — the News read is unaffected.
 Graceful must not mean SILENT: runtime_status() reports the real reason and
 the Track record surfaces it.
 
-Artifact bundle (ml/scripts/07 + 09 + 10), ~/.portfolio_tracker/ml_model/<ver>/:
+Artifact bundle (ml/scripts/07 + 09 + 10), ~/.convexity/ml_model/<ver>/:
     model.lgbm.txt        encoder Booster
     idf.npy, col_mask.npy train-fitted idf + df-pruning column mask
     feature_schema.json   must equal ml_features.feature_schema()
@@ -77,7 +77,7 @@ def model_dir() -> Path:
     env = os.environ.get("MLSENT_MODEL_DIR")
     if env:
         return Path(env)
-    return Path.home() / ".portfolio_tracker" / "ml_model" / ARTIFACT_VERSION
+    return Path.home() / ".convexity" / "ml_model" / ARTIFACT_VERSION
 
 
 def _load() -> dict:
@@ -104,7 +104,7 @@ def _load() -> dict:
             for mod in ("scipy.sparse", "sklearn"):
                 importlib.import_module(mod)
 
-            from portfolio_tracker import ml_features as mf
+            from convexity import ml_features as mf
 
             if json.loads((d / "feature_schema.json").read_text()) != mf.feature_schema():
                 raise RuntimeError("encoder feature schema differs from ml_features.py "
@@ -151,7 +151,7 @@ def runtime_status() -> dict:
 def load_closes(symbols: list[str]):
     """Daily adjusted closes for `symbols` + SPY (6 months, cached by
     analytics). One download serves a whole refresh."""
-    from portfolio_tracker.analytics import _bulk_close
+    from convexity.analytics import _bulk_close
 
     try:
         df = _bulk_close(sorted(set(symbols) | {"SPY"}), "6M")
@@ -245,8 +245,8 @@ def score_articles(articles: list[dict], symbol: str, closes=None) -> list[dict]
     import numpy as np
     import scipy.sparse as sp
 
-    from portfolio_tracker import ml_features as mf
-    from portfolio_tracker.relevance import is_boilerplate, load_company_names, relevance_score
+    from convexity import ml_features as mf
+    from convexity.relevance import is_boilerplate, load_company_names, relevance_score
 
     name = load_company_names().get((symbol or "").upper())
     ctx_by_day: dict = {}
@@ -332,8 +332,8 @@ def market_read(symbol: str, articles: list[dict], closes=None, now: float | Non
     if not st["ok"] or not articles:
         return None, None
     try:
-        from portfolio_tracker import ml_features as mf
-        from portfolio_tracker.relevance import window_sample
+        from convexity import ml_features as mf
+        from convexity.relevance import window_sample
 
         now = float(now) if now is not None else time.time()
         # The calibration panel's window is articles dated D-6..D (ET days),

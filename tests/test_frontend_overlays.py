@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-_STATIC = Path(__file__).resolve().parent.parent / "portfolio_tracker" / "static"
+_STATIC = Path(__file__).resolve().parent.parent / "convexity" / "static"
 _APP_JS = (_STATIC / "app.js").read_text(encoding="utf-8")
 _INDEX = (_STATIC / "index.html").read_text(encoding="utf-8")
 _CSS = (_STATIC / "style.css").read_text(encoding="utf-8")

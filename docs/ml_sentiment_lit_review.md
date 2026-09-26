@@ -218,7 +218,7 @@ Every locked pipeline choice below cites the evidence that motivated it.
 43. **Loughran & McDonald (2011), "When Is a Liability Not a Liability? Textual
     Analysis, Dictionaries, and 10-Ks," *J. Finance* 66(1).**
     doi:10.1111/j.1540-6261.2010.01625.x. Finance-specific word lists (the LM
-    lexicon already vendored in `portfolio_tracker/data/lm_lexicon.json`);
+    lexicon already vendored in `convexity/data/lm_lexicon.json`);
     general-purpose dictionaries misclassify financial text.
 44. **Loughran & McDonald (2016), "Textual Analysis in Accounting and Finance: A
     Survey," *J. Accounting Research* 54(4).** doi:10.1111/1475-679x.12123.

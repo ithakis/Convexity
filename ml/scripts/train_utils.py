@@ -15,7 +15,7 @@ def load_split(split: str, idf, max_rows: int | None = None):
     import pandas as pd
     import scipy.sparse as sp
 
-    from portfolio_tracker import ml_features as mf
+    from convexity import ml_features as mf
 
     d = config.FEATURES_DIR / split
     mask_path = config.FEATURES_DIR / "col_mask.npy"
@@ -94,7 +94,7 @@ def daily_ic(dates, score, label, horizon: int = 1, min_names: int = 20) -> dict
         if np.isfinite(c):
             ics.append((d, c))
     # The statistic itself is the app's own (Track record), not a copy.
-    from portfolio_tracker.news_diagnostics import clustered_mean_t
+    from convexity.news_diagnostics import clustered_mean_t
 
     if len(ics) < 3:
         return {"mean": float("nan"), "t": float("nan"), "t_nw": float("nan"),

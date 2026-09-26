@@ -46,7 +46,7 @@ import yfinance as yf
 # Numeric coercion + dividend-yield normalisation live in helpers.py — the
 # canonical copies. `_maybe_num` is an alias for `_safe_num` (identical finite-
 # float-or-None semantics) kept only so the many call sites below read the same.
-from portfolio_tracker.helpers import _normalize_dividend_yield, _safe_num as _maybe_num
+from convexity.helpers import _normalize_dividend_yield, _safe_num as _maybe_num
 
 
 # --------------------------------------------------------------------------

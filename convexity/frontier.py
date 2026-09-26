@@ -18,13 +18,13 @@ import time
 
 import numpy as np
 
-from portfolio_tracker import mpt
-from portfolio_tracker.analytics import _analyst_for, _bulk_close
-from portfolio_tracker.cache import _cache_get, _cache_put
-from portfolio_tracker.fx import (
+from convexity import mpt
+from convexity.analytics import _analyst_for, _bulk_close
+from convexity.cache import _cache_get, _cache_put
+from convexity.fx import (
     _apply_fx_to_closes, _fx_latest_close, _norm_ccy_for_fx, fx_rates,
 )
-from portfolio_tracker.helpers import _dedupe_rows_by_symbol
+from convexity.helpers import _dedupe_rows_by_symbol
 
 _MPT_LOOKBACK_YF = {"1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}
 _COV_MODELS = ("sample", "ledoit", "ewma")

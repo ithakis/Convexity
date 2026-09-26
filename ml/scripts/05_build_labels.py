@@ -257,8 +257,8 @@ def stage_c() -> None:
     import pyarrow.parquet as pq
 
     # Shared dedup logic with the app (same normalization + threshold as
-    # news_sentiment._dedup_articles, exported via portfolio_tracker.relevance).
-    from portfolio_tracker.relevance import cluster_titles
+    # news_sentiment._dedup_articles, exported via convexity.relevance).
+    from convexity.relevance import cluster_titles
 
     t0 = time.time()
     con = duckdb.connect()

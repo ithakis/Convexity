@@ -15,7 +15,7 @@ it and derives the `divergence` between the two engines.
 
 The two are peers. There is no blended score and no primary/challenger.
 
-Caches are disk-backed (`.portfolio_tracker_news.json`) and refresh is
+Caches are disk-backed (`.convexity_news.json`) and refresh is
 user-driven only (the refresh job, jobs.py). Nothing fails silently any more:
 the last LLM outcome is tracked (`llm_status()`), rides on /api/health as
 `llm_ok`, and a failed refresh keeps the previous News read but marks it
@@ -38,12 +38,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from portfolio_tracker.helpers import (
+from convexity.helpers import (
     _FH_LIMITER, _MAX_RETRIES, _NV_LIMITER, _RATE_LIMIT_BACKOFF_S, _RETRY_SLEEP_S,
     _YF_LIMITER, _YF_MAX_RETRIES, Cancelled, _is_rate_limited_error,
     _load_local_secret, _notify_rate, _repo_root,
 )
-from portfolio_tracker.relevance import (DEDUP_SIMILARITY, norm_title, relevance_score,
+from convexity.relevance import (DEDUP_SIMILARITY, norm_title, relevance_score,
                                          window_sample)
 
 # API key loading (env var, then a strictly-local file found by walking
@@ -180,10 +180,10 @@ def _cache_restore(cache: dict, key: str, entry: tuple[float, float, Any] | None
 
 
 # ---------------------------------------------------------------------------
-# Disk persistence — `.portfolio_tracker_news.json`
+# Disk persistence — `.convexity_news.json`
 # ---------------------------------------------------------------------------
 
-_PERSIST_FILE = _repo_root() / ".portfolio_tracker_news.json"
+_PERSIST_FILE = _repo_root() / ".convexity_news.json"
 _PERSIST_LOCK = threading.Lock()
 _persist_timer: threading.Timer | None = None
 _PERSIST_DEBOUNCE_S = 1.0
@@ -327,7 +327,7 @@ def _fh_call(path: str, params: dict[str, Any], cancel=None) -> Any | None:
     query = dict(params)
     query["token"] = FINNHUB_API_KEY
     url = _FINNHUB_BASE + path + "?" + urllib.parse.urlencode(query)
-    req = urllib.request.Request(url, headers={"User-Agent": "PortfolioTracker/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Convexity/1.0"})
 
     for attempt in range(_MAX_RETRIES):
         _FH_LIMITER.acquire(cancel=cancel)
@@ -752,7 +752,7 @@ def compute_divergence(news: dict | None, market: dict | None,
 # One record per symbol per refresh; same-day re-refresh overwrites.
 # ---------------------------------------------------------------------------
 
-_HISTORY_FILE = _repo_root() / ".portfolio_tracker_sentiment_history.json"
+_HISTORY_FILE = _repo_root() / ".convexity_sentiment_history.json"
 _HISTORY_LOCK = threading.Lock()
 _HISTORY_MAX_DAYS = 400
 
@@ -1199,7 +1199,7 @@ def _market_history(model_version: str, exclude: tuple[str, str]) -> list[float]
     reference the live-anchored percentile ranks against. Only the running
     model's scores (another model's are on another scale), and not the
     (date, symbol) being re-scored, which would rank a ticker against itself."""
-    from portfolio_tracker import ml_sentiment as _ml
+    from convexity import ml_sentiment as _ml
 
     cutoff = (datetime.now(timezone.utc)
               - timedelta(days=_ml.LIVE_WINDOW_DAYS)).strftime("%Y-%m-%d")
@@ -1216,7 +1216,7 @@ def _market_read(symbol: str, ctx: dict, cancel=None) -> tuple[dict | None, floa
     The Market read is always the 7-day read whatever the News window: that
     is the unit the model was calibrated on."""
     try:
-        from portfolio_tracker import ml_sentiment as _ml
+        from convexity import ml_sentiment as _ml
 
         if not _ml.available():
             _warn_ml_once(_ml.runtime_status().get("reason") or "model not loaded")
@@ -1530,7 +1530,7 @@ def refresh_sentiment(symbols: list[str], context: dict | None = None,
 
     closes = None
     try:
-        from portfolio_tracker import ml_sentiment as _ml
+        from convexity import ml_sentiment as _ml
         if _ml.available() and ordered:
             closes = _ml.load_closes(ordered)
     except Exception as exc:

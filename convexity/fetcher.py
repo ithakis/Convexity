@@ -11,12 +11,12 @@ from datetime import datetime, timezone
 import pandas as pd
 import yfinance as yf
 
-from portfolio_tracker.cache import (
+from convexity.cache import (
     _BENCH_CACHE, _BENCH_TTL,
     _CACHE_TTL_ANALYTICS,
     _cache_get, _cache_put,
 )
-from portfolio_tracker.helpers import (
+from convexity.helpers import (
     _bollinger_pct_b,
     _is_rate_limited_error,
     _macd_hist_pct,
@@ -27,15 +27,15 @@ from portfolio_tracker.helpers import (
     _series_to_points,
     _ytd_change,
 )
-from portfolio_tracker.resolver import _ordered_resolve
+from convexity.resolver import _ordered_resolve
 
 try:
-    from portfolio_tracker import finnhub_adapter as _fh
+    from convexity import finnhub_adapter as _fh
 except ImportError:
     _fh = None
 
 try:
-    from portfolio_tracker import news_sentiment as _ns
+    from convexity import news_sentiment as _ns
 except ImportError:
     _ns = None
 

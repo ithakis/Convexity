@@ -13,7 +13,7 @@ _REPO = os.path.dirname(os.path.dirname(__file__))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from portfolio_tracker import news_sentiment as ns
+from convexity import news_sentiment as ns
 
 
 @pytest.fixture(autouse=True)
@@ -24,8 +24,8 @@ def _clean_news_state(monkeypatch, tmp_path):
         ns._FH_LIMITER._calls.clear()
     with ns._NV_LIMITER._lock:
         ns._NV_LIMITER._calls.clear()
-    monkeypatch.setattr(ns, "_PERSIST_FILE", tmp_path / ".portfolio_tracker_news.json")
-    monkeypatch.setattr(ns, "_HISTORY_FILE", tmp_path / ".portfolio_tracker_sentiment_history.json")
+    monkeypatch.setattr(ns, "_PERSIST_FILE", tmp_path / ".convexity_news.json")
+    monkeypatch.setattr(ns, "_HISTORY_FILE", tmp_path / ".convexity_sentiment_history.json")
     monkeypatch.setattr(ns, "_schedule_persist", lambda: None)
     monkeypatch.setattr(ns, "_fh_rate_limit_until", 0.0)
     monkeypatch.setattr(ns, "_nv_rate_limit_until", 0.0)
@@ -299,7 +299,7 @@ def _arts(n=3):
 
 
 def test_read_batch_prefers_headlines_about_the_company(monkeypatch):
-    monkeypatch.setattr("portfolio_tracker.relevance.load_company_names",
+    monkeypatch.setattr("convexity.relevance.load_company_names",
                         lambda: {"NVDA": "NVIDIA CORP"})
     now = time.time()
     noise = [{"headline": f"Is stock {i} a buy before October?", "summary": "",
@@ -336,7 +336,7 @@ def test_assess_writes_items_both_engines_and_history(monkeypatch):
 
 
 def test_market_history_is_the_running_models_recent_scores(monkeypatch):
-    from portfolio_tracker import ml_sentiment as _ml
+    from convexity import ml_sentiment as _ml
 
     today = datetime.now(timezone.utc).date()
     day = lambda n: (today - timedelta(days=n)).isoformat()  # noqa: E731
@@ -400,7 +400,7 @@ def test_refresh_reports_scored_failed_and_empty(monkeypatch):
                         lambda days=7, stage_cb=None, cancel=None: ({"news": {}}, "ok"))
     monkeypatch.setattr(ns, "_refresh_symbol_sentiment",
                         lambda s, context=None, stage_cb=None, cancel=None: outcomes[s])
-    from portfolio_tracker import ml_sentiment as _ml
+    from convexity import ml_sentiment as _ml
     monkeypatch.setattr(_ml, "load_closes", lambda symbols: None)     # no network
     events = []
     out = ns.refresh_sentiment(["A", "B", "C"], progress_cb=lambda k, b: events.append((k, b)))

@@ -408,7 +408,7 @@ def source_sec_company_tickers(session) -> Iterable[SymbolRow]:
     weekly. Mostly US filers + cross-listed foreign issuers.
     NOTE: SEC requires a descriptive User-Agent. Set the env var
     ``SEC_USER_AGENT`` to something like ``"Your Name your@email"``."""
-    ua = os.environ.get("SEC_USER_AGENT", "PortfolioTracker contact@example.com")
+    ua = os.environ.get("SEC_USER_AGENT", "Convexity contact@example.com")
     headers = {"User-Agent": ua, "Accept": "application/json"}
     url = "https://www.sec.gov/files/company_tickers_exchange.json"
     try:

@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from portfolio_tracker import fetcher, jobs, persistence  # noqa: E402
+from convexity import fetcher, jobs, persistence  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

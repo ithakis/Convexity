@@ -14,7 +14,7 @@ cd "$REPO_DIR"
 
 ENV_NAME="${ENV_NAME:-pt}"
 APP_NAME="${APP_NAME:-Convexity}"
-BUNDLE_ID="com.ithakis.portfoliotracker"
+BUNDLE_ID="com.ithakis.convexity"
 
 echo "==> Convexity desktop app installer"
 echo "    repo:    $REPO_DIR"
@@ -92,7 +92,7 @@ fi
 # exit 0 here and the failure only surfaced weeks later as a silently dead ML
 # model inside the running app. envcheck exits non-zero on a critical miss.
 echo "==> Verifying runtime dependencies in '$ENV_NAME'..."
-"$ENV_PY" -m portfolio_tracker.envcheck
+"$ENV_PY" -m convexity.envcheck
 
 # ---------------------------------------------------------------------------
 # 3. Generate icon.icns from icon.png (macOS only; regenerate only if stale).
@@ -148,7 +148,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     cat > "$APP_PATH/Contents/MacOS/$APP_NAME" <<EOF
 #!/bin/bash
 cd "$REPO_DIR"
-exec "$ENV_PY" -m portfolio_tracker.desktop
+exec "$ENV_PY" -m convexity.desktop
 EOF
     chmod +x "$APP_PATH/Contents/MacOS/$APP_NAME"
 
@@ -192,5 +192,5 @@ EOF
     echo "    is unsigned by design; right-click > Open once to bypass it.)"
 else
     echo ""
-    echo "==> Done. Launch with: $ENV_PY -m portfolio_tracker.desktop"
+    echo "==> Done. Launch with: $ENV_PY -m convexity.desktop"
 fi

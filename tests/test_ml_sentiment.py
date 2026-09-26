@@ -1,4 +1,4 @@
-"""Tests for portfolio_tracker.ml_sentiment — the Market read.
+"""Tests for convexity.ml_sentiment — the Market read.
 
 The contracts that matter in production:
 1. Graceful degradation: no artifact / a schema mismatch -> available() False,
@@ -46,9 +46,9 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 
-from portfolio_tracker import ml_features as mf  # noqa: E402
-from portfolio_tracker import ml_sentiment as ms  # noqa: E402
-from portfolio_tracker.relevance import is_boilerplate, relevance_score  # noqa: E402
+from convexity import ml_features as mf  # noqa: E402
+from convexity import ml_sentiment as ms  # noqa: E402
+from convexity.relevance import is_boilerplate, relevance_score  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -150,7 +150,7 @@ def _training_item(a, symbol, sar_pred):
 
 def test_encoder_matches_the_training_featurization(tiny_artifact, monkeypatch):
     d, enc, idf, mask = tiny_artifact
-    monkeypatch.setattr("portfolio_tracker.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
     a = _article()
     items = ms.score_articles([a], "AAPL")
     assert len(items) == 1
@@ -169,7 +169,7 @@ def test_served_score_matches_the_calibration_panel(tiny_artifact, monkeypatch):
     """The Market read score (weighted_sar over live items) equals the panel's
     enc_wmean over training-built items for the same articles — the number
     the tier cuts were fitted on."""
-    monkeypatch.setattr("portfolio_tracker.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
     arts = [_article(1, 1.0), _article(2, 30.0, source="PR Newswire", n_duplicates=3,
                                        headline="Top 5 stocks to watch: company row2"),
             _article(3, 80.0, source="Some Blog", summary="")]
@@ -247,7 +247,7 @@ def test_calibrate_handles_flat_knots():
 
 # ----------------------------------------------------------------- market_read
 def test_market_read_is_the_weighted_encoder_score_over_7_days(tiny_artifact, monkeypatch):
-    monkeypatch.setattr("portfolio_tracker.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
     now = time.time()
     fresh = [_article(i, age_h=6 * i) for i in range(1, 6)]
     old = [_article(9, age_h=24 * 12)]
@@ -263,7 +263,7 @@ def test_market_read_is_the_weighted_encoder_score_over_7_days(tiny_artifact, mo
 
 
 def test_market_read_ranks_against_the_history_it_is_given(tiny_artifact, monkeypatch):
-    monkeypatch.setattr("portfolio_tracker.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
     arts = [_article(i, age_h=6 * i) for i in range(1, 4)]
     base, _ = ms.market_read("AAPL", arts)
     below = [base["score"] - 1.0] * ms.MIN_LIVE_HISTORY
@@ -273,7 +273,7 @@ def test_market_read_ranks_against_the_history_it_is_given(tiny_artifact, monkey
 
 
 def test_market_read_caps_the_window_like_the_training_panel(tiny_artifact, monkeypatch):
-    monkeypatch.setattr("portfolio_tracker.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
     arts = [_article(i, age_h=0.5 + i * 0.9) for i in range(150)]   # ~5.6 days
     market, _ = ms.market_read("AAPL", arts)
     assert market["n_articles"] <= mf.WINDOW_CAP

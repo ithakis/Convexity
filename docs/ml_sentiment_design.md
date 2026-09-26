@@ -6,7 +6,7 @@ News tab, beside the LLM **News read** (CLAUDE.md §4); the two are never
 blended. Sections 1–10 are the mlsent-v1 build (2026-07); §11 is the 2026-09
 recalibration (mlsent-v1.1, shipped) and the v2 retrain (not shipped).
 Companion document: `docs/ml_sentiment_lit_review.md` (60-paper grounding).
-Pipeline code: `ml/` (training) + `portfolio_tracker/{relevance,ml_features,
+Pipeline code: `ml/` (training) + `convexity/{relevance,ml_features,
 ml_sentiment}.py` (shared/production).
 
 ## 1. Problem
@@ -65,7 +65,7 @@ SPY present 1993–2023 so the trading calendar needs no yfinance).
 
 ## 4. Relevance heuristic (deterministic — NO parameters fitted on FNSPID)
 
-`portfolio_tracker/relevance.py`. Multiplicative: mention position (title
+`convexity/relevance.py`. Multiplicative: mention position (title
 1.0 / lead-150-chars 0.6 / body 0.35 / tagged-only 0.2, ticker regex OR
 symbol_db company-name fuzzy ≥88) × co-mention penalty 1/(1+0.4(n−1)) ×
 boilerplate 0.45 (listicle/roundup regexes) × long-headline 0.85 ×
@@ -76,7 +76,7 @@ on the same window day; at serve time = Finnhub `related` field.
 **Hand-set by construction** so the user's future ML relevance model can be
 trained on this same corpus without circularity.
 
-## 5. Features (shared featurizer, `portfolio_tracker/ml_features.py`)
+## 5. Features (shared featurizer, `convexity/ml_features.py`)
 
 - Hashed TF-IDF: HashingVectorizer 2^18, uni+bigrams, alternate_sign=False,
   title + first 600 summary chars (memory contract), × train-fitted idf,
@@ -154,13 +154,13 @@ dense-only ridge; SAR label ≥ raw-label model on SAR IC) · 6 slices
 (session/dollar-vol/relevance terciles; relevance top > bottom) ·
 7 calibration deciles (monotone ends, CIs) · 8 PhraseBank sign accuracy
 ≥0.65 · 9 live evidence: the app's Track record (date-clustered daily IC,
-long-short, hit rates — `portfolio_tracker/news_diagnostics.py`).
+long-short, hit rates — `convexity/news_diagnostics.py`).
 
 Results (fill after run): see `ml/data/reports/validation_report.json`.
 
 ## 9. Production (mlsent-v1.1)
 
-`portfolio_tracker/ml_sentiment.py` loads `~/.portfolio_tracker/ml_model/
+`convexity/ml_sentiment.py` loads `~/.convexity/ml_model/
 mlsent-v1.1/` (env `MLSENT_MODEL_DIR`) behind a schema gate. Per refresh, per
 ticker: the 7-day window's articles, capped with `relevance.window_sample(60,
 15)`, go through the v1 encoder (one batched predict); the score is

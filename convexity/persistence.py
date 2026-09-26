@@ -9,7 +9,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from portfolio_tracker.helpers import _dedupe_rows_by_symbol, _json_default, _repo_root
+from convexity.helpers import _dedupe_rows_by_symbol, _json_default, _repo_root
 
 
 def _atomic_write(path: Path, body: str) -> None:
@@ -41,11 +41,11 @@ def _atomic_write(path: Path, body: str) -> None:
 
 # ----------------------------- File paths -----------------------------------
 
-_WATCHLISTS_FILE = _repo_root() / ".portfolio_tracker_watchlists.json"
-_VIEWS_FILE = _repo_root() / ".portfolio_tracker_views.json"
-_LEGACY_SESSION_FILE = _repo_root() / ".portfolio_tracker_session.json"
-_MPT_FILE = _repo_root() / ".portfolio_tracker_mpt.json"
-_COLUMN_VIEWS_FILE = _repo_root() / ".portfolio_tracker_column_views.json"
+_WATCHLISTS_FILE = _repo_root() / ".convexity_watchlists.json"
+_VIEWS_FILE = _repo_root() / ".convexity_views.json"
+_LEGACY_SESSION_FILE = _repo_root() / ".convexity_session.json"
+_MPT_FILE = _repo_root() / ".convexity_mpt.json"
+_COLUMN_VIEWS_FILE = _repo_root() / ".convexity_column_views.json"
 
 # ----------------------------- Locks ----------------------------------------
 
@@ -519,7 +519,7 @@ def _as_run_list(val) -> list[dict]:
     """Normalize the on-disk per-view value to a newest-first list of run dicts.
 
     Tolerates the legacy single-dict format (pre-history) and any stray non-dict
-    entries, so an old ``.portfolio_tracker_mpt.json`` upgrades transparently.
+    entries, so an old ``.convexity_mpt.json`` upgrades transparently.
     """
     if isinstance(val, list):
         return [r for r in val if isinstance(r, dict)]

@@ -59,7 +59,7 @@ Assert-Success "env update"
 $EnvPython = "$CondaBase\envs\$EnvName\python.exe"
 if (Test-Path $EnvPython) {
     Write-Host "==> Verifying runtime dependencies in '$EnvName'..."
-    & $EnvPython -m portfolio_tracker.envcheck
+    & $EnvPython -m convexity.envcheck
     Assert-Success "dependency check"
 } else {
     Write-Host "WARNING: interpreter not found at $EnvPython - skipping dependency check" -ForegroundColor Yellow
