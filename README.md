@@ -4,6 +4,26 @@
 
 Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny stdlib HTTP server. Open it in any browser, paste your tickers, and get a live heat-mapped table in seconds.
 
+![Holdings table](docs/screenshots/table.png)
+
+## A tour
+
+**Portfolio optimization.** Black-Litterman expected returns (market-cap equilibrium blended with analyst price-target views) and a mean-CVaR efficient frontier solved by a custom 8-core interior-point solver. Slide along the frontier, see the tail risk, weights and bootstrap uncertainty band, and apply the result as a weight preset.
+
+![Portfolio optimization](docs/screenshots/optimize.png)
+
+**Portfolio analytics.** Performance against the S&P 500 (plus Nasdaq and a sector-mix overlay), moving averages, drawdown, and a risk & return card with Sharpe, Sortino, Calmar, beta and tracking error against any benchmark.
+
+![Portfolio analytics](docs/screenshots/analytics.png)
+
+**Analyst sentiment.** Weighted consensus rating, rating distribution, price-target upside (mean and median) and the full range of analyst targets for every holding.
+
+![Analyst sentiment](docs/screenshots/analyst.png)
+
+**News & sentiment.** Two independent reads of every holding's headlines: the *News read* (an LLM scoring each headline across financials, outlook, competition, regulation and street view) and the *Market read* (a statistical model of how prices have historically reacted to news like this). Plus movers, what to watch, a market-risk line and a per-headline timeline.
+
+![News & sentiment](docs/screenshots/news.png)
+
 ---
 
 ## Features
