@@ -1,4 +1,4 @@
-# Conda/mamba environment for the Portfolio Tracker desktop app.
+# Conda/mamba environment for the Convexity desktop app.
 #
 # Create:  mamba env create -f environment.yml   (or `conda env create ...`)
 # Update:  mamba env update -f environment.yml --prune

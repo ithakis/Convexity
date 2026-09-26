@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Double-click this in Finder to launch the Portfolio Dashboard.
+# Double-click this in Finder to launch the Convexity.
 # It activates the pt conda env if present, otherwise falls back to system python3.
 
 set -e
@@ -19,7 +19,7 @@ stop_existing_dashboard() {
         return 0
     fi
 
-    echo "Stopping existing Portfolio Dashboard (PID $existing_pid)..."
+    echo "Stopping existing Convexity (PID $existing_pid)..."
     kill "$existing_pid" 2>/dev/null || true
 
     for _ in {1..50}; do

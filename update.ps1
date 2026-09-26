@@ -1,4 +1,4 @@
-# Update an existing Portfolio _App checkout: pull latest source, then
+# Update an existing Convexity checkout: pull latest source, then
 # sync the `pt` conda env to environment.yml. Run install.ps1 first if
 # you've never set up the env/shortcuts on this machine.
 #
@@ -66,6 +66,6 @@ if (Test-Path $EnvPython) {
 }
 
 Write-Host ""
-Write-Host "==> Done. Fully quit and relaunch Portfolio _App to pick up the update."
+Write-Host "==> Done. Fully quit and relaunch Convexity to pick up the update."
 Write-Host "    (A failed model load is cached for the process lifetime, so an"
 Write-Host "     already-running app will not pick up new packages in place.)"

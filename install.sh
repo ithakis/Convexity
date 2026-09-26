@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap the Portfolio _App desktop app on macOS/Linux: install
+# Bootstrap the Convexity desktop app on macOS/Linux: install
 # Miniforge if missing, create/update the `pt` conda env, generate the app
 # icon, and install a native .app launcher (+ Desktop shortcut). Safe to
 # re-run — every step is idempotent.
@@ -13,10 +13,10 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
 ENV_NAME="${ENV_NAME:-pt}"
-APP_NAME="${APP_NAME:-Portfolio _App}"
+APP_NAME="${APP_NAME:-Convexity}"
 BUNDLE_ID="com.ithakis.portfoliotracker"
 
-echo "==> Portfolio _App desktop app installer"
+echo "==> Convexity desktop app installer"
 echo "    repo:    $REPO_DIR"
 echo "    env:     $ENV_NAME"
 echo "    app:     $APP_NAME"

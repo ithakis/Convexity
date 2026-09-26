@@ -137,7 +137,7 @@ def _build_splash_pixmap(dpr: float) -> QPixmap:
     title_font.setBold(True)
     painter.setFont(title_font)
     painter.setPen(QColor(_TEXT))
-    painter.drawText(QRect(0, 208, width, 40), Qt.AlignmentFlag.AlignCenter, "Portfolio _App")
+    painter.drawText(QRect(0, 208, width, 40), Qt.AlignmentFlag.AlignCenter, "Convexity")
 
     sub_font = QFont()
     sub_font.setPointSize(12)
@@ -275,7 +275,7 @@ def _handle_download(download: "QWebEngineDownloadRequest", window: "_MainWindow
 class _MainWindow(QMainWindow):
     def __init__(self, url: str):
         super().__init__()
-        self.setWindowTitle(f"Portfolio _App v{__version_display__}")
+        self.setWindowTitle(f"Convexity v{__version_display__}")
         self.resize(1440, 900)
         self._url = url
 
@@ -363,7 +363,7 @@ def main() -> None:
 
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QApplication([])
-    app.setApplicationName("Portfolio _App")
+    app.setApplicationName("Convexity")
     log.info("qt ready (+%.2fs) log=%s", time.monotonic() - t0, log_path)
 
     boot: dict = {"server": None, "port": None, "shutdown": None, "error": None, "done": False}
@@ -523,7 +523,7 @@ def main() -> None:
                 splash.hide()
                 QMessageBox.critical(
                     None,
-                    "Portfolio _App",
+                    "Convexity",
                     "The app failed to start.\n\nDetails were written to:\n" + str(log_path),
                 )
                 os._exit(1)

@@ -12,8 +12,6 @@ import threading
 import time
 import traceback
 import warnings
-import subprocess
-import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1098,17 +1096,9 @@ def main() -> None:
     server, port = start_server()
     url = f"http://localhost:{port}/"
     print("=" * 60)
-    print(f"  Portfolio _App v{__version_display__} running at {url}")
-    print("  Press Ctrl+C to stop.")
+    print(f"  Convexity v{__version_display__} running at {url}")
+    print("  Open that URL in your browser. Press Ctrl+C to stop.")
     print("=" * 60)
-    def _open_browser() -> None:
-        if sys.platform == "darwin":
-            subprocess.run(["open", "-a", "Google Chrome", url], check=False)
-        elif sys.platform == "win32":
-            os.startfile(url)  # noqa: S606 - local dashboard URL, not user input
-        else:
-            webbrowser.open(url)
-
     def _warm_optimizer() -> None:
         # Import mpt off the startup path so the first Optimize click never pays
         # the one-time numba JIT compile (~7 s) — it warms in the background here
@@ -1119,7 +1109,6 @@ def main() -> None:
         except Exception:
             pass
 
-    threading.Timer(0.8, _open_browser).start()
     threading.Thread(target=_warm_optimizer, name="pt-warm-mpt", daemon=True).start()
     try:
         # serve_forever() now runs on a background thread (see start_server);

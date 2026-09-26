@@ -4409,12 +4409,13 @@ function renderAnalyticsBody() {
     </div>
   `;
   drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
-  $("#pf-bench").onchange = (e) => {
-    STATE.bench = e.target.value;
+  wireBenchSelect($("#pf-bench"), (k) => {
+    if (k === STATE.bench) return;
+    STATE.bench = k;
     try { localStorage.setItem("pf_bench", STATE.bench); } catch { /* private mode */ }
     renderAnalyticsBody();
-  };
-  $("#pf-bench-pill-label").textContent = ((a.benchmarks || {})[activeBench(a)] || {}).label || "Benchmark";
+  });
+  $("#pf-bench-pill-label").textContent = ((a.benchmarks || {}).SPY || {}).label || "S&P 500";
   renderStatTipsKatex();
   renderAnalystDashboard(a);
 }
@@ -4582,13 +4583,49 @@ const METRIC_INFO = {
   },
 };
 
-/* "vs <select>" in the Risk & Return header — a native select is the whole
-   dropdown: keyboard, Esc and outside-click come for free. */
+/* "vs <benchmark>" in the Risk & Return header — a small custom popover
+   (the native <select> rendered an OS menu with a blank selected row). Only
+   the stats follow the pick; the chart always compares against SPY. */
 function benchSelectHtml(a) {
   const cur = activeBench(a);
-  const opts = Object.entries(a.benchmarks || {}).map(([k, b]) =>
-    `<option value="${escapeHtml(k)}"${k === cur ? " selected" : ""}>${escapeHtml(b.label)}</option>`).join("");
-  return `<select class="bench-select" id="pf-bench" title="Benchmark to compare against">${opts}</select>`;
+  const B = a.benchmarks || {};
+  const opts = Object.entries(B).map(([k, b]) =>
+    `<button type="button" role="option" class="bench-opt${k === cur ? " on" : ""}" data-bench="${escapeHtml(k)}" aria-selected="${k === cur}">
+       <span class="bench-opt-label">${escapeHtml(b.label)}</span><span class="bench-opt-key">${escapeHtml(k)}</span>
+       <svg class="bench-opt-check" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+     </button>`).join("");
+  return `<span class="bench-dd" id="pf-bench">
+    <button type="button" class="bench-trigger" aria-haspopup="listbox" aria-expanded="false" title="Benchmark for the risk &amp; return stats">
+      <span>${escapeHtml((B[cur] || {}).label || cur)}</span>
+      <svg class="bench-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <span class="bench-menu" role="listbox">${opts}</span>
+  </span>`;
+}
+function wireBenchSelect(root, onPick) {
+  if (!root) return;
+  const trig = root.querySelector(".bench-trigger");
+  const opts = [...root.querySelectorAll(".bench-opt")];
+  const close = () => {
+    root.classList.remove("open"); trig.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", outside, true);
+    document.removeEventListener("keydown", onKey, true);
+  };
+  const outside = (e) => { if (!root.contains(e.target)) close(); };
+  const onKey = (e) => {
+    const i = opts.indexOf(document.activeElement);
+    if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); close(); trig.focus(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); opts[(i + 1) % opts.length].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); opts[(i - 1 + opts.length) % opts.length].focus(); }
+  };
+  trig.onclick = () => {
+    if (root.classList.contains("open")) return close();
+    root.classList.add("open"); trig.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", outside, true);
+    document.addEventListener("keydown", onKey, true);
+    (opts.find(o => o.classList.contains("on")) || opts[0])?.focus();
+  };
+  opts.forEach(o => o.onclick = () => { close(); onPick(o.dataset.bench); });
 }
 
 /* Portfolio vs the selected benchmark ("/ x" is the benchmark's own value).
@@ -5142,13 +5179,14 @@ function activeBench(a) {
   return B[STATE.bench] ? STATE.bench : "SPY";
 }
 
-/* Comparison lines on the portfolio chart: the selected benchmark plus the
-   Nasdaq / Sector-mix overlays when switched on, without duplicates. */
-const BENCH_LINES = [[null, "showBench", "#8b5cf6"], ["QQQ", "showNdx", "#06b6d4"], ["SECTOR", "showSec", "#f59e0b"]];
+/* Comparison lines on the portfolio chart: SPY (always — the Risk & Return
+   picker deliberately does not move the chart) plus the Nasdaq / Sector-mix
+   overlays when switched on, without duplicates. */
+const BENCH_LINES = [["SPY", "showBench", "#8b5cf6"], ["QQQ", "showNdx", "#06b6d4"], ["SECTOR", "showSec", "#f59e0b"]];
 function pfBenchLines(a) {
   const out = [];
   for (const [k, flag, color] of BENCH_LINES) {
-    const key = k || activeBench(a);
+    const key = k;
     const b = (a.benchmarks || {})[key];
     if (STATE[flag] && b && b.series.length >= 2 && !out.some(l => l.key === key)) {
       out.push({ key, label: b.label, pts: b.series, color, ret: b.stats.total_return });
@@ -5217,7 +5255,7 @@ function drawPortfolioChart(a, hostEl, legendEl) {
   hostEl.innerHTML = svg + ddSvg + `<div class="pf-tt" id="pf-tt"></div><div class="chart-measure" id="pf-measure"></div>`;
 
   // The Nasdaq / Sector-mix entries are listed under Risk & Return instead.
-  const bench = benches.find(b => b.key === activeBench(a));
+  const bench = benches.find(b => b.key === "SPY");
   legendEl.innerHTML = [
     `<span><i style="background:var(--accent)"></i> Portfolio</span>`,
     bench && `<span><i style="background:${bench.color}"></i> ${escapeHtml(bench.label)}</span>`,
@@ -10081,7 +10119,7 @@ function renderSettingsAbout(el) {
   el.innerHTML =
     settingsRow({
       id: "version",
-      label: "Portfolio _App",
+      label: "Convexity",
       help: `<div class="settings-kv">
           ${kv("Version", escapeHtml(v))}
           ${kv("Server", "127.0.0.1 — local only, no accounts, no telemetry")}

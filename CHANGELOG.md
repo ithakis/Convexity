@@ -5,6 +5,13 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `portfolio_tracker/__init__.py`
 when merging a PR and add a line here.
 
+## 1.12.3 — 2026-09-26
+
+- Renamed the app to **Convexity** — "A portfolio optimization app built for long-term horizon investing." (window title, splash, page title, Settings → About, Excel export, installers, docs). Bundle ID, package name and log path unchanged so existing installs keep working.
+- Risk & Return benchmark picker is now a styled popover (pill trigger, check-marked options, keyboard navigation) instead of a native `<select>`.
+- The benchmark pick only drives the Risk & Return stats; the portfolio chart always compares against the S&P 500.
+- Browser mode no longer launches Chrome on start — it prints the URL instead.
+
 ## 1.12.2 — 2026-09-26
 
 ### Portfolio chart: correct moving averages, TradingView-style measure, benchmark picker

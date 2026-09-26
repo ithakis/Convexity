@@ -1,4 +1,4 @@
-# Portfolio Tracker — Engineering Notes for AI Agents
+# Convexity — Engineering Notes for AI Agents
 
 This file is the source of truth for AI agents working on this codebase.
 It captures the architecture, conventions, gotchas, and design contracts
@@ -10,8 +10,8 @@ new system or change an established pattern.
 ## 1. What this app is
 
 Single-user, local-only portfolio dashboard. Runs as a Python HTTP server
-on `127.0.0.1:8765`, opens itself in the user's browser (or a native
-PySide6 window — §14). No accounts, no network calls except to yfinance
+on `127.0.0.1:8765` and prints its URL — it does **not** auto-open a browser
+(removed in v1.12.3 at the user's request); or runs in a native PySide6 window — §14. No accounts, no network calls except to yfinance
 (Yahoo Finance), Finnhub (news), and NVIDIA NIM (the News read), no build
 step. Almost all logic lives in the `portfolio_tracker/` package, split
 into focused modules (server, fetcher, analytics, fx, persistence, etc. —
@@ -1622,9 +1622,9 @@ the update is live.
 
 ### Why this exists
 
-Browser mode (`python dashboard.py`) depends on Google Chrome being
-installed (`server.py`'s `main()` hard-codes `open -a "Google Chrome"`) — on
-a machine with no Chrome, that fails and the user is stuck. The desktop app
+Browser mode (`python dashboard.py`) historically auto-launched Google Chrome
+(removed in v1.12.3; it now only prints the URL), which failed on a machine
+with no Chrome. The desktop app
 wraps the *identical* HTTP server in a native window instead, using
 QtWebEngine (which bundles its own Chromium — same rendering engine as
 Chrome, so nothing about the frontend's behavior changes). Browser mode is
@@ -1689,7 +1689,7 @@ Run via `python -m portfolio_tracker.desktop` (what the installed launcher
 actually invokes). Single file, ~160 lines:
 
 - **Splash contract**: shown immediately via `QSplashScreen` (icon +
-  "Portfolio _App" + "Made by Alexander Tsoskounoglou 2026 · v{version_display}",
+  "Convexity" + "Made by Alexander Tsoskounoglou 2026 · v{version_display}",
   colors matching the dashboard's own dark theme — `#0d1117`/`#e6edf3`/`#7d8590`
   from `style.css`). A `QElapsedTimer` starts the moment it's shown. The
   main window is revealed on `max(0, 6000ms - elapsed)` after the

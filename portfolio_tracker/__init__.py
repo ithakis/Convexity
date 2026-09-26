@@ -1,10 +1,10 @@
-"""Portfolio Tracker — local-only portfolio dashboard.
+"""Convexity — a portfolio optimization app built for long-term horizon investing.
 
 Version history — see CHANGELOG.md for the full PR-by-PR mapping.
 X bumps on a major new feature/release, Y bumps on smaller polish/fixes.
 """
 
-__version__ = "1.12.2"
+__version__ = "1.12.3"
 __version_date__ = "2026-09-26"  # release date of __version__, ISO yyyy-mm-dd
 
 

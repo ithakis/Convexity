@@ -1,6 +1,6 @@
-# Portfolio _App
+# Convexity
 
-A fast, single-file local web dashboard for monitoring a stock portfolio — no API keys, no cloud accounts, no data leaving your machine.
+**Convexity** — a portfolio optimization app built for long-term horizon investing. Runs locally: no cloud accounts, no data leaving your machine.
 
 Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny stdlib HTTP server. Open it in any browser, paste your tickers, and get a live heat-mapped table in seconds.
 
@@ -41,7 +41,7 @@ screen.
 
 ```bash
 # macOS / Linux — one-time setup (installs Miniforge if needed, creates the
-# `pt` conda env, builds a Portfolio _App.app launcher + Desktop shortcut)
+# `pt` conda env, builds a Convexity.app launcher + Desktop shortcut)
 ./install.sh
 
 # Windows — same idea, creates Start Menu + Desktop shortcuts
@@ -49,7 +49,7 @@ screen.
 .\install.ps1
 ```
 
-After that, launch **Portfolio _App** from Launchpad/Spotlight/Start Menu
+After that, launch **Convexity** from Launchpad/Spotlight/Start Menu
 or your Desktop shortcut like any other app. To pick up new commits later:
 
 ```bash

@@ -1,5 +1,5 @@
 """
-Closed-form unit tests for every quantitative metric in the portfolio tracker.
+Closed-form unit tests for every quantitative metric in Convexity.
 
 Each test documents:
   - Standard formula being validated

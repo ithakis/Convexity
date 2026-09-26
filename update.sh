@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update an existing Portfolio _App checkout: pull latest source, then
+# Update an existing Convexity checkout: pull latest source, then
 # sync the `pt` conda env to environment.yml. Run install.sh first if you've
 # never set up the env/app launcher on this machine.
 set -euo pipefail
@@ -49,6 +49,6 @@ else
 fi
 
 echo ""
-echo "==> Done. Fully quit and relaunch Portfolio _App to pick up the update."
+echo "==> Done. Fully quit and relaunch Convexity to pick up the update."
 echo "    (A failed model load is cached for the process lifetime, so an"
 echo "     already-running app will not pick up new packages in place.)"
