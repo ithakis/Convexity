@@ -27,11 +27,13 @@ Rules that apply to every phase:
 
 Goal: nothing irreplaceable exists in only one place.
 
-- [ ] Copy `~/.convexity/ml_model/` (the deployed `mlsent-v1.1` model, the
+**Done 2026-09-26** — copied to an external drive, SHA-256/byte-verified.
+
+- [x] Copy `~/.convexity/ml_model/` (the deployed `mlsent-v1.1` model, the
       **only** copy) to a second location (external drive / cloud drive).
-- [ ] Copy the runtime state files (`.convexity_*.json`) and the key files the
+- [x] Copy the runtime state files (`.convexity_*.json`) and the key files the
       same way.
-- [ ] Note: `ml/data/` (FNSPID parquet, ~4.8 GB) no longer exists on disk. It
+- [x] Note: `ml/data/` (FNSPID parquet, ~4.8 GB) no longer exists on disk. It
       is rebuildable from the public dataset with `ml/scripts/00→06`; no action
       needed unless you want to retrain soon.
 
