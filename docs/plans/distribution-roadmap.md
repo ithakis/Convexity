@@ -1,6 +1,6 @@
 # Distribution roadmap: from "clone + conda" to an installable app
 
-Status: **Phases 0–4 done** (v1.14.0, 2026-09-27), **Phase 5 done** except publishing the model asset; written 2026-09-26, v1.13.0. One phase = one Claude Code
+Status: **Phases 0–4 done** (v1.14.0, 2026-09-27), **Phase 5 done** (v1.14.1); written 2026-09-26, v1.13.0. One phase = one Claude Code
 session = one PR. Do them in order; each phase lists what it depends on.
 
 How to run a phase with Claude Code:
@@ -290,15 +290,17 @@ Done when: one command on a clean account gives a working app.
 
 ---
 
-## Phase 5 — Model download on first run (v1.15.0)
+## Phase 5 — Model download on first run (v1.14.1)
 
 Goal: a fresh install has a working Market read. Depends on: Phase 3.
 
-**Done 2026-09-27** — committed on the `distribution` branch, no version bump
-yet. **The release asset is not published yet**: until `model-mlsent-v1.1`
-exists on GitHub, a fresh install's download fails with "HTTP 404" (visible in
-Settings, with Retry) — it starts working the moment the asset is uploaded, no
-app change needed. Deviations and findings:
+**Done 2026-09-27** (v1.14.1 — your call, rather than the 1.15.0 planned
+here) — committed on the `distribution` branch. The asset is published as the
+release `model-mlsent-v1.1` (targeting `main`, marked not-latest so the
+installer's `releases/latest` lookup still finds the app release). Downloaded
+back from GitHub: same SHA-256, and a real `python -m convexity.model_fetch`
+into a temp data folder installed it through GitHub's CDN redirect, byte-identical.
+Deviations and findings:
 - The tarball is built **deterministically** (Python `tarfile`: sorted names,
   mtime 0, uid 0, gzip mtime 0) by `model_fetch.pack()`, shared by the export
   script and the tests. Packing the same six files twice gives the same
@@ -335,8 +337,7 @@ app change needed. Deviations and findings:
 - [x] Package the model: `ml/scripts/10_export_artifact.py --tarball` →
       `mlsent-v1.1.tar.gz` (the six artifact files). Also `--from <dir>` to pack
       an existing bundle.
-- [ ] Upload it as an asset to a GitHub Release (`model-mlsent-v1.1`).
-      **Waiting for your OK** — it publishes.
+- [x] Upload it as an asset to a GitHub Release (`model-mlsent-v1.1`).
 - [x] `convexity/model_fetch.py`: if `models/mlsent-v1.1/` is missing, download
       the asset from a URL **pinned in code**, verify against a **SHA-256
       pinned in code**, extract safely (reject absolute paths / `..`), then
