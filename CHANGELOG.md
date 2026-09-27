@@ -5,15 +5,22 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `convexity/__init__.py`
 when merging a PR and add a line here.
 
-## Unreleased (1.14.0)
+## 1.14.0 — 2026-09-27
 
-Distribution work, roadmap Phases 2–4 (`distribution` branch). The version is bumped when Phase 4 lands.
+Distribution work, roadmap Phases 2–4 (`distribution` branch): an installable package, user data outside the code, and one-command installers on uv. conda is retired.
+
+- **One-command install** (Phase 4): `curl -LsSf https://raw.githubusercontent.com/ithakis/Convexity/main/install.sh | bash` on macOS/Linux, `irm .../install.ps1 | iex` on Windows. The installer gets [uv](https://docs.astral.sh/uv/) if needed, installs `convexity[desktop]` from the latest GitHub release with `uv tool install` (from the release's source archive, so git is not required), checks the result with the installed interpreter, and builds `Convexity.app` (macOS) or Start Menu + Desktop shortcuts (Windows). Running it again updates; `update.sh` / `update.ps1` just do that.
+- macOS: the installer checks for Homebrew `libomp` (needed by the Market read's LightGBM model) and offers to install it.
+- Upgrading from a checkout: API keys in `.finnhub_key` / `.nvidia_key` next to the installer are copied into the data folder's `config.json` (never overwriting an existing key), since an installed package cannot find them in the checkout.
+- **conda retired**: `requirements.txt`, `environment.yml` and the Miniforge / `pt` env code are gone. Development is `uv sync` / `uv run`; `Launch Dashboard.command` runs `uv run convexity`.
+- The app icon ships inside the package (`convexity/assets/icon.png`), so an installed app has its splash and window icon.
+- In-app fix hints (missing-dependency banner, Settings → Models & Data, Updating) now point at the installer instead of `./update.sh` + conda.
+- CI: new `tool-install-smoke` job (installs the package as a user would and boots it); the macOS and Windows jobs now run the whole installer end to end instead of only the icon/shortcut commands. Dependabot watches `uv.lock`.
 
 - **`pyproject.toml` is the dependency manifest** (hatchling, version read from `convexity/__init__.py`), with a committed `uv.lock`. Extras: `desktop` (PySide6), `dev` (pytest, ruff, pyflakes), `train` (duckdb, flaml). Python 3.11–3.14 (the test suite passes on 3.11 and 3.14).
 - **Entry points:** `convexity` (browser mode) and `convexity-app` (desktop window) — `uv sync --extra desktop && uv run convexity-app`.
 - CI installs through uv from the lockfile (`uv sync --locked`) and fails when `uv.lock` is stale.
-- `scripts/check_dependency_manifests.py` checks `envcheck.REQUIRED` against `pyproject.toml`, plus the deprecated files while they exist.
-- `requirements.txt` / `environment.yml` are deprecated and kept for one release so existing conda installs can still `./update.sh`. Nothing changes for them.
+- `scripts/check_dependency_manifests.py` checks `envcheck.REQUIRED` against `pyproject.toml`.
 - Documented: lightgbm from PyPI needs Homebrew `libomp` on macOS (conda-forge's build does not).
 - **User data moved out of the repo folder** (Phase 3). New `convexity/paths.py`: a per-user data folder — macOS `~/Library/Application Support/Convexity/`, Windows `%APPDATA%\Convexity\`, Linux `$XDG_DATA_HOME/convexity/`; `CONVEXITY_HOME` overrides. Inside: `state/*.json` (views, watchlists, mpt, column_views, news, sentiment_history — the old `.convexity_*.json`), `models/<version>/` (was `~/.convexity/ml_model/`), `symbol_db.sqlite`, `config.json` (API keys) and `logs/desktop.log` (was `~/Library/Logs/Convexity.log`).
 - Fixes: an installed wheel (`uv pip install`) wrote the user's watchlists into `site-packages/convexity/`, where an upgrade would delete them. The migration rescues such a file.

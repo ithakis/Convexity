@@ -53,56 +53,48 @@ Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny st
 
 ## Quick start
 
-### Desktop app (recommended)
+### Install the desktop app (recommended)
 
-Runs the same dashboard in a native window (PySide6 + QtWebEngine) instead of
-a browser tab — no Chrome dependency, custom dock/window icon, branded splash
-screen.
-
-```bash
-# macOS / Linux — one-time setup (installs Miniforge if needed, creates the
-# `pt` conda env, builds a Convexity.app launcher + Desktop shortcut)
-./install.sh
-
-# Windows — same idea, creates Start Menu + Desktop shortcuts
-# (written to mirror install.sh; see CLAUDE.md for what's untested)
-.\install.ps1
-```
-
-After that, launch **Convexity** from Launchpad/Spotlight/Start Menu
-or your Desktop shortcut like any other app. To pick up new commits later:
+Runs the dashboard in a native window (PySide6 + QtWebEngine) with a branded
+splash screen and a regular app icon. One command installs
+[uv](https://docs.astral.sh/uv/) if needed, then the latest release, and on
+macOS builds `Convexity.app` (+ a Desktop shortcut):
 
 ```bash
-./update.sh      # macOS/Linux
-.\update.ps1      # Windows
+# macOS / Linux
+curl -LsSf https://raw.githubusercontent.com/ithakis/Convexity/main/install.sh | bash
 ```
 
-The browser-mode entry points below (`dashboard.py`, `Launch Dashboard.command`)
-keep working exactly as before — the desktop app is purely additive.
+```powershell
+# Windows (creates Start Menu + Desktop shortcuts)
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/ithakis/Convexity/main/install.ps1 | iex"
+```
 
-### Option A — double-click (macOS)
+Then launch **Convexity** from Launchpad / Spotlight / the Start Menu or your
+Desktop. The app is unsigned: on macOS, right-click → Open the first time.
 
-Double-click **`Launch Dashboard.command`** in Finder.  
-It activates your `pt` conda environment (or falls back to system Python), installs any missing dependencies, and starts the server — open the URL it prints.
+- **macOS:** the Market read (a LightGBM model) needs Homebrew's `libomp`
+  (`brew install libomp`); the installer checks for it and offers to install it.
+- **Update:** run the same command again (or `./update.sh` / `update.ps1` from a
+  checkout). It installs the newest release and rebuilds the launcher.
+- **Your data** (portfolios, caches, API keys in `config.json`) lives in a
+  per-user folder — `~/Library/Application Support/Convexity/` on macOS,
+  `%APPDATA%\Convexity\` on Windows, `~/.local/share/convexity/` on Linux — so
+  updating or reinstalling never touches it.
+- **Uninstall:** `uv tool uninstall convexity`, delete `Convexity.app` (macOS) or
+  the shortcuts (Windows), and the data folder if you want your data gone too.
 
-### Option B — terminal
+### From a checkout (development)
 
 ```bash
-# create a virtual environment (one-time)
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-# run
-python dashboard.py
-# → prints http://127.0.0.1:8765 (open it in any browser)
+uv sync --extra dev --extra desktop
+uv run convexity-app     # desktop window
+uv run convexity         # browser mode: prints http://localhost:8765/
+uv run pytest
 ```
 
-### Option C — conda
-
-```bash
-conda activate pt            # or any env that has yfinance + pandas
-python dashboard.py
-```
+On macOS you can also double-click **`Launch Dashboard.command`**, which runs
+`uv run convexity` and prints the URL to open.
 
 ---
 
@@ -118,13 +110,9 @@ python dashboard.py
 
 ## Requirements
 
-| Package | Minimum version |
-|---|---|
-| Python | 3.10+ |
-| yfinance | 1.0.0+ |
-| pandas | 2.0.0+ |
-| numpy | 1.24.0+ |
-| requests | 2.28.0+ |
+Python 3.11–3.14 (the installer fetches 3.11 through uv). Every dependency is
+declared in `pyproject.toml` and locked in `uv.lock`; `convexity/envcheck.py`
+lists the ones the running app checks for at startup.
 
 ---
 

@@ -37,7 +37,7 @@ if _REPO not in sys.path:
 from convexity import mpt
 
 # Import _normalize_dividend_yield from the package (module-level function,
-# importable once requirements.txt deps are installed). If the import fails
+# importable once the pyproject.toml dependencies are installed). If the import fails
 # (e.g. missing yfinance/numba on a stripped env) skip all dashboard tests
 # explicitly — do NOT silently fall back to a local copy, which would make
 # tests pass even when the package is broken or has diverged.

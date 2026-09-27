@@ -1,9 +1,10 @@
-# The single dependency manifest (distribution roadmap, Phase 2).
+# The single dependency manifest (since v1.14; requirements.txt and
+# environment.yml are gone).
 #
 # `dependencies` must cover every entry of convexity/envcheck.REQUIRED —
-# scripts/check_dependency_manifests.py enforces it in CI. requirements.txt and
-# environment.yml are deprecated copies kept for one release so existing conda
-# installs can still ./update.sh; they are removed in Phase 4.
+# scripts/check_dependency_manifests.py enforces it in CI. The installers
+# (install.sh / install.ps1) `uv tool install` from these ranges, NOT from
+# uv.lock; CI's tool-install-smoke job exercises that resolution.
 #
 # Dev workflow:  uv sync --extra dev --extra desktop
 #                uv run convexity        (browser mode)

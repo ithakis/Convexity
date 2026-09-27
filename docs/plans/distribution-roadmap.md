@@ -1,6 +1,6 @@
 # Distribution roadmap: from "clone + conda" to an installable app
 
-Status: **planned** (written 2026-09-26, v1.13.0). One phase = one Claude Code
+Status: **Phases 0–4 done** (v1.14.0, 2026-09-27); written 2026-09-26, v1.13.0. One phase = one Claude Code
 session = one PR. Do them in order; each phase lists what it depends on.
 
 How to run a phase with Claude Code:
@@ -210,26 +210,75 @@ after using the app (`git status` shows nothing new, even untracked).
 
 Depends on: Phases 2–3.
 
-- [ ] `install.sh` (macOS/Linux):
+**Done 2026-09-27** (v1.14.0) — committed on the `distribution` branch. The
+installer only works for everyone once `v1.14.0` is tagged and released: it
+installs the latest release and refuses anything older than v1.14.0 (no
+pyproject). Deviations and findings:
+- **Source archive, not `git+https`.** The installers install from
+  `github.com/ithakis/Convexity/archive/refs/tags/<tag>.tar.gz`. A clean Mac
+  has no git (`/usr/bin/git` only offers the Xcode tools), and uv needs it for
+  `git+` URLs. The tag is the latest GitHub release, looked up at install time,
+  so install.sh never needs editing per release. `uv tool upgrade` cannot move
+  a tag-pinned URL, so **update = re-run the installer** (`--force`);
+  `update.sh`/`update.ps1` are thin wrappers.
+- `uv tool install` resolves from pyproject's ranges, **not `uv.lock`**. The
+  new CI job exercises exactly that resolution.
+- The icon moved into the package (`convexity/assets/icon.png`); at the repo
+  root an installed app could not see it and ran iconless.
+- **Keys:** an installed package cannot walk up to a checkout's `.finnhub_key`
+  / `.nvidia_key`, so an upgrading user would silently lose the News read. When
+  the installer runs from a checkout it copies them into `config.json` (0600,
+  never overwrites). A curl install has no checkout and nothing to copy.
+- Windows shortcuts point straight at the tool's `convexity-app.exe`; the
+  conda-era `.vbs` + `conda run` wrapper is gone (it existed for conda's DLL
+  search path only).
+- CI: rather than keeping icon-only jobs next to new ones, the macOS and
+  Windows jobs now run the **whole** installer (uv made that ~2 min instead of
+  10-15); `tool-install-smoke` (ubuntu) installs the package and boots it
+  outside the checkout. Not run yet — nothing was pushed.
+- Verified locally: full suite; a simulated clean account (empty `HOME`,
+  `PATH=/usr/bin:/bin`, installer piped as `curl | bash` would) — official uv
+  installer, managed Python 3.11 download, envcheck, `.app` with v1.14.0,
+  bundle launcher boots the app (`loadFinished ok=True`); the CI health check
+  against the installed `convexity`; install from a GitHub-style source
+  archive served over HTTP; libomp missing (brew / no brew / no terminal); tag
+  guard (v1.13.0 refused, v1.14.0+ accepted); key copy (0600, no overwrite,
+  bad JSON untouched); `Launch Dashboard.command` + SIGTERM through `uv run`.
+- Your own `/Applications/Convexity.app` was reinstalled from this checkout
+  (`CONVEXITY_SOURCE=. ./install.sh`) on 2026-09-27: it now runs the uv tool
+  (`~/.local/share/uv/tools/convexity`), keys were copied into `config.json`,
+  and an `open -a` launch reported v1.14.0, ML model loaded, both keys set,
+  10 portfolios. The `pt` env is still on disk, unused by the app.
+- Gotcha while testing: a tarball made with macOS `tar` carries `._*`
+  AppleDouble entries, so uv saw two top-level entries, did not strip the
+  directory and failed with "does not appear to be a Python project" — and
+  cached that by URL. Use `COPYFILE_DISABLE=1 tar --no-xattrs` and clear
+  `~/.cache/uv/sdists-*/url` when simulating a release archive.
+
+- [x] `install.sh` (macOS/Linux):
   1. install uv if missing (official installer, `curl -LsSf https://astral.sh/uv/install.sh | sh`);
-  2. `uv tool install "convexity[desktop] @ git+https://github.com/ithakis/Convexity@vX.Y.Z"`
-     (pinned to the latest release tag, not `main`);
+  2. `uv tool install "convexity[desktop] @ <release tag's source archive>"`
+     (pinned to the latest release tag, not `main` — see above for why not
+     `git+https`);
   3. build `Convexity.app` whose launcher execs the `convexity-app` command;
      generate `icon.icns` as today (icon is shipped as package data).
-- [ ] `install.sh` (macOS): check for Homebrew `libomp` before installing
+- [x] `install.sh` (macOS): check for Homebrew `libomp` before installing
       (the PyPI lightgbm wheel needs it; found in Phase 2) and tell the user to
       `brew install libomp`, or offer to run it, when it is missing.
-- [ ] `install.ps1`: same with the PowerShell uv installer, shortcuts point at
+- [x] `install.ps1`: same with the PowerShell uv installer, shortcuts point at
       `convexity-app.exe`. Keep `Assert-Success` after every native call.
-- [ ] `update.sh` / `update.ps1` → `uv tool upgrade convexity` (or reinstall at
-      the newest tag) + rebuild launcher.
-- [ ] `Launch Dashboard.command` → runs `uv run convexity` (dev checkout).
-- [ ] Delete `requirements.txt`, `environment.yml`; remove Miniforge code.
-- [ ] CI: keep the icon/shortcut smoke jobs; add a job that runs
-      `uv tool install .` then `convexity --help` (or a boot-and-health check).
-- [ ] CLAUDE.md §3/§14: `pt` env retired; dev workflow is `uv sync` / `uv run`.
+- [x] `update.sh` / `update.ps1` → reinstall at the newest tag + rebuild
+      launcher (they re-run the installer).
+- [x] `Launch Dashboard.command` → runs `uv run convexity` (dev checkout).
+- [x] Delete `requirements.txt`, `environment.yml`; remove Miniforge code.
+- [x] CI: keep the icon/shortcut smoke jobs (now inside full-installer jobs);
+      add a job that runs `uv tool install .` then a boot-and-health check.
+- [x] CLAUDE.md §3/§14: `pt` env retired; dev workflow is `uv sync` / `uv run`.
 - [ ] Manual verification on a clean macOS user account (System Settings →
       Users & Groups → new user) — the only realistic "new user" test.
+      **Left for you** (creating a macOS user is a system-settings change);
+      do it after v1.14.0 is released, with the one-line command from the
+      README. The empty-`HOME` simulation above is the closest stand-in.
 
 Done when: one command on a clean account gives a working app.
 

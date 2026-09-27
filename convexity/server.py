@@ -556,7 +556,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 from convexity import xlsx_export
             except ImportError as exc:
-                self._send_json(500, {"error": f"openpyxl not installed: {exc}. Run: pip install openpyxl"})
+                self._send_json(500, {"error": f"openpyxl not installed: {exc}. Re-run the installer, or `uv sync` in a checkout"})
                 return
             try:
                 meta = list_views().get("views") or {}

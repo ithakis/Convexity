@@ -9559,7 +9559,7 @@ function showEnvBanner() {
   bar.id = "env-banner";
   bar.className = "env-banner";
   bar.innerHTML = `<span>A required package is missing, so part of the app is running
-    degraded (the Market read is off). Run <code>./update.sh</code> and
+    degraded (the Market read is off). Re-run the installer and
     relaunch.</span>
     <button class="env-banner-link" id="env-banner-open">Details</button>
     <button class="env-banner-x" id="env-banner-x" aria-label="Dismiss">&times;</button>`;
@@ -9683,7 +9683,7 @@ const SETTINGS_SECTIONS = [
       { id: "ml-runtime", label: "Market read (statistical model)",
         keywords: ["available", "reason", "artifact", "mlsent", "version", "lightgbm"] },
       { id: "env", label: "Runtime dependencies",
-        keywords: ["packages", "missing", "conda", "update.sh", "environment"] },
+        keywords: ["packages", "missing", "install.sh", "uv", "environment"] },
       { id: "providers", label: "News providers",
         keywords: ["finnhub", "nvidia", "nim", "api key", "lexicon"] },
     ],
@@ -9979,8 +9979,9 @@ function renderSettingsColumnPresets(el) {
 function mlRuntimeHint(rt) {
   const why = (rt && rt.reason) || "";
   if (/lightgbm|sklearn|scikit|ModuleNotFound|ImportError/i.test(why)) {
-    return `The environment is missing a dependency. Run <code>./update.sh</code> to sync the
-      conda env, then fully quit and relaunch the app.`;
+    return `The environment is missing a dependency. Re-run the installer
+      (<code>./install.sh</code>, or <code>install.ps1</code> on Windows; <code>uv sync</code>
+      in a development checkout), then fully quit and relaunch the app.`;
   }
   if (rt && rt.model_dir && !rt.model_dir_exists) {
     return `No artifact found at <code>${escapeHtml(rt.model_dir)}</code> — deploy the
@@ -10051,8 +10052,9 @@ function renderSettingsModels(el) {
         kv(escapeHtml(m.module),
            `<span class="${m.critical ? "settings-bad-text" : ""}">missing — disables ${escapeHtml(m.feature)}</span>`)
       ).join("") + `</div>
-       <div class="settings-row-help">Run <code>./update.sh</code> to sync the conda env
-         to <code>environment.yml</code>, then relaunch.</div>`
+       <div class="settings-row-help">Re-run the installer (<code>./install.sh</code>, or
+         <code>install.ps1</code> on Windows; <code>uv sync</code> in a development checkout),
+         then relaunch.</div>`
     : `<div class="settings-kv">${kv("Status", "all runtime dependencies present")}
         ${kv("Interpreter", escapeHtml(env.executable || "—"))}
         ${kv("Python", escapeHtml(env.python || "—"))}</div>`;
@@ -10146,10 +10148,10 @@ function renderSettingsAbout(el) {
     settingsRow({
       id: "update",
       label: "Updating",
-      help: `Run <code>./update.sh</code> in the repo (<code>update.ps1</code> on Windows) to
-        pull the latest code and sync the conda environment, then relaunch the app. The
-        update script now verifies the environment and fails loudly if a required package
-        did not install.`,
+      help: `Re-run the install command (or <code>./update.sh</code> /
+        <code>update.ps1</code>): it installs the latest release, rebuilds the launcher and
+        fails loudly if a required package did not install. Then quit and relaunch the app.
+        In a development checkout: <code>git pull</code> and <code>uv sync</code>.`,
     });
   highlightSettingsMatches(el);
 }

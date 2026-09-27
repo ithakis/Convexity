@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Double-click this in Finder to launch the Convexity.
-# It activates the pt conda env if present, otherwise falls back to system python3.
+# Double-click this in Finder to run Convexity in browser mode from this
+# development checkout: `uv run convexity` (uv syncs .venv from uv.lock first).
+# It prints the URL to open. The installed app is Convexity.app (install.sh).
 
 set -e
 
@@ -43,33 +44,21 @@ fi
 
 trap cleanup EXIT
 
-if [ -f "$HOME/miniforge3/etc/profile.d/conda.sh" ]; then
-    # shellcheck disable=SC1091
-    source "$HOME/miniforge3/etc/profile.d/conda.sh"
-    conda activate pt 2>/dev/null || true
-elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-    # shellcheck disable=SC1091
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-    conda activate pt 2>/dev/null || true
-elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-    # shellcheck disable=SC1091
-    source "$HOME/anaconda3/etc/profile.d/conda.sh"
-    conda activate pt 2>/dev/null || true
+UV="$(command -v uv || true)"
+[ -z "$UV" ] && [ -x "$HOME/.local/bin/uv" ] && UV="$HOME/.local/bin/uv"
+if [ -z "$UV" ]; then
+    echo "uv is not installed: https://docs.astral.sh/uv/ (or run ./install.sh)."
+    exit 1
 fi
 
-# Make sure dependencies are present; install on first run if missing.
-PIP_NEEDED=0
-set +e
-python -c "import importlib.util, sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in ('yfinance','pandas','numpy')) else 1)"
-[ $? -ne 0 ] && PIP_NEEDED=1
-set -e
+# ~/Documents synced by iCloud can flag .venv files hidden; Python then skips
+# the editable .pth ("No module named 'convexity'") and Qt its plugins
+# (CLAUDE.md §3). Clear the flag right before the run.
+[ -d .venv ] && chflags -R nohidden .venv 2>/dev/null || true
 
-if [ "$PIP_NEEDED" = "1" ]; then
-    echo "Installing missing dependencies (yfinance, pandas, numpy)…"
-    python -m pip install --quiet yfinance pandas numpy
-fi
-
-python dashboard.py &
+# uv forwards SIGTERM/SIGINT to the server, so the PID file logic above can
+# stop it like before.
+"$UV" run convexity &
 DASHBOARD_PID=$!
 echo "$DASHBOARD_PID" > "$PID_FILE"
 

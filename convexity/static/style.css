@@ -3061,7 +3061,7 @@
   .settings-bad-text { color: var(--neg); }
 
   /* Missing-dependency banner. Sits directly under the topbar because the
-     failure it reports (a stale conda env silently disabling the ML model) was
+     failure it reports (a stale environment silently disabling the ML model) was
      previously invisible everywhere except a log pane nobody opens. */
   .env-banner {
     display: flex; align-items: center; gap: 10px;

@@ -38,7 +38,7 @@ for _mod in ("lightgbm", "sklearn"):
                         allow_module_level=True)
         pytest.fail(
             f"{_mod} is not installed — the Market read would be dead at runtime. "
-            f"Run ./update.sh to sync the conda env. Set PT_ALLOW_MISSING_ML=1 "
+            f"Run `uv sync --extra dev`. Set PT_ALLOW_MISSING_ML=1 "
             f"to skip these tests deliberately instead.",
             pytrace=False)
 

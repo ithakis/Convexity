@@ -32,7 +32,7 @@ repos:
       - id: pytest-metrics
         name: Metrics unit tests (pytest tests/)
         language: system
-        entry: bash -c '"${PT_PYTHON:-$HOME/miniforge3/envs/pt/bin/python}" -m pytest tests/ -q --tb=short'
+        entry: uv run pytest tests/ -q --tb=short
         pass_filenames: false
         always_run: true
         stages: [pre-commit]

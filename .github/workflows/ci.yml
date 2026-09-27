@@ -100,6 +100,10 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      - name: Shell syntax check (install.sh, update.sh, Launch Dashboard.command)
+        run: |
+          for f in install.sh update.sh "Launch Dashboard.command"; do bash -n "$f" && echo "$f OK"; done
+
   test:
     name: Metrics unit tests
     runs-on: ubuntu-latest
@@ -197,98 +201,131 @@ jobs:
           print('desktop module import OK under offscreen QApplication')
           "
 
-  macos-icon-smoke:
-    name: "macOS icon generation (sips + iconutil, the exact install.sh commands)"
+  tool-install-smoke:
+    name: "uv tool install . + boot and /api/health (what the installers do)"
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+
+    # The installers do `uv tool install`, which resolves from pyproject.toml's
+    # ranges — NOT from uv.lock like every other job here. This is the job that
+    # sees what a new user actually gets, and that the installed package (not
+    # the checkout) boots: static files and data ship as package data, and user
+    # state lands in the data folder, not next to the code.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: uv tool install .
+        run: uv tool install --python 3.11 .
+
+      - name: Dependency self-check with the tool's interpreter
+        run: '"$(uv tool dir)/convexity/bin/python" -m convexity.envcheck'
+
+      - name: Boot the installed `convexity` and hit /api/health
+        env:
+          CONVEXITY_HOME: ${{ runner.temp }}/convexity-home
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"   # prove nothing depends on the checkout
+          "$(uv tool dir --bin)/convexity" > server.log 2>&1 &
+          pid=$!
+          ok=""
+          for _ in $(seq 1 60); do
+            port=$(grep -o 'localhost:[0-9]*' server.log | head -n 1 | cut -d: -f2 || true)
+            if [ -n "$port" ] && curl -fsS "http://127.0.0.1:$port/api/health" -o health.json; then ok=1; break; fi
+            sleep 2
+          done
+          kill "$pid" || true
+          if [ -z "$ok" ]; then cat server.log; exit 1; fi
+          expected=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$GITHUB_WORKSPACE/convexity/__init__.py")
+          python3 - "$expected" <<'EOF'
+          import json, os, sys
+          h = json.load(open("health.json"))
+          assert h["version"] == sys.argv[1], (h["version"], sys.argv[1])
+          assert h["data_dir"] == os.environ["CONVEXITY_HOME"], h["data_dir"]
+          print("installed convexity", h["version"], "healthy; data dir", h["data_dir"])
+          EOF
+
+  macos-install-smoke:
+    name: "macOS: install.sh end to end (uv tool install, sips/iconutil, .app)"
     runs-on: macos-latest
     needs: [lint, test]
 
-    # Deliberately does NOT run the full install.sh (that means downloading
-    # and silently installing an entire Miniforge distribution + solving a
-    # full scientific-stack conda env — 10-15 minutes and mostly re-testing
-    # conda-forge's own solver, not this repo's code). sips/iconutil are
-    # macOS built-ins, so this runs in seconds and still exercises the one
-    # part of icon generation that's actually specific to this repo.
+    # The whole installer against this checkout (CONVEXITY_SOURCE), into
+    # throwaway locations. Before v1.14 this job ran only the icon commands,
+    # because the conda installer took 10-15 minutes; the uv one takes ~2.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Generate icon.icns with sips + iconutil (same commands as install.sh)
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Run install.sh
+        env:
+          CONVEXITY_SOURCE: ${{ github.workspace }}
+          INSTALL_APPS_DIR: ${{ runner.temp }}/Applications
+          INSTALL_DESKTOP_DIR: ""
+          CONVEXITY_HOME: ${{ runner.temp }}/convexity-home
+        run: bash install.sh < /dev/null
+
+      - name: Verify the .app bundle
         run: |
           set -euo pipefail
-          ICONSET_TMPDIR="$(mktemp -d -t icontest.XXXXXX)"
-          ICONSET_DIR="$ICONSET_TMPDIR/icon.iconset"
-          mkdir -p "$ICONSET_DIR"
-          for size in 16 32 128 256 512; do
-            sips -z "$size" "$size" icon.png --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
-            double=$((size * 2))
-            sips -z "$double" "$double" icon.png --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
-          done
-          iconutil -c icns "$ICONSET_DIR" -o /tmp/icon_test.icns
-          test -s /tmp/icon_test.icns || { echo "icon.icns not generated or empty"; exit 1; }
-          rm -rf "$ICONSET_TMPDIR" /tmp/icon_test.icns
-          echo "macOS icon generation OK"
+          app="$RUNNER_TEMP/Applications/Convexity.app"
+          test -s "$app/Contents/Resources/icon.icns" || { echo "icon.icns missing or empty"; exit 1; }
+          launcher="$app/Contents/MacOS/Convexity"
+          test -x "$launcher"
+          target=$(sed -n 's/^exec "\(.*\)" .*/\1/p' "$launcher")
+          test -x "$target" || { echo "launcher target not executable: $target"; exit 1; }
+          ver=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")
+          expected=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' convexity/__init__.py)
+          [ "$ver" = "$expected" ] || { echo "bundle version $ver != $expected"; exit 1; }
+          echo "Convexity.app OK: v$ver -> $target"
 
-  windows-icon-and-shortcut-smoke:
-    name: "Windows icon + shortcut creation (Pillow + WScript.Shell, real APIs)"
+  windows-install-smoke:
+    name: "Windows: install.ps1 end to end (uv tool install, Pillow icon, WScript.Shell shortcuts)"
     runs-on: windows-latest
     needs: [lint, test]
 
-    # Deliberately does NOT run the full install.ps1 (that means a silent
-    # Miniforge/NSIS install + a full conda env solve — 10-15 minutes,
-    # mostly re-testing conda-forge's solver rather than this repo's code).
-    # What's actually unique to this repo and otherwise has zero test
-    # coverage anywhere except a real Windows machine: the Pillow icon.ico
-    # call and, especially, WScript.Shell COM shortcut creation — a Windows
-    # Script Host API with no equivalent on macOS/Linux, not even under
-    # PowerShell Core. Both run in well under a minute here.
+    # The whole installer against this checkout on a disposable runner,
+    # including the real Start Menu + Desktop shortcuts. WScript.Shell has no
+    # equivalent on macOS/Linux (not even under PowerShell Core), so this is
+    # the only place the shortcut code ever runs before a user does.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: "3.11"
+          enable-cache: true
 
-      - name: Install Pillow
-        run: pip install pillow
+      - name: Run install.ps1
+        shell: pwsh
+        env:
+          CONVEXITY_HOME: ${{ runner.temp }}\convexity-home
+        run: ./install.ps1 -Source .
 
-      - name: Generate icon.ico with Pillow (same call as install.ps1)
+      - name: Verify shortcuts and icon
         shell: pwsh
         run: |
-          python -c "from PIL import Image; Image.open('icon.png').save('icon.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
-          if (-not (Test-Path "icon.ico")) { throw "icon.ico not generated" }
-          if ((Get-Item "icon.ico").Length -eq 0) { throw "icon.ico is empty" }
-          Write-Host "icon.ico generation OK"
-
-      # The real WScript.Shell COM API, the actual New-AppShortcut logic
-      # from install.ps1, against a dummy target file (no conda env needed
-      # to prove the shortcut mechanics work).
-      - name: Create and verify a shortcut via WScript.Shell (same API as install.ps1)
-        shell: pwsh
-        run: |
-          # Deliberately NOT under $env:TEMP: GitHub's windows-latest runner
-          # sets TEMP to an 8.3 short-path form (e.g. "RUNNER~1" instead of
-          # "runneradmin"), and neither Resolve-Path nor Get-Item expand a
-          # short name back to its long form — so a path built from $env:TEMP
-          # can never string-equal what WScript.Shell reads back (it returns
-          # the long form), no matter how it's normalized afterward. Building
-          # the dummy target under the checked-out repo's own working
-          # directory (never 8.3-shortened by the runner) sidesteps this
-          # entirely rather than trying to out-clever short/long path forms.
-          $dummyTarget = Join-Path (Get-Location).Path "pt_ci_dummy_target.exe"
-          Copy-Item "$env:WINDIR\System32\notepad.exe" $dummyTarget -ErrorAction SilentlyContinue
-          if (-not (Test-Path $dummyTarget)) { Set-Content -Path $dummyTarget -Value "dummy" }
-          $lnkPath = Join-Path (Get-Location).Path "pt_ci_test_shortcut.lnk"
+          $exe = Join-Path (uv tool dir) "convexity\Scripts\convexity-app.exe"
+          if (-not (Test-Path $exe)) { throw "convexity-app.exe not found at $exe" }
+          $ico = Join-Path $env:LOCALAPPDATA "Convexity\icon.ico"
+          if (-not (Test-Path $ico) -or (Get-Item $ico).Length -eq 0) { throw "icon.ico missing or empty" }
           $WshShell = New-Object -ComObject WScript.Shell
-          $Shortcut = $WshShell.CreateShortcut($lnkPath)
-          $Shortcut.TargetPath = $dummyTarget
-          $Shortcut.Arguments = "-m convexity.desktop"
-          $Shortcut.WorkingDirectory = (Get-Location).Path
-          $Shortcut.IconLocation = (Resolve-Path "icon.ico").Path
-          $Shortcut.Save()
-          if (-not (Test-Path $lnkPath)) { throw "shortcut was not created" }
-          $verify = $WshShell.CreateShortcut($lnkPath)
-          if (-not (Test-Path $verify.TargetPath)) { throw "TargetPath does not exist: $($verify.TargetPath)" }
-          if ($verify.TargetPath -ne $dummyTarget) { throw "TargetPath mismatch: $($verify.TargetPath) (expected $dummyTarget)" }
-          if ($verify.Arguments -notmatch "convexity\.desktop") { throw "Arguments mismatch: $($verify.Arguments)" }
-          Write-Host "WScript.Shell shortcut creation OK: $($verify.TargetPath) $($verify.Arguments)"
-          Remove-Item -Force $dummyTarget, $lnkPath -ErrorAction SilentlyContinue
+          $dirs = @("$env:APPDATA\Microsoft\Windows\Start Menu\Programs", [Environment]::GetFolderPath("Desktop"))
+          foreach ($d in $dirs) {
+            $lnk = Join-Path $d "Convexity.lnk"
+            if (-not (Test-Path $lnk)) { throw "shortcut not created: $lnk" }
+            $s = $WshShell.CreateShortcut($lnk)
+            if ($s.TargetPath -ine $exe) { throw "TargetPath mismatch in ${lnk}: $($s.TargetPath) (expected $exe)" }
+            if ($s.IconLocation -notlike "*icon.ico*") { throw "IconLocation mismatch in ${lnk}: $($s.IconLocation)" }
+            Write-Host "OK: $lnk -> $($s.TargetPath)"
+          }

@@ -1,27 +1,39 @@
-﻿# Bootstrap the Convexity desktop app on Windows: install Miniforge
-# if missing, create/update the `pt` conda env, generate the app icon, and
-# create Start Menu + Desktop shortcuts. Safe to re-run — every step is
-# idempotent.
+# Install (or update) the Convexity desktop app on Windows:
 #
-# NOTE: written to mirror install.sh 1:1 where the platforms allow, but has
-# not been run on a real Windows machine (this repo was built on macOS) —
-# see CLAUDE.md's Desktop app section for exactly what is untested.
+#   powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/ithakis/Convexity/main/install.ps1 | iex"
 #
-# EnvName / AppName are overridable (not documented to end users) so this
-# script can be exercised against throwaway names during development.
+# Mirrors install.sh: installs uv if missing, `uv tool install`s
+# convexity[desktop] from the latest GitHub release (the tag's source archive,
+# so git is not required), verifies it with the tool's own interpreter, and
+# creates Start Menu + Desktop shortcuts to convexity-app.exe. Safe to re-run:
+# that is also how you update (see update.ps1). User data lives in
+# %APPDATA%\Convexity and is never touched.
+#
+# NOTE: this repo is developed on macOS. CI runs this whole script on a real
+# Windows runner (windows-install-smoke); see CLAUDE.md §14 for what has still
+# never run on a real user's Windows machine.
+#
+# Undocumented overrides for development/testing (uv's UV_TOOL_DIR /
+# UV_TOOL_BIN_DIR isolate the tool): -Version / $env:CONVEXITY_VERSION (a
+# release tag), -Source / $env:CONVEXITY_SOURCE (a local checkout or an
+# archive URL), -AppName.
 
 param(
-    [string]$EnvName = "pt",
+    [string]$Version = $env:CONVEXITY_VERSION,
+    [string]$Source = $env:CONVEXITY_SOURCE,
     [string]$AppName = "Convexity"
 )
 
 $ErrorActionPreference = "Stop"
 
+$Repo = "ithakis/Convexity"
+$MinTag = "v1.14.0"   # first release with pyproject.toml
+$PythonVersion = "3.11"
+
 # $ErrorActionPreference only catches PowerShell-cmdlet errors, not a
-# non-zero exit code from a native command (.bat/.exe) invoked via "&" —
-# unlike bash's `set -e`. Call this after every external command so a
-# failed env create/update or installer run actually stops the script
-# instead of silently falling through to the icon/shortcut steps.
+# non-zero exit code from a native command (.exe) invoked via "&" — unlike
+# bash's `set -e`. Call this after every external command so a failed install
+# stops the script instead of silently falling through to the shortcuts.
 function Assert-Success {
     param([string]$Step)
     if ($LASTEXITCODE -ne 0) {
@@ -30,134 +42,165 @@ function Assert-Success {
     }
 }
 
-$RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $RepoDir
-
-Write-Host "==> Convexity desktop app installer"
-Write-Host "    repo:    $RepoDir"
-Write-Host "    env:     $EnvName"
-Write-Host "    app:     $AppName"
+Write-Host "==> Convexity installer"
 
 # ---------------------------------------------------------------------------
-# 1. Locate or install a conda/mamba base (Miniforge).
+# 1. uv
 # ---------------------------------------------------------------------------
-$CondaBase = $null
-foreach ($candidate in @("$env:USERPROFILE\miniforge3", "$env:USERPROFILE\miniconda3", "$env:USERPROFILE\anaconda3")) {
-    if (Test-Path "$candidate\condabin\conda.bat") {
-        $CondaBase = $candidate
-        break
+$Uv = $null
+$cmd = Get-Command uv -ErrorAction SilentlyContinue
+if ($cmd) { $Uv = $cmd.Source }
+$UvCandidates = @("$env:USERPROFILE\.local\bin\uv.exe", "$env:USERPROFILE\.cargo\bin\uv.exe")
+if (-not $Uv) {
+    foreach ($c in $UvCandidates) { if (Test-Path $c) { $Uv = $c; break } }
+}
+if (-not $Uv) {
+    Write-Host "==> Installing uv (https://docs.astral.sh/uv/)..."
+    & powershell -ExecutionPolicy ByPass -NoProfile -c "irm https://astral.sh/uv/install.ps1 | iex"
+    Assert-Success "uv installer"
+    foreach ($c in $UvCandidates) { if (Test-Path $c) { $Uv = $c; break } }
+    if (-not $Uv) {
+        Write-Host "ERROR: uv was installed but cannot be found; open a new terminal and re-run." -ForegroundColor Red
+        exit 1
+    }
+}
+$UvVersion = & $Uv --version
+Assert-Success "uv --version"
+Write-Host "==> uv: $Uv ($UvVersion)"
+
+# ---------------------------------------------------------------------------
+# 2. What to install
+# ---------------------------------------------------------------------------
+if ($Source) {
+    if (Test-Path $Source -PathType Container) {
+        $Src = ([System.Uri](Resolve-Path $Source).Path).AbsoluteUri
+    } else {
+        $Src = $Source
+    }
+    $Label = $Src
+} else {
+    $Tag = $Version
+    if (-not $Tag) {
+        try {
+            $Tag = (Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest").tag_name
+        } catch {
+            Write-Host "ERROR: could not look up the latest release of $Repo (offline?)." -ForegroundColor Red
+            exit 1
+        }
+    }
+    if ([version]($Tag.TrimStart("v")) -lt [version]($MinTag.TrimStart("v"))) {
+        Write-Host "ERROR: release $Tag predates the uv installer (needs $MinTag or newer)." -ForegroundColor Red
+        exit 1
+    }
+    $Src = "https://github.com/$Repo/archive/refs/tags/$Tag.tar.gz"
+    $Label = $Tag
+}
+
+Write-Host "==> Installing convexity[desktop] from $Label (Python $PythonVersion)..."
+& $Uv tool install --force --python $PythonVersion "convexity[desktop] @ $Src"
+Assert-Success "uv tool install"
+
+$ToolRoot = & $Uv tool dir
+Assert-Success "uv tool dir"
+$ToolDir = Join-Path $ToolRoot "convexity"
+$ToolPy = Join-Path $ToolDir "Scripts\python.exe"
+$AppExe = Join-Path $ToolDir "Scripts\convexity-app.exe"
+foreach ($p in @($ToolPy, $AppExe)) {
+    if (-not (Test-Path $p)) {
+        Write-Host "ERROR: expected file not found: $p" -ForegroundColor Red
+        exit 1
     }
 }
 
-if (-not $CondaBase) {
-    Write-Host "==> No conda/mamba installation found — installing Miniforge silently..."
-    $installerUrl = "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe"
-    $installerPath = Join-Path $env:TEMP "Miniforge3-Windows-x86_64.exe"
-    Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
-    $targetDir = "$env:USERPROFILE\miniforge3"
-    # NSIS's /D= must be the last argument and must NOT be quoted, even when
-    # the path contains spaces (a real risk here: $env:USERPROFILE contains
-    # spaces for any "First Last"-style Windows account name). Passing a
-    # single pre-joined string to -ArgumentList (not a string[]) avoids
-    # PowerShell's per-element quoting, which would otherwise wrap the path
-    # in quotes and break NSIS's parsing of /D=.
-    $proc = Start-Process -FilePath $installerPath -ArgumentList "/S /D=$targetDir" -Wait -PassThru
-    Remove-Item $installerPath -ErrorAction SilentlyContinue
-    if ($proc.ExitCode -ne 0) {
-        Write-Host "ERROR: Miniforge installer failed (exit code $($proc.ExitCode))" -ForegroundColor Red
-        exit $proc.ExitCode
-    }
-    $CondaBase = $targetDir
+# ---------------------------------------------------------------------------
+# 3. Verify with the interpreter that will run the app (the v1.10 lesson: a
+#    declared dependency is not an installed one). envcheck exits non-zero on
+#    a critical miss; the lightgbm import proves its native library loads.
+# ---------------------------------------------------------------------------
+Write-Host "==> Verifying runtime dependencies..."
+& $ToolPy -m convexity.envcheck
+Assert-Success "dependency check"
+& $ToolPy -c "import lightgbm" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WARNING: lightgbm does not load, so the Market read will be off." -ForegroundColor Yellow
 }
 
-$CondaExe = "$CondaBase\condabin\conda.bat"
-$MambaExe = "$CondaBase\condabin\mamba.bat"
-if (Test-Path $MambaExe) {
-    $Solver = $MambaExe
-} else {
-    $Solver = $CondaExe
-}
-Write-Host "==> Using $Solver (base: $CondaBase)"
+$AppVersion = & $ToolPy -c "import convexity; print(convexity.__version__)"
+Assert-Success "read version"
+$IconPng = & $ToolPy -c "import convexity, pathlib; print(pathlib.Path(convexity.__file__).parent / 'assets' / 'icon.png')"
+Assert-Success "locate icon"
 
 # ---------------------------------------------------------------------------
-# 2. Create or update the env (idempotent).
+# 4. API keys from an old checkout (.finnhub_key / .nvidia_key next to this
+#    script) into the data folder's config.json. An installed package cannot
+#    find them by walking up from its own folder. Never overwrites a key that
+#    is already there; values are never printed.
 # ---------------------------------------------------------------------------
-$EnvDir = "$CondaBase\envs\$EnvName"
-if (Test-Path $EnvDir) {
-    Write-Host "==> Updating existing '$EnvName' env..."
-    & $Solver env update -n $EnvName -f environment.yml --prune
-    Assert-Success "env update"
-} else {
-    Write-Host "==> Creating '$EnvName' env..."
-    & $Solver env create -n $EnvName -f environment.yml
-    Assert-Success "env create"
+$ScriptDir = $PSScriptRoot
+if ($ScriptDir -and ((Test-Path (Join-Path $ScriptDir ".finnhub_key")) -or (Test-Path (Join-Path $ScriptDir ".nvidia_key")))) {
+    $keyScript = @'
+import json, os, sys
+from pathlib import Path
+from convexity import paths
+src = Path(sys.argv[1])
+cfg = paths.config_file()
+try:
+    data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
+except (OSError, ValueError):
+    print(f"==> {cfg} is not valid JSON; leaving it alone (keys not copied).")
+    sys.exit(0)
+if not isinstance(data, dict):
+    sys.exit(0)
+added = []
+for fname, key in ((".finnhub_key", "finnhub_api_key"), (".nvidia_key", "nvidia_api_key")):
+    f = src / fname
+    if f.is_file() and not data.get(key):
+        value = f.read_text(encoding="utf-8").strip()
+        if value:
+            data[key] = value
+            added.append(key)
+if added:
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cfg.with_name(cfg.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, cfg)
+    print(f"==> Copied {', '.join(added)} into {cfg}")
+'@
+    $TmpKeyPy = Join-Path $env:TEMP "convexity_copy_keys.py"
+    Set-Content -Path $TmpKeyPy -Value $keyScript -Encoding UTF8
+    & $ToolPy $TmpKeyPy $ScriptDir
+    $rc = $LASTEXITCODE
+    Remove-Item -Force $TmpKeyPy -ErrorAction SilentlyContinue
+    $global:LASTEXITCODE = $rc
+    Assert-Success "copy API keys"
 }
 
-# Prove the env can actually import what the app needs, rather than trusting
-# that the solver did what environment.yml asked. A half-solved env used to
-# pass silently here and only surfaced weeks later as a dead ML model inside
-# the running app. envcheck exits non-zero on a critical miss, and
-# Assert-Success is required because PowerShell does not fail on a native
-# command's exit code even under $ErrorActionPreference = "Stop".
-$EnvPythonw = "$EnvDir\pythonw.exe"
-$EnvPython = "$EnvDir\python.exe"
-if (Test-Path $EnvPython) {
-    Write-Host "==> Verifying runtime dependencies in '$EnvName'..."
-    & $EnvPython -m convexity.envcheck
-    Assert-Success "dependency check"
-}
-if (-not (Test-Path $EnvPythonw)) {
-    Write-Host "ERROR: expected interpreter not found at $EnvPythonw" -ForegroundColor Red
-    exit 1
-}
-
 # ---------------------------------------------------------------------------
-# 3. Generate icon.ico from icon.png (regenerate only if stale).
+# 5. icon.ico from the packaged icon.png. Pillow is not an app dependency, so
+#    it comes from a throwaway `uv run --with pillow` environment. The icon
+#    lives in %LOCALAPPDATA%\Convexity (app-owned, not user data).
+#    icon.png is a transparent glyph packed as-is — no background compositing
+#    (see install.sh for why that was tried and reverted).
 # ---------------------------------------------------------------------------
-# icon.png is a transparent glyph (bars only, no background) and is packed
-# into icon.ico as-is — no compositing. (An earlier version flattened it onto
-# an opaque #0d1117 canvas to try to suppress a macOS Dock plate; that turned
-# out not to fix the macOS issue and just added an unwanted background, so
-# it was reverted on both platforms — see install.sh for the full story.)
-$IconPng = Join-Path $RepoDir "icon.png"
-$IconIco = Join-Path $RepoDir "icon.ico"
-
-if ((-not (Test-Path $IconIco)) -or ((Get-Item $IconPng).LastWriteTime -gt (Get-Item $IconIco).LastWriteTime)) {
-    Write-Host "==> Generating icon.ico..."
-    $pyScript = @"
+$IconDir = Join-Path $env:LOCALAPPDATA "Convexity"
+New-Item -ItemType Directory -Force -Path $IconDir | Out-Null
+$IconIco = Join-Path $IconDir "icon.ico"
+Write-Host "==> Generating icon.ico..."
+$TmpIconPy = Join-Path $env:TEMP "convexity_icon_gen.py"
+Set-Content -Path $TmpIconPy -Encoding UTF8 -Value @"
 from PIL import Image
 Image.open(r'$IconPng').save(r'$IconIco', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
 "@
-    $TmpPy = Join-Path $env:TEMP "pt_icon_gen.py"
-    Set-Content -Path $TmpPy -Value $pyScript -Encoding UTF8
-    & $EnvPython $TmpPy
-    Assert-Success "icon.ico generation"
-    Remove-Item -Force $TmpPy -ErrorAction SilentlyContinue
-}
+& $Uv run --no-project --python $PythonVersion --with pillow python $TmpIconPy
+Assert-Success "icon.ico generation"
+Remove-Item -Force $TmpIconPy -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------------
-# 4. Create Start Menu + Desktop shortcuts.
+# 6. Start Menu + Desktop shortcuts, straight to convexity-app.exe. uv builds
+#    it as a windowless GUI launcher ([project.gui-scripts]). The conda-era
+#    `conda run` .vbs wrapper existed only for conda's DLL search path; PyPI
+#    wheels carry their own DLLs.
 # ---------------------------------------------------------------------------
-# Shortcuts do NOT launch $EnvPythonw directly. A conda env's native deps
-# (numpy/scipy/numba's MKL + llvmlite DLLs under envs\<name>\Library\bin)
-# rely on the DLL search path that `conda activate` / `conda run` sets up.
-# Without it, pythonw.exe starts fine but hard-crashes with no Python
-# traceback (Windows Application-Error 0xc06d007f in KERNELBASE.dll) as
-# soon as a background task exercises numba/scipy — reproduced directly on
-# this machine, both via a bare shortcut-style launch and via
-# `python.exe dashboard.py`; `conda run -n <env> ...` did not crash under
-# the same load. Route the shortcut through `conda run` inside a hidden
-# .vbs wrapper (WScript.Shell.Run with windowStyle 0) so there's no console
-# flash for what's meant to be a GUI app.
-$LauncherVbs = Join-Path $RepoDir "launch_desktop.vbs"
-$CondaBatEscaped = $CondaExe -replace '"', '""'
-$VbsContent = @"
-Set shell = CreateObject("WScript.Shell")
-shell.CurrentDirectory = "$RepoDir"
-shell.Run "cmd /c ""$CondaBatEscaped"" run -n $EnvName --no-capture-output pythonw -m convexity.desktop", 0, False
-"@
-Set-Content -Path $LauncherVbs -Value $VbsContent -Encoding ASCII
-
 $StartMenuDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
 $DesktopDir = [Environment]::GetFolderPath("Desktop")
 
@@ -166,9 +209,8 @@ function New-AppShortcut {
     $shortcutPath = Join-Path $Directory "$AppName.lnk"
     $WshShell = New-Object -ComObject WScript.Shell
     $Shortcut = $WshShell.CreateShortcut($shortcutPath)
-    $Shortcut.TargetPath = "$env:WINDIR\System32\wscript.exe"
-    $Shortcut.Arguments = "`"$LauncherVbs`""
-    $Shortcut.WorkingDirectory = $RepoDir
+    $Shortcut.TargetPath = $AppExe
+    $Shortcut.WorkingDirectory = $env:USERPROFILE
     if (Test-Path $IconIco) {
         $Shortcut.IconLocation = $IconIco
     }
@@ -182,4 +224,5 @@ Write-Host "==> Creating Desktop shortcut..."
 New-AppShortcut -Directory $DesktopDir
 
 Write-Host ""
-Write-Host "==> Done. Launch '$AppName' from the Start Menu or your Desktop."
+Write-Host "==> Done (v$AppVersion). Launch '$AppName' from the Start Menu or your Desktop."
+Write-Host "    If it was already running, quit it fully and open it again."
