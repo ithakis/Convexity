@@ -156,7 +156,8 @@ def runtime_status() -> dict:
     from convexity import model_fetch  # stdlib + paths only; no cycle
     download = model_fetch.status()
     exists = model_dir().exists()
-    if not st["ok"] and not exists:
+    missing = model_fetch.needed()  # no COMPLETE artifact (a folder alone is not enough)
+    if not st["ok"] and missing:
         # The generic "No such file" says nothing useful on a fresh install:
         # name what the first-run download is doing (Track record shows this).
         state = download.get("state")
@@ -171,6 +172,7 @@ def runtime_status() -> dict:
         "reason": reason,
         "model_dir": str(model_dir()),
         "model_dir_exists": exists,
+        "model_missing": missing,
         "version": ARTIFACT_VERSION,
         "download": download,
     }

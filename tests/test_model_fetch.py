@@ -197,12 +197,50 @@ def test_download_installs_and_market_read_becomes_available(server, monkeypatch
     assert rs["available"] and rs["download"]["state"] == "installed"
 
 
-def test_not_needed_when_present(server, monkeypatch):
+def test_not_needed_only_when_complete(server, monkeypatch):
     _serve(server, monkeypatch, _good_tar())
-    mfetch.target_dir().mkdir(parents=True)
-    st = mfetch.start()
-    assert st["state"] == "not_needed"
+    t = mfetch.target_dir()
+    t.mkdir(parents=True)
+    for f in mfetch.ARTIFACT_FILES:
+        (t / f).write_bytes(b"user's own copy")
+    assert mfetch.start()["state"] == "not_needed"
     assert server.hits == []
+    assert (t / "meta.json").read_bytes() == b"user's own copy"
+
+
+@pytest.mark.parametrize("present", [[], ["meta.json", "tier_cuts.json"]])
+def test_incomplete_dir_is_set_aside_and_downloaded(server, monkeypatch, present):
+    """An emptied or half-copied folder used to count as installed: nothing
+    downloaded and Settings offered no Retry. Its contents are kept, not deleted."""
+    t = mfetch.target_dir()
+    t.mkdir(parents=True)
+    for f in present:
+        (t / f).write_bytes(b"partial")
+    assert mfetch.needed() is True
+    rs = ms.runtime_status()
+    assert rs["model_missing"] is True and rs["model_dir_exists"] is True
+
+    _serve(server, monkeypatch, _good_tar())
+    assert _run()["state"] == "installed"
+    assert mfetch.complete(t)
+    assert (t / "meta.json").read_bytes() == _files()["meta.json"]
+    aside = [p for p in _models().iterdir() if p.name.startswith(f"{VER}.incomplete-")]
+    assert len(aside) == 1
+    assert sorted(p.name for p in aside[0].iterdir()) == sorted(present)
+    assert ms.runtime_status()["model_missing"] is False
+
+
+def test_incomplete_dir_untouched_when_download_fails(monkeypatch):
+    t = mfetch.target_dir()
+    t.mkdir(parents=True)
+    (t / "meta.json").write_bytes(b"partial")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    monkeypatch.setenv("CONVEXITY_MODEL_URL", f"http://127.0.0.1:{port}/m.tar.gz")
+    assert _run()["state"] == "failed"
+    assert (t / "meta.json").read_bytes() == b"partial"   # only set aside on success
+    assert "model download failed" in ms.runtime_status()["reason"]
 
 
 def test_explicit_model_dir_is_never_downloaded_into(server, monkeypatch, tmp_path):

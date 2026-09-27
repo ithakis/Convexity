@@ -11,6 +11,7 @@ Roadmap Phase 5 (`distribution` branch).
 
 - **The Market read works on a fresh install.** When the model is missing, the app downloads it in the background on first launch (from the `model-mlsent-v1.1` GitHub release, ~1.4 MB), verifies it against a SHA-256 pinned in the code, installs it and starts the Market read — no restart. Startup never waits for it.
 - Settings → Models & Data shows the download (progress, installed, or the reason it failed) and a **Retry download** button; failures are also in the log and the Track record.
+- A model folder that is present but incomplete (emptied or half-copied by hand) is treated as missing: its contents are moved aside to `mlsent-v1.1.incomplete-<time>` (never deleted) and the model is downloaded again; Settings offers Retry in that state too.
 - Safe by construction: https only, the checksum is checked before the archive is opened, and only the six expected model files are extracted (absolute paths, `..`, links and anything unexpected are rejected).
 - `ml/scripts/10_export_artifact.py --tarball` builds the release asset reproducibly; the model release procedure is in CLAUDE.md §4. The asset is published as the `model-mlsent-v1.1` release (a data release, separate from the app's `vX.Y.Z` releases).
 

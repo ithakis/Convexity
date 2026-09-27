@@ -511,18 +511,23 @@ not reintroduce one; the engines answer different questions.
   Build: `ml/scripts/09_tier_cuts.py --model v1.1`, then
   `10_export_artifact.py --deploy`.
 - **First-run download (`model_fetch.py`, roadmap Phase 5).** The model is not
-  in the package. When `models/<ver>/` is missing (and neither
+  in the package. When `models/<ver>/` is missing **or incomplete** — present
+  means all six `ARTIFACT_FILES` (`model_fetch.complete()`), not just the
+  folder; an emptied folder once blocked both the download and Retry — (and neither
   `MLSENT_MODEL_DIR` nor the legacy folder applies), `start_server()`'s warm-up
   calls `model_fetch.start()`: a daemon thread downloads the GitHub Release
   asset at `MODEL_URL`, checks it against `MODEL_SHA256` **before opening it**
   (mismatch ⇒ deleted, never retried), extracts member by member (only the six
   `ARTIFACT_FILES` under `<ver>/`; absolute paths, `..`, links, devices and
   extra files are rejected — never `extractall`) into a
-  `.<ver>.<pid>.staging` dir, `os.rename`s it into place and calls
+  `.<ver>.<pid>.staging` dir, moves an incomplete existing folder aside to
+  `<ver>.incomplete-<timestamp>` (never deleted, only after a verified
+  download), `os.rename`s the new one into place and calls
   `ml_sentiment.reload()`. Boot never waits on it. Network errors / 5xx retry
   3× with backoff; 64 MB download cap; leftovers of dead runs are swept.
   Status (`downloading/verifying/installing/installed/failed/disabled/not_needed`)
-  rides on `runtime_status()["download"]`, and a missing-model `reason` names
+  rides on `runtime_status()["download"]` (plus `model_missing`, which the
+  Settings pane keys Retry on), and a missing-model `reason` names
   the download failure, so both Settings → Models & Data (with **Retry
   download** → `POST /api/model-download`, which ignores the disable flag) and
   the Track record say why. Every transition prints a `[model_fetch]` line.

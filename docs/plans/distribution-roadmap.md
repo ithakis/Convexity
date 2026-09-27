@@ -331,6 +331,14 @@ Deviations and findings:
   Running); tampered tarball (checksum mismatch, discarded, Retry with the good
   file → Running). Path traversal and the other unsafe archives are unit tests
   (they need a matching hash).
+- Gap found by `/verify` after the release and fixed: "present" meant "the
+  folder exists", so an emptied or half-copied `models/mlsent-v1.1/` blocked
+  the download, the Retry button and gave a raw `FileNotFoundError`. Present
+  now means all six files; an incomplete folder is moved aside (kept, never
+  deleted, only once a verified download is ready) and replaced. Verified in
+  the running app: half-empty folder at boot → set aside with its file intact,
+  one GET, Market read running; empty folder with auto-download off →
+  "(incomplete)" + Retry in Settings → click → installed.
 - Gotcha hit again: iCloud re-flagged ~17.7k `.venv` files `hidden`
   (`No module named 'convexity'`); `chflags -R nohidden .venv` before runs.
 
@@ -347,7 +355,7 @@ Deviations and findings:
 - [x] Failure is visible, not silent (same rule as `_warn_ml_once`).
 - [x] Tests: checksum mismatch rejected, path traversal rejected, offline
       degrades cleanly (local HTTP server in tests, no real network).
-      `tests/test_model_fetch.py`, 30 tests.
+      `tests/test_model_fetch.py`, 33 tests.
 - [x] Document the model-release procedure in CLAUDE.md §4 (retrain → new
       tarball → new release → bump pinned URL + hash).
 

@@ -122,15 +122,26 @@ def check_url(url: str) -> None:
                      "(http only for localhost)")
 
 
+def complete(d: Path) -> bool:
+    """All six artifact files present. Existence of the folder is not enough:
+    a folder emptied or half-copied by hand used to count as "installed", so
+    nothing downloaded and Settings offered no Retry (found in verification)."""
+    return all((d / f).is_file() for f in ARTIFACT_FILES)
+
+
 def needed() -> bool:
-    """True when the Market read has no artifact to load. An explicit
-    MLSENT_MODEL_DIR is the user's choice and is never downloaded into; the
-    one-release legacy location still counts as present."""
+    """True when the Market read has no complete artifact to load. An explicit
+    MLSENT_MODEL_DIR is the user's choice and is never downloaded into; a
+    complete copy in the one-release legacy location still counts as present
+    (ml_sentiment only falls back to it while the data-folder one is absent)."""
     if os.environ.get("MLSENT_MODEL_DIR"):
         return False
-    if target_dir().exists():
+    t = target_dir()
+    if complete(t):
         return False
-    return not (paths.legacy_model_root() / MODEL_VERSION).exists()
+    if not t.exists() and complete(paths.legacy_model_root() / MODEL_VERSION):
+        return False
+    return True
 
 
 # ------------------------------------------------------------------ lifecycle
@@ -173,7 +184,7 @@ def _run() -> None:
     try:
         check_url(url)
         _set(source=urllib.parse.urlparse(url).hostname or "")
-        _log(f"{MODEL_VERSION} missing — downloading from {url}")
+        _log(f"{MODEL_VERSION} missing or incomplete — downloading from {url}")
         models = paths.models_dir()
         models.mkdir(parents=True, exist_ok=True)
         _sweep(models)
@@ -330,10 +341,12 @@ def _install(archive: Path, models: Path) -> None:
         if missing:
             raise FetchError(f"archive incomplete: missing {', '.join(missing)}")
         final = target_dir()
+        if final.exists() and not complete(final):
+            _set_aside(final)
         try:
             os.rename(out, final)
         except OSError:
-            if final.exists():
+            if complete(final):
                 # Another instance installed it first; its copy passed the same
                 # checks, so ours is redundant.
                 _log(f"{final} appeared during install (another instance); keeping it")
@@ -341,6 +354,19 @@ def _install(archive: Path, models: Path) -> None:
                 raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def _set_aside(d: Path) -> None:
+    """Move an incomplete model folder out of the way instead of deleting it —
+    whatever is in there may be something the user put there by hand."""
+    dest = d.with_name(f"{d.name}.incomplete-{time.strftime('%Y%m%d-%H%M%S')}")
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = d.with_name(f"{d.name}.incomplete-{time.strftime('%Y%m%d-%H%M%S')}-{n}")
+    present = sorted(p.name for p in d.iterdir()) if d.is_dir() else []
+    os.rename(d, dest)
+    _log(f"{d.name} was incomplete (had {present or 'nothing'}); moved aside to {dest.name}")
 
 
 def _pid_alive(pid: int) -> bool:

@@ -9990,13 +9990,19 @@ function mlRuntimeHint(rt) {
       (<code>./install.sh</code>, or <code>install.ps1</code> on Windows; <code>uv sync</code>
       in a development checkout), then fully quit and relaunch the app.`;
   }
-  if (rt && rt.model_dir && !rt.model_dir_exists) {
+  // model_missing = no COMPLETE artifact; an emptied folder counts as missing.
+  if (rt && rt.model_missing) {
     const st = (rt.download || {}).state;
     if (st === "downloading" || st === "verifying" || st === "installing") {
       return `The model is being downloaded; the Market read starts on its own when it finishes.`;
     }
     return `The ${escapeHtml(rt.version || "model")} model is not installed. Retry the download in
       <b>Settings → Models &amp; Data</b>; <b>Settings → Logs</b> has the details.`;
+  }
+  if (rt && rt.model_dir && !rt.model_dir_exists) {
+    // MLSENT_MODEL_DIR points somewhere empty: never downloaded into (user's choice).
+    return `No artifact found at <code>${escapeHtml(rt.model_dir)}</code> — deploy the
+      ${escapeHtml(rt.version || "mlsent")} bundle there, or unset <code>MLSENT_MODEL_DIR</code>.`;
   }
   return `Check <b>Settings → Logs</b> for the full backend output.`;
 }
@@ -10080,21 +10086,24 @@ function renderSettingsModels(el) {
   const dlLine = modelDownloadLine(dl);
   // Retry whenever there is no model to load and nothing is in flight — after
   // a failure, but also when auto-download was disabled or never started.
-  const canRetry = !rt.available && !rt.model_dir_exists && !dlActive;
+  // model_missing (server-side: not all six files present) rather than "the
+  // folder exists" — an emptied folder must still offer the download.
+  const canRetry = !rt.available && rt.model_missing && !dlActive;
   // With no model on disk the Download line already says what is happening;
   // a Reason row would repeat it (in red, even mid-download).
-  const dlExplains = !rt.model_dir_exists && (dlActive || dl.state === "failed");
+  const dlExplains = rt.model_missing && (dlActive || dl.state === "failed");
   let mlBody = `<div class="settings-kv">
       ${kv("Artifact", escapeHtml(rt.version || "—"))}
       ${dlLine ? kv("Download", dlLine) : ""}
-      ${kv("Location", `${escapeHtml(rt.model_dir || "—")}${rt.model_dir && !rt.model_dir_exists ? " (missing)" : ""}`)}
+      ${kv("Location", `${escapeHtml(rt.model_dir || "—")}${rt.model_dir && !rt.model_dir_exists ? " (missing)"
+          : rt.model_missing ? " (incomplete)" : ""}`)}
       ${rt.available || dlExplains ? "" : kv("Reason", `<span class="settings-bad-text">${escapeHtml(rt.reason || "unknown")}</span>`)}
     </div>`;
   if (!rt.available) {
     mlBody += `<div class="settings-row-help">${mlRuntimeHint(rt)}</div>`;
   }
   // About dependencies, not the model files (a downloaded model loads at once).
-  if (rt.model_dir_exists) mlBody += `<div class="settings-row-help">The model is loaded once
+  if (!rt.model_missing) mlBody += `<div class="settings-row-help">The model is loaded once
     per process and the result is cached, so installing a missing package requires a full app
     restart before this flips.</div>`;
   mlBody += `
