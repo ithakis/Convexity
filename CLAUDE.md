@@ -147,21 +147,25 @@ therefore does **not** change the user's running app; re-install it
 `pt` any more. It may still exist on disk (as may the older QF12) — do not use
 or recommend either.
 
-**`.venv` files flagged `hidden` break the desktop app.** Seen twice on this Mac
-(both 2026-09-26, cause not identified — fresh `uv sync`s never reproduced it;
-the second time `uv run convexity` failed with `No module named 'convexity'`,
-because Python also skips a hidden `_editable_impl_convexity.pth`):
-~4k files inside `.venv` carried the macOS `UF_HIDDEN` flag while the uv cache
-copies did not. Qt's plugin loader skips hidden files, so `uv run convexity-app`
-died with `Could not find the Qt platform plugin "cocoa"` although
-`libqcocoa.dylib` was there. Diagnose with `ls -lO` (look for `hidden`) or
-`find .venv -flags +hidden | wc -l`; fix with `rm -rf .venv && uv sync ...`
-(or `chflags -R nohidden .venv`). Likely cause: `~/Documents` is synced by
-iCloud Desktop & Documents (file provider) — after a `chflags` the flag was
-back on ~6k files within minutes, while a clone under `/private/tmp` never got
-it. Clear it right before a run, or keep the venv outside `~/Documents`
-(`UV_PROJECT_ENVIRONMENT`). `QT_DEBUG_PLUGINS=1` shows Qt scanning the
-right directory and finding nothing.
+**iCloud hides `.venv`, which breaks the app — ROOT-CAUSED (2026-09-27).**
+`~/Documents` is synced by iCloud Desktop & Documents, and iCloud sets the
+macOS `UF_HIDDEN` flag on every file under a **dot-named** folder. Python skips
+a hidden `.pth` (`uv run convexity` → `No module named 'convexity'`) and Qt its
+hidden plugins (`uv run convexity-app` → `Could not find the Qt platform plugin
+"cocoa"`). Controlled test in `~/Documents`: a dot-named folder was fully
+re-flagged within minutes; a plain folder and folders *created* with a
+`.nosync` suffix (dot-named or not) never were. `chflags -R nohidden` does not
+last (~20 files/s re-flagged), and **renaming an existing `.venv` to
+`.venv.nosync` is not enough** — iCloud keeps flagging items it already
+tracks (7k files in 4 min), while a venv *created* as `.nosync` stayed at 0.
+**Setup on this Mac:** the real venv is `.venv.nosync`, built fresh
+(`UV_PROJECT_ENVIRONMENT=.venv.nosync uv sync --extra dev --extra desktop`),
+and `.venv` is a symlink to it, so plain `uv sync` / `uv run` work unchanged
+(uv keeps the symlink). Both names are gitignored. `Launch Dashboard.command`
+does this rebuild by itself when it finds a real `.venv` carrying the flag.
+Diagnose with `find .venv/ -flags +hidden | wc -l` (trailing slash: follow the
+symlink); a checkout outside `~/Documents` (e.g. `/private/tmp`) is unaffected.
+`QT_DEBUG_PLUGINS=1` shows Qt scanning the right directory and finding nothing.
 
 **Agents: never run the app against the user's real data.** Every dev, test
 and verification run sets `CONVEXITY_HOME` to a temp dir (§4 "Where user data
@@ -174,10 +178,13 @@ own app keeps running on 8765 meanwhile; `_pick_port` moves yours to 8766+.
 1. **System Python is missing yfinance** — always go through `uv run`
    (or the tool's own interpreter). `python dashboard.py` with a bare
    interpreter crashes on import.
-2. **TIME_WAIT on port 8765** — after a kill, 8765 sometimes stays in
-   TIME_WAIT for ~30s. `_pick_port()` falls through to 8766, 8767, 8768,
-   then any free port. Check `lsof -nP -iTCP -p <PID> | grep LISTEN` to
-   find which port the new server actually bound to.
+2. **Port 8765 after a restart** — fixed after v1.14.1: `_pick_port()`'s probe
+   used to bind without `SO_REUSEADDR` while the real server binds with it, so
+   the ~30 s of TIME_WAIT after any restart pushed the app to 8766+. The probe
+   now matches the server; a port something is *listening* on is still refused
+   (verified), so `_pick_port()` still falls through to 8766, 8767, 8768, then
+   any free port when 8765 is genuinely taken. Check
+   `lsof -nP -iTCP -p <PID> | grep LISTEN` to see which port a server bound.
 3. **Existing process check** — kill only what you started (keep its PID);
    the user's installed app runs as
    `~/.local/share/uv/tools/convexity/bin/python …/bin/convexity-app`, a
@@ -234,7 +241,10 @@ side effects, never creates a directory — writers `mkdir` their own parent.
   into place (no clobber) → re-check → re-hash the source → unlink it. Model
   dirs are staged whole and renamed in one step. An existing destination is
   **never overwritten** (identical ⇒ source removed; different ⇒ both kept,
-  logged CONFLICT). Two instances launched at once race for each destination:
+  logged CONFLICT — and shown: `migrate.conflicts()` → `/api/health`
+  `migration_conflicts` → a banner plus a list in Settings → About with what to
+  do; it repeats every launch until the old file is moved over or deleted).
+  Two instances launched at once race for each destination:
   the loser re-judges it (identical ⇒ dedup, not CONFLICT) and tolerates the
   winner having already removed the source. Temps of dead runs are swept —
   verified by `kill -9` at 20 points during a real launch. A `symbol_db.sqlite` with a

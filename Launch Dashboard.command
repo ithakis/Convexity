@@ -51,10 +51,22 @@ if [ -z "$UV" ]; then
     exit 1
 fi
 
-# ~/Documents synced by iCloud can flag .venv files hidden; Python then skips
-# the editable .pth ("No module named 'convexity'") and Qt its plugins
-# (CLAUDE.md §3). Clear the flag right before the run.
-[ -d .venv ] && chflags -R nohidden .venv 2>/dev/null || true
+# iCloud-synced ~/Documents flags every file under a dot-named folder
+# UF_HIDDEN; Python then skips the editable .pth ("No module named
+# 'convexity'") and Qt its plugins (CLAUDE.md §3). Clearing the flag does not
+# last: iCloud re-flags ~20 files/s. A venv *created* under a ".nosync" name is
+# left alone (renaming an existing one is not enough), so when .venv is a real
+# folder that carries the flag, rebuild it once as .venv.nosync behind a .venv
+# symlink. It is rebuilt from uv.lock, so nothing is lost.
+if [ -d .venv ] && [ ! -L .venv ] \
+        && [ -n "$(find .venv -flags +hidden -print -quit 2>/dev/null)" ]; then
+    echo "Rebuilding .venv as .venv.nosync (iCloud keeps hiding its files)..."
+    rm -rf .venv .venv.nosync
+    ln -s .venv.nosync .venv
+    UV_PROJECT_ENVIRONMENT=.venv.nosync "$UV" sync --extra dev --extra desktop
+fi
+# Belt and braces for any flag already set (trailing slash: follow the symlink).
+[ -d .venv ] && chflags -R nohidden .venv/ 2>/dev/null || true
 
 # uv forwards SIGTERM/SIGINT to the server, so the PID file logic above can
 # stop it like before.

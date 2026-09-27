@@ -289,6 +289,10 @@ class Handler(BaseHTTPRequestHandler):
                 # Where the user's data lives (Settings -> About). A local path
                 # on a 127.0.0.1-only server, shown to the one local user.
                 "data_dir": str(_paths.data_dir()),
+                # Old files the data-folder migration left alone because a
+                # different copy was already in the data folder (banner +
+                # Settings -> About). Empty on a normal launch.
+                "migration_conflicts": _migration_conflicts(),
             })
             return
         if parsed.path == "/api/watchlists":
@@ -1014,9 +1018,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(exc)})
 
 
+def _migration_conflicts() -> list[dict]:
+    try:
+        from convexity import migrate as _migrate
+        return _migrate.conflicts()
+    except Exception:
+        return []
+
+
 def _pick_port(preferred: int = 8765) -> int:
+    # The probe must bind the way the real server does. HTTPServer sets
+    # allow_reuse_address (SO_REUSEADDR); without it here, a port whose last
+    # connections are still in TIME_WAIT (~30 s after any restart) was refused
+    # by the probe although the real bind would succeed, so a restarted app
+    # drifted to 8766+. SO_REUSEADDR still refuses a port something is actually
+    # listening on (EADDRINUSE; verified on macOS), so no live app is shadowed.
     for port in [preferred, 8766, 8767, 8768, 0]:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("127.0.0.1", port))
                 return s.getsockname()[1]

@@ -12,7 +12,11 @@ pip-wheel-metadata/
 *.whl
 
 # Virtual environments
-.venv/
+.venv
+# The real venv of a checkout inside iCloud-synced ~/Documents, with .venv a
+# symlink to it: iCloud flags every file under a dot-named folder UF_HIDDEN, and
+# Python/Qt skip hidden files. A ".nosync" name is left alone (CLAUDE.md §3).
+.venv.nosync/
 venv/
 env/
 ENV/

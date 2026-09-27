@@ -3059,6 +3059,10 @@
   .settings-status-pill.bad { color: var(--neg); }
   .settings-ok-text { color: var(--pos); }
   .settings-bad-text { color: var(--neg); }
+  /* Settings -> About: old files the data-folder migration left in place. */
+  .settings-migrate-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+  .settings-migrate-list li { margin: 0 0 6px; }
+  .settings-migrate-list code { word-break: break-all; }
 
   /* Missing-dependency banner. Sits directly under the topbar because the
      failure it reports (a stale environment silently disabling the ML model) was

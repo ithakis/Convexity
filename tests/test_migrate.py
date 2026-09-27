@@ -247,3 +247,21 @@ def test_source_already_removed_by_other_instance(legacy):
     rep = migrate.Report()
     migrate._remove_source(src, src_fp, "views", rep, True)
     assert rep.copied == ["views"] and not rep.kept
+
+
+def test_conflicts_are_reported_for_the_ui(legacy, monkeypatch):
+    """A conflict must reach /api/health (banner + Settings), not only a log line."""
+    root, home, data = legacy
+    (data / "state").mkdir(parents=True)
+    (data / "state" / "views.json").write_text("different")
+    monkeypatch.setenv("CONVEXITY_HOME", str(data))
+    monkeypatch.setenv("CONVEXITY_LEGACY_ROOT", str(root))
+    monkeypatch.setattr(migrate, "LAST_REPORT", None)
+    assert migrate.conflicts() == []
+    migrate.run()
+    assert migrate.conflicts() == [{"old": str(root / ".convexity_views.json"),
+                                    "used": str(data / "state" / "views.json")}]
+    # dealt with (old file deleted) -> the next launch reports nothing
+    (root / ".convexity_views.json").unlink()
+    migrate.run()
+    assert migrate.conflicts() == []

@@ -170,6 +170,11 @@ Real data migrated (see the last bullet). Deviations and findings:
   logged false CONFLICT lines (now judged as identical ⇒ dedup); a malformed
   `config.json` was ignored silently (now logged once); Settings → About still
   listed the old file names (now shows the data folder, from `/api/health`).
+- Follow-ups fixed 2026-09-27 (after Phase 5): migration conflicts are shown
+  (banner + Settings → About, via `/api/health` `migration_conflicts`), the
+  port probe matches the server's bind so a restart keeps 8765, and the dev
+  venv in iCloud-synced `~/Documents` is `.venv.nosync` behind a `.venv`
+  symlink (root cause and test in CLAUDE.md §3).
 - [x] Real data migrated 2026-09-26 21:54 — by the first launch of the new code
       from `Convexity.app`, not by hand. Verified afterwards: all state files
       parse, 10 portfolios, both model versions; backup with a SHA-256 manifest

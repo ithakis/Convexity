@@ -5,6 +5,14 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `convexity/__init__.py`
 when merging a PR and add a line here.
 
+## Unreleased
+
+Fixes from the Phase 3 verification findings (`distribution` branch).
+
+- **Old data left behind by the move into the data folder is now visible.** When an old file and a different copy in the data folder both exist, the app uses the data-folder copy and never overwrites either — that used to be one log line. Now a banner says so, and Settings → About lists each old file with what to do (move it over the file in use, or delete it); the notice clears once that is done.
+- **The app keeps port 8765 when restarted.** Its free-port check was stricter than the server's own bind, so for ~30 s after any restart the app moved to 8766+ (and a bookmarked `localhost:8765` stopped working). A port another app is actually using is still skipped.
+- Developer checkout inside iCloud-synced `~/Documents`: iCloud hides every file in `.venv`, which broke `uv run` and the desktop window. The real venv now lives in `.venv.nosync` (a name iCloud leaves alone) with `.venv` as a symlink; `Launch Dashboard.command` sets this up by itself when it finds the problem.
+
 ## 1.14.1 — 2026-09-27
 
 Roadmap Phase 5 (`distribution` branch).

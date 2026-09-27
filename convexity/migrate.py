@@ -113,6 +113,15 @@ class Report:
     deduped: list[str] = field(default_factory=list)     # dest already identical, source removed
     kept: list[str] = field(default_factory=list)        # copied, source kept (changed / remove=False)
     conflicts: list[str] = field(default_factory=list)   # dest differs: both left alone
+    # The same conflicts as (legacy source, destination in use) pairs, for the
+    # UI (/api/health -> banner + Settings -> About). A conflict repeats on
+    # every launch until the user deals with the old file, so it must be
+    # visible somewhere a user looks, not only in a log line.
+    conflict_pairs: list[tuple[str, str]] = field(default_factory=list)
+
+    def conflict(self, src: Path, dst: Path, label: str) -> None:
+        self.conflicts.append(label)
+        self.conflict_pairs.append((str(src), str(dst)))
     skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     planned: list[str] = field(default_factory=list)     # dry run only
@@ -244,7 +253,7 @@ def _migrate_file(src: Path, dst: Path, rep: Report, *, remove: bool, _retry: bo
                     rep.deduped.append(label)
                     _log(f"{src.name}: identical copy already at {dst}; removed the old file")
                 return
-            rep.conflicts.append(label)
+            rep.conflict(src, dst, label)
             _log(f"CONFLICT {label}: destination exists and differs — left both untouched")
             return
         if rep.dry_run:
@@ -272,7 +281,7 @@ def _migrate_file(src: Path, dst: Path, rep: Report, *, remove: bool, _retry: bo
         if _retry:
             _migrate_file(src, dst, rep, remove=remove, _retry=False)
         else:
-            rep.conflicts.append(label)
+            rep.conflict(src, dst, label)
             _log(f"CONFLICT {label}: destination appeared during migration — source kept")
     except FileNotFoundError:
         if src.exists():
@@ -326,7 +335,7 @@ def _migrate_model_dir(src: Path, dst: Path, rep: Report, *, remove: bool, prune
                 else:
                     rep.kept.append(label)
                 return
-            rep.conflicts.append(label)
+            rep.conflict(src, dst, label)
             _log(f"CONFLICT {label}: destination exists and differs — left both untouched")
             return
         if rep.dry_run:
@@ -363,7 +372,7 @@ def _migrate_model_dir(src: Path, dst: Path, rep: Report, *, remove: bool, prune
         if _retry:  # see _migrate_file: a concurrent run placed it first
             _migrate_model_dir(src, dst, rep, remove=remove, prune_to=prune_to, _retry=False)
         else:
-            rep.conflicts.append(label)
+            rep.conflict(src, dst, label)
             _log(f"CONFLICT {label}: destination appeared during migration — source kept")
     except FileNotFoundError:
         if src.exists():
@@ -458,6 +467,17 @@ def _legacy_sources() -> tuple[Path | None, Path | None]:
     return root, home
 
 
+# The report of this process's automatic run (``run()``), or None if it did
+# not run. Read by server.py for /api/health's ``migration_conflicts``.
+LAST_REPORT: "Report | None" = None
+
+
+def conflicts() -> list[dict]:
+    """Conflicts from this launch's migration: [{old, used}], empty if none."""
+    rep = LAST_REPORT
+    return [{"old": o, "used": u} for o, u in rep.conflict_pairs] if rep else []
+
+
 def run(root: Path | None = None, home: Path | None = None) -> int:
     """Both steps. Explicit ``root``/``home`` (tests) are used as given;
     otherwise the gated legacy locations. Returns files/dirs moved."""
@@ -471,7 +491,9 @@ def run(root: Path | None = None, home: Path | None = None) -> int:
         for suffix in _STATE_SUFFIXES:
             moved += _move(root / f".{_OLD}_{suffix}.json", root / f".{_NEW}_{suffix}.json")
     # Step 2 only for the gated sources: explicit test roots stay in step 1.
-    moved += migrate_to_data_dir(auto_root, auto_home, paths.data_dir()).moved
+    global LAST_REPORT
+    LAST_REPORT = migrate_to_data_dir(auto_root, auto_home, paths.data_dir())
+    moved += LAST_REPORT.moved
     return moved
 
 

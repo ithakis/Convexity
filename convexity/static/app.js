@@ -9529,6 +9529,7 @@ function fxInit() {
 // fixed-position overlay). Any `.an-version` element already in the DOM when
 // this resolves is patched directly so a slow /api/health response still lands.
 let APP_VERSION = null; // {version, date, dataDir} — date is a raw ISO "yyyy-mm-dd"
+let MIGRATION_CONFLICTS = []; // [{old, used}] from /api/health — see syncMigrationBanner
 
 function versionLabel() {
   return APP_VERSION ? `v${APP_VERSION.version} (${fmtDateDMY(APP_VERSION.date)})` : "";
@@ -9543,6 +9544,8 @@ function loadAppVersion() {
     // the one panel that would have explained it.
     if (d.env_ok === false) showEnvBanner();
     syncLlmBanner(d);
+    MIGRATION_CONFLICTS = Array.isArray(d.migration_conflicts) ? d.migration_conflicts : [];
+    syncMigrationBanner();
     if (!d.version) return;
     APP_VERSION = { version: d.version, date: d.version_date, dataDir: d.data_dir || "" };
     document.querySelectorAll(".an-version").forEach(el => { el.textContent = versionLabel(); });
@@ -9604,6 +9607,47 @@ function syncLlmBanner(health) {
     openSettings();
   };
 }
+/* The move into the data folder never overwrites: when an old file and a
+   different copy in the data folder both exist, the app uses the data-folder
+   copy and leaves the old one untouched. That used to be one log line, so a
+   user whose newer edits sat in the old file saw them "vanish". The conflict
+   repeats on every launch until the old file is dealt with, so the banner does
+   too; Settings -> About lists the files. */
+function syncMigrationBanner() {
+  const old = document.getElementById("migrate-banner");
+  const n = MIGRATION_CONFLICTS.length;
+  if (!n) { if (old) old.remove(); return; }
+  if (old) return;
+  const bar = document.createElement("div");
+  bar.id = "migrate-banner";
+  bar.className = "env-banner";
+  bar.innerHTML = `<span>${n === 1 ? "One older data file was" : `${n} older data files were`}
+    not moved into the data folder because a different copy was already there.
+    The app is using the data-folder copy; the old ${n === 1 ? "file is" : "files are"} untouched.</span>
+    <button class="env-banner-link" id="migrate-banner-open">Details</button>
+    <button class="env-banner-x" id="migrate-banner-x" aria-label="Dismiss">&times;</button>`;
+  const topbar = document.getElementById("topbar");
+  if (topbar && topbar.parentNode) topbar.parentNode.insertBefore(bar, topbar.nextSibling);
+  else document.body.insertBefore(bar, document.body.firstChild);
+  document.getElementById("migrate-banner-x").onclick = () => bar.remove();
+  document.getElementById("migrate-banner-open").onclick = () => {
+    bar.remove();
+    selectSettingsSection("about");
+    openSettings();
+  };
+}
+
+function migrationConflictsHtml() {
+  if (!MIGRATION_CONFLICTS.length) return "";
+  const rows = MIGRATION_CONFLICTS.map(c => `<li><div><span class="settings-bad-text">Not moved:</span>
+      <code>${escapeHtml(c.old)}</code></div><div>In use: <code>${escapeHtml(c.used)}</code></div></li>`).join("");
+  return `<div class="settings-row-help"><b>Older files left in place.</b> A different copy
+      was already in the data folder, so these were not moved (nothing is ever
+      overwritten). If the old file holds changes you want, quit the app, move it over
+      the file in use, and relaunch. If not, delete the old file and this notice goes away.</div>
+    <ul class="settings-migrate-list">${rows}</ul>`;
+}
+
 function checkLlmHealth() {
   fetch("/api/health").then(r => r.json()).then(syncLlmBanner).catch(() => {});
 }
@@ -10214,7 +10258,8 @@ function renderSettingsAbout(el) {
         </div>
         <div class="settings-row-help">One folder per user, outside the app's own
           folder, so updating or reinstalling never touches it. It stays on this
-          machine.</div>`,
+          machine.</div>
+        ${migrationConflictsHtml()}`,
     }) +
     settingsRow({
       id: "update",
