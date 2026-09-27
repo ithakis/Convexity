@@ -54,6 +54,7 @@ Delete step 1 after 2027-06-30, step 2 after the 1.14 release cycle.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import shutil
@@ -216,6 +217,8 @@ def _remove_source(src: Path, fp: tuple[int, str], label: str, rep: Report, remo
             return
         src.unlink()
         _fsync_dir(src.parent)
+    except FileNotFoundError:
+        pass  # a concurrent run (second app instance) removed it first
     except OSError as exc:
         _log(f"{label}: copied, but could not remove the old file {src}: {exc}")
         rep.kept.append(label)
@@ -223,7 +226,7 @@ def _remove_source(src: Path, fp: tuple[int, str], label: str, rep: Report, remo
     rep.copied.append(label)
 
 
-def _migrate_file(src: Path, dst: Path, rep: Report, *, remove: bool) -> None:
+def _migrate_file(src: Path, dst: Path, rep: Report, *, remove: bool, _retry: bool = True) -> None:
     label = f"{src} -> {dst}"
     if not src.is_file():
         return
@@ -263,18 +266,35 @@ def _migrate_file(src: Path, dst: Path, rep: Report, *, remove: bool) -> None:
         _log(f"copied {label} (sha256 {src_fp[1][:12]}…, {src_fp[0]} bytes)")
         _remove_source(src, src_fp, label, rep, remove)
     except FileExistsError:
-        rep.conflicts.append(label)
-        _log(f"CONFLICT {label}: destination appeared during migration — source kept")
+        # Another process (a second app instance launched at the same moment)
+        # placed it first. Judge it like any existing destination: identical
+        # => just drop our source; different => a real conflict.
+        if _retry:
+            _migrate_file(src, dst, rep, remove=remove, _retry=False)
+        else:
+            rep.conflicts.append(label)
+            _log(f"CONFLICT {label}: destination appeared during migration — source kept")
+    except FileNotFoundError:
+        if src.exists():
+            rep.errors.append(f"{label}: file vanished mid-copy")
+            _log(f"ERROR {label}: file vanished mid-copy — source kept")
+        # else: a concurrent run already moved it — nothing to do
     except OSError as exc:
         rep.errors.append(f"{label}: {exc}")
         _log(f"ERROR {label}: {exc} — source kept")
 
 
-def _tree_fingerprints(root: Path) -> dict[str, tuple[int, str]]:
-    return {
-        str(p.relative_to(root)): _fingerprint(p)
-        for p in sorted(root.rglob("*")) if p.is_file()
-    }
+def _tree_fingerprints(root: Path, *, skip_vanished: bool = False) -> dict[str, tuple[int, str]]:
+    out: dict[str, tuple[int, str]] = {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            out[str(p.relative_to(root))] = _fingerprint(p)
+        except FileNotFoundError:
+            if not skip_vanished:
+                raise
+    return out
 
 
 def _prune_empty(d: Path, stop: Path) -> None:
@@ -289,7 +309,8 @@ def _prune_empty(d: Path, stop: Path) -> None:
         d = d.parent
 
 
-def _migrate_model_dir(src: Path, dst: Path, rep: Report, *, remove: bool, prune_to: Path) -> None:
+def _migrate_model_dir(src: Path, dst: Path, rep: Report, *, remove: bool, prune_to: Path,
+                       _retry: bool = True) -> None:
     label = f"{src}/ -> {dst}/"
     try:
         src_fps = _tree_fingerprints(src)
@@ -321,7 +342,12 @@ def _migrate_model_dir(src: Path, dst: Path, rep: Report, *, remove: bool, prune
                 raise OSError("staged copy does not match the source (size/SHA-256)")
             if dst.exists():
                 raise FileExistsError(str(dst))
-            os.rename(stage, dst)
+            try:
+                os.rename(stage, dst)
+            except OSError as exc:  # ENOTEMPTY/EEXIST: lost a race for dst
+                if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                    raise FileExistsError(str(dst)) from exc
+                raise
         finally:
             if stage.exists():
                 shutil.rmtree(stage, ignore_errors=True)
@@ -334,20 +360,30 @@ def _migrate_model_dir(src: Path, dst: Path, rep: Report, *, remove: bool, prune
         else:
             rep.kept.append(label)
     except FileExistsError:
-        rep.conflicts.append(label)
-        _log(f"CONFLICT {label}: destination appeared during migration — source kept")
+        if _retry:  # see _migrate_file: a concurrent run placed it first
+            _migrate_model_dir(src, dst, rep, remove=remove, prune_to=prune_to, _retry=False)
+        else:
+            rep.conflicts.append(label)
+            _log(f"CONFLICT {label}: destination appeared during migration — source kept")
+    except FileNotFoundError:
+        if src.exists():
+            rep.errors.append(f"{label}: file vanished mid-copy")
+            _log(f"ERROR {label}: file vanished mid-copy — source kept")
     except OSError as exc:
         rep.errors.append(f"{label}: {exc}")
         _log(f"ERROR {label}: {exc} — source kept")
 
 
 def _remove_tree(src: Path, fps: dict, label: str, rep: Report, prune_to: Path, *, dedup: bool) -> None:
-    if _tree_fingerprints(src) != fps:
+    now = _tree_fingerprints(src, skip_vanished=True) if src.exists() else {}
+    # Files missing from ``now`` were removed by a concurrent run; only a file
+    # that is new or different means the source changed under us.
+    if any(fps.get(rel) != fp for rel, fp in now.items()):
         _log(f"{label}: source changed during migration — kept it")
         rep.kept.append(label)
         return
     for rel in fps:
-        (src / rel).unlink()
+        (src / rel).unlink(missing_ok=True)
     for d in sorted({(src / rel).parent for rel in fps}, key=lambda p: len(p.parts), reverse=True):
         _prune_empty(d, prune_to)
     (rep.deduped if dedup else rep.copied).append(label)
@@ -459,7 +495,8 @@ def _main(argv: list[str] | None = None) -> int:
                          ("ERROR", rep.errors)):
         for it in items:
             print(f"  {title:>20}: {it}")
-    print(rep.summary())
+    if not (rep.planned or rep.moved or rep.kept or rep.conflicts or rep.errors or rep.skipped):
+        print(rep.summary())  # otherwise migrate_to_data_dir already logged it
     return 1 if rep.errors else 0
 
 

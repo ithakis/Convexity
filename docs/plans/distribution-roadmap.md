@@ -120,9 +120,8 @@ Done when: `uv run pytest` passes locally and in CI; the app runs from
 Goal: an installed package never writes next to its own code. Required before
 `uv tool install` can work. Depends on: Phase 2.
 
-**Done 2026-09-26** — committed on the `distribution` branch, no version bump.
-Your real data is **not** migrated yet (see the last bullet). Deviations and
-findings:
+**Done 2026-09-26/27** — committed on the `distribution` branch, no version bump.
+Real data migrated (see the last bullet). Deviations and findings:
 - Names (your choice): `state/views.json` etc. — dot **and** `convexity_`
   prefix dropped. The desktop log moved to `<data>/logs/desktop.log` on every
   OS (was `~/Library/Logs/Convexity.log`), so a test launch can never truncate
@@ -160,10 +159,21 @@ findings:
   **copy** of the real state (19 files, 0 SHA-256 mismatches, second run a
   no-op, all 10 portfolios in the UI, model loaded from `models/`);
   `uv run convexity-app` boots, ML available.
-- [ ] **Still to do, with the user:** migrate the real data. Stop both `pt`
-      processes, back up the checkout's `.convexity_*.json` + `symbol_db.sqlite`
-      + `~/.convexity/ml_model`, launch once, verify. The next launch of this
-      code without `CONVEXITY_HOME` does it automatically.
+- Post-commit runtime verification (2026-09-27), all through real app launches
+  on copies of the real data: conflict (dest differs → both kept, app uses the
+  data folder), stale temp from a dead run (swept), live SQLite WAL (skipped,
+  logged fallback), `kill -9` at 20 points during migration (no loss; two
+  kills left a half-copied `symbol_db.sqlite` temp / half-staged model dir,
+  both swept and completed on relaunch), two instances launched at once (no
+  loss), keys via `config.json` in an installed wheel, `build_symbol_db.py`
+  default output, desktop app. Fixed from it: two simultaneous launches
+  logged false CONFLICT lines (now judged as identical ⇒ dedup); a malformed
+  `config.json` was ignored silently (now logged once); Settings → About still
+  listed the old file names (now shows the data folder, from `/api/health`).
+- [x] Real data migrated 2026-09-26 21:54 — by the first launch of the new code
+      from `Convexity.app`, not by hand. Verified afterwards: all state files
+      parse, 10 portfolios, both model versions; backup with a SHA-256 manifest
+      in `~/Backups/convexity-data-folder-2026-09-26/`.
 
 - [x] New `convexity/paths.py` — single source of truth:
   - data dir: macOS `~/Library/Application Support/Convexity/`,

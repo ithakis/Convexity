@@ -37,6 +37,7 @@ def _showwarning_filter(message, category, filename, lineno, file=None, line=Non
 warnings.showwarning = _showwarning_filter
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
+from convexity import paths as _paths
 from convexity import __version__, __version_date__, __version_display__
 from convexity import envcheck, logbuf
 from convexity.analytics import (
@@ -285,6 +286,9 @@ class Handler(BaseHTTPRequestHandler):
                 "version": __version__, "version_date": __version_date__,
                 "env_ok": envcheck.status()["ok"],
                 "llm_ok": llm.get("ok"), "llm_error": llm.get("error"),
+                # Where the user's data lives (Settings -> About). A local path
+                # on a 127.0.0.1-only server, shown to the one local user.
+                "data_dir": str(_paths.data_dir()),
             })
             return
         if parsed.path == "/api/watchlists":

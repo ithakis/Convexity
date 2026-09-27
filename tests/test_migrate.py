@@ -218,3 +218,32 @@ def test_only_an_app_launch_migrates(monkeypatch):
         monkeypatch.setattr(sys, "orig_argv", orig)
         monkeypatch.setattr(sys, "argv", argv)
         assert convexity._launched_as_app() is want, orig
+
+
+def test_concurrent_instance_placing_first_is_not_a_conflict(legacy, monkeypatch):
+    """Two app instances launched together: losing the race for a destination
+    that the other one filled with the identical file is a dedup, not CONFLICT."""
+    root, home, data = legacy
+    real = migrate._place_no_clobber
+
+    def other_process_wins(tmp, dst):
+        import shutil
+        shutil.copy2(tmp, dst)  # the other instance's identical copy lands first
+        real(tmp, dst)
+
+    monkeypatch.setattr(migrate, "_place_no_clobber", other_process_wins)
+    rep = migrate.migrate_to_data_dir(root, home, data)
+    assert not rep.conflicts and not rep.errors
+    assert not (root / ".convexity_views.json").exists()
+
+
+def test_source_already_removed_by_other_instance(legacy):
+    root, home, data = legacy
+    (data / "state").mkdir(parents=True)
+    src = root / ".convexity_views.json"
+    (data / "state" / "views.json").write_bytes(src.read_bytes())
+    src_fp = migrate._fingerprint(src)
+    src.unlink()  # the other instance removed it between our check and unlink
+    rep = migrate.Report()
+    migrate._remove_source(src, src_fp, "views", rep, True)
+    assert rep.copied == ["views"] and not rep.kept

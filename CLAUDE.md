@@ -230,7 +230,10 @@ side effects, never creates a directory — writers `mkdir` their own parent.
   into place (no clobber) → re-check → re-hash the source → unlink it. Model
   dirs are staged whole and renamed in one step. An existing destination is
   **never overwritten** (identical ⇒ source removed; different ⇒ both kept,
-  logged CONFLICT). Temps of dead runs are swept. A `symbol_db.sqlite` with a
+  logged CONFLICT). Two instances launched at once race for each destination:
+  the loser re-judges it (identical ⇒ dedup, not CONFLICT) and tolerates the
+  winner having already removed the source. Temps of dead runs are swept —
+  verified by `kill -9` at 20 points during a real launch. A `symbol_db.sqlite` with a
   non-empty `-wal` (live writer) is skipped. Key files are never moved.
   **Gate:** with `CONVEXITY_HOME` set it migrates nothing unless
   `CONVEXITY_LEGACY_ROOT` / `CONVEXITY_LEGACY_HOME` name the source — each
@@ -243,7 +246,9 @@ side effects, never creates a directory — writers `mkdir` their own parent.
   (`MLSENT_MODEL_DIR` → `models/<ver>` → `~/.convexity/ml_model/<ver>`), the
   symbol DB (`PORTFOLIO_SYMBOL_DB` → data dir → checkout root; the builder
   writes to `symbol_db.write_path()`, never the legacy place). Remove them
-  after 1.14.
+  after 1.14. A malformed `config.json` is logged once (`[config] ignoring …`),
+  never silently treated as "no key".
+- `/api/health` carries `data_dir` (Settings → About shows it).
 
 ### Persistence
 Two separate JSON files (in `<data>/state/`) because they evolve independently:

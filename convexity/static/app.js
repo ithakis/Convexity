@@ -3412,7 +3412,7 @@ let STATE = {
   weightPresets: [],       // [{name, weights, saved_at}]
   // Pass D — column views. activeViewName is global (one selection
   // across all portfolios). customViews and builtinOverrides both mirror
-  // the server's .convexity_column_views.json — built-in views are
+  // the server's state/column_views.json — built-in views are
   // editable in place, their per-view deltas (columns + color modes) living
   // in builtinOverrides and persisting immediately (no transient state).
   activeViewName: "Default",
@@ -9528,7 +9528,7 @@ function fxInit() {
 // row (the version tag lives there now — see .an-version — instead of the old
 // fixed-position overlay). Any `.an-version` element already in the DOM when
 // this resolves is patched directly so a slow /api/health response still lands.
-let APP_VERSION = null; // {version, date} — date is a raw ISO "yyyy-mm-dd"
+let APP_VERSION = null; // {version, date, dataDir} — date is a raw ISO "yyyy-mm-dd"
 
 function versionLabel() {
   return APP_VERSION ? `v${APP_VERSION.version} (${fmtDateDMY(APP_VERSION.date)})` : "";
@@ -9544,7 +9544,7 @@ function loadAppVersion() {
     if (d.env_ok === false) showEnvBanner();
     syncLlmBanner(d);
     if (!d.version) return;
-    APP_VERSION = { version: d.version, date: d.version_date };
+    APP_VERSION = { version: d.version, date: d.version_date, dataDir: d.data_dir || "" };
     document.querySelectorAll(".an-version").forEach(el => { el.textContent = versionLabel(); });
   }).catch(() => {});
 }
@@ -10131,14 +10131,17 @@ function renderSettingsAbout(el) {
       id: "data",
       label: "Where your data lives",
       help: `<div class="settings-kv">
-          ${kv("Portfolios", "<code>.convexity_views.json</code>")}
-          ${kv("Watchlists", "<code>.convexity_watchlists.json</code>")}
-          ${kv("Optimizer runs", "<code>.convexity_mpt.json</code>")}
-          ${kv("News cache", "<code>.convexity_news.json</code>")}
-          ${kv("ML model", "<code>~/.convexity/ml_model/</code>")}
+          ${kv("Data folder", `<code>${escapeHtml((APP_VERSION && APP_VERSION.dataDir) || "—")}</code>`)}
+          ${kv("Portfolios", "<code>state/views.json</code>")}
+          ${kv("Watchlists", "<code>state/watchlists.json</code>")}
+          ${kv("Optimizer runs", "<code>state/mpt.json</code>")}
+          ${kv("News cache", "<code>state/news.json</code>")}
+          ${kv("ML model", "<code>models/</code>")}
+          ${kv("API keys", "<code>config.json</code>")}
         </div>
-        <div class="settings-row-help">All of these sit beside the app and stay on this
-          machine. They are excluded from git.</div>`,
+        <div class="settings-row-help">One folder per user, outside the app's own
+          folder, so updating or reinstalling never touches it. It stays on this
+          machine.</div>`,
     }) +
     settingsRow({
       id: "update",

@@ -20,6 +20,7 @@ Distribution work, roadmap Phases 2–4 (`distribution` branch). The version is 
 - **Automatic migration on first launch of the app** (`convexity/migrate.py`; a plain `import convexity` never migrates): copy → verify size + SHA-256 → remove the old file. Never overwrites an existing destination, safe to interrupt and to re-run, never fatal. `python -m convexity.migrate --dry-run` shows what it would move. With `CONVEXITY_HOME` set it migrates nothing unless `CONVEXITY_LEGACY_ROOT` / `CONVEXITY_LEGACY_HOME` name the source.
 - API keys: environment variable → `config.json` (`finnhub_api_key`, `nvidia_api_key`) → the old `.finnhub_key` / `.nvidia_key` files, which keep working for this release (logged when used, never deleted). The old model folder and a checkout-root `symbol_db.sqlite` also stay readable as logged fallbacks.
 - Tests always run against a temp data folder (`tests/conftest.py`).
+- Settings → About shows the data folder (`/api/health` carries `data_dir`). Two app instances launched at once migrate safely without false conflict warnings. A malformed `config.json` is reported in the log instead of silently ignored.
 
 ## 1.13.1 — 2026-09-26
 

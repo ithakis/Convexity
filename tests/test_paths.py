@@ -103,3 +103,14 @@ def test_symbol_db_prefers_data_dir_then_legacy(tmp_path, monkeypatch):
     assert symbol_db.write_path() == paths.symbol_db_file()
     symbol_db.init_db(symbol_db.write_path())
     assert symbol_db.db_path() == paths.symbol_db_file()
+
+
+def test_malformed_config_is_logged_once(monkeypatch, capsys):
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+    monkeypatch.setattr(helpers, "_CONFIG_WARNED", [])
+    paths.config_file().parent.mkdir(parents=True)
+    paths.config_file().write_text('{"finnhub_api_key": ')
+    assert helpers._config_secret("FINNHUB_API_KEY") == ""
+    assert helpers._config_secret("NVIDIA_API_KEY") == ""
+    err = capsys.readouterr().err
+    assert err.count("[config] ignoring") == 1

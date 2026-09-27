@@ -34,14 +34,26 @@ _CONFIG_KEYS = {
 }
 
 
+_CONFIG_WARNED: list = []
+
+
 def _config_secret(env_var: str) -> str:
     key = _CONFIG_KEYS.get(env_var)
     if not key:
         return ""
     from convexity import paths
+    cfg = paths.config_file()
     try:
-        data = json.loads(paths.config_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ""
+    except (OSError, ValueError) as exc:
+        # Hand-edited and broken: say so (once) rather than reporting a
+        # "missing" key with no hint. The error names the file, never content.
+        if not _CONFIG_WARNED:
+            _CONFIG_WARNED.append(True)
+            print(f"[config] ignoring {cfg}: {type(exc).__name__} — fix the JSON "
+                  f"(keys: {', '.join(sorted(_CONFIG_KEYS.values()))})", file=sys.stderr)
         return ""
     val = data.get(key) if isinstance(data, dict) else None
     return val.strip() if isinstance(val, str) else ""
