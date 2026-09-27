@@ -26,6 +26,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Windows PowerShell 5.1 on older .NET may not offer TLS 1.2, which GitHub
+# requires (uv's own installer does the same).
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 $Repo = "ithakis/Convexity"
 $MinTag = "v1.14.0"   # first release with pyproject.toml
 $PythonVersion = "3.11"
@@ -73,7 +77,7 @@ Write-Host "==> uv: $Uv ($UvVersion)"
 # ---------------------------------------------------------------------------
 if ($Source) {
     if (Test-Path $Source -PathType Container) {
-        $Src = ([System.Uri](Resolve-Path $Source).Path).AbsoluteUri
+        $Src = [System.Uri]::new((Resolve-Path $Source).Path, [System.UriKind]::Absolute).AbsoluteUri
     } else {
         $Src = $Source
     }
@@ -120,8 +124,15 @@ foreach ($p in @($ToolPy, $AppExe)) {
 Write-Host "==> Verifying runtime dependencies..."
 & $ToolPy -m convexity.envcheck
 Assert-Success "dependency check"
-& $ToolPy -c "import lightgbm" 2>$null
-if ($LASTEXITCODE -ne 0) {
+# Windows PowerShell 5.1 (what the one-liner runs) turns redirected native
+# stderr into a terminating error under $ErrorActionPreference = "Stop", so a
+# failed import would abort the install instead of warning. Relax it here only.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $ToolPy -c "import lightgbm" 2>&1 | Out-Null
+$lgbmOk = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevEap
+if (-not $lgbmOk) {
     Write-Host "WARNING: lightgbm does not load, so the Market read will be off." -ForegroundColor Yellow
 }
 

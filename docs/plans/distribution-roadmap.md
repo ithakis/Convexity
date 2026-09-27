@@ -249,6 +249,12 @@ pyproject). Deviations and findings:
   (`~/.local/share/uv/tools/convexity`), keys were copied into `config.json`,
   and an `open -a` launch reported v1.14.0, ML model loaded, both keys set,
   10 portfolios. The `pt` env is still on disk, unused by the app.
+- Post-commit verification (same day) found three Windows PowerShell 5.1
+  problems in `install.ps1` that pwsh 7 hides — the README one-liner runs 5.1:
+  redirected native stderr aborting the install under `Stop`, TLS 1.2 for the
+  GitHub API, and `-Source .` producing an empty URL (a `[Uri]` cast
+  precedence bug — it would have failed the Windows CI job). Fixed; the CI job
+  now runs the installer under 5.1. Details in CLAUDE.md §14.
 - Gotcha while testing: a tarball made with macOS `tar` carries `._*`
   AppleDouble entries, so uv saw two top-level entries, did not strip the
   directory and failed with "does not appear to be a Python project" — and

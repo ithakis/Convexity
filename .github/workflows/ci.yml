@@ -306,11 +306,13 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Run install.ps1
-        shell: pwsh
+      # Windows PowerShell 5.1 (`shell: powershell`), not pwsh 7: the README
+      # one-liner runs `powershell`, and 5.1 treats native stderr differently.
+      - name: Run install.ps1 (Windows PowerShell 5.1, as the one-liner does)
+        shell: powershell
         env:
           CONVEXITY_HOME: ${{ runner.temp }}\convexity-home
-        run: ./install.ps1 -Source .
+        run: .\install.ps1 -Source .
 
       - name: Verify shortcuts and icon
         shell: pwsh

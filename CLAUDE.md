@@ -1932,6 +1932,22 @@ install): `CONVEXITY_SOURCE` (local checkout or archive URL; `-Source`),
   every native call (uv installer, `uv tool install`, `uv tool dir`, envcheck,
   the icon and key-copy Python calls) — otherwise a failed install would
   silently fall through to building shortcuts against a broken tool.
+- **The Windows one-liner runs Windows PowerShell 5.1, not pwsh 7** — three
+  consequences found while verifying 1.14, all invisible to pwsh-only testing:
+  (1) under `$ErrorActionPreference = "Stop"`, *redirected* native stderr
+  (`2>$null`, `2>&1`) becomes a terminating error in 5.1, so a failed
+  `import lightgbm` probe would abort the install — `install.ps1` relaxes the
+  preference around that one call; (2) `Invoke-RestMethod` may not offer TLS 1.2
+  on older .NET, so the script ORs `Tls12` into `SecurityProtocol` (as uv's own
+  installer does); (3) `[Uri]"<path>"` leaves `AbsoluteUri` empty for a Unix
+  path, and `[System.Uri](Resolve-Path $x).Path` casts before `.Path` is read —
+  use `[System.Uri]::new(<path>, [System.UriKind]::Absolute)`.
+  `windows-install-smoke` therefore runs the installer with `shell: powershell`
+  (5.1). To exercise `install.ps1` on macOS: `pwsh -File install.ps1 -Source .`
+  with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`/`CONVEXITY_HOME` in scratch gets through
+  `uv tool install`; symlink `Scripts\python.exe` / `convexity-app.exe` to the
+  tool's `bin/` and set `LOCALAPPDATA`/`TEMP` to reach the `.ico`; only the
+  `WScript.Shell` COM step is Windows-only.
 - **Blank window when launched from the .app bundle (ROOT-CAUSED & FIXED —
   `--single-process`).** The single most important desktop-app gotcha. When
   launched from the installed `.app` via LaunchServices (Finder / Dock /
