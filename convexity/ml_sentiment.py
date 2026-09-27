@@ -152,12 +152,27 @@ def runtime_status() -> dict:
     """Why the Market read is (not) running. The load is cached for the
     process lifetime, so installing a dependency needs an app restart."""
     st = _load()
+    reason = st.get("reason") or ""
+    from convexity import model_fetch  # stdlib + paths only; no cycle
+    download = model_fetch.status()
+    exists = model_dir().exists()
+    if not st["ok"] and not exists:
+        # The generic "No such file" says nothing useful on a fresh install:
+        # name what the first-run download is doing (Track record shows this).
+        state = download.get("state")
+        if state == "failed":
+            reason = f"model download failed: {download.get('error')}"
+        elif state in model_fetch.IN_FLIGHT:
+            reason = "model is downloading"
+        elif state == "disabled":
+            reason = "model not installed (automatic download disabled)"
     return {
         "available": bool(st["ok"]),
-        "reason": st.get("reason") or "",
+        "reason": reason,
         "model_dir": str(model_dir()),
-        "model_dir_exists": model_dir().exists(),
+        "model_dir_exists": exists,
         "version": ARTIFACT_VERSION,
+        "download": download,
     }
 
 
@@ -379,8 +394,26 @@ def market_read(symbol: str, articles: list[dict], closes=None, now: float | Non
         return None, None
 
 
+def reload() -> dict:
+    """Forget the cached load and load again. model_fetch calls this once a
+    downloaded artifact is in place — otherwise the "missing artifact" failure
+    cached at boot would hide the new model until a restart.
+
+    A model that already loaded is left alone: scorers hold references into
+    _STATE, and clearing it under them would turn a no-op into a KeyError."""
+    # Under _LOCK: a load already in progress (the boot warm-up) finishes
+    # first, and if it found the new files there is nothing to redo.
+    with _LOCK:
+        if _STATE.get("loaded") and _STATE.get("ok"):
+            return _STATE
+        _STATE.clear()
+        _STATE.update({"loaded": False, "ok": False, "reason": ""})
+    return _load()
+
+
 def reset_for_tests() -> None:
-    """Test hook: forget the loaded model so a new MLSENT_MODEL_DIR applies."""
+    """Forget the loaded model so a new MLSENT_MODEL_DIR (or a freshly
+    downloaded artifact) applies on the next _load()."""
     with _LOCK:
         _STATE.clear()
         _STATE.update({"loaded": False, "ok": False, "reason": ""})

@@ -1,6 +1,6 @@
 # Distribution roadmap: from "clone + conda" to an installable app
 
-Status: **Phases 0–4 done** (v1.14.0, 2026-09-27); written 2026-09-26, v1.13.0. One phase = one Claude Code
+Status: **Phases 0–4 done** (v1.14.0, 2026-09-27), **Phase 5 done** except publishing the model asset; written 2026-09-26, v1.13.0. One phase = one Claude Code
 session = one PR. Do them in order; each phase lists what it depends on.
 
 How to run a phase with Claude Code:
@@ -294,19 +294,60 @@ Done when: one command on a clean account gives a working app.
 
 Goal: a fresh install has a working Market read. Depends on: Phase 3.
 
-- [ ] Package the model: `ml/scripts/10_export_artifact.py --tarball` →
-      `mlsent-v1.1.tar.gz` (the six artifact files).
-- [ ] Upload it as an asset to a GitHub Release (e.g. `model-mlsent-v1.1`).
-- [ ] `convexity/model_fetch.py`: if `models/mlsent-v1.1/` is missing, download
+**Done 2026-09-27** — committed on the `distribution` branch, no version bump
+yet. **The release asset is not published yet**: until `model-mlsent-v1.1`
+exists on GitHub, a fresh install's download fails with "HTTP 404" (visible in
+Settings, with Retry) — it starts working the moment the asset is uploaded, no
+app change needed. Deviations and findings:
+- The tarball is built **deterministically** (Python `tarfile`: sorted names,
+  mtime 0, uid 0, gzip mtime 0) by `model_fetch.pack()`, shared by the export
+  script and the tests. Packing the same six files twice gives the same
+  SHA-256, so the pinned hash can be re-derived from the model at any time.
+  macOS `tar` would have added `._*` entries, which the extractor rejects.
+- Built from a copy of the deployed model (1,411,751 bytes, sha256
+  `9e05d4af…fecf46d`); all six files checked for home paths / usernames first.
+  The installed files are byte-identical to the source.
+- Stricter than "reject absolute / `..`": an allowlist — only the six artifact
+  files under `mlsent-v1.1/`, no links, no devices, no extra files or dirs, all
+  six required, size caps on download and extraction. Extraction goes to a
+  staging dir and is moved into place with one `os.rename`.
+- `CONVEXITY_MODEL_URL` overrides the URL only (loopback http allowed, for
+  testing); the SHA-256 has no override. `CONVEXITY_MODEL_DOWNLOAD=0` disables
+  the automatic start (tests set it); Retry ignores it.
+- Race found in the first e2e run: with a fast server the boot warm-up and the
+  post-download reload both loaded the model. `reload()` now takes the model
+  lock first and keeps an already-loaded model, and the warm-up skips its load
+  while a download is running (no misleading "missing artifact" line at boot).
+- Settings: while downloading, the pill reads "Downloading" and the pane polls
+  every 1.5 s (timer cleared with the log poller's rule); Retry appears whenever
+  no model is on disk and nothing is running. A missing-model reason in the
+  Track record names the download failure.
+- Verified end to end (fresh `CONVEXITY_HOME`, local HTTP server, real app
+  boot, headless Chrome at DPR 1): happy path (boot banner before the download
+  finished, then "Market read available"); offline (3 attempts, one FAILED
+  line, nothing left behind, Failed + Retry in Settings, Retry → progress →
+  Running); tampered tarball (checksum mismatch, discarded, Retry with the good
+  file → Running). Path traversal and the other unsafe archives are unit tests
+  (they need a matching hash).
+- Gotcha hit again: iCloud re-flagged ~17.7k `.venv` files `hidden`
+  (`No module named 'convexity'`); `chflags -R nohidden .venv` before runs.
+
+- [x] Package the model: `ml/scripts/10_export_artifact.py --tarball` →
+      `mlsent-v1.1.tar.gz` (the six artifact files). Also `--from <dir>` to pack
+      an existing bundle.
+- [ ] Upload it as an asset to a GitHub Release (`model-mlsent-v1.1`).
+      **Waiting for your OK** — it publishes.
+- [x] `convexity/model_fetch.py`: if `models/mlsent-v1.1/` is missing, download
       the asset from a URL **pinned in code**, verify against a **SHA-256
       pinned in code**, extract safely (reject absolute paths / `..`), then
       reload. Stdlib only. Runs in the background; never blocks startup.
-- [ ] Settings → Models & Data: status ("downloading / installed / failed:
+- [x] Settings → Models & Data: status ("downloading / installed / failed:
       reason") and a "Retry download" button.
-- [ ] Failure is visible, not silent (same rule as `_warn_ml_once`).
-- [ ] Tests: checksum mismatch rejected, path traversal rejected, offline
+- [x] Failure is visible, not silent (same rule as `_warn_ml_once`).
+- [x] Tests: checksum mismatch rejected, path traversal rejected, offline
       degrades cleanly (local HTTP server in tests, no real network).
-- [ ] Document the model-release procedure in CLAUDE.md §4 (retrain → new
+      `tests/test_model_fetch.py`, 30 tests.
+- [x] Document the model-release procedure in CLAUDE.md §4 (retrain → new
       tarball → new release → bump pinned URL + hash).
 
 ---

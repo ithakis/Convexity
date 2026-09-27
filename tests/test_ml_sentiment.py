@@ -72,6 +72,13 @@ def _cal(horizon=1):
 @pytest.fixture()
 def tiny_artifact(tmp_path, monkeypatch):
     """A real (tiny) encoder artifact with the production schema."""
+    built = build_tiny_artifact(tmp_path / "mlsent-v1.1")
+    monkeypatch.setenv("MLSENT_MODEL_DIR", str(built[0]))
+    return built
+
+
+def build_tiny_artifact(d: Path):
+    """Write the six artifact files into ``d``; also used by test_model_fetch."""
     import lightgbm as lgb
 
     rng = np.random.default_rng(0)
@@ -88,15 +95,13 @@ def tiny_artifact(tmp_path, monkeypatch):
     enc = lgb.train({"objective": "regression", "verbosity": -1, "min_data_in_leaf": 5},
                     lgb.Dataset(X, y), num_boost_round=20)
 
-    d = tmp_path / "mlsent-v1.1"
-    d.mkdir()
+    d.mkdir(parents=True)
     enc.save_model(str(d / "model.lgbm.txt"))
     np.save(d / "idf.npy", idf)
     np.save(d / "col_mask.npy", mask)
     (d / "feature_schema.json").write_text(json.dumps(mf.feature_schema()))
     (d / "tier_cuts.json").write_text(json.dumps(_cal()))
     (d / "meta.json").write_text(json.dumps({"version": "test"}))
-    monkeypatch.setenv("MLSENT_MODEL_DIR", str(d))
     return d, enc, idf, mask
 
 

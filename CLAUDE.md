@@ -59,6 +59,7 @@ sub-decision.
 │   ├── relevance.py             ← Deterministic relevance, title dedup, window_sample (shared with ml/) — §4
 │   ├── lexicon.py               ← Loughran-McDonald scorer (data/lm_lexicon.json), an encoder feature
 │   ├── news_diagnostics.py      ← Track record statistics (date-clustered IC, verdicts, hit rates) — §4
+│   ├── model_fetch.py           ← First-run download of the Market read model (pinned URL + SHA-256) — §4
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
 │       ├── index.html           ← Main HTML template
@@ -509,6 +510,40 @@ not reintroduce one; the engines answer different questions.
   (must equal `ml_features.feature_schema()`), `tier_cuts.json`, `meta.json`.
   Build: `ml/scripts/09_tier_cuts.py --model v1.1`, then
   `10_export_artifact.py --deploy`.
+- **First-run download (`model_fetch.py`, roadmap Phase 5).** The model is not
+  in the package. When `models/<ver>/` is missing (and neither
+  `MLSENT_MODEL_DIR` nor the legacy folder applies), `start_server()`'s warm-up
+  calls `model_fetch.start()`: a daemon thread downloads the GitHub Release
+  asset at `MODEL_URL`, checks it against `MODEL_SHA256` **before opening it**
+  (mismatch ⇒ deleted, never retried), extracts member by member (only the six
+  `ARTIFACT_FILES` under `<ver>/`; absolute paths, `..`, links, devices and
+  extra files are rejected — never `extractall`) into a
+  `.<ver>.<pid>.staging` dir, `os.rename`s it into place and calls
+  `ml_sentiment.reload()`. Boot never waits on it. Network errors / 5xx retry
+  3× with backoff; 64 MB download cap; leftovers of dead runs are swept.
+  Status (`downloading/verifying/installing/installed/failed/disabled/not_needed`)
+  rides on `runtime_status()["download"]`, and a missing-model `reason` names
+  the download failure, so both Settings → Models & Data (with **Retry
+  download** → `POST /api/model-download`, which ignores the disable flag) and
+  the Track record say why. Every transition prints a `[model_fetch]` line.
+  Env: `CONVEXITY_MODEL_URL` overrides the **URL only** (http allowed for
+  loopback only) — the hash is never overridable, it is the trust anchor;
+  `CONVEXITY_MODEL_DOWNLOAD=0` disables the automatic start
+  (`tests/conftest.py` sets it — no test touches the network).
+  `ml_sentiment.reload()` takes `_LOCK` first, so a boot warm-up load that is
+  already running finishes before it, and an already-loaded model is left alone.
+- **Model release procedure** (retrain or recalibrate → users get it):
+  1. retrain / `09_tier_cuts.py`, then `10_export_artifact.py --deploy --tarball`
+     (or `--tarball --from <bundle dir>` to pack an existing bundle — the
+     tarball is deterministic, so the same six files always hash the same);
+  2. check every file is free of home paths / private data (the asset is public, §18);
+  3. with the user's explicit OK, `gh release create model-<ver> <ver>.tar.gz`
+     (a separate tag from the app's `vX.Y.Z` releases);
+  4. download the published asset and confirm its SHA-256 matches;
+  5. bump `ARTIFACT_VERSION` (if the version changed), `model_fetch.MODEL_VERSION`,
+     `MODEL_URL` and `MODEL_SHA256` together (`test_pins_are_consistent`), and
+     ship an app release. Never replace the asset of an existing tag — old
+     installs pin its hash.
 - Graceful degradation is the contract: a missing artifact, missing
   lightgbm / scikit-learn / scipy, or a schema mismatch ⇒ `available()` False,
   every call `None`, the News read untouched. It must not be *silent*: the
@@ -674,6 +709,7 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/weight-presets`            — upsert `{view, name, weights, rename_from?, set_active?}`
 - `/api/weight-presets/active`     — set `{view, name|null}` as the active preset for a portfolio
 - `/api/efficient-frontier`        — **streams NDJSON** (`progress`/`done`/`error`) for the mean-CVaR frontier. Body `{rows, lookback, rf, alpha, fully_invested, bounds, cov_model, haircut, budget, current_weights, display_ccy}` where `bounds` = `{sym:{min,max}}` per-position weight fractions and `budget` is a wall-clock tier (light≈5s/standard≈15s/dense≈60s). Client renders a real pct/ETA bar; aborting the request cancels the 8-core compute.
+- `/api/model-download`            — start (or retry) the first-run model download; `202` + `model_fetch.status()` (§4 Market read)
 - `/api/mpt-runs`                  — save `{view, run}` onto the portfolio's **last-3 run history** (newest-first, cap 3; a run whose `params` match the newest replaces it instead of duplicating)
 
 **DELETE**
@@ -2320,10 +2356,14 @@ GitHub's side needs a GitHub Support request by the owner.
   `config.json` in the data folder, then a gitignored legacy file). They never appear in code, logs, `/api/*` responses or the
   frontend — `/api/runtime-status` exposes booleans only.
 - No new outbound hosts, CDNs, analytics or telemetry without asking (today:
-  Yahoo Finance, Finnhub, NVIDIA NIM, KaTeX CDN).
+  Yahoo Finance, Finnhub, NVIDIA NIM, KaTeX CDN, and GitHub Releases for the
+  one-time model download — `model_fetch.py`, §4).
 - No `eval`/`exec`, `shell=True`, `pickle`/`joblib.load` of anything downloaded,
   or `yaml.load` without `SafeLoader`. Anything downloaded at runtime (model
-  artifact, future reference packs) is verified against a SHA-256 pinned in code.
+  artifact — `model_fetch.MODEL_SHA256`, checked before the archive is opened;
+  future reference packs) is verified against a SHA-256 pinned in code.
+  Release assets are public the moment they are uploaded: creating one needs
+  the user's OK, and an existing tag's asset is never replaced.
 - Dependencies: only well-known packages, declared in both manifests (§4
   envcheck rule). Review Dependabot PRs like any other change; never auto-merge.
   Version updates are configured in `.github/dependabot.yml` (pip + github-actions, weekly).

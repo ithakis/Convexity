@@ -589,6 +589,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/model-download":
+            # Settings -> Models & Data "Retry download". Harmless to trigger:
+            # it does nothing when the model is present, is single-flight, and
+            # the artifact is verified against the SHA-256 pinned in model_fetch.
+            from convexity import model_fetch
+            self._send_json(202, model_fetch.start(force=True))
+            return
         if parsed.path == "/api/watchlists":
             try:
                 payload = self._read_json()
@@ -1052,9 +1059,16 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
         # model unavailable with a real reason on /api/runtime-status.
         try:
             from convexity import ml_sentiment as _mls
+            # First run: fetch the Market read model in its own background
+            # thread (returns at once) — boot never waits on the network.
+            # A no-op when the model is present; status and failures surface
+            # in Settings -> Models & Data and the log (model_fetch.py).
+            from convexity import model_fetch
+            if model_fetch.start()["state"] in model_fetch.IN_FLIGHT:
+                return  # the download reloads the model itself when done
             _mls.available()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[ml_sentiment] warm-up failed: {type(exc).__name__}: {exc}")
 
     threading.Thread(target=_warm_ml, name="pt-warm-ml", daemon=True).start()
     port = _pick_port()

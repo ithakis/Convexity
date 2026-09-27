@@ -9731,6 +9731,7 @@ const SETTINGS = {
   runtimeBusy: false,
   lastSeq: 0,
   timer: null,
+  modelTimer: null,     // model-download status poll (Models pane only)
   showHttp: false,       // server.py logs every request — off by default
   autoscroll: true,      // pauses itself when the user scrolls up to read
   lines: [],
@@ -9744,12 +9745,16 @@ function openSettings() {
   const search = $("#settings-search");
   if (search) search.value = "";
   renderSettings();
+  // The runtime status is cached for the session, but the first-run model
+  // download can change it between opens: refresh a cached copy quietly.
+  if (SETTINGS.runtime) loadRuntimeStatus(true);
   requestAnimationFrame(() => { const s = $("#settings-search"); if (s) s.focus(); });
 }
 
 function closeSettings() {
   if (!hideOverlay("#settings-bg")) return;
   stopLogPolling();
+  stopModelPolling();
   // The overlay hides the page scrollbar, so anything measured while it was
   // open (applyTableFitMode reads .table-wrap's width) was measured against a
   // slightly wider wrap. Idempotent re-measure; does not rebuild rows.
@@ -9837,6 +9842,8 @@ function renderSettingsPane() {
   // not Logs must leave no live poller behind. Restarting is renderSettingsLogs'
   // job alone, so a future section can never leak a 1.5s timer against /api/logs.
   stopLogPolling();
+  // Same rule for the model-download poller: only renderSettingsModels re-arms it.
+  stopModelPolling();
   const pane = $("#settings-pane");
   if (!pane) return;
   const section = settingsSectionById(SETTINGS.section) || SETTINGS_SECTIONS[0];
@@ -9984,8 +9991,12 @@ function mlRuntimeHint(rt) {
       in a development checkout), then fully quit and relaunch the app.`;
   }
   if (rt && rt.model_dir && !rt.model_dir_exists) {
-    return `No artifact found at <code>${escapeHtml(rt.model_dir)}</code> — deploy the
-      ${escapeHtml(rt.version || "mlsent")} bundle there.`;
+    const st = (rt.download || {}).state;
+    if (st === "downloading" || st === "verifying" || st === "installing") {
+      return `The model is being downloaded; the Market read starts on its own when it finishes.`;
+    }
+    return `The ${escapeHtml(rt.version || "model")} model is not installed. Retry the download in
+      <b>Settings → Models &amp; Data</b>; <b>Settings → Logs</b> has the details.`;
   }
   return `Check <b>Settings → Logs</b> for the full backend output.`;
 }
@@ -10006,6 +10017,39 @@ function loadRuntimeStatus(force) {
   });
 }
 
+// First-run model download (model_fetch.py). While one is in flight the Models
+// pane re-reads /api/runtime-status every 1.5 s; loadRuntimeStatus re-renders
+// the pane, which clears this timer first and re-arms it only if still running.
+const MODEL_DL_ACTIVE = ["downloading", "verifying", "installing"];
+
+function stopModelPolling() {
+  if (SETTINGS.modelTimer) { clearTimeout(SETTINGS.modelTimer); SETTINGS.modelTimer = null; }
+}
+
+function modelDownloadLine(dl) {
+  const st = dl.state || "idle";
+  const mb = (b) => (b / 1e6).toFixed(1);
+  const since = (t) => !t ? "" : (Date.now() / 1000 - t < 60 ? "just now"
+                                  : relTime(new Date(t * 1000).toISOString()));
+  if (st === "downloading") {
+    const n = dl.bytes || 0;
+    return dl.total ? `Downloading ${mb(n)} / ${mb(dl.total)} MB (${Math.floor(100 * n / dl.total)}%)`
+                    : `Downloading ${mb(n)} MB`;
+  }
+  if (st === "verifying") return "Verifying checksum";
+  if (st === "installing") return "Installing";
+  if (st === "installed") return `<span class="settings-ok-text">Installed</span> ${since(dl.finished_at)}`;
+  if (st === "failed") return `<span class="settings-bad-text">Failed: ${escapeHtml(dl.error || "unknown")}</span>`;
+  if (st === "disabled") return "Not installed — automatic download is disabled";
+  return "";
+}
+
+function retryModelDownload(btn) {
+  if (btn) btn.disabled = true;
+  fetch("/api/model-download", { method: "POST" }).then(r => r.json()).catch(() => null)
+    .then(() => loadRuntimeStatus(true));
+}
+
 function renderSettingsModels(el) {
   const d = SETTINGS.runtime;
   if (!d) {
@@ -10022,6 +10066,8 @@ function renderSettingsModels(el) {
   const rt = d.ml || {};
   const pill = rt.available
     ? `<span class="settings-status-pill ok">Running</span>`
+    : MODEL_DL_ACTIVE.includes((rt.download || {}).state)
+    ? `<span class="settings-status-pill">Downloading</span>`
     : `<span class="settings-status-pill bad">Not running</span>`;
   const keys = d.keys || {};
   const llmPill = keys.llm_ok === false
@@ -10029,18 +10075,31 @@ function renderSettingsModels(el) {
     : keys.llm_ok === true ? `<span class="settings-status-pill ok">Running</span>`
     : `<span class="settings-status-pill">Not called yet</span>`;
   const kv = (k, v) => `<div class="settings-kv-k">${k}</div><div class="settings-kv-v">${v}</div>`;
+  const dl = rt.download || {};
+  const dlActive = MODEL_DL_ACTIVE.includes(dl.state);
+  const dlLine = modelDownloadLine(dl);
+  // Retry whenever there is no model to load and nothing is in flight — after
+  // a failure, but also when auto-download was disabled or never started.
+  const canRetry = !rt.available && !rt.model_dir_exists && !dlActive;
+  // With no model on disk the Download line already says what is happening;
+  // a Reason row would repeat it (in red, even mid-download).
+  const dlExplains = !rt.model_dir_exists && (dlActive || dl.state === "failed");
   let mlBody = `<div class="settings-kv">
       ${kv("Artifact", escapeHtml(rt.version || "—"))}
+      ${dlLine ? kv("Download", dlLine) : ""}
       ${kv("Location", `${escapeHtml(rt.model_dir || "—")}${rt.model_dir && !rt.model_dir_exists ? " (missing)" : ""}`)}
-      ${rt.available ? "" : kv("Reason", `<span class="settings-bad-text">${escapeHtml(rt.reason || "unknown")}</span>`)}
+      ${rt.available || dlExplains ? "" : kv("Reason", `<span class="settings-bad-text">${escapeHtml(rt.reason || "unknown")}</span>`)}
     </div>`;
   if (!rt.available) {
     mlBody += `<div class="settings-row-help">${mlRuntimeHint(rt)}</div>`;
   }
-  mlBody += `<div class="settings-row-help">The model is loaded once per process and the
-    result is cached, so installing a missing package requires a full app restart before
-    this flips.</div>
+  // About dependencies, not the model files (a downloaded model loads at once).
+  if (rt.model_dir_exists) mlBody += `<div class="settings-row-help">The model is loaded once
+    per process and the result is cached, so installing a missing package requires a full app
+    restart before this flips.</div>`;
+  mlBody += `
     <div class="settings-btn-row">
+      ${canRetry ? `<button class="settings-btn" id="settings-model-retry">Retry download</button>` : ""}
       <button class="settings-btn" id="settings-recheck">Re-check</button>
       <button class="settings-btn" id="settings-open-logs">Open Logs</button>
     </div>`;
@@ -10089,6 +10148,9 @@ function renderSettingsModels(el) {
   if (rc) rc.onclick = () => { SETTINGS.runtime = null; renderSettingsPane(); loadRuntimeStatus(true); };
   const ol = $("#settings-open-logs");
   if (ol) ol.onclick = () => selectSettingsSection("logs");
+  const rd = $("#settings-model-retry");
+  if (rd) rd.onclick = () => retryModelDownload(rd);
+  if (dlActive) SETTINGS.modelTimer = setTimeout(() => loadRuntimeStatus(true), 1500);
   highlightSettingsMatches(el);
 }
 

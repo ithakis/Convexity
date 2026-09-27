@@ -12,8 +12,16 @@ meta.json records provenance and the tier-cut verification. With --deploy the
 bundle is copied to <data>/models/mlsent-v1.1/ (convexity/paths.py; or
 MLSENT_MODEL_DIR), where convexity.ml_sentiment loads it.
 
+With --tarball the bundle is packed into the release asset that
+convexity/model_fetch.py downloads on first run (deterministic, so the same
+files always give the same SHA-256). --from packs an existing bundle directory
+instead of exporting one — that is how the published asset was built, from a
+copy of the deployed model. The printed SHA-256 goes into
+model_fetch.MODEL_SHA256 (CLAUDE.md §4 "Model release procedure").
+
 Usage:
-    python ml/scripts/10_export_artifact.py [--deploy]
+    python ml/scripts/10_export_artifact.py [--deploy] [--tarball [--out PATH]]
+    python ml/scripts/10_export_artifact.py --tarball --from <bundle dir> [--out PATH]
 """
 from __future__ import annotations
 
@@ -39,7 +47,17 @@ def _read(path: Path) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--deploy", action="store_true")
+    ap.add_argument("--tarball", action="store_true",
+                    help="also write <version>.tar.gz, the first-run download asset")
+    ap.add_argument("--from", dest="src", type=Path,
+                    help="with --tarball: pack this existing bundle dir, skip the export")
+    ap.add_argument("--out", type=Path, help="tarball path (default: next to the bundle)")
     args = ap.parse_args()
+    if args.src:
+        if not args.tarball:
+            ap.error("--from requires --tarball")
+        _tarball(args.src, args.out)
+        return
 
     from convexity import ml_features as mf
     from convexity.ml_sentiment import ARTIFACT_VERSION as version
@@ -85,6 +103,17 @@ def main() -> None:
         for f in required:
             shutil.copy2(out / f, dst / f)
         print(f"deployed -> {dst}", flush=True)
+    if args.tarball:
+        _tarball(out, args.out)
+
+
+def _tarball(src: Path, out: Path | None) -> None:
+    from convexity import model_fetch
+    out = out or src.parent / f"{model_fetch.MODEL_VERSION}.tar.gz"
+    sha = model_fetch.pack(src, out)
+    print(json.dumps({"tarball": str(out), "bytes": out.stat().st_size, "sha256": sha,
+                      "next": "set model_fetch.MODEL_SHA256 to this sha256, publish "
+                              "the file as a release asset"}, indent=2), flush=True)
 
 
 if __name__ == "__main__":

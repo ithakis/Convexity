@@ -5,6 +5,15 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `convexity/__init__.py`
 when merging a PR and add a line here.
 
+## Unreleased
+
+Roadmap Phase 5 (`distribution` branch).
+
+- **The Market read works on a fresh install.** When the model is missing, the app downloads it in the background on first launch (from the `model-mlsent-v1.1` GitHub release, ~1.4 MB), verifies it against a SHA-256 pinned in the code, installs it and starts the Market read — no restart. Startup never waits for it.
+- Settings → Models & Data shows the download (progress, installed, or the reason it failed) and a **Retry download** button; failures are also in the log and the Track record.
+- Safe by construction: https only, the checksum is checked before the archive is opened, and only the six expected model files are extracted (absolute paths, `..`, links and anything unexpected are rejected).
+- `ml/scripts/10_export_artifact.py --tarball` builds the release asset reproducibly; the model release procedure is in CLAUDE.md §4.
+
 ## 1.14.0 — 2026-09-27
 
 Distribution work, roadmap Phases 2–4 (`distribution` branch): an installable package, user data outside the code, and one-command installers on uv. conda is retired.
