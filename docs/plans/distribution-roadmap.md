@@ -1,25 +1,41 @@
 # Distribution roadmap: from "clone + conda" to an installable app
 
-Status: **Phases 0–4 done** (v1.14.0, 2026-09-27), **Phase 5 done** (v1.14.1); written 2026-09-26, v1.13.0. One phase = one Claude Code
-session = one PR. Do them in order; each phase lists what it depends on.
+Status: **Phases 0–6 done** on the local `distribution` branch (code at
+1.15.0, 2026-09-28); written 2026-09-26, v1.13.0. One phase = one Claude Code
+session. Do them in order; each phase lists what it depends on.
+
+**Release plan (decided 2026-09-28): one big v2.0.0.** Nothing after v1.13.0
+has been pushed or released — 1.14.x/1.15.0 exist only as commits on the local
+`distribution` branch. The phases below, then the v2 features (to be listed
+by the user), all land on `distribution`; at the end: one version bump to
+2.0.0, the 1.14–1.15 CHANGELOG sections folded into a single 2.0.0 section
+(no tag ever pointed at them), one PR to `main`, full CI, tag + GitHub release
+per CLAUDE.md §15. Until then: **no push, no PR, no tags, no version bumps.**
+One repository only: everything — app, installers, the reference-pack
+workflow (Phase 8) and the website (Phase 9) — lives in `ithakis/Convexity`.
+Consequence to keep in mind: CI's macOS/Windows installer jobs only run on
+GitHub, so each phase runs their local equivalents (CLAUDE.md §13) instead.
 
 How to run a phase with Claude Code:
 
 ```
 Read docs/plans/distribution-roadmap.md and implement Phase N.
-Follow CLAUDE.md (§18 security rules). Work on a branch, open a PR,
-and tick the phase's checklist in this file as part of the PR.
+Follow CLAUDE.md (§18 security rules). Commit to the current branch
+(distribution): no new branch, no push, no PR, no version bump. Tick the
+phase's checklist in this file and add your findings.
 ```
 
 Rules that apply to every phase:
-- One PR per phase. CI green before merging. Tag + release per CLAUDE.md §15
-  when the phase bumps the version (ask before bumping).
+- Commit to `distribution`; run the full local gate (pytest, check_syntax,
+  `uv lock --check`, smoke_test_server, local install smoke) before each
+  commit. The version stays at 1.15.0 until the v2.0.0 release (ask before
+  bumping, CLAUDE.md §15); release notes go under "Unreleased" in CHANGELOG.md.
 - Update CLAUDE.md in the same PR whenever a phase changes an established
   pattern (paths, env, install, dependency manifests).
 - Never commit runtime state, keys, the model's training data or absolute home
   paths (§18).
-- After merging: pull the main checkout, restart the app, verify
-  `/api/health` reports the new version.
+- After the v2.0.0 merge: pull the main checkout, reinstall the app, verify
+  `/api/health` reports 2.0.0.
 
 ---
 
@@ -462,7 +478,7 @@ Findings (2026-09-28, implemented on `distribution` after v1.14.2):
 
 ---
 
-## Phase 7 — Repository tidy-up (v1.15.x)
+## Phase 7 — Repository tidy-up (v2.0.0)
 
 Goal: looks and behaves like a maintained product. Can run any time after
 Phase 4.
@@ -491,47 +507,96 @@ Phase 4.
 
 ---
 
-## Phase 8 — Reference pack collector (v1.16.0)
+## Phase 8 — Reference pack, built in this repo (v2.0.0)
 
 Goal: new and returning users get a calibrated Market read and a meaningful
-Track record on day one. Depends on: Phase 5.
+Track record on day one. Depends on: Phase 5 (model download), Phase 7 (paths).
 
-Design:
-- New **separate public repo** `ithakis/Convexity-data` with a GitHub Actions
-  cron (weekdays, after US close). Keys in Actions secrets only.
-- Universe: S&P 500 (fixed list committed in that repo).
-- Per run: Finnhub news for the universe (rate-limited, ~9 min), the **Market
-  read only** (local LightGBM — no LLM, no look-ahead), forward returns from
-  yfinance joined once known.
-- Publishes to a Hugging Face **dataset** (or a rolling `data-latest` GitHub
-  release):
-  - `anchor.json` — last 90 days of `market_score` across the universe.
-  - `history.parquet` — records shaped like the local sentiment history.
-  - `manifest.json` — date, row counts, model version, schema version.
+Design — **one repository**: the collector is a scheduled GitHub Actions
+workflow in `ithakis/Convexity`, not a separate repo, and it publishes to a
+GitHub release of this repo, not to Hugging Face. (Revised 2026-09-28; the
+earlier draft had an `ithakis/Convexity-data` repo and a Hugging Face dataset.)
+- `.github/workflows/reference-pack.yml`: `schedule` weekdays after the US
+  close, plus `workflow_dispatch`. It runs the `convexity` package **from the
+  same commit** (`uv sync --locked`), so the featurizer is identical by
+  construction — train/serve parity without pinning a separate dependency.
+- Universe: S&P 500, a fixed list committed as package data (public tickers
+  only, never the user's book).
+- Per run: Finnhub company news for the universe (rate-limited, ~9 min), the
+  **Market read only** (the local LightGBM model, downloaded by
+  `model_fetch` and SHA-256 checked as in the app — no LLM, no look-ahead),
+  forward returns from yfinance joined once known.
+- Publishes to a **rolling release** with the fixed tag `reference-pack`
+  (separate from the app's `vX.Y.Z` and the model's `model-*` tags), replacing
+  its assets each run with `gh release upload --clobber`:
+  - `anchor.json.gz` — last 90 days of `market_score` across the universe.
+  - `history.json.gz` — records shaped like the local sentiment history.
+  - `manifest.json` — date, row counts, model version, schema version, and the
+    SHA-256 of the two data files.
+  JSON rather than parquet: pyarrow is deliberately not a dependency (it
+  switches pandas' string backing, CLAUDE.md §4).
 - Published: ticker, date, derived scores, at most a URL. **Never headline or
   article text** (news licensing). Nothing from users is ever uploaded.
-- Monitoring: healthchecks.io ping at the end of each run.
+- **The workflow never commits.** Data goes only to the release asset, so the
+  public git history stays code-only (§18) and the repo doesn't grow daily.
+- Secrets: a **separate free Finnhub key** for the workflow, stored as the
+  Actions secret `FINNHUB_API_KEY` — sharing the user's own key would split
+  its 60/min budget with their running app. No NVIDIA key needed (no LLM).
+- Permissions: the repo default stays `contents: read`; only the publish job
+  gets `contents: write`. Third-party actions SHA-pinned (§18). Scheduled
+  workflows only run on the default branch, so it goes live with the v2.0.0
+  merge; test it before that with `workflow_dispatch` — which needs the branch
+  pushed, so it is the one thing in this phase that waits for the release.
+- Monitoring: GitHub's own failed-run emails to the owner, plus the manifest
+  date shown in the app ("reference data is N days old"). No healthchecks.io:
+  every new outbound host needs the user's OK (§18), and this adds none.
+- Risk to check first: Yahoo sometimes rate-limits or blocks cloud IPs. Before
+  building the rest, run the forward-return fetch for the full universe on a
+  GitHub runner and confirm it completes.
+
+Why a rolling asset is safe although §18 says "never replace an existing
+tag's asset": that rule protects **code** pinned by hash in old installs (the
+model). The pack is **data** that changes daily and cannot be pinned. The app
+downloads it only from `github.com/ithakis/Convexity/releases/download/reference-pack/`
+over HTTPS, checks each file against the manifest's SHA-256 and a size cap,
+parses it with `json` only (never pickle, never executed), and validates schema
+and model version before use; anything that fails is ignored and logged.
 
 Tasks:
-- [ ] Collector repo + workflow (reuses `convexity` as a pinned dependency so
-      the featurizer is identical — train/serve parity).
+- [ ] Workflow + a `convexity build-reference-pack` subcommand it runs (so it
+      can be run and tested locally with `CONVEXITY_HOME=$(mktemp -d)`).
 - [ ] App: `convexity/reference_pack.py` fetches the pack when older than 24 h,
-      validates schema + model version, parses as data only (no pickle).
+      verifies manifest hashes + size cap, validates schema + model version,
+      parses as data only.
 - [ ] Market read anchor: `reference` when local history < 200, `live` after;
-      UI names which one (extends `anchor` values).
+      the UI names which one (extends the `anchor` values).
 - [ ] Track record: add a "Model (500 names)" view from the pack next to "Your
       holdings" (local).
 - [ ] Settings toggle to disable the download (privacy: it only reveals that
       the app is running, not what you hold — say so).
+- [ ] Tests with a local HTTP stub only (bad hash, oversize, wrong schema,
+      wrong model version, offline) — no real network, as with model_fetch.
+- [ ] CLAUDE.md: the rolling-asset exception in §18, the workflow in §13.
 
 ---
 
-## Phase 9 — Website (optional)
+## Phase 9 — Website on GitHub Pages, from this repo (optional, v2.0.0)
 
-- Static site on GitHub Pages or Cloudflare Pages; download buttons link to
-  `github.com/ithakis/Convexity/releases/latest`; OS-detected install command;
-  `/status` page generated from the collector's manifest.
-- 2FA on every account involved.
+- Static site source in `docs/site/` of this repo, deployed by a Pages
+  workflow (`actions/deploy-pages`, SHA-pinned; `pages: write` +
+  `id-token: write` on that job only) to `ithakis.github.io/Convexity`. No
+  second repo, no Cloudflare account. A custom domain is optional and a
+  separate decision.
+- Plain HTML/CSS, no build step and no third-party scripts or analytics.
+  Download buttons link to `github.com/ithakis/Convexity/releases/latest`;
+  the install command is picked by the visitor's OS, with the others shown too.
+- `/status`: generated **at deploy time** from the reference pack's
+  `manifest.json` (the Pages workflow runs after `reference-pack.yml` via
+  `workflow_run`), not fetched by the browser — release downloads don't send
+  CORS headers.
+- Screenshots from a synthetic portfolio of public tickers only (§18).
+- Goes live with the v2.0.0 merge (Pages deploys from the default branch).
+- 2FA on the GitHub account (the only account involved).
 
 ---
 

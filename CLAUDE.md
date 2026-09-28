@@ -2451,8 +2451,10 @@ GitHub's side needs a GitHub Support request by the owner.
   needed. Third-party actions pinned to a **commit SHA** with the tag in a
   comment. Never `pull_request_target`, never echo secrets, never write
   secrets into artifacts or caches. Downloaded tools are checksum-verified.
-- Collector/scheduled workflows (future) read keys from Actions secrets only
-  and publish derived data, never raw licensed article text.
+- Collector/scheduled workflows (future, roadmap Phase 8: in this repo, not a
+  separate one) read keys from Actions secrets only, publish derived data to a
+  release asset — never raw licensed article text — and **never commit** to
+  the repo.
 
 ### Periodic check (before each release, or when the user asks "is it secure?")
 ```bash
