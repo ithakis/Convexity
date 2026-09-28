@@ -14,6 +14,15 @@ name: Reference pack
 #   workflow_dispatch: first `yahoo-check`, then `build`.
 
 on:
+  # TEMPORARY (remove before the v2.0.0 PR): workflow_dispatch only works once
+  # this file is on main, so until then a push to `distribution` that touches
+  # the builder runs the yahoo-check job alone — no secrets, no publish.
+  push:
+    branches: ["distribution"]
+    paths:
+      - ".github/workflows/reference-pack.yml"
+      - "src/convexity/reference_build.py"
+      - "src/convexity/data/sp500.json"
   schedule:
     - cron: "30 22 * * 1-5" # weekdays, after the US close (22:30 UTC)
   workflow_dispatch:
@@ -34,7 +43,7 @@ concurrency:
 jobs:
   yahoo-check:
     name: Yahoo check (prices for the full universe, no publish)
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'yahoo-check'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'yahoo-check')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -56,7 +65,7 @@ jobs:
 
   build:
     name: Build the pack
-    if: github.event_name == 'schedule' || inputs.mode == 'build'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

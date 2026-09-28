@@ -6,7 +6,7 @@
 
 ### GitHub Actions (`.github/workflows/ci.yml`)
 
-Runs on every push to `main` or `claude/**` branches and on every PR to
+Runs on every push to `main`, `claude/**` or (until v2.0.0 merges) `distribution`, and on every PR to
 `main`. Python jobs install through `astral-sh/setup-uv` (SHA-pinned, cache
 on) and `uv sync --locked` from `uv.lock`; `server-smoke` uses the base deps,
 `desktop-import-smoke` adds `--extra desktop`. The three installer jobs
@@ -53,7 +53,11 @@ Builds the daily reference pack (news.md, "Reference pack") and replaces the
 three assets of the rolling release `reference-pack`. `schedule` 22:30 UTC
 Monday–Friday (after the US close) plus `workflow_dispatch` with
 `mode: yahoo-check | build`. **Scheduled runs only fire on the default
-branch**, so it goes live with the v2.0.0 merge.
+branch**, so it goes live with the v2.0.0 merge. `workflow_dispatch` likewise only
+appears once the file is on `main`, so while v2 is on `distribution` a
+**temporary `push` trigger** (paths: the workflow, `reference_build.py`,
+`sp500.json`) runs `yahoo-check` alone — remove it before the v2.0.0 PR. CI
+(`ci.yml`) also runs on pushes to `distribution` until it merges.
 
 | Job | Permissions / secrets | What it does |
 |---|---|---|

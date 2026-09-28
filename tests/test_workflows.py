@@ -68,3 +68,12 @@ def test_reference_pack_schedule_and_manual_modes():
     jobs = _jobs(text)
     assert "--returns-only" in jobs["yahoo-check"]
     assert "--out pack --previous prev" in jobs["build"]
+
+
+def test_a_push_can_only_run_the_yahoo_check():
+    """The temporary push trigger (until the file is on main) must never
+    build or publish: those jobs are gated on schedule / dispatch explicitly."""
+    jobs = _jobs(REF.read_text())
+    assert "github.event_name == 'push'" in jobs["yahoo-check"]
+    assert "'push'" not in jobs["build"] and "if:" not in jobs["publish"].split("steps:")[0]
+    assert "needs: build" in jobs["publish"]
