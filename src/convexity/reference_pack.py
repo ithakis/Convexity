@@ -467,6 +467,18 @@ def _run() -> None:
             os.utime(dest / MANIFEST)  # re-checked: fresh for another 24 h
             _set(state="up_to_date", error="", checked_at=time.time())
             return
+        # Never go backwards: a published pack older than the installed, valid
+        # one (a restored asset, a stale mirror) would replace newer data.
+        with _LOCK:
+            have = _LOADED["manifest"] if _LOADED["key"] else None
+        if have is None and _load_local(quiet=True):
+            with _LOCK:
+                have = _LOADED["manifest"]
+        if have is not None and manifest["date"] < have["date"]:
+            raise PackError(
+                f"published pack ({manifest['date']}) is older than the installed one "
+                f"({have['date']})"
+            )
         _set(state="downloading")
         blobs = {name: _get(base + name, MAX_FILE_BYTES) for name in DATA_FILES}
         verify_files(manifest, blobs, mv)  # hash, size, gunzip caps, schema

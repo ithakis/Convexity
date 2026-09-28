@@ -295,7 +295,7 @@ def test_oversize_fails(stub, tmp_path, monkeypatch):
         tmp_path,
         lambda s: _serve_oversize(s, monkeypatch),
         "too large",
-        after=lambda: monkeypatch.setattr(rp, "MAX_FILE_BYTES", _CAP),
+        after=lambda: (monkeypatch.setattr(rp, "MAX_FILE_BYTES", _CAP), rp._invalidate()),
     )
 
 
@@ -309,7 +309,13 @@ def test_oversize_without_content_length_fails(stub, tmp_path, monkeypatch):
         tmp_path,
         mutate,
         "exceeded",
-        after=lambda: monkeypatch.setattr(rp, "MAX_FILE_BYTES", _CAP),
+        after=lambda: (monkeypatch.setattr(rp, "MAX_FILE_BYTES", _CAP), rp._invalidate()),
+    )
+
+
+def test_an_older_pack_never_replaces_a_newer_one(stub, tmp_path):
+    _fails_and_keeps_previous(
+        stub, tmp_path, lambda s: _new_manifest(s, date="2026-01-02"), "older than the installed"
     )
 
 

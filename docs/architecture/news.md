@@ -301,7 +301,8 @@ same model run daily over the S&P 500, built in CI and downloaded by the app.
   truncated stream fails on EOF). Then hash + size against the manifest,
   schema + model version, staging dir, `os.replace` with the manifest last.
   Any failure: one `[reference_pack]` line, `status()["state"] = "failed"`
-  with the reason (Settings shows it, "— ignored"), previous copy kept. A copy
+  with the reason (Settings shows it, "— ignored"), previous copy kept. A published pack dated **before** the installed one is refused
+  (never go backwards: a restored or stale asset cannot replace newer data). A copy
   older than `MAX_AGE_DAYS = 14` or for another model version is not used.
 - **The switch** (Settings → Models & Data → Reference data;
   `<data>/state/reference_pack.json`, `CONVEXITY_REFERENCE_PACK=0` forces it
