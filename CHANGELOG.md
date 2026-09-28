@@ -7,6 +7,10 @@ when merging a PR and add a line here.
 
 ## Unreleased
 
+Roadmap Phase 8 (`distribution` branch): the reference pack.
+
+- The S&P 500 constituent list ships with the app (`src/convexity/data/sp500.json`, source and date recorded in the file) as the fixed universe of the daily reference pack. Public index membership only.
+
 Roadmap Phase 7 (`distribution` branch): repository tidy-up, for the v2.0.0 release.
 
 - The package moved to `src/convexity/` (the standard `src/` layout). Nothing changes for installed apps or your data; developers run the same `uv sync` / `uv run convexity`.
