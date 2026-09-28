@@ -428,6 +428,32 @@ def test_market_history_is_the_running_models_recent_scores(monkeypatch):
     assert sorted(ns._market_history("m1", (day(0), "ACME"))) == [0.1, 0.2]
 
 
+@pytest.mark.parametrize("n_own", [3, 250])
+def test_market_read_uses_the_reference_pack_only_without_enough_own_reads(monkeypatch, n_own):
+    from convexity import ml_sentiment as _ml
+    from convexity import reference_pack
+
+    seen = {}
+    monkeypatch.setattr(_ml, "available", lambda: True)
+    monkeypatch.setattr(ns, "fetch_company_news", lambda s, days=7, cancel=None: [])
+    monkeypatch.setattr(ns, "_market_history", lambda mv, ex: [0.0] * n_own)
+    calls = []
+
+    def anchor(mv, exclude=None):
+        calls.append((mv, exclude))
+        return [0.1] * 300
+
+    monkeypatch.setattr(reference_pack, "anchor_scores", anchor)
+    monkeypatch.setattr(reference_pack, "info", lambda: {"date": "2026-09-26"})
+    monkeypatch.setattr(_ml, "market_read", lambda *a, **kw: (seen.update(kw), (None, None))[1])
+    ns._market_read("ACME", {"closes": object()})
+    if n_own < _ml.MIN_LIVE_HISTORY:
+        assert len(seen["reference"]) == 300 and seen["reference_date"] == "2026-09-26"
+        assert calls and calls[0][1][1] == "ACME"  # never ranked against itself
+    else:
+        assert seen["reference"] == [] and calls == []
+
+
 def test_failed_refresh_keeps_the_headlines_the_stale_read_was_made_from(monkeypatch):
     read = _arts(2)
     for a in read:

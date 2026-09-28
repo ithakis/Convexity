@@ -296,6 +296,22 @@ def test_calibrate_anchors_to_live_history_once_there_is_enough():
     assert ms.calibrate(-1.0, cal, hist)["pct"] == 0.0
 
 
+def test_calibrate_three_way_anchor():
+    """live (own reads) > reference (the S&P 500 pack) > training knots."""
+    cal = _cal()
+    ref = [0.001 * i for i in range(ms.MIN_LIVE_HISTORY + 50)]
+    own = [0.5 + 0.001 * i for i in range(ms.MIN_LIVE_HISTORY - 1)]
+    out = ms.calibrate(0.19, cal, own, ref, "2026-09-26")
+    assert out["anchor"] == "reference" and out["reference_date"] == "2026-09-26"
+    assert out["n_reference"] == len(ref) and out["n_history"] == len(own)
+    assert out["pct"] == pytest.approx(100 * 190.5 / len(ref), abs=0.05)
+    # Enough reads of its own: the reference is ignored.
+    live = ms.calibrate(0.19, cal, own + [0.9], ref)
+    assert live["anchor"] == "live" and "reference_date" not in live
+    # A reference that is too small counts for nothing.
+    assert ms.calibrate(0.19, cal, [], ref[:10])["anchor"] == "training"
+
+
 def test_calibrate_ignores_non_finite_history():
     hist = [float("nan")] * 50 + [0.001 * i for i in range(ms.MIN_LIVE_HISTORY - 1)]
     assert ms.calibrate(0.0, _cal(), hist)["anchor"] == "training"

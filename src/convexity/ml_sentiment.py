@@ -351,25 +351,44 @@ def score_articles(
     return items
 
 
-def calibrate(score: float, cal: dict, history: list[float] | None = None) -> dict:
+def calibrate(
+    score: float,
+    cal: dict,
+    history: list[float] | None = None,
+    reference: list[float] | None = None,
+    reference_date: str | None = None,
+) -> dict:
     """Place a raw score on its own history: z, percentile, tier and the
     expected SAR (the realized mean SAR of that percentile band in the
     calibration window, isotonic).
 
     `history` — recent live scores. With at least MIN_LIVE_HISTORY of them the
     percentile is the score's mid-rank among them and z uses their mean/sd
-    (anchor "live"); otherwise the artifact's knots (anchor "training").
+    (anchor "live"). Otherwise `reference` — the reference pack's last 90
+    days of the same model over the S&P 500 (reference_pack.py) — when it has
+    MIN_LIVE_HISTORY scores (anchor "reference"); otherwise the artifact's
+    knots (anchor "training"). The app's own reads win as soon as there are
+    enough: they are the user's news mix, the pack is a proxy for it.
     ml/scripts/09 verifies the training-anchored path through this function."""
     import numpy as np
 
-    hist = [float(h) for h in (history or []) if h is not None and math.isfinite(float(h))]
+    def _clean(xs):
+        return [float(h) for h in (xs or []) if h is not None and math.isfinite(float(h))]
+
+    hist = _clean(history)
+    anchor = None
     if len(hist) >= MIN_LIVE_HISTORY:
+        anchor = "live"
+    else:
+        ref = _clean(reference)
+        if len(ref) >= MIN_LIVE_HISTORY:
+            hist, anchor = ref, "reference"
+    if anchor is not None:
         arr = np.asarray(hist)
         sd = float(arr.std())
         z = (float(score) - float(arr.mean())) / sd if sd > 0 else 0.0
         below = float((arr < score).sum()) + 0.5 * float((arr == score).sum())
         pct = 100.0 * below / len(arr)
-        anchor = "live"
     else:
         z = (float(score) - cal["mu"]) / cal["sigma"]
         knots = np.asarray(cal["pct_knots"], dtype="float64")
@@ -391,14 +410,20 @@ def calibrate(score: float, cal: dict, history: list[float] | None = None) -> di
     )
     edges, sars = cal["exp_sar"]["pct_edges"], cal["exp_sar"]["sar"]
     k = min(len(sars) - 1, max(0, int(np.searchsorted(edges, pct, side="right")) - 1))
-    return {
+    out = {
         "z": round(z, 2),
         "pct": round(pct, 1),
         "tier": tier,
         "sar": round(float(sars[k]), 3),
         "anchor": anchor,
-        "n_history": len(hist),
+        # The size of the set actually ranked against (the app's own count
+        # while the reference or the training knots are in use).
+        "n_history": len(hist) if anchor != "reference" else len(_clean(history)),
     }
+    if anchor == "reference":
+        out["n_reference"] = len(hist)
+        out["reference_date"] = reference_date
+    return out
 
 
 def market_read(
@@ -408,6 +433,8 @@ def market_read(
     now: float | None = None,
     history: list[float] | None = None,
     company_name: str | None = None,
+    reference: list[float] | None = None,
+    reference_date: str | None = None,
 ) -> tuple[dict | None, float | None]:
     """The Market read for one ticker from its 7-day articles.
 
@@ -442,7 +469,7 @@ def market_read(
         score, wsum = mf.weighted_sar(items, now)
         if score is None:
             return None, None
-        cal = calibrate(score, st["cal"], history)
+        cal = calibrate(score, st["cal"], history, reference, reference_date)
         vol = price_features(closes, symbol).get("tkr_vol_20d")
         return {
             **cal,

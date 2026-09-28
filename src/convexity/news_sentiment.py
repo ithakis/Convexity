@@ -1445,7 +1445,17 @@ def _market_read(symbol: str, ctx: dict, cancel=None) -> tuple[dict | None, floa
             closes = _ml.load_closes([symbol])
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         history = _market_history(_ml.ARTIFACT_VERSION, (today, symbol))
-        return _ml.market_read(symbol, arts7, closes, history=history)
+        reference, ref_date = [], None
+        if len(history) < _ml.MIN_LIVE_HISTORY:
+            # Too few reads of our own yet: rank against the reference pack
+            # (the S&P 500 under the same model) rather than the 2023 knots.
+            from convexity import reference_pack
+
+            reference = reference_pack.anchor_scores(_ml.ARTIFACT_VERSION, (today, symbol))
+            ref_date = (reference_pack.info() or {}).get("date") if reference else None
+        return _ml.market_read(
+            symbol, arts7, closes, history=history, reference=reference, reference_date=ref_date
+        )
     except Cancelled:
         raise
     except Exception as exc:
@@ -1464,8 +1474,9 @@ def _assess_symbol(symbol: str, ctx: dict, stage_cb=None, cancel=None) -> tuple[
       {news: {tier, score, confidence, agreement, n_items, n_none, brief,
               lenses: {lens: {score, tier, n, fact, ids} | None}, other_n,
               assessed_at, lookback_days, stale?, stale_reason?} | None,
-       market: {sar, z, pct, tier, anchor, n_history, score, horizon_days,
-                confidence, n_articles, model_version, assessed_at} | None,
+       market: {sar, z, pct, tier, anchor (live/reference/training), n_history,
+                [n_reference, reference_date,] score, horizon_days, confidence,
+                n_articles, model_version, assessed_at} | None,
        divergence: {kind, text} | None, article_count, assessed_at}
     """
     days = _clamp_lookback(ctx.get("lookback_days") or _DEFAULT_LOOKBACK_DAYS)

@@ -1456,11 +1456,21 @@ function nsMarketMove(m) {
   if (!m || m.sar == null) return "—";
   return `${fmtSig(m.sar, 2)}σ`;
 }
-/* What the Market read's percentile is ranked against (ml_sentiment.calibrate). */
+/* What the Market read's percentile is ranked against (ml_sentiment.calibrate):
+   the app's own reads once there are 200, until then the S&P 500 reference
+   pack (reference_pack.py), and without one the 2023 backtest knots. */
 function nsMarketAnchor(m) {
-  return m && m.anchor === "live"
-    ? `vs the app's last ${m.n_history} reads`
-    : "vs the 2023 backtest";
+  if (m && m.anchor === "live") return `vs the app's last ${m.n_history} reads`;
+  if (m && m.anchor === "reference") {
+    let age = "";
+    const t = m.reference_date ? Date.parse(m.reference_date + "T00:00:00Z") : NaN;
+    if (isFinite(t)) {
+      const days = Math.max(0, Math.floor((Date.now() - t) / 86400000));
+      age = `, ${referenceAgeText(days)}`;
+    }
+    return `vs 500 S&P names, last 90 days (reference data${age})`;
+  }
+  return "vs the 2023 backtest";
 }
 function nsOrdinal(p) {
   const n = Math.round(p);
@@ -7579,7 +7589,7 @@ function methodologyHtml() {
         <ul>
           <li><b>Weak on average.</b> Per headline, rank IC 0.026 on the 2023 holdout. Per ticker per day, the score's IC was 0.016 on Oct–Dec 2023 (t 2.2, 59 days), but both extreme tiers realized the <i>wrong</i> sign. No out-of-sample edge has been shown; the Track record is the live test.</li>
           <li>Blind to nuance: it counts words, so "beat but guided down" and "beat and raised" look alike.</li>
-          <li>Its output level drifts with the news mix. That is why the percentile is anchored to recent live reads rather than fixed cut-points.</li>
+          <li>Its output level drifts with the news mix. That is why the percentile is anchored to recent live reads rather than fixed cut-points: your own last 90 days once there are 200 reads, before that the same model's last 90 days over the S&amp;P 500 (the reference data, refreshed daily), and only without either the 2023 backtest.</li>
         </ul>
       </section>
       <section class="mth-sec">
