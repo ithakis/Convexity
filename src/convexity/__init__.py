@@ -36,7 +36,7 @@ __version_display__ = f"{__version__} ({_format_version_date(__version_date__)})
 # development that once emptied the checkout under two running copies of the
 # old app, which still read their state from there.
 _APP_MODULES = ("convexity", "convexity.server", "convexity.desktop")
-_APP_SCRIPTS = ("convexity", "convexity-app", "dashboard.py")
+_APP_SCRIPTS = ("convexity", "convexity-app")
 
 
 def _launched_as_app() -> bool:

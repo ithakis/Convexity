@@ -1,5 +1,10 @@
 # Metrics Audit Report
 
+> Historical document: written when the whole backend was one `dashboard.py`.
+> Its `dashboard.py:<line>` references predate the package split — the
+> functions now live in `src/convexity/` (`analytics._stats` / `_relative`,
+> `helpers._normalize_dividend_yield`, the KaTeX formulas in `static/app.js`).
+
 Comprehensive validation of every quantitative metric and formula across
 `mpt.py`, `dashboard.py`, and `xlsx_export.py` against standard references.
 

@@ -9,7 +9,7 @@
 #    /usr/bin/git shim only offers to install the Xcode tools);
 # 3. verifies the install with the tool's own interpreter (envcheck + lightgbm);
 # 4. macOS: builds Convexity.app whose launcher execs `convexity-app`.
-# Safe to re-run: that is also how you update (see update.sh).
+# Safe to re-run: that is also how you update (see packaging/update.sh).
 #
 # Works piped from curl, so nothing here may depend on a checkout. User data
 # lives in the per-user data folder (src/convexity/paths.py) and is never touched.

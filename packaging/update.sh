@@ -8,4 +8,6 @@
 # Working in a development checkout? `git pull && uv sync` instead.
 set -euo pipefail
 
-exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh" "$@"
+# install.sh stays at the repo root (it is the curl target); this wrapper
+# lives in packaging/.
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/install.sh" "$@"

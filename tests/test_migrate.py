@@ -211,7 +211,7 @@ def test_only_an_app_launch_migrates(monkeypatch):
         (["python", "-c", "import convexity"], ["-c"], False),
         (["/venv/bin/python", "/venv/bin/convexity"], ["/venv/bin/convexity"], True),
         (["pythonw", "/env/Scripts/convexity-app.exe"], ["/env/Scripts/convexity-app.exe"], True),
-        (["python", "dashboard.py"], ["dashboard.py"], True),
+        (["python", "-m", "convexity", "build-symbols"], ["-m"], True),
         (["python", "-m", "pytest"], ["-m"], False),
     ]
     for orig, argv, want in cases:

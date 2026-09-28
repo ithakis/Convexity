@@ -60,7 +60,7 @@ jobs:
       # Pyflakes catches undefined names, unused imports, etc.
       - name: Pyflakes on package modules
         run: |
-          uvx pyflakes src/convexity/*.py build_symbol_db.py scripts/*.py 2>&1 || true
+          uvx pyflakes src/convexity/*.py scripts/*.py 2>&1 || true
 
       # The check that would have caught the v1.10.0 bug: two manifests that
       # were never compared, so lightgbm/scikit-learn lived only in the one CI
@@ -74,18 +74,14 @@ jobs:
       - name: Lockfile is up to date
         run: uv lock --check
 
-      - name: dashboard.py shim parses
-        run: |
-          uv run --no-project python -c "import ast; ast.parse(open('dashboard.py').read()); print('dashboard.py shim: parseable')"
-
-      # install.ps1/update.ps1 are a file type this project didn't have
+      # packaging/install.ps1 + update.ps1 are a file type this project didn't have
       # before (Windows bootstrap scripts) — CLAUDE.md's own convention says
       # new file types must be added to the syntax-check step, so PowerShell
       # Core (pwsh, preinstalled on ubuntu-latest runners) parses them here.
-      - name: PowerShell syntax check (install.ps1, update.ps1)
+      - name: PowerShell syntax check (packaging/install.ps1, update.ps1)
         shell: pwsh
         run: |
-          $files = "install.ps1", "update.ps1"
+          $files = "packaging/install.ps1", "packaging/update.ps1"
           $failed = $false
           foreach ($f in $files) {
             $errs = $null
@@ -100,9 +96,9 @@ jobs:
           }
           if ($failed) { exit 1 }
 
-      - name: Shell syntax check (install.sh, update.sh, Launch Dashboard.command)
+      - name: Shell syntax check (install.sh, packaging/update.sh, packaging/Launch Dashboard.command)
         run: |
-          for f in install.sh update.sh "Launch Dashboard.command"; do bash -n "$f" && echo "$f OK"; done
+          for f in install.sh packaging/update.sh "packaging/Launch Dashboard.command"; do bash -n "$f" && echo "$f OK"; done
 
   test:
     name: Metrics unit tests
@@ -290,7 +286,7 @@ jobs:
           echo "Convexity.app OK: v$ver -> $target"
 
   windows-install-smoke:
-    name: "Windows: install.ps1 end to end (uv tool install, Pillow icon, WScript.Shell shortcuts)"
+    name: "Windows: packaging/install.ps1 end to end (uv tool install, Pillow icon, WScript.Shell shortcuts)"
     runs-on: windows-latest
     needs: [lint, test]
 
@@ -312,7 +308,7 @@ jobs:
         shell: powershell
         env:
           CONVEXITY_HOME: ${{ runner.temp }}\convexity-home
-        run: .\install.ps1 -Source .
+        run: .\packaging\install.ps1 -Source .
 
       - name: Verify shortcuts and icon
         shell: pwsh

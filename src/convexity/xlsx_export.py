@@ -2,7 +2,7 @@
 "everything you can see in the app" artifact you'd hand to an AI/chatbot.
 
 Design contract (matches the inline comment next to the Export button in
-dashboard.py — keep them in sync when extending):
+static/app.js — keep them in sync when extending):
 
   • Every saved portfolio becomes its own sheet (sheet name = portfolio
     name, Excel-sanitized).

@@ -28,8 +28,8 @@ Step 2 is built so it cannot lose data:
   directories are assembled in a staging dir and renamed into place in one
   step, so ``ml_sentiment`` never sees a partial artifact.
 - **Only in the app.** ``__init__`` runs this only when the process *is* the
-  app (``convexity``, ``convexity-app``, ``-m convexity[.server|.desktop]``,
-  ``dashboard.py`` — ``convexity._launched_as_app``); a bare import from a
+  app (``convexity``, ``convexity-app``, ``-m convexity[.server|.desktop]`` —
+  ``convexity._launched_as_app``); a bare import from a
   script or test never moves anything.
 - **Gated.** With ``CONVEXITY_HOME`` set (tests, dev runs) nothing is migrated
   unless the legacy source is named explicitly too (``CONVEXITY_LEGACY_ROOT``

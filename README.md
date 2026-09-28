@@ -67,7 +67,7 @@ curl -LsSf https://raw.githubusercontent.com/ithakis/Convexity/main/install.sh |
 
 ```powershell
 # Windows (creates Start Menu + Desktop shortcuts)
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/ithakis/Convexity/main/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/ithakis/Convexity/main/packaging/install.ps1 | iex"
 ```
 
 Then launch **Convexity** from Launchpad / Spotlight / the Start Menu or your
@@ -75,8 +75,8 @@ Desktop. The app is unsigned: on macOS, right-click → Open the first time.
 
 - **macOS:** the Market read (a LightGBM model) needs Homebrew's `libomp`
   (`brew install libomp`); the installer checks for it and offers to install it.
-- **Update:** run the same command again (or `./update.sh` / `update.ps1` from a
-  checkout). It installs the newest release and rebuilds the launcher.
+- **Update:** run the same command again (or `packaging/update.sh` /
+  `packaging/update.ps1` from a checkout). It installs the newest release and rebuilds the launcher.
 - **News** needs two free API keys ([Finnhub](https://finnhub.io/register) and
   [NVIDIA NIM](https://build.nvidia.com/)). Add them in Settings (gear) → **API
   keys**; they take effect immediately. Everything else works without them.
@@ -96,7 +96,7 @@ uv run convexity         # browser mode: prints http://localhost:8765/
 uv run pytest
 ```
 
-On macOS you can also double-click **`Launch Dashboard.command`**, which runs
+On macOS you can also double-click **`packaging/Launch Dashboard.command`**, which runs
 `uv run convexity` and prints the URL to open.
 
 ---

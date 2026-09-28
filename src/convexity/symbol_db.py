@@ -57,7 +57,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 _PROVIDER = "yfinance"
 # In the user data dir (src/convexity/paths.py), not beside the code: an installed
-# package has no repo root. build_symbol_db.py writes it there by default.
+# package has no repo root. `convexity build-symbols` writes it there by default.
 _DB_PATH = paths.symbol_db_file()
 _DB_LOCK = threading.Lock()
 _NAME_NORM_RE = re.compile(r"[^a-z0-9]+")
@@ -146,7 +146,7 @@ def normalize_name(s: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Builder API — called from build_symbol_db.py
+# Builder API — called from `convexity build-symbols` (cli.py)
 # --------------------------------------------------------------------------
 
 def init_db(path: Optional[Path] = None) -> None:

@@ -2,7 +2,7 @@
 
 Why this exists: the whole backend logs via bare `print()` — 30+ call sites
 across news_sentiment, ml_sentiment, fetcher and server. In browser mode those
-land in the terminal that launched `dashboard.py`. In DESKTOP mode they land
+land in the terminal that launched `convexity`. In DESKTOP mode they land
 nowhere at all: the `.app` bundle has no terminal, and desktop.py's
 `_setup_logging()` redirects the `logging` module, not `sys.stdout`. So when the
 ML model failed to load in the shipped app, the one line that said so was

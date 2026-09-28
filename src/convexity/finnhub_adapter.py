@@ -44,7 +44,7 @@ from convexity.helpers import (
 FINNHUB_API_KEY = _load_local_secret("FINNHUB_API_KEY", ".finnhub_key")
 _BASE_URL = "https://finnhub.io/api/v1/"
 
-# TTL cache mirroring dashboard.py's (timestamp, ttl, val) tuple shape.
+# TTL cache mirroring cache.py's (timestamp, ttl, val) tuple shape.
 _FH_CACHE: dict[str, tuple[float, float, Any]] = {}
 
 # Negative-cache sentinel. A genuine empty / no-coverage response (e.g. a

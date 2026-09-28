@@ -17,7 +17,7 @@ temp dir so they can never touch the real data.
 Layout::
 
     config.json          API keys (read here; written by Settings in a later phase)
-    symbol_db.sqlite     fuzzy ticker DB (build_symbol_db.py)
+    symbol_db.sqlite     fuzzy ticker DB (`convexity build-symbols`)
     state/<name>.json    views, watchlists, mpt, column_views, news, ...
     models/<version>/    the Market read artifact
     logs/desktop.log     desktop-app boot log

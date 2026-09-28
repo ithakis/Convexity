@@ -10095,7 +10095,7 @@ function mlRuntimeHint(rt) {
   const why = (rt && rt.reason) || "";
   if (/lightgbm|sklearn|scikit|ModuleNotFound|ImportError/i.test(why)) {
     return `The environment is missing a dependency. Re-run the installer
-      (<code>./install.sh</code>, or <code>install.ps1</code> on Windows; <code>uv sync</code>
+      (<code>./install.sh</code>, or <code>packaging/install.ps1</code> on Windows; <code>uv sync</code>
       in a development checkout), then fully quit and relaunch the app.`;
   }
   // model_missing = no COMPLETE artifact; an emptied folder counts as missing.
@@ -10229,7 +10229,7 @@ function renderSettingsModels(el) {
            `<span class="${m.critical ? "settings-bad-text" : ""}">missing — disables ${escapeHtml(m.feature)}</span>`)
       ).join("") + `</div>
        <div class="settings-row-help">Re-run the installer (<code>./install.sh</code>, or
-         <code>install.ps1</code> on Windows; <code>uv sync</code> in a development checkout),
+         <code>packaging/install.ps1</code> on Windows; <code>uv sync</code> in a development checkout),
          then relaunch.</div>`
     : `<div class="settings-kv">${kv("Status", "all runtime dependencies present")}
         ${kv("Interpreter", escapeHtml(env.executable || "—"))}
@@ -10470,8 +10470,8 @@ function renderSettingsAbout(el) {
     settingsRow({
       id: "update",
       label: "Updating",
-      help: `Re-run the install command (or <code>./update.sh</code> /
-        <code>update.ps1</code>): it installs the latest release, rebuilds the launcher and
+      help: `Re-run the install command (or <code>packaging/update.sh</code> /
+        <code>packaging/update.ps1</code> from a checkout): it installs the latest release, rebuilds the launcher and
         fails loudly if a required package did not install. Then quit and relaunch the app.
         In a development checkout: <code>git pull</code> and <code>uv sync</code>.`,
     });

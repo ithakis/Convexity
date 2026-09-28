@@ -5,7 +5,8 @@
 
 set -e
 
-cd "$(dirname "$0")"
+# This file lives in packaging/; everything below runs from the repo root.
+cd "$(dirname "$0")/.."
 
 PID_FILE=".dashboard.pid"
 

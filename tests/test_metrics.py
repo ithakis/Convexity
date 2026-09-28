@@ -8,7 +8,7 @@ Each test documents:
 
 No network calls, no yfinance, no HTTP server required.
 The analytics _stats() and _relative() helpers are imported and tested directly.
-_normalize_dividend_yield is importable at module level from dashboard.py.
+_normalize_dividend_yield is imported from convexity.helpers.
 """
 
 import math
@@ -22,12 +22,6 @@ import pytest
 # ---------------------------------------------------------------------------
 # Import helpers from the app modules
 # ---------------------------------------------------------------------------
-
-# dashboard.py does heavy top-level work only when __name__ == '__main__' or
-# when the HTTP handler runs, but importing it executes module-level code
-# including yfinance imports. We use importlib with a path insertion and rely
-# on the fact that dashboard.py is importable (CI smoke-test confirms this).
-# Only _normalize_dividend_yield is imported directly from dashboard.py.
 
 _REPO = os.path.dirname(os.path.dirname(__file__))
 if _REPO not in sys.path:
@@ -50,9 +44,9 @@ except Exception as _exc:
 
 
 def _require_dashboard():
-    """Skip the calling test if dashboard.py could not be imported."""
+    """Skip the calling test if convexity.helpers could not be imported."""
     if _DASHBOARD_IMPORT_ERROR is not None:
-        pytest.skip(f"dashboard.py not importable: {_DASHBOARD_IMPORT_ERROR}")
+        pytest.skip(f"convexity.helpers not importable: {_DASHBOARD_IMPORT_ERROR}")
 
 
 # The real analytics stats helpers (ret = daily returns, val = equity curve).
@@ -74,7 +68,7 @@ def _bday_index(n: int, start="2020-01-02"):
 def test_sharpe():
     """
     Formula: S = (E[R] * 252) / (σ * √252) = E[R] * √252 / σ
-    Source:  dashboard.py:2510
+    Source:  analytics._stats
 
     Daily returns: [0.01, -0.005, 0.02, 0.0, -0.01]
     mean  = (0.01 - 0.005 + 0.02 + 0.0 - 0.01) / 5 = 0.015 / 5 = 0.003
@@ -104,7 +98,7 @@ def test_sortino_standard_formula():
     """
     Formula: S_o = (E[R] * 252) / (σ_down * √252)
     where σ_down = sqrt( mean( min(r_i, 0)² ) )  — all N periods in denominator
-    Source:  dashboard.py:2511-2512 (post-fix)
+    Source:  analytics._stats (post-fix)
 
     Daily returns: [0.01, -0.005, 0.02, 0.0, -0.01], MAR = 0
     min(r, 0) → [0, -0.005, 0, 0, -0.01]
@@ -165,7 +159,7 @@ def test_sortino_differs_from_buggy_formula():
 def test_max_drawdown():
     """
     Formula: DD_max = min_t( V_t / max_{s≤t}(V_s) - 1 ) * 100
-    Source:  dashboard.py:2513-2514
+    Source:  analytics._stats
 
     Equity curve: [100, 110, 95, 105, 80, 90]
     Running max:  [100, 110, 110, 110, 110, 110]
@@ -188,7 +182,7 @@ def test_max_drawdown():
 def test_calmar():
     """
     Formula: C = R_ann / |DD_max|   (both in %)
-    Source:  dashboard.py:2515
+    Source:  analytics._stats
 
     ann_return = 15%, max_dd = -20%  →  Calmar = 15 / 20 = 0.75
     """
@@ -251,7 +245,7 @@ def test_relative_partial_and_identity():
 def test_dividend_yield_fraction_input():
     """
     Yahoo returns yield as fraction 0.035 → pass through unchanged (<=1 branch).
-    Source: dashboard.py:1774
+    Source: helpers._normalize_dividend_yield
     """
     _require_dashboard()
     result = _normalize_dividend_yield(0.035)
@@ -261,7 +255,7 @@ def test_dividend_yield_fraction_input():
 def test_dividend_yield_percent_input():
     """
     Yahoo returns yield as 3.5 (i.e. 3.5%) → divide by 100.
-    Source: dashboard.py:1774  (val > 1.0 branch)
+    Source: helpers._normalize_dividend_yield  (val > 1.0 branch)
     """
     _require_dashboard()
     result = _normalize_dividend_yield(3.5)
@@ -285,7 +279,7 @@ def test_dividend_yield_rate_over_price():
     """
     Prefer dividend_rate / price over raw yield field.
     dividend_rate=1.0, price=20.0  →  yield = 1.0/20.0 = 0.05
-    Source: dashboard.py:1764-1768
+    Source: helpers._normalize_dividend_yield
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
@@ -300,7 +294,7 @@ def test_dividend_yield_high_percent():
     """
     Yahoo occasionally returns yields like 150 (meaning 150% — synthetic/error).
     divide by 100: 150 → 1.5 (kept as-is for caller to filter).
-    Source: dashboard.py:1774
+    Source: helpers._normalize_dividend_yield
     """
     _require_dashboard()
     result = _normalize_dividend_yield(150.0)
@@ -311,7 +305,7 @@ def test_dividend_yield_trailing_rate_fallback():
     """
     When dividend_rate is not provided, trailing_rate is tried next.
     trailing_rate=2.0, price=40.0 → yield = 2.0/40.0 = 0.05
-    Source: dashboard.py:1765-1768
+    Source: helpers._normalize_dividend_yield
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
@@ -326,7 +320,7 @@ def test_dividend_yield_trailing_yield_fallback():
     """
     When price/rate are unavailable, fall through to trailing_yield.
     trailing_yield=0.035 (already a fraction) → 0.035.
-    Source: dashboard.py:1770-1774
+    Source: helpers._normalize_dividend_yield
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
@@ -339,7 +333,7 @@ def test_dividend_yield_trailing_yield_fallback():
 def test_dividend_yield_trailing_yield_percent():
     """
     trailing_yield=3.5 (percent representation) → 0.035.
-    Source: dashboard.py:1774 (val > 1.0 branch)
+    Source: helpers._normalize_dividend_yield (val > 1.0 branch)
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
@@ -352,7 +346,7 @@ def test_dividend_yield_trailing_yield_percent():
 def test_dividend_yield_negative_raw_skipped():
     """
     Negative raw_yield is skipped; trailing_yield is used.
-    Source: dashboard.py:1772 (val < 0 → continue)
+    Source: helpers._normalize_dividend_yield (val < 0 → continue)
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
@@ -366,7 +360,7 @@ def test_dividend_yield_price_zero_falls_to_raw():
     """
     price=0 means rate/price path is skipped; falls back to raw_yield.
     dividend_rate=1.0, price=0 → can't divide; raw_yield=0.04 → 0.04
-    Source: dashboard.py:1764 (px > 0 guard)
+    Source: helpers._normalize_dividend_yield (px > 0 guard)
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
@@ -391,7 +385,7 @@ def test_dividend_yield_both_none_returns_none():
 def test_ann_return_two_years():
     """
     Formula: (V_T/V_0)^(365.25/days) - 1
-    Source:  dashboard.py:2508
+    Source:  analytics._stats
 
     V_0=100, V_T=121, days=730 (2 years)
     CAGR = 1.21^(365.25/730) - 1 = 1.21^0.5 - 1 = 0.10 = 10%
@@ -418,7 +412,7 @@ def test_ann_return_two_years():
 def test_ann_vol():
     """
     Formula: σ_ann = σ_daily * √252 * 100  (in %)
-    Source:  dashboard.py:2509
+    Source:  analytics._stats
 
     Constant daily return of 0.01 → std = 0 → ann_vol = 0%.
     Non-trivial: [0.01, -0.01, 0.01, -0.01, 0.01, -0.01]

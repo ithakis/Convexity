@@ -1,6 +1,8 @@
-"""Allow `python -m convexity` to launch the server."""
+"""Allow `python -m convexity` (and `python -m convexity build-symbols`)."""
 
-from convexity.server import main
+import sys
+
+from convexity.cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

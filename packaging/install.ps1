@@ -1,6 +1,6 @@
 # Install (or update) the Convexity desktop app on Windows:
 #
-#   powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/ithakis/Convexity/main/install.ps1 | iex"
+#   powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/ithakis/Convexity/main/packaging/install.ps1 | iex"
 #
 # Mirrors install.sh: installs uv if missing, `uv tool install`s
 # convexity[desktop] from the latest GitHub release (the tag's source archive,
@@ -142,13 +142,19 @@ $IconPng = & $ToolPy -c "import convexity, pathlib; print(pathlib.Path(convexity
 Assert-Success "locate icon"
 
 # ---------------------------------------------------------------------------
-# 4. API keys from an old checkout (.finnhub_key / .nvidia_key next to this
-#    script) into the data folder's config.json. An installed package cannot
-#    find them by walking up from its own folder. Never overwrites a key that
+# 4. API keys from an old checkout (.finnhub_key / .nvidia_key at the checkout
+#    root, i.e. the parent of this packaging/ folder) into the data folder's
+#    config.json. An installed package cannot find them by walking up from its
+#    own folder. Never overwrites a key that
 #    is already there; values are never printed.
 # ---------------------------------------------------------------------------
-$ScriptDir = $PSScriptRoot
-if ($ScriptDir -and ((Test-Path (Join-Path $ScriptDir ".finnhub_key")) -or (Test-Path (Join-Path $ScriptDir ".nvidia_key")))) {
+$KeyDir = $null
+if ($PSScriptRoot) {
+    foreach ($d in @($PSScriptRoot, (Split-Path -Parent $PSScriptRoot))) {
+        if ($d -and ((Test-Path (Join-Path $d ".finnhub_key")) -or (Test-Path (Join-Path $d ".nvidia_key")))) { $KeyDir = $d; break }
+    }
+}
+if ($KeyDir) {
     $keyScript = @'
 import json, os, sys
 from pathlib import Path
@@ -179,7 +185,7 @@ if added:
 '@
     $TmpKeyPy = Join-Path $env:TEMP "convexity_copy_keys.py"
     Set-Content -Path $TmpKeyPy -Value $keyScript -Encoding UTF8
-    & $ToolPy $TmpKeyPy $ScriptDir
+    & $ToolPy $TmpKeyPy $KeyDir
     $rc = $LASTEXITCODE
     Remove-Item -Force $TmpKeyPy -ErrorAction SilentlyContinue
     $global:LASTEXITCODE = $rc

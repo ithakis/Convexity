@@ -54,7 +54,7 @@ dev = ["pytest", "ruff", "pyflakes"]
 train = ["duckdb", "flaml"]
 
 [project.scripts]
-convexity = "convexity.server:main"
+convexity = "convexity.cli:main"
 
 [project.gui-scripts]
 convexity-app = "convexity.desktop:main"

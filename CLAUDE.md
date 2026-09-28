@@ -15,8 +15,10 @@ on `127.0.0.1:8765` and prints its URL — it does **not** auto-open a browser
 (Yahoo Finance), Finnhub (news), and NVIDIA NIM (the News read), no build
 step. Almost all logic lives in the `src/convexity/` package, split
 into focused modules (server, fetcher, analytics, fx, persistence, etc. —
-see the table below); `dashboard.py` at the repo root is a thin
-backward-compat shim (`python dashboard.py` still works).
+see the table below). The `convexity` command is `cli.main()`: no
+arguments runs the server, `convexity build-symbols` builds the symbol DB.
+(The root `dashboard.py` shim and `build_symbol_db.py` were removed in
+Phase 7.)
 
 User profile: quantitative-finance background, power user, runs the app
 locally on macOS, expects complete autonomous delivery on requests, fast
@@ -30,11 +32,10 @@ sub-decision.
 
 ```
 .
-├── dashboard.py                 ← Backward-compat shim: `python dashboard.py` → convexity.server.main()
-├── build_symbol_db.py           ← CLI to (re)build symbol_db.sqlite from public sources
-├── src/convexity/           ← The package. Everything below is imported by server.py or desktop.py.
+├── src/convexity/               ← The package (src layout since Phase 7). Everything below is imported by server.py or desktop.py.
 │   ├── __init__.py
-│   ├── __main__.py              ← `python -m convexity` entry point
+│   ├── __main__.py              ← `python -m convexity [build-symbols]` → cli.main()
+│   ├── cli.py                   ← The `convexity` command: no args = server, `build-symbols` = symbol DB builder — §6
 │   ├── server.py                ← HTTP server, route handlers, start_server()/shutdown_server() — §4, §14
 │   ├── fetcher.py                ← fetch_one() per-symbol row builder — §4
 │   ├── analytics.py             ← analyze_portfolios_multi(), bulk close, analyst blocks — §4
@@ -71,12 +72,14 @@ sub-decision.
 ├── docs/                         ← Reference/audit notes not needed to run the app day-to-day
 ├── scripts/                      ← Dev scripts (check_syntax.py, smoke_test_server.py, benchmark_news_read.py, …)
 ├── ml/                           ← FNSPID training pipeline for the Market read — docs/ml_sentiment_design.md
-├── Launch Dashboard.command      ← macOS dev launcher: `uv run convexity` from this checkout, restarts cleanly
 ├── pyproject.toml                ← THE dependency manifest + entry points (`convexity`, `convexity-app`) — §3, §4
 ├── uv.lock                       ← uv lockfile solved from pyproject.toml (CI installs exactly this) — §13
 ├── .python-version               ← 3.11, the interpreter `uv` uses for this checkout
-├── install.sh / install.ps1      ← Installer: uv + `uv tool install` of the latest release + launcher (macOS/Linux / Windows) — §14
-├── update.sh / update.ps1        ← Thin wrappers: re-run the installer (that is the update) — §14
+├── install.sh                    ← Installer, macOS/Linux: uv + `uv tool install` of the latest release + launcher — §14. Stays at the root: it is the curl target
+├── packaging/
+│   ├── install.ps1               ← The Windows installer (same steps, Start Menu + Desktop shortcuts) — §14
+│   ├── update.sh / update.ps1    ← Thin wrappers: re-run the installer (that is the update) — §14
+│   └── Launch Dashboard.command  ← macOS dev launcher: `uv run convexity` from this checkout (cds to the repo root), restarts cleanly
 ├── README.md
 ├── CLAUDE.md                     ← This file
 ├── LICENSE
@@ -91,7 +94,7 @@ overrides it):
 ```
 ~/Library/Application Support/Convexity/   (macOS; Windows %APPDATA%\Convexity\, Linux $XDG_DATA_HOME/convexity/)
 ├── config.json                 ← API keys {finnhub_api_key, nvidia_api_key}, 0600 — written by Settings → API keys (keys.py)
-├── symbol_db.sqlite            ← Built by `python build_symbol_db.py` — §6
+├── symbol_db.sqlite            ← Built by `convexity build-symbols` — §6
 ├── state/
 │   ├── views.json              ← Per-portfolio cached rows + metadata + weight presets
 │   ├── watchlists.json         ← Per-portfolio entries strings
@@ -130,7 +133,7 @@ uv run pytest
 
 # Or double-click the launcher (pid-file cleanup, clears .venv hidden flags,
 # then `uv run convexity`):
-./"Launch Dashboard.command"
+./packaging/"Launch Dashboard.command"
 ```
 
 After editing `pyproject.toml` run `uv lock` — CI's `uv sync --locked` and
@@ -177,7 +180,7 @@ own app keeps running on 8765 meanwhile; `_pick_port` moves yours to 8766+.
 **Critical gotchas when restarting:**
 
 1. **System Python is missing yfinance** — always go through `uv run`
-   (or the tool's own interpreter). `python dashboard.py` with a bare
+   (or the tool's own interpreter). `python -m convexity` with a bare
    interpreter crashes on import.
 2. **Port 8765 after a restart** — fixed in v1.14.2: `_pick_port()`'s probe
    used to bind without `SO_REUSEADDR` while the real server binds with it, so
@@ -192,8 +195,8 @@ own app keeps running on 8765 meanwhile; `_pick_port` moves yours to 8766+.
    checkout run as `.venv/bin/convexity`. Never `pkill -f convexity` blindly.
    The launcher stops its own previous run via `.dashboard.pid`.
 4. **Python module caching** — restarting the server is the ONLY way to
-   pick up changes to `symbol_db.py` or `xlsx_export.py`. Same for
-   `dashboard.py` itself. No autoreload.
+   pick up changes to `symbol_db.py` or `xlsx_export.py` (or any other
+   module). No autoreload.
 5. **Background warm-up** — the server runs `warmRecentTabs()` +
    `preloadFxIndexes()` ~1.2s after startup. Those write yfinance
    deprecation warnings to stdout — they look scary but are harmless.
@@ -233,7 +236,7 @@ side effects, never creates a directory — writers `mkdir` their own parent.
   `CONVEXITY_HOME=$(mktemp -d) uv run convexity`.
 - **Migration** (`migrate.migrate_to_data_dir`, from `__init__`, **only when
   the process is the app** — `convexity._launched_as_app()`: the `convexity` /
-  `convexity-app` scripts, `-m convexity[.server|.desktop]`, `dashboard.py`).
+  `convexity-app` scripts, `-m convexity[.server|.desktop]`).
   A bare `import convexity` never migrates: during Phase 3 a dev script
   (`scripts/check_dependency_manifests.py`) run without `CONVEXITY_HOME`
   migrated the user's real data out from under two running old-code apps; it
@@ -1269,7 +1272,7 @@ columns).
 
 ---
 
-## 6. `symbol_db.py` + `build_symbol_db.py`
+## 6. `symbol_db.py` + `convexity build-symbols`
 
 ### Why
 Map fuzzy human input (`"microsoft"`, `"Microsft"`, `"DaVita"`) to a
@@ -1302,11 +1305,13 @@ CREATE TABLE symbols (
    Software`).
 4. Substring scan fallback when rapidfuzz isn't installed.
 
-### Builder (`build_symbol_db.py`)
+### Builder (`convexity build-symbols`, `cli.build_symbols`)
+Was the root script `build_symbol_db.py` until Phase 7; a subcommand ships in
+the package, so an installed app can build its DB too.
 ```bash
-python build_symbol_db.py                # all sources
-python build_symbol_db.py --sources nasdaq
-python build_symbol_db.py --db /tmp/syms.sqlite
+uv run convexity build-symbols                    # all sources
+uv run convexity build-symbols --sources nasdaq
+uv run convexity build-symbols --db /tmp/syms.sqlite
 ```
 
 ### Shipped sources (US-focused today)
@@ -1318,7 +1323,7 @@ python build_symbol_db.py --db /tmp/syms.sqlite
 1. Write `def source_xxx(session) -> Iterable[SymbolRow]:` in
    `symbol_db.py`.
 2. Register it in the `SOURCES` dict at the bottom.
-3. Re-run `python build_symbol_db.py`.
+3. Re-run `convexity build-symbols`.
 
 Good targets when expanding coverage:
 - LSE listings (lseg.com publishes a public CSV)
@@ -1506,9 +1511,8 @@ issues, never back into a file. Distribution/packaging work follows
 
 ## 11. Quick reference — current line landmarks
 
-The frontend (HTML/CSS/JS) is embedded in `src/convexity/static/`, not
-in `dashboard.py` (that file is now an 11-line backward-compat shim — see
-§1/§2). Landmarks below are within `src/convexity/static/app.js` unless
+The frontend (HTML/CSS/JS) lives in `src/convexity/static/` (it was once
+embedded in the monolithic `dashboard.py`, since removed — see §1/§2). Landmarks below are within `src/convexity/static/app.js` unless
 noted otherwise. (Approximate. Use `grep -n` to confirm before editing.)
 
 | What | File | Where |
@@ -1752,13 +1756,13 @@ fails in seconds instead of waiting on the platform-specific jobs first:
 | Job | Runner | What it proves |
 |---|---|---|
 | `secrets` | ubuntu | gitleaks (checksum-pinned binary) over the **full history**, plus a filename check that no runtime-state / key / `settings.local.json` file exists in any commit — §18. Independent of the others so a leak fails fast |
-| `lint` | ubuntu | Every `.py` parses (`scripts/check_syntax.py`); `pyflakes` on all `src/convexity/*.py` + `build_symbol_db.py` + `scripts/*.py` (non-blocking); dependency manifests cover `envcheck.REQUIRED`; `uv lock --check` (lockfile matches pyproject); `dashboard.py` parses; `install.ps1`/`update.ps1` parse via PowerShell Core's own `Parser.ParseFile`; `install.sh`/`update.sh`/`Launch Dashboard.command` pass `bash -n`. Runs `uv run --no-project` — no dependency install |
+| `lint` | ubuntu | Every `.py` parses (`scripts/check_syntax.py`); `pyflakes` on all `src/convexity/*.py` + `scripts/*.py` (non-blocking); dependency manifests cover `envcheck.REQUIRED`; `uv lock --check` (lockfile matches pyproject); `dashboard.py` parses; `install.ps1`/`update.ps1` parse via PowerShell Core's own `Parser.ParseFile`; `install.sh`/`update.sh`/`Launch Dashboard.command` pass `bash -n`. Runs `uv run --no-project` — no dependency install |
 | `test` | ubuntu | `uv sync --locked --extra dev` then `uv run pytest tests/` — the full unit suite |
 | `server-smoke` | ubuntu | Real HTTP requests against a real running server (`scripts/smoke_test_server.py`) — `/`, `/api/watchlists`, `/api/views`, `/static/*` must return real 200s with real bodies. This is the answer to "is the app actually working," not just "does it import." |
 | `desktop-import-smoke` | ubuntu | `convexity.desktop` imports cleanly under a real (headless, `QT_QPA_PLATFORM=offscreen`) `QApplication` — catches PySide6/QtWebEngine API breakage the plain lint job can't see, since lint never installs PySide6. Needs a handful of system graphics libraries (`libegl1`, `libgl1`, etc.) installed via `apt-get` first — the bare runner has none, not even for the offscreen platform plugin |
 | `tool-install-smoke` | ubuntu | `uv tool install .`, envcheck with the tool's interpreter, then boots the **installed** `convexity` from a directory outside the checkout and asserts `/api/health` reports this `__version__` and `data_dir == CONVEXITY_HOME` — the package (static files, icon, lexicon) works without a checkout |
 | `macos-install-smoke` | **macos-latest** | The whole `install.sh` against the checkout (`CONVEXITY_SOURCE`) into throwaway dirs (`INSTALL_APPS_DIR`, no Desktop shortcut, stdin `/dev/null` so the libomp prompt answers no): real `sips`/`iconutil`, then asserts the bundle's `.icns`, the launcher's exec target and `CFBundleShortVersionString` |
-| `windows-install-smoke` | **windows-latest** | The whole `install.ps1 -Source .` on a disposable runner — uv tool install, envcheck, the `uv run --with pillow` `.ico`, and the **real** Start Menu + Desktop shortcuts, re-read through `WScript.Shell` (TargetPath = the tool's `convexity-app.exe`, IconLocation = the `.ico`). `WScript.Shell` has no equivalent on macOS/Linux, not even under PowerShell Core |
+| `windows-install-smoke` | **windows-latest** | The whole `packaging/install.ps1 -Source .` on a disposable runner — uv tool install, envcheck, the `uv run --with pillow` `.ico`, and the **real** Start Menu + Desktop shortcuts, re-read through `WScript.Shell` (TargetPath = the tool's `convexity-app.exe`, IconLocation = the `.ico`). `WScript.Shell` has no equivalent on macOS/Linux, not even under PowerShell Core |
 
 Until v1.14 the two platform jobs ran only the icon/shortcut commands: the
 conda installers cost 10-15 minutes per platform per push, mostly re-testing
@@ -1847,7 +1851,7 @@ the update is live.
 
 ### Why this exists
 
-Browser mode (`python dashboard.py`) historically auto-launched Google Chrome
+Browser mode (`convexity`, formerly `python dashboard.py`) historically auto-launched Google Chrome
 (removed in v1.12.3; it now only prints the URL), which failed on a machine
 with no Chrome. The desktop app
 wraps the *identical* HTTP server in a native window instead, using
@@ -1954,7 +1958,13 @@ actually invokes). Single file, ~160 lines:
   Accessibility API — all three cleanly free the port immediately, even
   with an NDJSON stream actively in flight.
 
-### Installers (`install.sh` / `install.ps1`, v1.14)
+### Installers (`install.sh` / `packaging/install.ps1`, v1.14)
+
+Since Phase 7 only `install.sh` is at the repo root — it is the curl target
+(`raw.githubusercontent.com/ithakis/Convexity/main/install.sh`). The Windows
+installer, both update wrappers and the dev launcher live in `packaging/`, so
+the Windows one-liner is `irm …/main/packaging/install.ps1 | iex` (the old
+`main/install.ps1` URL stops working once this reaches `main`).
 
 One command on a clean account, and safe to re-run (that is the update):
 
@@ -1979,7 +1989,9 @@ One command on a clean account, and safe to re-run (that is the update):
    `config.json` (0600, never overwriting a key already there, values never
    printed). An installed package cannot find them by walking up from
    `site-packages`, so without this an upgrading user's News read went dark.
-   Piped from curl there is no checkout and nothing to copy.
+   Piped from curl there is no checkout and nothing to copy. `install.sh`
+   looks beside itself (the repo root); `packaging/install.ps1` looks beside
+   itself and in its parent, the repo root.
 7. **Launcher** — macOS: `Convexity.app` (bundle ID `com.ithakis.convexity`,
    `CFBundleShortVersionString` = the installed version) whose executable is
    `exec "<uv tool dir>/convexity/bin/convexity-app"` — an absolute path,
@@ -2050,10 +2062,12 @@ install): `CONVEXITY_SOURCE` (local checkout or archive URL; `-Source`),
   path, and `[System.Uri](Resolve-Path $x).Path` casts before `.Path` is read —
   use `[System.Uri]::new(<path>, [System.UriKind]::Absolute)`.
   `windows-install-smoke` therefore runs the installer with `shell: powershell`
-  (5.1). To exercise `install.ps1` on macOS: `pwsh -File install.ps1 -Source .`
+  (5.1). To exercise `install.ps1` on macOS: `pwsh -File packaging/install.ps1 -Source .`
   with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`/`CONVEXITY_HOME` in scratch gets through
-  `uv tool install`; symlink `Scripts\python.exe` / `convexity-app.exe` to the
-  tool's `bin/` and set `LOCALAPPDATA`/`TEMP` to reach the `.ico`; only the
+  `uv tool install`; to reach the `.ico`, put a `uv` shim first on `PATH` that
+  runs the real uv and, after `tool install`, symlinks `Scripts\python.exe` /
+  `convexity-app.exe` to the tool's `bin/` (symlinking beforehand is useless:
+  `--force` recreates the tool env), and set `LOCALAPPDATA`/`TEMP`; only the
   `WScript.Shell` COM step is Windows-only.
 - **Blank window when launched from the .app bundle (ROOT-CAUSED & FIXED —
   `--single-process`).** The single most important desktop-app gotcha. When
