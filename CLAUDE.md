@@ -451,7 +451,12 @@ not reintroduce one; the engines answer different questions.
   (`ok/rejected/rate_limited/unavailable/network_error/no_key/error`); the key
   is only ever in a header, never a URL, and a full limiter reports
   `rate_limited` instead of blocking the click. These branches never put
-  `str(exc)` or a traceback in a response or log. `tests/test_keys.py`'s leak
+  `str(exc)` or a traceback in a response or log. Both POSTs go through
+  `Handler._same_origin_json()` (403 otherwise): `Content-Type: application/json`
+  (a text/plain cross-site POST needs no CORS preflight, so any open web page
+  could otherwise swap or delete a key), a loopback `Host` (DNS rebinding) and,
+  when the browser sends one, an `Origin` equal to this server. Older
+  state-changing routes predate this and don't have it yet. `tests/test_keys.py`'s leak
   test posts a sentinel and greps every response, stdout/stderr and the log ring.
   `keys._FINNHUB_BASE` / `_NVIDIA_BASE` are module constants so tests point them
   at a local stub. First-run banner: `/api/health` `finnhub_key_set` /

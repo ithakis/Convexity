@@ -4,7 +4,7 @@ Version history — see CHANGELOG.md for the full PR-by-PR mapping.
 X bumps on a major new feature/release, Y bumps on smaller polish/fixes.
 """
 
-__version__ = "1.14.2"
+__version__ = "1.15.0"
 __version_date__ = "2026-09-28"  # release date of __version__, ISO yyyy-mm-dd
 
 

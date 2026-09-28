@@ -599,12 +599,34 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def _same_origin_json(self) -> bool:
+        """Guard for routes that change secrets. Any web page open in the
+        user's browser can send a "simple" cross-site POST to 127.0.0.1 (a
+        text/plain body needs no CORS preflight), which could swap or delete a
+        key. Requiring application/json forces a preflight this server never
+        approves; the Host check stops DNS rebinding; and a browser's Origin
+        header, when sent, must be this server itself."""
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            return False
+        host = (self.headers.get("Host") or "").strip().lower()
+        hostname = host.rsplit(":", 1)[0] if not host.endswith("]") else host
+        if hostname not in ("127.0.0.1", "localhost", "[::1]"):
+            return False
+        origin = (self.headers.get("Origin") or "").strip().lower()
+        if origin and origin not in (f"http://{host}", f"https://{host}"):
+            return False
+        return True
+
     def _handle_keys_post(self, path: str) -> None:
         """POST /api/keys and /api/keys/test. Nothing in these branches may put
         the request body, a key or an exception message into a response or a
         log line: every error answer is fixed text (keys.InvalidKey carries
         fixed text too), and no traceback is printed — a frame's locals would
         be one repr away from the key."""
+        if not self._same_origin_json():
+            self._send_json(403, {"error": "cross-origin request refused"})
+            return
         try:
             payload = self._read_json()
             if not isinstance(payload, dict):

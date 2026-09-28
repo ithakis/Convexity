@@ -5,6 +5,15 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `convexity/__init__.py`
 when merging a PR and add a line here.
 
+## 1.15.0 — 2026-09-28
+
+Roadmap Phase 6 (`distribution` branch): API keys in Settings.
+
+- **Settings → API keys.** Enter the free Finnhub and NVIDIA NIM keys News needs, test each with one cheap call (works / rejected / rate-limited / can't reach the provider), or remove it — with links to where to get them. No more hand-editing `config.json`.
+- **Keys take effect immediately** — no restart. Saving a new NVIDIA key also clears an earlier "key rejected" state, so the News read retries straight away.
+- **First-run banner**: "Add your free API keys to enable News" until both keys are set; it can be dismissed.
+- Keys stay private: stored only in `config.json` in the data folder (readable only by you), never shown back, logged or sent anywhere but the provider — the page shows only whether a key is set and where it comes from. A key set by environment variable still wins, and Settings says so. A `config.json` that is not valid JSON is never overwritten; Settings says to fix or delete it. The key routes only accept requests from the app's own page, so another website open in the same browser cannot change or remove a key.
+
 ## 1.14.2 — 2026-09-28
 
 Fixes from the Phase 3 verification findings (`distribution` branch).

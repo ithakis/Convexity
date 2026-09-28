@@ -441,9 +441,23 @@ Findings (2026-09-28, implemented on `distribution` after v1.14.2):
   `config.json` is `{}`, banner back; dismiss survives a reload. The sentinel
   never appeared in any response body the page received, `/api/logs`, the
   server's console log, or `localStorage`.
-- Not done here: a Test click with the real keys (awaiting the user's OK), and
-  `install.sh`'s copy of legacy keys still writes `config.json` itself rather
-  than through `keys.py` (same fields and mode; out of scope).
+- Real keys, with the user's OK (temp data folder, keys from the checkout's
+  legacy files): Test → Finnhub ok (HTTP 200, 456 ms), NIM ok (HTTP 200,
+  879 ms). Wrong keys against the real providers: Finnhub 401, NIM **403**
+  (not 401), both reported as "rejected" — `_classify_http` treats 401 and
+  403 alike for that reason.
+- Found in the verification pass and fixed: the key routes accepted a
+  cross-site "simple" POST (text/plain needs no CORS preflight), so any web page
+  open in the user's browser could have swapped or deleted a key. They now
+  require JSON, a loopback Host and a same-origin Origin (403 otherwise; tested
+  for text/plain, a foreign Origin, another local port and a rebinding Host).
+  The older state-changing routes (watchlists, views, …) have the same exposure
+  and are not guarded yet — a follow-up. Also: the LLM's "NVIDIA key missing"
+  reason still pointed at hand-editing config.json; it now points at Settings.
+- Not done here: `install.sh`'s copy of legacy keys still writes `config.json`
+  itself rather than through `keys.py` (same fields and mode). Browsers may
+  offer to save a pasted key in their password manager (it is a password
+  field); the desktop app's QtWebEngine has no password manager.
 
 ---
 

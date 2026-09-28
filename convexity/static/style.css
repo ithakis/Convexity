@@ -3067,7 +3067,9 @@
     font: 12px ui-monospace, "SF Mono", Menlo, monospace; padding: 5px 8px;
     border-radius: var(--r-sm);
   }
-  .settings-key-input::placeholder { color: var(--muted); font-family: inherit; }
+  .settings-key-input::placeholder {
+    color: var(--muted); font-family: -apple-system, "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  }
   .settings-key-input:focus { outline: none; border-color: var(--accent); }
   .settings-key-src code {
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px;

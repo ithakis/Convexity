@@ -833,7 +833,7 @@ def llm_status() -> dict:
         st = dict(_LLM_STATUS)
     if not NVIDIA_API_KEY:
         st.update({"ok": False, "permanent": True,
-                   "error": "NVIDIA key missing (config.json nvidia_api_key or NVIDIA_API_KEY)"})
+                   "error": "NVIDIA key missing — add it in Settings → API keys"})
     return st
 
 
@@ -941,7 +941,7 @@ def _nvidia_call(system_prompt: str, user_content: str, lens_enum: tuple[str, ..
     key: no retry, recorded in llm_status for the banner."""
     global _nv_rate_limit_until
     if not NVIDIA_API_KEY:
-        _llm_record(False, "NVIDIA key missing (config.json nvidia_api_key or NVIDIA_API_KEY)", permanent=True)
+        _llm_record(False, "NVIDIA key missing — add it in Settings → API keys", permanent=True)
         return None
     _ck(cancel)
     _wait_for_circuit_breaker("NVIDIA NIM", "_nv_rate_limit_until", cancel=cancel)

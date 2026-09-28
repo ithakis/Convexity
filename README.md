@@ -77,6 +77,9 @@ Desktop. The app is unsigned: on macOS, right-click → Open the first time.
   (`brew install libomp`); the installer checks for it and offers to install it.
 - **Update:** run the same command again (or `./update.sh` / `update.ps1` from a
   checkout). It installs the newest release and rebuilds the launcher.
+- **News** needs two free API keys ([Finnhub](https://finnhub.io/register) and
+  [NVIDIA NIM](https://build.nvidia.com/)). Add them in Settings (gear) → **API
+  keys**; they take effect immediately. Everything else works without them.
 - **Your data** (portfolios, caches, API keys in `config.json`) lives in a
   per-user folder — `~/Library/Application Support/Convexity/` on macOS,
   `%APPDATA%\Convexity\` on Windows, `~/.local/share/convexity/` on Linux — so

@@ -376,3 +376,33 @@ def test_key_never_leaves_config_json(stub, monkeypatch):
     assert SENTINEL not in ring
     assert SENTINEL not in out.getvalue() and SENTINEL not in err.getvalue()
     assert json.loads(_cfg().read_text()) == {}
+
+
+@pytest.mark.parametrize("headers", [
+    {"Content-Type": "text/plain"},                                      # no-preflight simple POST
+    {"Content-Type": "application/json", "Origin": "https://evil.example"},
+    {"Content-Type": "application/json", "Origin": "http://127.0.0.1:1"},  # other local port
+    {"Content-Type": "application/json", "Host": "evil.example"},        # DNS rebinding
+])
+def test_key_routes_refuse_cross_origin(headers):
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        for path, body in (("/api/keys", {"provider": "nvidia", "action": "set", "key": SENTINEL}),
+                           ("/api/keys/test", {"provider": "nvidia"})):
+            req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                                         method="POST", headers=headers)
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                urllib.request.urlopen(req, timeout=10)
+            assert ei.value.code == 403
+        # the page's own same-origin request still works
+        ok = urllib.request.Request(
+            base + "/api/keys", method="POST",
+            data=json.dumps({"provider": "nvidia", "action": "set", "key": SENTINEL}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base})
+        assert urllib.request.urlopen(ok, timeout=10).status == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert json.loads(_cfg().read_text()) == {"nvidia_api_key": SENTINEL}
