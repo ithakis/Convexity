@@ -1,4 +1,5 @@
 """Shared loaders/metrics for 07_train_flaml.py, 08_validate.py, 09_tier_cuts.py."""
+
 from __future__ import annotations
 
 import sys
@@ -83,8 +84,13 @@ def daily_ic(dates, score, label, horizon: int = 1, min_names: int = 20) -> dict
     import numpy as np
     import pandas as pd
 
-    df = pd.DataFrame({"d": np.asarray(dates), "s": np.asarray(score, "float64"),
-                       "y": np.asarray(label, "float64")}).dropna()
+    df = pd.DataFrame(
+        {
+            "d": np.asarray(dates),
+            "s": np.asarray(score, "float64"),
+            "y": np.asarray(label, "float64"),
+        }
+    ).dropna()
     ics = []
     for d, g in df.groupby("d", sort=True):
         if len(g) < min_names or g["s"].nunique() < 3:
@@ -98,13 +104,23 @@ def daily_ic(dates, score, label, horizon: int = 1, min_names: int = 20) -> dict
     from convexity.news_diagnostics import clustered_mean_t
 
     if len(ics) < 3:
-        return {"mean": float("nan"), "t": float("nan"), "t_nw": float("nan"),
-                "n_days": len(ics), "series": ics}
+        return {
+            "mean": float("nan"),
+            "t": float("nan"),
+            "t_nw": float("nan"),
+            "n_days": len(ics),
+            "series": ics,
+        }
     x = [c for _, c in ics]
     plain, nw = clustered_mean_t(x, 1), clustered_mean_t(x, horizon)
     nan = float("nan")
-    return {"mean": plain["mean"], "t": plain["t"] if plain["t"] is not None else nan,
-            "t_nw": nw["t"] if nw["t"] is not None else nan, "n_days": len(x), "series": ics}
+    return {
+        "mean": plain["mean"],
+        "t": plain["t"] if plain["t"] is not None else nan,
+        "t_nw": nw["t"] if nw["t"] is not None else nan,
+        "n_days": len(x),
+        "series": ics,
+    }
 
 
 def decile_means(dates, score, label) -> list[float]:
@@ -113,8 +129,14 @@ def decile_means(dates, score, label) -> list[float]:
     import numpy as np
     import pandas as pd
 
-    df = pd.DataFrame({"d": np.asarray(dates), "s": np.asarray(score, "float64"),
-                       "y": np.asarray(label, "float64")}).dropna()
+    df = pd.DataFrame(
+        {
+            "d": np.asarray(dates),
+            "s": np.asarray(score, "float64"),
+            "y": np.asarray(label, "float64"),
+        }
+    ).dropna()
     df["dec"] = df.groupby("d")["s"].transform(
-        lambda s: np.floor(s.rank(method="first") * 10 / (len(s) + 1)).clip(0, 9))
+        lambda s: np.floor(s.rank(method="first") * 10 / (len(s) + 1)).clip(0, 9)
+    )
     return [float(df.loc[df["dec"] == k, "y"].mean()) for k in range(10)]

@@ -1,4 +1,5 @@
 """The Excel export's News read / Market read columns (xlsx_export.SENTIMENT_COLS)."""
+
 from __future__ import annotations
 
 import sys
@@ -9,11 +10,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from convexity import xlsx_export as xe  # noqa: E402
 
 S = {
-    "news": {"tier": "bullish", "score": 0.9, "stale": False,
-             "lenses": {"financials": {"score": 2.0}, "outlook": {"score": -1.0},
-                        "competition": None, "regulation": None, "street": {"score": 1.0}}},
+    "news": {
+        "tier": "bullish",
+        "score": 0.9,
+        "stale": False,
+        "lenses": {
+            "financials": {"score": 2.0},
+            "outlook": {"score": -1.0},
+            "competition": None,
+            "regulation": None,
+            "street": {"score": 1.0},
+        },
+    },
     "market": {"tier": "no_edge", "z": -0.42},
-    "divergence": {"kind": "good_news_weak_reaction", "text": "Financials +2.0; Market read bearish"},
+    "divergence": {
+        "kind": "good_news_weak_reaction",
+        "text": "Financials +2.0; Market read bearish",
+    },
 }
 
 
@@ -22,7 +35,7 @@ def test_every_sentiment_column_resolves():
     assert got["News read"] == "bullish"
     assert got["News · Financials (−2..+2)"] == 2.0
     assert got["News · Outlook (−2..+2)"] == -1.0
-    assert got["News · Competition (−2..+2)"] is None        # no news, not 0
+    assert got["News · Competition (−2..+2)"] is None  # no news, not 0
     assert got["Market read"] == "no edge"
     assert got["Market read z (σ)"] == -0.42
     assert got["Divergence"].startswith("Financials +2.0")

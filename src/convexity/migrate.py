@@ -70,8 +70,13 @@ _NEW = "convexity"
 # Checkout-root runtime state files, by suffix (see .gitignore "Runtime state").
 # In the data folder each becomes state/<suffix>.json.
 _STATE_SUFFIXES = (
-    "views", "watchlists", "mpt", "column_views", "session",
-    "news", "sentiment_history",
+    "views",
+    "watchlists",
+    "mpt",
+    "column_views",
+    "session",
+    "news",
+    "sentiment_history",
 )
 _TMP_TAG = ".migrating-"
 
@@ -81,6 +86,7 @@ def _log(msg: str) -> None:
 
 
 # ------------------------------------------------------------ step 1: rename
+
 
 def _move(old: Path, new: Path) -> bool:
     if new.exists() or not old.exists():
@@ -106,13 +112,14 @@ def rename_legacy_names(root: Path, home: Path) -> int:
 
 # ------------------------------------------------------- step 2: data folder
 
+
 @dataclass
 class Report:
     dry_run: bool = False
-    copied: list[str] = field(default_factory=list)      # new copy in place, source removed
-    deduped: list[str] = field(default_factory=list)     # dest already identical, source removed
-    kept: list[str] = field(default_factory=list)        # copied, source kept (changed / remove=False)
-    conflicts: list[str] = field(default_factory=list)   # dest differs: both left alone
+    copied: list[str] = field(default_factory=list)  # new copy in place, source removed
+    deduped: list[str] = field(default_factory=list)  # dest already identical, source removed
+    kept: list[str] = field(default_factory=list)  # copied, source kept (changed / remove=False)
+    conflicts: list[str] = field(default_factory=list)  # dest differs: both left alone
     # The same conflicts as (legacy source, destination in use) pairs, for the
     # UI (/api/health -> banner + Settings -> About). A conflict repeats on
     # every launch until the user deals with the old file, so it must be
@@ -122,9 +129,10 @@ class Report:
     def conflict(self, src: Path, dst: Path, label: str) -> None:
         self.conflicts.append(label)
         self.conflict_pairs.append((str(src), str(dst)))
+
     skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-    planned: list[str] = field(default_factory=list)     # dry run only
+    planned: list[str] = field(default_factory=list)  # dry run only
 
     @property
     def moved(self) -> int:
@@ -133,9 +141,11 @@ class Report:
     def summary(self) -> str:
         if self.dry_run:
             return f"dry run: {len(self.planned)} to migrate, {len(self.conflicts)} conflicts, {len(self.skipped)} skipped"
-        return (f"{len(self.copied)} migrated, {len(self.deduped)} already there, "
-                f"{len(self.kept)} copied (source kept), {len(self.conflicts)} conflicts, "
-                f"{len(self.skipped)} skipped, {len(self.errors)} errors")
+        return (
+            f"{len(self.copied)} migrated, {len(self.deduped)} already there, "
+            f"{len(self.kept)} copied (source kept), {len(self.conflicts)} conflicts, "
+            f"{len(self.skipped)} skipped, {len(self.errors)} errors"
+        )
 
 
 def _fingerprint(p: Path) -> tuple[int, str]:
@@ -318,8 +328,9 @@ def _prune_empty(d: Path, stop: Path) -> None:
         d = d.parent
 
 
-def _migrate_model_dir(src: Path, dst: Path, rep: Report, *, remove: bool, prune_to: Path,
-                       _retry: bool = True) -> None:
+def _migrate_model_dir(
+    src: Path, dst: Path, rep: Report, *, remove: bool, prune_to: Path, _retry: bool = True
+) -> None:
     label = f"{src}/ -> {dst}/"
     try:
         src_fps = _tree_fingerprints(src)
@@ -383,7 +394,9 @@ def _migrate_model_dir(src: Path, dst: Path, rep: Report, *, remove: bool, prune
         _log(f"ERROR {label}: {exc} — source kept")
 
 
-def _remove_tree(src: Path, fps: dict, label: str, rep: Report, prune_to: Path, *, dedup: bool) -> None:
+def _remove_tree(
+    src: Path, fps: dict, label: str, rep: Report, prune_to: Path, *, dedup: bool
+) -> None:
     now = _tree_fingerprints(src, skip_vanished=True) if src.exists() else {}
     # Files missing from ``now`` were removed by a concurrent run; only a file
     # that is new or different means the source changed under us.
@@ -418,13 +431,19 @@ def migrate_to_data_dir(
             _sweep_temps(data, state, models)
         if legacy_root is not None:
             for suffix in _STATE_SUFFIXES:
-                _migrate_file(legacy_root / f".{_NEW}_{suffix}.json",
-                              state / f"{suffix}.json", rep, remove=remove)
+                _migrate_file(
+                    legacy_root / f".{_NEW}_{suffix}.json",
+                    state / f"{suffix}.json",
+                    rep,
+                    remove=remove,
+                )
             db = legacy_root / "symbol_db.sqlite"
             wal = legacy_root / "symbol_db.sqlite-wal"
             if db.is_file():
                 if wal.is_file() and wal.stat().st_size > 0:
-                    rep.skipped.append(f"{db}: uncommitted WAL (a writer is open) — try again later")
+                    rep.skipped.append(
+                        f"{db}: uncommitted WAL (a writer is open) — try again later"
+                    )
                     _log(rep.skipped[-1])
                 else:
                     n_before = rep.moved
@@ -441,8 +460,13 @@ def migrate_to_data_dir(
             old_models = legacy_home / f".{_NEW}" / "ml_model"
             if old_models.is_dir():
                 for ver in sorted(p for p in old_models.iterdir() if p.is_dir()):
-                    _migrate_model_dir(ver, models / ver.name, rep, remove=remove,
-                                       prune_to=legacy_home / f".{_NEW}")
+                    _migrate_model_dir(
+                        ver,
+                        models / ver.name,
+                        rep,
+                        remove=remove,
+                        prune_to=legacy_home / f".{_NEW}",
+                    )
                 if not dry_run and remove:
                     _prune_empty(old_models, legacy_home / f".{_NEW}")
                     try:
@@ -499,9 +523,11 @@ def run(root: Path | None = None, home: Path | None = None) -> int:
 
 def _main(argv: list[str] | None = None) -> int:
     import argparse
+
     ap = argparse.ArgumentParser(
         prog="python -m convexity.migrate",
-        description="Move pre-1.14 Convexity data into the per-user data folder.")
+        description="Move pre-1.14 Convexity data into the per-user data folder.",
+    )
     ap.add_argument("--dry-run", action="store_true", help="show what would move; change nothing")
     args = ap.parse_args(argv)
     root, home = _legacy_sources()
@@ -511,10 +537,15 @@ def _main(argv: list[str] | None = None) -> int:
     if not args.dry_run and root is not None and home is not None:
         rename_legacy_names(root, home)
     rep = migrate_to_data_dir(root, home, paths.data_dir(), dry_run=args.dry_run)
-    for title, items in (("would migrate", rep.planned), ("migrated", rep.copied),
-                         ("already there", rep.deduped), ("copied, source kept", rep.kept),
-                         ("CONFLICT", rep.conflicts), ("skipped", rep.skipped),
-                         ("ERROR", rep.errors)):
+    for title, items in (
+        ("would migrate", rep.planned),
+        ("migrated", rep.copied),
+        ("already there", rep.deduped),
+        ("copied, source kept", rep.kept),
+        ("CONFLICT", rep.conflicts),
+        ("skipped", rep.skipped),
+        ("ERROR", rep.errors),
+    ):
         for it in items:
             print(f"  {title:>20}: {it}")
     if not (rep.planned or rep.moved or rep.kept or rep.conflicts or rep.errors or rep.skipped):

@@ -22,7 +22,10 @@ from convexity import mpt
 from convexity.analytics import _analyst_for, _bulk_close
 from convexity.cache import _cache_get, _cache_put
 from convexity.fx import (
-    _apply_fx_to_closes, _fx_latest_close, _norm_ccy_for_fx, fx_rates,
+    _apply_fx_to_closes,
+    _fx_latest_close,
+    _norm_ccy_for_fx,
+    fx_rates,
 )
 from convexity.helpers import _dedupe_rows_by_symbol
 
@@ -38,16 +41,21 @@ _COV_MODELS = ("sample", "ledoit", "ewma")
 # the streamed pct/ETA trivially honest (pct = elapsed/target). `nf` = base-frontier
 # sample points (cheap); `cloud` = shipped cloud points.
 _BUDGETS = {
-    "light":    {"nf": 24, "secs": 5.0,  "cloud": 20000},
+    "light": {"nf": 24, "secs": 5.0, "cloud": 20000},
     "standard": {"nf": 40, "secs": 15.0, "cloud": 40000},
-    "dense":    {"nf": 60, "secs": 60.0, "cloud": 80000},
+    "dense": {"nf": 60, "secs": 60.0, "cloud": 80000},
 }
 _DEF_BUDGET = "standard"
-_BOOT_MIN, _BOOT_CAP = 24, 8000          # bootstrap replicas: floor / ceiling
+_BOOT_MIN, _BOOT_CAP = 24, 8000  # bootstrap replicas: floor / ceiling
 
 _RF_YF: dict[str, str] = {
-    "USD": "^IRX", "EUR": "^IRX", "GBP": "^IRX", "JPY": "^IRX",
-    "CHF": "^IRX", "AUD": "^IRX", "CAD": "^IRX",
+    "USD": "^IRX",
+    "EUR": "^IRX",
+    "GBP": "^IRX",
+    "JPY": "^IRX",
+    "CHF": "^IRX",
+    "AUD": "^IRX",
+    "CAD": "^IRX",
 }
 
 
@@ -84,12 +92,17 @@ def _risk_free_history(ccy: str, lookback: str) -> dict:
             current_pct = vals[-1]
 
     note = (
-        f"{ticker} (US 13-week T-bill yield)" if cc == "USD"
+        f"{ticker} (US 13-week T-bill yield)"
+        if cc == "USD"
         else f"{ticker} proxy — no native yf series for {cc}; using US 13-week T-bill"
     )
     out = {
-        "ccy": cc, "lookback": lb, "ticker": ticker,
-        "series": series, "mean_pct": mean_pct, "current_pct": current_pct,
+        "ccy": cc,
+        "lookback": lb,
+        "ticker": ticker,
+        "series": series,
+        "mean_pct": mean_pct,
+        "current_pct": current_pct,
         "source_note": note,
     }
     _cache_put(cache_key, out, ttl=14400.0)
@@ -121,10 +134,7 @@ def _market_cap_weights(active: list[str], by_sym: dict) -> dict[str, float]:
     equilibrium prior is dominated by whichever assets happen to quote in a
     small-unit currency.
     """
-    ccys = {
-        _norm_ccy_for_fx(by_sym.get(s, {}).get("currency") or "USD")
-        for s in active
-    }
+    ccys = {_norm_ccy_for_fx(by_sym.get(s, {}).get("currency") or "USD") for s in active}
     rates: dict = {}
     if ccys - {"USD"}:
         try:
@@ -150,8 +160,9 @@ def _market_cap_weights(active: list[str], by_sym: dict) -> dict[str, float]:
     return caps
 
 
-def _analyst_views(active: list[str], by_sym: dict, rf: float
-                   ) -> tuple[dict[str, dict], dict[str, dict]]:
+def _analyst_views(
+    active: list[str], by_sym: dict, rf: float
+) -> tuple[dict[str, dict], dict[str, dict]]:
     """Per-asset BL views + a richer analyst-detail block, in ONE fetch pass.
 
     Returns ``(views, detail)``:
@@ -174,7 +185,8 @@ def _analyst_views(active: list[str], by_sym: dict, rf: float
         price = blk.get("price") or by_sym.get(s, {}).get("price")
         tgt = blk.get("target_mean")
         try:
-            price = float(price); tgt = float(tgt)
+            price = float(price)
+            tgt = float(tgt)
         except (TypeError, ValueError):
             return s, None, None
         if price <= 0 or tgt <= 0:
@@ -189,7 +201,8 @@ def _analyst_views(active: list[str], by_sym: dict, rf: float
             disp = None
         n = blk.get("n_analysts")
         det = {
-            "price": price, "target_mean": tgt,
+            "price": price,
+            "target_mean": tgt,
             "target_low": (float(lo) if lo is not None else None),
             "target_high": (float(hi) if hi is not None else None),
             "upside_pct": (tgt / price - 1.0) * 100.0,
@@ -269,8 +282,12 @@ def compute_efficient_frontier_stream(
         # pct = elapsed/target, ETA = target − elapsed (never negative).
         el = time.perf_counter() - t_total
         pct = max(0.01, min(0.99, el / target_s))
-        return {"type": "progress", "pct": round(pct * 100.0, 1),
-                "eta": round(max(0.0, target_s - el), 1), "label": label}
+        return {
+            "type": "progress",
+            "pct": round(pct * 100.0, 1),
+            "eta": round(max(0.0, target_s - el), 1),
+            "label": label,
+        }
 
     lookback_u = (lookback or "3Y").upper()
     if lookback_u not in _MPT_LOOKBACK_YF:
@@ -305,8 +322,11 @@ def compute_efficient_frontier_stream(
         return
     returns = mpt.compute_returns(closes, "daily")  # DAILY scenarios
     if returns.shape[0] < 60 or returns.shape[1] < 2:
-        yield {"type": "error", "error": f"insufficient overlapping data "
-               f"({returns.shape[0]} daily obs, {returns.shape[1]} assets)"}
+        yield {
+            "type": "error",
+            "error": f"insufficient overlapping data "
+            f"({returns.shape[0]} daily obs, {returns.shape[1]} assets)",
+        }
         return
     active = list(returns.columns)
     missing = [s for s in symbols if s not in active]
@@ -326,8 +346,15 @@ def compute_efficient_frontier_stream(
     t_opt = time.perf_counter()
     lo_b, hi_b = _build_bounds(active, bounds, w_min, w_max)
     fr = mpt.mean_cvar_frontier(
-        returns, mu, alpha=alpha, w_min=lo_b, w_max=hi_b,
-        fully_invested=fully_invested, rf=rf, n_points=nf, cov=cov,
+        returns,
+        mu,
+        alpha=alpha,
+        w_min=lo_b,
+        w_max=hi_b,
+        fully_invested=fully_invested,
+        rf=rf,
+        n_points=nf,
+        cov=cov,
     )
     if not fr.get("ok"):
         yield {"type": "error", "error": fr.get("error", "frontier failed")}
@@ -345,27 +372,42 @@ def compute_efficient_frontier_stream(
     # frontier message can carry them (they don't depend on cloud/bootstrap) ----
     eq_w = {s: 1.0 / len(active) for s in active}
     cap_total = sum(mkt_w.values())
-    cap_w = ({s: mkt_w[s] / cap_total for s in active} if cap_total > 0 else dict(eq_w))
+    cap_w = {s: mkt_w[s] / cap_total for s in active} if cap_total > 0 else dict(eq_w)
     cur_in = current_weights or {}
     cur_total = sum(max(0.0, float(cur_in.get(s, 0.0))) for s in active)
-    cur_w = ({s: max(0.0, float(cur_in.get(s, 0.0))) / cur_total for s in active}
-             if cur_total > 0 else dict(eq_w))
+    cur_w = (
+        {s: max(0.0, float(cur_in.get(s, 0.0))) / cur_total for s in active}
+        if cur_total > 0
+        else dict(eq_w)
+    )
 
     def _anchor(w: dict) -> dict:
-        return mpt.portfolio_risk_metrics(w, mu, cov, returns, alpha=alpha, rf=rf,
-                                          fully_invested=fully_invested)
+        return mpt.portfolio_risk_metrics(
+            w, mu, cov, returns, alpha=alpha, rf=rf, fully_invested=fully_invested
+        )
 
     anchors = {"equal": _anchor(eq_w), "cap": _anchor(cap_w), "current": _anchor(cur_w)}
     bl_payload = {
-        "mu": bl["mu"], "prior": bl["prior"], "q": bl["q"],
-        "delta": bl["delta"], "tau": bl["tau"], "haircut": bl["haircut"],
-        "viewed": bl["viewed"], "no_view": bl["no_view"],
+        "mu": bl["mu"],
+        "prior": bl["prior"],
+        "q": bl["q"],
+        "delta": bl["delta"],
+        "tau": bl["tau"],
+        "haircut": bl["haircut"],
+        "viewed": bl["viewed"],
+        "no_view": bl["no_view"],
     }
     params_payload = {
-        "lookback": lookback_u, "frequency": "daily", "display_ccy": display_ccy,
-        "rf": rf, "alpha": alpha, "fully_invested": bool(fully_invested),
-        "cov_model": cov_model, "haircut": haircut,
-        "budget": budget, "bounds": bounds or {},
+        "lookback": lookback_u,
+        "frequency": "daily",
+        "display_ccy": display_ccy,
+        "rf": rf,
+        "alpha": alpha,
+        "fully_invested": bool(fully_invested),
+        "cov_model": cov_model,
+        "haircut": haircut,
+        "budget": budget,
+        "bounds": bounds or {},
     }
 
     # Ship the frontier + anchors NOW so the client can fix the axis domain and
@@ -373,11 +415,15 @@ def compute_efficient_frontier_stream(
     # bootstrap band (cvar30_lo/med/hi) is added later and re-shipped in `done`.
     yield {
         "type": "frontier",
-        "symbols": active, "missing": missing,
-        "frontier": frontier, "min_cvar": fr["min_cvar"], "max_ret": fr["max_ret"],
-        "anchors": anchors, "bl": bl_payload, "params": params_payload,
-        "meta": {"n_frontier": int(K), "n_cloud": int(cloud_n),
-                 "n_viewed": int(len(bl["viewed"]))},
+        "symbols": active,
+        "missing": missing,
+        "frontier": frontier,
+        "min_cvar": fr["min_cvar"],
+        "max_ret": fr["max_ret"],
+        "anchors": anchors,
+        "bl": bl_payload,
+        "params": params_payload,
+        "meta": {"n_frontier": int(K), "n_cloud": int(cloud_n), "n_viewed": int(len(bl["viewed"]))},
     }
 
     # ---- (CVaR30, return) cloud — streamed in chunks so it fills the scatter
@@ -391,9 +437,17 @@ def compute_efficient_frontier_stream(
         # the achievable set the frontier has to be the upper-left envelope of,
         # so sampling a wider one puts most of the scatter outside the feasible
         # region and leaves the frontier floating in the middle of it.
-        pts = mpt.cvar_return_cloud(returns, mu, alpha=alpha, n=take, seed=1000 + g,
-                                    w_min=lo_b, w_max=hi_b,
-                                    fully_invested=fully_invested, rf=rf)
+        pts = mpt.cvar_return_cloud(
+            returns,
+            mu,
+            alpha=alpha,
+            n=take,
+            seed=1000 + g,
+            w_min=lo_b,
+            w_max=hi_b,
+            fully_invested=fully_invested,
+            rf=rf,
+        )
         cloud.extend(pts)
         g += 1
         yield {"type": "cloud", "points": pts}
@@ -409,7 +463,9 @@ def compute_efficient_frontier_stream(
     per_chunk = max(4, min(400, int(650 / max(1, K))))  # ≈1 s of solves per chunk
     n_boot = 0
     while n_boot < _BOOT_CAP and (n_boot < _BOOT_MIN or time.perf_counter() < boot_deadline):
-        arr = mpt.bootstrap_cvar(Rv, ctx, np.arange(n_boot + 1, n_boot + 1 + per_chunk, dtype=np.int64))
+        arr = mpt.bootstrap_cvar(
+            Rv, ctx, np.arange(n_boot + 1, n_boot + 1 + per_chunk, dtype=np.int64)
+        )
         boot.append(arr)
         n_boot += per_chunk
         yield _prog(f"Bootstrapping frontier stability… {n_boot} replicas")
@@ -444,9 +500,11 @@ def compute_efficient_frontier_stream(
         warnings.append(f"{fr['n_nonconv']} frontier point(s) hit the solver iteration cap")
 
     result = {
-        "symbols": active, "missing": missing,
+        "symbols": active,
+        "missing": missing,
         "frontier": frontier,
-        "min_cvar": fr["min_cvar"], "max_ret": fr["max_ret"],
+        "min_cvar": fr["min_cvar"],
+        "max_ret": fr["max_ret"],
         # Cloud was already streamed as `cloud` chunk messages — don't re-ship the
         # 20-80k points here. The blocking wrapper reassembles them from the chunks.
         "cloud": [],
@@ -456,10 +514,15 @@ def compute_efficient_frontier_stream(
         "bl": bl_payload,
         "params": params_payload,
         "meta": {
-            "n_obs": int(returns.shape[0]), "n_assets": int(len(active)),
-            "n_frontier": int(K), "n_cloud": int(len(cloud)),
-            "n_boot": int(n_boot), "n_viewed": int(len(bl["viewed"])),
-            "fetch_ms": fetch_ms, "bl_ms": bl_ms, "optimize_ms": optimize_ms,
+            "n_obs": int(returns.shape[0]),
+            "n_assets": int(len(active)),
+            "n_frontier": int(K),
+            "n_cloud": int(len(cloud)),
+            "n_boot": int(n_boot),
+            "n_viewed": int(len(bl["viewed"])),
+            "fetch_ms": fetch_ms,
+            "bl_ms": bl_ms,
+            "optimize_ms": optimize_ms,
             "cloud_ms": cloud_ms,
             "total_ms": int((time.perf_counter() - t_total) * 1000),
             "warnings": warnings,
@@ -482,12 +545,12 @@ def compute_efficient_frontier(rows: list[dict], **kwargs) -> dict:
     cloud_acc: list = []
     for msg in compute_efficient_frontier_stream(rows, **kwargs):
         t = msg["type"]
-        if t == "cloud":                       # reassemble the streamed chunks
+        if t == "cloud":  # reassemble the streamed chunks
             cloud_acc.extend(msg.get("points") or [])
         elif t == "done":
             result = msg["result"]
         elif t == "error":
             return {"error": msg["error"]}
     if result is not None and not result.get("cloud"):
-        result["cloud"] = cloud_acc            # so non-streaming callers/tests see it
+        result["cloud"] = cloud_acc  # so non-streaming callers/tests see it
     return result if result is not None else {"error": "no result produced"}

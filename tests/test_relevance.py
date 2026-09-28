@@ -1,5 +1,6 @@
 """Unit tests for convexity.relevance — the deterministic relevance
 heuristic and the shared title-dedup primitives (train/serve contract)."""
+
 from __future__ import annotations
 
 import sys
@@ -26,11 +27,13 @@ def test_norm_title_matches_app_convention():
 
 
 def test_cluster_titles_collapses_near_duplicates():
-    keep, dups = cluster_titles([
-        "Apple beats earnings estimates",
-        "Apple Beats Earnings Estimates!",
-        "Microsoft launches new product",
-    ])
+    keep, dups = cluster_titles(
+        [
+            "Apple beats earnings estimates",
+            "Apple Beats Earnings Estimates!",
+            "Microsoft launches new product",
+        ]
+    )
     assert keep == [0, 2]
     assert dups == [1, 0]
 
@@ -48,23 +51,26 @@ def test_is_near_duplicate_symmetric():
 
 def test_relevance_ordering_title_beats_lead_beats_tagged_only():
     title_hit = relevance_score("Apple announces record sales", "", "AAPL", "Apple Inc.")
-    lead_hit = relevance_score("Tech earnings preview", "Apple reports this week...",
-                               "AAPL", "Apple Inc.")
-    tagged = relevance_score("Markets rally on Fed decision", "The S&P rose.",
-                             "AAPL", "Apple Inc.")
+    lead_hit = relevance_score(
+        "Tech earnings preview", "Apple reports this week...", "AAPL", "Apple Inc."
+    )
+    tagged = relevance_score("Markets rally on Fed decision", "The S&P rose.", "AAPL", "Apple Inc.")
     assert title_hit > lead_hit > tagged
 
 
 def test_relevance_boilerplate_penalty():
     normal = relevance_score("Apple announces record sales", "", "AAPL", "Apple Inc.")
-    listicle = relevance_score("Top 10 stocks to watch: Apple leads", "", "AAPL",
-                               "Apple Inc.")
+    listicle = relevance_score("Top 10 stocks to watch: Apple leads", "", "AAPL", "Apple Inc.")
     assert listicle < normal
 
 
 def test_relevance_co_mention_penalty_monotonic():
-    scores = [relevance_score("Apple announces record sales", "", "AAPL",
-                              "Apple Inc.", co_mention_count=n) for n in (1, 3, 10)]
+    scores = [
+        relevance_score(
+            "Apple announces record sales", "", "AAPL", "Apple Inc.", co_mention_count=n
+        )
+        for n in (1, 3, 10)
+    ]
     assert scores[0] > scores[1] > scores[2]
 
 
@@ -93,8 +99,10 @@ def test_is_boilerplate_flags_roundups_only():
 # read's training panel (ml/scripts/06), so its shape is a train/serve contract.
 def test_window_sample_spans_window_instead_of_collapsing_to_newest():
     now = time.time()
-    arts = [{"headline": f"h{i}", "datetime": now - i * (7 * 86400 / 40), "url": f"u{i}"}
-            for i in range(40)]
+    arts = [
+        {"headline": f"h{i}", "datetime": now - i * (7 * 86400 / 40), "url": f"u{i}"}
+        for i in range(40)
+    ]
     out = window_sample(arts, cap=25, min_recent=10)
     span_days = (out[0]["datetime"] - out[-1]["datetime"]) / 86400.0
     assert span_days > 5.0  # a plain newest-25 cut would only span ~4.4 days
@@ -105,10 +113,10 @@ def test_window_sample_zero_timestamp_does_not_collapse_the_window():
     # A single datetime==0 article (unparsed yfinance pubDate) used to make
     # tmin=0, so every dated article landed in the last bucket.
     now = time.time()
-    dated = [{"headline": f"h{i}", "datetime": now - i * 3600, "url": f"u{i}"}
-             for i in range(40)]
-    out = window_sample(dated + [{"headline": "unparsed", "datetime": 0, "url": "uz"}],
-                        cap=30, min_recent=10)
+    dated = [{"headline": f"h{i}", "datetime": now - i * 3600, "url": f"u{i}"} for i in range(40)]
+    out = window_sample(
+        dated + [{"headline": "unparsed", "datetime": 0, "url": "uz"}], cap=30, min_recent=10
+    )
     assert len(out) > 20
 
 

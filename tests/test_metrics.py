@@ -37,6 +37,7 @@ from convexity import mpt
 # tests pass even when the package is broken or has diverged.
 try:
     from convexity.helpers import _normalize_dividend_yield  # noqa: E402
+
     _DASHBOARD_IMPORT_ERROR = None
 except Exception as _exc:
     _DASHBOARD_IMPORT_ERROR = str(_exc)
@@ -57,6 +58,7 @@ from convexity.analytics import _relative, _stats  # noqa: E402
 # Helper — build a dated index of N business days
 # ---------------------------------------------------------------------------
 
+
 def _bday_index(n: int, start="2020-01-02"):
     return pd.bdate_range(start=start, periods=n)
 
@@ -64,6 +66,7 @@ def _bday_index(n: int, start="2020-01-02"):
 # ===========================================================================
 # 1. Sharpe Ratio
 # ===========================================================================
+
 
 def test_sharpe():
     """
@@ -83,8 +86,10 @@ def test_sharpe():
     mean = r.mean()
     std = r.std()
     expected = mean * math.sqrt(252) / std
-    val = pd.Series([100.0] + [100.0 * np.prod([1 + x for x in rets[:i+1]]) for i in range(5)],
-                    index=pd.bdate_range(start="2020-01-01", periods=6))
+    val = pd.Series(
+        [100.0] + [100.0 * np.prod([1 + x for x in rets[: i + 1]]) for i in range(5)],
+        index=pd.bdate_range(start="2020-01-01", periods=6),
+    )
     s = _stats(r, val)
     assert s["sharpe"] is not None
     assert abs(s["sharpe"] - expected) < 1e-10
@@ -93,6 +98,7 @@ def test_sharpe():
 # ===========================================================================
 # 2. Sortino Ratio (standard semi-deviation)
 # ===========================================================================
+
 
 def test_sortino_standard_formula():
     """
@@ -112,11 +118,13 @@ def test_sortino_standard_formula():
     r = pd.Series(rets, index=_bday_index(5))
     # Hand derivation
     neg_sq = [min(x, 0) ** 2 for x in rets]
-    sigma_down = math.sqrt(sum(neg_sq) / len(neg_sq))   # = 0.005
+    sigma_down = math.sqrt(sum(neg_sq) / len(neg_sq))  # = 0.005
     expected = (r.mean() * 252) / (sigma_down * math.sqrt(252))
 
-    val = pd.Series([100.0] + [100.0 * np.prod([1 + x for x in rets[:i+1]]) for i in range(5)],
-                    index=pd.bdate_range(start="2020-01-01", periods=6))
+    val = pd.Series(
+        [100.0] + [100.0 * np.prod([1 + x for x in rets[: i + 1]]) for i in range(5)],
+        index=pd.bdate_range(start="2020-01-01", periods=6),
+    )
     s = _stats(r, val)
     assert s["sortino"] is not None
     assert abs(s["sortino"] - expected) < 1e-10
@@ -156,6 +164,7 @@ def test_sortino_differs_from_buggy_formula():
 # 3. Max Drawdown
 # ===========================================================================
 
+
 def test_max_drawdown():
     """
     Formula: DD_max = min_t( V_t / max_{s≤t}(V_s) - 1 ) * 100
@@ -179,6 +188,7 @@ def test_max_drawdown():
 # 4. Calmar Ratio
 # ===========================================================================
 
+
 def test_calmar():
     """
     Formula: C = R_ann / |DD_max|   (both in %)
@@ -201,7 +211,7 @@ def test_calmar_from_stats():
     # linear growth 0→10% with a -10% dip at midpoint
     base = np.linspace(100, 110, n)
     curve = base.copy()
-    curve[n // 2] = 99.0   # dip to create a clear max drawdown
+    curve[n // 2] = 99.0  # dip to create a clear max drawdown
     val = pd.Series(curve, index=idx)
     rets = val.pct_change().dropna()
     s = _stats(rets, val)
@@ -215,6 +225,7 @@ def test_calmar_from_stats():
 # ===========================================================================
 # 5. Beta, R², tracking error (analytics._relative)
 # ===========================================================================
+
 
 def test_relative_exact_leverage():
     """
@@ -241,6 +252,7 @@ def test_relative_partial_and_identity():
 # ===========================================================================
 # 8. Dividend Yield normalization
 # ===========================================================================
+
 
 def test_dividend_yield_fraction_input():
     """
@@ -283,7 +295,7 @@ def test_dividend_yield_rate_over_price():
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
-        raw_yield=0.99,          # should be ignored
+        raw_yield=0.99,  # should be ignored
         price=20.0,
         dividend_rate=1.0,
     )
@@ -309,7 +321,7 @@ def test_dividend_yield_trailing_rate_fallback():
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
-        raw_yield=0.99,   # should be ignored (rate/price takes priority)
+        raw_yield=0.99,  # should be ignored (rate/price takes priority)
         price=40.0,
         trailing_rate=2.0,
     )
@@ -382,6 +394,7 @@ def test_dividend_yield_both_none_returns_none():
 # 9. Annualised Return (CAGR)
 # ===========================================================================
 
+
 def test_ann_return_two_years():
     """
     Formula: (V_T/V_0)^(365.25/days) - 1
@@ -409,6 +422,7 @@ def test_ann_return_two_years():
 # 10. Annualised Volatility
 # ===========================================================================
 
+
 def test_ann_vol():
     """
     Formula: σ_ann = σ_daily * √252 * 100  (in %)
@@ -422,16 +436,18 @@ def test_ann_vol():
     rets_vals = [0.01, -0.01, 0.01, -0.01, 0.01, -0.01]
     r = pd.Series(rets_vals, index=_bday_index(6))
     expected_ann_vol = r.std() * math.sqrt(252) * 100.0
-    val = pd.Series([100.0] + [100.0 * np.prod([1 + x for x in rets_vals[:i+1]]) for i in range(6)],
-                    index=pd.bdate_range(start="2020-01-01", periods=7))
+    val = pd.Series(
+        [100.0] + [100.0 * np.prod([1 + x for x in rets_vals[: i + 1]]) for i in range(6)],
+        index=pd.bdate_range(start="2020-01-01", periods=7),
+    )
     s = _stats(r, val)
     assert abs(s["ann_vol"] - expected_ann_vol) < 1e-10
-
 
 
 # ===========================================================================
 # 11. Covariance estimators (annualized_cov: sample / ledoit / ewma)
 # ===========================================================================
+
 
 def _toy_returns(seed=0, T=200, n=4):
     """Reproducible daily returns with distinct per-asset mean/vol."""
@@ -482,6 +498,7 @@ def test_annualized_cov_unknown_model_falls_back_to_ledoit():
 # 12. Ledoit-Wolf shrinkage primitive
 # ===========================================================================
 
+
 def test_ledoit_wolf_one_asset():
     """One asset: target == sample cov, shrinkage is identity."""
     cov = pd.DataFrame([[0.04]], index=["A"], columns=["A"])
@@ -492,8 +509,7 @@ def test_ledoit_wolf_one_asset():
 def test_ledoit_wolf_output_positive_semidefinite():
     """Shrunk matrix stays PSD. Source: mpt.ledoit_wolf_shrink."""
     rng = np.random.default_rng(0)
-    rets = pd.DataFrame(rng.standard_normal((60, 5)) * 0.01,
-                        columns=[f"A{i}" for i in range(5)])
+    rets = pd.DataFrame(rng.standard_normal((60, 5)) * 0.01, columns=[f"A{i}" for i in range(5)])
     cov_shrunk = mpt.ledoit_wolf_shrink(rets.cov(), returns=rets)
     eig = np.linalg.eigvalsh(cov_shrunk.values)
     assert np.all(eig >= -1e-10), f"Negative eigenvalue: {eig.min()}"
@@ -503,14 +519,14 @@ def test_ledoit_wolf_output_positive_semidefinite():
 # 13. Black-Litterman posterior returns
 # ===========================================================================
 
+
 def _bl_setup(seed=0):
     rng = np.random.default_rng(seed)
     syms = ["A", "B", "C", "D"]
     rets = pd.DataFrame(rng.standard_normal((300, 4)) * 0.02, columns=syms)
     cov = mpt.annualized_cov(rets, "daily", "ledoit")
     mktw = {"A": 100, "B": 50, "C": 30, "D": 20}
-    views = {"A": {"q": 0.25, "n": 20, "disp": 0.1},
-             "C": {"q": -0.05, "n": 15, "disp": 0.15}}
+    views = {"A": {"q": 0.25, "n": 20, "disp": 0.1}, "C": {"q": -0.05, "n": 15, "disp": 0.15}}
     return syms, cov, mktw, views
 
 
@@ -554,6 +570,7 @@ def test_bl_delta_finite_positive_and_breakdown_complete():
 # 14. CVaR / CDaR / max-drawdown vs brute-force definitions
 # ===========================================================================
 
+
 def test_cvar_of_matches_tail_mean():
     """cvar_of == negated mean of the worst ceil((1-α)T) returns."""
     rng = np.random.default_rng(1)
@@ -584,13 +601,15 @@ def test_cdar_is_mean_of_worst_drawdowns():
 # 15. Mean-CVaR solver — certify _cvar_pdip against the HiGHS reference
 # ===========================================================================
 
+
 def _rand_problem(seed, N, T):
     rng = np.random.default_rng(seed)
     vols = rng.uniform(0.008, 0.03, N)
     means = rng.uniform(-5e-4, 15e-4, N)
     F = rng.standard_normal((T, 1)) * 0.01
-    R = np.ascontiguousarray(rng.standard_normal((T, N)) * vols + means
-                             + F * rng.uniform(0.3, 1.0, N))
+    R = np.ascontiguousarray(
+        rng.standard_normal((T, N)) * vols + means + F * rng.uniform(0.3, 1.0, N)
+    )
     mu = means * 252
     return R, mu
 
@@ -599,6 +618,7 @@ def test_cvar_pdip_matches_highs_reference():
     """Custom interior-point solver == HiGHS reference on the objective (CVaR)
     to 1e-6 across many random problems / constraint modes."""
     from tests._cvar_reference import cvar_lp_reference
+
     worst = 0.0
     n_cases = 0
     for seed in range(25):
@@ -607,7 +627,8 @@ def test_cvar_pdip_matches_highs_reference():
         R, mu = _rand_problem(seed, N, T)
         for alpha in (0.90, 0.95, 0.99):
             for fully in (True, False):
-                l = np.zeros(N); h = np.ones(N)
+                l = np.zeros(N)
+                h = np.ones(N)
                 a_ret = mu if fully else (mu - 0.04)
                 kappa = 1.0 / ((1 - alpha) * T)
                 w, _, _, _ = mpt._cvar_pdip(R, a_ret, -1e18, l, h, kappa, 1 if fully else 0, 80)
@@ -623,7 +644,8 @@ def test_cvar_pdip_matches_highs_reference():
 def test_cvar_pdip_respects_constraints():
     """Returned weights satisfy sum=1 / box / return floor."""
     R, mu = _rand_problem(7, 8, 300)
-    l = np.full(8, 0.05); h = np.full(8, 0.40)
+    l = np.full(8, 0.05)
+    h = np.full(8, 0.40)
     kappa = 1.0 / ((1 - 0.95) * 300)
     # min-CVaR endpoint (floor disabled)
     w, _, _, conv = mpt._cvar_pdip(R, mu, -1e18, l, h, kappa, 1, 60)
@@ -642,7 +664,8 @@ def test_cvar_pdip_respects_constraints():
 def test_cvar_pdip_cash_mode_allows_underinvestment():
     """fully_invested=0 permits Σw ≤ 1 (cash), still long-only in box."""
     R, mu = _rand_problem(11, 6, 250)
-    l = np.zeros(6); h = np.ones(6)
+    l = np.zeros(6)
+    h = np.ones(6)
     kappa = 1.0 / ((1 - 0.95) * 250)
     w, _, _, _ = mpt._cvar_pdip(R, mu - 0.04, -1e18, l, h, kappa, 0, 80)
     assert w.sum() <= 1.0 + 1e-5
@@ -652,6 +675,7 @@ def test_cvar_pdip_cash_mode_allows_underinvestment():
 # ===========================================================================
 # 16. Mean-CVaR frontier + risk metrics
 # ===========================================================================
+
 
 def test_mean_cvar_frontier_monotone_and_shaped():
     """Frontier is min-CVaR → max-return, monotone (ret & cvar both nondecreasing),
@@ -716,13 +740,16 @@ def test_cvar_return_cloud_shape():
 # 17. Per-position bounds, bootstrap band, streaming orchestrator (v2 rework)
 # ===========================================================================
 
+
 def test_as_bound_vec_scalar_and_vector():
     """Scalar broadcasts; per-asset vector passes through; bad length falls back."""
     assert np.allclose(mpt._as_bound_vec(0.1, 4, 0.0), [0.1] * 4)
     assert np.allclose(mpt._as_bound_vec([0.0, 0.2, 0.5, 0.3], 4, 0.0), [0.0, 0.2, 0.5, 0.3])
-    assert np.allclose(mpt._as_bound_vec([0.1, 0.2], 4, 0.9), [0.9] * 4)   # wrong length → default
+    assert np.allclose(mpt._as_bound_vec([0.1, 0.2], 4, 0.9), [0.9] * 4)  # wrong length → default
     assert np.allclose(mpt._as_bound_vec(None, 3, 0.7), [0.7] * 3)
-    assert (mpt._as_bound_vec([2.0, -1.0, 0.5], 3, 0.0) == [1.0, 0.0, 0.5]).all()  # clipped to [0,1]
+    assert (
+        mpt._as_bound_vec([2.0, -1.0, 0.5], 3, 0.0) == [1.0, 0.0, 0.5]
+    ).all()  # clipped to [0,1]
 
 
 def test_mean_cvar_frontier_per_position_bounds():
@@ -756,33 +783,34 @@ def test_mean_cvar_frontier_pin_and_exclude_respected():
     """Regression: an equal box (pin min==max) and a zero max (exclude) must be
     honored exactly — the old `h <= l` repair silently widened both. Uses a pin
     value below 1/n and an exclude, the two cases that triggered the bug."""
-    R, mu_v = _rand_problem(4, 6, 400)   # 1/n = 16.7%
+    R, mu_v = _rand_problem(4, 6, 400)  # 1/n = 16.7%
     df = pd.DataFrame(R, columns=[f"A{i}" for i in range(6)])
     mu = {f"A{i}": float(mu_v[i]) for i in range(6)}
-    lo = [0.04, 0.0, 0.0, 0.0, 0.0, 0.0]   # pin A0 = 4%
-    hi = [0.04, 0.0, 1.0, 1.0, 1.0, 1.0]   # A0 pinned, A1 excluded (max 0)
+    lo = [0.04, 0.0, 0.0, 0.0, 0.0, 0.0]  # pin A0 = 4%
+    hi = [0.04, 0.0, 1.0, 1.0, 1.0, 1.0]  # A0 pinned, A1 excluded (max 0)
     out = mpt.mean_cvar_frontier(df, mu, alpha=0.95, w_min=lo, w_max=hi, n_points=12)
     assert out["ok"]
     for p in out["frontier"]:
         assert abs(p["weights"]["A0"] - 0.04) < 1e-4, p["weights"]["A0"]  # pinned, not widened
-        assert p["weights"]["A1"] < 1e-4, p["weights"]["A1"]              # excluded, not funded
+        assert p["weights"]["A1"] < 1e-4, p["weights"]["A1"]  # excluded, not funded
 
 
 def test_max_return_weights_funds_floor_in_cash_mode():
     """Regression: the closed-form max-return endpoint must fund a mandatory floor
     even on a negative-μ asset in cash mode (was seeded from zeros → floor ignored)."""
-    mu_ex = np.array([-0.05, 0.10, 0.08])   # A0 return-unattractive but has a floor
+    mu_ex = np.array([-0.05, 0.10, 0.08])  # A0 return-unattractive but has a floor
     l = np.array([0.08, 0.0, 0.0])
     h = np.ones(3)
     w = mpt._max_return_weights(mu_ex, l, h, fully_invested=False)
-    assert w[0] >= 0.08 - 1e-9, w          # floor funded despite negative μ
+    assert w[0] >= 0.08 - 1e-9, w  # floor funded despite negative μ
     assert w.sum() <= 1.0 + 1e-9
     # And end-to-end: the frontier's max_ret endpoint honors it too.
     R, mu_v = _rand_problem(5, 3, 300)
     df = pd.DataFrame(R, columns=["A0", "A1", "A2"])
     mu = {"A0": -0.05, "A1": 0.10, "A2": 0.08}
-    out = mpt.mean_cvar_frontier(df, mu, alpha=0.95, w_min=[0.08, 0.0, 0.0],
-                                 fully_invested=False, n_points=10)
+    out = mpt.mean_cvar_frontier(
+        df, mu, alpha=0.95, w_min=[0.08, 0.0, 0.0], fully_invested=False, n_points=10
+    )
     assert out["ok"] and out["max_ret"]["weights"]["A0"] >= 0.08 - 1e-4
 
 
@@ -815,7 +843,7 @@ def test_cloud_kernel_parallel_matches_serial():
     mu = rng.uniform(0.0, 0.2, N)
     h = mpt.LIQ_HORIZON
     out = mpt._cloud_kernel(W, R, mu, 0.95, h)
-    port = W @ R.T                      # [Kp, T]
+    port = W @ R.T  # [Kp, T]
     # reference: empirical CVaR of each portfolio's overlapping h-day returns
     M = T - h + 1
     ref_rh = np.vstack([mpt.overlapping_h_returns(port[j], h) for j in range(Kp)])
@@ -829,22 +857,33 @@ def test_frontier_stream_progress_then_done():
     """compute_efficient_frontier_stream yields progress msgs then one done payload
     with the bootstrap band attached; max_seconds keeps it fast."""
     from convexity import frontier
+
     rng = np.random.default_rng(1)
     rows = []
     for i in range(6):
-        rows.append({"symbol": f"A{i}", "price": 100.0, "market_cap": 1e11 * (i + 1),
-                     "currency": "USD"})
+        rows.append(
+            {"symbol": f"A{i}", "price": 100.0, "market_cap": 1e11 * (i + 1), "currency": "USD"}
+        )
     # Patch the data-fetch + views so the test never touches yfinance.
     idx = pd.date_range("2022-01-01", periods=400, freq="B")
-    closes = pd.DataFrame(np.cumprod(1 + rng.standard_normal((400, 6)) * 0.01, axis=0) * 100,
-                          index=idx, columns=[f"A{i}" for i in range(6)])
+    closes = pd.DataFrame(
+        np.cumprod(1 + rng.standard_normal((400, 6)) * 0.01, axis=0) * 100,
+        index=idx,
+        columns=[f"A{i}" for i in range(6)],
+    )
     orig_close, orig_views = frontier._bulk_close, frontier._analyst_views
     frontier._bulk_close = lambda syms, period: closes[[s for s in syms if s in closes.columns]]
     frontier._analyst_views = lambda active, by_sym, rf: ({}, {})
     try:
-        msgs = list(frontier.compute_efficient_frontier_stream(
-            rows, budget="light", max_seconds=0.0, haircut=0.25,
-            bounds={"A0": {"min": 0.05, "max": 0.25}}))
+        msgs = list(
+            frontier.compute_efficient_frontier_stream(
+                rows,
+                budget="light",
+                max_seconds=0.0,
+                haircut=0.25,
+                bounds={"A0": {"min": 0.05, "max": 0.25}},
+            )
+        )
     finally:
         frontier._bulk_close, frontier._analyst_views = orig_close, orig_views
     kinds = [m["type"] for m in msgs]
@@ -853,7 +892,9 @@ def test_frontier_stream_progress_then_done():
     prog = [m for m in msgs if m["type"] == "progress"]
     assert all(0.0 <= m["pct"] <= 100.0 and (m["eta"] is None or m["eta"] >= 0) for m in prog)
     res = [m for m in msgs if m["type"] == "done"][0]["result"]
-    assert res["meta"]["n_boot"] >= 1 and res["params"]["bounds"] == {"A0": {"min": 0.05, "max": 0.25}}
+    assert res["meta"]["n_boot"] >= 1 and res["params"]["bounds"] == {
+        "A0": {"min": 0.05, "max": 0.25}
+    }
     p0 = res["frontier"][0]
     assert {"cvar_lo", "cvar_med", "cvar_hi"} <= set(p0)
     assert p0["weights"]["A0"] >= 0.05 - 1e-6 and p0["weights"]["A0"] <= 0.25 + 1e-6
@@ -862,6 +903,7 @@ def test_frontier_stream_progress_then_done():
 def test_frontier_stream_error_too_few_symbols():
     """A single-symbol request yields exactly one error message, no crash."""
     from convexity import frontier
+
     msgs = list(frontier.compute_efficient_frontier_stream([{"symbol": "AAA"}], budget="light"))
     assert msgs and msgs[-1]["type"] == "error"
 
@@ -871,15 +913,15 @@ def test_var_cvar_horizon_estimator():
     rng = np.random.default_rng(7)
     r = rng.standard_normal(750) * 0.012
     rh = mpt.overlapping_h_returns(r, 10)
-    assert rh.size == r.size - 9                      # T − h + 1
+    assert rh.size == r.size - 9  # T − h + 1
     # unscaled reference at 10 days
     k = mpt._tail_count(rh.size, 0.95)
     worst = np.sort(rh)[:k]
     ref_cvar10 = -worst.mean()
     ref_var10 = -worst[-1]
     var30, cvar30 = mpt.var_cvar_horizon(r, 0.95)
-    assert cvar30 >= var30                            # shortfall ≥ threshold
-    assert abs(cvar30 - ref_cvar10 * np.sqrt(3.0)) < 1e-12   # √(30/10) scaling
+    assert cvar30 >= var30  # shortfall ≥ threshold
+    assert abs(cvar30 - ref_cvar10 * np.sqrt(3.0)) < 1e-12  # √(30/10) scaling
     assert abs(var30 - ref_var10 * np.sqrt(3.0)) < 1e-12
     # degenerate: fewer obs than the horizon → single whole-period window (finite)
     assert mpt.overlapping_h_returns(r[:4], 10).size == 1
@@ -888,8 +930,7 @@ def test_var_cvar_horizon_estimator():
 def test_asset_risk_stats_fields_and_finiteness():
     """Per-asset stats carry the expected keys and stay finite on normal data."""
     rng = np.random.default_rng(8)
-    R = pd.DataFrame(rng.standard_normal((400, 3)) * 0.011 + 0.0003,
-                     columns=["A", "B", "C"])
+    R = pd.DataFrame(rng.standard_normal((400, 3)) * 0.011 + 0.0003, columns=["A", "B", "C"])
     st = mpt.asset_risk_stats(R, 0.95)
     assert set(st["A"]) == {"ret_ann", "ret_total", "var30", "cvar30"}
     for s in R.columns:
@@ -902,20 +943,38 @@ def test_frontier_stream_cloud_frontier_messages_and_payload():
     cloud but the blocking wrapper reassembles it; 30-day risk fields are present
     and the displayed frontier is monotone in cvar30."""
     from convexity import frontier
+
     rng = np.random.default_rng(2)
-    rows = [{"symbol": f"A{i}", "price": 100.0, "market_cap": 1e11 * (i + 1),
-             "currency": "USD"} for i in range(6)]
+    rows = [
+        {"symbol": f"A{i}", "price": 100.0, "market_cap": 1e11 * (i + 1), "currency": "USD"}
+        for i in range(6)
+    ]
     idx = pd.date_range("2022-01-01", periods=400, freq="B")
-    closes = pd.DataFrame(np.cumprod(1 + rng.standard_normal((400, 6)) * 0.01, axis=0) * 100,
-                          index=idx, columns=[f"A{i}" for i in range(6)])
+    closes = pd.DataFrame(
+        np.cumprod(1 + rng.standard_normal((400, 6)) * 0.01, axis=0) * 100,
+        index=idx,
+        columns=[f"A{i}" for i in range(6)],
+    )
     orig_close, orig_views = frontier._bulk_close, frontier._analyst_views
     frontier._bulk_close = lambda syms, period: closes[[s for s in syms if s in closes.columns]]
     frontier._analyst_views = lambda active, by_sym, rf: (
-        {}, {"A0": {"price": 100.0, "target_mean": 120.0, "target_low": 100.0,
-                    "target_high": 150.0, "upside_pct": 20.0, "n_analysts": 8, "disp": 0.42}})
+        {},
+        {
+            "A0": {
+                "price": 100.0,
+                "target_mean": 120.0,
+                "target_low": 100.0,
+                "target_high": 150.0,
+                "upside_pct": 20.0,
+                "n_analysts": 8,
+                "disp": 0.42,
+            }
+        },
+    )
     try:
-        msgs = list(frontier.compute_efficient_frontier_stream(
-            rows, budget="light", max_seconds=0.0))
+        msgs = list(
+            frontier.compute_efficient_frontier_stream(rows, budget="light", max_seconds=0.0)
+        )
         res = frontier.compute_efficient_frontier(rows, budget="light", max_seconds=0.0)
     finally:
         frontier._bulk_close, frontier._analyst_views = orig_close, orig_views
@@ -924,13 +983,13 @@ def test_frontier_stream_cloud_frontier_messages_and_payload():
     assert "frontier" in kinds and "cloud" in kinds
     assert kinds.index("frontier") < kinds.index("cloud") < kinds.index("done")
     done = [m for m in msgs if m["type"] == "done"][0]["result"]
-    assert done["cloud"] == []                        # bulk cloud not re-shipped
+    assert done["cloud"] == []  # bulk cloud not re-shipped
     assert "asset_stats" in done and "analyst_detail" in done
     assert done["analyst_detail"]["A0"]["upside_pct"] == 20.0
     p0 = done["frontier"][0]
     assert {"var30", "cvar30", "cvar30_lo", "cvar30_med", "cvar30_hi"} <= set(p0)
     xs = [p["cvar30"] for p in done["frontier"]]
-    assert all(b >= a - 1e-9 for a, b in zip(xs, xs[1:]))   # monotone on display axis
+    assert all(b >= a - 1e-9 for a, b in zip(xs, xs[1:]))  # monotone on display axis
     # blocking wrapper reassembles the streamed cloud
     assert len(res["cloud"]) >= 500 and all(len(pt) == 2 for pt in res["cloud"][:5])
 
@@ -939,8 +998,9 @@ def test_mpt_run_history_last_three(tmp_path, monkeypatch):
     """save_mpt_run keeps the last 3 runs newest-first, dedupes identical params,
     caps at 3; get_last_mpt_run/get_mpt_runs read them; legacy formats tolerated."""
     from convexity import persistence as P
+
     monkeypatch.setattr(P, "_MPT_FILE", tmp_path / "mpt.json")
-    for a in (0.90, 0.95, 0.975, 0.99):                       # 4 distinct params
+    for a in (0.90, 0.95, 0.975, 0.99):  # 4 distinct params
         P.save_mpt_run("View1", {"params": {"alpha": a}, "symbols": ["A", "B"]})
     runs = P.get_mpt_runs("View1")
     assert [r["params"]["alpha"] for r in runs] == [0.99, 0.975, 0.95]  # newest-first, cap 3

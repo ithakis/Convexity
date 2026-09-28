@@ -13,6 +13,7 @@ Output calendar.parquet, one row per trading date D:
 Adjusted prices are used (adj factor applied to open as adj_close/close) so
 window returns are dividend/split-consistent with the per-ticker label math.
 """
+
 from __future__ import annotations
 
 import json
@@ -68,14 +69,16 @@ def main() -> None:
     o = spy["open"].astype("float64").to_numpy()
     c = spy["close"].astype("float64").to_numpy()
 
-    cal = pd.DataFrame({
-        "date": dates.dt.date,
-        "next_date": dates.shift(-1).dt.date,
-        "prev_date": dates.shift(1).dt.date,
-        "m_overnight": np.concatenate([[np.nan], o[1:] / c[:-1] - 1.0]),
-        "m_intraday": c / o - 1.0,
-        "m_cc": np.concatenate([[np.nan], c[1:] / c[:-1] - 1.0]),
-    })
+    cal = pd.DataFrame(
+        {
+            "date": dates.dt.date,
+            "next_date": dates.shift(-1).dt.date,
+            "prev_date": dates.shift(1).dt.date,
+            "m_overnight": np.concatenate([[np.nan], o[1:] / c[:-1] - 1.0]),
+            "m_intraday": c / o - 1.0,
+            "m_cc": np.concatenate([[np.nan], c[1:] / c[:-1] - 1.0]),
+        }
+    )
     cal.to_parquet(config.CALENDAR_PARQUET, index=False)
     report = {
         "rows": len(cal),

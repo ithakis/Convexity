@@ -13,8 +13,10 @@ import yfinance as yf
 from convexity.cache import (
     _BULK_CLOSE_MISS,
     _CACHE_TTL_ANALYTICS,
-    _bulk_close_get_cached, _bulk_close_put,
-    _cache_get, _cache_put,
+    _bulk_close_get_cached,
+    _bulk_close_put,
+    _cache_get,
+    _cache_put,
 )
 from convexity.fetcher import _SECTOR_ETF
 from convexity.fx import _apply_fx_to_closes, _norm_ccy_for_fx
@@ -25,8 +27,13 @@ from convexity.helpers import (
 )
 
 _PERIOD_YF = {
-    "3M": "3mo", "6M": "6mo", "YTD": "ytd",
-    "1Y": "1y", "3Y": "3y", "5Y": "5y", "MAX": "max",
+    "3M": "3mo",
+    "6M": "6mo",
+    "YTD": "ytd",
+    "1Y": "1y",
+    "3Y": "3y",
+    "5Y": "5y",
+    "MAX": "max",
 }
 _PERIOD_MONTHS = {"3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60}
 
@@ -34,7 +41,15 @@ _PERIOD_MONTHS = {"3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60}
 # averages have 200 trading days of warm-up before the period's first bar —
 # computing them on the trimmed period left SMA 200 empty for its first
 # ~10 months. Stats are computed on the period slice only.
-_WARMUP_YF = {"3M": "2y", "6M": "2y", "YTD": "2y", "1Y": "2y", "3Y": "5y", "5Y": "10y", "MAX": "max"}
+_WARMUP_YF = {
+    "3M": "2y",
+    "6M": "2y",
+    "YTD": "2y",
+    "1Y": "2y",
+    "3Y": "5y",
+    "5Y": "10y",
+    "MAX": "max",
+}
 _SMA_WINDOWS = (20, 50, 200)
 
 # Selectable benchmarks: key -> (Yahoo ticker, label, quote currency).
@@ -67,11 +82,13 @@ def _stats(ret: pd.Series, val: pd.Series) -> dict:
     downside = math.sqrt((ret.clip(upper=0) ** 2).mean())
     max_dd = float((val / val.cummax() - 1.0).min() * 100.0)
     return {
-        "total_return": (growth - 1.0) * 100.0, "ann_return": ann_return,
+        "total_return": (growth - 1.0) * 100.0,
+        "ann_return": ann_return,
         "ann_vol": float(std * math.sqrt(252)) * 100.0,
         "sharpe": float(ret.mean() * 252 / (std * math.sqrt(252))) if std else None,
         "sortino": float(ret.mean() * 252 / (downside * math.sqrt(252))) if downside > 0 else None,
-        "max_dd": max_dd, "calmar": (ann_return / abs(max_dd)) if max_dd < 0 else None,
+        "max_dd": max_dd,
+        "calmar": (ann_return / abs(max_dd)) if max_dd < 0 else None,
     }
 
 
@@ -89,15 +106,21 @@ def _relative(rp: pd.Series, rb: pd.Series) -> dict:
     }
 
 
-def _bench_block(label: str, val: pd.Series, spy_ret: pd.Series | None, port_ret: pd.Series) -> dict:
+def _bench_block(
+    label: str, val: pd.Series, spy_ret: pd.Series | None, port_ret: pd.Series
+) -> dict:
     """One benchmark: its stats (+ beta/R²/TE vs SPY) and the portfolio's
     beta/R²/TE against it. `val` is its value index on the period."""
     ret = val.pct_change().dropna()
     stats = _stats(ret, val)
     if spy_ret is not None:
         stats.update(_relative(ret, spy_ret))
-    return {"label": label, "stats": stats, "rel": _relative(port_ret, ret),
-            "series": _series_to_points(100.0 * val / val.iloc[0])}
+    return {
+        "label": label,
+        "stats": stats,
+        "rel": _relative(port_ret, ret),
+        "series": _series_to_points(100.0 * val / val.iloc[0]),
+    }
 
 
 def _normalize_weights(weights_in: dict, symbols: list[str]) -> dict[str, float]:
@@ -156,8 +179,13 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
     if to_fetch:
         try:
             df = yf.download(
-                tickers=to_fetch, period=period_yf, interval="1d",
-                auto_adjust=True, group_by="ticker", threads=True, progress=False,
+                tickers=to_fetch,
+                period=period_yf,
+                interval="1d",
+                auto_adjust=True,
+                group_by="ticker",
+                threads=True,
+                progress=False,
             )
         except Exception:
             df = None
@@ -310,8 +338,12 @@ def _analyst_for(symbol: str, row: dict | None = None) -> dict:
     return out
 
 
-def analyze_portfolio(rows: list[dict], weights_in: dict, period: str, display_ccy: str = "USD") -> dict:
-    out = analyze_portfolios_multi(rows, {"__single__": weights_in or {}}, period, display_ccy=display_ccy)
+def analyze_portfolio(
+    rows: list[dict], weights_in: dict, period: str, display_ccy: str = "USD"
+) -> dict:
+    out = analyze_portfolios_multi(
+        rows, {"__single__": weights_in or {}}, period, display_ccy=display_ccy
+    )
     if isinstance(out, dict) and "error" in out:
         return out
     return (out or {}).get("__single__", {"error": "no result"})
@@ -350,7 +382,11 @@ def analyze_portfolios_multi(
     per_set_cache_keys: dict[str, str] = {}
     cached_results: dict[str, dict] = {}
     for name, weights in normalized_sets.items():
-        key = "pf|" + "|".join(f"{s}:{weights[s]:.6f}" for s in sorted(symbols)) + f"|{period_u}|{display_ccy}"
+        key = (
+            "pf|"
+            + "|".join(f"{s}:{weights[s]:.6f}" for s in sorted(symbols))
+            + f"|{period_u}|{display_ccy}"
+        )
         per_set_cache_keys[name] = key
         hit = _cache_get(key)
         if hit is not None:
@@ -362,8 +398,9 @@ def analyze_portfolios_multi(
     # all to the display currency (indices quote in EUR/JPY/KRW, and a USD
     # display still has to convert non-USD holdings).
     warmup_yf = _WARMUP_YF[period_u]
-    sec_etfs = sorted({_SECTOR_ETF[sec] for r in rows
-                       if (sec := (r.get("sector") or "").strip()) in _SECTOR_ETF})
+    sec_etfs = sorted(
+        {_SECTOR_ETF[sec] for r in rows if (sec := (r.get("sector") or "").strip()) in _SECTOR_ETF}
+    )
     bench_tickers = [t for t, _, _ in _BENCHMARKS.values()]
     wide = _bulk_close(list(dict.fromkeys(symbols + bench_tickers + sec_etfs)), warmup_yf)
     warnings: list[str] = []
@@ -395,8 +432,11 @@ def analyze_portfolios_multi(
         ser = wide[col].ffill().reindex(common_index).dropna()
         return ser if len(ser) >= 2 else None
 
-    shared_bench = {k: (label, v) for k, (t, label, _) in _BENCHMARKS.items()
-                    if (v := _on_period(t)) is not None}
+    shared_bench = {
+        k: (label, v)
+        for k, (t, label, _) in _BENCHMARKS.items()
+        if (v := _on_period(t)) is not None
+    }
     spy_ret = shared_bench["SPY"][1].pct_change().dropna() if "SPY" in shared_bench else None
     sec_ret_df = None
     sec_cols = [e for e in sec_etfs if e in wide.columns]
@@ -418,8 +458,9 @@ def analyze_portfolios_multi(
     div_vals = {s: analyst_blocks.get(s, {}).get("div_yield") for s in active}
     mcap_vals = {s: _safe_num(by_sym.get(s, {}).get("market_cap")) for s in active}
 
-    period_returns = {s: float(sym_closes[s].iloc[-1] / sym_closes[s].iloc[0] - 1.0) * 100.0
-                      for s in active}
+    period_returns = {
+        s: float(sym_closes[s].iloc[-1] / sym_closes[s].iloc[0] - 1.0) * 100.0 for s in active
+    }
 
     results: dict[str, dict] = dict(cached_results)
     for name, weights in normalized_sets.items():
@@ -439,12 +480,16 @@ def analyze_portfolios_multi(
         drawdown = (port_val / port_val.cummax() - 1.0) * 100.0
         # min_periods=1: only where no earlier data exists at all (MAX, or a
         # young holding) does an average start on fewer than n bars.
-        sma = {str(n): _series_to_points(100.0 * port_ext.rolling(n, min_periods=1).mean()
-                                         .loc[common_index] / base)
-               for n in _SMA_WINDOWS}
+        sma = {
+            str(n): _series_to_points(
+                100.0 * port_ext.rolling(n, min_periods=1).mean().loc[common_index] / base
+            )
+            for n in _SMA_WINDOWS
+        }
 
-        benchmarks = {k: _bench_block(label, v, spy_ret, port_ret)
-                      for k, (label, v) in shared_bench.items()}
+        benchmarks = {
+            k: _bench_block(label, v, spy_ret, port_ret) for k, (label, v) in shared_bench.items()
+        }
         if sec_ret_df is not None:
             sector_alloc: dict[str, float] = {}
             for s in active:
@@ -454,8 +499,9 @@ def analyze_portfolios_multi(
             total = sum(sector_alloc.values())
             if total > 0:
                 blend = sum(sec_ret_df[etf] * (w / total) for etf, w in sector_alloc.items())
-                benchmarks["SECTOR"] = _bench_block("Sector mix", (1.0 + blend).cumprod(),
-                                                    spy_ret, port_ret)
+                benchmarks["SECTOR"] = _bench_block(
+                    "Sector mix", (1.0 + blend).cumprod(), spy_ret, port_ret
+                )
 
         pf_stats = _stats(port_ret, port_val)
 
@@ -470,8 +516,10 @@ def analyze_portfolios_multi(
             return num / denom if denom > 0 else None
 
         weighted = {
-            "pe": _w_avg(pe_vals), "ps": _w_avg(ps_vals),
-            "ev_ebitda": _w_avg(ev_vals), "div_yield": _w_avg(div_vals),
+            "pe": _w_avg(pe_vals),
+            "ps": _w_avg(ps_vals),
+            "ev_ebitda": _w_avg(ev_vals),
+            "div_yield": _w_avg(div_vals),
             "market_cap": _w_avg(mcap_vals),
         }
 
@@ -511,17 +559,26 @@ def analyze_portfolios_multi(
                     dist_w += w
             has_coverage = bool((na and na > 0) or mr is not None or tgt or dist)
             if has_coverage:
-                holdings_out.append({
-                    "symbol": s, "name": row.get("name") or s,
-                    "currency": row.get("currency") or blk.get("currency") or "USD",
-                    "weight": w, "price": px,
-                    "target_mean": tgt, "target_median": tgt_med,
-                    "target_low": tgt_lo, "target_high": tgt_hi,
-                    "upside_pct": upside, "mean_rating": mr,
-                    "rec_key": blk.get("rec_key"),
-                    "n_analysts": int(na) if (na is not None and math.isfinite(float(na))) else None,
-                    "dist": dist,
-                })
+                holdings_out.append(
+                    {
+                        "symbol": s,
+                        "name": row.get("name") or s,
+                        "currency": row.get("currency") or blk.get("currency") or "USD",
+                        "weight": w,
+                        "price": px,
+                        "target_mean": tgt,
+                        "target_median": tgt_med,
+                        "target_low": tgt_lo,
+                        "target_high": tgt_hi,
+                        "upside_pct": upside,
+                        "mean_rating": mr,
+                        "rec_key": blk.get("rec_key"),
+                        "n_analysts": int(na)
+                        if (na is not None and math.isfinite(float(na)))
+                        else None,
+                        "dist": dist,
+                    }
+                )
             else:
                 not_covered.append({"symbol": s, "name": row.get("name") or s, "weight": w})
         holdings_out.sort(key=lambda h: (-(h.get("weight") or 0), h["symbol"]))
@@ -536,9 +593,12 @@ def analyze_portfolios_multi(
             "weighted_target_upside_pct": (upside_num / upside_w) if upside_w > 0 else None,
             "target_coverage_weight": upside_w,
             "n_analysts_total": n_analysts_total,
-            "distribution_pct": dist_norm, "distribution_weight": dist_w,
-            "holdings": holdings_out, "not_covered": not_covered,
-            "covered_count": len(holdings_out), "active_count": len(active),
+            "distribution_pct": dist_norm,
+            "distribution_weight": dist_w,
+            "holdings": holdings_out,
+            "not_covered": not_covered,
+            "covered_count": len(holdings_out),
+            "active_count": len(active),
         }
 
         by_sector: dict[str, float] = {}
@@ -566,30 +626,42 @@ def analyze_portfolios_multi(
         for s in active:
             w = weights.get(s, 0.0)
             pr = period_returns.get(s, 0.0)
-            contribution.append({
-                "symbol": s, "name": by_sym.get(s, {}).get("name") or s,
-                "weight": w, "period_return": pr, "contribution": w * pr,
-                "sector": by_sym.get(s, {}).get("sector") or "",
-            })
+            contribution.append(
+                {
+                    "symbol": s,
+                    "name": by_sym.get(s, {}).get("name") or s,
+                    "weight": w,
+                    "period_return": pr,
+                    "contribution": w * pr,
+                    "sector": by_sym.get(s, {}).get("sector") or "",
+                }
+            )
         contribution.sort(key=lambda x: x["contribution"], reverse=True)
 
         out_one = {
-            "period": period_u, "display_ccy": display_ccy,
-            "weights_applied": weights, "active_symbols": active,
+            "period": period_u,
+            "display_ccy": display_ccy,
+            "weights_applied": weights,
+            "active_symbols": active,
             "missing_symbols": missing,
             "series": {
                 "portfolio": _series_to_points(port_val),
                 "drawdown": _series_to_points(drawdown),
                 "sma": sma,
             },
-            "stats": pf_stats, "benchmarks": benchmarks,
-            "weighted": weighted, "analyst": analyst,
+            "stats": pf_stats,
+            "benchmarks": benchmarks,
+            "weighted": weighted,
+            "analyst": analyst,
             "exposure": {
-                "by_sector": by_sector, "by_industry": by_industry,
-                "by_bucket": by_bucket, "by_country": by_country,
+                "by_sector": by_sector,
+                "by_industry": by_industry,
+                "by_bucket": by_bucket,
+                "by_country": by_country,
             },
             "concentration": {"top5": top5, "herfindahl": herfindahl, "effective_n": effective_n},
-            "contribution": contribution, "warnings": warnings,
+            "contribution": contribution,
+            "warnings": warnings,
         }
         _cache_put(per_set_cache_keys[name], out_one, ttl=_CACHE_TTL_ANALYTICS)
         results[name] = out_one

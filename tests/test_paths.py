@@ -34,8 +34,12 @@ def test_platform_defaults(tmp_path, monkeypatch):
 
 def test_state_files_are_in_the_data_dir_not_the_package():
     pkg = Path(persistence.__file__).resolve().parent
-    for f in (persistence._VIEWS_FILE, persistence._WATCHLISTS_FILE,
-              persistence._MPT_FILE, persistence._COLUMN_VIEWS_FILE):
+    for f in (
+        persistence._VIEWS_FILE,
+        persistence._WATCHLISTS_FILE,
+        persistence._MPT_FILE,
+        persistence._COLUMN_VIEWS_FILE,
+    ):
         assert f.parent.name == "state"
         assert pkg not in f.parents and pkg.parent not in f.parents
 

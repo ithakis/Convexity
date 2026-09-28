@@ -18,6 +18,7 @@ Usage:
     python ml/scripts/06_build_features.py            # full run
     python ml/scripts/06_build_features.py --sample   # 200k-row smoke test
 """
+
 from __future__ import annotations
 
 import argparse
@@ -106,13 +107,17 @@ def build_shards(sample: bool) -> None:
     quotas = {}
     for _, r in strata.iterrows():
         prop = int(round(r["n"] * budget / total))
-        quotas[(int(r["year"]), r["session_class"])] = min(int(r["n"]),
-                                                           max(prop, min(int(r["n"]), STRATUM_FLOOR if not sample else prop)))
-    qdf = pd.DataFrame([(y, s, q) for (y, s), q in quotas.items()],
-                       columns=["year", "session_class", "quota"])
+        quotas[(int(r["year"]), r["session_class"])] = min(
+            int(r["n"]), max(prop, min(int(r["n"]), STRATUM_FLOOR if not sample else prop))
+        )
+    qdf = pd.DataFrame(
+        [(y, s, q) for (y, s), q in quotas.items()], columns=["year", "session_class", "quota"]
+    )
     con.register("quotas", qdf)
-    print(f"train pool {total:,} -> budget {budget:,} "
-          f"(quota sum {int(qdf['quota'].sum()):,})", flush=True)
+    print(
+        f"train pool {total:,} -> budget {budget:,} (quota sum {int(qdf['quota'].sum()):,})",
+        flush=True,
+    )
 
     for split, where, order in (
         ("train", f"""d1 < DATE '{config.TEST_START}' AND rn <= quota""", "d1, row_key"),
@@ -153,31 +158,73 @@ def build_shards(sample: bool) -> None:
                 continue
             pub_tier = df["publisher"].map(mf.publisher_tier).astype("float32")
             rel = np.fromiter(
-                (relevance_score(t, s, sym, names.get(sym), int(co), float(pt))
-                 for t, s, sym, co, pt in zip(df["title"], df["summary"], df["symbol"],
-                                              df["co_mention_count"], pub_tier)),
-                dtype="float32", count=len(df))
-            arts = ({"title": t, "summary": s, "publisher_tier": pt, "relevance": r,
-                     "n_duplicates": nd, "co_mention_count": co, "session_class": sc,
-                     "day_of_week": dw, "month": mo, "spy_ret_1d": s1, "spy_ret_5d": s5,
-                     "spy_vol_20d": sv, "tkr_ret_5d": t5}
-                    for t, s, pt, r, nd, co, sc, dw, mo, s1, s5, sv, t5 in zip(
-                        df["title"], df["summary"], pub_tier, rel, df["n_duplicates"],
-                        df["co_mention_count"], df["session_class"], df["day_of_week"],
-                        df["month"], df["spy_ret_1d"], df["spy_ret_5d"],
-                        df["spy_vol_20d"], df["tkr_ret_5d"]))
+                (
+                    relevance_score(t, s, sym, names.get(sym), int(co), float(pt))
+                    for t, s, sym, co, pt in zip(
+                        df["title"], df["summary"], df["symbol"], df["co_mention_count"], pub_tier
+                    )
+                ),
+                dtype="float32",
+                count=len(df),
+            )
+            arts = (
+                {
+                    "title": t,
+                    "summary": s,
+                    "publisher_tier": pt,
+                    "relevance": r,
+                    "n_duplicates": nd,
+                    "co_mention_count": co,
+                    "session_class": sc,
+                    "day_of_week": dw,
+                    "month": mo,
+                    "spy_ret_1d": s1,
+                    "spy_ret_5d": s5,
+                    "spy_vol_20d": sv,
+                    "tkr_ret_5d": t5,
+                }
+                for t, s, pt, r, nd, co, sc, dw, mo, s1, s5, sv, t5 in zip(
+                    df["title"],
+                    df["summary"],
+                    pub_tier,
+                    rel,
+                    df["n_duplicates"],
+                    df["co_mention_count"],
+                    df["session_class"],
+                    df["day_of_week"],
+                    df["month"],
+                    df["spy_ret_1d"],
+                    df["spy_ret_5d"],
+                    df["spy_vol_20d"],
+                    df["tkr_ret_5d"],
+                )
+            )
             dense = np.asarray([mf.dense_vector(a) for a in arts], dtype="float32")
             np.nan_to_num(dense, copy=False)
             counts = mf.hash_counts(
-                [mf.text_for_hashing(t, s) for t, s in zip(df["title"], df["summary"])])
+                [mf.text_for_hashing(t, s) for t, s in zip(df["title"], df["summary"])]
+            )
 
             sp.save_npz(out_dir / f"counts_{shard:04d}.npz", counts)
             np.save(out_dir / f"dense_{shard:04d}.npy", dense)
             df["relevance"] = rel
             df["publisher_tier"] = pub_tier
-            meta_cols = ["symbol", "d0", "d1", "session_class", "sar", "abn",
-                         "r_cc_baseline", "group_weight", "group_size", "n_duplicates",
-                         "relevance", "publisher_tier", "dollar_vol", "year"]
+            meta_cols = [
+                "symbol",
+                "d0",
+                "d1",
+                "session_class",
+                "sar",
+                "abn",
+                "r_cc_baseline",
+                "group_weight",
+                "group_size",
+                "n_duplicates",
+                "relevance",
+                "publisher_tier",
+                "dollar_vol",
+                "year",
+            ]
             df[meta_cols].to_parquet(out_dir / f"meta_{shard:04d}.parquet", index=False)
             n_rows += len(df)
             shard += 1
@@ -196,11 +243,10 @@ def build_idf() -> None:
     mats = (sp.load_npz(p) for p in sorted(train_dir.glob("counts_*.npz")))
     idf = mf.fit_idf(mats)
     np.save(config.FEATURES_DIR / "idf.npy", idf)
-    print(f"idf fitted: {int((idf > np.log(2)).sum()):,} buckets seen in <=50% of docs",
-          flush=True)
+    print(f"idf fitted: {int((idf > np.log(2)).sum()):,} buckets seen in <=50% of docs", flush=True)
 
 
-def build_mask(k: int = 2 ** 16) -> None:
+def build_mask(k: int = 2**16) -> None:
     """Keep the top-k hash buckets by TRAIN document frequency.
 
     LightGBM's sparse multi-val bin construction cost scales with column
@@ -213,7 +259,7 @@ def build_mask(k: int = 2 ** 16) -> None:
     import scipy.sparse as sp
 
     train_dir = config.FEATURES_DIR / "train"
-    df = np.zeros(2 ** 18, dtype="int64")
+    df = np.zeros(2**18, dtype="int64")
     for p in sorted(train_dir.glob("counts_*.npz")):
         m = sp.load_npz(p)
         m.data = (m.data > 0).astype("float32")
@@ -221,9 +267,12 @@ def build_mask(k: int = 2 ** 16) -> None:
     mask = np.sort(np.argsort(df)[::-1][:k]).astype("int32")
     np.save(config.FEATURES_DIR / "col_mask.npy", mask)
     kept = df[mask].sum() / max(1, df.sum())
-    print(f"column mask: kept {k:,}/{len(df):,} buckets covering "
-          f"{100*kept:.1f}% of doc-term incidences "
-          f"(df cutoff ~{int(df[mask].min())})", flush=True)
+    print(
+        f"column mask: kept {k:,}/{len(df):,} buckets covering "
+        f"{100 * kept:.1f}% of doc-term incidences "
+        f"(df cutoff ~{int(df[mask].min())})",
+        flush=True,
+    )
 
 
 # =========================================================== v2: ticker-day
@@ -256,48 +305,85 @@ def _articles_worker(args):
     import scipy.sparse as sp
 
     from convexity import ml_features as mf
-    from convexity.relevance import (is_boilerplate, load_company_names,
-                                             relevance_score)
+    from convexity.relevance import is_boilerplate, load_company_names, relevance_score
 
     shard, df = args
     names = load_company_names()
     pub_tier = df["publisher"].map(mf.publisher_tier).astype("float32")
     rel = np.fromiter(
-        (relevance_score(t, s, sym, names.get(sym), int(co), float(pt))
-         for t, s, sym, co, pt in zip(df["title"], df["summary"], df["symbol"],
-                                      df["co_mention_count"], pub_tier)),
-        dtype="float32", count=len(df))
-    arts = ({"title": t, "summary": s, "publisher_tier": pt, "relevance": r,
-             "n_duplicates": nd, "co_mention_count": co, "session_class": sc,
-             "day_of_week": dw, "month": mo, "spy_ret_1d": s1, "spy_ret_5d": s5,
-             "spy_vol_20d": sv, "tkr_ret_5d": t5}
-            for t, s, pt, r, nd, co, sc, dw, mo, s1, s5, sv, t5 in zip(
-                df["title"], df["summary"], pub_tier, rel, df["n_duplicates"],
-                df["co_mention_count"], df["session_class"], df["day_of_week"],
-                df["month"], df["spy_ret_1d"], df["spy_ret_5d"],
-                df["spy_vol_20d"], df["tkr_ret_5d"]))
+        (
+            relevance_score(t, s, sym, names.get(sym), int(co), float(pt))
+            for t, s, sym, co, pt in zip(
+                df["title"], df["summary"], df["symbol"], df["co_mention_count"], pub_tier
+            )
+        ),
+        dtype="float32",
+        count=len(df),
+    )
+    arts = (
+        {
+            "title": t,
+            "summary": s,
+            "publisher_tier": pt,
+            "relevance": r,
+            "n_duplicates": nd,
+            "co_mention_count": co,
+            "session_class": sc,
+            "day_of_week": dw,
+            "month": mo,
+            "spy_ret_1d": s1,
+            "spy_ret_5d": s5,
+            "spy_vol_20d": sv,
+            "tkr_ret_5d": t5,
+        }
+        for t, s, pt, r, nd, co, sc, dw, mo, s1, s5, sv, t5 in zip(
+            df["title"],
+            df["summary"],
+            pub_tier,
+            rel,
+            df["n_duplicates"],
+            df["co_mention_count"],
+            df["session_class"],
+            df["day_of_week"],
+            df["month"],
+            df["spy_ret_1d"],
+            df["spy_ret_5d"],
+            df["spy_vol_20d"],
+            df["tkr_ret_5d"],
+        )
+    )
     dense = np.asarray([mf.dense_vector(a) for a in arts], dtype="float32")
     np.nan_to_num(dense, copy=False)
-    counts = mf.hash_counts(
-        [mf.text_for_hashing(t, s) for t, s in zip(df["title"], df["summary"])])
+    counts = mf.hash_counts([mf.text_for_hashing(t, s) for t, s in zip(df["title"], df["summary"])])
     sp.save_npz(ARTICLES_DIR / f"counts_{shard:04d}.npz", counts)
     np.save(ARTICLES_DIR / f"dense_{shard:04d}.npy", dense)
 
     lm_col = mf.DENSE_COLUMNS.index("lm_score")
     miss_col = mf.DENSE_COLUMNS.index("lm_missing")
     unc_col = mf.DENSE_COLUMNS.index("uncertainty_ratio")
-    meta = df[["row_key", "symbol", "edate", "d1", "year", "session_class",
-               "sar", "group_weight", "n_duplicates"]].copy()
+    meta = df[
+        [
+            "row_key",
+            "symbol",
+            "edate",
+            "d1",
+            "year",
+            "session_class",
+            "sar",
+            "group_weight",
+            "n_duplicates",
+        ]
+    ].copy()
     meta["publisher_tier"] = pub_tier.to_numpy()
     meta["relevance"] = rel
     meta["lm"] = np.where(dense[:, miss_col] > 0, np.nan, dense[:, lm_col])
     meta["unc"] = dense[:, unc_col]
-    meta["boiler"] = np.fromiter((is_boilerplate(t) for t in df["title"]),
-                                 dtype="int8", count=len(df))
+    meta["boiler"] = np.fromiter(
+        (is_boilerplate(t) for t in df["title"]), dtype="int8", count=len(df)
+    )
     con = duckdb.connect()
     con.register("m", meta)
-    con.execute(f"COPY m TO '{ARTICLES_DIR / f'meta_{shard:04d}.parquet'}' "
-                f"(FORMAT parquet)")
+    con.execute(f"COPY m TO '{ARTICLES_DIR / f'meta_{shard:04d}.parquet'}' (FORMAT parquet)")
     return shard, len(df)
 
 
@@ -319,8 +405,12 @@ def build_articles() -> None:
     tmp = config.DATA_DIR / "duckdb_tmp"
     tmp.mkdir(parents=True, exist_ok=True)
     con.execute(f"PRAGMA temp_directory='{tmp}'")
-    years = [y for (y,) in con.execute(
-        f"SELECT DISTINCT year FROM read_parquet('{ENRICHED_PARQUET}') ORDER BY 1").fetchall()]
+    years = [
+        y
+        for (y,) in con.execute(
+            f"SELECT DISTINCT year FROM read_parquet('{ENRICHED_PARQUET}') ORDER BY 1"
+        ).fetchall()
+    ]
     n_proc = max(1, config.N_JOBS - 1)
     t0 = time.time()
     done = 0
@@ -347,12 +437,16 @@ def build_articles() -> None:
                 # bounded in-flight queue: never hold more than 2 chunks per worker
                 while len(pending) >= 2 * n_proc:
                     done += pending.pop(0).get()[1]
-            print(f"  articles: year {year} queued ({shard} shards), {done:,} rows done "
-                  f"({(time.time()-t0)/60:.1f} min)", flush=True)
+            print(
+                f"  articles: year {year} queued ({shard} shards), {done:,} rows done "
+                f"({(time.time() - t0) / 60:.1f} min)",
+                flush=True,
+            )
         for p in pending:
             done += p.get()[1]
-    print(f"articles: {shard} shards, {done:,} rows in {(time.time()-t0)/60:.1f} min",
-          flush=True)
+    print(
+        f"articles: {shard} shards, {done:,} rows in {(time.time() - t0) / 60:.1f} min", flush=True
+    )
 
 
 def _article_shards():
@@ -362,8 +456,11 @@ def _article_shards():
 def _read_meta(i: int, cols: str = "*"):
     import duckdb
 
-    return duckdb.connect().execute(
-        f"SELECT {cols} FROM read_parquet('{ARTICLES_DIR / f'meta_{i:04d}.parquet'}')").df()
+    return (
+        duckdb.connect()
+        .execute(f"SELECT {cols} FROM read_parquet('{ARTICLES_DIR / f'meta_{i:04d}.parquet'}')")
+        .df()
+    )
 
 
 def _shard_matrix(i: int, idf, mask, rows=None):
@@ -394,8 +491,15 @@ def build_encoder_preds() -> None:
     cfg = json.loads((art / "train_metrics.json").read_text())["best_config"]
     deployed = lgb.Booster(model_file=str(art / "model.lgbm.txt"))
     params = {k: v for k, v in cfg.items() if k not in ("n_estimators", "log_max_bin")}
-    params.update({"objective": "regression", "verbosity": -1, "seed": config.SEED,
-                   "num_threads": config.N_JOBS, "max_bin": 2 ** int(cfg["log_max_bin"]) - 1})
+    params.update(
+        {
+            "objective": "regression",
+            "verbosity": -1,
+            "seed": config.SEED,
+            "num_threads": config.N_JOBS,
+            "max_bin": 2 ** int(cfg["log_max_bin"]) - 1,
+        }
+    )
     n_trees = int(cfg["n_estimators"])
 
     shards = _article_shards()
@@ -408,7 +512,7 @@ def build_encoder_preds() -> None:
     v1 = {}
     for i in shards:
         v1[i] = deployed.predict(_shard_matrix(i, idf, mask)).astype("float32")
-    print(f"encoder: deployed preds for all rows ({(time.time()-t0)/60:.1f} min)", flush=True)
+    print(f"encoder: deployed preds for all rows ({(time.time() - t0) / 60:.1f} min)", flush=True)
 
     # 2) expanding-window cross-fits, one per calendar year (2023: H1 only)
     test_start = np.datetime64(config.TEST_START)
@@ -431,8 +535,9 @@ def build_encoder_preds() -> None:
         X = sp.vstack(Xs, format="csr")
         y, w = np.concatenate(ys), np.concatenate(ws)
         del Xs
-        bst = lgb.train(params, lgb.Dataset(X, y, weight=w, free_raw_data=True),
-                        num_boost_round=n_trees)
+        bst = lgb.train(
+            params, lgb.Dataset(X, y, weight=w, free_raw_data=True), num_boost_round=n_trees
+        )
         del X
         n_pred = 0
         for i in shards:
@@ -440,15 +545,19 @@ def build_encoder_preds() -> None:
             if len(sel):
                 xfit[i][sel] = bst.predict(_shard_matrix(i, idf, mask, sel))
                 n_pred += len(sel)
-        print(f"  encoder {year}: trained on {len(y):,} rows (d1 < {lo}), "
-              f"scored {n_pred:,} ({(time.time()-t0)/60:.1f} min)", flush=True)
+        print(
+            f"  encoder {year}: trained on {len(y):,} rows (d1 < {lo}), "
+            f"scored {n_pred:,} ({(time.time() - t0) / 60:.1f} min)",
+            flush=True,
+        )
 
     for i in shards:
         hold = d1s[i] >= test_start
         xfit[i][hold] = v1[i][hold]
-        np.save(ARTICLES_DIR / f"pred_{i:04d}.npy",
-                np.stack([xfit[i], v1[i]], axis=1).astype("float32"))
-    print(f"encoder: done in {(time.time()-t0)/60:.1f} min", flush=True)
+        np.save(
+            ARTICLES_DIR / f"pred_{i:04d}.npy", np.stack([xfit[i], v1[i]], axis=1).astype("float32")
+        )
+    print(f"encoder: done in {(time.time() - t0) / 60:.1f} min", flush=True)
 
 
 PANEL_PARQUET = config.FEATURES_DIR / "panel.parquet"
@@ -470,33 +579,59 @@ def _panel_worker(batch):
     syms, nums = [], []
     for sym, A, Dd in batch:
         ed = A["eday"]
-        arts = [{"sar_pred": float(p) if p == p else None,
-                 "sar_v1": float(v),
-                 "lm": float(lm) if lm == lm else None, "unc": float(u),
-                 "publisher_tier": float(pt), "n_duplicates": int(nd),
-                 "relevance": float(r), "boiler": bool(b),
-                 "datetime": float(e) * 86400.0 + _NOON_ET_S}
-                for p, v, lm, u, pt, nd, r, b, e in zip(
-                    A["pred"], A["v1"], A["lm"], A["unc"], A["publisher_tier"],
-                    A["n_duplicates"], A["relevance"], A["boiler"], ed)]
+        arts = [
+            {
+                "sar_pred": float(p) if p == p else None,
+                "sar_v1": float(v),
+                "lm": float(lm) if lm == lm else None,
+                "unc": float(u),
+                "publisher_tier": float(pt),
+                "n_duplicates": int(nd),
+                "relevance": float(r),
+                "boiler": bool(b),
+                "datetime": float(e) * 86400.0 + _NOON_ET_S,
+            }
+            for p, v, lm, u, pt, nd, r, b, e in zip(
+                A["pred"],
+                A["v1"],
+                A["lm"],
+                A["unc"],
+                A["publisher_tier"],
+                A["n_duplicates"],
+                A["relevance"],
+                A["boiler"],
+                ed,
+            )
+        ]
         days = Dd["dday"]
         lo_a = np.searchsorted(ed, days - (mf.WINDOW_DAYS - 1), "left")
         hi_a = np.searchsorted(ed, days, "right")
-        base_a = np.searchsorted(ed, days - (mf.WINDOW_DAYS - 1 + mf.ATTN_BASE_DAYS),
-                                 "left")
+        base_a = np.searchsorted(ed, days - (mf.WINDOW_DAYS - 1 + mf.ATTN_BASE_DAYS), "left")
         for j in np.flatnonzero(hi_a > lo_a):
             lo, hi = int(lo_a[j]), int(hi_a[j])
             now = float(days[j]) * 86400.0 + _CLOSE_ET_S
             # newest-first, then the app's exact retention cap (parity)
             win = window_sample(arts[lo:hi][::-1], mf.WINDOW_CAP, mf.WINDOW_MIN_RECENT)
             price = {c: Dd[c][j] for c in mf.PRICE_COLUMNS}
-            feats = mf.window_vector(win, now, (hi - lo) / mf.WINDOW_DAYS,
-                                     (lo - int(base_a[j])) / mf.ATTN_BASE_DAYS, price)
+            feats = mf.window_vector(
+                win,
+                now,
+                (hi - lo) / mf.WINDOW_DAYS,
+                (lo - int(base_a[j])) / mf.ATTN_BASE_DAYS,
+                price,
+            )
             v1_wmean, v1_wsum = mf.weighted_sar(win, now, key="sar_v1")
             syms.append(sym)
-            nums.append((float(days[j]), *feats,
-                         math.nan if v1_wmean is None else v1_wmean, v1_wsum, hi - lo,
-                         *[Dd[c][j] for c in _LABEL_COLS]))
+            nums.append(
+                (
+                    float(days[j]),
+                    *feats,
+                    math.nan if v1_wmean is None else v1_wmean,
+                    v1_wsum,
+                    hi - lo,
+                    *[Dd[c][j] for c in _LABEL_COLS],
+                )
+            )
     # float64 so the day number (~19k) and tiny SAR predictions stay exact;
     # the parent narrows to float32 per column after assembly.
     return syms, np.asarray(nums, dtype="float64").reshape(len(nums), -1)
@@ -514,41 +649,49 @@ def build_panel() -> None:
     t0 = time.time()
     frames = []
     for i in _article_shards():
-        m = _read_meta(i, "symbol, edate, publisher_tier, relevance, n_duplicates, "
-                          "lm, unc, boiler")
+        m = _read_meta(i, "symbol, edate, publisher_tier, relevance, n_duplicates, lm, unc, boiler")
         pr = np.load(ARTICLES_DIR / f"pred_{i:04d}.npy")
         m["pred"], m["v1"] = pr[:, 0], pr[:, 1]
         frames.append(m)
     arts = pd.concat(frames, ignore_index=True)
     del frames
-    arts["eday"] = (arts["edate"].astype("datetime64[s]").astype("int64") // 86400)
+    arts["eday"] = arts["edate"].astype("datetime64[s]").astype("int64") // 86400
     arts = arts.drop(columns=["edate"]).sort_values(["symbol", "eday"], kind="stable")
-    print(f"panel: {len(arts):,} articles loaded ({(time.time()-t0)/60:.1f} min)", flush=True)
+    print(f"panel: {len(arts):,} articles loaded ({(time.time() - t0) / 60:.1f} min)", flush=True)
 
     con = duckdb.connect()
     td = con.execute(f"""
-        SELECT symbol, date, {', '.join(_LABEL_COLS)}, {', '.join(mf.PRICE_COLUMNS)}
-        FROM read_parquet('{config.PARQUET_DIR / 'ticker_day.parquet'}')
+        SELECT symbol, date, {", ".join(_LABEL_COLS)}, {", ".join(mf.PRICE_COLUMNS)}
+        FROM read_parquet('{config.PARQUET_DIR / "ticker_day.parquet"}')
         ORDER BY symbol, date
     """).df()
     td["dday"] = td["date"].astype("datetime64[s]").astype("int64") // 86400
     print(f"panel: {len(td):,} ticker-days loaded", flush=True)
 
     a_groups = {s: g for s, g in arts.groupby("symbol", sort=False)}
-    a_cols = ["eday", "pred", "v1", "lm", "unc", "publisher_tier", "n_duplicates",
-              "relevance", "boiler"]
+    a_cols = [
+        "eday",
+        "pred",
+        "v1",
+        "lm",
+        "unc",
+        "publisher_tier",
+        "n_duplicates",
+        "relevance",
+        "boiler",
+    ]
     d_cols = ["dday", *_LABEL_COLS, *mf.PRICE_COLUMNS]
     items = []
     for sym, g in td.groupby("symbol", sort=False):
         ag = a_groups.get(sym)
         if ag is None:
             continue
-        items.append((sym, {c: ag[c].to_numpy() for c in a_cols},
-                      {c: g[c].to_numpy() for c in d_cols}))
+        items.append(
+            (sym, {c: ag[c].to_numpy() for c in a_cols}, {c: g[c].to_numpy() for c in d_cols})
+        )
     del arts, a_groups, td
     batches = [items[k::64] for k in range(64)]
-    cols = ["symbol", "dday", *mf.WINDOW_COLUMNS, "v1_wmean", "v1_wsum", "n_win",
-            *_LABEL_COLS]
+    cols = ["symbol", "dday", *mf.WINDOW_COLUMNS, "v1_wmean", "v1_wsum", "n_win", *_LABEL_COLS]
     sym_parts, num_parts = [], []
     with mp.get_context("spawn").Pool(max(1, config.N_JOBS - 1)) as pool:
         for k, (syms, nums) in enumerate(pool.imap_unordered(_panel_worker, batches)):
@@ -556,13 +699,16 @@ def build_panel() -> None:
                 sym_parts.append(np.asarray(syms, dtype=object))
                 num_parts.append(nums.astype("float32"))
             if (k + 1) % 8 == 0:
-                print(f"  panel: {k + 1}/64 batches, "
-                      f"{sum(len(x) for x in sym_parts):,} rows "
-                      f"({(time.time()-t0)/60:.1f} min)", flush=True)
+                print(
+                    f"  panel: {k + 1}/64 batches, "
+                    f"{sum(len(x) for x in sym_parts):,} rows "
+                    f"({(time.time() - t0) / 60:.1f} min)",
+                    flush=True,
+                )
     num = np.concatenate(num_parts)
     del num_parts
     panel = pd.DataFrame(num[:, 1:], columns=cols[2:])
-    panel.insert(0, "dday", num[:, 0].astype("int64"))   # day numbers are exact in f32
+    panel.insert(0, "dday", num[:, 0].astype("int64"))  # day numbers are exact in f32
     panel.insert(0, "symbol", np.concatenate(sym_parts))
     del num, sym_parts
     panel["date"] = pd.to_datetime(panel["dday"] * 86400, unit="s").dt.date
@@ -572,15 +718,21 @@ def build_panel() -> None:
             panel[c] = panel[c].astype("float32")
     con.register("p", panel)
     con.execute(f"COPY p TO '{PANEL_PARQUET}' (FORMAT parquet, COMPRESSION zstd)")
-    print(f"panel: {len(panel):,} ticker-days, {panel['symbol'].nunique():,} symbols "
-          f"({(time.time()-t0)/60:.1f} min)", flush=True)
+    print(
+        f"panel: {len(panel):,} ticker-days, {panel['symbol'].nunique():,} symbols "
+        f"({(time.time() - t0) / 60:.1f} min)",
+        flush=True,
+    )
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample", action="store_true")
-    ap.add_argument("--stage", choices=["enrich", "shards", "idf", "mask",
-                                        "articles", "encoder", "panel"], default=None)
+    ap.add_argument(
+        "--stage",
+        choices=["enrich", "shards", "idf", "mask", "articles", "encoder", "panel"],
+        default=None,
+    )
     args = ap.parse_args()
     config.ensure_dirs()
     t0 = time.time()
@@ -599,7 +751,7 @@ def main() -> None:
         build_encoder_preds()
     if "panel" in stages:
         build_panel()
-    print(f"done in {(time.time()-t0)/60:.1f} min", flush=True)
+    print(f"done in {(time.time() - t0) / 60:.1f} min", flush=True)
 
 
 if __name__ == "__main__":

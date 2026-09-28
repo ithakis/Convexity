@@ -68,6 +68,7 @@ DISP_HORIZON = 30
 # Returns + covariance
 # ---------------------------------------------------------------------------
 
+
 def compute_returns(closes: pd.DataFrame, freq: str = "daily") -> pd.DataFrame:
     """Resample close prices to the requested frequency and return pct-change.
 
@@ -180,6 +181,7 @@ def annualized_cov(returns: pd.DataFrame, freq: str, model: str = "ledoit") -> p
 # excess space is the standard BL convention and keeps δ, Π and the views on the
 # same footing.
 
+
 def black_litterman(
     symbols: list[str],
     cov: pd.DataFrame,
@@ -263,8 +265,8 @@ def black_litterman(
             Q = np.array(qs, dtype=float)
             Omega = np.diag(np.array(omegas, dtype=float))
             tS = tau * Sig
-            tSP = tS[:, idx]                 # τΣ Pᵀ  (n×k)
-            PtSP = tS[np.ix_(idx, idx)]      # P τΣ Pᵀ (k×k)
+            tSP = tS[:, idx]  # τΣ Pᵀ  (n×k)
+            PtSP = tS[np.ix_(idx, idx)]  # P τΣ Pᵀ (k×k)
             k = idx.size
             A = PtSP + Omega + 1e-12 * np.eye(k)
             adj = tSP @ np.linalg.solve(A, Q - pi[idx])
@@ -292,6 +294,7 @@ def black_litterman(
 # CVaR / drawdown helpers (empirical, on a portfolio's scenario returns)
 # ---------------------------------------------------------------------------
 
+
 def _tail_count(t: int, level: float) -> int:
     """Number of observations in the worst (1-level) tail = ceil((1-level)·t).
 
@@ -312,7 +315,7 @@ def cvar_of(port_ret: np.ndarray, alpha: float) -> float:
     if t == 0:
         return float("nan")
     k = _tail_count(t, alpha)
-    worst = np.sort(r)[:k]          # k smallest returns (largest losses)
+    worst = np.sort(r)[:k]  # k smallest returns (largest losses)
     return float(-worst.mean())
 
 
@@ -338,7 +341,7 @@ def cdar(port_ret: np.ndarray, beta: float = 0.95) -> float:
     peak = np.maximum.accumulate(curve)
     dd = 1.0 - curve / peak
     k = _tail_count(dd.size, beta)
-    worst = np.sort(dd)[::-1][:k]   # k largest drawdowns
+    worst = np.sort(dd)[::-1][:k]  # k largest drawdowns
     return float(worst.mean())
 
 
@@ -360,17 +363,17 @@ def overlapping_h_returns(port_ret: np.ndarray, h: int) -> np.ndarray:
         # degenerate branch exactly so cloud and frontier CVaR never disagree.
         # Unreachable in the real pipeline (≥60-obs floor upstream).
         return np.array([float(np.prod(1.0 + r) - 1.0)], dtype=float)
-    g = np.cumprod(1.0 + r)              # g[i] = ∏_{0..i}(1+r)
-    num = g[h - 1:]                      # ∏_{0..i+h-1}, length T−h+1
+    g = np.cumprod(1.0 + r)  # g[i] = ∏_{0..i}(1+r)
+    num = g[h - 1 :]  # ∏_{0..i+h-1}, length T−h+1
     prev = np.empty(t - h + 1, dtype=float)
-    prev[0] = 1.0                        # first window has no prior product
-    prev[1:] = g[:t - h]                 # g[i-1] for i ≥ 1
+    prev[0] = 1.0  # first window has no prior product
+    prev[1:] = g[: t - h]  # g[i-1] for i ≥ 1
     return num / prev - 1.0
 
 
-def var_cvar_horizon(port_ret: np.ndarray, alpha: float,
-                     h_base: int = LIQ_HORIZON,
-                     h_target: int = DISP_HORIZON) -> tuple[float, float]:
+def var_cvar_horizon(
+    port_ret: np.ndarray, alpha: float, h_base: int = LIQ_HORIZON, h_target: int = DISP_HORIZON
+) -> tuple[float, float]:
     """Empirical (VaR, CVaR) on overlapping ``h_base``-day returns, √-scaled to ``h_target``.
 
     Both are positive expected-loss fractions at confidence ``alpha``. VaR is the
@@ -382,10 +385,10 @@ def var_cvar_horizon(port_ret: np.ndarray, alpha: float,
     if rh.size == 0:
         return float("nan"), float("nan")
     k = _tail_count(rh.size, alpha)
-    worst = np.sort(rh)[:k]             # k smallest returns = k largest losses
+    worst = np.sort(rh)[:k]  # k smallest returns = k largest losses
     scale = math.sqrt(float(h_target) / float(h_base))
     cvar = float(-worst.mean() * scale)
-    var = float(-worst[-1] * scale)    # least-extreme of the tail = the quantile
+    var = float(-worst[-1] * scale)  # least-extreme of the tail = the quantile
     return var, cvar
 
 
@@ -406,8 +409,7 @@ def asset_risk_stats(returns: pd.DataFrame, alpha: float) -> dict[str, dict]:
         total = float(np.prod(1.0 + col) - 1.0)
         # 1+total = ∏(1+r) ≥ 0 (a daily return can't be < −1), so the fractional
         # power is real; a wiped-out asset (total ≤ −1) annualizes to −100%.
-        ann = (float((1.0 + total) ** (TRADING_DAYS / col.size) - 1.0)
-               if total > -1.0 else -1.0)
+        ann = float((1.0 + total) ** (TRADING_DAYS / col.size) - 1.0) if total > -1.0 else -1.0
         # Guard against a huge gain on a very short series blowing up the exponent
         # (e.g. 1.5**252 → inf); surface NaN rather than a garbage tooltip number.
         if not math.isfinite(ann):
@@ -461,7 +463,11 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
     # ---- starting point (interior, infeasible allowed) ----
     w = np.empty(N)
     for i in range(N):
-        w[i] = min(max(1.0 / N, l[i] + 1e-3), h[i] - 1e-3) if h[i] - l[i] > 2e-3 else 0.5 * (l[i] + h[i])
+        w[i] = (
+            min(max(1.0 / N, l[i] + 1e-3), h[i] - 1e-3)
+            if h[i] - l[i] > 2e-3
+            else 0.5 * (l[i] + h[i])
+        )
     zeta = 0.0
     # portfolio scenario returns at start
     u = np.empty(T)
@@ -469,14 +475,16 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
         rt = 0.0
         for i in range(N):
             rt += R[t, i] * w[i]
-        u[t] = abs(rt) + 1.0   # ensures s_S = rt+zeta+u > 0 and u > 0
+        u[t] = abs(rt) + 1.0  # ensures s_S = rt+zeta+u > 0 and u > 0
 
     # slacks
-    sL = np.empty(N); sU = np.empty(N)
+    sL = np.empty(N)
+    sU = np.empty(N)
     for i in range(N):
         sL[i] = max(w[i] - l[i], 1e-6)
         sU[i] = max(h[i] - w[i], 1e-6)
-    sN = np.empty(T); sS = np.empty(T)
+    sN = np.empty(T)
+    sS = np.empty(T)
     for t in range(T):
         sN[t] = max(u[t], 1e-6)
         rt = 0.0
@@ -496,11 +504,13 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
     # of λ=1. This also neutralises a disabled return floor (s_R≈1e18 ⇒ λ_R≈1e-18
     # ⇒ product ≈ 1, so it never pollutes the duality measure) and typically
     # halves iterations vs a flat λ=1 start.
-    lL = np.empty(N); lU = np.empty(N)
+    lL = np.empty(N)
+    lU = np.empty(N)
     for i in range(N):
         lL[i] = 1.0 / sL[i]
         lU[i] = 1.0 / sU[i]
-    lN = np.empty(T); lS = np.empty(T)
+    lN = np.empty(T)
+    lS = np.empty(T)
     for t in range(T):
         lN[t] = 1.0 / sN[t]
         lS[t] = 1.0 / sS[t]
@@ -541,18 +551,21 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
         # ---- primal residuals r_p = Gz + s - q (per group) ----
         # For s defined independently we track r_p to drive feasibility.
         # r_p_L = (-w + sL) - (-l) = sL - (w - l)
-        rpL = np.empty(N); rpU = np.empty(N)
+        rpL = np.empty(N)
+        rpU = np.empty(N)
         for i in range(N):
             rpL[i] = sL[i] - (w[i] - l[i])
             rpU[i] = sU[i] - (h[i] - w[i])
-        rpN = np.empty(T); rpS = np.empty(T)
+        rpN = np.empty(T)
+        rpS = np.empty(T)
         for t in range(T):
             rt = 0.0
             for i in range(N):
                 rt += R[t, i] * w[i]
             rpN[t] = sN[t] - u[t]
             rpS[t] = sS[t] - (rt + zeta + u[t])
-        aw = 0.0; sumw = 0.0
+        aw = 0.0
+        sumw = 0.0
         for i in range(N):
             aw += a_ret[i] * w[i]
             sumw += w[i]
@@ -611,8 +624,8 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
         for t in range(T):
             for i in range(N):
                 Rg[t, i] = g[t] * R[t, i]
-        RtGR = R.T @ Rg              # N×N
-        RtG = np.empty(N)            # Σ_t g_t R_t
+        RtGR = R.T @ Rg  # N×N
+        RtG = np.empty(N)  # Σ_t g_t R_t
         gsum = 0.0
         for t in range(T):
             gsum += g[t]
@@ -650,38 +663,69 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
 
         # ================= affine predictor (sigma=0) =================
         # tv_* = (r_c - lam*rp)/s  with r_c = lam*s  ->  tv = lam - lam*rp/s
-        tvL = np.empty(N); tvU = np.empty(N)
+        tvL = np.empty(N)
+        tvU = np.empty(N)
         for i in range(N):
             tvL[i] = lL[i] - lL[i] * rpL[i] / sL[i]
             tvU[i] = lU[i] - lU[i] * rpU[i] / sU[i]
-        tvN = np.empty(T); tvS = np.empty(T)
+        tvN = np.empty(T)
+        tvS = np.empty(T)
         for t in range(T):
             tvN[t] = lN[t] - lN[t] * rpN[t] / sN[t]
             tvS[t] = lS[t] - lS[t] * rpS[t] / sS[t]
         tvR = lR - lR * rpR / sR
         tvC = lC - lC * rpC / sC
 
-        dw_a = np.empty(N); dz_a = np.empty(1); du_a = np.empty(T)
+        dw_a = np.empty(N)
+        dz_a = np.empty(1)
+        du_a = np.empty(T)
         dy_a = np.empty(1)
-        _solve_reduced(M, nx, nk, N, T, fully_invested,
-                       rdw, rdz, rdu, rb, tvL, tvU, tvN, tvS, tvR, tvC,
-                       a_ret, R, D5, Ecoef,
-                       dw_a, dz_a, du_a, dy_a)
+        _solve_reduced(
+            M,
+            nx,
+            nk,
+            N,
+            T,
+            fully_invested,
+            rdw,
+            rdz,
+            rdu,
+            rb,
+            tvL,
+            tvU,
+            tvN,
+            tvS,
+            tvR,
+            tvC,
+            a_ret,
+            R,
+            D5,
+            Ecoef,
+            dw_a,
+            dz_a,
+            du_a,
+            dy_a,
+        )
 
         # recover affine Ds, Dlam per group. Ds = -rp - G*Dz ; complementarity
         # (sigma=0): Lam*Ds + S*Dlam = -(lam*s)  ->  Dlam = -lam - lam*Ds/s.
-        dsL_a = np.empty(N); dsU_a = np.empty(N)
-        dlL_a = np.empty(N); dlU_a = np.empty(N)
-        dlN_a = np.empty(T); dlS_a = np.empty(T)
+        dsL_a = np.empty(N)
+        dsU_a = np.empty(N)
+        dlL_a = np.empty(N)
+        dlU_a = np.empty(N)
+        dlN_a = np.empty(T)
+        dlS_a = np.empty(T)
         du_af = du_a
         dz_af = dz_a[0]
         for i in range(N):
             dsL = -rpL[i] - (-dw_a[i])
             dsU = -rpU[i] - dw_a[i]
-            dsL_a[i] = dsL; dsU_a[i] = dsU
+            dsL_a[i] = dsL
+            dsU_a[i] = dsU
             dlL_a[i] = -lL[i] - lL[i] * dsL / sL[i]
             dlU_a[i] = -lU[i] - lU[i] * dsU / sU[i]
-        dsN_a = np.empty(T); dsS_a = np.empty(T)
+        dsN_a = np.empty(T)
+        dsS_a = np.empty(T)
         for t in range(T):
             rdw_t = 0.0
             for i in range(N):
@@ -690,10 +734,12 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
             gzS = -(rdw_t + dz_af + du_af[t])
             dsN = -rpN[t] - gzN
             dsS = -rpS[t] - gzS
-            dsN_a[t] = dsN; dsS_a[t] = dsS
+            dsN_a[t] = dsN
+            dsS_a[t] = dsS
             dlN_a[t] = -lN[t] - lN[t] * dsN / sN[t]
             dlS_a[t] = -lS[t] - lS[t] * dsS / sS[t]
-        adw_r = 0.0; sumdw = 0.0
+        adw_r = 0.0
+        sumdw = 0.0
         for i in range(N):
             adw_r += a_ret[i] * dw_a[i]
             sumdw += dw_a[i]
@@ -706,13 +752,19 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
 
         # affine step length (fraction to boundary on s,λ ≥ 0)
         a_aff = 1.0
-        a_aff = _ratio(a_aff, sL, dsL_a); a_aff = _ratio(a_aff, sU, dsU_a)
-        a_aff = _ratio(a_aff, sN, dsN_a); a_aff = _ratio(a_aff, sS, dsS_a)
-        a_aff = _ratio(a_aff, lL, dlL_a); a_aff = _ratio(a_aff, lU, dlU_a)
-        a_aff = _ratio(a_aff, lN, dlN_a); a_aff = _ratio(a_aff, lS, dlS_a)
-        a_aff = _ratio1(a_aff, sR, dsR_a); a_aff = _ratio1(a_aff, lR, dlR_a)
+        a_aff = _ratio(a_aff, sL, dsL_a)
+        a_aff = _ratio(a_aff, sU, dsU_a)
+        a_aff = _ratio(a_aff, sN, dsN_a)
+        a_aff = _ratio(a_aff, sS, dsS_a)
+        a_aff = _ratio(a_aff, lL, dlL_a)
+        a_aff = _ratio(a_aff, lU, dlU_a)
+        a_aff = _ratio(a_aff, lN, dlN_a)
+        a_aff = _ratio(a_aff, lS, dlS_a)
+        a_aff = _ratio1(a_aff, sR, dsR_a)
+        a_aff = _ratio1(a_aff, lR, dlR_a)
         if fully_invested == 0:
-            a_aff = _ratio1(a_aff, sC, dsC_a); a_aff = _ratio1(a_aff, lC, dlC_a)
+            a_aff = _ratio1(a_aff, sC, dsC_a)
+            a_aff = _ratio1(a_aff, lC, dlC_a)
 
         # mu_aff
         comp_aff = 0.0
@@ -748,23 +800,55 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
         rcC = lC * sC - sig_mu + dsC_a * dlC_a
         tvC = (rcC - lC * rpC) / sC
 
-        dw = np.empty(N); dz = np.empty(1); du = np.empty(T); dyv = np.empty(1)
-        _solve_reduced(M, nx, nk, N, T, fully_invested,
-                       rdw, rdz, rdu, rb, tvL, tvU, tvN, tvS, tvR, tvC,
-                       a_ret, R, D5, Ecoef,
-                       dw, dz, du, dyv)
+        dw = np.empty(N)
+        dz = np.empty(1)
+        du = np.empty(T)
+        dyv = np.empty(1)
+        _solve_reduced(
+            M,
+            nx,
+            nk,
+            N,
+            T,
+            fully_invested,
+            rdw,
+            rdz,
+            rdu,
+            rb,
+            tvL,
+            tvU,
+            tvN,
+            tvS,
+            tvR,
+            tvC,
+            a_ret,
+            R,
+            D5,
+            Ecoef,
+            dw,
+            dz,
+            du,
+            dyv,
+        )
 
         # recover ds, dl for corrector
-        dsL = np.empty(N); dsU = np.empty(N); dlL = np.empty(N); dlU = np.empty(N)
+        dsL = np.empty(N)
+        dsU = np.empty(N)
+        dlL = np.empty(N)
+        dlU = np.empty(N)
         for i in range(N):
-            gzl = -dw[i]; gzu = dw[i]
+            gzl = -dw[i]
+            gzu = dw[i]
             dsL[i] = -rpL[i] - gzl
             dsU[i] = -rpU[i] - gzu
             rcL = lL[i] * sL[i] - sig_mu + dsL_a[i] * dlL_a[i]
             rcU = lU[i] * sU[i] - sig_mu + dsU_a[i] * dlU_a[i]
             dlL[i] = (-rcL - lL[i] * dsL[i]) / sL[i]
             dlU[i] = (-rcU - lU[i] * dsU[i]) / sU[i]
-        dsN = np.empty(T); dsS = np.empty(T); dlN = np.empty(T); dlS = np.empty(T)
+        dsN = np.empty(T)
+        dsS = np.empty(T)
+        dlN = np.empty(T)
+        dlS = np.empty(T)
         dz0 = dz[0]
         for t in range(T):
             rdw_t = 0.0
@@ -778,7 +862,8 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
             rcS = lS[t] * sS[t] - sig_mu + dsS_a[t] * dlS_a[t]
             dlN[t] = (-rcN - lN[t] * dsN[t]) / sN[t]
             dlS[t] = (-rcS - lS[t] * dsS[t]) / sS[t]
-        adw_r = 0.0; sumdw = 0.0
+        adw_r = 0.0
+        sumdw = 0.0
         for i in range(N):
             adw_r += a_ret[i] * dw[i]
             sumdw += dw[i]
@@ -792,13 +877,19 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
         # step length (fraction to boundary, η=0.95)
         eta = 0.95
         a_p = 1.0
-        a_p = _ratio(a_p, sL, dsL); a_p = _ratio(a_p, sU, dsU)
-        a_p = _ratio(a_p, sN, dsN); a_p = _ratio(a_p, sS, dsS)
-        a_p = _ratio(a_p, lL, dlL); a_p = _ratio(a_p, lU, dlU)
-        a_p = _ratio(a_p, lN, dlN); a_p = _ratio(a_p, lS, dlS)
-        a_p = _ratio1(a_p, sR, dsR); a_p = _ratio1(a_p, lR, dlR)
+        a_p = _ratio(a_p, sL, dsL)
+        a_p = _ratio(a_p, sU, dsU)
+        a_p = _ratio(a_p, sN, dsN)
+        a_p = _ratio(a_p, sS, dsS)
+        a_p = _ratio(a_p, lL, dlL)
+        a_p = _ratio(a_p, lU, dlU)
+        a_p = _ratio(a_p, lN, dlN)
+        a_p = _ratio(a_p, lS, dlS)
+        a_p = _ratio1(a_p, sR, dsR)
+        a_p = _ratio1(a_p, lR, dlR)
         if fully_invested == 0:
-            a_p = _ratio1(a_p, sC, dsC); a_p = _ratio1(a_p, lC, dlC)
+            a_p = _ratio1(a_p, sC, dsC)
+            a_p = _ratio1(a_p, lC, dlC)
         step = eta * a_p
         if step > 1.0:
             step = 1.0
@@ -806,16 +897,22 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
         # ---- update ----
         for i in range(N):
             w[i] += step * dw[i]
-            sL[i] += step * dsL[i]; sU[i] += step * dsU[i]
-            lL[i] += step * dlL[i]; lU[i] += step * dlU[i]
+            sL[i] += step * dsL[i]
+            sU[i] += step * dsU[i]
+            lL[i] += step * dlL[i]
+            lU[i] += step * dlU[i]
         zeta += step * dz0
         for t in range(T):
             u[t] += step * du[t]
-            sN[t] += step * dsN[t]; sS[t] += step * dsS[t]
-            lN[t] += step * dlN[t]; lS[t] += step * dlS[t]
-        sR += step * dsR; lR += step * dlR
+            sN[t] += step * dsN[t]
+            sS[t] += step * dsS[t]
+            lN[t] += step * dlN[t]
+            lS[t] += step * dlS[t]
+        sR += step * dsR
+        lR += step * dlR
         if fully_invested == 0:
-            sC += step * dsC; lC += step * dlC
+            sC += step * dsC
+            lC += step * dlC
         else:
             y += step * dyv[0]
 
@@ -860,10 +957,32 @@ def _ratio1(alpha, s, ds):
 
 
 @njit(cache=True, fastmath=True)
-def _solve_reduced(M, nx, nk, N, T, fully_invested,
-                   rdw, rdz, rdu, rb, tvL, tvU, tvN, tvS, tvR, tvC,
-                   a_ret, R, D5, Ecoef,
-                   dw_out, dz_out, du_out, dy_out):
+def _solve_reduced(
+    M,
+    nx,
+    nk,
+    N,
+    T,
+    fully_invested,
+    rdw,
+    rdz,
+    rdu,
+    rb,
+    tvL,
+    tvU,
+    tvN,
+    tvS,
+    tvR,
+    tvC,
+    a_ret,
+    R,
+    D5,
+    Ecoef,
+    dw_out,
+    dz_out,
+    du_out,
+    dy_out,
+):
     """Solve the reduced KKT system for (Δw, Δζ, Δu, Δy).
 
     rhs_z = -r_d + Gᵀ((r_c - λ∘r_p)/s) = -r_d + Gᵀ(tv). Then u eliminated:
@@ -947,6 +1066,7 @@ def _solve_reduced(M, nx, nk, N, T, fully_invested,
 # scenarios with replacement and re-solves the min-CVaR LP at every frontier
 # return level; the cross-replica spread of the resulting CVaR is the band.
 
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _bootstrap_cvar(R, a_ret, targets, l, h, kappa, fully_invested, seeds):
     """Annualized CVaR at each target on B bootstrap-resampled scenario sets.
@@ -962,15 +1082,14 @@ def _bootstrap_cvar(R, a_ret, targets, l, h, kappa, fully_invested, seeds):
     ann = math.sqrt(252.0)
     out = np.empty((B, K))
     for b in prange(B):
-        np.random.seed(seeds[b])            # per-replica determinism (thread-local RNG)
+        np.random.seed(seeds[b])  # per-replica determinism (thread-local RNG)
         Rb = np.empty((T, N))
         for t in range(T):
-            src = np.random.randint(0, T)   # resample a scenario row with replacement
+            src = np.random.randint(0, T)  # resample a scenario row with replacement
             for i in range(N):
                 Rb[t, i] = R[src, i]
         for k in range(K):
-            w, zeta, cvar, conv = _cvar_pdip(Rb, a_ret, targets[k], l, h,
-                                             kappa, fully_invested, 60)
+            w, zeta, cvar, conv = _cvar_pdip(Rb, a_ret, targets[k], l, h, kappa, fully_invested, 60)
             out[b, k] = cvar * ann
     return out
 
@@ -984,8 +1103,12 @@ def bootstrap_cvar(R: np.ndarray, ctx: dict, seeds: np.ndarray) -> np.ndarray:
     """
     return _bootstrap_cvar(
         np.ascontiguousarray(R, dtype=np.float64),
-        ctx["a_ret"], ctx["targets"], ctx["l"], ctx["h"],
-        float(ctx["kappa"]), int(ctx["fi"]),
+        ctx["a_ret"],
+        ctx["targets"],
+        ctx["l"],
+        ctx["h"],
+        float(ctx["kappa"]),
+        int(ctx["fi"]),
         np.ascontiguousarray(seeds, dtype=np.int64),
     )
 
@@ -994,8 +1117,10 @@ def bootstrap_cvar(R: np.ndarray, ctx: dict, seeds: np.ndarray) -> np.ndarray:
 # Frontier orchestration (pure-python wrappers around the JIT core)
 # ---------------------------------------------------------------------------
 
-def _max_return_weights(mu_ex: np.ndarray, l: np.ndarray, h: np.ndarray,
-                        fully_invested: bool) -> np.ndarray:
+
+def _max_return_weights(
+    mu_ex: np.ndarray, l: np.ndarray, h: np.ndarray, fully_invested: bool
+) -> np.ndarray:
     """Closed-form max-(excess-)return long-only box portfolio.
 
     Every asset starts at its floor ``l`` (a hard constraint in both modes), then
@@ -1082,11 +1207,16 @@ def mean_cvar_frontier(
     # Σmin > 1 is infeasible in either mode (w ≥ l ⇒ Σw ≥ Σl); Σmax < 1 only bites
     # when fully invested (weights must reach Σw = 1).
     if float(l.sum()) > 1.0 + 1e-9:
-        return {"ok": False, "error": "infeasible per-position minimums "
-                                       f"(Σmin={l.sum():.2f} exceeds 100%)"}
+        return {
+            "ok": False,
+            "error": f"infeasible per-position minimums (Σmin={l.sum():.2f} exceeds 100%)",
+        }
     if fully_invested and float(h.sum()) < 1.0 - 1e-9:
-        return {"ok": False, "error": "infeasible per-position maximums for a fully-invested "
-                                       f"portfolio (Σmax={h.sum():.2f} below 100%)"}
+        return {
+            "ok": False,
+            "error": "infeasible per-position maximums for a fully-invested "
+            f"portfolio (Σmax={h.sum():.2f} below 100%)",
+        }
     kappa = 1.0 / ((1.0 - float(alpha)) * T)
     fi = 1 if fully_invested else 0
     ann = math.sqrt(TRADING_DAYS)
@@ -1100,7 +1230,7 @@ def mean_cvar_frontier(
 
     def _point(w: np.ndarray) -> dict:
         port = R @ w
-        cv_daily = cvar_of(port, alpha)          # daily — drives the efficient envelope
+        cv_daily = cvar_of(port, alpha)  # daily — drives the efficient envelope
         var30, cvar30 = var_cvar_horizon(port, alpha)  # 10d→30d — display only
         ret_ann = float(mu_ann @ w) if fully_invested else float(rf + (mu_ann - rf) @ w)
         vol = None
@@ -1121,14 +1251,26 @@ def mean_cvar_frontier(
     def _ctx(targets: np.ndarray) -> dict:
         # Everything the bootstrap band needs to re-solve at the frontier's own
         # return levels on resampled scenarios (see _bootstrap_cvar / frontier.py).
-        return {"a_ret": a_ret, "l": l, "h": h, "kappa": float(kappa),
-                "fi": int(fi), "targets": np.ascontiguousarray(targets, dtype=np.float64)}
+        return {
+            "a_ret": a_ret,
+            "l": l,
+            "h": h,
+            "kappa": float(kappa),
+            "fi": int(fi),
+            "targets": np.ascontiguousarray(targets, dtype=np.float64),
+        }
 
     if n == 1:
         w = np.array([1.0])
         p = _point(w)
-        return {"ok": True, "frontier": [p], "min_cvar": p, "max_ret": p,
-                "n_nonconv": 0, "_ctx": _ctx(np.array([p["_t"]]))}
+        return {
+            "ok": True,
+            "frontier": [p],
+            "min_cvar": p,
+            "max_ret": p,
+            "n_nonconv": 0,
+            "_ctx": _ctx(np.array([p["_t"]])),
+        }
 
     # endpoints. Track non-convergence so the orchestrator can warn rather than
     # silently trust an iterate that hit the iteration cap.
@@ -1158,6 +1300,7 @@ def mean_cvar_frontier(
     def _xkey(p: dict) -> float:
         c = p.get("cvar30")
         return float(c) if (c is not None and c == c) else float(p["cvar"])
+
     pts.sort(key=lambda p: (_xkey(p), -p["ret"]))
     cleaned: list[dict] = []
     best = -1e18
@@ -1168,14 +1311,25 @@ def mean_cvar_frontier(
     if not cleaned:
         cleaned = [p_min]
     targets = np.array([p["_t"] for p in cleaned], dtype=np.float64)
-    return {"ok": True, "frontier": cleaned, "min_cvar": cleaned[0],
-            "max_ret": cleaned[-1], "n_nonconv": int(n_nonconv), "_ctx": _ctx(targets)}
+    return {
+        "ok": True,
+        "frontier": cleaned,
+        "min_cvar": cleaned[0],
+        "max_ret": cleaned[-1],
+        "n_nonconv": int(n_nonconv),
+        "_ctx": _ctx(targets),
+    }
 
 
-def portfolio_risk_metrics(weights: dict[str, float], mu: dict[str, float],
-                           cov: pd.DataFrame | None, returns: pd.DataFrame,
-                           alpha: float = 0.95, rf: float = 0.04,
-                           fully_invested: bool = True) -> dict:
+def portfolio_risk_metrics(
+    weights: dict[str, float],
+    mu: dict[str, float],
+    cov: pd.DataFrame | None,
+    returns: pd.DataFrame,
+    alpha: float = 0.95,
+    rf: float = 0.04,
+    fully_invested: bool = True,
+) -> dict:
     """Metrics for an arbitrary weight vector (anchors: equal/cap/current)."""
     symbols = list(returns.columns)
     n = len(symbols)
@@ -1206,6 +1360,7 @@ def portfolio_risk_metrics(weights: dict[str, float], mu: dict[str, float],
 # Light (CVaR, return) cloud — visual decoration
 # ---------------------------------------------------------------------------
 
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _cloud_kernel(W, R, mu_ann, alpha, h):
     """(cvar_hday, ret_ann) for each row of W. Parallel over portfolios (prange).
@@ -1218,7 +1373,7 @@ def _cloud_kernel(W, R, mu_ann, alpha, h):
     K = W.shape[0]
     N = W.shape[1]
     T = R.shape[0]
-    M = T - h + 1                    # number of overlapping h-day windows
+    M = T - h + 1  # number of overlapping h-day windows
     if M < 1:
         M = 1
     k = int(math.ceil((1.0 - alpha) * M - 1e-9))  # matches _tail_count on M
@@ -1226,9 +1381,9 @@ def _cloud_kernel(W, R, mu_ann, alpha, h):
         k = 1
     out = np.empty((K, 2))
     for j in prange(K):
-        port = np.empty(T)   # thread-local scratch (must be inside the parallel loop)
-        cp = np.empty(T)     # thread-local cumulative product of (1+port)
-        rh = np.empty(M)     # thread-local overlapping h-day returns
+        port = np.empty(T)  # thread-local scratch (must be inside the parallel loop)
+        cp = np.empty(T)  # thread-local cumulative product of (1+port)
+        rh = np.empty(M)  # thread-local overlapping h-day returns
         r = 0.0
         for i in range(N):
             r += W[j, i] * mu_ann[i]
@@ -1238,13 +1393,13 @@ def _cloud_kernel(W, R, mu_ann, alpha, h):
             for i in range(N):
                 pv += W[j, i] * R[t, i]
             port[t] = pv
-            acc *= (1.0 + pv)
+            acc *= 1.0 + pv
             cp[t] = acc
         if T >= h:
             for m in range(M):
                 prev = cp[m - 1] if m >= 1 else 1.0
                 rh[m] = cp[m + h - 1] / prev - 1.0
-        else:                 # degenerate: fewer obs than the horizon
+        else:  # degenerate: fewer obs than the horizon
             rh[0] = cp[T - 1] - 1.0
         srt = np.sort(rh)
         tail = 0.0
@@ -1255,8 +1410,7 @@ def _cloud_kernel(W, R, mu_ann, alpha, h):
     return out
 
 
-def _project_into_box(W: np.ndarray, lo: np.ndarray, hi: np.ndarray,
-                      iters: int = 32) -> np.ndarray:
+def _project_into_box(W: np.ndarray, lo: np.ndarray, hi: np.ndarray, iters: int = 32) -> np.ndarray:
     """Water-fill rows of ``W`` back under ``hi`` without changing their sums.
 
     ``W`` arrives already at or above ``lo`` and with the right row sums; only the
@@ -1283,10 +1437,17 @@ def _project_into_box(W: np.ndarray, lo: np.ndarray, hi: np.ndarray,
     return W
 
 
-def cvar_return_cloud(returns: pd.DataFrame, mu: dict[str, float],
-                      alpha: float = 0.95, n: int = 4000, seed: int = 42,
-                      w_min=0.0, w_max=1.0, fully_invested: bool = True,
-                      rf: float = 0.0) -> list:
+def cvar_return_cloud(
+    returns: pd.DataFrame,
+    mu: dict[str, float],
+    alpha: float = 0.95,
+    n: int = 4000,
+    seed: int = 42,
+    w_min=0.0,
+    w_max=1.0,
+    fully_invested: bool = True,
+    rf: float = 0.0,
+) -> list:
     """A light long-only cloud in (CVaR_30day, return_annual) space.
 
     Dirichlet mixture (concentrated + uniform + a few sparse-k) so the cloud
@@ -1331,7 +1492,7 @@ def cvar_return_cloud(returns: pd.DataFrame, mu: dict[str, float],
     # box floor is added underneath it below.
     D = np.empty((n, n_assets), dtype=np.float64)
     D[:n_lo] = rng.dirichlet(np.full(n_assets, 0.15), size=n_lo)
-    D[n_lo:n_lo + n_hi] = rng.dirichlet(np.full(n_assets, 1.0), size=n_hi)
+    D[n_lo : n_lo + n_hi] = rng.dirichlet(np.full(n_assets, 1.0), size=n_hi)
     # sparse-k rows
     base = n_lo + n_hi
     ks = np.clip(rng.choice(np.array([1, 2, 3, 5, 8]), size=n_sp), 1, n_assets)
@@ -1362,15 +1523,18 @@ def cvar_return_cloud(returns: pd.DataFrame, mu: dict[str, float],
 # JIT warm-up (first user call shouldn't pay the compile cost)
 # ---------------------------------------------------------------------------
 
+
 def _warm_jit() -> None:
     rng = np.random.default_rng(0)
     R = np.ascontiguousarray(rng.standard_normal((40, 3)) * 0.01)
     mu = np.array([0.08, 0.10, 0.06])
-    l = np.zeros(3); h = np.ones(3)
+    l = np.zeros(3)
+    h = np.ones(3)
     _cvar_pdip(R, mu, -1e18, l, h, 1.0 / (0.05 * 40), 1, 40)
     _cloud_kernel(np.ascontiguousarray(rng.dirichlet(np.ones(3), size=8)), R, mu, 0.95, 10)
-    _bootstrap_cvar(R, mu, np.array([0.05, 0.10]), l, h, 1.0 / (0.05 * 40), 1,
-                    np.array([1, 2], dtype=np.int64))
+    _bootstrap_cvar(
+        R, mu, np.array([0.05, 0.10]), l, h, 1.0 / (0.05 * 40), 1, np.array([1, 2], dtype=np.int64)
+    )
 
 
 try:

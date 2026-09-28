@@ -13,6 +13,7 @@ def _format_version_date(date_str: str) -> str:
     # `import convexity` (that would take down every entry point over
     # a one-character typo). Fall back to the raw string on any parse failure.
     from datetime import datetime
+
     try:
         return datetime.strptime(date_str, "%Y-%m-%d").strftime("%d %b %Y")
     except (ValueError, TypeError):
@@ -42,6 +43,7 @@ _APP_SCRIPTS = ("convexity", "convexity-app")
 def _launched_as_app() -> bool:
     import sys
     from pathlib import Path
+
     argv = list(getattr(sys, "orig_argv", ()))
     if "-m" in argv:
         i = argv.index("-m")
@@ -58,9 +60,11 @@ def _auto_migrate() -> None:
         return
     try:
         from . import migrate
+
         migrate.run()
     except Exception as exc:  # pragma: no cover - defensive
         import sys
+
         print(f"[migrate] skipped: {exc}", file=sys.stderr)
 
 

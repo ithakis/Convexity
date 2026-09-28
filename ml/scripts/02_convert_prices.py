@@ -10,6 +10,7 @@ Usage:
     python ml/scripts/02_convert_prices.py            # full run
     python ml/scripts/02_convert_prices.py --sample   # first 50 tickers
 """
+
 from __future__ import annotations
 
 import argparse
@@ -40,23 +41,35 @@ def main() -> None:
     if not zip_path.exists():
         sys.exit(f"ABORT: {zip_path} not found — run 00_download_fnspid.py --prices first")
 
-    out_path = config.PRICES_PARQUET if not args.sample else config.PARQUET_DIR / "prices_sample.parquet"
+    out_path = (
+        config.PRICES_PARQUET if not args.sample else config.PARQUET_DIR / "prices_sample.parquet"
+    )
     tmp_path = out_path.with_suffix(".unsorted.parquet")
 
-    schema = pa.schema([
-        ("symbol", pa.string()),
-        ("date", pa.date32()),
-        ("open", pa.float32()),
-        ("high", pa.float32()),
-        ("low", pa.float32()),
-        ("close", pa.float32()),
-        ("adj_close", pa.float32()),
-        ("volume", pa.int64()),
-    ])
+    schema = pa.schema(
+        [
+            ("symbol", pa.string()),
+            ("date", pa.date32()),
+            ("open", pa.float32()),
+            ("high", pa.float32()),
+            ("low", pa.float32()),
+            ("close", pa.float32()),
+            ("adj_close", pa.float32()),
+            ("volume", pa.int64()),
+        ]
+    )
     # FNSPID per-ticker CSVs use yfinance column names; map case-insensitively.
-    col_map = {"date": "date", "open": "open", "high": "high", "low": "low",
-               "close": "close", "adj close": "adj_close", "adj_close": "adj_close",
-               "adjclose": "adj_close", "volume": "volume"}
+    col_map = {
+        "date": "date",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "adj close": "adj_close",
+        "adj_close": "adj_close",
+        "adjclose": "adj_close",
+        "volume": "volume",
+    }
 
     t0 = time.time()
     n_tickers = n_rows = n_skipped = 0
@@ -85,7 +98,9 @@ def main() -> None:
                 if field.name == "symbol":
                     arrays.append(pa.array([sym] * len(tbl), pa.string()))
                     continue
-                src = next((names[k] for k, v in col_map.items() if v == field.name and k in names), None)
+                src = next(
+                    (names[k] for k, v in col_map.items() if v == field.name and k in names), None
+                )
                 if src is None:
                     # adj_close missing -> fall back to close; anything else missing -> skip file
                     if field.name == "adj_close" and "close" in names:

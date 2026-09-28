@@ -9,8 +9,9 @@ from convexity import analytics as A
 def _closes(symbols, periods=520, seed=0):
     rng = np.random.default_rng(seed)
     idx = pd.bdate_range(end="2026-09-25", periods=periods)
-    return pd.DataFrame({s: 100 * np.cumprod(1 + rng.normal(0.0005, 0.01, periods)) for s in symbols},
-                        index=idx)
+    return pd.DataFrame(
+        {s: 100 * np.cumprod(1 + rng.normal(0.0005, 0.01, periods)) for s in symbols}, index=idx
+    )
 
 
 def _run(monkeypatch, period="1Y"):
@@ -47,7 +48,7 @@ def test_benchmarks_shape(monkeypatch):
         assert abs(blk["series"][0][1] - 100.0) < 1e-9
         assert {"total_return", "beta"} <= set(blk["stats"])
         assert {"beta", "r2", "te"} <= set(blk["rel"])
-    assert abs(b["SPY"]["stats"]["beta"] - 1.0) < 1e-12   # SPY vs itself
+    assert abs(b["SPY"]["stats"]["beta"] - 1.0) < 1e-12  # SPY vs itself
     # Stats come from the period slice, not the warm-up window.
     first = pd.Timestamp(a["series"]["portfolio"][0][0], unit="ms")
     assert first >= pd.Timestamp("2026-09-25") - pd.DateOffset(years=1)

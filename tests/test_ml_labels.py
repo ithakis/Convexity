@@ -5,6 +5,7 @@ trailing sigma/beta stored AT the jump date do not include the jump — i.e.
 every stat dated D was computed from data <= D-1 only (the shift(1) contract
 the SAR label depends on).
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -24,7 +25,8 @@ pytest.importorskip("pyarrow")
 
 def _load_labels_module():
     spec = importlib.util.spec_from_file_location(
-        "labels05", ROOT / "ml" / "scripts" / "05_build_labels.py")
+        "labels05", ROOT / "ml" / "scripts" / "05_build_labels.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -41,23 +43,28 @@ def test_stage_a_stats_are_point_in_time(tmp_path, monkeypatch):
     r = rng.normal(0, 0.01, n)
     r[jump_i] = 0.60  # the jump that must NOT leak into stats dated jump day
     close = 100 * np.cumprod(1 + r)
-    prices = pd.DataFrame({
-        "symbol": "TEST", "date": dates,
-        "open": (close * 0.999).astype("float32"),
-        "high": (close * 1.01).astype("float32"),
-        "low": (close * 0.99).astype("float32"),
-        "close": close.astype("float32"),
-        "adj_close": close.astype("float32"),
-        "volume": np.int64(1_000_000),
-    })
-    cal = pd.DataFrame({
-        "date": dates,
-        "next_date": np.roll(dates, -1),
-        "prev_date": np.roll(dates, 1),
-        "m_overnight": rng.normal(0, 0.002, n),
-        "m_intraday": rng.normal(0, 0.006, n),
-        "m_cc": rng.normal(0, 0.008, n),
-    })
+    prices = pd.DataFrame(
+        {
+            "symbol": "TEST",
+            "date": dates,
+            "open": (close * 0.999).astype("float32"),
+            "high": (close * 1.01).astype("float32"),
+            "low": (close * 0.99).astype("float32"),
+            "close": close.astype("float32"),
+            "adj_close": close.astype("float32"),
+            "volume": np.int64(1_000_000),
+        }
+    )
+    cal = pd.DataFrame(
+        {
+            "date": dates,
+            "next_date": np.roll(dates, -1),
+            "prev_date": np.roll(dates, 1),
+            "m_overnight": rng.normal(0, 0.002, n),
+            "m_intraday": rng.normal(0, 0.006, n),
+            "m_cc": rng.normal(0, 0.008, n),
+        }
+    )
     prices_p = tmp_path / "prices.parquet"
     cal_p = tmp_path / "calendar.parquet"
     stats_p = tmp_path / "stats.parquet"

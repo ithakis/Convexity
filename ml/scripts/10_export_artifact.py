@@ -23,6 +23,7 @@ Usage:
     python ml/scripts/10_export_artifact.py [--deploy] [--tarball [--out PATH]]
     python ml/scripts/10_export_artifact.py --tarball --from <bundle dir> [--out PATH]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,10 +49,17 @@ def _read(path: Path) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--deploy", action="store_true")
-    ap.add_argument("--tarball", action="store_true",
-                    help="also write <version>.tar.gz, the first-run download asset")
-    ap.add_argument("--from", dest="src", type=Path,
-                    help="with --tarball: pack this existing bundle dir, skip the export")
+    ap.add_argument(
+        "--tarball",
+        action="store_true",
+        help="also write <version>.tar.gz, the first-run download asset",
+    )
+    ap.add_argument(
+        "--from",
+        dest="src",
+        type=Path,
+        help="with --tarball: pack this existing bundle dir, skip the export",
+    )
     ap.add_argument("--out", type=Path, help="tarball path (default: next to the bundle)")
     args = ap.parse_args()
     if args.src:
@@ -76,19 +84,26 @@ def main() -> None:
         sys.exit(f"FAIL: {out / 'tier_cuts.json'} missing — run 09_tier_cuts.py --model v1.1")
     if int(cuts.get("horizon_days", -1)) != 1:
         sys.exit("FAIL: tier_cuts.json horizon does not match the exported model")
-    git_sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                             text=True, cwd=config.REPO_ROOT).stdout.strip()
-    (out / "meta.json").write_text(json.dumps({
-        "version": version,
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "git_sha": git_sha,
-        "encoder": _read(enc / "meta.json") or {"source": str(enc)},
-        "horizon_days": cuts["horizon_days"],
-        "tier_holdout": cuts.get("holdout_verification"),
-        "label": f"SAR over the next {cuts['horizon_days']} trading day(s) from close(D): "
-                 "beta-adjusted abnormal return / trailing sigma, winsor +/-5",
-        "calibration_window": cuts.get("calibration_window"),
-    }, indent=2, default=str))
+    git_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=config.REPO_ROOT
+    ).stdout.strip()
+    (out / "meta.json").write_text(
+        json.dumps(
+            {
+                "version": version,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "git_sha": git_sha,
+                "encoder": _read(enc / "meta.json") or {"source": str(enc)},
+                "horizon_days": cuts["horizon_days"],
+                "tier_holdout": cuts.get("holdout_verification"),
+                "label": f"SAR over the next {cuts['horizon_days']} trading day(s) from close(D): "
+                "beta-adjusted abnormal return / trailing sigma, winsor +/-5",
+                "calibration_window": cuts.get("calibration_window"),
+            },
+            indent=2,
+            default=str,
+        )
+    )
 
     missing = [f for f in required if not (out / f).exists()]
     if missing:
@@ -98,8 +113,8 @@ def main() -> None:
 
     if args.deploy:
         from convexity import paths
-        dst = Path(os.environ.get("MLSENT_MODEL_DIR")
-                   or paths.models_dir() / version)
+
+        dst = Path(os.environ.get("MLSENT_MODEL_DIR") or paths.models_dir() / version)
         dst.mkdir(parents=True, exist_ok=True)
         for f in required:
             shutil.copy2(out / f, dst / f)
@@ -110,11 +125,22 @@ def main() -> None:
 
 def _tarball(src: Path, out: Path | None) -> None:
     from convexity import model_fetch
+
     out = out or src.parent / f"{model_fetch.MODEL_VERSION}.tar.gz"
     sha = model_fetch.pack(src, out)
-    print(json.dumps({"tarball": str(out), "bytes": out.stat().st_size, "sha256": sha,
-                      "next": "set model_fetch.MODEL_SHA256 to this sha256, publish "
-                              "the file as a release asset"}, indent=2), flush=True)
+    print(
+        json.dumps(
+            {
+                "tarball": str(out),
+                "bytes": out.stat().st_size,
+                "sha256": sha,
+                "next": "set model_fetch.MODEL_SHA256 to this sha256, publish "
+                "the file as a release asset",
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

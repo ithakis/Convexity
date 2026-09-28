@@ -24,6 +24,7 @@ Design notes:
   * Writes still go to the real stream, so the terminal / launcher log file
     behave exactly as before. This is additive.
 """
+
 from __future__ import annotations
 
 import sys
@@ -51,13 +52,15 @@ def record(text: str, stream: str = "stdout") -> None:
         return
     with _LOCK:
         _SEQ += 1
-        _BUF.append({
-            "seq": _SEQ,
-            "ts": time.time(),
-            "stream": stream,
-            "text": text[:4000],   # one pathological line can't eat the ring
-            "http": _is_http_line(text),
-        })
+        _BUF.append(
+            {
+                "seq": _SEQ,
+                "ts": time.time(),
+                "stream": stream,
+                "text": text[:4000],  # one pathological line can't eat the ring
+                "http": _is_http_line(text),
+            }
+        )
 
 
 def _is_http_line(text: str) -> bool:
@@ -88,11 +91,11 @@ class _Tee:
             while "\n" in self._partial:
                 line, self._partial = self._partial.split("\n", 1)
                 record(line, self._name)
-            if len(self._partial) > 8000:      # never buffer unboundedly
+            if len(self._partial) > 8000:  # never buffer unboundedly
                 record(self._partial, self._name)
                 self._partial = ""
         except Exception:
-            pass          # logging must never break the thing being logged
+            pass  # logging must never break the thing being logged
         return n
 
     def flush(self) -> None:
@@ -133,8 +136,7 @@ def read(since: int = 0, limit: int = 1000) -> dict:
     if limit and len(lines) > limit:
         lines = lines[-limit:]
         dropped = True
-    return {"lines": lines, "last_seq": last_seq, "dropped": dropped,
-            "capacity": _MAXLEN}
+    return {"lines": lines, "last_seq": last_seq, "dropped": dropped, "capacity": _MAXLEN}
 
 
 def reset_for_tests() -> None:

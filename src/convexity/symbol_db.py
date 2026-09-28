@@ -48,6 +48,7 @@ from convexity import paths
 
 try:
     from rapidfuzz import fuzz, process as rf_process
+
     _HAS_RAPIDFUZZ = True
 except ImportError:  # pragma: no cover - optional dependency
     _HAS_RAPIDFUZZ = False
@@ -67,8 +68,9 @@ _NAME_NORM_RE = re.compile(r"[^a-z0-9]+")
 class SymbolRow:
     """One row destined for the symbols table. ``provider`` defaults to
     yfinance — override when adding non-yfinance sources."""
-    ticker: str           # in provider format
-    name: str             # canonical human-readable name
+
+    ticker: str  # in provider format
+    name: str  # canonical human-readable name
     exchange: Optional[str] = None
     country: Optional[str] = None
     instrument_type: Optional[str] = None  # "stock"|"etf"|"adr"|"index"|...
@@ -80,7 +82,7 @@ class LookupHit:
     ticker: str
     name: str
     exchange: Optional[str]
-    score: float          # 0..100, higher is closer
+    score: float  # 0..100, higher is closer
 
 
 def write_path() -> Path:
@@ -149,6 +151,7 @@ def normalize_name(s: str) -> str:
 # Builder API — called from `convexity build-symbols` (cli.py)
 # --------------------------------------------------------------------------
 
+
 def init_db(path: Optional[Path] = None) -> None:
     """Create the schema if missing. Idempotent."""
     (path or db_path()).parent.mkdir(parents=True, exist_ok=True)
@@ -166,14 +169,19 @@ def upsert_rows(rows: Iterable[SymbolRow], source: str, *, path: Optional[Path] 
         name = (r.name or "").strip()
         if not ticker or not name:
             continue
-        payload.append((
-            r.provider, ticker, name,
-            (r.exchange or None),
-            (r.country or None),
-            (r.instrument_type or None),
-            normalize_name(name),
-            source, now,
-        ))
+        payload.append(
+            (
+                r.provider,
+                ticker,
+                name,
+                (r.exchange or None),
+                (r.country or None),
+                (r.instrument_type or None),
+                normalize_name(name),
+                source,
+                now,
+            )
+        )
     if not payload:
         return 0
     with _DB_LOCK, _connect(path) as conn:
@@ -205,12 +213,16 @@ def db_stats(path: Optional[Path] = None) -> dict:
         with _connect(path) as conn:
             _ensure_schema(conn)
             total = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
-            by_src = dict(conn.execute(
-                "SELECT source, COUNT(*) FROM symbols GROUP BY source ORDER BY 2 DESC"
-            ).fetchall())
-            by_xch = dict(conn.execute(
-                "SELECT COALESCE(exchange,'?'), COUNT(*) FROM symbols GROUP BY exchange ORDER BY 2 DESC LIMIT 12"
-            ).fetchall())
+            by_src = dict(
+                conn.execute(
+                    "SELECT source, COUNT(*) FROM symbols GROUP BY source ORDER BY 2 DESC"
+                ).fetchall()
+            )
+            by_xch = dict(
+                conn.execute(
+                    "SELECT COALESCE(exchange,'?'), COUNT(*) FROM symbols GROUP BY exchange ORDER BY 2 DESC LIMIT 12"
+                ).fetchall()
+            )
         return {"total": total, "by_source": by_src, "top_exchanges": by_xch}
     except sqlite3.DatabaseError:
         return {"total": 0, "by_source": {}, "top_exchanges": {}}
@@ -224,7 +236,7 @@ def db_stats(path: Optional[Path] = None) -> dict:
 # in memory after first read so rapidfuzz can scan it in microseconds.
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict = {"loaded_at": 0.0, "rows": None, "mtime": 0.0}
-_CACHE_RELOAD_AFTER_S = 300.0   # check disk mtime at most every 5 min
+_CACHE_RELOAD_AFTER_S = 300.0  # check disk mtime at most every 5 min
 
 
 def _load_cache(force: bool = False) -> list[tuple[str, str, str, Optional[str]]]:
@@ -250,8 +262,7 @@ def _load_cache(force: bool = False) -> list[tuple[str, str, str, Optional[str]]
             with _connect(p) as conn:
                 _ensure_schema(conn)
                 rows = conn.execute(
-                    "SELECT name_norm, ticker, name, exchange "
-                    "FROM symbols WHERE provider = ?",
+                    "SELECT name_norm, ticker, name, exchange FROM symbols WHERE provider = ?",
                     (_PROVIDER,),
                 ).fetchall()
             _CACHE["rows"] = [(r[0], r[1], r[2], r[3]) for r in rows]
@@ -332,7 +343,8 @@ def lookup(query: str, *, min_score: float = 72.0, limit: int = 1) -> list[Looku
         choices = [r[0] for r in rows]
         # Lower base cutoff (60) lets typos through; composite re-rank filters.
         cands = rf_process.extract(
-            q_norm, choices,
+            q_norm,
+            choices,
             scorer=fuzz.WRatio,
             limit=40,
             score_cutoff=60.0,
@@ -369,17 +381,22 @@ def lookup(query: str, *, min_score: float = 72.0, limit: int = 1) -> list[Looku
 # Each function MUST return an iterable of SymbolRow.
 # --------------------------------------------------------------------------
 
+
 def source_nasdaq_trader(session) -> Iterable[SymbolRow]:
     """NASDAQ-listed + Other-listed (NYSE, AMEX, ARCA) US securities. The
     files are pipe-delimited, refreshed nightly, no auth.
     Docs: https://www.nasdaqtrader.com/trader.aspx?id=symboldirdefs
     """
     urls = [
-        ("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",  "nasdaq"),
-        ("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",   "other"),
+        ("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt", "nasdaq"),
+        ("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt", "other"),
     ]
     exch_map = {  # otherlisted's single-letter codes
-        "A": "AMEX", "N": "NYSE", "P": "ARCA", "Z": "BATS", "V": "IEX",
+        "A": "AMEX",
+        "N": "NYSE",
+        "P": "ARCA",
+        "Z": "BATS",
+        "V": "IEX",
     }
     out: list[SymbolRow] = []
     for url, kind in urls:
@@ -412,13 +429,15 @@ def source_nasdaq_trader(session) -> Iterable[SymbolRow]:
             else:
                 exchange = exch_map.get((row.get("Exchange") or "").strip(), "NYSE")
             etf = (row.get("ETF") or "").upper() == "Y"
-            out.append(SymbolRow(
-                ticker=ticker,
-                name=name,
-                exchange=exchange,
-                country="US",
-                instrument_type="etf" if etf else "stock",
-            ))
+            out.append(
+                SymbolRow(
+                    ticker=ticker,
+                    name=name,
+                    exchange=exchange,
+                    country="US",
+                    instrument_type="etf" if etf else "stock",
+                )
+            )
     return out
 
 
@@ -454,10 +473,15 @@ def source_sec_company_tickers(session) -> Iterable[SymbolRow]:
             xch = (r2[i_xch] or "").strip() or None
             if not ticker or not name:
                 continue
-            out.append(SymbolRow(
-                ticker=ticker, name=name, exchange=xch, country="US",
-                instrument_type="stock",
-            ))
+            out.append(
+                SymbolRow(
+                    ticker=ticker,
+                    name=name,
+                    exchange=xch,
+                    country="US",
+                    instrument_type="stock",
+                )
+            )
         except (IndexError, TypeError):
             continue
     return out
@@ -466,5 +490,5 @@ def source_sec_company_tickers(session) -> Iterable[SymbolRow]:
 # Register sources here. Key is the CLI `--sources` token.
 SOURCES: dict[str, Callable] = {
     "nasdaq": source_nasdaq_trader,
-    "sec":    source_sec_company_tickers,
+    "sec": source_sec_company_tickers,
 }

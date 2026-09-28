@@ -19,6 +19,7 @@ an article is relevant to a symbol when the company is the SUBJECT — named
 early and prominently, not one ticker among twenty in a "stocks to watch"
 roundup from a low-tier syndicator.
 """
+
 from __future__ import annotations
 
 import re
@@ -56,8 +57,9 @@ _NAME_SUFFIX_RE = re.compile(
 # ------------------------------------------------------------------ dedup
 def norm_title(title: str) -> str:
     """Identical to news_sentiment._norm_title — lowercase, alnum-only, squeezed."""
-    return " ".join("".join(c if c.isalnum() or c.isspace() else " "
-                            for c in (title or "").lower()).split())
+    return " ".join(
+        "".join(c if c.isalnum() or c.isspace() else " " for c in (title or "").lower()).split()
+    )
 
 
 def is_near_duplicate(title_a: str, title_b: str) -> bool:
@@ -159,6 +161,7 @@ def _find_symbol_db() -> Path | None:
     # checkout-root fallback). Location only — the table's content, and so
     # train/serve parity, is unaffected.
     from convexity import symbol_db
+
     p = symbol_db.db_path()
     return p if p.exists() else None
 
@@ -199,8 +202,12 @@ def _ticker_hits(symbol: str, raw_text: str) -> bool:
         return False
     sym = re.escape(symbol.upper())
     if len(symbol) <= 2:
-        return re.search(rf"\${sym}\b|\({sym}\)|NYSE:\s*{sym}\b|NASDAQ:\s*{sym}\b",
-                         raw_text, re.IGNORECASE) is not None
+        return (
+            re.search(
+                rf"\${sym}\b|\({sym}\)|NYSE:\s*{sym}\b|NASDAQ:\s*{sym}\b", raw_text, re.IGNORECASE
+            )
+            is not None
+        )
     return re.search(rf"\b{sym}\b", raw_text) is not None
 
 

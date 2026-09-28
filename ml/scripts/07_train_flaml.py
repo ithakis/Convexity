@@ -25,6 +25,7 @@ Usage:
     python ml/scripts/07_train_flaml.py --max-rows 400000  # memory-escalation lever
     python ml/scripts/07_train_flaml.py --stage window     # v2 window model (~20 min)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,8 +39,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from ml import config  # noqa: E402
 
 
-from ml.scripts.train_utils import (daily_ic, decile_means, group_spearman,  # noqa: E402
-                                    load_panel, load_split)
+from ml.scripts.train_utils import (
+    daily_ic,
+    decile_means,
+    group_spearman,  # noqa: E402
+    load_panel,
+    load_split,
+)
 
 
 def train_encoder(args) -> None:
@@ -52,8 +58,10 @@ def train_encoder(args) -> None:
     X, y, w, meta = load_split("train", idf, args.max_rows)
     assert meta["d1"].is_monotonic_increasing, "rows must be time-ordered for split_type='time'"
     rss = psutil.Process().memory_info().rss / 1e9
-    print(f"train X: {X.shape}, nnz={X.nnz:,} ({X.nnz/len(y):.0f}/row), "
-          f"RSS {rss:.1f} GB", flush=True)
+    print(
+        f"train X: {X.shape}, nnz={X.nnz:,} ({X.nnz / len(y):.0f}/row), RSS {rss:.1f} GB",
+        flush=True,
+    )
 
     from flaml import AutoML, tune
 
@@ -65,23 +73,39 @@ def train_encoder(args) -> None:
     # Caps sized from a measured probe: 100 trees x 64 leaves on 1M rows =
     # ~8.6 min at 8 threads => a 300-tree/3M-row fit is ~1.3h, bounding both
     # the worst single trial and the final retrain_full.
-    custom_hp = {"lgbm": {
-        "log_max_bin": {"domain": 5},
-        "n_estimators": {"domain": tune.lograndint(lower=20, upper=300),
-                         "init_value": 50, "low_cost_init_value": 20},
-        "num_leaves": {"domain": tune.lograndint(lower=4, upper=256),
-                       "init_value": 32, "low_cost_init_value": 4},
-    }}
+    custom_hp = {
+        "lgbm": {
+            "log_max_bin": {"domain": 5},
+            "n_estimators": {
+                "domain": tune.lograndint(lower=20, upper=300),
+                "init_value": 50,
+                "low_cost_init_value": 20,
+            },
+            "num_leaves": {
+                "domain": tune.lograndint(lower=4, upper=256),
+                "init_value": 32,
+                "low_cost_init_value": 4,
+            },
+        }
+    }
 
     automl = AutoML()
     automl.fit(
-        X_train=X, y_train=y, sample_weight=w,
-        task="regression", metric="mse",
-        estimator_list=["lgbm"], time_budget=args.budget,
-        eval_method="cv", split_type="time", n_splits=config.N_CV_FOLDS,
-        n_jobs=config.N_JOBS, seed=config.SEED,
-        retrain_full=True, early_stop=True,
-        mem_thres=3 * 1024 ** 3,
+        X_train=X,
+        y_train=y,
+        sample_weight=w,
+        task="regression",
+        metric="mse",
+        estimator_list=["lgbm"],
+        time_budget=args.budget,
+        eval_method="cv",
+        split_type="time",
+        n_splits=config.N_CV_FOLDS,
+        n_jobs=config.N_JOBS,
+        seed=config.SEED,
+        retrain_full=True,
+        early_stop=True,
+        mem_thres=3 * 1024**3,
         model_history=False,
         custom_hp=custom_hp,
         log_file_name=str(config.ARTIFACTS_DIR / "flaml.log"),
@@ -98,7 +122,7 @@ def train_encoder(args) -> None:
     Xt, yt, wt, meta_t = load_split("test", idf)
     pred = booster.predict(Xt).astype("float32")
     resid = yt - pred
-    mse = float(np.mean(resid ** 2))
+    mse = float(np.mean(resid**2))
     mae = float(np.mean(np.abs(resid)))
     r2 = 1.0 - mse / float(np.var(yt))
     ic = group_spearman(meta_t, pred)
@@ -111,12 +135,18 @@ def train_encoder(args) -> None:
 
     train_pred = booster.predict(X).astype("float32")
     metrics = {
-        "train_rows": int(len(y)), "test_rows": int(len(yt)),
+        "train_rows": int(len(y)),
+        "test_rows": int(len(yt)),
         "nnz_per_row": round(X.nnz / len(y), 1),
         "best_config": automl.best_config,
         "cv_mse": float(automl.best_loss),
-        "holdout": {"mse": mse, "mae": mae, "r2": r2,
-                    "group_spearman_ic": ic, "decile_mean_sar": dec_means},
+        "holdout": {
+            "mse": mse,
+            "mae": mae,
+            "r2": r2,
+            "group_spearman_ic": ic,
+            "decile_mean_sar": dec_means,
+        },
         "train_ic_insample": group_spearman(meta, train_pred),
         "budget_s": args.budget,
         "minutes_total": round((time.time() - t0) / 60, 1),
@@ -129,13 +159,12 @@ def train_encoder(args) -> None:
     mask_path = config.FEATURES_DIR / "col_mask.npy"
     if mask_path.exists():
         import shutil as _sh
+
         _sh.copy2(mask_path, out / "col_mask.npy")
     (out / "train_metrics.json").write_text(json.dumps(metrics, indent=2, default=str))
     # holdout predictions cached for 08_validate / 09_tier_cuts
-    meta_t.assign(pred=pred).to_parquet(config.FEATURES_DIR / "holdout_pred.parquet",
-                                        index=False)
-    meta.assign(pred=train_pred).to_parquet(config.FEATURES_DIR / "train_pred.parquet",
-                                            index=False)
+    meta_t.assign(pred=pred).to_parquet(config.FEATURES_DIR / "holdout_pred.parquet", index=False)
+    meta.assign(pred=train_pred).to_parquet(config.FEATURES_DIR / "train_pred.parquet", index=False)
     print(json.dumps(metrics, indent=2, default=str), flush=True)
 
 
@@ -169,10 +198,20 @@ def _group_sizes(dates):
 
 
 def _lgb_params(objective: str) -> dict:
-    p = {"objective": objective, "learning_rate": 0.03, "num_leaves": 31,
-         "min_data_in_leaf": 2000, "feature_fraction": 0.8, "bagging_fraction": 0.7,
-         "bagging_freq": 1, "lambda_l2": 10.0, "verbosity": -1, "seed": config.SEED,
-         "num_threads": config.N_JOBS, "max_bin": 63}
+    p = {
+        "objective": objective,
+        "learning_rate": 0.03,
+        "num_leaves": 31,
+        "min_data_in_leaf": 2000,
+        "feature_fraction": 0.8,
+        "bagging_fraction": 0.7,
+        "bagging_freq": 1,
+        "lambda_l2": 10.0,
+        "verbosity": -1,
+        "seed": config.SEED,
+        "num_threads": config.N_JOBS,
+        "max_bin": 63,
+    }
     if objective == "lambdarank":
         p["lambdarank_truncation_level"] = 50
     return p
@@ -213,8 +252,7 @@ def _fit_lgb(objective, X, y, dates, rounds):
 
 def _ic(dates, score, y, h):
     r = daily_ic(dates, score, y, horizon=h)
-    return {k: (round(v, 4) if isinstance(v, float) else v)
-            for k, v in r.items() if k != "series"}
+    return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items() if k != "series"}
 
 
 def train_window(args) -> None:
@@ -229,13 +267,22 @@ def train_window(args) -> None:
     dates = panel["date"].astype("datetime64[ns]").to_numpy()
     X_all = panel[WINDOW_COLUMNS].to_numpy("float32")
     sel, test = np.datetime64(config.SEL_START), np.datetime64(config.TEST_START)
-    print(f"window: panel {len(panel):,} rows, {len(WINDOW_COLUMNS)} features "
-          f"({(time.time()-t0)/60:.1f} min)", flush=True)
+    print(
+        f"window: panel {len(panel):,} rows, {len(WINDOW_COLUMNS)} features "
+        f"({(time.time() - t0) / 60:.1f} min)",
+        flush=True,
+    )
 
-    report = {"protocol": {"train": f"[{config.ENCODER_FIRST_YEAR}, {config.SEL_START})",
-                           "select": f"[{config.SEL_START}, {config.TEST_START})",
-                           "holdout": f"[{config.TEST_START}, end)"},
-              "n_rows": int(len(panel)), "features": WINDOW_COLUMNS, "horizons": {}}
+    report = {
+        "protocol": {
+            "train": f"[{config.ENCODER_FIRST_YEAR}, {config.SEL_START})",
+            "select": f"[{config.SEL_START}, {config.TEST_START})",
+            "holdout": f"[{config.TEST_START}, end)",
+        },
+        "n_rows": int(len(panel)),
+        "features": WINDOW_COLUMNS,
+        "horizons": {},
+    }
     WINDOW_DIR.mkdir(parents=True, exist_ok=True)
     preds_out = panel[["symbol", "date", "v1_wmean", "sar_1d", "sar_5d"]].copy()
 
@@ -247,8 +294,13 @@ def train_window(args) -> None:
         va = ok & (dates >= sel) & (dates < test)
         fin = ok & (dates < test)
         ho = ok & (dates >= test)
-        res = {"n_train": int(tr.sum()), "n_select": int(va.sum()), "n_holdout": int(ho.sum()),
-               "select": {}, "holdout": {}}
+        res = {
+            "n_train": int(tr.sum()),
+            "n_select": int(va.sum()),
+            "n_holdout": int(ho.sum()),
+            "select": {},
+            "holdout": {},
+        }
 
         # ---- selection: every candidate x rounds on the selection window
         best = None
@@ -259,13 +311,17 @@ def train_window(args) -> None:
                 res["select"][f"lgbm_{obj}@{k}"] = ic
                 if best is None or ic["mean"] > best[2]:
                     best = (obj, k, ic["mean"])
-            print(f"  h={h}d {obj}: " + ", ".join(
-                f"{k}:{res['select'][f'lgbm_{obj}@{k}']['mean']:.4f}" for k in _ROUNDS)
-                + f" ({(time.time()-t0)/60:.1f} min)", flush=True)
+            print(
+                f"  h={h}d {obj}: "
+                + ", ".join(f"{k}:{res['select'][f'lgbm_{obj}@{k}']['mean']:.4f}" for k in _ROUNDS)
+                + f" ({(time.time() - t0) / 60:.1f} min)",
+                flush=True,
+            )
         ridge = _Ridge().fit(X_all[tr], y_all[tr])
         res["select"]["ridge"] = _ic(dates[va], ridge.predict(X_all[va]), y_all[va], h)
         res["select"]["enc_wmean(v1.1-shaped)"] = _ic(
-            dates[va], X_all[va, WINDOW_COLUMNS.index("enc_wmean")], y_all[va], h)
+            dates[va], X_all[va, WINDOW_COLUMNS.index("enc_wmean")], y_all[va], h
+        )
         if res["select"]["ridge"]["mean"] > best[2]:
             best = ("ridge", 0, res["select"]["ridge"]["mean"])
         res["winner"] = {"model": best[0], "rounds": best[1], "select_ic": round(best[2], 4)}
@@ -280,21 +336,23 @@ def train_window(args) -> None:
             final.save_model(str(WINDOW_DIR / f"window_{h}d.lgbm.txt"))
             score = final.predict(X_all)
             imp = final.feature_importance("gain")
-            res["importance_gain"] = {c: round(float(v), 1) for c, v in
-                                      sorted(zip(WINDOW_COLUMNS, imp), key=lambda t: -t[1])}
+            res["importance_gain"] = {
+                c: round(float(v), 1)
+                for c, v in sorted(zip(WINDOW_COLUMNS, imp), key=lambda t: -t[1])
+            }
         preds_out[f"score_{h}d"] = score.astype("float32")
         ridge_f = _Ridge().fit(X_all[fin], y_all[fin])
-        reg_f = (final if best[0] == "regression"
-                 else _fit_lgb("regression", X_all[fin], y_all[fin], dates[fin],
-                               max(best[1], 200)))
+        reg_f = (
+            final
+            if best[0] == "regression"
+            else _fit_lgb("regression", X_all[fin], y_all[fin], dates[fin], max(best[1], 200))
+        )
         res["holdout"] = {
             "winner": _ic(dates[ho], score[ho], y_all[ho], h),
             "ridge_dense": _ic(dates[ho], ridge_f.predict(X_all[ho]), y_all[ho], h),
             "regression": _ic(dates[ho], reg_f.predict(X_all[ho]), y_all[ho], h),
-            "v1_1_recalibrated": _ic(dates[ho], panel["v1_wmean"].to_numpy()[ho],
-                                     y_all[ho], h),
-            "decile_means": [round(v, 4) for v in
-                             decile_means(dates[ho], score[ho], y_all[ho])],
+            "v1_1_recalibrated": _ic(dates[ho], panel["v1_wmean"].to_numpy()[ho], y_all[ho], h),
+            "decile_means": [round(v, 4) for v in decile_means(dates[ho], score[ho], y_all[ho])],
         }
         report["horizons"][f"{h}d"] = res
         print(f"  h={h}d holdout: " + json.dumps(res["holdout"]), flush=True)

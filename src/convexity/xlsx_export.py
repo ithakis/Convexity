@@ -91,29 +91,34 @@ HOLDINGS_PRIMARY_COLS: list[tuple[str, str]] = [
 
 # Analyst columns appended to the right of the holdings table.
 ANALYST_COLS: list[tuple[str, str]] = [
-    ("recommendation_key",  "Analyst Rating"),
+    ("recommendation_key", "Analyst Rating"),
     ("recommendation_mean", "Rec. Mean (1=Buy,5=Sell)"),
-    ("num_analysts",        "# Analysts"),
-    ("target_mean",         "Target Mean"),
-    ("target_high",         "Target High"),
-    ("target_low",          "Target Low"),
-    ("target_upside_pct",   "Target Upside (%)"),
-    ("forward_pe",          "Forward P/E"),
-    ("ev_ebitda",           "EV/EBITDA"),
-    ("peg",                 "PEG"),
-    ("beta_info",           "Beta (info)"),
-    ("dividend_yield",      "Dividend Yield"),
+    ("num_analysts", "# Analysts"),
+    ("target_mean", "Target Mean"),
+    ("target_high", "Target High"),
+    ("target_low", "Target Low"),
+    ("target_upside_pct", "Target Upside (%)"),
+    ("forward_pe", "Forward P/E"),
+    ("ev_ebitda", "EV/EBITDA"),
+    ("peg", "PEG"),
+    ("beta_info", "Beta (info)"),
+    ("dividend_yield", "Dividend Yield"),
 ]
 
 # Fields explicitly skipped from the holdings "extras" pass — these are
 # either large arrays (charts) or already reported elsewhere in the
 # analyst block, so we don't want them appearing twice.
 HOLDINGS_SKIP_EXTRAS = {
-    "sparkline", "rs_rank", "error",
+    "sparkline",
+    "rs_rank",
+    "error",
     # Pass D — these now ride on every row (via fetch_one) but are also
     # rendered in the dedicated ANALYST_COLS block; skip the auto-extras
     # pass so they don't duplicate.
-    "forward_pe", "ev_ebitda", "recommendation_mean", "target_mean_price",
+    "forward_pe",
+    "ev_ebitda",
+    "recommendation_mean",
+    "target_mean_price",
     # Rendered as the dedicated SENTIMENT_COLS block below instead of a
     # "[5 keys]" blob.
     "news_sentiment",
@@ -123,15 +128,15 @@ HOLDINGS_SKIP_EXTRAS = {
 # the News tab shows, flattened for the sheet. Keys are resolved from the
 # row's `news_sentiment` payload by _sentiment_value().
 SENTIMENT_COLS: list[tuple[str, str]] = [
-    ("ns:news_tier",        "News read"),
-    ("ns:lens:financials",  "News · Financials (−2..+2)"),
-    ("ns:lens:outlook",     "News · Outlook (−2..+2)"),
+    ("ns:news_tier", "News read"),
+    ("ns:lens:financials", "News · Financials (−2..+2)"),
+    ("ns:lens:outlook", "News · Outlook (−2..+2)"),
     ("ns:lens:competition", "News · Competition (−2..+2)"),
-    ("ns:lens:regulation",  "News · Regulation (−2..+2)"),
-    ("ns:lens:street",      "News · Street view (−2..+2)"),
-    ("ns:market_tier",      "Market read"),
-    ("ns:market_z",         "Market read z (σ)"),
-    ("ns:divergence",       "Divergence"),
+    ("ns:lens:regulation", "News · Regulation (−2..+2)"),
+    ("ns:lens:street", "News · Street view (−2..+2)"),
+    ("ns:market_tier", "Market read"),
+    ("ns:market_z", "Market read z (σ)"),
+    ("ns:divergence", "Divergence"),
 ]
 
 
@@ -155,39 +160,40 @@ def _sentiment_value(key: str, s) -> object:
         return (s.get("divergence") or {}).get("text")
     return None
 
+
 # Stats keys (under analytics["stats"]) in display order — these are the
 # rows of the prominent "Portfolio Metrics" block.
 STATS_KEYS: list[tuple[str, str]] = [
     ("total_return", "Total Return (%)"),
-    ("ann_return",   "Annualised Return (%)"),
-    ("ann_vol",      "Annualised Volatility (%)"),
-    ("sharpe",       "Sharpe Ratio"),
-    ("sortino",      "Sortino Ratio"),
-    ("calmar",       "Calmar Ratio"),
-    ("max_dd",       "Max Drawdown (%)"),
-    ("beta",         "Beta vs SPY"),
-    ("r2",           "R² vs SPY"),
-    ("te",           "Tracking Error vs SPY (%)"),
+    ("ann_return", "Annualised Return (%)"),
+    ("ann_vol", "Annualised Volatility (%)"),
+    ("sharpe", "Sharpe Ratio"),
+    ("sortino", "Sortino Ratio"),
+    ("calmar", "Calmar Ratio"),
+    ("max_dd", "Max Drawdown (%)"),
+    ("beta", "Beta vs SPY"),
+    ("r2", "R² vs SPY"),
+    ("te", "Tracking Error vs SPY (%)"),
 ]
 
 EXPORT_STATS_PERIODS: tuple[str, ...] = ("1Y", "5Y")
 
 # Aggregated analyst-coverage keys (under analytics["analyst"]).
 ANALYST_AGG_KEYS: list[tuple[str, str]] = [
-    ("mean_rating",                "Mean Analyst Rating (1=Buy,5=Sell)"),
-    ("rating_coverage_weight",     "Rating Coverage (weight)"),
+    ("mean_rating", "Mean Analyst Rating (1=Buy,5=Sell)"),
+    ("rating_coverage_weight", "Rating Coverage (weight)"),
     ("weighted_target_upside_pct", "Weighted Target Upside (%)"),
-    ("target_coverage_weight",     "Target Coverage (weight)"),
-    ("n_analysts_total",           "Total Analysts"),
-    ("covered_count",              "Holdings Covered"),
-    ("active_count",               "Active Holdings"),
+    ("target_coverage_weight", "Target Coverage (weight)"),
+    ("n_analysts_total", "Total Analysts"),
+    ("covered_count", "Holdings Covered"),
+    ("active_count", "Active Holdings"),
 ]
 
 # Concentration keys (under analytics["concentration"]).
 CONCENTRATION_KEYS: list[tuple[str, str]] = [
-    ("top5",         "Top-5 Concentration"),
-    ("herfindahl",   "Herfindahl Index"),
-    ("effective_n",  "Effective N (1/HHI)"),
+    ("top5", "Top-5 Concentration"),
+    ("herfindahl", "Herfindahl Index"),
+    ("effective_n", "Effective N (1/HHI)"),
 ]
 
 
@@ -214,17 +220,17 @@ def _analyst_info_one(symbol: str) -> dict:
             info = tk.info or {}
     except Exception:
         info = {}
-    out["recommendation_key"]  = (info.get("recommendationKey") or "").lower() or None
+    out["recommendation_key"] = (info.get("recommendationKey") or "").lower() or None
     out["recommendation_mean"] = _maybe_num(info.get("recommendationMean"))
-    out["num_analysts"]        = _maybe_num(info.get("numberOfAnalystOpinions"))
-    out["target_mean"]         = _maybe_num(info.get("targetMeanPrice"))
-    out["target_high"]         = _maybe_num(info.get("targetHighPrice"))
-    out["target_low"]          = _maybe_num(info.get("targetLowPrice"))
-    out["forward_pe"]          = _maybe_num(info.get("forwardPE"))
-    out["ev_ebitda"]           = _maybe_num(info.get("enterpriseToEbitda"))
-    out["peg"]                 = _maybe_num(info.get("pegRatio") or info.get("trailingPegRatio"))
-    out["beta_info"]           = _maybe_num(info.get("beta"))
-    out["dividend_yield"]      = _normalize_dividend_yield(
+    out["num_analysts"] = _maybe_num(info.get("numberOfAnalystOpinions"))
+    out["target_mean"] = _maybe_num(info.get("targetMeanPrice"))
+    out["target_high"] = _maybe_num(info.get("targetHighPrice"))
+    out["target_low"] = _maybe_num(info.get("targetLowPrice"))
+    out["forward_pe"] = _maybe_num(info.get("forwardPE"))
+    out["ev_ebitda"] = _maybe_num(info.get("enterpriseToEbitda"))
+    out["peg"] = _maybe_num(info.get("pegRatio") or info.get("trailingPegRatio"))
+    out["beta_info"] = _maybe_num(info.get("beta"))
+    out["dividend_yield"] = _normalize_dividend_yield(
         info.get("dividendYield"),
         price=info.get("currentPrice") or info.get("regularMarketPrice"),
         dividend_rate=info.get("dividendRate"),
@@ -352,13 +358,15 @@ def _write_overview(wb: Workbook, summaries: list[dict], metric_periods: list[st
 
     headers = ["Portfolio", "Rows", "Cached At"]
     for period in metric_periods:
-        headers.extend([
-            f"{period} Ann Return %",
-            f"{period} Ann Vol %",
-            f"{period} Sharpe",
-            f"{period} Max DD %",
-            f"{period} Excess vs SPY %",
-        ])
+        headers.extend(
+            [
+                f"{period} Ann Return %",
+                f"{period} Ann Vol %",
+                f"{period} Sharpe",
+                f"{period} Max DD %",
+                f"{period} Excess vs SPY %",
+            ]
+        )
     row = 4
     _write_header_cells(ws, row, headers)
     for s in summaries:
@@ -371,11 +379,16 @@ def _write_overview(wb: Workbook, summaries: list[dict], metric_periods: list[st
         for period in metric_periods:
             analytics = analytics_by_period.get(period) or {}
             stats = analytics.get("stats") or {}
-            ws.cell(row=row, column=col, value=_maybe_num(stats.get("ann_return"))); col += 1
-            ws.cell(row=row, column=col, value=_maybe_num(stats.get("ann_vol"))); col += 1
-            ws.cell(row=row, column=col, value=_maybe_num(stats.get("sharpe"))); col += 1
-            ws.cell(row=row, column=col, value=_maybe_num(stats.get("max_dd"))); col += 1
-            ws.cell(row=row, column=col, value=_excess_vs_spy(analytics)); col += 1
+            ws.cell(row=row, column=col, value=_maybe_num(stats.get("ann_return")))
+            col += 1
+            ws.cell(row=row, column=col, value=_maybe_num(stats.get("ann_vol")))
+            col += 1
+            ws.cell(row=row, column=col, value=_maybe_num(stats.get("sharpe")))
+            col += 1
+            ws.cell(row=row, column=col, value=_maybe_num(stats.get("max_dd")))
+            col += 1
+            ws.cell(row=row, column=col, value=_excess_vs_spy(analytics))
+            col += 1
 
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = 18
@@ -416,7 +429,7 @@ def _per_symbol_analyst(analytics: dict) -> dict[str, dict]:
     if not isinstance(analytics, dict):
         return out
     ana = analytics.get("analyst") or {}
-    for h in (ana.get("holdings") or []):
+    for h in ana.get("holdings") or []:
         if isinstance(h, dict) and h.get("symbol"):
             out[h["symbol"]] = h
     return out
@@ -457,8 +470,16 @@ def _write_portfolio_sheet(
 
     # 2) Portfolio metrics + benchmark comparison side-by-side.
     if not has_analytics:
-        errors = [a.get("error") for a in analytics_by_period.values() if isinstance(a, dict) and a.get("error")]
-        msg = f"(analytics unavailable: {errors[0]})" if errors else "(no analytics computed for this export)"
+        errors = [
+            a.get("error")
+            for a in analytics_by_period.values()
+            if isinstance(a, dict) and a.get("error")
+        ]
+        msg = (
+            f"(analytics unavailable: {errors[0]})"
+            if errors
+            else "(no analytics computed for this export)"
+        )
         ws.cell(row=r, column=1, value=msg).font = Font(italic=True, color="9CA3AF")
         r += 2
     else:
@@ -466,12 +487,17 @@ def _write_portfolio_sheet(
             analytics = analytics_by_period.get(period) or {}
             r = _write_section(ws, r, f"Portfolio Metrics ({weighting_label}, {period})")
             if analytics.get("error"):
-                ws.cell(row=r, column=1, value=f"(analytics unavailable: {analytics['error']})").font = Font(italic=True, color="9CA3AF")
+                ws.cell(
+                    row=r, column=1, value=f"(analytics unavailable: {analytics['error']})"
+                ).font = Font(italic=True, color="9CA3AF")
                 r += 2
                 continue
             spy = _bench(analytics, "SPY")
-            columns = [{**(analytics.get("stats") or {}), **(spy.get("rel") or {})},
-                       spy.get("stats") or {}, _bench(analytics, "QQQ").get("stats") or {}]
+            columns = [
+                {**(analytics.get("stats") or {}), **(spy.get("rel") or {})},
+                spy.get("stats") or {},
+                _bench(analytics, "QQQ").get("stats") or {},
+            ]
             _write_header_cells(ws, r, ["Metric", "Portfolio", "SPY", "NASDAQ"])
             r += 1
             for key, label in STATS_KEYS:
@@ -591,6 +617,7 @@ def _write_portfolio_sheet(
 # Weighting resolution
 # --------------------------------------------------------------------------
 
+
 def _resolve_active_weights(view: dict, rows: list[dict]) -> tuple[dict[str, float], str, str]:
     """Resolve the weighting the export should use for one portfolio.
 
@@ -640,6 +667,7 @@ def _resolve_active_weights(view: dict, rows: list[dict]) -> tuple[dict[str, flo
 # --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
+
 
 def build_workbook(
     views_map: dict[str, dict],
@@ -697,14 +725,18 @@ def build_workbook(
         if analytics_runner is not None:
             for analytics_period in metric_periods:
                 try:
-                    result = analytics_runner(rows, {set_name: weights}, analytics_period, display_ccy)
-                    analytics_by_period[analytics_period] = _analytics_result_for_period(result, set_name)
+                    result = analytics_runner(
+                        rows, {set_name: weights}, analytics_period, display_ccy
+                    )
+                    analytics_by_period[analytics_period] = _analytics_result_for_period(
+                        result, set_name
+                    )
                 except Exception as exc:
                     analytics_by_period[analytics_period] = {"error": f"runner failed: {exc}"}
         portfolio_analytics.append((name, view, analytics_by_period, weighting_label))
         # Symbols already covered by analytics["analyst"]["holdings"].
         for analytics in analytics_by_period.values():
-            for h in ((analytics.get("analyst") or {}).get("holdings") or []):
+            for h in (analytics.get("analyst") or {}).get("holdings") or []:
                 if isinstance(h, dict) and h.get("symbol"):
                     covered_symbols.add(h["symbol"])
 
@@ -717,14 +749,24 @@ def build_workbook(
     # Write per-portfolio sheets + summaries.
     for name, view, analytics_by_period, weighting_label in portfolio_analytics:
         sheet_name = _sanitize_sheet_name(name, used_names)
-        _write_portfolio_sheet(wb, sheet_name, name, view, analytics_by_period,
-                               metric_periods, analyst_fallback, weighting_label)
-        summaries.append({
-            "name": name,
-            "rows": len(view.get("rows") or []),
-            "saved_at": view.get("saved_at"),
-            "analytics_by_period": analytics_by_period,
-        })
+        _write_portfolio_sheet(
+            wb,
+            sheet_name,
+            name,
+            view,
+            analytics_by_period,
+            metric_periods,
+            analyst_fallback,
+            weighting_label,
+        )
+        summaries.append(
+            {
+                "name": name,
+                "rows": len(view.get("rows") or []),
+                "saved_at": view.get("saved_at"),
+                "analytics_by_period": analytics_by_period,
+            }
+        )
 
     _write_overview(wb, summaries, metric_periods)
     # Move Overview to the front (openpyxl appends it after creation).

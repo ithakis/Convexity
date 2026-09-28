@@ -94,6 +94,7 @@ def _setup_logging() -> Path:
     # <data>/logs/ on every OS (paths.py). It honours CONVEXITY_HOME, so a
     # dev/test launch can never truncate a running app's log (filemode="w").
     from convexity import paths
+
     log_path = paths.logs_dir() / "desktop.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -128,7 +129,8 @@ def _build_splash_pixmap(dpr: float) -> QPixmap:
 
     if _ICON_PNG.exists():
         icon_pix = QPixmap(str(_ICON_PNG)).scaled(
-            int(160 * dpr), int(160 * dpr),
+            int(160 * dpr),
+            int(160 * dpr),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -147,7 +149,8 @@ def _build_splash_pixmap(dpr: float) -> QPixmap:
     painter.setFont(sub_font)
     painter.setPen(QColor(_MUTED))
     painter.drawText(
-        QRect(0, 248, width, 30), Qt.AlignmentFlag.AlignCenter,
+        QRect(0, 248, width, 30),
+        Qt.AlignmentFlag.AlignCenter,
         f"Made by Alexander Tsoskounoglou 2026 · v{__version_display__}",
     )
 
@@ -162,7 +165,7 @@ class _Splash(QSplashScreen):
 
     def __init__(self, dpr: float):
         super().__init__(_build_splash_pixmap(dpr))
-        self.progress = 0.0   # displayed value, eased toward .target each tick
+        self.progress = 0.0  # displayed value, eased toward .target each tick
         self.target = 0.02
         self.stage = "Starting"
         self._spin_frame = 0
@@ -200,7 +203,9 @@ class _Splash(QSplashScreen):
         painter.setPen(QColor(_ACCENT))
         painter.drawText(QRect(bar_x, 314, 16, 20), Qt.AlignmentFlag.AlignLeft, spinner)
         painter.setPen(QColor(_MUTED))
-        painter.drawText(QRect(bar_x + 18, 314, bar_w - 60, 20), Qt.AlignmentFlag.AlignLeft, self.stage)
+        painter.drawText(
+            QRect(bar_x + 18, 314, bar_w - 60, 20), Qt.AlignmentFlag.AlignLeft, self.stage
+        )
         painter.setPen(QColor(_TEXT))
         painter.drawText(QRect(bar_x, 314, bar_w, 20), Qt.AlignmentFlag.AlignRight, pct)
 
@@ -258,7 +263,9 @@ def _handle_download(download: "QWebEngineDownloadRequest", window: "_MainWindow
     # carries the server's suggested name; we just redirect the directory to
     # the OS Downloads folder (Chromium's own default is a fixed internal
     # path, not necessarily where a user would look).
-    downloads_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+    downloads_dir = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.DownloadLocation
+    )
     if downloads_dir:
         download.setDownloadDirectory(downloads_dir)
     download.accept()
@@ -310,9 +317,7 @@ class _MainWindow(QMainWindow):
         """
         for key in (QKeySequence.StandardKey.ZoomIn, QKeySequence("Ctrl+=")):
             QShortcut(key, self, activated=lambda: self._step_zoom(1))
-        QShortcut(
-            QKeySequence.StandardKey.ZoomOut, self, activated=lambda: self._step_zoom(-1)
-        )
+        QShortcut(QKeySequence.StandardKey.ZoomOut, self, activated=lambda: self._step_zoom(-1))
         QShortcut(QKeySequence("Ctrl+0"), self, activated=self._reset_zoom)
 
     def _apply_zoom(self) -> None:
@@ -379,6 +384,7 @@ def main() -> None:
         # worker only writes plain fields).
         try:
             from convexity.server import shutdown_server, start_server
+
             log.info("server module imported (+%.2fs)", time.monotonic() - t0)
             server, port = start_server()
             boot["shutdown"] = shutdown_server
@@ -407,8 +413,12 @@ def main() -> None:
                 # Deadline hit without a confirmed 200 — proceed anyway (the
                 # load-retry + safety timer are the backstop) but don't claim
                 # readiness we never observed.
-                log.warning("server readiness probe timed out on %d (+%.2fs); "
-                            "proceeding, relying on load-retry", port, time.monotonic() - t0)
+                log.warning(
+                    "server readiness probe timed out on %d (+%.2fs); "
+                    "proceeding, relying on load-retry",
+                    port,
+                    time.monotonic() - t0,
+                )
         except Exception:
             boot["error"] = traceback.format_exc()
             log.error("boot failed:\n%s", boot["error"])
@@ -446,8 +456,13 @@ def main() -> None:
     splash.set_stage("Loading market data engine", 0.55)
     threading.Thread(target=_boot_worker, name="pt-boot", daemon=True).start()
 
-    state = {"window": None, "revealed": False, "reveal_scheduled": False, "load_tries": 0,
-             "load_ok": False}
+    state = {
+        "window": None,
+        "revealed": False,
+        "reveal_scheduled": False,
+        "load_tries": 0,
+        "load_ok": False,
+    }
     _MAX_LOAD_TRIES = 4
 
     def reveal() -> None:
@@ -495,7 +510,12 @@ def main() -> None:
         splash.set_stage("Rendering dashboard", 0.62 + 0.38 * (p / 100.0))
 
     def on_load_finished(ok: bool) -> None:
-        log.info("page loadFinished ok=%s try=%d (+%.2fs)", ok, state["load_tries"], time.monotonic() - t0)
+        log.info(
+            "page loadFinished ok=%s try=%d (+%.2fs)",
+            ok,
+            state["load_tries"],
+            time.monotonic() - t0,
+        )
         if ok:
             state["load_ok"] = True
             splash.set_stage("Ready", 1.0)
@@ -508,7 +528,9 @@ def main() -> None:
         if state["load_tries"] < _MAX_LOAD_TRIES and state["window"] is not None:
             state["load_tries"] += 1
             delay = 250 * state["load_tries"]
-            log.warning("load failed — retry %d/%d in %dms", state["load_tries"], _MAX_LOAD_TRIES, delay)
+            log.warning(
+                "load failed — retry %d/%d in %dms", state["load_tries"], _MAX_LOAD_TRIES, delay
+            )
             splash.set_stage("Retrying", splash.target)
             # Re-issue the explicit URL load rather than view.reload(): after a
             # failed first navigation the view may have no committed URL, so

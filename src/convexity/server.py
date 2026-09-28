@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 warnings.filterwarnings("ignore")
 try:
     from pandas.errors import Pandas4Warning  # type: ignore
+
     warnings.simplefilter("ignore", Pandas4Warning)
 except Exception:
     pass
@@ -29,10 +30,12 @@ warnings.simplefilter("ignore", FutureWarning)
 
 _orig_showwarning = warnings.showwarning
 
+
 def _showwarning_filter(message, category, filename, lineno, file=None, line=None):
     if "site-packages" in str(filename):
         return
     _orig_showwarning(message, category, filename, lineno, file, line)
+
 
 warnings.showwarning = _showwarning_filter
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
@@ -47,6 +50,7 @@ from convexity.analytics import (
 from convexity import jobs
 from convexity.fetcher import fetch_detail, fetch_portfolio, range_history
 from convexity.fetcher import stream_quotes as fetcher_stream_quotes
+
 # NB: convexity.frontier (and its numba/mpt dependency, ~1.7s to
 # import) is imported lazily at its two call sites below — the MPT/Optimize
 # feature is on-demand, so keeping it off the module-load path shaves that
@@ -124,8 +128,10 @@ class Handler(BaseHTTPRequestHandler):
         ... not 'Series'") that names neither the line nor the input — the
         duplicate-symbol 500 was undiagnosable from the log for exactly that
         reason."""
-        print(f"[{self.log_date_time_string()}] {route} failed"
-              + (f" ({detail})" if detail else ""), file=sys.stderr)
+        print(
+            f"[{self.log_date_time_string()}] {route} failed" + (f" ({detail})" if detail else ""),
+            file=sys.stderr,
+        )
         traceback.print_exc()
 
     def _send_json(self, status: int, payload: dict) -> None:
@@ -165,9 +171,9 @@ class Handler(BaseHTTPRequestHandler):
             # first; the client-supplied view/entries/context are ignored.
             watch = load_watchlists()
             meta = (list_views() or {}).get("views") or {}
-            names = sorted(watch.keys(),
-                           key=lambda n: (meta.get(n) or {}).get("saved_at") or "",
-                           reverse=True)
+            names = sorted(
+                watch.keys(), key=lambda n: (meta.get(n) or {}).get("saved_at") or "", reverse=True
+            )
             entries_by_view = {n: watch[n] for n in names}
             context = None
         else:
@@ -177,15 +183,26 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "nothing to refresh"})
             return
 
-        job, outcome = jobs.submit(scope=scope, phases=phases, days=days,
-                                   entries_by_view=entries_by_view, context=context,
-                                   on_conflict=on_conflict)
+        job, outcome = jobs.submit(
+            scope=scope,
+            phases=phases,
+            days=days,
+            entries_by_view=entries_by_view,
+            context=context,
+            on_conflict=on_conflict,
+        )
         if outcome == "rejected":
             # 409 + the running job's id: the client attaches to it rather than
             # starting a second one. See the single-flight note in jobs.py.
-            self._send_json(409, {"error": "a refresh is already running",
-                                  "job_id": job.id, "state": job.state,
-                                  "snapshot": job.snapshot()})
+            self._send_json(
+                409,
+                {
+                    "error": "a refresh is already running",
+                    "job_id": job.id,
+                    "state": job.state,
+                    "snapshot": job.snapshot(),
+                },
+            )
             return
         self._send_json(202, {"job_id": job.id, "state": job.state, "outcome": outcome})
 
@@ -199,18 +216,27 @@ class Handler(BaseHTTPRequestHandler):
         try:
             # Connection frames carry seq 0 and are never replayed; the client
             # must only advance its cursor on nonzero seqs.
-            self.wfile.write(_safe_json({
-                "type": "hello", "seq": 0, "job": job.snapshot(),
-                "dropped": dropped, "replay_from": since,
-                "last_seq": job.snapshot()["last_seq"],
-            }))
+            self.wfile.write(
+                _safe_json(
+                    {
+                        "type": "hello",
+                        "seq": 0,
+                        "job": job.snapshot(),
+                        "dropped": dropped,
+                        "replay_from": since,
+                        "last_seq": job.snapshot()["last_seq"],
+                    }
+                )
+            )
             for frame in replay:
                 self.wfile.write(_safe_json(frame))
                 since = max(since, frame["seq"])
             self.wfile.flush()
-            terminal_seen = any(f["type"] in ("done", "error") or
-                                (f["type"] == "job" and f.get("state") in ("cancelled",))
-                                for f in replay)
+            terminal_seen = any(
+                f["type"] in ("done", "error")
+                or (f["type"] == "job" and f.get("state") in ("cancelled",))
+                for f in replay
+            )
             while not terminal_seen:
                 frames = job.wait(since, timeout=15.0)
                 if not frames:
@@ -223,7 +249,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(_safe_json(frame))
                     since = max(since, frame["seq"])
                     if frame["type"] in ("done", "error") or (
-                            frame["type"] == "job" and frame.get("state") == "cancelled"):
+                        frame["type"] == "job" and frame.get("state") == "cancelled"
+                    ):
                         terminal_seen = True
                 self.wfile.flush()
             self.wfile.write(_safe_json({"type": "end", "seq": 0}))
@@ -267,7 +294,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if parsed.path.startswith("/static/"):
-            rel = parsed.path[len("/static/"):]
+            rel = parsed.path[len("/static/") :]
             if self._serve_static(rel):
                 return
             self.send_response(404)
@@ -282,25 +309,34 @@ class Handler(BaseHTTPRequestHandler):
             # no network. False (with llm_error) drives "News read
             # unavailable: <reason>" — the model was retired once and the app
             # kept showing August's sentiment without a word.
-            llm = _ns.llm_status() if _ns is not None else {"ok": False,
-                                                            "error": "news module unavailable"}
-            self._send_json(200, {
-                "ok": True, "ts": datetime.now(timezone.utc).isoformat(),
-                "version": __version__, "version_date": __version_date__,
-                "env_ok": envcheck.status()["ok"],
-                "llm_ok": llm.get("ok"), "llm_error": llm.get("error"),
-                # Where the user's data lives (Settings -> About). A local path
-                # on a 127.0.0.1-only server, shown to the one local user.
-                "data_dir": str(_paths.data_dir()),
-                # Old files the data-folder migration left alone because a
-                # different copy was already in the data folder (banner +
-                # Settings -> About). Empty on a normal launch.
-                "migration_conflicts": _migration_conflicts(),
-                # Drives the first-run "Add your free API keys" banner. Module
-                # globals, so still cheap; booleans only.
-                "finnhub_key_set": bool(getattr(_ns, "FINNHUB_API_KEY", "")),
-                "nvidia_key_set": bool(getattr(_ns, "NVIDIA_API_KEY", "")),
-            })
+            llm = (
+                _ns.llm_status()
+                if _ns is not None
+                else {"ok": False, "error": "news module unavailable"}
+            )
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "version": __version__,
+                    "version_date": __version_date__,
+                    "env_ok": envcheck.status()["ok"],
+                    "llm_ok": llm.get("ok"),
+                    "llm_error": llm.get("error"),
+                    # Where the user's data lives (Settings -> About). A local path
+                    # on a 127.0.0.1-only server, shown to the one local user.
+                    "data_dir": str(_paths.data_dir()),
+                    # Old files the data-folder migration left alone because a
+                    # different copy was already in the data folder (banner +
+                    # Settings -> About). Empty on a normal launch.
+                    "migration_conflicts": _migration_conflicts(),
+                    # Drives the first-run "Add your free API keys" banner. Module
+                    # globals, so still cheap; booleans only.
+                    "finnhub_key_set": bool(getattr(_ns, "FINNHUB_API_KEY", "")),
+                    "nvidia_key_set": bool(getattr(_ns, "NVIDIA_API_KEY", "")),
+                },
+            )
             return
         if parsed.path == "/api/keys":
             # Settings -> API keys. Booleans + source names only (keys.status).
@@ -314,15 +350,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/column-views":
             raw = load_column_views()
-            self._send_json(200, {
-                "builtins": ["Default", "Fundamentals", "Momentum"],
-                "custom": raw.get("custom_views") or {},
-                "builtin_overrides": raw.get("builtin_overrides") or {},
-                "active": raw.get("active_view") or "Default",
-            })
+            self._send_json(
+                200,
+                {
+                    "builtins": ["Default", "Fundamentals", "Momentum"],
+                    "custom": raw.get("custom_views") or {},
+                    "builtin_overrides": raw.get("builtin_overrides") or {},
+                    "active": raw.get("active_view") or "Default",
+                },
+            )
             return
         if parsed.path.startswith("/api/views/"):
-            name = unquote(parsed.path[len("/api/views/"):])
+            name = unquote(parsed.path[len("/api/views/") :])
             view = load_view(name)
             # Backfill news_sentiment on row payloads from the rehydrated
             # in-memory cache. Views saved before sentiment was fetched
@@ -366,7 +405,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/fx-indexes-bulk":
             q = parse_qs(parsed.query)
             period = (q.get("period") or ["1y"])[0].strip() or "1y"
-            ccys = [c.strip().upper() for c in (q.get("ccys") or [",".join(SUPPORTED_FX)])[0].split(",") if c.strip()]
+            ccys = [
+                c.strip().upper()
+                for c in (q.get("ccys") or [",".join(SUPPORTED_FX)])[0].split(",")
+                if c.strip()
+            ]
             ccys = [c for c in ccys if c in SUPPORTED_FX]
             results: dict[str, list] = {}
             for c in ccys:
@@ -414,9 +457,8 @@ class Handler(BaseHTTPRequestHandler):
             j = jobs.current()
             self._send_json(200, {"job": j.snapshot() if j else None})
             return
-        if (parsed.path.startswith("/api/refresh-job/")
-                and parsed.path.endswith("/stream")):
-            job_id = parsed.path[len("/api/refresh-job/"):-len("/stream")]
+        if parsed.path.startswith("/api/refresh-job/") and parsed.path.endswith("/stream"):
+            job_id = parsed.path[len("/api/refresh-job/") : -len("/stream")]
             q = parse_qs(parsed.query)
             try:
                 since = int((q.get("since") or ["0"])[0])
@@ -438,6 +480,7 @@ class Handler(BaseHTTPRequestHandler):
             lb = (q.get("lookback") or ["3Y"])[0].strip() or "3Y"
             try:
                 from convexity.frontier import _risk_free_history
+
                 self._send_json(200, _risk_free_history(ccy, lb))
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
@@ -457,31 +500,39 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(503, {"error": "news_sentiment module not available"})
                 return
             q = parse_qs(parsed.query)
-            symbols = [s.strip().upper() for s in (q.get("symbols") or [""])[0].split(",") if s.strip()]
+            symbols = [
+                s.strip().upper() for s in (q.get("symbols") or [""])[0].split(",") if s.strip()
+            ]
             if not symbols:
                 self._send_json(400, {"error": "symbols required"})
                 return
             days = (q.get("days") or [None])[0]
-            self._send_json(200, {"sentiment": _ns.get_cached_sentiments(symbols, days),
-                                  "status": _ns.status()})
+            self._send_json(
+                200, {"sentiment": _ns.get_cached_sentiments(symbols, days), "status": _ns.status()}
+            )
             return
         if parsed.path == "/api/news-market":
             if _ns is None:
                 self._send_json(503, {"error": "news_sentiment module not available"})
                 return
             days = (parse_qs(parsed.query).get("days") or [None])[0]
-            self._send_json(200, {
-                "sentiment": _ns.get_cached_market(days),
-                "articles": _ns.get_cached_market_articles(days),
-                "status": _ns.status(),
-            })
+            self._send_json(
+                200,
+                {
+                    "sentiment": _ns.get_cached_market(days),
+                    "articles": _ns.get_cached_market_articles(days),
+                    "status": _ns.status(),
+                },
+            )
             return
         if parsed.path == "/api/news-tape":
             if _ns is None:
                 self._send_json(503, {"error": "news_sentiment module not available"})
                 return
             q = parse_qs(parsed.query)
-            symbols = [s.strip().upper() for s in (q.get("symbols") or [""])[0].split(",") if s.strip()]
+            symbols = [
+                s.strip().upper() for s in (q.get("symbols") or [""])[0].split(",") if s.strip()
+            ]
             try:
                 # Cache-only read — safe to call on every panel open.
                 self._send_json(200, {"articles": _ns.get_cached_articles(symbols)})
@@ -518,18 +569,25 @@ class Handler(BaseHTTPRequestHandler):
             # it is paid once and then cached process-wide by _STATE.
             try:
                 from convexity import ml_sentiment as _ml
+
                 ml = _ml.runtime_status()
             except Exception as exc:
                 # Same shape as compute_diagnostics()'s except-branch so the
                 # frontend renders one thing regardless of which route served it.
-                ml = {"available": False, "reason": f"{type(exc).__name__}: {exc}",
-                      "model_dir": "", "model_dir_exists": False, "version": ""}
+                ml = {
+                    "available": False,
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "model_dir": "",
+                    "model_dir_exists": False,
+                    "version": "",
+                }
             keys = {}
             if _ns is not None:
                 try:
                     st = _ns.status()
                     # Booleans only — never serve key material to the frontend.
                     from convexity import lexicon as _lex
+
                     keys = {
                         "finnhub_key_set": bool(st.get("finnhub_key_set")),
                         "nvidia_key_set": bool(st.get("nvidia_key_set")),
@@ -540,13 +598,16 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 except Exception:
                     keys = {}
-            self._send_json(200, {
-                "ml": ml,
-                "env": envcheck.status(),
-                "keys": keys,
-                "version": __version__,
-                "version_date": __version_date__,
-            })
+            self._send_json(
+                200,
+                {
+                    "ml": ml,
+                    "env": envcheck.status(),
+                    "keys": keys,
+                    "version": __version__,
+                    "version_date": __version_date__,
+                },
+            )
             return
         if parsed.path == "/api/news-diagnostics":
             if _ns is None:
@@ -571,7 +632,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 from convexity import xlsx_export
             except ImportError as exc:
-                self._send_json(500, {"error": f"openpyxl not installed: {exc}. Re-run the installer, or `uv sync` in a checkout"})
+                self._send_json(
+                    500,
+                    {
+                        "error": f"openpyxl not installed: {exc}. Re-run the installer, or `uv sync` in a checkout"
+                    },
+                )
                 return
             try:
                 meta = list_views().get("views") or {}
@@ -584,13 +650,18 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": "no saved portfolios to export"})
                     return
                 blob = xlsx_export.build_workbook(
-                    full, analytics_runner=analyze_portfolios_multi,
-                    period="1Y", display_ccy="USD",
+                    full,
+                    analytics_runner=analyze_portfolios_multi,
+                    period="1Y",
+                    display_ccy="USD",
                 )
                 stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
                 fname = f"convexity_export_{stamp}.xlsx"
                 self.send_response(200)
-                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header(
+                    "Content-Type",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
                 self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
                 self.send_header("Content-Length", str(len(blob)))
                 self.send_header("Cache-Control", "no-store")
@@ -659,8 +730,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.rfile.read(length)
         except (ValueError, OSError):
             pass
-        print(f"[{self.log_date_time_string()}] refused cross-origin {self.command} "
-              f"{urlparse(self.path).path}", file=sys.stderr)
+        print(
+            f"[{self.log_date_time_string()}] refused cross-origin {self.command} "
+            f"{urlparse(self.path).path}",
+            file=sys.stderr,
+        )
         self._send_json(403, {"error": "cross-origin request refused"})
 
     def _handle_keys_post(self, path: str) -> None:
@@ -688,14 +762,18 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "clear":
                 self._send_json(200, _keys.clear(provider))
             else:
-                self._send_json(400, {"error": "action must be \"set\" or \"clear\""})
+                self._send_json(400, {"error": 'action must be "set" or "clear"'})
         except _keys.InvalidKey as exc:
             self._send_json(400, {"error": str(exc)})
         except _keys.ConfigMalformed:
-            self._send_json(409, {
-                "error": "config.json is not valid JSON, so it was left untouched. "
-                         "Fix or delete it, then save the key again.",
-                "config_path": str(_paths.config_file())})
+            self._send_json(
+                409,
+                {
+                    "error": "config.json is not valid JSON, so it was left untouched. "
+                    "Fix or delete it, then save the key again.",
+                    "config_path": str(_paths.config_file()),
+                },
+            )
         except Exception as exc:
             print(f"[keys] {path} failed: {type(exc).__name__}", file=sys.stderr)
             self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
@@ -715,6 +793,7 @@ class Handler(BaseHTTPRequestHandler):
             # it does nothing when the model is present, is single-flight, and
             # the artifact is verified against the SHA-256 pinned in model_fetch.
             from convexity import model_fetch
+
             self._send_json(202, model_fetch.start(force=True))
             return
         if parsed.path == "/api/watchlists":
@@ -749,11 +828,14 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("columns") or [],
                     payload.get("heat"),
                 )
-                self._send_json(200, {
-                    "custom": raw.get("custom_views") or {},
-                    "builtin_overrides": raw.get("builtin_overrides") or {},
-                    "active": raw.get("active_view") or "Default",
-                })
+                self._send_json(
+                    200,
+                    {
+                        "custom": raw.get("custom_views") or {},
+                        "builtin_overrides": raw.get("builtin_overrides") or {},
+                        "active": raw.get("active_view") or "Default",
+                    },
+                )
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
             except Exception as exc:
@@ -771,11 +853,14 @@ class Handler(BaseHTTPRequestHandler):
                     str(payload.get("key") or ""),
                     str(payload.get("mode") or ""),
                 )
-                self._send_json(200, {
-                    "custom": raw.get("custom_views") or {},
-                    "builtin_overrides": raw.get("builtin_overrides") or {},
-                    "active": raw.get("active_view") or "Default",
-                })
+                self._send_json(
+                    200,
+                    {
+                        "custom": raw.get("custom_views") or {},
+                        "builtin_overrides": raw.get("builtin_overrides") or {},
+                        "active": raw.get("active_view") or "Default",
+                    },
+                )
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
             except Exception as exc:
@@ -793,11 +878,14 @@ class Handler(BaseHTTPRequestHandler):
                     str(payload.get("name") or ""),
                     bool(payload.get("acked", True)),
                 )
-                self._send_json(200, {
-                    "custom": raw.get("custom_views") or {},
-                    "builtin_overrides": raw.get("builtin_overrides") or {},
-                    "active": raw.get("active_view") or "Default",
-                })
+                self._send_json(
+                    200,
+                    {
+                        "custom": raw.get("custom_views") or {},
+                        "builtin_overrides": raw.get("builtin_overrides") or {},
+                        "active": raw.get("active_view") or "Default",
+                    },
+                )
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
             except Exception as exc:
@@ -816,7 +904,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path.startswith("/api/views/"):
-            name = unquote(parsed.path[len("/api/views/"):])
+            name = unquote(parsed.path[len("/api/views/") :])
             try:
                 payload = self._read_json()
                 entries = str(payload.get("entries") or "")
@@ -889,10 +977,18 @@ class Handler(BaseHTTPRequestHandler):
                 weight_sets = payload.get("weight_sets") or {}
                 period = str(payload.get("period") or "1Y")
                 display_ccy = str(payload.get("display_ccy") or "USD").strip().upper()
-                if not isinstance(rows, list) or not isinstance(weight_sets, dict) or not weight_sets:
-                    self._send_json(400, {"error": "rows[] and weight_sets{name: weights} required"})
+                if (
+                    not isinstance(rows, list)
+                    or not isinstance(weight_sets, dict)
+                    or not weight_sets
+                ):
+                    self._send_json(
+                        400, {"error": "rows[] and weight_sets{name: weights} required"}
+                    )
                     return
-                results = analyze_portfolios_multi(rows, weight_sets, period, display_ccy=display_ccy)
+                results = analyze_portfolios_multi(
+                    rows, weight_sets, period, display_ccy=display_ccy
+                )
                 self._send_json(200, {"results": results} if "error" not in results else results)
             except Exception as exc:
                 self._log_exception("/api/portfolio-analytics-multi", _rows_summary(rows, period))
@@ -941,11 +1037,15 @@ class Handler(BaseHTTPRequestHandler):
                 rows,
                 lookback=str(payload.get("lookback") or "3Y"),
                 display_ccy=str(payload.get("display_ccy") or "USD"),
-                rf=_fnum("rf", 0.04), alpha=_fnum("alpha", 0.95),
-                fully_invested=fully_invested, bounds=bounds,
-                w_min=_fnum("w_min", 0.0), w_max=_fnum("w_max", 1.0),
+                rf=_fnum("rf", 0.04),
+                alpha=_fnum("alpha", 0.95),
+                fully_invested=fully_invested,
+                bounds=bounds,
+                w_min=_fnum("w_min", 0.0),
+                w_max=_fnum("w_max", 1.0),
                 cov_model=str(payload.get("cov_model") or "ledoit"),
-                haircut=_fnum("haircut", 0.25), budget=budget,
+                haircut=_fnum("haircut", 0.25),
+                budget=budget,
                 current_weights=payload.get("current_weights") or {},
             )
             try:
@@ -985,7 +1085,9 @@ class Handler(BaseHTTPRequestHandler):
                 rename_from = payload.get("rename_from")
                 set_active = bool(payload.get("set_active", True))
                 out = upsert_weight_preset(
-                    view, name, weights,
+                    view,
+                    name,
+                    weights,
                     rename_from=(str(rename_from).strip() if rename_from else None),
                     set_active=set_active,
                 )
@@ -1050,7 +1152,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path.startswith("/api/refresh-job/") and parsed.path.endswith("/cancel"):
-            job_id = parsed.path[len("/api/refresh-job/"):-len("/cancel")]
+            job_id = parsed.path[len("/api/refresh-job/") : -len("/cancel")]
             if jobs.cancel(job_id):
                 self._send_json(200, {"ok": True, "state": "cancelled"})
             elif jobs.get(job_id) is None:
@@ -1087,7 +1189,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/views/"):
-            name = unquote(parsed.path[len("/api/views/"):])
+            name = unquote(parsed.path[len("/api/views/") :])
             try:
                 delete_view(name)
                 self._send_json(200, {"ok": True})
@@ -1113,14 +1215,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": str(exc)})
             return
         if parsed.path.startswith("/api/column-views/"):
-            name = unquote(parsed.path[len("/api/column-views/"):])
+            name = unquote(parsed.path[len("/api/column-views/") :])
             try:
                 raw = delete_column_view(name)
-                self._send_json(200, {
-                    "custom": raw.get("custom_views") or {},
-                    "builtin_overrides": raw.get("builtin_overrides") or {},
-                    "active": raw.get("active_view") or "Default",
-                })
+                self._send_json(
+                    200,
+                    {
+                        "custom": raw.get("custom_views") or {},
+                        "builtin_overrides": raw.get("builtin_overrides") or {},
+                        "active": raw.get("active_view") or "Default",
+                    },
+                )
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
             except Exception as exc:
@@ -1141,6 +1246,7 @@ class Handler(BaseHTTPRequestHandler):
 def _migration_conflicts() -> list[dict]:
     try:
         from convexity import migrate as _migrate
+
         return _migrate.conflicts()
     except Exception:
         return []
@@ -1198,11 +1304,13 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
         # model unavailable with a real reason on /api/runtime-status.
         try:
             from convexity import ml_sentiment as _mls
+
             # First run: fetch the Market read model in its own background
             # thread (returns at once) — boot never waits on the network.
             # A no-op when the model is present; status and failures surface
             # in Settings -> Models & Data and the log (model_fetch.py).
             from convexity import model_fetch
+
             if model_fetch.start()["state"] in model_fetch.IN_FLIGHT:
                 return  # the download reloads the model itself when done
             _mls.available()
@@ -1256,12 +1364,14 @@ def main() -> None:
     print(f"  Convexity v{__version_display__} running at {url}")
     print("  Open that URL in your browser. Press Ctrl+C to stop.")
     print("=" * 60)
+
     def _warm_optimizer() -> None:
         # Import mpt off the startup path so the first Optimize click never pays
         # the one-time numba JIT compile (~7 s) — it warms in the background here
         # while the user reads their dashboard. Best-effort; failure is harmless.
         try:
             import importlib
+
             importlib.import_module("convexity.mpt")  # import triggers _warm_jit()
         except Exception:
             pass

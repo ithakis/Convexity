@@ -39,6 +39,7 @@ Usage:
     python ml/scripts/05_build_labels.py --stage A    # one stage
     python ml/scripts/05_build_labels.py --sample     # cap news rows for smoke test
 """
+
 from __future__ import annotations
 
 import argparse
@@ -69,30 +70,43 @@ def stage_a() -> None:
     cal = pd.read_parquet(config.CALENDAR_PARQUET)[["date", "m_cc"]]
     cal["date"] = pd.to_datetime(cal["date"])
 
-    symbols = [s for (s,) in con.execute(
-        f"SELECT DISTINCT symbol FROM read_parquet('{config.PRICES_PARQUET}') ORDER BY symbol"
-    ).fetchall()]
+    symbols = [
+        s
+        for (s,) in con.execute(
+            f"SELECT DISTINCT symbol FROM read_parquet('{config.PRICES_PARQUET}') ORDER BY symbol"
+        ).fetchall()
+    ]
     print(f"stage A: {len(symbols)} symbols", flush=True)
 
-    schema = pa.schema([
-        ("symbol", pa.string()), ("date", pa.date32()),
-        ("adj_open", pa.float32()), ("adj_close", pa.float32()),
-        ("sigma_cc", pa.float32()), ("sigma_oc", pa.float32()), ("sigma_co", pa.float32()),
-        ("beta", pa.float32()), ("dollar_vol", pa.float32()),
-    ])
+    schema = pa.schema(
+        [
+            ("symbol", pa.string()),
+            ("date", pa.date32()),
+            ("adj_open", pa.float32()),
+            ("adj_close", pa.float32()),
+            ("sigma_cc", pa.float32()),
+            ("sigma_oc", pa.float32()),
+            ("sigma_co", pa.float32()),
+            ("beta", pa.float32()),
+            ("dollar_vol", pa.float32()),
+        ]
+    )
     writer = pq.ParquetWriter(config.TICKER_STATS_PARQUET, schema, compression="zstd")
     w, mn = config.SIGMA_WINDOW, config.SIGMA_MIN_OBS
     bw, bmn = config.BETA_WINDOW, config.BETA_MIN_OBS
     b1, b0 = config.BETA_BLUME
 
     for i in range(0, len(symbols), SYMBOL_BATCH):
-        batch = symbols[i:i + SYMBOL_BATCH]
-        df = con.execute(f"""
+        batch = symbols[i : i + SYMBOL_BATCH]
+        df = con.execute(
+            f"""
             SELECT symbol, date, open, close, adj_close, volume
             FROM read_parquet('{config.PRICES_PARQUET}')
-            WHERE symbol IN ({','.join('?' * len(batch))})
+            WHERE symbol IN ({",".join("?" * len(batch))})
             ORDER BY symbol, date
-        """, batch).df()
+        """,
+            batch,
+        ).df()
         df["date"] = pd.to_datetime(df["date"])
         df = df.merge(cal, on="date", how="left")
         out_frames = []
@@ -113,19 +127,26 @@ def stage_a() -> None:
             beta_hat = (cov / var).shift(1)
             beta = (b1 * beta_hat + b0).clip(*config.BETA_CLIP)
             dollar_vol = (g["close"] * g["volume"]).rolling(w, min_periods=mn).median().shift(1)
-            out_frames.append(pd.DataFrame({
-                "symbol": sym, "date": g["date"].dt.date,
-                "adj_open": adj_open.astype("float32"),
-                "adj_close": adj_close.astype("float32"),
-                "sigma_cc": sigma_cc.astype("float32"), "sigma_oc": sigma_oc.astype("float32"),
-                "sigma_co": sigma_co.astype("float32"),
-                "beta": beta.astype("float32"), "dollar_vol": dollar_vol.astype("float32"),
-            }))
+            out_frames.append(
+                pd.DataFrame(
+                    {
+                        "symbol": sym,
+                        "date": g["date"].dt.date,
+                        "adj_open": adj_open.astype("float32"),
+                        "adj_close": adj_close.astype("float32"),
+                        "sigma_cc": sigma_cc.astype("float32"),
+                        "sigma_oc": sigma_oc.astype("float32"),
+                        "sigma_co": sigma_co.astype("float32"),
+                        "beta": beta.astype("float32"),
+                        "dollar_vol": dollar_vol.astype("float32"),
+                    }
+                )
+            )
         chunk = pd.concat(out_frames, ignore_index=True)
         writer.write_table(pa.Table.from_pandas(chunk, schema=schema, preserve_index=False))
         print(f"  {i + len(batch)}/{len(symbols)} symbols", flush=True)
     writer.close()
-    print(f"stage A done in {(time.time()-t0)/60:.1f} min", flush=True)
+    print(f"stage A done in {(time.time() - t0) / 60:.1f} min", flush=True)
 
 
 # --------------------------------------------------------------------- stage B
@@ -238,14 +259,19 @@ def stage_b(sample: bool) -> None:
         SELECT (SELECT count(*) FROM ev),
                (SELECT count(*) FROM read_parquet('{LABELED_PRE_PARQUET}'))
     """).fetchone()
-    by_class = dict(con.execute(f"""
+    by_class = dict(
+        con.execute(f"""
         SELECT session_class, count(*) FROM read_parquet('{LABELED_PRE_PARQUET}')
         GROUP BY session_class
-    """).fetchall())
-    report = {"events_in": n_ev, "rows_out": n_out,
-              "joined_frac": round(n_out / max(1, n_ev), 4),
-              "by_session_class": by_class,
-              "minutes": round((time.time() - t0) / 60, 1)}
+    """).fetchall()
+    )
+    report = {
+        "events_in": n_ev,
+        "rows_out": n_out,
+        "joined_frac": round(n_out / max(1, n_ev), 4),
+        "by_session_class": by_class,
+        "minutes": round((time.time() - t0) / 60, 1),
+    }
     (config.REPORTS_DIR / "labels_stage_b_report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2), flush=True)
 
@@ -271,17 +297,31 @@ def stage_c() -> None:
     con.execute(f"PRAGMA temp_directory='{tmp}'")
     con.execute("SET preserve_insertion_order=false")
 
-    schema = pa.schema([
-        ("symbol", pa.string()), ("title", pa.string()), ("publisher", pa.string()),
-        ("url", pa.string()), ("summary", pa.string()), ("ts_et", pa.timestamp("us")),
-        ("session_class", pa.string()), ("d0", pa.date32()), ("d1", pa.date32()),
-        ("beta", pa.float32()), ("dollar_vol", pa.float32()),
-        ("r_win", pa.float32()), ("m_win", pa.float32()), ("sigma", pa.float32()),
-        ("abn", pa.float32()), ("sar", pa.float32()), ("sar_raw", pa.float32()),
-        ("r_cc_baseline", pa.float32()),
-        ("n_duplicates", pa.int32()), ("group_size", pa.int32()),
-        ("group_weight", pa.float32()),
-    ])
+    schema = pa.schema(
+        [
+            ("symbol", pa.string()),
+            ("title", pa.string()),
+            ("publisher", pa.string()),
+            ("url", pa.string()),
+            ("summary", pa.string()),
+            ("ts_et", pa.timestamp("us")),
+            ("session_class", pa.string()),
+            ("d0", pa.date32()),
+            ("d1", pa.date32()),
+            ("beta", pa.float32()),
+            ("dollar_vol", pa.float32()),
+            ("r_win", pa.float32()),
+            ("m_win", pa.float32()),
+            ("sigma", pa.float32()),
+            ("abn", pa.float32()),
+            ("sar", pa.float32()),
+            ("sar_raw", pa.float32()),
+            ("r_cc_baseline", pa.float32()),
+            ("n_duplicates", pa.int32()),
+            ("group_size", pa.int32()),
+            ("group_weight", pa.float32()),
+        ]
+    )
     writer = pq.ParquetWriter(config.LABELED_PARQUET, schema, compression="zstd")
 
     # Group keys include d1, so a group never spans calendar years — process
@@ -290,9 +330,12 @@ def stage_c() -> None:
     # entirely; only multi-article groups run the rapidfuzz clustering, driven
     # by numpy index arrays instead of per-group DataFrames (the per-group
     # pd.concat version of this loop got OOM-killed on an 8 GB machine).
-    years = [y for (y,) in con.execute(
-        f"SELECT DISTINCT year(d1) FROM read_parquet('{LABELED_PRE_PARQUET}') ORDER BY 1"
-    ).fetchall()]
+    years = [
+        y
+        for (y,) in con.execute(
+            f"SELECT DISTINCT year(d1) FROM read_parquet('{LABELED_PRE_PARQUET}') ORDER BY 1"
+        ).fetchall()
+    ]
 
     n_in = n_kept = 0
     for y in years:
@@ -306,8 +349,7 @@ def stage_c() -> None:
         if not len(df):
             continue
         n_in += len(df)
-        grouped = df.groupby(["symbol", "d1", "session_class"], sort=False,
-                             observed=True)
+        grouped = df.groupby(["symbol", "d1", "session_class"], sort=False, observed=True)
         gid = grouped.ngroup().to_numpy()
         counts = np.bincount(gid)
 
@@ -334,8 +376,9 @@ def stage_c() -> None:
         out["sar"] = sar_raw.clip(-config.SAR_WINSOR, config.SAR_WINSOR)
         out = out.sort_values(["symbol", "d1", "session_class"], kind="stable")
         n_kept += len(out)
-        writer.write_table(pa.Table.from_pandas(out[[f.name for f in schema]],
-                                                schema=schema, preserve_index=False))
+        writer.write_table(
+            pa.Table.from_pandas(out[[f.name for f in schema]], schema=schema, preserve_index=False)
+        )
         del df, out, gid, keep, ndup
         print(f"  year {y} done ({n_kept:,} kept so far)", flush=True)
     writer.close()
@@ -347,12 +390,16 @@ def stage_c() -> None:
         FROM read_parquet('{config.LABELED_PARQUET}')
     """).fetchone()
     report = {
-        "rows_in_after_filters": n_in, "rows_kept": n_kept,
+        "rows_in_after_filters": n_in,
+        "rows_kept": n_kept,
         "dedup_removed_frac": round(1 - n_kept / max(1, n_in), 4),
-        "sar_mean": round(float(stats[1]), 4), "sar_std": round(float(stats[2]), 4),
+        "sar_mean": round(float(stats[1]), 4),
+        "sar_std": round(float(stats[2]), 4),
         "sar_median": round(float(stats[3]), 4),
-        "sar_p01": round(float(stats[4]), 3), "sar_p99": round(float(stats[5]), 3),
-        "d1_min": str(stats[6]), "d1_max": str(stats[7]),
+        "sar_p01": round(float(stats[4]), 3),
+        "sar_p99": round(float(stats[5]), 3),
+        "d1_min": str(stats[6]),
+        "d1_max": str(stats[7]),
         "minutes": round((time.time() - t0) / 60, 1),
     }
     (config.REPORTS_DIR / "labels_stage_c_report.json").write_text(json.dumps(report, indent=2))
@@ -454,8 +501,12 @@ def stage_d() -> None:
         SELECT count(*), count(sar_1d), count(sar_5d)
         FROM read_parquet('{TICKER_DAY_PARQUET}')
     """).fetchone()
-    report = {"rows": n, "with_sar_1d": n1, "with_sar_5d": n5,
-              "minutes": round((time.time() - t0) / 60, 1)}
+    report = {
+        "rows": n,
+        "with_sar_1d": n1,
+        "with_sar_5d": n5,
+        "minutes": round((time.time() - t0) / 60, 1),
+    }
     (config.REPORTS_DIR / "labels_stage_d_report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2), flush=True)
 

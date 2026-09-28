@@ -1,6 +1,7 @@
 """News read engine (LLM, five lenses) — the deterministic math and the
 failure handling. The model itself is mocked; the prompt is certified on the
 gold set by scripts/benchmark_news_read.py, not here."""
+
 import json
 import os
 import sys
@@ -35,8 +36,11 @@ def _clean_news_state(monkeypatch, tmp_path):
     monkeypatch.setattr(ns.time, "sleep", lambda *_a, **_k: None)
     monkeypatch.setattr(ns._NV_LIMITER, "acquire", lambda cancel=None: None)
     monkeypatch.setattr(ns._NV_LIMITER, "penalize", lambda: None)
-    monkeypatch.setattr(ns, "_LLM_STATUS", {"ok": None, "error": None, "at": None,
-                                            "model": ns._MODEL, "permanent": False})
+    monkeypatch.setattr(
+        ns,
+        "_LLM_STATUS",
+        {"ok": None, "error": None, "at": None, "model": ns._MODEL, "permanent": False},
+    )
     yield
     ns._NEWS_CACHE.clear()
     ns._SENTIMENT_CACHE.clear()
@@ -51,6 +55,7 @@ class _HTTPError(Exception):
 
 def _fake_client(outcomes, calls):
     """outcomes: list of payload strings/dicts or exceptions, consumed per call."""
+
     class _Msg:
         def __init__(self, c):
             self.content = c
@@ -79,16 +84,32 @@ def _install(monkeypatch, outcomes):
 
 
 def _payload(lenses_scores, brief="Acme beat estimates."):
-    return {"items": [{"id": i, "lens": ln, "score": sc, "fact": f"fact {i}"}
-                      for i, (ln, sc) in enumerate(lenses_scores, 1)], "brief": brief}
+    return {
+        "items": [
+            {"id": i, "lens": ln, "score": sc, "fact": f"fact {i}"}
+            for i, (ln, sc) in enumerate(lenses_scores, 1)
+        ],
+        "brief": brief,
+    }
 
 
 # ---------------------------------------------------------------- tiers
-@pytest.mark.parametrize("score,tier", [
-    (-2.0, "very_bearish"), (-1.25, "very_bearish"), (-1.24, "bearish"),
-    (-0.4, "bearish"), (-0.39, "neutral"), (0.0, "neutral"), (0.39, "neutral"),
-    (0.4, "bullish"), (1.24, "bullish"), (1.25, "very_bullish"), (2.0, "very_bullish"),
-])
+@pytest.mark.parametrize(
+    "score,tier",
+    [
+        (-2.0, "very_bearish"),
+        (-1.25, "very_bearish"),
+        (-1.24, "bearish"),
+        (-0.4, "bearish"),
+        (-0.39, "neutral"),
+        (0.0, "neutral"),
+        (0.39, "neutral"),
+        (0.4, "bullish"),
+        (1.24, "bullish"),
+        (1.25, "very_bullish"),
+        (2.0, "very_bullish"),
+    ],
+)
 def test_tier_cut_edges(score, tier):
     assert ns.tier_for(score) == tier
 
@@ -99,23 +120,36 @@ def test_tier_of_nothing_is_nothing():
 
 # ---------------------------------------------------------------- aggregation
 def _item(lens, score, days_ago=0.0, source="Reuters", n_dup=0, fact="", aid=None):
-    return {"lens": lens, "llm_score": score, "fact": fact or f"{lens} {score}",
-            "datetime": time.time() - days_ago * 86400, "source": source,
-            "n_duplicates": n_dup, "aid": aid or f"{lens}{score}{days_ago}"}
+    return {
+        "lens": lens,
+        "llm_score": score,
+        "fact": fact or f"{lens} {score}",
+        "datetime": time.time() - days_ago * 86400,
+        "source": source,
+        "n_duplicates": n_dup,
+        "aid": aid or f"{lens}{score}{days_ago}",
+    }
 
 
 def test_lens_scores_are_weighted_means_with_the_leading_fact():
     now = time.time()
-    items = [_item("financials", 2, fact="Q2 revenue beat", aid="a1"),
-             _item("financials", 1, days_ago=3, aid="a2"),
-             _item("outlook", -1, fact="Guidance cut", aid="a3")]
+    items = [
+        _item("financials", 2, fact="Q2 revenue beat", aid="a1"),
+        _item("financials", 1, days_ago=3, aid="a2"),
+        _item("outlook", -1, fact="Guidance cut", aid="a3"),
+    ]
     out = ns.aggregate_items(items, agreement=1.0, now=now)
     fin = out["lenses"]["financials"]
-    assert 1.0 < fin["score"] < 2.0                  # recency pulls toward the fresh +2
+    assert 1.0 < fin["score"] < 2.0  # recency pulls toward the fresh +2
     assert fin["n"] == 2 and set(fin["ids"]) == {"a1", "a2"}
-    assert fin["fact"] == "Q2 revenue beat"           # highest |score| x weight
-    assert out["lenses"]["outlook"] == {"score": -1.0, "tier": "bearish", "n": 1,
-                                        "fact": "Guidance cut", "ids": ["a3"]}
+    assert fin["fact"] == "Q2 revenue beat"  # highest |score| x weight
+    assert out["lenses"]["outlook"] == {
+        "score": -1.0,
+        "tier": "bearish",
+        "n": 1,
+        "fact": "Guidance cut",
+        "ids": ["a3"],
+    }
 
 
 def test_empty_lens_is_null_not_neutral():
@@ -131,7 +165,7 @@ def test_none_items_are_ignored_and_other_counts_overall():
     out = ns.aggregate_items(items, agreement=0.9)
     assert out["n_items"] == 4 and out["n_none"] == 2 and out["other_n"] == 1
     assert "other" not in out["lenses"]
-    assert out["score"] == pytest.approx(0.5)        # (+2 - 1) / 2, same weights
+    assert out["score"] == pytest.approx(0.5)  # (+2 - 1) / 2, same weights
     assert out["tier"] == "bullish"
 
 
@@ -156,14 +190,18 @@ def test_unscored_articles_are_skipped():
 
 # ---------------------------------------------------------------- two passes
 def test_merge_averages_scores_and_measures_agreement():
-    p1 = [{"lens": "financials", "score": 2, "fact": "a"},
-          {"lens": "outlook", "score": -1, "fact": "b"},
-          {"lens": "street", "score": 1, "fact": "c"},
-          {"lens": "none", "score": 0, "fact": "d"}]
-    p2 = [{"lens": "financials", "score": 1, "fact": "a2"},   # same lens, gap 1: agrees
-          {"lens": "outlook", "score": 1, "fact": "b2"},      # gap 2: disagrees
-          {"lens": "none", "score": 0, "fact": "c2"},         # one says none -> none
-          {"lens": "none", "score": 0, "fact": "d2"}]
+    p1 = [
+        {"lens": "financials", "score": 2, "fact": "a"},
+        {"lens": "outlook", "score": -1, "fact": "b"},
+        {"lens": "street", "score": 1, "fact": "c"},
+        {"lens": "none", "score": 0, "fact": "d"},
+    ]
+    p2 = [
+        {"lens": "financials", "score": 1, "fact": "a2"},  # same lens, gap 1: agrees
+        {"lens": "outlook", "score": 1, "fact": "b2"},  # gap 2: disagrees
+        {"lens": "none", "score": 0, "fact": "c2"},  # one says none -> none
+        {"lens": "none", "score": 0, "fact": "d2"},
+    ]
     merged, agreement = ns.merge_passes(p1, p2)
     assert [m["lens"] for m in merged] == ["financials", "outlook", "none", "none"]
     assert [m["score"] for m in merged] == [1.5, 0.0, 0.0, 0.0]
@@ -193,18 +231,21 @@ def test_validation_accepts_a_clean_pass_and_zeroes_none_scores():
     assert brief == "Acme beat estimates."
 
 
-@pytest.mark.parametrize("mutate", [
-    lambda it: it[0].update(id=0),                 # id below range
-    lambda it: it[0].update(id=4),                 # id above range
-    lambda it: it[1].update(id=1),                 # duplicate id
-    lambda it: it.pop(),                           # missing id
-    lambda it: it[0].update(score=3),              # score out of range
-    lambda it: it[0].update(score=-3),
-    lambda it: it[0].update(score=1.5),            # not an integer
-    lambda it: it[0].update(score=float("nan")),
-    lambda it: it[0].update(id=True),              # bool is not an id
-    lambda it: it[0].update(lens="earnings"),      # not in the enum
-])
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda it: it[0].update(id=0),  # id below range
+        lambda it: it[0].update(id=4),  # id above range
+        lambda it: it[1].update(id=1),  # duplicate id
+        lambda it: it.pop(),  # missing id
+        lambda it: it[0].update(score=3),  # score out of range
+        lambda it: it[0].update(score=-3),
+        lambda it: it[0].update(score=1.5),  # not an integer
+        lambda it: it[0].update(score=float("nan")),
+        lambda it: it[0].update(id=True),  # bool is not an id
+        lambda it: it[0].update(lens="earnings"),  # not in the enum
+    ],
+)
 def test_validation_rejects_bad_ids_and_ranges(mutate):
     raw = _payload([("financials", 1), ("outlook", 0), ("street", -1)])
     mutate(raw["items"])
@@ -235,7 +276,7 @@ def test_410_is_model_retired_and_never_retried(monkeypatch):
     calls = _install(monkeypatch, [_HTTPError(410)] * 5)
     res = ns.read_headlines("sys", "user", 1)
     assert res is None
-    assert len(calls) == 2                           # one per concurrent pass, no retries
+    assert len(calls) == 2  # one per concurrent pass, no retries
     st = ns.llm_status()
     assert st["ok"] is False and "410 model retired" in st["error"] and st["permanent"]
     # later tickers in the same refresh are spared the call...
@@ -293,32 +334,62 @@ def test_two_passes_report_agreement(monkeypatch):
 # ---------------------------------------------------------------- per-ticker flow
 def _arts(n=3):
     now = time.time()
-    return [{"headline": f"Acme headline {i}", "summary": "", "source": "Reuters",
-             "datetime": now - i * 3600, "url": f"https://x/{i}", "n_duplicates": 0,
-             "aid": f"id{i}"} for i in range(n)]
+    return [
+        {
+            "headline": f"Acme headline {i}",
+            "summary": "",
+            "source": "Reuters",
+            "datetime": now - i * 3600,
+            "url": f"https://x/{i}",
+            "n_duplicates": 0,
+            "aid": f"id{i}",
+        }
+        for i in range(n)
+    ]
 
 
 def test_read_batch_prefers_headlines_about_the_company(monkeypatch):
-    monkeypatch.setattr("convexity.relevance.load_company_names",
-                        lambda: {"NVDA": "NVIDIA CORP"})
+    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {"NVDA": "NVIDIA CORP"})
     now = time.time()
-    noise = [{"headline": f"Is stock {i} a buy before October?", "summary": "",
-              "datetime": now - i * 60} for i in range(20)]
-    named = [{"headline": f"Nvidia signs supply deal {i}", "summary": "",
-              "datetime": now - 86400 * (2 + i)} for i in range(4)]
+    noise = [
+        {"headline": f"Is stock {i} a buy before October?", "summary": "", "datetime": now - i * 60}
+        for i in range(20)
+    ]
+    named = [
+        {
+            "headline": f"Nvidia signs supply deal {i}",
+            "summary": "",
+            "datetime": now - 86400 * (2 + i),
+        }
+        for i in range(4)
+    ]
     batch = ns._read_batch(noise + named, "NVDA")
     assert len(batch) == ns._SCORE_BATCH
-    assert all(a in batch for a in named)                      # older, but about NVDA
+    assert all(a in batch for a in named)  # older, but about NVDA
     assert batch == sorted(batch, key=lambda a: -a["datetime"])  # presented newest first
-    assert noise[0] in batch and noise[-1] not in batch         # ties go to the newest
+    assert noise[0] in batch and noise[-1] not in batch  # ties go to the newest
 
 
 def test_assess_writes_items_both_engines_and_history(monkeypatch):
     arts = _arts(3)
     monkeypatch.setattr(ns, "fetch_company_news", lambda s, days=7, cancel=None: arts)
-    monkeypatch.setattr(ns, "_market_read", lambda s, ctx, cancel=None: (
-        {"sar": -0.1, "z": -1.9, "pct": 3.0, "tier": "very_bearish", "score": -0.004,
-         "horizon_days": 1, "confidence": 0.6, "model_version": "mlsent-v1.1"}, 0.02))
+    monkeypatch.setattr(
+        ns,
+        "_market_read",
+        lambda s, ctx, cancel=None: (
+            {
+                "sar": -0.1,
+                "z": -1.9,
+                "pct": 3.0,
+                "tier": "very_bearish",
+                "score": -0.004,
+                "horizon_days": 1,
+                "confidence": 0.6,
+                "model_version": "mlsent-v1.1",
+            },
+            0.02,
+        ),
+    )
     p = _payload([("financials", 2), ("outlook", 1), ("none", 0)])
     _install(monkeypatch, [p, p])
     res, outcome = ns._assess_symbol("ACME", {"row": {"price": 10.0}})
@@ -345,8 +416,12 @@ def test_market_history_is_the_running_models_recent_scores(monkeypatch):
         {"date": day(0), "symbol": "B", "market_score": 0.2, "market_model": "m1"},
         {"date": day(0), "symbol": "ACME", "market_score": 0.3, "market_model": "m1"},
         {"date": day(2), "symbol": "C", "market_score": 0.4, "market_model": "m0"},
-        {"date": day(_ml.LIVE_WINDOW_DAYS + 5), "symbol": "D", "market_score": 0.5,
-         "market_model": "m1"},
+        {
+            "date": day(_ml.LIVE_WINDOW_DAYS + 5),
+            "symbol": "D",
+            "market_score": 0.5,
+            "market_model": "m1",
+        },
         {"date": day(1), "symbol": "E", "ml_sar": 0.6},
     ]
     monkeypatch.setattr(ns, "_history_load", lambda: recs)
@@ -358,14 +433,26 @@ def test_failed_refresh_keeps_the_headlines_the_stale_read_was_made_from(monkeyp
     for a in read:
         a.update(lens="financials", llm_score=1.0, fact="f")
     ns._cache_put(ns._NEWS_CACHE, "news|ACME|7", read, ns._NEWS_TTL)
-    ns._SENTIMENT_CACHE["sentiment|ACME|7"] = (time.time(), ns._SENTIMENT_TTL, {
-        "news": {"tier": "bullish", "score": 1.0, "lenses": {}, "brief": "old",
-                 "assessed_at": "2026-08-07T09:00:00+00:00"}, "market": None})
-    fresh = _arts(3)                                     # re-fetched, not yet read
+    ns._SENTIMENT_CACHE["sentiment|ACME|7"] = (
+        time.time(),
+        ns._SENTIMENT_TTL,
+        {
+            "news": {
+                "tier": "bullish",
+                "score": 1.0,
+                "lenses": {},
+                "brief": "old",
+                "assessed_at": "2026-08-07T09:00:00+00:00",
+            },
+            "market": None,
+        },
+    )
+    fresh = _arts(3)  # re-fetched, not yet read
 
     def fetch(s, days=7, cancel=None):
         ns._cache_put(ns._NEWS_CACHE, f"news|{s}|{days}", fresh, ns._NEWS_TTL)
         return fresh
+
     monkeypatch.setattr(ns, "fetch_company_news", fetch)
     monkeypatch.setattr(ns, "_market_read", lambda s, ctx, cancel=None: (None, None))
     _install(monkeypatch, [_HTTPError(410), _HTTPError(410)])
@@ -377,31 +464,46 @@ def test_failed_refresh_keeps_the_headlines_the_stale_read_was_made_from(monkeyp
 
 def test_failed_read_keeps_previous_news_marked_stale(monkeypatch):
     arts = _arts(2)
-    prev = {"news": {"tier": "bullish", "score": 1.0, "lenses": {}, "brief": "old",
-                     "assessed_at": "2026-08-07T09:00:00+00:00"},
-            "market": None, "divergence": None, "article_count": 2,
-            "assessed_at": "2026-08-07T09:00:00+00:00"}
+    prev = {
+        "news": {
+            "tier": "bullish",
+            "score": 1.0,
+            "lenses": {},
+            "brief": "old",
+            "assessed_at": "2026-08-07T09:00:00+00:00",
+        },
+        "market": None,
+        "divergence": None,
+        "article_count": 2,
+        "assessed_at": "2026-08-07T09:00:00+00:00",
+    }
     ns._SENTIMENT_CACHE["sentiment|ACME|7"] = (time.time(), ns._SENTIMENT_TTL, prev)
     monkeypatch.setattr(ns, "fetch_company_news", lambda s, days=7, cancel=None: arts)
     monkeypatch.setattr(ns, "_market_read", lambda s, ctx, cancel=None: (None, None))
-    _install(monkeypatch, [_HTTPError(410), _HTTPError(410)])      # one per pass
+    _install(monkeypatch, [_HTTPError(410), _HTTPError(410)])  # one per pass
     res, outcome = ns._assess_symbol("ACME", {})
     assert outcome == "failed"
     assert res["news"]["stale"] is True and "410" in res["news"]["stale_reason"]
-    assert res["news"]["assessed_at"] == "2026-08-07T09:00:00+00:00"   # never re-dated
+    assert res["news"]["assessed_at"] == "2026-08-07T09:00:00+00:00"  # never re-dated
     assert res["divergence"] is None
-    assert ns._history_load() == []                  # nothing new to record
+    assert ns._history_load() == []  # nothing new to record
 
 
 def test_refresh_reports_scored_failed_and_empty(monkeypatch):
-    outcomes = {"A": ({"news": {}}, "ok"), "B": ({"news": None}, "failed"),
-                "C": (None, "empty")}
-    monkeypatch.setattr(ns, "_refresh_market_sentiment",
-                        lambda days=7, stage_cb=None, cancel=None: ({"news": {}}, "ok"))
-    monkeypatch.setattr(ns, "_refresh_symbol_sentiment",
-                        lambda s, context=None, stage_cb=None, cancel=None: outcomes[s])
+    outcomes = {"A": ({"news": {}}, "ok"), "B": ({"news": None}, "failed"), "C": (None, "empty")}
+    monkeypatch.setattr(
+        ns,
+        "_refresh_market_sentiment",
+        lambda days=7, stage_cb=None, cancel=None: ({"news": {}}, "ok"),
+    )
+    monkeypatch.setattr(
+        ns,
+        "_refresh_symbol_sentiment",
+        lambda s, context=None, stage_cb=None, cancel=None: outcomes[s],
+    )
     from convexity import ml_sentiment as _ml
-    monkeypatch.setattr(_ml, "load_closes", lambda symbols: None)     # no network
+
+    monkeypatch.setattr(_ml, "load_closes", lambda symbols: None)  # no network
     events = []
     out = ns.refresh_sentiment(["A", "B", "C"], progress_cb=lambda k, b: events.append((k, b)))
     st = out["status"]
@@ -442,31 +544,45 @@ def test_divergence_good_news_weak_reaction():
 
 
 def test_divergence_reverse():
-    d = ns.compute_divergence(_news("very_bearish", score=-1.5),
-                              {"tier": "very_bullish", "z": 2.0})
+    d = ns.compute_divergence(_news("very_bearish", score=-1.5), {"tier": "very_bullish", "z": 2.0})
     assert d["kind"] == "weak_news_strong_reaction"
 
 
 def test_divergence_sold_the_news():
-    d = ns.compute_divergence(_news("bullish", {"financials": {"score": 2.0}}),
-                              {"tier": "no_edge"}, {"pct_1d": -19.0}, vol_20d=0.03)
+    d = ns.compute_divergence(
+        _news("bullish", {"financials": {"score": 2.0}}),
+        {"tier": "no_edge"},
+        {"pct_1d": -19.0},
+        vol_20d=0.03,
+    )
     assert d["kind"] == "sold_the_news"
     assert d["text"] == "Financials +2.0; stock −19.0% on the day"
 
 
 def test_no_divergence_when_engines_agree_or_move_is_normal():
     assert ns.compute_divergence(_news("bullish"), {"tier": "bullish"}) is None
-    assert ns.compute_divergence(_news("bullish"), {"tier": "no_edge"},
-                                 {"pct_1d": -3.0}, vol_20d=0.03) is None
+    assert (
+        ns.compute_divergence(_news("bullish"), {"tier": "no_edge"}, {"pct_1d": -3.0}, vol_20d=0.03)
+        is None
+    )
     assert ns.compute_divergence(None, {"tier": "bearish"}) is None
 
 
 # ---------------------------------------------------------------- persistence / dedup
 def test_persisted_old_shape_sentiment_is_ignored(tmp_path, monkeypatch):
     f = tmp_path / "news.json"
-    f.write_text(json.dumps({"version": 2, "news": {}, "sentiment": {
-        "sentiment|OLD|7": {"value": {"tier": "bearish", "s_total": -0.2}},
-        "sentiment|NEW|7": {"value": {"news": {"tier": "bullish"}, "market": None}}}}))
+    f.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "news": {},
+                "sentiment": {
+                    "sentiment|OLD|7": {"value": {"tier": "bearish", "s_total": -0.2}},
+                    "sentiment|NEW|7": {"value": {"news": {"tier": "bullish"}, "market": None}},
+                },
+            }
+        )
+    )
     monkeypatch.setattr(ns, "_PERSIST_FILE", f)
     ns._load_persisted_caches()
     assert "sentiment|OLD|7" not in ns._SENTIMENT_CACHE
@@ -495,7 +611,7 @@ def test_dedup_collapses_syndicated_copies_and_ids_articles():
     assert len(out) == 2
     guid = [a for a in out if "guidance" in a["headline"].lower()][0]
     assert guid["n_duplicates"] == 1
-    assert guid["datetime"] == now - 100          # earliest copy kept as canonical
+    assert guid["datetime"] == now - 100  # earliest copy kept as canonical
     assert len({a["aid"] for a in out}) == 2
 
 
@@ -506,8 +622,10 @@ def test_get_cached_articles_spans_window_across_many_symbols():
     now = time.time()
     syms = [f"S{i}" for i in range(15)]
     for s in syms:
-        arts = [{"headline": f"{s}-{j}", "url": f"{s}/{j}",
-                 "datetime": now - j * (7 * 86400 / 40)} for j in range(40)]
+        arts = [
+            {"headline": f"{s}-{j}", "url": f"{s}/{j}", "datetime": now - j * (7 * 86400 / 40)}
+            for j in range(40)
+        ]
         ns._NEWS_CACHE[f"news|{s}|7"] = (now, ns._NEWS_TTL, arts)
     out = ns.get_cached_articles(syms, limit=250)
     assert len(out) <= 250
@@ -519,10 +637,11 @@ def test_get_cached_articles_spans_window_across_many_symbols():
 def test_cached_reads_never_fetch(monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("network touched")
+
     monkeypatch.setattr(ns, "_fh_call", _boom)
     monkeypatch.setattr(ns, "_nvidia_call", _boom)
     val = {"news": {"tier": "bullish"}, "market": None}
     ns._SENTIMENT_CACHE["sentiment|ACME|14"] = (time.time(), ns._SENTIMENT_TTL, val)
     assert ns.get_cached_sentiments(["ACME", "NONE"], days=14) == {"ACME": val, "NONE": None}
-    assert ns.get_cached_sentiment("ACME") == val     # sweeps other windows
+    assert ns.get_cached_sentiment("ACME") == val  # sweeps other windows
     assert ns.get_cached_market() is None

@@ -37,6 +37,7 @@ Artifact bundle (ml/scripts/07 + 09 + 10), <data>/models/<ver>/ (paths.py):
     tier_cuts.json        bootstrap mu/sigma/knots, tier cuts, expected-SAR table
     meta.json             provenance and gate results
 """
+
 from __future__ import annotations
 
 import json
@@ -70,6 +71,7 @@ TIERS = ("very_bearish", "bearish", "no_edge", "bullish", "very_bullish")
 
 try:
     from zoneinfo import ZoneInfo
+
     _ET = ZoneInfo("America/New_York")
 except Exception:  # pragma: no cover
     _ET = timezone(timedelta(hours=-5))
@@ -112,17 +114,21 @@ def _load() -> dict:
         try:
             import numpy as np
             import lightgbm as lgb
+
             # Imported here so available() is HONEST: scoring needs both
             # (scipy.sparse.hstack; sklearn via ml_features.hash_counts).
             import importlib
+
             for mod in ("scipy.sparse", "sklearn"):
                 importlib.import_module(mod)
 
             from convexity import ml_features as mf
 
             if json.loads((d / "feature_schema.json").read_text()) != mf.feature_schema():
-                raise RuntimeError("encoder feature schema differs from ml_features.py "
-                                   "— retrain or redeploy the bundle")
+                raise RuntimeError(
+                    "encoder feature schema differs from ml_features.py "
+                    "— retrain or redeploy the bundle"
+                )
             _STATE["encoder"] = lgb.Booster(model_file=str(d / "model.lgbm.txt"))
             _STATE["idf"] = np.load(d / "idf.npy")
             _STATE["mask"] = np.load(d / "col_mask.npy")
@@ -154,6 +160,7 @@ def runtime_status() -> dict:
     st = _load()
     reason = st.get("reason") or ""
     from convexity import model_fetch  # stdlib + paths only; no cycle
+
     download = model_fetch.status()
     exists = model_dir().exists()
     missing = model_fetch.needed()  # no COMPLETE artifact (a folder alone is not enough)
@@ -200,8 +207,7 @@ def _series(closes, symbol):
 
 
 def _returns(values):
-    return [values[i] / values[i - 1] - 1.0 for i in range(1, len(values))
-            if values[i - 1]]
+    return [values[i] / values[i - 1] - 1.0 for i in range(1, len(values)) if values[i - 1]]
 
 
 def _std(xs):
@@ -215,8 +221,17 @@ def price_features(closes, symbol: str, today=None) -> dict:
     """ml_features.PRICE_COLUMNS as of the last COMPLETED session before
     `today` (ET) — the training panel's as-of-D-1 convention (05 stage D)."""
     today = today or datetime.now(_ET).date()
-    out = {c: math.nan for c in ("tkr_ret_1d", "tkr_ret_5d", "tkr_ret_20d",
-                                 "tkr_vol_20d", "spy_ret_5d", "spy_vol_20d")}
+    out = {
+        c: math.nan
+        for c in (
+            "tkr_ret_1d",
+            "tkr_ret_5d",
+            "tkr_ret_20d",
+            "tkr_vol_20d",
+            "spy_ret_5d",
+            "spy_vol_20d",
+        )
+    }
     s, spy = _series(closes, symbol), _series(closes, "SPY")
     if s is not None:
         c = [float(v) for d, v in zip(s.index, s.values) if d.date() < today]
@@ -287,28 +302,44 @@ def score_articles(articles: list[dict], symbol: str, closes=None) -> list[dict]
         related = a.get("related") or ""
         n_co = max(1, len([t for t in str(related).split(",") if t.strip()]))
         tier = mf.publisher_tier(a.get("source"))
-        rel = relevance_score(title, summary, symbol, name, co_mention_count=n_co,
-                              publisher_tier=tier)
+        rel = relevance_score(
+            title, summary, symbol, name, co_mention_count=n_co, publisher_tier=tier
+        )
         ts = a.get("datetime") or time.time()
         dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(_ET)
         if dt.date() not in ctx_by_day:
             ctx_by_day[dt.date()] = _article_context(closes, symbol, dt.date())
-        row = mf.dense_vector({
-            "title": title, "summary": summary, "publisher_tier": tier, "relevance": rel,
-            "n_duplicates": a.get("n_duplicates", 0), "co_mention_count": n_co,
-            "session_class": "dateonly_cc", "day_of_week": dt.isoweekday(),
-            "month": dt.month, **ctx_by_day[dt.date()]})
+        row = mf.dense_vector(
+            {
+                "title": title,
+                "summary": summary,
+                "publisher_tier": tier,
+                "relevance": rel,
+                "n_duplicates": a.get("n_duplicates", 0),
+                "co_mention_count": n_co,
+                "session_class": "dateonly_cc",
+                "day_of_week": dt.isoweekday(),
+                "month": dt.month,
+                **ctx_by_day[dt.date()],
+            }
+        )
         dense_rows.append(row)
         texts.append(mf.text_for_hashing(title, summary))
         lm_i = mf.DENSE_COLUMNS.index("lm_score")
         miss_i = mf.DENSE_COLUMNS.index("lm_missing")
-        items.append({"lm": None if row[miss_i] else row[lm_i],
-                      "unc": row[mf.DENSE_COLUMNS.index("uncertainty_ratio")],
-                      "source": a.get("source"), "n_duplicates": a.get("n_duplicates", 0),
-                      "relevance": rel, "boiler": is_boilerplate(title), "datetime": ts})
+        items.append(
+            {
+                "lm": None if row[miss_i] else row[lm_i],
+                "unc": row[mf.DENSE_COLUMNS.index("uncertainty_ratio")],
+                "source": a.get("source"),
+                "n_duplicates": a.get("n_duplicates", 0),
+                "relevance": rel,
+                "boiler": is_boilerplate(title),
+                "datetime": ts,
+            }
+        )
     tfidf = mf.apply_idf(mf.hash_counts(texts), st["idf"])[:, st["mask"]]
-    X = sp.hstack([tfidf, sp.csr_matrix(np.asarray(dense_rows, dtype="float32"))],
-                  format="csr")
+    X = sp.hstack([tfidf, sp.csr_matrix(np.asarray(dense_rows, dtype="float32"))], format="csr")
     for it, p in zip(items, st["encoder"].predict(X)):
         it["sar_pred"] = float(p)
     return items
@@ -341,16 +372,36 @@ def calibrate(score: float, cal: dict, history: list[float] | None = None) -> di
         pct = float(np.interp(z, xs, np.arange(101, dtype="float64")[idx]))
         anchor = "training"
     lo, lo2, hi2, hi = cal["tier_pct"]
-    tier = ("very_bearish" if pct <= lo else "bearish" if pct <= lo2
-            else "no_edge" if pct < hi2 else "bullish" if pct < hi else "very_bullish")
+    tier = (
+        "very_bearish"
+        if pct <= lo
+        else "bearish"
+        if pct <= lo2
+        else "no_edge"
+        if pct < hi2
+        else "bullish"
+        if pct < hi
+        else "very_bullish"
+    )
     edges, sars = cal["exp_sar"]["pct_edges"], cal["exp_sar"]["sar"]
     k = min(len(sars) - 1, max(0, int(np.searchsorted(edges, pct, side="right")) - 1))
-    return {"z": round(z, 2), "pct": round(pct, 1), "tier": tier,
-            "sar": round(float(sars[k]), 3), "anchor": anchor, "n_history": len(hist)}
+    return {
+        "z": round(z, 2),
+        "pct": round(pct, 1),
+        "tier": tier,
+        "sar": round(float(sars[k]), 3),
+        "anchor": anchor,
+        "n_history": len(hist),
+    }
 
 
-def market_read(symbol: str, articles: list[dict], closes=None, now: float | None = None,
-                history: list[float] | None = None) -> tuple[dict | None, float | None]:
+def market_read(
+    symbol: str,
+    articles: list[dict],
+    closes=None,
+    now: float | None = None,
+    history: list[float] | None = None,
+) -> tuple[dict | None, float | None]:
     """The Market read for one ticker from its 7-day articles.
 
     Returns (market dict, the stock's 20d vol) — the vol feeds the "sold the
@@ -369,12 +420,16 @@ def market_read(symbol: str, articles: list[dict], closes=None, now: float | Non
         now = float(now) if now is not None else time.time()
         # The calibration panel's window is articles dated D-6..D (ET days),
         # capped exactly like the app's retained set.
-        first = (datetime.fromtimestamp(now, tz=timezone.utc).astimezone(_ET).date()
-                 - timedelta(days=mf.WINDOW_DAYS - 1))
-        recent = [a for a in sorted(articles, key=lambda a: a.get("datetime") or 0,
-                                    reverse=True)
-                  if a.get("datetime") and datetime.fromtimestamp(
-                      a["datetime"], tz=timezone.utc).astimezone(_ET).date() >= first]
+        first = datetime.fromtimestamp(now, tz=timezone.utc).astimezone(_ET).date() - timedelta(
+            days=mf.WINDOW_DAYS - 1
+        )
+        recent = [
+            a
+            for a in sorted(articles, key=lambda a: a.get("datetime") or 0, reverse=True)
+            if a.get("datetime")
+            and datetime.fromtimestamp(a["datetime"], tz=timezone.utc).astimezone(_ET).date()
+            >= first
+        ]
         recent = window_sample(recent, mf.WINDOW_CAP, mf.WINDOW_MIN_RECENT)
         items = score_articles(recent, symbol, closes)
         score, wsum = mf.weighted_sar(items, now)

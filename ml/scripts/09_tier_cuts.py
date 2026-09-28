@@ -46,6 +46,7 @@ Usage:
     python ml/scripts/09_tier_cuts.py --model v1.1
     python ml/scripts/09_tier_cuts.py --model v2 [--horizon 1]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -61,8 +62,7 @@ from ml.scripts.train_utils import daily_ic, load_panel  # noqa: E402
 
 TIER_PCT = [5.0, 15.0, 85.0, 95.0]
 # (calibrate from, calibrate to / verify from). Verification runs to end of data.
-CAL_WINDOWS = {"v2": (config.SEL_START, config.TEST_START),
-               "v1.1": ("2023-07-01", "2023-10-01")}
+CAL_WINDOWS = {"v2": (config.SEL_START, config.TEST_START), "v1.1": ("2023-07-01", "2023-10-01")}
 DESIGN_MASS = [0.05, 0.10, 0.70, 0.10, 0.05]
 PCT_EDGES = list(range(0, 101, 5))
 
@@ -92,10 +92,14 @@ def _scores(model: str, horizon: int):
     if model == "v1.1":
         df = load_panel(["symbol", "date", "enc_wmean AS score", f"sar_{horizon}d AS y"])
     else:
-        df = duckdb.connect().execute(f"""
+        df = (
+            duckdb.connect()
+            .execute(f"""
             SELECT symbol, date, score_{horizon}d AS score, sar_{horizon}d AS y
-            FROM read_parquet('{config.FEATURES_DIR / 'window_pred.parquet'}')
-            ORDER BY date, symbol""").df()
+            FROM read_parquet('{config.FEATURES_DIR / "window_pred.parquet"}')
+            ORDER BY date, symbol""")
+            .df()
+        )
     return df.dropna(subset=["score"])
 
 
@@ -124,26 +128,35 @@ def main() -> None:
     z_cal = (s_cal - mu) / sigma
     knots = [float(v) for v in np.quantile(z_cal, np.linspace(0, 1, 101))]
 
-    cal = {"version": version, "score": "enc_wmean" if args.model == "v1.1" else "window",
-           "horizon_days": args.horizon, "mu": mu, "sigma": sigma,
-           "pct_knots": knots, "tier_pct": TIER_PCT, "tiers": [
-               "very_bearish", "bearish", "no_edge", "bullish", "very_bullish"],
-           "calibration_window": list(CAL_WINDOWS[args.model]),
-           "n_calibration": int(cal_m.sum())}
+    cal = {
+        "version": version,
+        "score": "enc_wmean" if args.model == "v1.1" else "window",
+        "horizon_days": args.horizon,
+        "mu": mu,
+        "sigma": sigma,
+        "pct_knots": knots,
+        "tier_pct": TIER_PCT,
+        "tiers": ["very_bearish", "bearish", "no_edge", "bullish", "very_bullish"],
+        "calibration_window": list(CAL_WINDOWS[args.model]),
+        "n_calibration": int(cal_m.sum()),
+    }
 
     # expected-SAR table: realized mean label per percentile band, isotonic
     xs, idx = np.unique(np.asarray(knots), return_index=True)
     pct_cal = np.interp(z_cal, xs, np.arange(101, dtype="float64")[idx])
     ok = np.isfinite(y_cal)
-    band = np.clip(np.searchsorted(PCT_EDGES, pct_cal[ok], side="right") - 1, 0,
-                   len(PCT_EDGES) - 2)
+    band = np.clip(np.searchsorted(PCT_EDGES, pct_cal[ok], side="right") - 1, 0, len(PCT_EDGES) - 2)
     means, counts = [], []
     for k in range(len(PCT_EDGES) - 1):
         yy = y_cal[ok][band == k]
         means.append(float(yy.mean()) if len(yy) else 0.0)
         counts.append(int(len(yy)))
-    cal["exp_sar"] = {"pct_edges": PCT_EDGES, "sar": [round(v, 4) for v in _pav(means, counts)],
-                      "raw": [round(v, 4) for v in means], "n": counts}
+    cal["exp_sar"] = {
+        "pct_edges": PCT_EDGES,
+        "sar": [round(v, 4) for v in _pav(means, counts)],
+        "raw": [round(v, 4) for v in means],
+        "n": counts,
+    }
 
     # ---- holdout, through the production function
     hs = df.loc[ho_m, "score"].to_numpy("float64")
@@ -158,19 +171,32 @@ def main() -> None:
     ic = daily_ic(df.loc[ho_m, "date"].to_numpy(), hs, hy, horizon=args.horizon)
     gates = {
         "mass_within_3pp": all(abs(m - dm) <= 0.03 for m, dm in zip(mass, DESIGN_MASS)),
-        "tail_signs": (tmeans[0] is not None and tmeans[0] < 0
-                       and tmeans[4] is not None and tmeans[4] > 0),
+        "tail_signs": (
+            tmeans[0] is not None and tmeans[0] < 0 and tmeans[4] is not None and tmeans[4] > 0
+        ),
     }
-    cal["holdout_verification"] = {"mass": mass, "design_mass": DESIGN_MASS,
-                                   "tier_mean_sar": tmeans, "n": int(len(hs)),
-                                   "daily_ic": round(ic["mean"], 4), "t_nw": round(ic["t_nw"], 2),
-                                   "n_days": ic["n_days"], "gates": gates}
+    cal["holdout_verification"] = {
+        "mass": mass,
+        "design_mass": DESIGN_MASS,
+        "tier_mean_sar": tmeans,
+        "n": int(len(hs)),
+        "daily_ic": round(ic["mean"], 4),
+        "t_nw": round(ic["t_nw"], 2),
+        "n_days": ic["n_days"],
+        "gates": gates,
+    }
     out = config.ARTIFACTS_DIR / version
     out.mkdir(parents=True, exist_ok=True)
     (out / "tier_cuts.json").write_text(json.dumps(cal, indent=2))
-    report = {"model": args.model, "horizon": args.horizon, "mu": mu, "sigma": sigma,
-              "exp_sar": cal["exp_sar"], "holdout": cal["holdout_verification"],
-              "minutes": round((time.time() - t0) / 60, 1)}
+    report = {
+        "model": args.model,
+        "horizon": args.horizon,
+        "mu": mu,
+        "sigma": sigma,
+        "exp_sar": cal["exp_sar"],
+        "holdout": cal["holdout_verification"],
+        "minutes": round((time.time() - t0) / 60, 1),
+    }
     (config.REPORTS_DIR / f"tier_cuts_{version}.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2), flush=True)
     print("GATES PASS" if all(gates.values()) else f"GATES FAIL: {gates}", flush=True)

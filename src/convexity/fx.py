@@ -10,9 +10,12 @@ import pandas as pd
 import yfinance as yf
 
 from convexity.cache import (
-    _FX_CCY_HIST_CACHE, _FX_CCY_HIST_TTL,
-    _FX_HIST_CACHE, _FX_HIST_TTL,
-    _FX_RATES_CACHE, _FX_RATES_TTL,
+    _FX_CCY_HIST_CACHE,
+    _FX_CCY_HIST_TTL,
+    _FX_HIST_CACHE,
+    _FX_HIST_TTL,
+    _FX_RATES_CACHE,
+    _FX_RATES_TTL,
 )
 from convexity.helpers import SUPPORTED_FX
 
@@ -158,8 +161,13 @@ def fx_rates(base: str = "USD") -> dict:
     out: dict[str, float] = {base: 1.0}
     try:
         df = yf.download(
-            tickers=syms, period="5d", interval="1d",
-            auto_adjust=True, group_by="ticker", threads=True, progress=False,
+            tickers=syms,
+            period="5d",
+            interval="1d",
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+            progress=False,
         )
     except Exception:
         df = None
@@ -197,9 +205,13 @@ def fx_rates(base: str = "USD") -> dict:
 
 
 _PERIOD_DOWNLOAD = {
-    "1y": ("2y", 365), "1Y": ("2y", 365),
-    "6mo": ("6mo", None), "3mo": ("3mo", None),
-    "2y": ("2y", None), "5y": ("5y", None), "max": ("max", None),
+    "1y": ("2y", 365),
+    "1Y": ("2y", 365),
+    "6mo": ("6mo", None),
+    "3mo": ("3mo", None),
+    "2y": ("2y", None),
+    "5y": ("5y", None),
+    "max": ("max", None),
 }
 
 
@@ -219,8 +231,13 @@ def fx_index_history(base: str, period: str = "1y") -> list:
     syms = [_fx_pair_symbol(base, c) for c in others]
     try:
         df = yf.download(
-            tickers=syms, period=download_period, interval="1d",
-            auto_adjust=True, group_by="ticker", threads=True, progress=False,
+            tickers=syms,
+            period=download_period,
+            interval="1d",
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+            progress=False,
         )
     except Exception:
         df = None
@@ -232,7 +249,9 @@ def fx_index_history(base: str, period: str = "1y") -> list:
                     time.sleep(0.15 + random.random() * 0.10)
                 for attempt in range(2):
                     try:
-                        h = yf.Ticker(s).history(period=download_period, auto_adjust=True, actions=False)
+                        h = yf.Ticker(s).history(
+                            period=download_period, auto_adjust=True, actions=False
+                        )
                         if h is not None and not h.empty and "Close" in h.columns:
                             parts[s] = h["Close"].dropna()
                             break

@@ -58,13 +58,19 @@ def _mode(p):
 
 # ----------------------------- storage --------------------------------------
 
+
 def test_save_creates_0600_and_reloads_modules():
     st = keys.save("nvidia", SENTINEL)
     assert json.loads(_cfg().read_text()) == {"nvidia_api_key": SENTINEL}
     if os.name == "posix":
         assert _mode(_cfg()) == 0o600
-    assert st["nvidia"] == {"set": True, "source": "config", "in_config": True,
-                            "env_var": "NVIDIA_API_KEY", "env_overrides": False}
+    assert st["nvidia"] == {
+        "set": True,
+        "source": "config",
+        "in_config": True,
+        "env_var": "NVIDIA_API_KEY",
+        "env_overrides": False,
+    }
     assert st["finnhub"]["set"] is False
     assert ns.NVIDIA_API_KEY == SENTINEL
     assert SENTINEL not in json.dumps(st)
@@ -76,13 +82,20 @@ def test_merge_keeps_other_fields_and_other_key():
     os.chmod(_cfg(), 0o644)
     keys.save("nvidia", "nv-new")
     data = json.loads(_cfg().read_text())
-    assert data == {"finnhub_api_key": "fh-old", "theme": "dark", "n": [1, 2],
-                    "nvidia_api_key": "nv-new"}
+    assert data == {
+        "finnhub_api_key": "fh-old",
+        "theme": "dark",
+        "n": [1, 2],
+        "nvidia_api_key": "nv-new",
+    }
     if os.name == "posix":
         assert _mode(_cfg()) == 0o600  # tightened on rewrite
     keys.clear("finnhub")
-    assert json.loads(_cfg().read_text()) == {"theme": "dark", "n": [1, 2],
-                                              "nvidia_api_key": "nv-new"}
+    assert json.loads(_cfg().read_text()) == {
+        "theme": "dark",
+        "n": [1, 2],
+        "nvidia_api_key": "nv-new",
+    }
     assert fh.FINNHUB_API_KEY == "" and ns.FINNHUB_API_KEY == ""
     assert not list(_cfg().parent.glob("config.json.*.tmp"))
 
@@ -93,8 +106,9 @@ def test_padded_key_is_stripped():
     assert fh.FINNHUB_API_KEY == SENTINEL
 
 
-@pytest.mark.parametrize("bad", ["", "   ", "\n\t", "abc def", "abc\ndef", "a\x00b",
-                                 "x" * 600, None, 42])
+@pytest.mark.parametrize(
+    "bad", ["", "   ", "\n\t", "abc def", "abc\ndef", "a\x00b", "x" * 600, None, 42]
+)
 def test_invalid_keys_rejected_without_echo(bad):
     with pytest.raises(keys.InvalidKey) as ei:
         keys.save("nvidia", bad)
@@ -138,8 +152,13 @@ def test_env_var_wins_and_is_reported(monkeypatch):
     assert st["nvidia"]["env_overrides"] is True
     assert ns.NVIDIA_API_KEY == "from-env"
     st = keys.clear("nvidia")
-    assert st["nvidia"] == {"set": True, "source": "env", "in_config": False,
-                            "env_var": "NVIDIA_API_KEY", "env_overrides": False}
+    assert st["nvidia"] == {
+        "set": True,
+        "source": "env",
+        "in_config": False,
+        "env_var": "NVIDIA_API_KEY",
+        "env_overrides": False,
+    }
 
 
 def test_legacy_file_still_read(tmp_path):
@@ -154,6 +173,7 @@ def test_legacy_file_still_read(tmp_path):
 
 
 # ----------------------------- reload ---------------------------------------
+
 
 def test_new_nvidia_key_clears_rejected_state_and_client():
     ns._llm_record(False, "key rejected (HTTP 401)", permanent=True)
@@ -191,6 +211,7 @@ def test_reload_rearms_malformed_warning(capsys):
 
 # ----------------------------- Test buttons ---------------------------------
 
+
 class _Stub:
     """Local provider stub: records every request's path, headers and body."""
 
@@ -202,8 +223,7 @@ class _Stub:
             def _answer(self):
                 n = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(n) if n else b""
-                stub.seen.append({"path": self.path, "headers": dict(self.headers),
-                                  "body": body})
+                stub.seen.append({"path": self.path, "headers": dict(self.headers), "body": body})
                 if stub.delay:
                     time.sleep(stub.delay)
                 try:
@@ -240,14 +260,24 @@ def stub(monkeypatch):
         monkeypatch.setattr(keys, "_FINNHUB_BASE", s.base + "/api/v1/")
         monkeypatch.setattr(keys, "_NVIDIA_BASE", s.base + "/v1")
         return s
+
     yield make
     for s in made:
         s.close()
 
 
-@pytest.mark.parametrize("code,expected", [(200, "ok"), (401, "rejected"), (403, "rejected"),
-                                           (429, "rate_limited"), (410, "unavailable"),
-                                           (503, "unavailable"), (400, "error")])
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        (200, "ok"),
+        (401, "rejected"),
+        (403, "rejected"),
+        (429, "rate_limited"),
+        (410, "unavailable"),
+        (503, "unavailable"),
+        (400, "error"),
+    ],
+)
 @pytest.mark.parametrize("provider", ["finnhub", "nvidia"])
 def test_check_classifies_and_keeps_key_out_of_url(stub, provider, code, expected):
     s = stub(code)
@@ -302,6 +332,7 @@ def test_check_full_budget_reports_instead_of_blocking(stub):
 
 # ----------------------------- the leak test --------------------------------
 
+
 def test_key_never_leaves_config_json(stub, monkeypatch):
     """POST a sentinel key through the real Handler, then read every route
     that could plausibly carry it, stdout/stderr and the log ring: only
@@ -320,8 +351,9 @@ def test_key_never_leaves_config_json(stub, monkeypatch):
 
     def call(method, path, payload=None):
         data = json.dumps(payload).encode() if payload is not None else None
-        req = urllib.request.Request(base + path, data=data, method=method,
-                                     headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(
+            base + path, data=data, method=method, headers={"Content-Type": "application/json"}
+        )
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 body, code = r.read().decode(), r.status
@@ -336,12 +368,14 @@ def test_key_never_leaves_config_json(stub, monkeypatch):
     try:
         assert setkey("nvidia", "  " + SENTINEL + "  ") == 200
         assert setkey("finnhub", SENTINEL) == 200
-        assert setkey("finnhub", SENTINEL) == 200           # double submit
-        assert setkey("nvidia", SENTINEL + " x") == 400      # inner whitespace
+        assert setkey("finnhub", SENTINEL) == 200  # double submit
+        assert setkey("nvidia", SENTINEL + " x") == 400  # inner whitespace
         assert setkey("bogus", SENTINEL) == 400
         assert setkey("nvidia", "") == 400
-        assert call("POST", "/api/keys", {"provider": "nvidia", "action": "zap",
-                                          "key": SENTINEL})[0] == 400
+        assert (
+            call("POST", "/api/keys", {"provider": "nvidia", "action": "zap", "key": SENTINEL})[0]
+            == 400
+        )
         assert call("POST", "/api/keys", [SENTINEL])[0] == 400
         code, body = call("POST", "/api/keys/test", {"provider": "nvidia"})
         assert code == 200 and json.loads(body)["status"] == "rejected"
@@ -371,36 +405,44 @@ def test_key_never_leaves_config_json(stub, monkeypatch):
     for b in bodies:
         assert SENTINEL not in b
     ring = json.dumps(logbuf.read(since=since, limit=4000))
-    assert "[keys] NVIDIA NIM key saved" in ring        # the tee really captured
+    assert "[keys] NVIDIA NIM key saved" in ring  # the tee really captured
     assert "/api/keys" in ring
     assert SENTINEL not in ring
     assert SENTINEL not in out.getvalue() and SENTINEL not in err.getvalue()
     assert json.loads(_cfg().read_text()) == {}
 
 
-@pytest.mark.parametrize("headers", [
-    {"Content-Type": "text/plain"},                                      # no-preflight simple POST
-    {"Content-Type": "application/json", "Origin": "https://evil.example"},
-    {"Content-Type": "application/json", "Origin": "http://127.0.0.1:1"},  # other local port
-    {"Content-Type": "application/json", "Host": "evil.example"},        # DNS rebinding
-])
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Content-Type": "text/plain"},  # no-preflight simple POST
+        {"Content-Type": "application/json", "Origin": "https://evil.example"},
+        {"Content-Type": "application/json", "Origin": "http://127.0.0.1:1"},  # other local port
+        {"Content-Type": "application/json", "Host": "evil.example"},  # DNS rebinding
+    ],
+)
 def test_key_routes_refuse_cross_origin(headers):
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     try:
-        for path, body in (("/api/keys", {"provider": "nvidia", "action": "set", "key": SENTINEL}),
-                           ("/api/keys/test", {"provider": "nvidia"})):
-            req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
-                                         method="POST", headers=headers)
+        for path, body in (
+            ("/api/keys", {"provider": "nvidia", "action": "set", "key": SENTINEL}),
+            ("/api/keys/test", {"provider": "nvidia"}),
+        ):
+            req = urllib.request.Request(
+                base + path, data=json.dumps(body).encode(), method="POST", headers=headers
+            )
             with pytest.raises(urllib.error.HTTPError) as ei:
                 urllib.request.urlopen(req, timeout=10)
             assert ei.value.code == 403
         # the page's own same-origin request still works
         ok = urllib.request.Request(
-            base + "/api/keys", method="POST",
+            base + "/api/keys",
+            method="POST",
             data=json.dumps({"provider": "nvidia", "action": "set", "key": SENTINEL}).encode(),
-            headers={"Content-Type": "application/json", "Origin": base})
+            headers={"Content-Type": "application/json", "Origin": base},
+        )
         assert urllib.request.urlopen(ok, timeout=10).status == 200
     finally:
         srv.shutdown()

@@ -5,6 +5,7 @@ cap guard, because both failure modes are silent — an over-cap request comes
 back as an EMPTY frame from Yahoo rather than an error, and a symbol with no
 intraday data looks identical to a transient outage.
 """
+
 from __future__ import annotations
 
 import sys
@@ -29,6 +30,7 @@ def _clear_cache():
 
 class _FakeTicker:
     """Records every history() call so tests can assert what was requested."""
+
     calls: list[dict] = []
     frames: dict = {}
 
@@ -56,11 +58,20 @@ def fake_yf(monkeypatch):
 # ------------------------------ _period_days --------------------------------
 
 
-@pytest.mark.parametrize("period,days", [
-    ("7d", 7), ("60d", 60), ("1y", 365.25), ("2y", 730.5),
-    ("3mo", 91.32), ("1wk", 7), ("max", 10_000), ("ytd", 10_000),
-    ("nonsense", 10_000),          # unparseable must read as "huge", not "tiny"
-])
+@pytest.mark.parametrize(
+    "period,days",
+    [
+        ("7d", 7),
+        ("60d", 60),
+        ("1y", 365.25),
+        ("2y", 730.5),
+        ("3mo", 91.32),
+        ("1wk", 7),
+        ("max", 10_000),
+        ("ytd", 10_000),
+        ("nonsense", 10_000),  # unparseable must read as "huge", not "tiny"
+    ],
+)
 def test_period_days(period, days):
     assert fetcher._period_days(period) == pytest.approx(days, rel=1e-3)
 
@@ -70,20 +81,23 @@ def test_unparseable_period_is_treated_as_over_cap(fake_yf):
     let an over-cap request through and Yahoo would answer with an empty frame,
     i.e. a blank chart instead of a graceful fall back to daily."""
     assert fetcher.intraday_history("AAPL", "30m", "nonsense") is None
-    assert fake_yf.calls == []      # never even asked
+    assert fake_yf.calls == []  # never even asked
 
 
 # --------------------------- cap guard / fallback ---------------------------
 
 
-@pytest.mark.parametrize("interval,period,ok", [
-    ("30m", "60d", True),          # exactly at Yahoo's 60-day cap for 30m
-    ("30m", "90d", False),
-    ("1h", "1y", True),            # 1h reaches 730 days
-    ("1h", "3y", False),
-    ("1m", "7d", True),
-    ("1m", "30d", False),
-])
+@pytest.mark.parametrize(
+    "interval,period,ok",
+    [
+        ("30m", "60d", True),  # exactly at Yahoo's 60-day cap for 30m
+        ("30m", "90d", False),
+        ("1h", "1y", True),  # 1h reaches 730 days
+        ("1h", "3y", False),
+        ("1m", "7d", True),
+        ("1m", "30d", False),
+    ],
+)
 def test_interval_caps(fake_yf, interval, period, ok):
     got = fetcher.intraday_history("AAPL", interval, period)
     assert (got is not None) is ok
@@ -124,7 +138,7 @@ def test_range_history_daily_ranges_fall_back(fake_yf):
     for rng in ("YTD", "1Y", "5Y", "MAX"):
         out = fetcher.range_history("AAPL", rng)
         assert out["fallback"] is True
-        assert "history" not in out          # client keeps drawing the daily payload
+        assert "history" not in out  # client keeps drawing the daily payload
     assert fake_yf.calls == []
 
 

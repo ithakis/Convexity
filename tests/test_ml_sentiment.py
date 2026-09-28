@@ -12,6 +12,7 @@ The contracts that matter in production:
    the app has MIN_LIVE_HISTORY live scores, then from those; the middle 70%
    is labelled "no edge".
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -34,13 +35,13 @@ _ALLOW_MISSING = os.environ.get("PT_ALLOW_MISSING_ML") == "1"
 for _mod in ("lightgbm", "sklearn"):
     if importlib.util.find_spec(_mod) is None:
         if _ALLOW_MISSING:
-            pytest.skip(f"{_mod} not installed (PT_ALLOW_MISSING_ML=1)",
-                        allow_module_level=True)
+            pytest.skip(f"{_mod} not installed (PT_ALLOW_MISSING_ML=1)", allow_module_level=True)
         pytest.fail(
             f"{_mod} is not installed — the Market read would be dead at runtime. "
             f"Run `uv sync --extra dev`. Set PT_ALLOW_MISSING_ML=1 "
             f"to skip these tests deliberately instead.",
-            pytrace=False)
+            pytrace=False,
+        )
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -61,12 +62,20 @@ def _reset():
 def _cal(horizon=1):
     # z knots: an evenly spread standard-normal-ish grid from -3 to +3
     knots = [round(-3 + 6 * i / 100, 4) for i in range(101)]
-    return {"version": "test", "score": "enc_wmean", "horizon_days": horizon,
-            "mu": 0.1, "sigma": 0.5, "pct_knots": knots,
-            "tier_pct": [5.0, 15.0, 85.0, 95.0],
-            "tiers": ["very_bearish", "bearish", "no_edge", "bullish", "very_bullish"],
-            "exp_sar": {"pct_edges": list(range(0, 101, 5)),
-                        "sar": [round(-0.2 + 0.02 * i, 3) for i in range(20)]}}
+    return {
+        "version": "test",
+        "score": "enc_wmean",
+        "horizon_days": horizon,
+        "mu": 0.1,
+        "sigma": 0.5,
+        "pct_knots": knots,
+        "tier_pct": [5.0, 15.0, 85.0, 95.0],
+        "tiers": ["very_bearish", "bearish", "no_edge", "bullish", "very_bullish"],
+        "exp_sar": {
+            "pct_edges": list(range(0, 101, 5)),
+            "sar": [round(-0.2 + 0.02 * i, 3) for i in range(20)],
+        },
+    }
 
 
 @pytest.fixture()
@@ -88,12 +97,17 @@ def build_tiny_artifact(d: Path):
     idf = mf.fit_idf([counts])
     dfreq = np.asarray((counts > 0).sum(axis=0)).ravel()
     mask = np.sort(np.argsort(dfreq)[::-1][:4096]).astype("int32")
-    dense = np.asarray([mf.dense_vector({"title": t, "session_class": "dateonly_cc"})
-                        for t in texts], dtype="float32")
+    dense = np.asarray(
+        [mf.dense_vector({"title": t, "session_class": "dateonly_cc"}) for t in texts],
+        dtype="float32",
+    )
     X = sp.hstack([mf.apply_idf(counts, idf)[:, mask], sp.csr_matrix(dense)], format="csr")
     y = np.where(np.arange(n) % 2, 0.5, -0.5) + rng.normal(0, 0.1, n)
-    enc = lgb.train({"objective": "regression", "verbosity": -1, "min_data_in_leaf": 5},
-                    lgb.Dataset(X, y), num_boost_round=20)
+    enc = lgb.train(
+        {"objective": "regression", "verbosity": -1, "min_data_in_leaf": 5},
+        lgb.Dataset(X, y),
+        num_boost_round=20,
+    )
 
     d.mkdir(parents=True)
     enc.save_model(str(d / "model.lgbm.txt"))
@@ -134,9 +148,14 @@ def test_bad_knots_degrade(tiny_artifact):
 
 # ----------------------------------------------------------------- parity
 def _article(i=1, age_h=2.0, **kw):
-    a = {"headline": f"company beats earnings row{i}", "summary": "strong quarter",
-         "source": "Reuters", "datetime": time.time() - age_h * 3600,
-         "n_duplicates": 0, "related": "AAPL"}
+    a = {
+        "headline": f"company beats earnings row{i}",
+        "summary": "strong quarter",
+        "source": "Reuters",
+        "datetime": time.time() - age_h * 3600,
+        "n_duplicates": 0,
+        "related": "AAPL",
+    }
     a.update(kw)
     return a
 
@@ -146,11 +165,21 @@ def _training_item(a, symbol, sar_pred):
     tier = mf.publisher_tier(a["source"])
     rel = relevance_score(a["headline"], a["summary"], symbol, None, 1, tier)
     row = mf.dense_vector({"title": a["headline"], "summary": a["summary"]})
-    lm = None if row[mf.DENSE_COLUMNS.index("lm_missing")] else row[mf.DENSE_COLUMNS.index("lm_score")]
-    return {"sar_pred": sar_pred, "lm": lm,
-            "unc": row[mf.DENSE_COLUMNS.index("uncertainty_ratio")],
-            "publisher_tier": tier, "n_duplicates": a["n_duplicates"], "relevance": rel,
-            "boiler": is_boilerplate(a["headline"]), "datetime": a["datetime"]}
+    lm = (
+        None
+        if row[mf.DENSE_COLUMNS.index("lm_missing")]
+        else row[mf.DENSE_COLUMNS.index("lm_score")]
+    )
+    return {
+        "sar_pred": sar_pred,
+        "lm": lm,
+        "unc": row[mf.DENSE_COLUMNS.index("uncertainty_ratio")],
+        "publisher_tier": tier,
+        "n_duplicates": a["n_duplicates"],
+        "relevance": rel,
+        "boiler": is_boilerplate(a["headline"]),
+        "datetime": a["datetime"],
+    }
 
 
 def test_encoder_matches_the_training_featurization(tiny_artifact, monkeypatch):
@@ -161,11 +190,24 @@ def test_encoder_matches_the_training_featurization(tiny_artifact, monkeypatch):
     assert len(items) == 1
     dt = datetime.fromtimestamp(a["datetime"], tz=timezone.utc).astimezone(ms._ET)
     counts = mf.hash_counts([mf.text_for_hashing(a["headline"], a["summary"])])
-    dense = np.asarray([mf.dense_vector({
-        "title": a["headline"], "summary": a["summary"],
-        "publisher_tier": mf.publisher_tier("Reuters"), "relevance": items[0]["relevance"],
-        "n_duplicates": 0, "co_mention_count": 1, "session_class": "dateonly_cc",
-        "day_of_week": dt.isoweekday(), "month": dt.month})], dtype="float32")
+    dense = np.asarray(
+        [
+            mf.dense_vector(
+                {
+                    "title": a["headline"],
+                    "summary": a["summary"],
+                    "publisher_tier": mf.publisher_tier("Reuters"),
+                    "relevance": items[0]["relevance"],
+                    "n_duplicates": 0,
+                    "co_mention_count": 1,
+                    "session_class": "dateonly_cc",
+                    "day_of_week": dt.isoweekday(),
+                    "month": dt.month,
+                }
+            )
+        ],
+        dtype="float32",
+    )
     X = sp.hstack([mf.apply_idf(counts, idf)[:, mask], sp.csr_matrix(dense)], format="csr")
     assert items[0]["sar_pred"] == pytest.approx(float(enc.predict(X)[0]), abs=1e-6)
 
@@ -175,9 +217,17 @@ def test_served_score_matches_the_calibration_panel(tiny_artifact, monkeypatch):
     enc_wmean over training-built items for the same articles — the number
     the tier cuts were fitted on."""
     monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
-    arts = [_article(1, 1.0), _article(2, 30.0, source="PR Newswire", n_duplicates=3,
-                                       headline="Top 5 stocks to watch: company row2"),
-            _article(3, 80.0, source="Some Blog", summary="")]
+    arts = [
+        _article(1, 1.0),
+        _article(
+            2,
+            30.0,
+            source="PR Newswire",
+            n_duplicates=3,
+            headline="Top 5 stocks to watch: company row2",
+        ),
+        _article(3, 80.0, source="Some Blog", summary=""),
+    ]
     live = ms.score_articles(arts, "AAPL")
     train = [_training_item(a, "AAPL", it["sar_pred"]) for a, it in zip(arts, live)]
     now = time.time()
@@ -192,9 +242,9 @@ def test_price_features_are_as_of_the_previous_session():
     c = 100 * np.cumprod(1 + np.linspace(-0.01, 0.02, len(days)))
     spy = 400 * np.cumprod(1 + np.linspace(0.005, -0.005, len(days)))
     closes = pd.DataFrame({"AAPL": c, "SPY": spy}, index=days)
-    today = date(2026, 9, 25)              # the last row is today's (partial) bar
+    today = date(2026, 9, 25)  # the last row is today's (partial) bar
     f = ms.price_features(closes, "AAPL", today)
-    h = c[:-1]                             # the SQL stage uses closes < D only
+    h = c[:-1]  # the SQL stage uses closes < D only
     r = np.diff(h[-21:]) / h[-21:-1]
     assert f["tkr_ret_1d"] == pytest.approx(h[-1] / h[-2] - 1)
     assert f["tkr_ret_5d"] == pytest.approx(h[-1] / h[-6] - 1)
@@ -212,15 +262,23 @@ def test_price_features_are_as_of_the_previous_session():
 def test_calibrate_places_scores_on_their_history():
     cal = _cal()
     # knots are linear in pct: z = -3 + 6 * pct / 100  =>  pct = (z + 3) / 6 * 100
-    for z, tier in [(-3.0, "very_bearish"), (-2.7, "very_bearish"), (-2.6, "bearish"),
-                    (-2.1, "bearish"), (-2.0, "no_edge"), (0.0, "no_edge"),
-                    (2.1, "bullish"), (2.7, "very_bullish"), (3.5, "very_bullish")]:
+    for z, tier in [
+        (-3.0, "very_bearish"),
+        (-2.7, "very_bearish"),
+        (-2.6, "bearish"),
+        (-2.1, "bearish"),
+        (-2.0, "no_edge"),
+        (0.0, "no_edge"),
+        (2.1, "bullish"),
+        (2.7, "very_bullish"),
+        (3.5, "very_bullish"),
+    ]:
         out = ms.calibrate(0.1 + 0.5 * z, cal)
         assert out["z"] == pytest.approx(z, abs=0.01)
         assert out["tier"] == tier, (z, out)
     mid = ms.calibrate(0.1, cal)
     assert mid["pct"] == pytest.approx(50.0, abs=0.01)
-    assert mid["sar"] == cal["exp_sar"]["sar"][10]           # the 50-55 band
+    assert mid["sar"] == cal["exp_sar"]["sar"][10]  # the 50-55 band
 
 
 def test_calibrate_anchors_to_live_history_once_there_is_enough():
@@ -228,7 +286,7 @@ def test_calibrate_anchors_to_live_history_once_there_is_enough():
     hist = [0.001 * i for i in range(ms.MIN_LIVE_HISTORY)]
     few = ms.calibrate(0.19, cal, hist[:-1])
     assert few["anchor"] == "training" and few["n_history"] == ms.MIN_LIVE_HISTORY - 1
-    out = ms.calibrate(0.19, cal, hist)                        # 190 of 200 below
+    out = ms.calibrate(0.19, cal, hist)  # 190 of 200 below
     assert out["anchor"] == "live" and out["n_history"] == ms.MIN_LIVE_HISTORY
     assert out["pct"] == pytest.approx(100 * 190.5 / ms.MIN_LIVE_HISTORY, abs=0.05)
     assert out["tier"] == "very_bullish"
@@ -246,7 +304,7 @@ def test_calibrate_ignores_non_finite_history():
 def test_calibrate_handles_flat_knots():
     cal = _cal()
     cal["pct_knots"] = [0.0] * 40 + [round(0.05 * i, 3) for i in range(61)]
-    out = ms.calibrate(0.1, cal)                              # z = 0, a tied knot
+    out = ms.calibrate(0.1, cal)  # z = 0, a tied knot
     assert 0 <= out["pct"] <= 100
 
 
@@ -257,14 +315,14 @@ def test_market_read_is_the_weighted_encoder_score_over_7_days(tiny_artifact, mo
     fresh = [_article(i, age_h=6 * i) for i in range(1, 6)]
     old = [_article(9, age_h=24 * 12)]
     market, vol = ms.market_read("AAPL", fresh + old, None, now=now)
-    assert market["n_articles"] == 5                          # the 12-day-old one is out
+    assert market["n_articles"] == 5  # the 12-day-old one is out
     assert market["model_version"] == ms.ARTIFACT_VERSION
     assert market["horizon_days"] == 1
     assert market["tier"] in ms.TIERS and 0 <= market["confidence"] <= 1
     expected, _ = mf.weighted_sar(ms.score_articles(fresh, "AAPL"), now)
     assert market["score"] == pytest.approx(expected, abs=1e-6)
     assert market["anchor"] == "training" and market["n_history"] == 0
-    assert vol is None                                       # no closes, no vol
+    assert vol is None  # no closes, no vol
 
 
 def test_market_read_ranks_against_the_history_it_is_given(tiny_artifact, monkeypatch):
@@ -279,7 +337,7 @@ def test_market_read_ranks_against_the_history_it_is_given(tiny_artifact, monkey
 
 def test_market_read_caps_the_window_like_the_training_panel(tiny_artifact, monkeypatch):
     monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
-    arts = [_article(i, age_h=0.5 + i * 0.9) for i in range(150)]   # ~5.6 days
+    arts = [_article(i, age_h=0.5 + i * 0.9) for i in range(150)]  # ~5.6 days
     market, _ = ms.market_read("AAPL", arts)
     assert market["n_articles"] <= mf.WINDOW_CAP
 
@@ -330,11 +388,12 @@ def test_load_never_publishes_a_half_initialized_state(tiny_artifact, monkeypatc
 
 def test_article_context_uses_the_article_day():
     days = pd.bdate_range(end=pd.Timestamp("2026-09-25"), periods=30)
-    closes = pd.DataFrame({"AAPL": np.linspace(100, 130, 30),
-                           "SPY": np.linspace(400, 460, 30)}, index=days)
-    ctx = ms._article_context(closes, "AAPL", date(2026, 9, 20))   # a Sunday
+    closes = pd.DataFrame(
+        {"AAPL": np.linspace(100, 130, 30), "SPY": np.linspace(400, 460, 30)}, index=days
+    )
+    ctx = ms._article_context(closes, "AAPL", date(2026, 9, 20))  # a Sunday
     spy = closes["SPY"][closes.index <= "2026-09-20"].to_numpy()
-    assert ctx["spy_ret_1d"] == pytest.approx(spy[-1] / spy[-2] - 1)   # Friday's move
+    assert ctx["spy_ret_1d"] == pytest.approx(spy[-1] / spy[-2] - 1)  # Friday's move
     a = closes["AAPL"][closes.index <= "2026-09-20"].to_numpy()
     assert ctx["tkr_ret_5d"] == pytest.approx(a[-1] / a[-6] - 1)
     assert ms._article_context(None, "AAPL", date(2026, 9, 20))["spy_ret_1d"] == 0.0

@@ -5,6 +5,7 @@ folder; no test touches the network or the real ~/.convexity. The pinned
 SHA-256 is monkeypatched to each test tarball's hash — the code path is the
 production one, only the trust anchor is swapped.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -38,8 +39,15 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(mfetch, "_TIMEOUT_S", 5.0)
     mfetch.wait(10)
     with mfetch._LOCK:
-        mfetch._STATUS.update(state="idle", bytes=0, total=None, error="",
-                              started_at=None, finished_at=None, source="")
+        mfetch._STATUS.update(
+            state="idle",
+            bytes=0,
+            total=None,
+            error="",
+            started_at=None,
+            finished_at=None,
+            source="",
+        )
     ms.reset_for_tests()
     yield
     mfetch.wait(10)
@@ -103,8 +111,12 @@ def _tar(members, top=True) -> bytes:
             ti = tarfile.TarInfo(name)
             if isinstance(data, tuple):
                 kind, target = data
-                ti.type = {"sym": tarfile.SYMTYPE, "lnk": tarfile.LNKTYPE,
-                           "dir": tarfile.DIRTYPE, "fifo": tarfile.FIFOTYPE}[kind]
+                ti.type = {
+                    "sym": tarfile.SYMTYPE,
+                    "lnk": tarfile.LNKTYPE,
+                    "dir": tarfile.DIRTYPE,
+                    "fifo": tarfile.FIFOTYPE,
+                }[kind]
                 ti.linkname = target
                 tf.addfile(ti)
             else:
@@ -120,7 +132,9 @@ def _good_tar() -> bytes:
 def _serve(server, monkeypatch, body: bytes, pin: bytes | None = None, code=200):
     server.routes["/m.tar.gz"] = (code, body)
     monkeypatch.setenv("CONVEXITY_MODEL_URL", server.url())
-    monkeypatch.setattr(mfetch, "MODEL_SHA256", hashlib.sha256(pin if pin is not None else body).hexdigest())
+    monkeypatch.setattr(
+        mfetch, "MODEL_SHA256", hashlib.sha256(pin if pin is not None else body).hexdigest()
+    )
 
 
 def _run() -> dict:
@@ -149,6 +163,7 @@ def test_sha_not_overridable_by_env(monkeypatch):
     before = mfetch.MODEL_SHA256
     monkeypatch.setenv("CONVEXITY_MODEL_SHA256", "0" * 64)
     import importlib
+
     importlib.reload(mfetch)
     try:
         assert mfetch.MODEL_SHA256 == before
@@ -186,10 +201,10 @@ def test_download_installs_and_market_read_becomes_available(server, monkeypatch
     _serve(server, monkeypatch, body)
     assert hashlib.sha256(body).hexdigest() == sha
 
-    assert ms.available() is False          # boot state: missing, cached
+    assert ms.available() is False  # boot state: missing, cached
     st = _run()
     assert st["state"] == "installed", st
-    assert ms.available() is True           # reload() cleared the cached failure
+    assert ms.available() is True  # reload() cleared the cached failure
     for f in mfetch.ARTIFACT_FILES:
         assert (mfetch.target_dir() / f).read_bytes() == (src / f).read_bytes()
     assert _leftovers() == [VER]
@@ -239,7 +254,7 @@ def test_incomplete_dir_untouched_when_download_fails(monkeypatch):
         port = s.getsockname()[1]
     monkeypatch.setenv("CONVEXITY_MODEL_URL", f"http://127.0.0.1:{port}/m.tar.gz")
     assert _run()["state"] == "failed"
-    assert (t / "meta.json").read_bytes() == b"partial"   # only set aside on success
+    assert (t / "meta.json").read_bytes() == b"partial"  # only set aside on success
     assert "model download failed" in ms.runtime_status()["reason"]
 
 
@@ -286,21 +301,24 @@ def test_checksum_mismatch_rejected(server, monkeypatch):
     assert st["state"] == "failed" and "checksum mismatch" in st["error"]
     assert not mfetch.target_dir().exists()
     assert _leftovers() == []
-    assert len(server.hits) == 1            # never retried
+    assert len(server.hits) == 1  # never retried
     assert "download failed: checksum mismatch" in ms.runtime_status()["reason"]
 
 
-@pytest.mark.parametrize("members,why", [
-    ([(f"{VER}/../evil.txt", b"x")], "traversal"),
-    ([("../evil.txt", b"x")], "traversal"),
-    ([("/tmp/evil.txt", b"x")], "absolute"),
-    ([(f"{VER}/model.lgbm.txt", ("sym", "/etc/passwd"))], "link"),
-    ([(f"{VER}/model.lgbm.txt", ("lnk", "/etc/passwd"))], "link"),
-    ([(f"{VER}/idf.npy", ("fifo", ""))], "special"),
-    ([(f"{VER}/evil.py", b"x")], "unexpected file"),
-    ([(f"{VER}/sub", ("dir", ""))], "unexpected directory"),
-    ([(f"other/{mfetch.ARTIFACT_FILES[0]}", b"x")], "unexpected file"),
-])
+@pytest.mark.parametrize(
+    "members,why",
+    [
+        ([(f"{VER}/../evil.txt", b"x")], "traversal"),
+        ([("../evil.txt", b"x")], "traversal"),
+        ([("/tmp/evil.txt", b"x")], "absolute"),
+        ([(f"{VER}/model.lgbm.txt", ("sym", "/etc/passwd"))], "link"),
+        ([(f"{VER}/model.lgbm.txt", ("lnk", "/etc/passwd"))], "link"),
+        ([(f"{VER}/idf.npy", ("fifo", ""))], "special"),
+        ([(f"{VER}/evil.py", b"x")], "unexpected file"),
+        ([(f"{VER}/sub", ("dir", ""))], "unexpected directory"),
+        ([(f"other/{mfetch.ARTIFACT_FILES[0]}", b"x")], "unexpected file"),
+    ],
+)
 def test_unsafe_archive_rejected(server, monkeypatch, tmp_path, members, why):
     body = _tar([(f"{VER}/{n}", b) for n, b in _files().items()] + members)
     _serve(server, monkeypatch, body)
@@ -330,7 +348,7 @@ def test_not_a_tarball(server, monkeypatch):
 
 
 def test_offline_degrades_cleanly(monkeypatch):
-    with socket.socket() as s:            # a port nothing listens on
+    with socket.socket() as s:  # a port nothing listens on
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     monkeypatch.setenv("CONVEXITY_MODEL_URL", f"http://127.0.0.1:{port}/m.tar.gz")
@@ -363,8 +381,9 @@ def test_oversize_rejected(server, monkeypatch):
     assert _leftovers() == []
 
 
-@pytest.mark.parametrize("url", ["http://example.com/m.tar.gz", "ftp://127.0.0.1/m",
-                                 "file:///etc/passwd", "not a url"])
+@pytest.mark.parametrize(
+    "url", ["http://example.com/m.tar.gz", "ftp://127.0.0.1/m", "file:///etc/passwd", "not a url"]
+)
 def test_insecure_urls_refused(monkeypatch, url):
     monkeypatch.setenv("CONVEXITY_MODEL_URL", url)
     st = _run()
@@ -393,9 +412,12 @@ def test_retry_route(server, monkeypatch):
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/api/model-download",
-                                     data=b"{}", method="POST",
-                                     headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{httpd.server_address[1]}/api/model-download",
+            data=b"{}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
         with urllib.request.urlopen(req, timeout=10) as r:
             assert r.status == 202
             assert json.loads(r.read())["state"] in ("downloading", "installed")

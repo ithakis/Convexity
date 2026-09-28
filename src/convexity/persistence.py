@@ -40,6 +40,7 @@ def _atomic_write(path: Path, body: str) -> None:
             pass
         raise
 
+
 # ----------------------------- File paths -----------------------------------
 
 # All under <data>/state/ (src/convexity/paths.py) — never next to the code. The
@@ -61,6 +62,7 @@ _CURRENT_KEY = "__current__"
 
 
 # ----------------------------- Views ----------------------------------------
+
 
 def _watchlists_path() -> Path:
     return Path(_WATCHLISTS_FILE)
@@ -252,6 +254,7 @@ def delete_view(name: str) -> None:
 
 # ----------------------------- Weight presets (per-portfolio) ----------------
 
+
 def _normalize_preset_weights(weights_in) -> dict[str, float]:
     out: dict[str, float] = {}
     if not isinstance(weights_in, dict):
@@ -272,9 +275,14 @@ def list_weight_presets(view_name: str) -> dict:
     return {"presets": presets, "active": entry.get("active_weight_preset")}
 
 
-def upsert_weight_preset(view_name: str, preset_name: str, weights: dict,
-                         *, rename_from: str | None = None,
-                         set_active: bool = True) -> dict:
+def upsert_weight_preset(
+    view_name: str,
+    preset_name: str,
+    weights: dict,
+    *,
+    rename_from: str | None = None,
+    set_active: bool = True,
+) -> dict:
     clean_view = (view_name or "").strip()
     clean_name = (preset_name or "").strip()
     if not clean_view:
@@ -330,8 +338,11 @@ def delete_weight_preset(view_name: str, preset_name: str) -> dict:
         entry = views_map.get(clean_view)
         if not isinstance(entry, dict):
             return {"presets": [], "active": None}
-        presets = [p for p in (entry.get("weight_presets") or [])
-                   if isinstance(p, dict) and (p.get("name") or "").strip() != clean_name]
+        presets = [
+            p
+            for p in (entry.get("weight_presets") or [])
+            if isinstance(p, dict) and (p.get("name") or "").strip() != clean_name
+        ]
         entry["weight_presets"] = presets
         if (entry.get("active_weight_preset") or "").strip() == clean_name:
             entry["active_weight_preset"] = None
@@ -390,8 +401,10 @@ def upsert_analytics_cache(view_name: str, key: str, payload: dict) -> dict:
             cache = {}
         cache[clean_key] = record
         if len(cache) > _ANALYTICS_CACHE_MAX_PER_VIEW:
-            items = sorted(cache.items(),
-                           key=lambda kv: kv[1].get("saved_at", "") if isinstance(kv[1], dict) else "")
+            items = sorted(
+                cache.items(),
+                key=lambda kv: kv[1].get("saved_at", "") if isinstance(kv[1], dict) else "",
+            )
             for old_key, _ in items[: len(cache) - _ANALYTICS_CACHE_MAX_PER_VIEW]:
                 cache.pop(old_key, None)
         entry["analytics_cache"] = cache
@@ -419,6 +432,7 @@ def clear_analytics_cache(view_name: str) -> None:
 
 
 # ----------------------------- Watchlists -----------------------------------
+
 
 def load_watchlists() -> dict[str, str]:
     watchlists_path = _watchlists_path()
@@ -499,6 +513,7 @@ def delete_watchlist(name: str) -> dict[str, str]:
 
 # ----------------------------- MPT runs -------------------------------------
 
+
 def _read_mpt_raw() -> dict:
     path = Path(_MPT_FILE)
     if not path.exists():
@@ -566,7 +581,7 @@ def save_mpt_run(view_name: str, run: dict) -> dict:
         history = _as_run_list(runs_map.get(clean_view))
         new_params = run.get("params")
         if history and new_params and history[0].get("params") == new_params:
-            history[0] = payload           # dedupe identical params → replace newest
+            history[0] = payload  # dedupe identical params → replace newest
         else:
             history.insert(0, payload)
         runs_map[clean_view] = history[:_MPT_MAX_RUNS]
@@ -641,7 +656,9 @@ def _read_column_views_raw() -> dict:
     # is present only when the user reordered/added/removed columns; heat holds
     # only the explicit color-mode overrides (never the factory defaults — so a
     # future factory change still propagates to any view the user hasn't frozen).
-    bo_raw = data.get("builtin_overrides") if isinstance(data.get("builtin_overrides"), dict) else {}
+    bo_raw = (
+        data.get("builtin_overrides") if isinstance(data.get("builtin_overrides"), dict) else {}
+    )
     builtin_overrides: dict[str, dict] = {}
     for name, entry in bo_raw.items():
         clean_name = _normalize_builtin_column_view_name(str(name))

@@ -10,6 +10,7 @@ Usage:
     python ml/scripts/00_download_fnspid.py --prices   # prices zip only
     python ml/scripts/00_download_fnspid.py --all
 """
+
 from __future__ import annotations
 
 import argparse
@@ -67,8 +68,11 @@ def download(filename: str, min_free_gb: float) -> Path:
             return Path(path)
         except Exception as e:  # network hiccups: back off and resume
             last_err = e
-            wait = min(60, 2 ** attempt * 5)
-            print(f"[attempt {attempt}/{RETRIES}] {type(e).__name__}: {e} — retrying in {wait}s", flush=True)
+            wait = min(60, 2**attempt * 5)
+            print(
+                f"[attempt {attempt}/{RETRIES}] {type(e).__name__}: {e} — retrying in {wait}s",
+                flush=True,
+            )
             time.sleep(wait)
     raise SystemExit(f"Download failed after {RETRIES} attempts: {last_err}")
 
@@ -82,7 +86,10 @@ def fetch(filename: str, min_free_gb: float) -> None:
     t0 = time.time()
     path = download(filename, min_free_gb)
     size = path.stat().st_size
-    print(f"downloaded {filename}: {size/1e9:.2f} GB in {(time.time()-t0)/60:.1f} min; hashing…", flush=True)
+    print(
+        f"downloaded {filename}: {size / 1e9:.2f} GB in {(time.time() - t0) / 60:.1f} min; hashing…",
+        flush=True,
+    )
     m[filename] = {
         "size": size,
         "sha256": _sha256(path),

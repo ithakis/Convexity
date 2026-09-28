@@ -29,28 +29,36 @@ def cvar_lp_reference(R, a_ret, b_ret, l, h, alpha, fully_invested):
     nv = N + 1 + T
     c = np.zeros(nv)
     c[N] = 1.0
-    c[N + 1:] = 1.0 / tail
+    c[N + 1 :] = 1.0 / tail
 
-    blocks = [sphstack([csr_matrix(-R), csr_matrix(-np.ones((T, 1))),
-                        -speye(T, format="csr")], format="csr")]
+    blocks = [
+        sphstack(
+            [csr_matrix(-R), csr_matrix(-np.ones((T, 1))), -speye(T, format="csr")], format="csr"
+        )
+    ]
     b_ub = [np.zeros(T)]
     if b_ret > -1e17:
-        row = np.zeros((1, nv)); row[0, :N] = -np.asarray(a_ret, float)
-        blocks.append(csr_matrix(row)); b_ub.append(np.array([-b_ret]))
+        row = np.zeros((1, nv))
+        row[0, :N] = -np.asarray(a_ret, float)
+        blocks.append(csr_matrix(row))
+        b_ub.append(np.array([-b_ret]))
     if not fully_invested:
-        row = np.zeros((1, nv)); row[0, :N] = 1.0
-        blocks.append(csr_matrix(row)); b_ub.append(np.array([1.0]))
+        row = np.zeros((1, nv))
+        row[0, :N] = 1.0
+        blocks.append(csr_matrix(row))
+        b_ub.append(np.array([1.0]))
     A_ub = spvstack(blocks, format="csr")
     b_ub = np.concatenate(b_ub)
 
     A_eq = b_eq = None
     if fully_invested:
-        row = np.zeros((1, nv)); row[0, :N] = 1.0
-        A_eq = csr_matrix(row); b_eq = np.array([1.0])
+        row = np.zeros((1, nv))
+        row[0, :N] = 1.0
+        A_eq = csr_matrix(row)
+        b_eq = np.array([1.0])
 
     bounds = [(l[i], h[i]) for i in range(N)] + [(None, None)] + [(0.0, None)] * T
-    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
-                  bounds=bounds, method="highs")
+    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
     if not res.success:
         return None
     x = res.x

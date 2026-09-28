@@ -12,6 +12,7 @@ Answers three questions the label builder must not guess at:
 Writes ml/data/reports/timestamp_audit.json; downstream scripts read the
 decisions (source_tz, dateonly_frac) from there via config.load_timestamp_audit().
 """
+
 from __future__ import annotations
 
 import json
@@ -50,29 +51,36 @@ def main() -> None:
           AND extract(minute FROM ts)=0 AND extract(second FROM ts)=0
     """).fetchone()[0]
 
-    by_year = {str(y): {"n": n, "dateonly_frac": round(d / max(1, n), 4)}
-               for y, n, d in con.execute("""
+    by_year = {
+        str(y): {"n": n, "dateonly_frac": round(d / max(1, n), 4)}
+        for y, n, d in con.execute("""
         SELECT year, count(*),
                count(*) FILTER (WHERE extract(hour FROM ts)=0 AND
                                 extract(minute FROM ts)=0 AND extract(second FROM ts)=0)
         FROM news WHERE ts IS NOT NULL GROUP BY year ORDER BY year
-    """).fetchall()}
+    """).fetchall()
+    }
 
-    by_publisher = {p or "?": {"n": n, "dateonly_frac": round(d / max(1, n), 4)}
-                    for p, n, d in con.execute("""
+    by_publisher = {
+        p or "?": {"n": n, "dateonly_frac": round(d / max(1, n), 4)}
+        for p, n, d in con.execute("""
         SELECT publisher, count(*),
                count(*) FILTER (WHERE extract(hour FROM ts)=0 AND
                                 extract(minute FROM ts)=0 AND extract(second FROM ts)=0)
         FROM news WHERE ts IS NOT NULL
         GROUP BY publisher ORDER BY count(*) DESC LIMIT 25
-    """).fetchall()}
+    """).fetchall()
+    }
 
-    hour_hist = {int(h): int(n) for h, n in con.execute("""
+    hour_hist = {
+        int(h): int(n)
+        for h, n in con.execute("""
         SELECT extract(hour FROM ts) AS h, count(*) FROM news
         WHERE ts IS NOT NULL AND NOT (extract(hour FROM ts)=0 AND
               extract(minute FROM ts)=0 AND extract(second FROM ts)=0)
         GROUP BY h ORDER BY h
-    """).fetchall()}
+    """).fetchall()
+    }
 
     # Timezone inference: compare mass in the UTC-implied band (13-21) vs the
     # ET-naive-implied band (8-17). US market news concentrates 08:00-17:00 ET.
@@ -108,9 +116,7 @@ def main() -> None:
             FROM ns LEFT JOIN ps USING (symbol)
         """).fetchone()[0]
 
-    date_range = con.execute(
-        "SELECT min(ts), max(ts) FROM news WHERE ts IS NOT NULL"
-    ).fetchone()
+    date_range = con.execute("SELECT min(ts), max(ts) FROM news WHERE ts IS NOT NULL").fetchone()
 
     audit = {
         "total_rows": total,
@@ -131,9 +137,17 @@ def main() -> None:
     }
     config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     config.TIMESTAMP_AUDIT_JSON.write_text(json.dumps(audit, indent=2))
-    print(json.dumps({k: v for k, v in audit.items()
-                      if k not in ("by_year", "top_publishers", "hour_histogram_timed")},
-                     indent=2), flush=True)
+    print(
+        json.dumps(
+            {
+                k: v
+                for k, v in audit.items()
+                if k not in ("by_year", "top_publishers", "hour_histogram_timed")
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
     print(f"full audit -> {config.TIMESTAMP_AUDIT_JSON}", flush=True)
 
 

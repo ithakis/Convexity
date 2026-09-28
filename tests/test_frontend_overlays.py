@@ -14,6 +14,7 @@ unconditional pass, a nested pair could restore the wrong value. Both bugs are
 invisible in review and obvious in use, which is exactly the kind a cheap
 static guard should catch.
 """
+
 from __future__ import annotations
 
 import re
@@ -30,9 +31,18 @@ _CSS = (_STATIC / "style.css").read_text(encoding="utf-8")
 # (the FX hover card, the inline "Save as..." prompt, dropdowns, the toast) are
 # deliberately absent — they don't cover the page, so they must NOT lock scroll.
 _OVERLAY_IDS = [
-    "confirm-bg", "pf-weights-bg", "pf-mpt-bg", "pf-mpt-info-bg", "cv-modal-bg",
-    "info-bg", "modal-bg", "methodology-bg", "ns-prog-bg", "settings-bg",
-    "ns-tape-fs-bg", "export-bg",
+    "confirm-bg",
+    "pf-weights-bg",
+    "pf-mpt-bg",
+    "pf-mpt-info-bg",
+    "cv-modal-bg",
+    "info-bg",
+    "modal-bg",
+    "methodology-bg",
+    "ns-prog-bg",
+    "settings-bg",
+    "ns-tape-fs-bg",
+    "export-bg",
 ]
 
 
@@ -53,8 +63,7 @@ def test_body_overflow_is_only_touched_by_the_lock_helpers():
     Anything else is a second, competing lock — which is what the three
     dataset.*PrevOverflow implementations were.
     """
-    writes = [m.start() for m in
-              re.finditer(r"(?:document\.)?body\.style\.overflow\s*=", _APP_JS)]
+    writes = [m.start() for m in re.finditer(r"(?:document\.)?body\.style\.overflow\s*=", _APP_JS)]
     # The two legitimate writers live inside lockBodyScroll / unlockBodyScroll.
     lock_start = _APP_JS.index("function lockBodyScroll")
     lock_end = _APP_JS.index("function showOverlay")
@@ -95,12 +104,21 @@ def test_overlay_scroll_containers_contain_their_overscroll():
     """
     block = re.search(
         r"/\* ===== Overlay scroll containment.*?\*/\s*(.*?)\{\s*overscroll-behavior:\s*contain;",
-        _CSS, re.S)
+        _CSS,
+        re.S,
+    )
     assert block, "the grouped overscroll-containment rule is gone from style.css"
     listed = {s.strip() for s in block.group(1).split(",") if s.strip()}
-    for required in (".modal-bg", ".info-modal", ".mth-body", ".ns-prog-jobs",
-                     ".ns-tape-fs-body", ".pf-weights-body", ".cv-list",
-                     ".settings-pane-body.scroll"):
+    for required in (
+        ".modal-bg",
+        ".info-modal",
+        ".mth-body",
+        ".ns-prog-jobs",
+        ".ns-tape-fs-body",
+        ".pf-weights-body",
+        ".cv-list",
+        ".settings-pane-body.scroll",
+    ):
         assert required in listed, f"{required} missing from the containment rule"
 
 

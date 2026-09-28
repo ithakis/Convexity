@@ -8,6 +8,7 @@ The property that matters most is the honest one — widening the window cannot
 conjure headlines that were never fetched or read, and the result has to SAY so
 rather than presenting a re-weighting of 7 days of evidence as a 30-day read.
 """
+
 from __future__ import annotations
 
 import sys
@@ -39,9 +40,12 @@ def _clean_caches(monkeypatch):
 
 def _article(age_days, score, *, url=None, headline="Co beats estimates", lens="financials"):
     a = {
-        "headline": headline, "summary": "", "source": "Reuters",
+        "headline": headline,
+        "summary": "",
+        "source": "Reuters",
         "datetime": int(time.time() - age_days * DAY),
-        "url": url or f"http://x/{headline}/{age_days}", "n_duplicates": 0,
+        "url": url or f"http://x/{headline}/{age_days}",
+        "n_duplicates": 0,
     }
     if score is not None:
         a.update({"lens": lens, "llm_score": score, "fact": f"{headline} fact"})
@@ -59,6 +63,7 @@ def _cache_news(sym, days, articles):
 def test_rescores_from_cache_without_network(monkeypatch):
     def _boom(*a, **kw):
         raise AssertionError("rescore_window must not fetch or score")
+
     monkeypatch.setattr(ns, "_fh_call", _boom)
     monkeypatch.setattr(ns, "_fetch_yf_news", _boom)
     monkeypatch.setattr(ns, "_nvidia_call", _boom)
@@ -85,11 +90,14 @@ def test_narrowing_drops_older_articles():
 
 
 def test_lenses_are_re_aggregated_per_window():
-    _cache_news("AAPL", 30, [_article(1, 2, lens="financials"),
-                             _article(10, -2, lens="regulation", headline="Fine")])
+    _cache_news(
+        "AAPL",
+        30,
+        [_article(1, 2, lens="financials"), _article(10, -2, lens="regulation", headline="Fine")],
+    )
     narrow = ns.rescore_window(["AAPL"], 7)["sentiment"]["AAPL"]["news"]["lenses"]
     assert narrow["financials"]["score"] == 2.0
-    assert narrow["regulation"] is None           # out of window: no news, not 0
+    assert narrow["regulation"] is None  # out of window: no news, not 0
     ns._SENTIMENT_CACHE.clear()
     wide = ns.rescore_window(["AAPL"], 30)["sentiment"]["AAPL"]["news"]["lenses"]
     assert wide["regulation"]["score"] == -2.0
@@ -149,11 +157,22 @@ def test_never_writes_history(_clean_caches):
 
 def test_brief_and_market_are_carried_forward():
     _cache_news("AAPL", 7, [_article(1, 2)])
-    market = {"sar": -0.2, "z": -2.1, "pct": 2.0, "tier": "very_bearish", "score": -0.01,
-              "horizon_days": 1, "confidence": 0.7, "model_version": "mlsent-v1.1"}
-    ns._cache_put(ns._SENTIMENT_CACHE, "sentiment|AAPL|7",
-                  {"news": {"brief": "Old brief.", "lookback_days": 7, "agreement": 0.9},
-                   "market": market}, ns._SENTIMENT_TTL)
+    market = {
+        "sar": -0.2,
+        "z": -2.1,
+        "pct": 2.0,
+        "tier": "very_bearish",
+        "score": -0.01,
+        "horizon_days": 1,
+        "confidence": 0.7,
+        "model_version": "mlsent-v1.1",
+    }
+    ns._cache_put(
+        ns._SENTIMENT_CACHE,
+        "sentiment|AAPL|7",
+        {"news": {"brief": "Old brief.", "lookback_days": 7, "agreement": 0.9}, "market": market},
+        ns._SENTIMENT_TTL,
+    )
     s = ns.rescore_window(["AAPL"], 7)["sentiment"]["AAPL"]
     # The LLM wrote the brief for a different headline set and it can't be
     # regenerated without a NIM call — carry it, but don't pass it off as current.
@@ -167,9 +186,13 @@ def test_brief_and_market_are_carried_forward():
 
 def test_market_read_is_served_from_the_nearest_cached_window():
     _cache_news("AAPL", 7, [_article(1, 1)])
-    ns._cache_put(ns._SENTIMENT_CACHE, "sentiment|__market__|7",
-                  {"news": {"score": -0.8, "tier": "bearish"}}, ns._SENTIMENT_TTL)
-    out = ns.rescore_window(["AAPL"], 30)     # no 30D market entry exists
+    ns._cache_put(
+        ns._SENTIMENT_CACHE,
+        "sentiment|__market__|7",
+        {"news": {"score": -0.8, "tier": "bearish"}},
+        ns._SENTIMENT_TTL,
+    )
+    out = ns.rescore_window(["AAPL"], 30)  # no 30D market entry exists
     assert out["market"]["news"]["score"] == -0.8
 
 

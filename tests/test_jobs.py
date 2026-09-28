@@ -6,6 +6,7 @@ reconnect, the single-flight guard, cancellation actually de-queuing work, and
 the guard that stops a background job overwriting good holdings with a batch
 Yahoo mostly failed to answer.
 """
+
 from __future__ import annotations
 
 import sys
@@ -72,8 +73,14 @@ def _run_to_completion(job, timeout=20):
 
 
 def test_seqs_are_monotonic_and_replay_is_gapless():
-    job = jobs.Job(scope="current", phases=("quotes",), views=["v"],
-                   entries={"v": "AAPL"}, days=7, context=None)
+    job = jobs.Job(
+        scope="current",
+        phases=("quotes",),
+        views=["v"],
+        entries={"v": "AAPL"},
+        days=7,
+        context=None,
+    )
     for i in range(10):
         job.emit("item", n=i)
     frames, dropped = job.events_since(0)
@@ -87,8 +94,14 @@ def test_seqs_are_monotonic_and_replay_is_gapless():
 
 def test_dropped_is_reported_when_the_ring_overflows(monkeypatch):
     monkeypatch.setattr(jobs, "_EVENT_MAXLEN", 8)
-    job = jobs.Job(scope="current", phases=("quotes",), views=["v"],
-                   entries={"v": "AAPL"}, days=7, context=None)
+    job = jobs.Job(
+        scope="current",
+        phases=("quotes",),
+        views=["v"],
+        entries={"v": "AAPL"},
+        days=7,
+        context=None,
+    )
     job._events = type(job._events)(maxlen=8)
     for i in range(20):
         job.emit("item", n=i)
@@ -104,8 +117,14 @@ def test_dropped_is_reported_when_the_ring_overflows(monkeypatch):
 def test_counts_ride_on_every_counted_frame():
     """The client assigns counts, never accumulates — see Job._COUNTED. A
     `phase` total is per-view, so adding it client-side double-counted."""
-    job = jobs.Job(scope="current", phases=("quotes",), views=["v"],
-                   entries={"v": "AAPL"}, days=7, context=None)
+    job = jobs.Job(
+        scope="current",
+        phases=("quotes",),
+        views=["v"],
+        entries={"v": "AAPL"},
+        days=7,
+        context=None,
+    )
     job.bump("quotes_total", 4)
     for kind in jobs.Job._COUNTED:
         assert "counts" in job.emit(kind)
@@ -113,8 +132,14 @@ def test_counts_ride_on_every_counted_frame():
 
 
 def test_wait_blocks_until_a_new_frame_arrives():
-    job = jobs.Job(scope="current", phases=("quotes",), views=["v"],
-                   entries={"v": "AAPL"}, days=7, context=None)
+    job = jobs.Job(
+        scope="current",
+        phases=("quotes",),
+        views=["v"],
+        entries={"v": "AAPL"},
+        days=7,
+        context=None,
+    )
     got = []
 
     def waiter():
@@ -134,11 +159,13 @@ def test_wait_blocks_until_a_new_frame_arrives():
 
 def test_second_submit_is_rejected_and_returns_the_running_job(fake_quotes, isolated_state):
     fake_quotes["delay"] = 0.3
-    first, outcome = jobs.submit(scope="current", phases=["quotes"], days=7,
-                                 entries_by_view={"v": "A,B,C,D"})
+    first, outcome = jobs.submit(
+        scope="current", phases=["quotes"], days=7, entries_by_view={"v": "A,B,C,D"}
+    )
     assert outcome == "created"
-    second, outcome2 = jobs.submit(scope="current", phases=["quotes"], days=7,
-                                   entries_by_view={"v": "E"})
+    second, outcome2 = jobs.submit(
+        scope="current", phases=["quotes"], days=7, entries_by_view={"v": "E"}
+    )
     # Not politeness: the rate limiters are process-global and the sentiment
     # cache take/restore races destructively between two concurrent jobs.
     assert outcome2 == "rejected"
@@ -164,8 +191,11 @@ def test_concurrent_submits_cannot_both_win(fake_quotes, isolated_state):
 
         def _submit(name):
             start.wait()
-            outcomes.append(jobs.submit(scope="current", phases=["quotes"], days=7,
-                                        entries_by_view={name: "A,B"}))
+            outcomes.append(
+                jobs.submit(
+                    scope="current", phases=["quotes"], days=7, entries_by_view={name: "A,B"}
+                )
+            )
 
         threads = [threading.Thread(target=_submit, args=(f"v{i}",)) for i in range(2)]
         for t in threads:
@@ -183,11 +213,16 @@ def test_concurrent_submits_cannot_both_win(fake_quotes, isolated_state):
 
 def test_supersede_cancels_the_running_job(fake_quotes, isolated_state):
     fake_quotes["delay"] = 0.5
-    first, _ = jobs.submit(scope="current", phases=["quotes"], days=7,
-                           entries_by_view={"v": "A,B,C,D,E,F"})
-    second, outcome = jobs.submit(scope="current", phases=["quotes"], days=7,
-                                  entries_by_view={"v": "G"},
-                                  on_conflict="supersede")
+    first, _ = jobs.submit(
+        scope="current", phases=["quotes"], days=7, entries_by_view={"v": "A,B,C,D,E,F"}
+    )
+    second, outcome = jobs.submit(
+        scope="current",
+        phases=["quotes"],
+        days=7,
+        entries_by_view={"v": "G"},
+        on_conflict="supersede",
+    )
     assert outcome == "created" and second is not first
     assert first.cancel.is_set()
     _run_to_completion(first)
@@ -195,8 +230,7 @@ def test_supersede_cancels_the_running_job(fake_quotes, isolated_state):
 
 
 def test_current_clears_once_the_job_finishes(fake_quotes, isolated_state):
-    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7,
-                         entries_by_view={"v": "A,B"})
+    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7, entries_by_view={"v": "A,B"})
     assert _run_to_completion(job)
     assert jobs.current() is None
 
@@ -212,22 +246,23 @@ def test_cancel_dequeues_pending_work(fake_quotes, isolated_state):
     """
     fake_quotes["delay"] = 0.2
     symbols = ",".join(f"S{i}" for i in range(40))
-    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7,
-                         entries_by_view={"v": symbols})
+    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7, entries_by_view={"v": symbols})
     time.sleep(0.35)
     assert job.request_cancel() is True
     assert _run_to_completion(job)
     assert job.state == "cancelled"
     assert len(fake_quotes["calls"]) < 20, (
-        f"cancel de-queued nothing: {len(fake_quotes['calls'])}/40 still fetched")
+        f"cancel de-queued nothing: {len(fake_quotes['calls'])}/40 still fetched"
+    )
 
 
 def test_cancel_frame_is_emitted_synchronously(fake_quotes, isolated_state):
     """The UI must reflect the cancel immediately, not whenever a worker
     happens to notice."""
     fake_quotes["delay"] = 0.3
-    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7,
-                         entries_by_view={"v": "A,B,C,D,E,F,G,H"})
+    job, _ = jobs.submit(
+        scope="current", phases=["quotes"], days=7, entries_by_view={"v": "A,B,C,D,E,F,G,H"}
+    )
     time.sleep(0.1)
     before = job.snapshot()["last_seq"]
     job.request_cancel("user")
@@ -242,8 +277,12 @@ def test_cancel_frame_is_emitted_synchronously(fake_quotes, isolated_state):
 
 def test_a_cancelled_job_does_not_save(fake_quotes, isolated_state):
     fake_quotes["delay"] = 0.2
-    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7,
-                         entries_by_view={"Tech": ",".join(f"S{i}" for i in range(30))})
+    job, _ = jobs.submit(
+        scope="current",
+        phases=["quotes"],
+        days=7,
+        entries_by_view={"Tech": ",".join(f"S{i}" for i in range(30))},
+    )
     time.sleep(0.3)
     job.request_cancel()
     assert _run_to_completion(job)
@@ -257,9 +296,10 @@ def test_degraded_batch_is_not_saved(fake_quotes, isolated_state):
     """save_view overwrites rows wholesale. An unattended job must never
     replace good holdings with a batch Yahoo mostly failed to answer."""
     persistence.save_view("Tech", "A,B,C,D,E", [{"symbol": "A", "price": 1.0}])
-    fake_quotes["error_symbols"] = {"A", "B", "C", "D"}     # 4/5 broken
-    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7,
-                         entries_by_view={"Tech": "A,B,C,D,E"})
+    fake_quotes["error_symbols"] = {"A", "B", "C", "D"}  # 4/5 broken
+    job, _ = jobs.submit(
+        scope="current", phases=["quotes"], days=7, entries_by_view={"Tech": "A,B,C,D,E"}
+    )
     assert _run_to_completion(job)
     frames, _ = job.events_since(0)
     end = [f for f in frames if f["type"] == "phase" and f.get("state") == "end"][0]
@@ -268,9 +308,10 @@ def test_degraded_batch_is_not_saved(fake_quotes, isolated_state):
 
 
 def test_healthy_batch_saves_without_touching_last_view(fake_quotes, isolated_state):
-    persistence.save_view("Other", "Z", [{"symbol": "Z"}])   # sets last_view
-    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7,
-                         entries_by_view={"Tech": "A,B,C"})
+    persistence.save_view("Other", "Z", [{"symbol": "Z"}])  # sets last_view
+    job, _ = jobs.submit(
+        scope="current", phases=["quotes"], days=7, entries_by_view={"Tech": "A,B,C"}
+    )
     assert _run_to_completion(job)
     assert len(persistence.load_view("Tech")["rows"]) == 3
     # set_last=False: a background job must never repoint the restore-on-launch
@@ -283,8 +324,9 @@ def test_views_run_sequentially(fake_quotes, isolated_state):
     all-scope phase must do one portfolio at a time."""
     order = []
     fake_quotes["delay"] = 0.05
-    job, _ = jobs.submit(scope="all", phases=["quotes"], days=7,
-                         entries_by_view={"A": "AA,AB", "B": "BA,BB"})
+    job, _ = jobs.submit(
+        scope="all", phases=["quotes"], days=7, entries_by_view={"A": "AA,AB", "B": "BA,BB"}
+    )
     assert _run_to_completion(job)
     for f in job.events_since(0)[0]:
         if f["type"] == "phase" and f.get("state") == "start":
@@ -326,8 +368,8 @@ def test_closing_the_generator_dequeues(fake_quotes):
     JOINED every future, so an abandoned build kept hitting Yahoo for ~30 s."""
     fake_quotes["delay"] = 0.15
     gen = fetcher.stream_quotes([f"s{i}" for i in range(40)])
-    next(gen)              # start
-    next(gen)              # first row
+    next(gen)  # start
+    next(gen)  # first row
     gen.close()
     time.sleep(0.4)
     assert len(fake_quotes["calls"]) < 25
@@ -345,18 +387,30 @@ def test_closing_the_generator_dequeues(fake_quotes):
 def _make_fake_news(outcome_for=lambda s: "ok"):
     """Stand-in for news_sentiment: reports the market read, then each symbol
     with its News read outcome (ok | failed | empty)."""
+
     def _refresh(symbols, context=None, progress_cb=None, cancel=None):
         outcomes = {s: outcome_for(s) for s in symbols}
         if progress_cb:
             progress_cb("market", {"sentiment": {"news": {}}, "outcome": "ok"})
             for s in symbols:
-                progress_cb("symbol", {"symbol": s, "outcome": outcomes[s],
-                                       "sentiment": {"news": {}} if outcomes[s] != "empty"
-                                       else None})
+                progress_cb(
+                    "symbol",
+                    {
+                        "symbol": s,
+                        "outcome": outcomes[s],
+                        "sentiment": {"news": {}} if outcomes[s] != "empty" else None,
+                    },
+                )
         vals = list(outcomes.values())
-        return {"status": {"scored": vals.count("ok"), "failed": vals.count("failed"),
-                           "empty": vals.count("empty"), "total": len(symbols),
-                           "llm_error": "410 model retired" if "failed" in vals else None}}
+        return {
+            "status": {
+                "scored": vals.count("ok"),
+                "failed": vals.count("failed"),
+                "empty": vals.count("empty"),
+                "total": len(symbols),
+                "llm_error": "410 model retired" if "failed" in vals else None,
+            }
+        }
 
     return type("_NS", (), {"refresh_sentiment": staticmethod(_refresh)})
 
@@ -368,21 +422,31 @@ def fake_news(monkeypatch):
     return fake
 
 
-def test_failed_news_reads_are_counted_not_reported_as_done(fake_quotes, isolated_state,
-                                                            monkeypatch):
+def test_failed_news_reads_are_counted_not_reported_as_done(
+    fake_quotes, isolated_state, monkeypatch
+):
     """The News read silently died once (a retired model); the job must now
     carry scored/failed counts on every counted frame and say why."""
     monkeypatch.setattr(jobs, "_ns", _make_fake_news(lambda s: "failed" if s == "B" else "ok"))
-    job, _ = jobs.submit(scope="current", phases=["quotes", "news"], days=7,
-                         entries_by_view={"Tech": "A,B,C"}, context={})
+    job, _ = jobs.submit(
+        scope="current",
+        phases=["quotes", "news"],
+        days=7,
+        entries_by_view={"Tech": "A,B,C"},
+        context={},
+    )
     assert _run_to_completion(job)
     assert job.counts["news_scored"] == 2 and job.counts["news_failed"] == 1
     frames = job.events_since(0)[0]
-    items = {f["symbol"]: f["state"] for f in frames
-             if f["type"] == "item" and f.get("phase") == "news"}
+    items = {
+        f["symbol"]: f["state"] for f in frames if f["type"] == "item" and f.get("phase") == "news"
+    }
     assert items == {"__market__": "ok", "A": "ok", "B": "failed", "C": "ok"}
-    end = [f for f in frames if f["type"] == "phase" and f.get("phase") == "news"
-           and f.get("state") == "end"][0]
+    end = [
+        f
+        for f in frames
+        if f["type"] == "phase" and f.get("phase") == "news" and f.get("state") == "end"
+    ][0]
     assert (end["scored"], end["failed"], end["total"]) == (2, 1, 3)
     assert "retired" in end["llm_error"]
 
@@ -401,8 +465,13 @@ def _unified_ratios(job):
 
 
 def test_both_totals_are_known_on_the_very_first_frame(fake_quotes, fake_news, isolated_state):
-    job, _ = jobs.submit(scope="current", phases=["quotes", "news"], days=7,
-                         entries_by_view={"Tech": "A,B,C"}, context={})
+    job, _ = jobs.submit(
+        scope="current",
+        phases=["quotes", "news"],
+        days=7,
+        entries_by_view={"Tech": "A,B,C"},
+        context={},
+    )
     assert _run_to_completion(job)
     first = job.events_since(0)[0][0]
     # The `queued` frame, emitted by submit() before the worker thread starts —
@@ -418,8 +487,9 @@ def test_both_totals_are_known_on_the_very_first_frame(fake_quotes, fake_news, i
 def test_quotes_total_spans_every_view_from_the_start(fake_quotes, isolated_state):
     """All-scope: the total is the whole account's, not the current portfolio's,
     so the bar doesn't restart as each portfolio begins."""
-    job, _ = jobs.submit(scope="all", phases=["quotes"], days=7,
-                         entries_by_view={"A": "AA,AB", "B": "BA,BB,BC"})
+    job, _ = jobs.submit(
+        scope="all", phases=["quotes"], days=7, entries_by_view={"A": "AA,AB", "B": "BA,BB,BC"}
+    )
     assert _run_to_completion(job)
     frames = job.events_since(0)[0]
     assert frames[0]["counts"]["quotes_total"] == 5
@@ -432,19 +502,28 @@ def test_news_total_is_corrected_to_the_real_symbol_count(fake_quotes, fake_news
     """Two views share a symbol, so the news phase (which runs over the UNION of
     resolved symbols) is smaller than a naive per-view sum. The plan already
     de-duplicates; this pins that the phase then asserts the exact figure."""
-    job, _ = jobs.submit(scope="all", phases=["quotes", "news"], days=7,
-                         entries_by_view={"A": "AA,SHARED", "B": "BB,SHARED"},
-                         context={})
+    job, _ = jobs.submit(
+        scope="all",
+        phases=["quotes", "news"],
+        days=7,
+        entries_by_view={"A": "AA,SHARED", "B": "BB,SHARED"},
+        context={},
+    )
     assert _run_to_completion(job)
-    assert job.counts["quotes_total"] == 4          # quotes still fetch per view
-    assert job.counts["news_total"] == 4            # 3 unique symbols + market
+    assert job.counts["quotes_total"] == 4  # quotes still fetch per view
+    assert job.counts["news_total"] == 4  # 3 unique symbols + market
     assert job.counts["news_done"] == 4
 
 
 def test_unified_progress_never_goes_backwards(fake_quotes, fake_news, isolated_state):
     """The actual regression: run the client's own formula over every frame."""
-    job, _ = jobs.submit(scope="all", phases=["quotes", "news"], days=7,
-                         entries_by_view={"A": "AA,AB,AC", "B": "BA,BB"}, context={})
+    job, _ = jobs.submit(
+        scope="all",
+        phases=["quotes", "news"],
+        days=7,
+        entries_by_view={"A": "AA,AB,AC", "B": "BA,BB"},
+        context={},
+    )
     assert _run_to_completion(job)
     ratios = _unified_ratios(job)
     assert ratios, "no counted frames"
@@ -457,16 +536,22 @@ def test_skipped_news_phase_releases_its_reservation(fake_quotes, isolated_state
     """news_sentiment unavailable: the planned news items are never coming, so
     they must leave the denominator or the bar can never reach 100%."""
     monkeypatch.setattr(jobs, "_ns", None)
-    job, _ = jobs.submit(scope="current", phases=["quotes", "news"], days=7,
-                         entries_by_view={"Tech": "A,B,C"}, context={})
+    job, _ = jobs.submit(
+        scope="current",
+        phases=["quotes", "news"],
+        days=7,
+        entries_by_view={"Tech": "A,B,C"},
+        context={},
+    )
     assert _run_to_completion(job)
     assert job.counts["news_total"] == 0
     assert _unified_ratios(job)[-1] == pytest.approx(1.0)
 
 
 def test_empty_view_releases_its_quotes_reservation(fake_quotes, isolated_state):
-    job, _ = jobs.submit(scope="all", phases=["quotes"], days=7,
-                         entries_by_view={"A": "AA,AB", "Empty": ""})
+    job, _ = jobs.submit(
+        scope="all", phases=["quotes"], days=7, entries_by_view={"A": "AA,AB", "Empty": ""}
+    )
     assert _run_to_completion(job)
     assert job.counts["quotes_total"] == 2
     assert _unified_ratios(job)[-1] == pytest.approx(1.0)
@@ -477,8 +562,9 @@ def test_parse_entries_matches_what_the_phase_fetches(fake_quotes, isolated_stat
     denominator visibly corrects itself on the first item."""
     entries = "AA, AB\nAC,, AD "
     assert jobs._parse_entries(entries) == ["AA", "AB", "AC", "AD"]
-    job, _ = jobs.submit(scope="current", phases=["quotes"], days=7,
-                         entries_by_view={"Tech": entries})
+    job, _ = jobs.submit(
+        scope="current", phases=["quotes"], days=7, entries_by_view={"Tech": entries}
+    )
     assert _run_to_completion(job)
     frames = job.events_since(0)[0]
     assert {f["counts"]["quotes_total"] for f in frames if f.get("counts")} == {4}

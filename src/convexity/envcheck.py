@@ -29,6 +29,7 @@ question this answers is "can the running interpreter import what the app needs"
 which is exactly the failure mode that shipped. Version *ranges* are the
 manifest's job and are enforced by the resolver (uv).
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -47,6 +48,7 @@ class Requirement(NamedTuple):
     critical — True: a core surface is dead without it. False: degraded but the
                app is still useful. Only `critical` misses make env_ok False.
     """
+
     module: str
     pip: str
     feature: str
@@ -55,33 +57,26 @@ class Requirement(NamedTuple):
 
 # Ordered roughly by how loudly the app breaks without each one.
 REQUIRED: tuple[Requirement, ...] = (
-    Requirement("pandas", "pandas",
-                "quotes, analytics, and every table in the app"),
-    Requirement("numpy", "numpy",
-                "all numeric computation"),
-    Requirement("yfinance", "yfinance",
-                "market data — no prices, no rows"),
-    Requirement("requests", "requests",
-                "Finnhub news and symbol-database downloads"),
-    Requirement("numba", "numba",
-                "the mean-CVaR optimizer (Optimize tab) JIT kernels"),
-    Requirement("scipy", "scipy",
-                "ML feature assembly (scipy.sparse) and the LP reference solver"),
+    Requirement("pandas", "pandas", "quotes, analytics, and every table in the app"),
+    Requirement("numpy", "numpy", "all numeric computation"),
+    Requirement("yfinance", "yfinance", "market data — no prices, no rows"),
+    Requirement("requests", "requests", "Finnhub news and symbol-database downloads"),
+    Requirement("numba", "numba", "the mean-CVaR optimizer (Optimize tab) JIT kernels"),
+    Requirement("scipy", "scipy", "ML feature assembly (scipy.sparse) and the LP reference solver"),
     # The two that were missing for weeks. ml_sentiment._load() imports both,
     # so either one absent silently demotes every ml_* field to null.
-    Requirement("lightgbm", "lightgbm",
-                "ML news sentiment — the primary NS signal (falls back to LLM)"),
-    Requirement("sklearn", "scikit-learn",
-                "ML news sentiment feature hashing (needed with lightgbm)"),
-    Requirement("openai", "openai",
-                "LLM news sentiment via the NVIDIA NIM endpoint"),
-    Requirement("lxml", "lxml",
-                "the EPS Surprise column (yfinance parses Yahoo HTML via lxml)"),
-    Requirement("openpyxl", "openpyxl",
-                "Excel export"),
-    Requirement("rapidfuzz", "rapidfuzz",
-                "fuzzy ticker lookup and news de-duplication",
-                critical=False),
+    Requirement(
+        "lightgbm", "lightgbm", "ML news sentiment — the primary NS signal (falls back to LLM)"
+    ),
+    Requirement(
+        "sklearn", "scikit-learn", "ML news sentiment feature hashing (needed with lightgbm)"
+    ),
+    Requirement("openai", "openai", "LLM news sentiment via the NVIDIA NIM endpoint"),
+    Requirement("lxml", "lxml", "the EPS Surprise column (yfinance parses Yahoo HTML via lxml)"),
+    Requirement("openpyxl", "openpyxl", "Excel export"),
+    Requirement(
+        "rapidfuzz", "rapidfuzz", "fuzzy ticker lookup and news de-duplication", critical=False
+    ),
 )
 
 
@@ -119,8 +114,7 @@ def status() -> dict:
         "python": sys.version.split()[0],
         "executable": sys.executable,
         "missing": [
-            {"module": r.module, "pip": r.pip,
-             "feature": r.feature, "critical": r.critical}
+            {"module": r.module, "pip": r.pip, "feature": r.feature, "critical": r.critical}
             for r in missing
         ],
     }

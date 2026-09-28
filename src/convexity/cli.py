@@ -38,14 +38,16 @@ def build_symbols(argv: list[str]) -> int:
         description="Build the local symbol database.",
     )
     ap.add_argument(
-        "--sources", default=",".join(sdb.SOURCES.keys()),
+        "--sources",
+        default=",".join(sdb.SOURCES.keys()),
         help=f"Comma-separated list of sources to pull. "
-             f"Available: {','.join(sdb.SOURCES.keys())}. Default: all.",
+        f"Available: {','.join(sdb.SOURCES.keys())}. Default: all.",
     )
     ap.add_argument(
-        "--db", default=str(sdb.write_path()),
+        "--db",
+        default=str(sdb.write_path()),
         help="Output SQLite path. Default: symbol_db.sqlite in the Convexity "
-             "data folder (CONVEXITY_HOME / PORTFOLIO_SYMBOL_DB override).",
+        "data folder (CONVEXITY_HOME / PORTFOLIO_SYMBOL_DB override).",
     )
     args = ap.parse_args(argv)
 
@@ -77,9 +79,9 @@ def build_symbols(argv: list[str]) -> int:
             continue
         wrote = sdb.upsert_rows(rows, source=name, path=db)
         total += wrote
-        print(f"[{name}] wrote {wrote} rows in {time.time()-t1:.1f}s")
+        print(f"[{name}] wrote {wrote} rows in {time.time() - t1:.1f}s")
 
-    print(f"\n✓ {total} rows total in {time.time()-t0:.1f}s")
+    print(f"\n✓ {total} rows total in {time.time() - t0:.1f}s")
     stats = sdb.db_stats(db)
     print(f"  on-disk total: {stats['total']}")
     if stats["by_source"]:
@@ -97,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else list(argv)
     if not args:
         from .server import main as serve
+
         serve()
         return 0
     if args[0] == "build-symbols":

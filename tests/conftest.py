@@ -25,7 +25,9 @@ os.environ["CONVEXITY_HOME"] = tempfile.mkdtemp(prefix="convexity-test-home-")
 # The symbol DB's legacy fallback would otherwise open the checkout's real
 # symbol_db.sqlite (SQLite touches its -shm sidecar even read-only). No test
 # depends on its contents — CI has none.
-os.environ["PORTFOLIO_SYMBOL_DB"] = os.path.join(os.environ["CONVEXITY_HOME"], "no-symbol-db.sqlite")
+os.environ["PORTFOLIO_SYMBOL_DB"] = os.path.join(
+    os.environ["CONVEXITY_HOME"], "no-symbol-db.sqlite"
+)
 # A server booted by a test (start_server) would otherwise start the first-run
 # model download from GitHub — no real network in tests. test_model_fetch.py
 # drives model_fetch directly against a local server.

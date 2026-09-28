@@ -27,8 +27,9 @@ def test_empty_store_defaults(cv):
 
 
 def test_custom_view_roundtrip_with_heat(cv):
-    raw = cv.upsert_column_view("MyVal", ["symbol", "price", "ev_ebitda"],
-                                heat={"ev_ebitda": "percentile"})
+    raw = cv.upsert_column_view(
+        "MyVal", ["symbol", "price", "ev_ebitda"], heat={"ev_ebitda": "percentile"}
+    )
     entry = raw["custom_views"]["MyVal"]
     assert entry["columns"] == ["symbol", "price", "ev_ebitda"]
     assert entry["heat"] == {"ev_ebitda": "percentile"}
@@ -40,8 +41,9 @@ def test_custom_view_roundtrip_with_heat(cv):
 def test_builtin_name_routes_to_override_not_custom(cv):
     """A built-in name is editable in place — it must land in builtin_overrides,
     never as a custom view masquerading under the reserved name."""
-    raw = cv.upsert_column_view("Fundamentals", ["symbol", "ev_ebitda"],
-                                heat={"ev_ebitda": "minmax"})
+    raw = cv.upsert_column_view(
+        "Fundamentals", ["symbol", "ev_ebitda"], heat={"ev_ebitda": "minmax"}
+    )
     assert "Fundamentals" not in raw["custom_views"]
     ov = raw["builtin_overrides"]["Fundamentals"]
     assert ov["columns"] == ["symbol", "ev_ebitda"]
@@ -75,8 +77,7 @@ def test_set_builtin_view_heat_on_pristine_view(cv):
 
 def test_delete_builtin_resets_to_factory(cv):
     """Deleting a built-in name drops its override (reset), never erroring."""
-    cv.upsert_column_view("Fundamentals", ["symbol", "ev_ebitda"],
-                          heat={"ev_ebitda": "minmax"})
+    cv.upsert_column_view("Fundamentals", ["symbol", "ev_ebitda"], heat={"ev_ebitda": "minmax"})
     raw = cv.delete_column_view("Fundamentals")
     assert raw["builtin_overrides"] == {}
     # Active view untouched by a built-in reset.
@@ -92,8 +93,9 @@ def test_delete_custom_view_and_active_fallback(cv):
 
 
 def test_invalid_heat_modes_are_dropped(cv):
-    raw = cv.upsert_column_view("MyVal", ["symbol", "ev_ebitda"],
-                                heat={"ev_ebitda": "bogus", "pe_ratio": "percentile"})
+    raw = cv.upsert_column_view(
+        "MyVal", ["symbol", "ev_ebitda"], heat={"ev_ebitda": "bogus", "pe_ratio": "percentile"}
+    )
     assert raw["custom_views"]["MyVal"]["heat"] == {"pe_ratio": "percentile"}
 
 
@@ -115,8 +117,7 @@ def test_upsert_requires_nonempty_columns(cv):
 def test_overrides_persist_to_disk(cv, tmp_path):
     """State must round-trip through the on-disk JSON — verify the raw file, so
     a fresh process (which reads from disk on every call) sees the overrides."""
-    cv.upsert_column_view("Fundamentals", ["symbol", "ev_ebitda"],
-                          heat={"ev_ebitda": "percentile"})
+    cv.upsert_column_view("Fundamentals", ["symbol", "ev_ebitda"], heat={"ev_ebitda": "percentile"})
     cv.upsert_column_view("MyVal", ["symbol", "price"], heat={"pe_ratio": "off"})
     on_disk = json.loads((tmp_path / "cv.json").read_text())
     assert on_disk["builtin_overrides"]["Fundamentals"]["heat"] == {"ev_ebitda": "percentile"}
@@ -177,10 +178,15 @@ def test_ack_without_an_override_is_a_noop(cv):
 def test_lone_acked_entry_does_not_survive_a_read(cv, tmp_path):
     """An `acked` with no columns/heat means nothing — the empty-override-
     disappears invariant must still hold, however the file got that way."""
-    (tmp_path / "cv.json").write_text(json.dumps({
-        "custom_views": {}, "active_view": "Default",
-        "builtin_overrides": {"Default": {"acked": True}},
-    }))
+    (tmp_path / "cv.json").write_text(
+        json.dumps(
+            {
+                "custom_views": {},
+                "active_view": "Default",
+                "builtin_overrides": {"Default": {"acked": True}},
+            }
+        )
+    )
     assert cv.load_column_views()["builtin_overrides"] == {}
 
 

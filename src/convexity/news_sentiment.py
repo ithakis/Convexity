@@ -40,12 +40,19 @@ from typing import Any
 
 from convexity import paths
 from convexity.helpers import (
-    _FH_LIMITER, _MAX_RETRIES, _NV_LIMITER, _RATE_LIMIT_BACKOFF_S, _RETRY_SLEEP_S,
-    _YF_LIMITER, _YF_MAX_RETRIES, Cancelled, _is_rate_limited_error,
-    _load_local_secret, _notify_rate,
+    _FH_LIMITER,
+    _MAX_RETRIES,
+    _NV_LIMITER,
+    _RATE_LIMIT_BACKOFF_S,
+    _RETRY_SLEEP_S,
+    _YF_LIMITER,
+    _YF_MAX_RETRIES,
+    Cancelled,
+    _is_rate_limited_error,
+    _load_local_secret,
+    _notify_rate,
 )
-from convexity.relevance import (DEDUP_SIMILARITY, norm_title, relevance_score,
-                                         window_sample)
+from convexity.relevance import DEDUP_SIMILARITY, norm_title, relevance_score, window_sample
 
 # API key loading (env var, then a strictly-local file found by walking
 # upward from this module's directory) lives in helpers._load_local_secret —
@@ -92,21 +99,53 @@ def _tau_for_days(days: int) -> float:
 # Source credibility tiers (Tetlock 2007 / news-analytics practice: agency
 # and top-masthead coverage carries more signal than PR wires and
 # promotional aggregators). Matched by lowercase substring.
-_SOURCE_TIER_1 = ("reuters", "bloomberg", "wall street journal", "wsj",
-                  "financial times", "associated press", "ap news")
-_SOURCE_TIER_2 = ("cnbc", "barron", "marketwatch", "yahoo", "forbes",
-                  "investor's business daily", "business insider", "fortune")
-_SOURCE_WIRE = ("pr newswire", "prnewswire", "globenewswire", "business wire",
-                "businesswire", "accesswire", "motley fool", "zacks",
-                "seekingalpha", "seeking alpha", "benzinga", "investorplace",
-                "thefly", "newsfile", "openpr")
+_SOURCE_TIER_1 = (
+    "reuters",
+    "bloomberg",
+    "wall street journal",
+    "wsj",
+    "financial times",
+    "associated press",
+    "ap news",
+)
+_SOURCE_TIER_2 = (
+    "cnbc",
+    "barron",
+    "marketwatch",
+    "yahoo",
+    "forbes",
+    "investor's business daily",
+    "business insider",
+    "fortune",
+)
+_SOURCE_WIRE = (
+    "pr newswire",
+    "prnewswire",
+    "globenewswire",
+    "business wire",
+    "businesswire",
+    "accesswire",
+    "motley fool",
+    "zacks",
+    "seekingalpha",
+    "seeking alpha",
+    "benzinga",
+    "investorplace",
+    "thefly",
+    "newsfile",
+    "openpr",
+)
 _W_SOURCE = {"tier1": 1.0, "tier2": 0.8, "wire": 0.5, "unknown": 0.7}
 
 # ---- lenses: the only taxonomy -------------------------------------------
 LENSES = ("financials", "outlook", "competition", "regulation", "street")
-LENS_LABELS = {"financials": "Financials", "outlook": "Outlook",
-               "competition": "Competition", "regulation": "Regulation",
-               "street": "Street view"}
+LENS_LABELS = {
+    "financials": "Financials",
+    "outlook": "Outlook",
+    "competition": "Competition",
+    "regulation": "Regulation",
+    "street": "Street view",
+}
 _ITEM_LENSES = (*LENSES, "other", "none")
 _MARKET_LENSES = ("other", "none")
 
@@ -215,13 +254,17 @@ def _save_persisted_caches() -> None:
                 if val is _MISS:
                     continue
                 sent_out[k] = {"saved_at": ts, "ttl": ttl, "value": val}
-        body = json.dumps({
-            "version": 3,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            "news": news_out,
-            "sentiment": sent_out,
-            "llm_status": dict(_LLM_STATUS),
-        }, ensure_ascii=True, indent=2)
+        body = json.dumps(
+            {
+                "version": 3,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "news": news_out,
+                "sentiment": sent_out,
+                "llm_status": dict(_LLM_STATUS),
+            },
+            ensure_ascii=True,
+            indent=2,
+        )
         with _PERSIST_LOCK:
             _PERSIST_FILE.parent.mkdir(parents=True, exist_ok=True)
             _PERSIST_FILE.write_text(body + "\n", encoding="utf-8")
@@ -262,8 +305,10 @@ def _load_persisted_caches() -> None:
     if isinstance(st, dict) and st.get("model") == _MODEL:
         _LLM_STATUS.update({k: st.get(k) for k in ("ok", "error", "at", "permanent")})
     if loaded_news or loaded_sent:
-        print(f"[news] rehydrated {loaded_news} news + {loaded_sent} sentiment entries from disk",
-              file=sys.stderr)
+        print(
+            f"[news] rehydrated {loaded_news} news + {loaded_sent} sentiment entries from disk",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -302,14 +347,18 @@ def _wait_for_circuit_breaker(label: str, until_attr: str, cancel=None) -> None:
             wait = until - time.time()
         if wait <= 0:
             if warned:
-                _notify_rate(provider=label, reason="cleared",
-                             waited_s=round(time.time() - started, 1))
+                _notify_rate(
+                    provider=label, reason="cleared", waited_s=round(time.time() - started, 1)
+                )
             return
         if not warned:
-            print(f"[news] {label} backoff active — sleeping until the window reopens",
-                  file=sys.stderr)
-            _notify_rate(provider=label, reason="circuit_breaker",
-                         retry_in_s=round(wait, 1), until_ts=until)
+            print(
+                f"[news] {label} backoff active — sleeping until the window reopens",
+                file=sys.stderr,
+            )
+            _notify_rate(
+                provider=label, reason="circuit_breaker", retry_in_s=round(wait, 1), until_ts=until
+            )
             warned = True
         time.sleep(min(_RETRY_SLEEP_S, max(wait, 0.1)))
 
@@ -341,10 +390,18 @@ def _fh_call(path: str, params: dict[str, Any], cancel=None) -> Any | None:
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 _FH_LIMITER.penalize()
-                print(f"[news] Finnhub 429 (attempt {attempt+1}/{_MAX_RETRIES}) — "
-                      f"sleeping {_RETRY_SLEEP_S}s", file=sys.stderr)
-                _notify_rate(provider="finnhub", reason="http_429", attempt=attempt + 1,
-                             max_attempts=_MAX_RETRIES, retry_in_s=_RETRY_SLEEP_S)
+                print(
+                    f"[news] Finnhub 429 (attempt {attempt + 1}/{_MAX_RETRIES}) — "
+                    f"sleeping {_RETRY_SLEEP_S}s",
+                    file=sys.stderr,
+                )
+                _notify_rate(
+                    provider="finnhub",
+                    reason="http_429",
+                    attempt=attempt + 1,
+                    max_attempts=_MAX_RETRIES,
+                    retry_in_s=_RETRY_SLEEP_S,
+                )
                 time.sleep(_RETRY_SLEEP_S)
                 if attempt == _MAX_RETRIES - 1:
                     with _rate_limit_lock:
@@ -435,6 +492,7 @@ def _fetch_yf_news(symbol: str, days: int, cancel=None) -> list[dict]:
     otherwise ignore a larger `count` on a reused object. Globally throttled
     via _YF_LIMITER + jittered retry."""
     import yfinance as yf
+
     count = min(100, max(30, days * 8))
     raw: list = []
     for attempt in range(_YF_MAX_RETRIES):
@@ -458,24 +516,33 @@ def _fetch_yf_news(symbol: str, days: int, cancel=None) -> list[dict]:
         if not title:
             continue
         prov = content.get("provider")
-        source = (prov.get("displayName") if isinstance(prov, dict) else None) \
-            or content.get("publisher") or n.get("publisher") or ""
+        source = (
+            (prov.get("displayName") if isinstance(prov, dict) else None)
+            or content.get("publisher")
+            or n.get("publisher")
+            or ""
+        )
         curl = content.get("canonicalUrl")
-        link = (curl.get("url") if isinstance(curl, dict) else None) \
-            or content.get("link") or n.get("link") or ""
+        link = (
+            (curl.get("url") if isinstance(curl, dict) else None)
+            or content.get("link")
+            or n.get("link")
+            or ""
+        )
         ts = _parse_yf_epoch(content, n)
         if ts and ts < cutoff:
             continue
-        out.append({
-            "headline": title,
-            "summary": content.get("summary") or content.get("description") or "",
-            "source": source,
-            "datetime": ts,
-            "url": link,
-            "related": symbol,
-        })
+        out.append(
+            {
+                "headline": title,
+                "summary": content.get("summary") or content.get("description") or "",
+                "source": source,
+                "datetime": ts,
+                "url": link,
+                "related": symbol,
+            }
+        )
     return out
-
 
 
 def fetch_company_news(symbol: str, days: int = 7, cancel=None) -> list[dict] | None:
@@ -492,8 +559,9 @@ def fetch_company_news(symbol: str, days: int = 7, cancel=None) -> list[dict] | 
 
     to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    raw = _fh_call("company-news", {"symbol": symbol, "from": from_date, "to": to_date},
-                   cancel=cancel)
+    raw = _fh_call(
+        "company-news", {"symbol": symbol, "from": from_date, "to": to_date}, cancel=cancel
+    )
     articles: list[dict] = []
     fh_failed = raw is None  # transient failure vs "returned but empty"
     if isinstance(raw, list):
@@ -502,14 +570,16 @@ def fetch_company_news(symbol: str, days: int = 7, cancel=None) -> list[dict] | 
         # window to its newest days for a high-volume ticker.
         fh_cap = min(300, max(60, days * 20))
         for a in raw[:fh_cap]:
-            articles.append({
-                "headline": a.get("headline", ""),
-                "summary": a.get("summary", ""),
-                "source": a.get("source", ""),
-                "datetime": a.get("datetime", 0),
-                "url": a.get("url", ""),
-                "related": a.get("related", ""),
-            })
+            articles.append(
+                {
+                    "headline": a.get("headline", ""),
+                    "summary": a.get("summary", ""),
+                    "source": a.get("source", ""),
+                    "datetime": a.get("datetime", 0),
+                    "url": a.get("url", ""),
+                    "related": a.get("related", ""),
+                }
+            )
     articles.extend(_fetch_yf_news(symbol, days, cancel=cancel))
     if not articles:
         if fh_failed:
@@ -546,13 +616,15 @@ def fetch_market_news(days: int = _DEFAULT_LOOKBACK_DAYS, cancel=None) -> list[d
     articles = []
     if isinstance(raw, list):
         for a in raw[:30]:
-            articles.append({
-                "headline": a.get("headline", ""),
-                "summary": a.get("summary", ""),
-                "source": a.get("source", ""),
-                "datetime": a.get("datetime", 0),
-                "url": a.get("url", ""),
-            })
+            articles.append(
+                {
+                    "headline": a.get("headline", ""),
+                    "summary": a.get("summary", ""),
+                    "source": a.get("source", ""),
+                    "datetime": a.get("datetime", 0),
+                    "url": a.get("url", ""),
+                }
+            )
     for idx in _MARKET_INDEX_TICKERS:
         articles.extend(_fetch_yf_news(idx, days, cancel=cancel))
     if not articles:
@@ -573,11 +645,13 @@ def _market_tape_context() -> tuple[str, list[dict]]:
     ("", []) and the prompt simply omits the block."""
     try:
         import yfinance as yf
+
         parts: list[str] = []
         items: list[dict] = []
         labels = {"SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF", "^TNX": "US 10Y yield (x10 bp)"}
-        data = yf.download(list(labels), period="5d", interval="1d",
-                           progress=False, auto_adjust=True)["Close"]
+        data = yf.download(
+            list(labels), period="5d", interval="1d", progress=False, auto_adjust=True
+        )["Close"]
         for sym, label in labels.items():
             try:
                 s = data[sym].dropna()
@@ -608,8 +682,7 @@ def _source_weight(source: str) -> float:
     return _W_SOURCE["unknown"]
 
 
-def _article_weight(article: dict, now: float | None = None,
-                    tau: float | None = None) -> float:
+def _article_weight(article: dict, now: float | None = None, tau: float | None = None) -> float:
     """w = recency x source x novelty; items the LLM tagged `none` weigh 0.
     `tau` is the recency e-folding in days (scaled with the window)."""
     if article.get("lens") == "none":
@@ -638,16 +711,20 @@ def tier_for(score: float | None) -> str | None:
     return "very_bullish"
 
 
-def aggregate_items(items: list[dict], agreement: float | None,
-                    now: float | None = None, tau: float | None = None) -> dict | None:
+def aggregate_items(
+    items: list[dict], agreement: float | None, now: float | None = None, tau: float | None = None
+) -> dict | None:
     """Lens scores + the overall News read from scored headlines.
 
     `items` are article dicts carrying `lens` / `llm_score` / `fact` / `aid`
     plus the weight fields (datetime, source, n_duplicates). A lens with no
     items is None — "no news", never a fabricated 0. Returns None when no
     headline was scored at all."""
-    scored = [a for a in items if a.get("lens") in _ITEM_LENSES
-              and isinstance(a.get("llm_score"), (int, float))]
+    scored = [
+        a
+        for a in items
+        if a.get("lens") in _ITEM_LENSES and isinstance(a.get("llm_score"), (int, float))
+    ]
     if not scored:
         return None
     rows: dict[str, list] = {k: [] for k in (*LENSES, "other")}
@@ -663,8 +740,13 @@ def aggregate_items(items: list[dict], agreement: float | None,
             continue
         s = sum(w * float(a["llm_score"]) for w, a in grp) / wsum
         lead = max(grp, key=lambda t: abs(float(t[1]["llm_score"])) * t[0])[1]
-        lenses[lens] = {"score": round(s, 2), "tier": tier_for(s), "n": len(grp),
-                        "fact": lead.get("fact") or "", "ids": [a.get("aid") for _, a in grp]}
+        lenses[lens] = {
+            "score": round(s, 2),
+            "tier": tier_for(s),
+            "n": len(grp),
+            "fact": lead.get("fact") or "",
+            "ids": [a.get("aid") for _, a in grp],
+        }
     about = [(w, a) for lst in rows.values() for w, a in lst if w > 0]
     wsum = sum(w for w, _ in about)
     n_none = sum(1 for a in scored if a["lens"] == "none")
@@ -687,8 +769,9 @@ def aggregate_items(items: list[dict], agreement: float | None,
     }
 
 
-def merge_passes(first: list[dict] | None, second: list[dict] | None
-                 ) -> tuple[list[dict], float | None] | None:
+def merge_passes(
+    first: list[dict] | None, second: list[dict] | None
+) -> tuple[list[dict], float | None] | None:
     """Combine two validated passes (lists aligned to headline order).
 
     Score = mean of the two. Lens: pass 1's when both agree or both call the
@@ -702,8 +785,11 @@ def merge_passes(first: list[dict] | None, second: list[dict] | None
         return (first or second), None
     merged, same = [], 0
     for a, b in zip(first, second):
-        lens = a["lens"] if (a["lens"] == b["lens"]
-                             or (a["lens"] != "none" and b["lens"] != "none")) else "none"
+        lens = (
+            a["lens"]
+            if (a["lens"] == b["lens"] or (a["lens"] != "none" and b["lens"] != "none"))
+            else "none"
+        )
         score = 0.0 if lens == "none" else (a["score"] + b["score"]) / 2.0
         if a["lens"] == b["lens"] and abs(a["score"] - b["score"]) <= 1:
             same += 1
@@ -711,8 +797,9 @@ def merge_passes(first: list[dict] | None, second: list[dict] | None
     return merged, (same / len(merged) if merged else None)
 
 
-def compute_divergence(news: dict | None, market: dict | None,
-                       row: dict | None = None, vol_20d: float | None = None) -> dict | None:
+def compute_divergence(
+    news: dict | None, market: dict | None, row: dict | None = None, vol_20d: float | None = None
+) -> dict | None:
     """Flag the two engines disagreeing — one factual sentence, or None.
 
     good_news_weak_reaction  News bullish+ while the Market read is bearish-
@@ -727,25 +814,37 @@ def compute_divergence(news: dict | None, market: dict | None,
     bad = ntier in ("bearish", "very_bearish")
     mtier = (market or {}).get("tier") or ""
     parts = []
-    for lens in sorted(LENSES, key=lambda k: -abs(((news.get("lenses") or {}).get(k)
-                                                    or {}).get("score") or 0)):
+    for lens in sorted(
+        LENSES, key=lambda k: -abs(((news.get("lenses") or {}).get(k) or {}).get("score") or 0)
+    ):
         ent = (news.get("lenses") or {}).get(lens)
         if ent and abs(ent["score"]) >= 0.4 and len(parts) < 2:
             parts.append(f"{LENS_LABELS[lens]} {ent['score']:+.1f}".replace("-", "−"))
     lead = ", ".join(parts) or f"News {news['score']:+.1f}".replace("-", "−")
     pct_1d = (row or {}).get("pct_1d")
-    if good and isinstance(pct_1d, (int, float)) and vol_20d and vol_20d > 0 \
-            and pct_1d / 100.0 <= -2.0 * vol_20d:
-        return {"kind": "sold_the_news",
-                "text": f"{lead}; stock {pct_1d:+.1f}% on the day".replace("-", "−")}
+    if (
+        good
+        and isinstance(pct_1d, (int, float))
+        and vol_20d
+        and vol_20d > 0
+        and pct_1d / 100.0 <= -2.0 * vol_20d
+    ):
+        return {
+            "kind": "sold_the_news",
+            "text": f"{lead}; stock {pct_1d:+.1f}% on the day".replace("-", "−"),
+        }
     z = (market or {}).get("z")
     zs = f" ({z:+.1f}σ)" if isinstance(z, (int, float)) else ""
     if good and mtier in ("bearish", "very_bearish"):
-        return {"kind": "good_news_weak_reaction",
-                "text": f"{lead}; Market read {mtier.replace('_', ' ')}{zs}".replace("-", "−")}
+        return {
+            "kind": "good_news_weak_reaction",
+            "text": f"{lead}; Market read {mtier.replace('_', ' ')}{zs}".replace("-", "−"),
+        }
     if bad and mtier in ("bullish", "very_bullish"):
-        return {"kind": "weak_news_strong_reaction",
-                "text": f"{lead}; Market read {mtier.replace('_', ' ')}{zs}".replace("-", "−")}
+        return {
+            "kind": "weak_news_strong_reaction",
+            "text": f"{lead}; Market read {mtier.replace('_', ' ')}{zs}".replace("-", "−"),
+        }
     return None
 
 
@@ -778,16 +877,16 @@ def _history_append(record: dict) -> None:
             except Exception:
                 records = []
             key = (record.get("date"), record.get("symbol"))
-            records = [r for r in records
-                       if (r.get("date"), r.get("symbol")) != key]
+            records = [r for r in records if (r.get("date"), r.get("symbol")) != key]
             records.append(record)
-            cutoff = (datetime.now(timezone.utc)
-                      - timedelta(days=_HISTORY_MAX_DAYS)).strftime("%Y-%m-%d")
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=_HISTORY_MAX_DAYS)).strftime(
+                "%Y-%m-%d"
+            )
             records = [r for r in records if (r.get("date") or "") >= cutoff]
             _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
             _HISTORY_FILE.write_text(
-                json.dumps({"version": 2, "records": records}) + "\n",
-                encoding="utf-8")
+                json.dumps({"version": 2, "records": records}) + "\n", encoding="utf-8"
+            )
     except Exception as exc:
         print(f"[news] failed to append sentiment history: {exc}", file=sys.stderr)
 
@@ -809,8 +908,13 @@ _MAX_TOKENS = 1800
 
 # Last LLM outcome, persisted with the caches so a retired model is still
 # reported after a restart. ok: None (never called) | True | False.
-_LLM_STATUS: dict[str, Any] = {"ok": None, "error": None, "at": None, "model": _MODEL,
-                               "permanent": False}
+_LLM_STATUS: dict[str, Any] = {
+    "ok": None,
+    "error": None,
+    "at": None,
+    "model": _MODEL,
+    "permanent": False,
+}
 _LLM_STATUS_LOCK = threading.Lock()
 
 _nvidia_client: Any = None
@@ -821,9 +925,15 @@ def _llm_record(ok: bool, error: str | None = None, permanent: bool = False) -> 
     """`permanent` marks failures a retry cannot fix (no key, retired model,
     rejected key): the second pass and re-asks are skipped for those."""
     with _LLM_STATUS_LOCK:
-        _LLM_STATUS.update({"ok": ok, "error": error, "model": _MODEL,
-                            "permanent": bool(permanent) and not ok,
-                            "at": datetime.now(timezone.utc).isoformat()})
+        _LLM_STATUS.update(
+            {
+                "ok": ok,
+                "error": error,
+                "model": _MODEL,
+                "permanent": bool(permanent) and not ok,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
 
 def llm_status() -> dict:
@@ -832,8 +942,13 @@ def llm_status() -> dict:
     with _LLM_STATUS_LOCK:
         st = dict(_LLM_STATUS)
     if not NVIDIA_API_KEY:
-        st.update({"ok": False, "permanent": True,
-                   "error": "NVIDIA key missing — add it in Settings → API keys"})
+        st.update(
+            {
+                "ok": False,
+                "permanent": True,
+                "error": "NVIDIA key missing — add it in Settings → API keys",
+            }
+        )
     return st
 
 
@@ -889,8 +1004,10 @@ def _get_client() -> Any:
             # timeout caps a hung request (SDK default is 600 s); max_retries=0
             # so our own loop is the only retry layer.
             _nvidia_client = _OpenAI(
-                base_url=_NVIDIA_BASE, api_key=NVIDIA_API_KEY,
-                timeout=_NV_TIMEOUT_S, max_retries=0,
+                base_url=_NVIDIA_BASE,
+                api_key=NVIDIA_API_KEY,
+                timeout=_NV_TIMEOUT_S,
+                max_retries=0,
             )
         return _nvidia_client
 
@@ -909,24 +1026,32 @@ def _json_schema(lens_enum: tuple[str, ...]) -> dict:
     came back malformed on 2 of 4 calls; this one was 5/5 valid, so lens
     verdicts are computed in Python instead (plan §2.3)."""
     return {
-        "type": "object", "additionalProperties": False, "required": ["items", "brief"],
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["items", "brief"],
         "properties": {
-            "items": {"type": "array", "items": {
-                "type": "object", "additionalProperties": False,
-                "required": ["id", "lens", "score", "fact"],
-                "properties": {
-                    "id": {"type": "integer"},
-                    "lens": {"type": "string", "enum": list(lens_enum)},
-                    "score": {"type": "integer", "minimum": -2, "maximum": 2},
-                    "fact": {"type": "string"},
-                }}},
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["id", "lens", "score", "fact"],
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "lens": {"type": "string", "enum": list(lens_enum)},
+                        "score": {"type": "integer", "minimum": -2, "maximum": 2},
+                        "fact": {"type": "string"},
+                    },
+                },
+            },
             "brief": {"type": "string"},
         },
     }
 
 
-def _nvidia_call(system_prompt: str, user_content: str, lens_enum: tuple[str, ...],
-                 cancel=None) -> dict | None:
+def _nvidia_call(
+    system_prompt: str, user_content: str, lens_enum: tuple[str, ...], cancel=None
+) -> dict | None:
     """One schema-constrained NIM completion, parsed.
 
     Thinking is off twice over (chat_template_kwargs AND a leading /no_think):
@@ -959,9 +1084,18 @@ def _nvidia_call(system_prompt: str, user_content: str, lens_enum: tuple[str, ..
         _NV_LIMITER.acquire(cancel=cancel)
         try:
             response = client.chat.completions.create(
-                model=_MODEL, messages=messages, temperature=0.1, max_tokens=_MAX_TOKENS,
-                response_format={"type": "json_schema", "json_schema": {
-                    "name": "news_read", "schema": _json_schema(lens_enum), "strict": True}},
+                model=_MODEL,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=_MAX_TOKENS,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "news_read",
+                        "schema": _json_schema(lens_enum),
+                        "strict": True,
+                    },
+                },
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             text = (response.choices[0].message.content or "").strip()
@@ -972,7 +1106,7 @@ def _nvidia_call(system_prompt: str, user_content: str, lens_enum: tuple[str, ..
             return data
         except json.JSONDecodeError:
             last_err = "malformed JSON"
-            print(f"[news] NIM returned unusable JSON (attempt {attempt+1})", file=sys.stderr)
+            print(f"[news] NIM returned unusable JSON (attempt {attempt + 1})", file=sys.stderr)
             time.sleep(1.0)
             continue
         except Cancelled:
@@ -992,31 +1126,43 @@ def _nvidia_call(system_prompt: str, user_content: str, lens_enum: tuple[str, ..
             if code == 503:
                 last_err = "503 service overloaded"
                 wait = 1.5 + attempt * 1.5 + random.random()
-                print(f"[news] NIM {last_err} (attempt {attempt+1}/{_MAX_RETRIES}) — "
-                      f"retrying in {wait:.1f}s", file=sys.stderr)
+                print(
+                    f"[news] NIM {last_err} (attempt {attempt + 1}/{_MAX_RETRIES}) — "
+                    f"retrying in {wait:.1f}s",
+                    file=sys.stderr,
+                )
                 time.sleep(wait)
                 continue
             if code == 429 or "rate limit" in str(exc).lower():
                 _NV_LIMITER.penalize()
                 last_err = "429 rate limited"
-                print(f"[news] NIM {last_err} (attempt {attempt+1}/{_MAX_RETRIES}) — "
-                      f"sleeping {_RETRY_SLEEP_S}s", file=sys.stderr)
-                _notify_rate(provider="nvidia", reason="http_429", attempt=attempt + 1,
-                             max_attempts=_MAX_RETRIES, retry_in_s=_RETRY_SLEEP_S)
+                print(
+                    f"[news] NIM {last_err} (attempt {attempt + 1}/{_MAX_RETRIES}) — "
+                    f"sleeping {_RETRY_SLEEP_S}s",
+                    file=sys.stderr,
+                )
+                _notify_rate(
+                    provider="nvidia",
+                    reason="http_429",
+                    attempt=attempt + 1,
+                    max_attempts=_MAX_RETRIES,
+                    retry_in_s=_RETRY_SLEEP_S,
+                )
                 time.sleep(_RETRY_SLEEP_S)
                 if attempt == _MAX_RETRIES - 1:
                     with _rate_limit_lock:
                         _nv_rate_limit_until = time.time() + _RATE_LIMIT_BACKOFF_S
                 continue
             last_err = f"{type(exc).__name__}: {str(exc)[:160]}"
-            print(f"[news] NIM call failed: {last_err} (attempt {attempt+1})", file=sys.stderr)
+            print(f"[news] NIM call failed: {last_err} (attempt {attempt + 1})", file=sys.stderr)
             continue
     _llm_record(False, last_err)
     return None
 
 
-def validate_items(raw: dict | None, n: int, lens_enum: tuple[str, ...] = _ITEM_LENSES
-                   ) -> tuple[list[dict], str] | None:
+def validate_items(
+    raw: dict | None, n: int, lens_enum: tuple[str, ...] = _ITEM_LENSES
+) -> tuple[list[dict], str] | None:
     """Strict check of one pass. Returns (items aligned to headline order,
     brief) or None when the pass is unusable: every id 1..n must appear
     exactly once with a lens from the enum and an integer score in -2..2.
@@ -1028,28 +1174,36 @@ def validate_items(raw: dict | None, n: int, lens_enum: tuple[str, ...] = _ITEM_
         if not isinstance(it, dict):
             return None
         idx, lens, score = it.get("id"), it.get("lens"), it.get("score")
-        if isinstance(idx, bool) or not isinstance(idx, int) or not 1 <= idx <= n \
-                or idx in by_id:
+        if isinstance(idx, bool) or not isinstance(idx, int) or not 1 <= idx <= n or idx in by_id:
             return None
         if lens not in lens_enum:
             return None
-        if isinstance(score, bool) or not isinstance(score, (int, float)) \
-                or not math.isfinite(score) or float(score) != int(score) \
-                or not -2 <= score <= 2:
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(score)
+            or float(score) != int(score)
+            or not -2 <= score <= 2
+        ):
             return None
-        by_id[idx] = {"lens": lens, "score": 0 if lens == "none" else int(score),
-                      "fact": str(it.get("fact") or "").strip()[:160]}
+        by_id[idx] = {
+            "lens": lens,
+            "score": 0 if lens == "none" else int(score),
+            "fact": str(it.get("fact") or "").strip()[:160],
+        }
     if len(by_id) != n:
         return None
     return [by_id[i + 1] for i in range(n)], str(raw.get("brief") or "").strip()[:500]
 
 
-def _read_pass(system_prompt: str, user_prompt: str, n: int, lens_enum,
-               cancel=None) -> tuple[list[dict], str] | None:
+def _read_pass(
+    system_prompt: str, user_prompt: str, n: int, lens_enum, cancel=None
+) -> tuple[list[dict], str] | None:
     """One pass = one call; a response that fails validation is re-asked once."""
     for _ in range(2):
-        out = validate_items(_nvidia_call(system_prompt, user_prompt, lens_enum, cancel=cancel),
-                             n, lens_enum)
+        out = validate_items(
+            _nvidia_call(system_prompt, user_prompt, lens_enum, cancel=cancel), n, lens_enum
+        )
         if out is not None:
             return out
         if _llm_blocked():
@@ -1057,8 +1211,9 @@ def _read_pass(system_prompt: str, user_prompt: str, n: int, lens_enum,
     return None
 
 
-def read_headlines(system_prompt: str, user_prompt: str, n: int, lens_enum=_ITEM_LENSES,
-                   stage_cb=None, cancel=None) -> tuple[list[dict], str, float | None] | None:
+def read_headlines(
+    system_prompt: str, user_prompt: str, n: int, lens_enum=_ITEM_LENSES, stage_cb=None, cancel=None
+) -> tuple[list[dict], str, float | None] | None:
     """The two-pass News read: (items, brief, agreement) or None if both fail.
 
     The passes are independent samples of the same prompt, so they run
@@ -1068,14 +1223,15 @@ def read_headlines(system_prompt: str, user_prompt: str, n: int, lens_enum=_ITEM
     if _llm_blocked():
         return None
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futs = [pool.submit(_read_pass, system_prompt, user_prompt, n, lens_enum, cancel)
-                for _ in range(2)]
+        futs = [
+            pool.submit(_read_pass, system_prompt, user_prompt, n, lens_enum, cancel)
+            for _ in range(2)
+        ]
         done = []
         for fut in as_completed(futs):
             done.append(fut)
             if stage_cb:
-                stage_cb("pass1" if len(done) == 1 else "pass2",
-                         0.5 if len(done) == 1 else 0.75)
+                stage_cb("pass1" if len(done) == 1 else "pass2", 0.5 if len(done) == 1 else 0.75)
         first, second = (f.result() for f in futs)
     _ck(cancel)
     merged = merge_passes(first[0] if first else None, second[0] if second else None)
@@ -1130,8 +1286,10 @@ def _format_quant_context(symbol: str, row_ctx: dict | None) -> str:
         return ""
     parts = []
     fmt = {
-        "pct_1d": "1-day move {:+.1f}%", "pct_1w": "1-week move {:+.1f}%",
-        "pct_ytd": "YTD {:+.1f}%", "delta_ath": "vs all-time high {:+.1f}%",
+        "pct_1d": "1-day move {:+.1f}%",
+        "pct_1w": "1-week move {:+.1f}%",
+        "pct_ytd": "YTD {:+.1f}%",
+        "delta_ath": "vs all-time high {:+.1f}%",
         "target_upside": "analyst target upside {:+.1f}%",
     }
     for key, template in fmt.items():
@@ -1155,22 +1313,28 @@ def _read_batch(articles: list[dict], symbol: str) -> list[dict]:
     on 2026-09-25 NVDA's newest 15 were all "not about NVDA" while four
     headlines that named it sat just outside the cut. Recency still weights
     the aggregate (aggregate_items)."""
-    ranked = sorted(articles, key=lambda a: (
-        -relevance_score(a.get("headline", ""), a.get("summary"), symbol),
-        -(a.get("datetime") or 0)))
+    ranked = sorted(
+        articles,
+        key=lambda a: (
+            -relevance_score(a.get("headline", ""), a.get("summary"), symbol),
+            -(a.get("datetime") or 0),
+        ),
+    )
     return sorted(ranked[:_SCORE_BATCH], key=lambda a: -(a.get("datetime") or 0))
 
 
-def _build_articles_prompt(batch: list[dict], symbol: str,
-                           row_ctx: dict | None = None) -> str:
+def _build_articles_prompt(batch: list[dict], symbol: str, row_ctx: dict | None = None) -> str:
     """Numbered headlines (+ a 300-char summary) for one ticker's batch."""
     name = (row_ctx or {}).get("name")
     target = f"{symbol} ({name})" if name else symbol
     lines = [f"TARGET COMPANY: {target}.", _format_quant_context(symbol, row_ctx)]
     for i, a in enumerate(batch, 1):
         ts = a.get("datetime", 0)
-        date = (datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
-                if isinstance(ts, (int, float)) and ts > 0 else "?")
+        date = (
+            datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            if isinstance(ts, (int, float)) and ts > 0
+            else "?"
+        )
         dup = a.get("n_duplicates", 0)
         dup_note = f" (+{dup} syndicated copies)" if dup else ""
         lines.append(f"[{i}] {date} | {a.get('source', '')}{dup_note} | {a.get('headline', '')}")
@@ -1211,8 +1375,10 @@ def _warn_ml_once(reason: str) -> None:
     if _ML_WARNED:
         return
     _ML_WARNED = True
-    print(f"[news_sentiment] Market read unavailable ({reason}) — market fields "
-          f"will be null", file=sys.stderr)
+    print(
+        f"[news_sentiment] Market read unavailable ({reason}) — market fields will be null",
+        file=sys.stderr,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1227,13 +1393,17 @@ def _market_history(model_version: str, exclude: tuple[str, str]) -> list[float]
     (date, symbol) being re-scored, which would rank a ticker against itself."""
     from convexity import ml_sentiment as _ml
 
-    cutoff = (datetime.now(timezone.utc)
-              - timedelta(days=_ml.LIVE_WINDOW_DAYS)).strftime("%Y-%m-%d")
-    return [r["market_score"] for r in _history_load()
-            if r.get("market_model") == model_version
-            and isinstance(r.get("market_score"), (int, float))
-            and (r.get("date") or "") >= cutoff
-            and (r.get("date"), r.get("symbol")) != exclude]
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_ml.LIVE_WINDOW_DAYS)).strftime(
+        "%Y-%m-%d"
+    )
+    return [
+        r["market_score"]
+        for r in _history_load()
+        if r.get("market_model") == model_version
+        and isinstance(r.get("market_score"), (int, float))
+        and (r.get("date") or "") >= cutoff
+        and (r.get("date"), r.get("symbol")) != exclude
+    ]
 
 
 def _market_read(symbol: str, ctx: dict, cancel=None) -> tuple[dict | None, float | None]:
@@ -1263,8 +1433,7 @@ def _market_read(symbol: str, ctx: dict, cancel=None) -> tuple[dict | None, floa
         return None, None
 
 
-def _assess_symbol(symbol: str, ctx: dict, stage_cb=None,
-                   cancel=None) -> tuple[dict | None, str]:
+def _assess_symbol(symbol: str, ctx: dict, stage_cb=None, cancel=None) -> tuple[dict | None, str]:
     """Run both engines for one ticker. Returns (result, outcome) where
     outcome is "ok" (fresh News read), "failed" (the LLM could not produce
     one — the previous read is kept, marked stale) or "empty" (no news).
@@ -1292,8 +1461,13 @@ def _assess_symbol(symbol: str, ctx: dict, stage_cb=None,
     row_ctx = ctx.get("row")
     batch = _read_batch(articles, symbol)
     now_iso = datetime.now(timezone.utc).isoformat()
-    read = read_headlines(_NEWS_READ_PROMPT, _build_articles_prompt(batch, symbol, row_ctx),
-                          len(batch), stage_cb=stage_cb, cancel=cancel)
+    read = read_headlines(
+        _NEWS_READ_PROMPT,
+        _build_articles_prompt(batch, symbol, row_ctx),
+        len(batch),
+        stage_cb=stage_cb,
+        cancel=cancel,
+    )
     outcome = "ok"
     news = None
     if read is not None:
@@ -1302,14 +1476,21 @@ def _assess_symbol(symbol: str, ctx: dict, stage_cb=None,
         _cache_put(_NEWS_CACHE, f"news|{symbol}|{days}", articles, _NEWS_TTL)
         agg = aggregate_items(batch, agreement, tau=tau)
         if agg is not None:
-            news = {**agg, "brief": brief or "No summary available.",
-                    "assessed_at": now_iso, "lookback_days": days}
+            news = {
+                **agg,
+                "brief": brief or "No summary available.",
+                "assessed_at": now_iso,
+                "lookback_days": days,
+            }
     if news is None:
         outcome = "failed"
         old = (prev or {}).get("news")
         if old:
-            news = {**old, "stale": True,
-                    "stale_reason": llm_status().get("error") or "News read failed"}
+            news = {
+                **old,
+                "stale": True,
+                "stale_reason": llm_status().get("error") or "News read failed",
+            }
 
     if stage_cb:
         stage_cb("market", 0.85)
@@ -1322,35 +1503,43 @@ def _assess_symbol(symbol: str, ctx: dict, stage_cb=None,
     result = {
         "news": news,
         "market": market,
-        "divergence": compute_divergence(news if outcome == "ok" else None, market,
-                                         row_ctx, vol_20d),
+        "divergence": compute_divergence(
+            news if outcome == "ok" else None, market, row_ctx, vol_20d
+        ),
         "article_count": len(articles),
         "assessed_at": now_iso,
     }
     _cache_put(_SENTIMENT_CACHE, key, result, _SENTIMENT_TTL)
     if outcome == "ok" or market is not None:
-        lens_scores = {k: ((news or {}).get("lenses") or {}).get(k, {}) or {}
-                       for k in LENSES}
-        _history_append({
-            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "symbol": symbol,
-            "news_score": news.get("score") if (news and outcome == "ok") else None,
-            "news_tier": news.get("tier") if (news and outcome == "ok") else None,
-            "lens": {k: v.get("score") for k, v in lens_scores.items()}
-            if outcome == "ok" else None,
-            "agreement": news.get("agreement") if (news and outcome == "ok") else None,
-            **({f"market_{k}": market.get(k) for k in ("score", "sar", "z", "pct", "tier")}
-               if market and not market.get("stale") else {}),
-            "market_model": market.get("model_version")
-            if market and not market.get("stale") else None,
-            "price": (row_ctx or {}).get("price"),
-            "beta": ctx.get("beta"),
-        })
+        lens_scores = {k: ((news or {}).get("lenses") or {}).get(k, {}) or {} for k in LENSES}
+        _history_append(
+            {
+                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "symbol": symbol,
+                "news_score": news.get("score") if (news and outcome == "ok") else None,
+                "news_tier": news.get("tier") if (news and outcome == "ok") else None,
+                "lens": {k: v.get("score") for k, v in lens_scores.items()}
+                if outcome == "ok"
+                else None,
+                "agreement": news.get("agreement") if (news and outcome == "ok") else None,
+                **(
+                    {f"market_{k}": market.get(k) for k in ("score", "sar", "z", "pct", "tier")}
+                    if market and not market.get("stale")
+                    else {}
+                ),
+                "market_model": market.get("model_version")
+                if market and not market.get("stale")
+                else None,
+                "price": (row_ctx or {}).get("price"),
+                "beta": ctx.get("beta"),
+            }
+        )
     return result, outcome
 
 
-def get_news_sentiment(symbol: str, context: dict | None = None,
-                       stage_cb=None, cancel=None) -> dict | None:
+def get_news_sentiment(
+    symbol: str, context: dict | None = None, stage_cb=None, cancel=None
+) -> dict | None:
     """Per-ticker two-engine read. Cache-first, then fetch + assess.
 
     `context` (optional): {row: {...}, beta, lookback_days, closes} — the row
@@ -1370,8 +1559,7 @@ def get_cached_sentiment(symbol: str, days: int | None = None) -> dict | None:
     Reads the requested window first, then sweeps every lookback bucket
     (default-first): the main table's NS dots aren't tied to the News tab's
     window, and the refresh that last scored a row may have used another."""
-    order = ([_clamp_lookback(days)] if days else []) + [_DEFAULT_LOOKBACK_DAYS,
-                                                         *_LOOKBACK_CHOICES]
+    order = ([_clamp_lookback(days)] if days else []) + [_DEFAULT_LOOKBACK_DAYS, *_LOOKBACK_CHOICES]
     for d in order:
         cached = _cache_get(_SENTIMENT_CACHE, f"sentiment|{symbol}|{d}")
         if isinstance(cached, dict):
@@ -1386,8 +1574,7 @@ def get_cached_sentiments(symbols: list[str], days: int | None = None) -> dict:
 
 def get_cached_market(days: int | None = None) -> dict | None:
     """The market-wide News read from cache (requested window first)."""
-    order = ([_clamp_lookback(days)] if days else []) + [_DEFAULT_LOOKBACK_DAYS,
-                                                         *_LOOKBACK_CHOICES]
+    order = ([_clamp_lookback(days)] if days else []) + [_DEFAULT_LOOKBACK_DAYS, *_LOOKBACK_CHOICES]
     for d in order:
         cached = _cache_get(_SENTIMENT_CACHE, f"sentiment|__market__|{d}")
         if isinstance(cached, dict):
@@ -1397,8 +1584,7 @@ def get_cached_market(days: int | None = None) -> dict | None:
 
 def get_cached_market_articles(days: int | None = None) -> list[dict]:
     """The market feed's cached headlines (requested window first)."""
-    order = ([_clamp_lookback(days)] if days else []) + [_DEFAULT_LOOKBACK_DAYS,
-                                                         *_LOOKBACK_CHOICES]
+    order = ([_clamp_lookback(days)] if days else []) + [_DEFAULT_LOOKBACK_DAYS, *_LOOKBACK_CHOICES]
     for d in order:
         arts = _cache_get(_NEWS_CACHE, f"news|__market__|{d}")
         if arts and arts is not _MISS:
@@ -1421,9 +1607,14 @@ def _assess_market(days: int, stage_cb=None, cancel=None) -> tuple[dict | None, 
         return None, "empty"
     tape, tape_items = _market_tape_context()
     batch = articles[:_SCORE_BATCH]
-    read = read_headlines(_MARKET_READ_PROMPT, _build_market_prompt(articles, tape),
-                          len(batch), lens_enum=_MARKET_LENSES, stage_cb=stage_cb,
-                          cancel=cancel)
+    read = read_headlines(
+        _MARKET_READ_PROMPT,
+        _build_market_prompt(articles, tape),
+        len(batch),
+        lens_enum=_MARKET_LENSES,
+        stage_cb=stage_cb,
+        cancel=cancel,
+    )
     now_iso = datetime.now(timezone.utc).isoformat()
     outcome, news = "ok", None
     if read is not None:
@@ -1432,30 +1623,51 @@ def _assess_market(days: int, stage_cb=None, cancel=None) -> tuple[dict | None, 
         _cache_put(_NEWS_CACHE, f"news|__market__|{days}", articles, _NEWS_TTL)
         agg = aggregate_items(batch, agreement, tau=_tau_for_days(days))
         if agg is not None:
-            news = {k: agg[k] for k in ("score", "tier", "confidence", "agreement",
-                                        "n_items", "n_none")}
-            news.update({"brief": brief or "No summary available.",
-                         "assessed_at": now_iso, "lookback_days": days})
+            news = {
+                k: agg[k] for k in ("score", "tier", "confidence", "agreement", "n_items", "n_none")
+            }
+            news.update(
+                {
+                    "brief": brief or "No summary available.",
+                    "assessed_at": now_iso,
+                    "lookback_days": days,
+                }
+            )
     if news is None:
         outcome = "failed"
         old = (prev or {}).get("news")
         if old:
-            news = {**old, "stale": True,
-                    "stale_reason": llm_status().get("error") or "News read failed"}
+            news = {
+                **old,
+                "stale": True,
+                "stale_reason": llm_status().get("error") or "News read failed",
+            }
     if stage_cb:
         stage_cb("aggregate", 0.95)
-    result = {"news": news, "tape": tape, "tape_items": tape_items,
-              "article_count": len(articles), "assessed_at": now_iso}
+    result = {
+        "news": news,
+        "tape": tape,
+        "tape_items": tape_items,
+        "article_count": len(articles),
+        "assessed_at": now_iso,
+    }
     _cache_put(_SENTIMENT_CACHE, key, result, _SENTIMENT_TTL)
     if outcome == "ok":
-        _history_append({"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                         "symbol": "__market__", "news_score": news.get("score"),
-                         "news_tier": news.get("tier"), "agreement": news.get("agreement")})
+        _history_append(
+            {
+                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "symbol": "__market__",
+                "news_score": news.get("score"),
+                "news_tier": news.get("tier"),
+                "agreement": news.get("agreement"),
+            }
+        )
     return result, outcome
 
 
-def _refresh_symbol_sentiment(symbol: str, context: dict | None = None,
-                              stage_cb=None, cancel=None) -> tuple[dict | None, str]:
+def _refresh_symbol_sentiment(
+    symbol: str, context: dict | None = None, stage_cb=None, cancel=None
+) -> tuple[dict | None, str]:
     """Force-refresh one ticker. The article cache is taken out so the fetch
     is real, and restored if the refresh produced nothing (a transient
     failure must not leave the tape empty) or if the News read failed: the
@@ -1481,14 +1693,15 @@ def _refresh_symbol_sentiment(symbol: str, context: dict | None = None,
             _cache_restore(_NEWS_CACHE, f"news|{symbol}|7", prev_week)
 
 
-def _refresh_market_sentiment(days: int = _DEFAULT_LOOKBACK_DAYS, stage_cb=None,
-                              cancel=None) -> tuple[dict | None, str]:
+def _refresh_market_sentiment(
+    days: int = _DEFAULT_LOOKBACK_DAYS, stage_cb=None, cancel=None
+) -> tuple[dict | None, str]:
     news_key = f"news|__market__|{days}"
     prev_news = _cache_take(_NEWS_CACHE, news_key)
     try:
         result, outcome = _assess_market(days, stage_cb=stage_cb, cancel=cancel)
         if outcome == "failed" and prev_news is not None:
-            _cache_restore(_NEWS_CACHE, news_key, prev_news)   # same reason as above
+            _cache_restore(_NEWS_CACHE, news_key, prev_news)  # same reason as above
         return result, outcome
     finally:
         if _cache_peek_entry(_NEWS_CACHE, news_key) is None:
@@ -1507,9 +1720,15 @@ def _symbol_context(symbol: str, context: dict | None, closes=None) -> dict:
     }
 
 
-def refresh_sentiment(symbols: list[str], context: dict | None = None,
-                      progress_cb=None, *, cancel=None, refresh_market=True,
-                      workers: int = 2) -> dict:
+def refresh_sentiment(
+    symbols: list[str],
+    context: dict | None = None,
+    progress_cb=None,
+    *,
+    cancel=None,
+    refresh_market=True,
+    workers: int = 2,
+) -> dict:
     """Force-refresh, staged: the market read first, then constituents sorted
     by portfolio weight descending so the biggest positions land first.
 
@@ -1544,7 +1763,8 @@ def refresh_sentiment(symbols: list[str], context: dict | None = None,
         _market_stage("start", 0.05)
         try:
             market, market_outcome = _refresh_market_sentiment(
-                days, stage_cb=_market_stage, cancel=cancel)
+                days, stage_cb=_market_stage, cancel=cancel
+            )
         except RefreshCancelled:
             if progress_cb:
                 progress_cb("market", {"sentiment": None, "outcome": "cancelled"})
@@ -1557,6 +1777,7 @@ def refresh_sentiment(symbols: list[str], context: dict | None = None,
     closes = None
     try:
         from convexity import ml_sentiment as _ml
+
         if _ml.available() and ordered:
             closes = _ml.load_closes(ordered)
     except Exception as exc:
@@ -1568,6 +1789,7 @@ def refresh_sentiment(symbols: list[str], context: dict | None = None,
 
         def cb(stage, frac):
             progress_cb("symbol_stage", {"symbol": sym, "stage": stage, "frac": frac})
+
         return cb
 
     portfolio: dict[str, dict | None] = {}
@@ -1583,9 +1805,15 @@ def refresh_sentiment(symbols: list[str], context: dict | None = None,
             if cancel is not None and cancel.is_set():
                 cancelled = True
                 break
-            futures[pool.submit(_refresh_symbol_sentiment, sym,
-                                _symbol_context(sym, context, closes),
-                                _mk_stage_cb(sym), cancel)] = sym
+            futures[
+                pool.submit(
+                    _refresh_symbol_sentiment,
+                    sym,
+                    _symbol_context(sym, context, closes),
+                    _mk_stage_cb(sym),
+                    cancel,
+                )
+            ] = sym
         for future in as_completed(futures):
             sym = futures[future]
             try:
@@ -1594,27 +1822,28 @@ def refresh_sentiment(symbols: list[str], context: dict | None = None,
                 portfolio[sym], outcomes[sym] = None, "cancelled"
                 cancelled = True
             except Exception as exc:
-                print(f"[news] {sym}: refresh failed: {type(exc).__name__}: {exc}",
-                      file=sys.stderr)
+                print(f"[news] {sym}: refresh failed: {type(exc).__name__}: {exc}", file=sys.stderr)
                 portfolio[sym], outcomes[sym] = None, "failed"
             if progress_cb:
-                progress_cb("symbol", {"symbol": sym, "sentiment": portfolio[sym],
-                                       "outcome": outcomes[sym]})
+                progress_cb(
+                    "symbol", {"symbol": sym, "sentiment": portfolio[sym], "outcome": outcomes[sym]}
+                )
             if cancel is not None and cancel.is_set():
                 cancelled = True
                 break
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     diag = status()
-    diag.update({
-        "market_ok": market_outcome in ("ok", "skipped") and market is not None,
-        "scored": sum(1 for o in outcomes.values() if o == "ok"),
-        "failed": sum(1 for o in outcomes.values() if o == "failed"),
-        "empty": sum(1 for o in outcomes.values() if o == "empty"),
-        "total": len(symbols),
-    })
-    return {"market": market, "portfolio": portfolio, "status": diag,
-            "cancelled": cancelled}
+    diag.update(
+        {
+            "market_ok": market_outcome in ("ok", "skipped") and market is not None,
+            "scored": sum(1 for o in outcomes.values() if o == "ok"),
+            "failed": sum(1 for o in outcomes.values() if o == "failed"),
+            "empty": sum(1 for o in outcomes.values() if o == "empty"),
+            "total": len(symbols),
+        }
+    )
+    return {"market": market, "portfolio": portfolio, "status": diag, "cancelled": cancelled}
 
 
 # ---------------------------------------------------------------------------
@@ -1693,28 +1922,32 @@ def rescore_window(symbols: list[str], days: int) -> dict:
         if agg is None:
             out[sym] = None
             continue
-        news = {**agg,
-                # The brief was written for a DIFFERENT headline set and can't
-                # be regenerated without a NIM call. Carried forward, flagged.
-                "brief": prev_news.get("brief") or "No summary available.",
-                "brief_stale": True,
-                "brief_window": prev_news.get("lookback_days"),
-                "assessed_at": prev_news.get("assessed_at"),
-                "lookback_days": days,
-                "rescored": True}
+        news = {
+            **agg,
+            # The brief was written for a DIFFERENT headline set and can't
+            # be regenerated without a NIM call. Carried forward, flagged.
+            "brief": prev_news.get("brief") or "No summary available.",
+            "brief_stale": True,
+            "brief_window": prev_news.get("lookback_days"),
+            "assessed_at": prev_news.get("assessed_at"),
+            "lookback_days": days,
+            "rescored": True,
+        }
         market = (prev or {}).get("market")
-        result = {"news": news, "market": market,
-                  "divergence": compute_divergence(news, market),
-                  "article_count": len(windowed),
-                  "assessed_at": (prev or {}).get("assessed_at")}
+        result = {
+            "news": news,
+            "market": market,
+            "divergence": compute_divergence(news, market),
+            "article_count": len(windowed),
+            "assessed_at": (prev or {}).get("assessed_at"),
+        }
         # Safe to cache: _refresh_symbol_sentiment computes afresh, so a later
         # real Refresh at this window is never short-circuited by this entry.
         _cache_put(_SENTIMENT_CACHE, f"sentiment|{sym}|{days}", result, _SENTIMENT_TTL)
         out[sym] = result
     # Deliberately NO _history_append: a rescore re-projects evidence already
     # recorded, and writing it would double-count the day in the Track record.
-    return {"days": days, "sentiment": out, "market": get_cached_market(days),
-            "coverage": coverage}
+    return {"days": days, "sentiment": out, "market": get_cached_market(days), "coverage": coverage}
 
 
 def get_cached_articles(symbols: list[str], limit: int = 800) -> list[dict]:

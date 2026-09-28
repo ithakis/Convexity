@@ -34,6 +34,7 @@ Usage:
 The gold metrics are also reported on the confidently-labelled subset
 (`gold_certain_only`); the gates use the full set.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -59,15 +60,23 @@ def _batches(rows: list[dict], size: int = ns._SCORE_BATCH):
         by_sym[r["symbol"]].append(r)
     for sym, items in by_sym.items():
         for i in range(0, len(items), size):
-            yield sym, items[i:i + size]
+            yield sym, items[i : i + size]
 
 
 def run_gold(rows: list[dict]) -> dict:
     preds: dict[int, dict] = {}
     latencies, agreements, failed = [], [], 0
     for sym, items in _batches(rows):
-        arts = [{"headline": r["headline"], "summary": r["summary"], "source": r["source"],
-                 "datetime": 0, "n_duplicates": 0} for r in items]
+        arts = [
+            {
+                "headline": r["headline"],
+                "summary": r["summary"],
+                "source": r["source"],
+                "datetime": 0,
+                "n_duplicates": 0,
+            }
+            for r in items
+        ]
         prompt = ns._build_articles_prompt(arts, sym, {"name": items[0]["name"]})
         t0 = time.time()
         res = ns.read_headlines(ns._NEWS_READ_PROMPT, prompt, len(items))
@@ -81,10 +90,18 @@ def run_gold(rows: list[dict]) -> dict:
             agreements.append(agreement)
         for r, g in zip(items, got):
             preds[r["id"]] = g
-        print(f"  {sym:>10}: {len(items):2d} headlines  {latencies[-1]:5.1f}s  "
-              f"agreement {agreement if agreement is not None else '—'}", flush=True)
-    return {"preds": preds, "latencies": latencies, "agreements": agreements,
-            "failed_batches": failed, "n_batches": len(latencies)}
+        print(
+            f"  {sym:>10}: {len(items):2d} headlines  {latencies[-1]:5.1f}s  "
+            f"agreement {agreement if agreement is not None else '—'}",
+            flush=True,
+        )
+    return {
+        "preds": preds,
+        "latencies": latencies,
+        "agreements": agreements,
+        "failed_batches": failed,
+        "n_batches": len(latencies),
+    }
 
 
 def score_gold(rows: list[dict], preds: dict[int, dict]) -> dict:
@@ -100,21 +117,33 @@ def score_gold(rows: list[dict], preds: dict[int, dict]) -> dict:
     def sign(x):
         return (x > 0) - (x < 0)
 
-    dir_acc = sum(sign(preds[r["id"]]["score"]) == r["direction"] for r in dir_rows) \
-        / max(1, len(dir_rows))
+    dir_acc = sum(sign(preds[r["id"]]["score"]) == r["direction"] for r in dir_rows) / max(
+        1, len(dir_rows)
+    )
     confusion = Counter((r["lens"], preds[r["id"]]["lens"]) for r in scored)
-    misses = [{"id": r["id"], "symbol": r["symbol"], "headline": r["headline"],
-               "gold": f"{r['lens']} {r['direction']:+d}",
-               "pred": f"{preds[r['id']]['lens']} {preds[r['id']]['score']:+.1f}",
-               "uncertain": r["uncertain"]}
-              for r in scored
-              if preds[r["id"]]["lens"] != r["lens"]
-              or (r["direction"] and sign(preds[r["id"]]["score"]) != r["direction"])]
-    return {"n": len(scored), "lens_accuracy": round(lens_acc, 3),
-            "none_precision": round(none_prec, 3), "none_recall": round(none_rec, 3),
-            "direction_accuracy": round(dir_acc, 3), "n_direction": len(dir_rows),
-            "confusion": {f"{g}->{p}": c for (g, p), c in sorted(confusion.items())},
-            "misses": misses}
+    misses = [
+        {
+            "id": r["id"],
+            "symbol": r["symbol"],
+            "headline": r["headline"],
+            "gold": f"{r['lens']} {r['direction']:+d}",
+            "pred": f"{preds[r['id']]['lens']} {preds[r['id']]['score']:+.1f}",
+            "uncertain": r["uncertain"],
+        }
+        for r in scored
+        if preds[r["id"]]["lens"] != r["lens"]
+        or (r["direction"] and sign(preds[r["id"]]["score"]) != r["direction"])
+    ]
+    return {
+        "n": len(scored),
+        "lens_accuracy": round(lens_acc, 3),
+        "none_precision": round(none_prec, 3),
+        "none_recall": round(none_rec, 3),
+        "direction_accuracy": round(dir_acc, 3),
+        "n_direction": len(dir_rows),
+        "confusion": {f"{g}->{p}": c for (g, p), c in sorted(confusion.items())},
+        "misses": misses,
+    }
 
 
 def run_phrasebank(path: Path, n: int, seed: int = 42) -> dict:
@@ -133,7 +162,7 @@ def run_phrasebank(path: Path, n: int, seed: int = 42) -> dict:
     rng.shuffle(rows)
     correct = total = failed = 0
     for i in range(0, len(rows), 10):
-        batch = rows[i:i + 10]
+        batch = rows[i : i + 10]
         user = "Sentences:\n" + "\n".join(f"[{j + 1}] {s}" for j, (s, _) in enumerate(batch))
         res = ns.read_headlines(_PHRASEBANK_PROMPT, user, len(batch))
         if res is None:
@@ -142,8 +171,11 @@ def run_phrasebank(path: Path, n: int, seed: int = 42) -> dict:
         for (_, lab), it in zip(batch, res[0]):
             total += 1
             correct += ((it["score"] > 0) - (it["score"] < 0)) == lab
-    return {"n": total, "direction_accuracy": round(correct / max(1, total), 3),
-            "failed_batches": failed}
+    return {
+        "n": total,
+        "direction_accuracy": round(correct / max(1, total), 3),
+        "failed_batches": failed,
+    }
 
 
 def main() -> None:
@@ -155,18 +187,27 @@ def main() -> None:
 
     ns.llm_unblock()
     rows = [json.loads(line) for line in GOLD.read_text().splitlines() if line.strip()]
-    print(f"[gold] {len(rows)} headlines, {len({r['symbol'] for r in rows})} tickers, "
-          f"model {ns._MODEL}", flush=True)
+    print(
+        f"[gold] {len(rows)} headlines, {len({r['symbol'] for r in rows})} tickers, "
+        f"model {ns._MODEL}",
+        flush=True,
+    )
     run = run_gold(rows)
     gold = score_gold(rows, run["preds"])
     certain = score_gold([r for r in rows if not r["uncertain"]], run["preds"])
     lat = sorted(run["latencies"])
     p95 = lat[min(len(lat) - 1, int(round(0.95 * (len(lat) - 1))))] if lat else float("nan")
     agree = sum(run["agreements"]) / max(1, len(run["agreements"]))
-    report = {"model": ns._MODEL, "gold": gold, "gold_certain_only": {
-        k: certain[k] for k in ("n", "lens_accuracy", "none_precision", "direction_accuracy")},
-        "agreement_mean": round(agree, 3), "p95_latency_s": round(p95, 1),
-        "json_valid": 1 - run["failed_batches"] / max(1, run["n_batches"])}
+    report = {
+        "model": ns._MODEL,
+        "gold": gold,
+        "gold_certain_only": {
+            k: certain[k] for k in ("n", "lens_accuracy", "none_precision", "direction_accuracy")
+        },
+        "agreement_mean": round(agree, 3),
+        "p95_latency_s": round(p95, 1),
+        "json_valid": 1 - run["failed_batches"] / max(1, run["n_batches"]),
+    }
     if args.phrasebank:
         print("[phrasebank] scoring...", flush=True)
         report["phrasebank"] = run_phrasebank(Path(args.phrasebank), args.pb_n)
@@ -185,8 +226,10 @@ def main() -> None:
     print(json.dumps({k: v for k, v in gold.items() if k != "misses"}, indent=2))
     print("\nmisses:")
     for m in gold["misses"]:
-        print(f"  [{m['id']:3d}] {m['symbol']:>9} gold {m['gold']:<16} pred {m['pred']:<16}"
-              f"{' (uncertain)' if m['uncertain'] else ''}  {m['headline'][:90]}")
+        print(
+            f"  [{m['id']:3d}] {m['symbol']:>9} gold {m['gold']:<16} pred {m['pred']:<16}"
+            f"{' (uncertain)' if m['uncertain'] else ''}  {m['headline'][:90]}"
+        )
     print("\n" + "\n".join(f"  {'PASS' if ok else 'FAIL'}  {g}" for g, ok in gates.items()))
     if args.out:
         Path(args.out).write_text(json.dumps(report, indent=2))

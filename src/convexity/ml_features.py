@@ -14,13 +14,14 @@ novelty, session one-hot, calendar, trailing-only market context.
 sklearn is imported lazily so the app can import this module (and degrade
 gracefully) when sklearn isn't installed.
 """
+
 from __future__ import annotations
 
 import math
 import re
 from functools import lru_cache
 
-HASH_DIM = 2 ** 18
+HASH_DIM = 2**18
 NGRAM_RANGE = (1, 2)
 # Only this many summary chars feed the HASHED text (memory: nnz/row budget on
 # an 8 GB training box). The lexicon/dense features still read the full summary.
@@ -53,23 +54,61 @@ SESSION_CLASSES = ("overnight", "preopen_oc", "intraday_cc", "dateonly_cc")
 
 # Column order is the schema contract — append-only; never reorder.
 DENSE_COLUMNS: list[str] = [
-    "lm_score", "lm_missing", "uncertainty_ratio",
+    "lm_score",
+    "lm_missing",
+    "uncertainty_ratio",
     *[f"ev_{k}" for k in EVENT_PATTERNS],
-    "publisher_tier", "relevance", "log1p_n_duplicates", "log1p_co_mentions",
+    "publisher_tier",
+    "relevance",
+    "log1p_n_duplicates",
+    "log1p_co_mentions",
     *[f"sess_{s}" for s in SESSION_CLASSES],
-    "day_of_week", "month",
-    "title_n_tokens", "summary_n_tokens",
-    "spy_ret_1d", "spy_ret_5d", "spy_vol_20d", "tkr_ret_5d",
+    "day_of_week",
+    "month",
+    "title_n_tokens",
+    "summary_n_tokens",
+    "spy_ret_1d",
+    "spy_ret_5d",
+    "spy_vol_20d",
+    "tkr_ret_5d",
 ]
 
-_TIER1 = ("reuters", "bloomberg", "wall street journal", "wsj",
-          "financial times", "associated press", "ap news")
-_TIER2 = ("cnbc", "barron", "marketwatch", "yahoo", "forbes",
-          "investor's business daily", "business insider", "fortune")
-_WIRE = ("pr newswire", "prnewswire", "globenewswire", "business wire",
-         "businesswire", "accesswire", "motley fool", "zacks",
-         "seekingalpha", "seeking alpha", "benzinga", "investorplace",
-         "thefly", "newsfile", "openpr")
+_TIER1 = (
+    "reuters",
+    "bloomberg",
+    "wall street journal",
+    "wsj",
+    "financial times",
+    "associated press",
+    "ap news",
+)
+_TIER2 = (
+    "cnbc",
+    "barron",
+    "marketwatch",
+    "yahoo",
+    "forbes",
+    "investor's business daily",
+    "business insider",
+    "fortune",
+)
+_WIRE = (
+    "pr newswire",
+    "prnewswire",
+    "globenewswire",
+    "business wire",
+    "businesswire",
+    "accesswire",
+    "motley fool",
+    "zacks",
+    "seekingalpha",
+    "seeking alpha",
+    "benzinga",
+    "investorplace",
+    "thefly",
+    "newsfile",
+    "openpr",
+)
 
 
 @lru_cache(maxsize=4096)
@@ -118,8 +157,11 @@ def dense_vector(article: dict) -> list[float]:
         1.0 if lm is None else 0.0,
         float(unc) if unc is not None else 0.0,
         *[float(ev[k]) for k in EVENT_PATTERNS],
-        float(article.get("publisher_tier") if article.get("publisher_tier") is not None
-              else publisher_tier(article.get("publisher"))),
+        float(
+            article.get("publisher_tier")
+            if article.get("publisher_tier") is not None
+            else publisher_tier(article.get("publisher"))
+        ),
         float(article.get("relevance", 0.5)),
         math.log1p(float(article.get("n_duplicates", 0) or 0)),
         math.log1p(max(0.0, float(article.get("co_mention_count", 1) or 1) - 1.0)),
@@ -142,8 +184,12 @@ def _vectorizer():
     from sklearn.feature_extraction.text import HashingVectorizer
 
     return HashingVectorizer(
-        n_features=HASH_DIM, ngram_range=NGRAM_RANGE, alternate_sign=False,
-        lowercase=True, norm=None, dtype="float32",
+        n_features=HASH_DIM,
+        ngram_range=NGRAM_RANGE,
+        alternate_sign=False,
+        lowercase=True,
+        norm=None,
+        dtype="float32",
     )
 
 
@@ -212,8 +258,8 @@ def feature_schema() -> dict:
 # in that panel: live Finnhub volume for a large cap is 10-50x what FNSPID
 # tags per ticker; attn_shock is the scale-free version.
 RECENCY_TAU_DAYS = 3.0
-WINDOW_DAYS = 7            # articles dated D-6..D (ET calendar days)
-ATTN_BASE_DAYS = 60        # attention baseline: the 60 days before the window
+WINDOW_DAYS = 7  # articles dated D-6..D (ET calendar days)
+ATTN_BASE_DAYS = 60  # attention baseline: the 60 days before the window
 # The window's article set is capped exactly like the app's retained set
 # (relevance.window_sample(articles, WINDOW_CAP, WINDOW_MIN_RECENT)) in both
 # training and serving: max/min/share statistics depend on how many articles
@@ -221,13 +267,23 @@ ATTN_BASE_DAYS = 60        # attention baseline: the 60 days before the window
 WINDOW_CAP = 60
 WINDOW_MIN_RECENT = 15
 WINDOW_COLUMNS: list[str] = [
-    "enc_mean", "enc_max", "enc_min", "enc_wmean",
-    "lm_mean", "unc_mean",
+    "enc_mean",
+    "enc_max",
+    "enc_min",
+    "enc_wmean",
+    "lm_mean",
+    "unc_mean",
     "attn_shock",
-    "share_tier1", "mean_log_dup", "share_boiler",
+    "share_tier1",
+    "mean_log_dup",
+    "share_boiler",
     "fresh_days",
-    "tkr_ret_1d", "tkr_ret_5d", "tkr_ret_20d", "tkr_vol_20d",
-    "spy_ret_5d", "spy_vol_20d",
+    "tkr_ret_1d",
+    "tkr_ret_5d",
+    "tkr_ret_20d",
+    "tkr_vol_20d",
+    "spy_ret_5d",
+    "spy_vol_20d",
 ]
 PRICE_COLUMNS = WINDOW_COLUMNS[-6:]
 
@@ -275,22 +331,37 @@ def attention_shock(rate_window: float, rate_base: float) -> float:
     return math.log((7.0 * max(0.0, rate_window) + 1.0) / (7.0 * max(0.0, rate_base) + 1.0))
 
 
-def window_vector(articles: list[dict], now: float, rate_window: float,
-                  rate_base: float, price: dict | None = None) -> list[float]:
+def window_vector(
+    articles: list[dict],
+    now: float,
+    rate_window: float,
+    rate_base: float,
+    price: dict | None = None,
+) -> list[float]:
     """One v2 window-panel feature row (training only). `articles` are the window's deduped items:
     {sar_pred, lm, unc, publisher_tier|source, n_duplicates, relevance,
     boiler, datetime}. `price` holds PRICE_COLUMNS as of the last completed
     session BEFORE the as-of day. Missing values are NaN (LightGBM routes
     them; never impute here or train and serve drift apart)."""
-    preds = [float(a["sar_pred"]) for a in articles
-             if a.get("sar_pred") is not None and math.isfinite(float(a["sar_pred"]))]
-    lms = [float(a["lm"]) for a in articles
-           if a.get("lm") is not None and math.isfinite(float(a["lm"]))]
+    preds = [
+        float(a["sar_pred"])
+        for a in articles
+        if a.get("sar_pred") is not None and math.isfinite(float(a["sar_pred"]))
+    ]
+    lms = [
+        float(a["lm"])
+        for a in articles
+        if a.get("lm") is not None and math.isfinite(float(a["lm"]))
+    ]
     n = len(articles)
     wmean, _ = weighted_sar(articles, now)
     ages = [max(0.0, (now - float(a.get("datetime") or now)) / 86400.0) for a in articles]
-    tiers = [float(a["publisher_tier"]) if a.get("publisher_tier") is not None
-             else publisher_tier(a.get("source")) for a in articles]
+    tiers = [
+        float(a["publisher_tier"])
+        if a.get("publisher_tier") is not None
+        else publisher_tier(a.get("source"))
+        for a in articles
+    ]
     price = price or {}
     row = [
         sum(preds) / len(preds) if preds else math.nan,
@@ -298,12 +369,17 @@ def window_vector(articles: list[dict], now: float, rate_window: float,
         min(preds) if preds else math.nan,
         wmean if wmean is not None else math.nan,
         sum(lms) / len(lms) if lms else math.nan,
-        (sum(_num(a.get("unc")) if math.isfinite(_num(a.get("unc"))) else 0.0
-             for a in articles) / n) if n else math.nan,
+        (
+            sum(_num(a.get("unc")) if math.isfinite(_num(a.get("unc"))) else 0.0 for a in articles)
+            / n
+        )
+        if n
+        else math.nan,
         attention_shock(rate_window, rate_base),
         (sum(1.0 for t in tiers if t >= 1.0) / n) if n else math.nan,
         (sum(math.log1p(float(a.get("n_duplicates", 0) or 0)) for a in articles) / n)
-        if n else math.nan,
+        if n
+        else math.nan,
         (sum(1.0 for a in articles if a.get("boiler")) / n) if n else math.nan,
         min(ages) if ages else math.nan,
         *[_num(price.get(c)) for c in PRICE_COLUMNS],

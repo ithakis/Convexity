@@ -18,6 +18,7 @@ import pandas as pd
 
 # ----------------------------- Path helpers ---------------------------------
 
+
 def _repo_root() -> Path:
     current = Path(__file__).resolve()
     for parent in (current.parent, *current.parents):
@@ -42,6 +43,7 @@ def _config_secret(env_var: str) -> str:
     if not key:
         return ""
     from convexity import paths
+
     cfg = paths.config_file()
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))
@@ -52,8 +54,11 @@ def _config_secret(env_var: str) -> str:
         # "missing" key with no hint. The error names the file, never content.
         if not _CONFIG_WARNED:
             _CONFIG_WARNED.append(True)
-            print(f"[config] ignoring {cfg}: {type(exc).__name__} — fix the JSON "
-                  f"(keys: {', '.join(sorted(_CONFIG_KEYS.values()))})", file=sys.stderr)
+            print(
+                f"[config] ignoring {cfg}: {type(exc).__name__} — fix the JSON "
+                f"(keys: {', '.join(sorted(_CONFIG_KEYS.values()))})",
+                file=sys.stderr,
+            )
         return ""
     val = data.get(key) if isinstance(data, dict) else None
     return val.strip() if isinstance(val, str) else ""
@@ -82,10 +87,13 @@ def _resolve_secret(env_var: str, filename: str) -> tuple[str, str | None]:
                 val = p.read_text(encoding="utf-8").strip()
                 if val:
                     from convexity import paths
+
                     paths.note_legacy(
-                        f"key file {filename}", p,
+                        f"key file {filename}",
+                        p,
                         f"move it to {paths.config_file().name} "
-                        f"(\"{_CONFIG_KEYS.get(env_var, '?')}\") or set {env_var}")
+                        f'("{_CONFIG_KEYS.get(env_var, "?")}") or set {env_var}',
+                    )
                     return val, "legacy"
                 return "", None
         except Exception:
@@ -110,13 +118,25 @@ def secret_source(env_var: str, filename: str) -> dict:
 # ----------------------------- FX constants ---------------------------------
 
 SUPPORTED_FX: list[str] = [
-    "USD", "EUR", "GBP", "JPY", "CHF",
-    "CAD", "AUD", "NZD", "CNY", "ZAR",
-    "MXN", "SGD", "HKD", "INR",
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "CHF",
+    "CAD",
+    "AUD",
+    "NZD",
+    "CNY",
+    "ZAR",
+    "MXN",
+    "SGD",
+    "HKD",
+    "INR",
 ]
 
 
 # ----------------------------- Rate-limit heuristics -------------------------
+
 
 def _is_rate_limited_error(exc: Exception) -> bool:
     """Yahoo/yfinance don't raise a typed rate-limit exception — this is the
@@ -169,8 +189,9 @@ class _RateLimiter:
                     self._calls.append(now)
                     return
                 wait = 60.0 - (now - self._calls[0]) + 0.05
-            _notify_rate(provider=self.name, reason="budget",
-                         retry_in_s=round(min(max(wait, 0.05), 5.0), 2))
+            _notify_rate(
+                provider=self.name, reason="budget", retry_in_s=round(min(max(wait, 0.05), 5.0), 2)
+            )
             time.sleep(min(max(wait, 0.05), 5.0))
 
     def penalize(self) -> None:
@@ -235,6 +256,7 @@ def _notify_rate(**event) -> None:
 
 # ----------------------------- Row helpers ----------------------------------
 
+
 def _dedupe_rows_by_symbol(rows) -> list:
     """One row per symbol: first position, latest row — upsert semantics.
 
@@ -269,6 +291,7 @@ def _dedupe_rows_by_symbol(rows) -> list:
 
 
 # ----------------------------- Numeric helpers ------------------------------
+
 
 def _safe_num(v) -> float | None:
     if v is None or v == "":
@@ -312,6 +335,7 @@ def _normalize_dividend_yield(
 
 # ----------------------------- Technical indicators -------------------------
 
+
 def _pct_change(series: pd.Series, lookback_days: int) -> float | None:
     if series is None or series.empty:
         return None
@@ -353,7 +377,9 @@ def _rsi(series: pd.Series, period: int = 14) -> float | None:
     return float(100.0 - (100.0 / (1.0 + rs)))
 
 
-def _macd_hist_pct(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> float | None:
+def _macd_hist_pct(
+    series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
+) -> float | None:
     if series is None or len(series) < slow + signal:
         return None
     ema_fast = series.ewm(span=fast, adjust=False, min_periods=fast).mean()
@@ -387,6 +413,7 @@ def _bollinger_pct_b(series: pd.Series, period: int = 20, width: float = 2.0) ->
 
 # ----------------------------- Series conversion ----------------------------
 
+
 def _series_to_points(s: pd.Series) -> list[list[float]]:
     """Compact [[ts_ms, close], ...] list, dropping NaN."""
     out: list[list[float]] = []
@@ -402,6 +429,7 @@ def _series_to_points(s: pd.Series) -> list[list[float]]:
 
 
 # ----------------------------- JSON serialization ---------------------------
+
 
 def _json_default(o):
     if isinstance(o, (np.floating,)):

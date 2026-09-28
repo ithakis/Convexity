@@ -14,6 +14,7 @@ Usage:
     python ml/scripts/01_convert_news.py            # full run
     python ml/scripts/01_convert_news.py --sample   # first 100k rows, smoke test
 """
+
 from __future__ import annotations
 
 import argparse
@@ -78,9 +79,9 @@ def main() -> None:
     """)
     convert_s = time.time() - t0
 
-    n_out = con.execute(
-        f"SELECT count(*) FROM read_parquet('{out_dir}/**/*.parquet')"
-    ).fetchone()[0]
+    n_out = con.execute(f"SELECT count(*) FROM read_parquet('{out_dir}/**/*.parquet')").fetchone()[
+        0
+    ]
     # rejected_rows() view exists only when ignore_errors dropped something
     try:
         n_rejected = con.execute("SELECT count(*) FROM reject_errors").fetchone()[0]
@@ -101,8 +102,10 @@ def main() -> None:
     print(json.dumps(report, indent=2), flush=True)
 
     if report["reject_frac"] > REJECT_FRAC_MAX:
-        sys.exit(f"FAIL: reject fraction {report['reject_frac']:.4f} > {REJECT_FRAC_MAX} — "
-                 "inspect before deleting the raw CSV")
+        sys.exit(
+            f"FAIL: reject fraction {report['reject_frac']:.4f} > {REJECT_FRAC_MAX} — "
+            "inspect before deleting the raw CSV"
+        )
     print("OK — safe to delete the raw CSV after eyeballing the report", flush=True)
 
 

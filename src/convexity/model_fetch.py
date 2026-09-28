@@ -28,6 +28,7 @@ feeds ``/api/runtime-status`` -> Settings -> Models & Data, which offers Retry.
 Releasing a new model: CLAUDE.md §4 "Model release procedure".
 Stdlib only.
 """
+
 from __future__ import annotations
 
 import gzip
@@ -48,25 +49,39 @@ from pathlib import Path
 from convexity import paths
 
 MODEL_VERSION = "mlsent-v1.1"  # must equal ml_sentiment.ARTIFACT_VERSION (tested)
-MODEL_URL = ("https://github.com/ithakis/Convexity/releases/download/"
-             "model-mlsent-v1.1/mlsent-v1.1.tar.gz")
+MODEL_URL = (
+    "https://github.com/ithakis/Convexity/releases/download/model-mlsent-v1.1/mlsent-v1.1.tar.gz"
+)
 MODEL_SHA256 = "9e05d4af6b2546651af6b65bb2352a92834bdf4c7e7dce64d8e406dfffecf46d"
-ARTIFACT_FILES = ("col_mask.npy", "feature_schema.json", "idf.npy",
-                  "meta.json", "model.lgbm.txt", "tier_cuts.json")
+ARTIFACT_FILES = (
+    "col_mask.npy",
+    "feature_schema.json",
+    "idf.npy",
+    "meta.json",
+    "model.lgbm.txt",
+    "tier_cuts.json",
+)
 # The tarball is ~3 MB; the six files ~4 MB. Generous, but capped: a hostile
 # or broken server cannot fill the disk.
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 MAX_EXTRACT_BYTES = 128 * 1024 * 1024
 
 _ATTEMPTS = 3
-_BACKOFF_S = 2.0          # 2 s, 4 s between attempts (tests shrink it)
+_BACKOFF_S = 2.0  # 2 s, 4 s between attempts (tests shrink it)
 _TIMEOUT_S = 30.0
 _CHUNK = 64 * 1024
 
 _LOCK = threading.Lock()
 _THREAD: threading.Thread | None = None
-_STATUS: dict = {"state": "idle", "bytes": 0, "total": None, "error": "",
-                 "started_at": None, "finished_at": None, "source": ""}
+_STATUS: dict = {
+    "state": "idle",
+    "bytes": 0,
+    "total": None,
+    "error": "",
+    "started_at": None,
+    "finished_at": None,
+    "source": "",
+}
 IN_FLIGHT = ("downloading", "verifying", "installing")
 
 
@@ -97,7 +112,12 @@ def target_dir() -> Path:
 
 
 def disabled() -> bool:
-    return os.environ.get("CONVEXITY_MODEL_DOWNLOAD", "").strip().lower() in ("0", "false", "no", "off")
+    return os.environ.get("CONVEXITY_MODEL_DOWNLOAD", "").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 def source_url() -> str:
@@ -118,8 +138,7 @@ def check_url(url: str) -> None:
                 return
         except ValueError:
             pass
-    raise FetchError(f"refusing to download from {url!r}: https required "
-                     "(http only for localhost)")
+    raise FetchError(f"refusing to download from {url!r}: https required (http only for localhost)")
 
 
 def complete(d: Path) -> bool:
@@ -160,12 +179,21 @@ def start(force: bool = False) -> dict:
             return dict(_STATUS)
         if disabled() and not force:
             if _STATUS["state"] != "disabled":
-                _log("model missing; automatic download disabled "
-                     "(CONVEXITY_MODEL_DOWNLOAD=0) — use Settings -> Models & Data -> Retry")
+                _log(
+                    "model missing; automatic download disabled "
+                    "(CONVEXITY_MODEL_DOWNLOAD=0) — use Settings -> Models & Data -> Retry"
+                )
             _STATUS.update(state="disabled", error="")
             return dict(_STATUS)
-        _STATUS.update(state="downloading", bytes=0, total=None, error="",
-                       started_at=time.time(), finished_at=None, source="")
+        _STATUS.update(
+            state="downloading",
+            bytes=0,
+            total=None,
+            error="",
+            started_at=time.time(),
+            finished_at=None,
+            source="",
+        )
         _THREAD = threading.Thread(target=_run, name="pt-model-fetch", daemon=True)
         _THREAD.start()
         return dict(_STATUS)
@@ -204,12 +232,15 @@ def _run() -> None:
 
 def _fail(reason: str) -> None:
     _set(state="failed", error=reason, finished_at=time.time())
-    _log(f"download FAILED: {reason} — the Market read stays unavailable; "
-         "retry from Settings -> Models & Data")
+    _log(
+        f"download FAILED: {reason} — the Market read stays unavailable; "
+        "retry from Settings -> Models & Data"
+    )
 
 
 def _finish_install() -> None:
     from convexity import ml_sentiment
+
     st = ml_sentiment.reload()
     _set(state="installed", error="", finished_at=time.time())
     if st.get("ok"):
@@ -218,8 +249,10 @@ def _finish_install() -> None:
         # The files are in place and verified; loading them failed (e.g.
         # lightgbm missing) and ml_sentiment's reason — shown beside this
         # status in Settings — says why. Re-downloading would not help.
-        _log(f"installed {MODEL_VERSION} -> {target_dir()}, but the model did not load: "
-             f"{st.get('reason')}")
+        _log(
+            f"installed {MODEL_VERSION} -> {target_dir()}, but the model did not load: "
+            f"{st.get('reason')}"
+        )
 
 
 # ------------------------------------------------------------------ download
@@ -243,12 +276,16 @@ def _download_verified(url: str, dest: Path) -> None:
     _set(state="verifying")
     if digest != MODEL_SHA256:
         dest.unlink(missing_ok=True)
-        raise FetchError(f"checksum mismatch (got sha256 {digest[:12]}…, "
-                         f"expected {MODEL_SHA256[:12]}…) — file discarded")
+        raise FetchError(
+            f"checksum mismatch (got sha256 {digest[:12]}…, "
+            f"expected {MODEL_SHA256[:12]}…) — file discarded"
+        )
 
 
 def _download(url: str, dest: Path) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": f"convexity-model-fetch/{MODEL_VERSION}"})
+    req = urllib.request.Request(
+        url, headers={"User-Agent": f"convexity-model-fetch/{MODEL_VERSION}"}
+    )
     h = hashlib.sha256()
     n = 0
     try:
@@ -277,8 +314,10 @@ def _download(url: str, dest: Path) -> str:
             if total is not None and n != total:
                 raise FetchError(f"download truncated ({n} of {total} bytes)", retry=True)
     except urllib.error.HTTPError as e:
-        raise FetchError(f"HTTP {e.code} from {urllib.parse.urlparse(url).hostname}",
-                         retry=e.code >= 500 or e.code == 429) from None
+        raise FetchError(
+            f"HTTP {e.code} from {urllib.parse.urlparse(url).hostname}",
+            retry=e.code >= 500 or e.code == 429,
+        ) from None
     except urllib.error.URLError as e:
         raise FetchError(f"network unavailable ({e.reason})", retry=True) from None
     except OSError as e:  # timeouts, resets, a full disk
@@ -387,7 +426,7 @@ def _sweep(models: Path) -> None:
     for p in models.iterdir():
         if not p.name.startswith(prefix):
             continue
-        rest = p.name[len(prefix):]
+        rest = p.name[len(prefix) :]
         pid_s, _, kind = rest.partition(".")
         if kind not in ("part", "staging") or not pid_s.isdigit():
             continue

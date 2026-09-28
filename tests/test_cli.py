@@ -16,7 +16,9 @@ def test_no_arguments_runs_the_server(monkeypatch):
 def test_unknown_command_is_an_error(monkeypatch, capsys):
     import convexity.server as server
 
-    monkeypatch.setattr(server, "main", lambda: (_ for _ in ()).throw(AssertionError("server started")))
+    monkeypatch.setattr(
+        server, "main", lambda: (_ for _ in ()).throw(AssertionError("server started"))
+    )
     assert cli.main(["serve-please"]) == 2
     assert "unknown command" in capsys.readouterr().err
 

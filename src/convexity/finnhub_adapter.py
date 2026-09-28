@@ -32,7 +32,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from convexity.helpers import (
-    _FH_LIMITER, _MAX_RETRIES, _RETRY_SLEEP_S, _load_local_secret, _notify_rate, _safe_num,
+    _FH_LIMITER,
+    _MAX_RETRIES,
+    _RETRY_SLEEP_S,
+    _load_local_secret,
+    _notify_rate,
+    _safe_num,
 )
 
 # Key resolution (env var, then a strictly-local ``.finnhub_key`` found by
@@ -112,13 +117,18 @@ def _fh_call(path: str, params: dict[str, Any], symbol: str) -> Any | None:
             if exc.code == 429 and attempt < _MAX_RETRIES - 1:
                 _FH_LIMITER.penalize()
                 print(
-                    f"[finnhub] 429 on {symbol} (attempt {attempt+1}/{_MAX_RETRIES}) "
+                    f"[finnhub] 429 on {symbol} (attempt {attempt + 1}/{_MAX_RETRIES}) "
                     f"— sleeping {_RETRY_SLEEP_S}s",
                     file=sys.stderr,
                 )
-                _notify_rate(provider="finnhub", reason="http_429", symbol=symbol,
-                             attempt=attempt + 1, max_attempts=_MAX_RETRIES,
-                             retry_in_s=_RETRY_SLEEP_S)
+                _notify_rate(
+                    provider="finnhub",
+                    reason="http_429",
+                    symbol=symbol,
+                    attempt=attempt + 1,
+                    max_attempts=_MAX_RETRIES,
+                    retry_in_s=_RETRY_SLEEP_S,
+                )
                 time.sleep(_RETRY_SLEEP_S)
                 continue
             if exc.code == 429:
@@ -163,12 +173,14 @@ def get_earnings_surprise(symbol: str) -> list[dict] | None:
                 surprise_pct = None
             else:
                 surprise_pct = (actual - estimate) / abs(estimate) * 100
-            out.append({
-                "period": e.get("period"),
-                "actual": actual,
-                "estimate": estimate,
-                "surprise_pct": surprise_pct,
-            })
+            out.append(
+                {
+                    "period": e.get("period"),
+                    "actual": actual,
+                    "estimate": estimate,
+                    "surprise_pct": surprise_pct,
+                }
+            )
         if not out:
             _fh_put(cache_key, _MISS, _NEG_TTL)  # genuine no-coverage
             return None

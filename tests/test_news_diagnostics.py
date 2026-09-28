@@ -1,4 +1,5 @@
 """Track record statistics on synthetic history with a KNOWN answer."""
+
 from __future__ import annotations
 
 import math
@@ -37,11 +38,18 @@ def _records(idx, closes, score_fn, tiers=True):
         d = idx[d_i]
         for k in range(N_SYMS):
             s = f"S{k}"
-            fwd = (closes[s].iloc[d_i + 1] / closes[s].iloc[d_i] - 1.0) \
-                - (closes["SPY"].iloc[d_i + 1] / closes["SPY"].iloc[d_i] - 1.0)
+            fwd = (closes[s].iloc[d_i + 1] / closes[s].iloc[d_i] - 1.0) - (
+                closes["SPY"].iloc[d_i + 1] / closes["SPY"].iloc[d_i] - 1.0
+            )
             score = score_fn(fwd)
-            rec = {"date": d.strftime("%Y-%m-%d"), "symbol": s, "beta": 1.0,
-                   "news_score": score, "market_score": score, "market_z": score}
+            rec = {
+                "date": d.strftime("%Y-%m-%d"),
+                "symbol": s,
+                "beta": 1.0,
+                "news_score": score,
+                "market_score": score,
+                "market_z": score,
+            }
             if tiers:
                 t = "bullish" if score > 0.01 else "bearish" if score < -0.01 else "neutral"
                 rec.update(news_tier=t, market_tier=t if t != "neutral" else "no_edge")
@@ -76,17 +84,25 @@ def test_shuffled_scores_show_no_evidence():
 
 def test_too_early_below_forty_days():
     closes, _, idx = _world()
-    recs = [r for r in _records(idx, closes, lambda f: f)
-            if r["date"] <= idx[29].strftime("%Y-%m-%d")]
+    recs = [
+        r for r in _records(idx, closes, lambda f: f) if r["date"] <= idx[29].strftime("%Y-%m-%d")
+    ]
     v = nd.compute(recs, closes=closes)["news"]["verdict"]
     assert v["key"] == "too_early" and v["text"] == "Too early — 30 of ~60 trading days"
 
 
-@pytest.mark.parametrize("n_days,t,mean,key", [
-    (39, 9.0, 0.1, "too_early"), (40, 2.0, 0.01, "edge"), (40, 2.5, -0.01, "none"),
-    (60, 1.0, 0.02, "weak"), (60, 1.99, 0.02, "weak"), (60, 0.99, 0.02, "none"),
-    (60, None, None, "none"),
-])
+@pytest.mark.parametrize(
+    "n_days,t,mean,key",
+    [
+        (39, 9.0, 0.1, "too_early"),
+        (40, 2.0, 0.01, "edge"),
+        (40, 2.5, -0.01, "none"),
+        (60, 1.0, 0.02, "weak"),
+        (60, 1.99, 0.02, "weak"),
+        (60, 0.99, 0.02, "none"),
+        (60, None, None, "none"),
+    ],
+)
 def test_verdict_rule(n_days, t, mean, key):
     assert nd.verdict({"n_days": n_days, "t": t, "mean": mean})["key"] == key
 
@@ -97,7 +113,7 @@ def test_wilson_interval_matches_reference():
     assert w["lo"] == pytest.approx(0.4902, abs=1e-3)
     assert w["hi"] == pytest.approx(0.9433, abs=1e-3)
     small = nd.wilson(2, 3)
-    assert 0 < small["lo"] < small["rate"] < small["hi"] < 1      # never below 0
+    assert 0 < small["lo"] < small["rate"] < small["hi"] < 1  # never below 0
     assert nd.wilson(0, 0)["rate"] is None
 
 
@@ -124,10 +140,18 @@ def test_one_date_is_one_observation():
 
 
 def test_compat_loader_maps_only_the_two_scores():
-    raw = [{"date": "2026-08-01", "symbol": "A", "s_idio": 0.3, "ml_sar": -0.01,
-            "tier": "bearish", "ml_tier": "bearish"},
-           {"date": "2026-08-01", "symbol": "__market__", "s_idio": 0.1},
-           {"date": "2026-09-25", "symbol": "B", "news_score": 1.2, "news_tier": "bullish"}]
+    raw = [
+        {
+            "date": "2026-08-01",
+            "symbol": "A",
+            "s_idio": 0.3,
+            "ml_sar": -0.01,
+            "tier": "bearish",
+            "ml_tier": "bearish",
+        },
+        {"date": "2026-08-01", "symbol": "__market__", "s_idio": 0.1},
+        {"date": "2026-09-25", "symbol": "B", "news_score": 1.2, "news_tier": "bullish"},
+    ]
     recs = nd.load_records(raw)
     assert [r["symbol"] for r in recs] == ["A", "B"]
     assert recs[0]["news_score"] == 0.3 and recs[0]["market_sar"] == -0.01

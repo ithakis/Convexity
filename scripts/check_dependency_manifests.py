@@ -21,6 +21,7 @@ Deliberately dependency-free (tomllib, 3.11+), so it runs in the bare lint job. 
 package name appear as a declared dependency", not "is the version range
 right", which is the resolvers' job.
 """
+
 from __future__ import annotations
 
 import re
@@ -57,21 +58,25 @@ def main() -> int:
     problems = [
         f"{r.module}: '{r.pip}' missing from pyproject.toml [project].dependencies "
         f"(needed for: {r.feature})"
-        for r in REQUIRED if _base_name(r.pip) not in declared
+        for r in REQUIRED
+        if _base_name(r.pip) not in declared
     ]
 
     if problems:
-        print("pyproject.toml is out of sync with "
-              "src/convexity/envcheck.REQUIRED:\n", file=sys.stderr)
+        print(
+            "pyproject.toml is out of sync with src/convexity/envcheck.REQUIRED:\n", file=sys.stderr
+        )
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
-        print("\nAdd the missing specs, or drop the entry from REQUIRED if the "
-              "app genuinely no longer needs it. After editing pyproject.toml "
-              "run `uv lock`.\n", file=sys.stderr)
+        print(
+            "\nAdd the missing specs, or drop the entry from REQUIRED if the "
+            "app genuinely no longer needs it. After editing pyproject.toml "
+            "run `uv lock`.\n",
+            file=sys.stderr,
+        )
         return 1
 
-    print(f"OK — all {len(REQUIRED)} runtime dependencies are declared in "
-          "pyproject.toml")
+    print(f"OK — all {len(REQUIRED)} runtime dependencies are declared in pyproject.toml")
     return 0
 
 

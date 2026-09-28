@@ -89,6 +89,7 @@ def symbol_db_file() -> Path:
 
 # ------------------------------------------------------------ legacy locations
 
+
 def legacy_root() -> Path:
     """Where pre-1.14 code wrote state: the checkout root (walk up to .git),
     else the package directory — which, for an installed wheel, is exactly the

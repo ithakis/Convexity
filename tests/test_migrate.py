@@ -20,6 +20,7 @@ def _sha(p):
 
 # ------------------------------------------------------------ step 1 (v1.13)
 
+
 def test_moves_legacy_state_and_home_dir(tmp_path):
     root, home = tmp_path / "repo", tmp_path / "home"
     root.mkdir()
@@ -45,6 +46,7 @@ def test_never_overwrites_existing_new_file(tmp_path):
 
 
 # ------------------------------------------------------- step 2 (v1.14)
+
 
 @pytest.fixture
 def legacy(tmp_path):
@@ -203,11 +205,16 @@ def test_only_an_app_launch_migrates(monkeypatch):
     import sys
 
     import convexity
+
     cases = [
         (["python", "-m", "convexity"], ["-m"], True),
         (["python", "-m", "convexity.desktop"], ["-m"], True),
         (["python", "-m", "convexity.migrate", "--dry-run"], ["-m"], False),
-        (["python", "scripts/check_dependency_manifests.py"], ["scripts/check_dependency_manifests.py"], False),
+        (
+            ["python", "scripts/check_dependency_manifests.py"],
+            ["scripts/check_dependency_manifests.py"],
+            False,
+        ),
         (["python", "-c", "import convexity"], ["-c"], False),
         (["/venv/bin/python", "/venv/bin/convexity"], ["/venv/bin/convexity"], True),
         (["pythonw", "/env/Scripts/convexity-app.exe"], ["/env/Scripts/convexity-app.exe"], True),
@@ -228,6 +235,7 @@ def test_concurrent_instance_placing_first_is_not_a_conflict(legacy, monkeypatch
 
     def other_process_wins(tmp, dst):
         import shutil
+
         shutil.copy2(tmp, dst)  # the other instance's identical copy lands first
         real(tmp, dst)
 
@@ -259,8 +267,9 @@ def test_conflicts_are_reported_for_the_ui(legacy, monkeypatch):
     monkeypatch.setattr(migrate, "LAST_REPORT", None)
     assert migrate.conflicts() == []
     migrate.run()
-    assert migrate.conflicts() == [{"old": str(root / ".convexity_views.json"),
-                                    "used": str(data / "state" / "views.json")}]
+    assert migrate.conflicts() == [
+        {"old": str(root / ".convexity_views.json"), "used": str(data / "state" / "views.json")}
+    ]
     # dealt with (old file deleted) -> the next launch reports nothing
     (root / ".convexity_views.json").unlink()
     migrate.run()

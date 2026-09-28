@@ -105,15 +105,21 @@ def status() -> dict:
     if exists and ok:
         try:
             data = json.loads(paths.config_file().read_text(encoding="utf-8"))
-            in_cfg = {p: bool(isinstance(data.get(_field(p)), str) and data[_field(p)].strip())
-                      for p in PROVIDERS}
+            in_cfg = {
+                p: bool(isinstance(data.get(_field(p)), str) and data[_field(p)].strip())
+                for p in PROVIDERS
+            }
         except (OSError, ValueError):
             pass
     out: dict = {"config_ok": ok, "config_path": str(paths.config_file())}
     for p, (env_var, fname) in PROVIDERS.items():
         src = helpers.secret_source(env_var, fname)
-        out[p] = {**src, "in_config": bool(in_cfg.get(p)), "env_var": env_var,
-                  "env_overrides": src["source"] == "env" and bool(in_cfg.get(p))}
+        out[p] = {
+            **src,
+            "in_config": bool(in_cfg.get(p)),
+            "env_var": env_var,
+            "env_overrides": src["source"] == "env" and bool(in_cfg.get(p)),
+        }
     return out
 
 
@@ -140,6 +146,7 @@ def _write(provider: str, key: str | None) -> None:
                 return  # a double submit: nothing to write
             data[field] = key
         from convexity.persistence import _atomic_write
+
         _atomic_write(cfg, json.dumps(data, indent=2) + "\n")
         try:
             os.chmod(cfg, 0o600)
@@ -150,8 +157,11 @@ def _write(provider: str, key: str | None) -> None:
 def _warn_malformed(cfg, what: str) -> None:
     if not _MALFORMED_WARNED:
         _MALFORMED_WARNED.append(True)
-        print(f"[keys] refusing to write {cfg}: it is not a JSON object ({what}) — "
-              f"fix or delete it, then save the key again", file=sys.stderr)
+        print(
+            f"[keys] refusing to write {cfg}: it is not a JSON object ({what}) — "
+            f"fix or delete it, then save the key again",
+            file=sys.stderr,
+        )
 
 
 def save(provider, key) -> dict:
@@ -167,8 +177,9 @@ def clear(provider) -> dict:
     provider = _check_provider(provider)
     _write(provider, None)
     reload_all()
-    print(f"[keys] {_LABELS[provider]} key removed from {paths.config_file().name}",
-          file=sys.stderr)
+    print(
+        f"[keys] {_LABELS[provider]} key removed from {paths.config_file().name}", file=sys.stderr
+    )
     return status()
 
 
@@ -187,6 +198,7 @@ def reload_all() -> None:
 
 
 # ----------------------------- Test buttons ---------------------------------
+
 
 def _classify_http(code: int) -> str:
     if code in (401, 403):
@@ -235,22 +247,33 @@ def check(provider) -> dict:
     if provider == "finnhub":
         req = urllib.request.Request(
             _FINNHUB_BASE + "quote?symbol=AAPL",
-            headers={"X-Finnhub-Token": key, "User-Agent": "Convexity/1.0"})
+            headers={"X-Finnhub-Token": key, "User-Agent": "Convexity/1.0"},
+        )
         res = _call(req, _FH_TIMEOUT_S, helpers._FH_LIMITER)
     else:
         try:
             from convexity.news_sentiment import _MODEL as model
         except ImportError:
             model = "nvidia/nemotron-3-super-120b-a12b"
-        body = json.dumps({"model": model, "max_tokens": 1,
-                           "messages": [{"role": "user", "content": "ok"}]}).encode()
+        body = json.dumps(
+            {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]}
+        ).encode()
         req = urllib.request.Request(
-            _NVIDIA_BASE.rstrip("/") + "/chat/completions", data=body, method="POST",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-                     "User-Agent": "Convexity/1.0"})
+            _NVIDIA_BASE.rstrip("/") + "/chat/completions",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Convexity/1.0",
+            },
+        )
         res = _call(req, _NV_TIMEOUT_S, helpers._NV_LIMITER)
     del key
     res.update({"provider": provider, "ms": int((time.monotonic() - t0) * 1000)})
-    print(f"[keys] {_LABELS[provider]} key test: {res['status']}"
-          + (f" (HTTP {res['http']})" if res.get("http") else ""), file=sys.stderr)
+    print(
+        f"[keys] {_LABELS[provider]} key test: {res['status']}"
+        + (f" (HTTP {res['http']})" if res.get("http") else ""),
+        file=sys.stderr,
+    )
     return res

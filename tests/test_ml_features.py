@@ -1,5 +1,6 @@
 """Unit tests for convexity.ml_features — the shared featurizer whose
 train/serve parity the deployed model depends on."""
+
 from __future__ import annotations
 
 import math
@@ -32,8 +33,18 @@ def test_publisher_tier_in_sync_with_news_sentiment():
     sync mechanism."""
     from convexity.news_sentiment import _source_weight
 
-    for src in ("Reuters", "Bloomberg", "CNBC", "Motley Fool", "Benzinga",
-                "Random Blog", "GlobeNewswire", "MarketWatch", None, ""):
+    for src in (
+        "Reuters",
+        "Bloomberg",
+        "CNBC",
+        "Motley Fool",
+        "Benzinga",
+        "Random Blog",
+        "GlobeNewswire",
+        "MarketWatch",
+        None,
+        "",
+    ):
         assert mf.publisher_tier(src) == _source_weight(src or ""), src
 
 
@@ -71,12 +82,18 @@ def test_dense_vector_market_context_passthrough():
     assert cols["tkr_ret_5d"] == pytest.approx(-0.02)
 
 
-
 # ------------------------------------------------------------ ticker-day window
 def _win_item(sar, age_d=0.0, tier=1.0, dup=0, rel=1.0, lm=0.5, unc=0.01, boiler=False):
-    return {"sar_pred": sar, "lm": lm, "unc": unc, "publisher_tier": tier,
-            "n_duplicates": dup, "relevance": rel, "boiler": boiler,
-            "datetime": 1_000_000.0 - age_d * 86400}
+    return {
+        "sar_pred": sar,
+        "lm": lm,
+        "unc": unc,
+        "publisher_tier": tier,
+        "n_duplicates": dup,
+        "relevance": rel,
+        "boiler": boiler,
+        "datetime": 1_000_000.0 - age_d * 86400,
+    }
 
 
 def test_window_vector_names_every_column():
@@ -86,19 +103,21 @@ def test_window_vector_names_every_column():
 
 def test_window_vector_statistics():
     now = 1_000_000.0
-    items = [_win_item(0.02, 0.0, tier=1.0), _win_item(-0.01, 2.0, tier=0.5, dup=3,
-                                                       lm=None, boiler=True)]
-    cols = dict(zip(mf.WINDOW_COLUMNS, mf.window_vector(items, now, 2 / 7, 0.1,
-                                                        {"tkr_ret_1d": 0.03})))
+    items = [
+        _win_item(0.02, 0.0, tier=1.0),
+        _win_item(-0.01, 2.0, tier=0.5, dup=3, lm=None, boiler=True),
+    ]
+    cols = dict(
+        zip(mf.WINDOW_COLUMNS, mf.window_vector(items, now, 2 / 7, 0.1, {"tkr_ret_1d": 0.03}))
+    )
     assert cols["enc_mean"] == pytest.approx(0.005)
     assert cols["enc_max"] == 0.02 and cols["enc_min"] == -0.01
     wm, wsum = mf.weighted_sar(items, now)
-    assert cols["enc_wmean"] == pytest.approx(wm) and wm > 0.005   # fresher tier-1 dominates
-    assert cols["lm_mean"] == pytest.approx(0.5)                     # the None is skipped
+    assert cols["enc_wmean"] == pytest.approx(wm) and wm > 0.005  # fresher tier-1 dominates
+    assert cols["lm_mean"] == pytest.approx(0.5)  # the None is skipped
     assert cols["share_tier1"] == 0.5 and cols["share_boiler"] == 0.5
     assert cols["fresh_days"] == 0.0
-    assert cols["attn_shock"] == \
-        pytest.approx(mf.attention_shock(2 / 7, 0.1))
+    assert cols["attn_shock"] == pytest.approx(mf.attention_shock(2 / 7, 0.1))
     assert cols["tkr_ret_1d"] == 0.03 and math.isnan(cols["spy_vol_20d"])
 
 
@@ -110,13 +129,15 @@ def test_window_vector_empty_is_nan_not_zero():
 
 def test_attention_shock_is_scale_free_and_finite():
     assert mf.attention_shock(1.0, 1.0) == 0.0
-    assert mf.attention_shock(5.0, 0.0) > 3          # a first-ever burst is large, finite
+    assert mf.attention_shock(5.0, 0.0) > 3  # a first-ever burst is large, finite
     assert mf.attention_shock(0.0, 5.0) < 0
 
 
 def test_article_weight_reads_either_tier_or_source():
     a = {"datetime": 100.0, "n_duplicates": 0, "relevance": 1.0}
-    assert mf.article_weight(dict(a, publisher_tier=1.0), 100.0) == \
-        pytest.approx(mf.article_weight(dict(a, source="Reuters"), 100.0))
-    assert mf.article_weight(dict(a, source="Reuters"), 100.0 + 3 * 86400) == \
-        pytest.approx(math.exp(-1.0))
+    assert mf.article_weight(dict(a, publisher_tier=1.0), 100.0) == pytest.approx(
+        mf.article_weight(dict(a, source="Reuters"), 100.0)
+    )
+    assert mf.article_weight(dict(a, source="Reuters"), 100.0 + 3 * 86400) == pytest.approx(
+        math.exp(-1.0)
+    )

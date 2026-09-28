@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """AST syntax check for all .py files — used by pre-commit and CI."""
+
 import ast
 import pathlib
 import sys

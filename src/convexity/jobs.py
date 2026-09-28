@@ -67,7 +67,7 @@ except Exception:  # pragma: no cover - optional at runtime, like everywhere els
 # dominated by `row` frames (a fetch_one dict carries a 252-point sparkline,
 # ~6 KB), so ~1 MB per large job and <= 4 MB resident with the retention below.
 _EVENT_MAXLEN = 6000
-_RETAIN_S = 900          # a finished job stays queryable for 15 minutes
+_RETAIN_S = 900  # a finished job stays queryable for 15 minutes
 _MAX_FINISHED = 3
 
 # Refuse to save a portfolio whose rows came back mostly broken. Yahoo answers
@@ -103,10 +103,10 @@ class Job:
 
     def __init__(self, *, scope, phases, views, entries, days, context):
         self.id = "rj_" + uuid.uuid4().hex[:12]
-        self.scope = scope                 # "current" | "all"
-        self.phases = tuple(phases)        # ("quotes",) | ("quotes", "news")
-        self.views = list(views)           # portfolio names, in run order
-        self.entries = dict(entries)       # view -> entries string, snapshotted
+        self.scope = scope  # "current" | "all"
+        self.phases = tuple(phases)  # ("quotes",) | ("quotes", "news")
+        self.views = list(views)  # portfolio names, in run order
+        self.entries = dict(entries)  # view -> entries string, snapshotted
         self.days = days
         self.context = context
         self.created_at = time.time()
@@ -117,9 +117,15 @@ class Job:
         # news_scored / news_failed split news_done by outcome: the chip says
         # "12/15 scored", and a refresh where the News read failed for every
         # ticker must never read as a plain "done".
-        self.counts = {"quotes_done": 0, "quotes_total": 0,
-                       "news_done": 0, "news_total": 0,
-                       "news_scored": 0, "news_failed": 0, "rate_waits": 0}
+        self.counts = {
+            "quotes_done": 0,
+            "quotes_total": 0,
+            "news_done": 0,
+            "news_total": 0,
+            "news_scored": 0,
+            "news_failed": 0,
+            "rate_waits": 0,
+        }
         # Per-view symbol counts: the planner's estimate, and the real number
         # each view reports at its own phase start. quotes_total is always
         # actual-where-known + planned-for-the-rest, so it stays a whole-job
@@ -132,7 +138,7 @@ class Job:
         self._cv = threading.Condition()
         self._events: deque = deque(maxlen=_EVENT_MAXLEN)
         self._seq = 0
-        self._first_seq = 1                # oldest seq still in the ring
+        self._first_seq = 1  # oldest seq still in the ring
         self._thread = None
 
     # ----------------------------- events -----------------------------------
@@ -179,10 +185,15 @@ class Job:
     def snapshot(self) -> dict:
         with self._cv:
             return {
-                "id": self.id, "scope": self.scope, "state": self.state,
-                "phases": list(self.phases), "phase": self.phase,
-                "views": list(self.views), "days": self.days,
-                "counts": dict(self.counts), "last_seq": self._seq,
+                "id": self.id,
+                "scope": self.scope,
+                "state": self.state,
+                "phases": list(self.phases),
+                "phase": self.phase,
+                "views": list(self.views),
+                "days": self.days,
+                "counts": dict(self.counts),
+                "last_seq": self._seq,
                 "error": self.error,
                 "elapsed_s": round((self.ended_at or time.time()) - self.created_at, 2),
             }
@@ -212,8 +223,9 @@ class Job:
         # than whenever a worker next notices. `drained: false` says the
         # in-flight calls have not necessarily unwound yet — a later `job`
         # frame with drained:true marks that.
-        self.emit("cancelled", reason=reason, at_phase=self.phase,
-                  drained=False, counts=dict(self.counts))
+        self.emit(
+            "cancelled", reason=reason, at_phase=self.phase, drained=False, counts=dict(self.counts)
+        )
         return True
 
 
@@ -248,15 +260,22 @@ def cancel(job_id: str, reason: str = "user") -> bool:
     return bool(j and j.request_cancel(reason))
 
 
-def submit(*, scope, phases, days, entries_by_view, context=None,
-           on_conflict="reject") -> tuple["Job | None", str]:
+def submit(
+    *, scope, phases, days, entries_by_view, context=None, on_conflict="reject"
+) -> tuple["Job | None", str]:
     """Create and start a job. Returns (job, outcome).
 
     outcome is "created", or "rejected" with the running job returned instead
     (see the single-flight rationale in the module docstring).
     """
-    job = Job(scope=scope, phases=phases, views=list(entries_by_view.keys()),
-              entries=entries_by_view, days=days, context=context)
+    job = Job(
+        scope=scope,
+        phases=phases,
+        views=list(entries_by_view.keys()),
+        entries=entries_by_view,
+        days=days,
+        context=context,
+    )
     # Before ANY frame is emitted — including the `queued` one below and the
     # snapshot a late-attaching client reads — so the progress bar has a real
     # denominator from the very first thing it ever sees.
@@ -285,10 +304,12 @@ def submit(*, scope, phases, days, entries_by_view, context=None,
     # lock order is registry -> job condvar, never held while emitting.
     if superseded is not None:
         superseded.request_cancel("superseded")
-    job.emit("job", state="queued", scope=scope, views=job.views,
-             days=days, phases=list(job.phases))
-    job._thread = threading.Thread(target=_run, args=(job,),
-                                   name=f"pt-refresh-{job.id}", daemon=True)
+    job.emit(
+        "job", state="queued", scope=scope, views=job.views, days=days, phases=list(job.phases)
+    )
+    job._thread = threading.Thread(
+        target=_run, args=(job,), name=f"pt-refresh-{job.id}", daemon=True
+    )
     job._thread.start()
     return job, "created"
 
@@ -351,8 +372,9 @@ def _plan_totals(job: Job) -> None:
         # have yet; unique entries is the closest thing available and is exact
         # whenever the user typed tickers. +1 for the market-wide read. Corrected
         # in _run_news_phase, so an estimate that is off costs one small nudge.
-        planned_news = {e.upper() for v in job.views
-                        for e in _parse_entries(job.entries.get(v) or "")}
+        planned_news = {
+            e.upper() for v in job.views for e in _parse_entries(job.entries.get(v) or "")
+        }
         job.set_count("news_total", len(planned_news) + 1)
 
 
@@ -384,7 +406,7 @@ def _run(job: Job) -> None:
         # `except Exception` here reported it as "Refresh failed".
         _finish(job, "cancelled")
         return
-    except Exception as exc:                       # pragma: no cover - defensive
+    except Exception as exc:  # pragma: no cover - defensive
         job.error = f"{type(exc).__name__}: {exc}"
         _finish(job, "error")
         return
@@ -400,8 +422,12 @@ def _finish(job: Job, state: str) -> None:
     elif state == "cancelled":
         job.emit("job", state="cancelled", drained=True, counts=dict(job.counts))
     else:
-        job.emit("done", counts=dict(job.counts), views=job.views,
-                 elapsed_s=round(job.ended_at - job.created_at, 2))
+        job.emit(
+            "done",
+            counts=dict(job.counts),
+            views=job.views,
+            elapsed_s=round(job.ended_at - job.created_at, 2),
+        )
     with _REG_LOCK:
         if _CURRENT is job:
             globals()["_CURRENT"] = None
@@ -420,27 +446,47 @@ def _run_quotes_phase(job: Job, view: str, index: int, rows_by_symbol: dict) -> 
             # real count and re-derive the whole-job total, so the denominator
             # stays the whole job's and only ever nudges by the estimate's error.
             job._actual_quotes[view] = msg["total"]
-            job.set_count("quotes_total", sum(job._actual_quotes.values()) + sum(
-                n for v, n in job._planned_quotes.items() if v not in job._actual_quotes))
-            job.emit("phase", phase="quotes", state="start", view=view,
-                     view_index=index, view_count=len(job.views),
-                     total=msg["total"], symbols=msg["symbols"])
+            job.set_count(
+                "quotes_total",
+                sum(job._actual_quotes.values())
+                + sum(n for v, n in job._planned_quotes.items() if v not in job._actual_quotes),
+            )
+            job.emit(
+                "phase",
+                phase="quotes",
+                state="start",
+                view=view,
+                view_index=index,
+                view_count=len(job.views),
+                total=msg["total"],
+                symbols=msg["symbols"],
+            )
         elif msg["type"] == "row":
             row = msg["row"]
             rows.append(row)
             if row.get("symbol"):
                 rows_by_symbol.setdefault(row["symbol"], row)
             job.bump("quotes_done")
-            job.emit("item", phase="quotes", view=view, symbol=row.get("symbol"),
-                     state="error" if row.get("error") else "ok",
-                     done=msg["done"], total=msg["total"], row=row)
+            job.emit(
+                "item",
+                phase="quotes",
+                view=view,
+                symbol=row.get("symbol"),
+                state="error" if row.get("error") else "ok",
+                done=msg["done"],
+                total=msg["total"],
+                row=row,
+            )
     if not started:
         # Nothing was fetched for this view (empty entries, or cancelled before
         # the first message). Drop its reservation or the denominator keeps
         # counting symbols that will never arrive and the bar can't reach 100%.
         job._actual_quotes[view] = 0
-        job.set_count("quotes_total", sum(job._actual_quotes.values()) + sum(
-            n for v, n in job._planned_quotes.items() if v not in job._actual_quotes))
+        job.set_count(
+            "quotes_total",
+            sum(job._actual_quotes.values())
+            + sum(n for v, n in job._planned_quotes.items() if v not in job._actual_quotes),
+        )
         return
 
     failed = sum(1 for r in rows if r.get("error"))
@@ -460,10 +506,17 @@ def _run_quotes_phase(job: Job, view: str, index: int, rows_by_symbol: dict) -> 
         # restore-on-launch target at whatever portfolio it happened to touch.
         payload = persistence.save_view(view, entries, rows, set_last=False)
         saved = True
-        job.emit("view_saved", view=view, rows=len(rows),
-                 saved_at=payload.get("saved_at"))
-    job.emit("phase", phase="quotes", state="end", view=view, saved=saved,
-             ok=ok, failed=failed, reason=reason)
+        job.emit("view_saved", view=view, rows=len(rows), saved_at=payload.get("saved_at"))
+    job.emit(
+        "phase",
+        phase="quotes",
+        state="end",
+        view=view,
+        saved=saved,
+        ok=ok,
+        failed=failed,
+        reason=reason,
+    )
 
 
 def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
@@ -473,8 +526,7 @@ def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
     # must not leave items in the denominator that nothing will ever complete.
     if _ns is None:
         job.set_count("news_total", 0)
-        job.emit("phase", phase="news", state="skipped",
-                 reason="news_sentiment unavailable")
+        job.emit("phase", phase="news", state="skipped", reason="news_sentiment unavailable")
         return
     symbols = sorted(rows_by_symbol.keys())
     if not symbols:
@@ -485,8 +537,16 @@ def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
     # Assign, don't bump: this is the authoritative count replacing the plan's
     # estimate (+1 for the market-wide read).
     job.set_count("news_total", len(symbols) + 1)
-    job.emit("phase", phase="news", state="start", view=None, market=True,
-             days=job.days, total=len(symbols) + 1, symbols=symbols)
+    job.emit(
+        "phase",
+        phase="news",
+        state="start",
+        view=None,
+        market=True,
+        days=job.days,
+        total=len(symbols) + 1,
+        symbols=symbols,
+    )
 
     def _progress(kind: str, body: dict) -> None:
         # Translate news_sentiment's vocabulary into the job's. `stage` values
@@ -497,11 +557,21 @@ def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
         if kind == "plan":
             return
         if kind == "market_stage":
-            job.emit("item_stage", phase="news", symbol="__market__",
-                     stage=body.get("stage"), frac=body.get("frac"))
+            job.emit(
+                "item_stage",
+                phase="news",
+                symbol="__market__",
+                stage=body.get("stage"),
+                frac=body.get("frac"),
+            )
         elif kind == "symbol_stage":
-            job.emit("item_stage", phase="news", symbol=body.get("symbol"),
-                     stage=body.get("stage"), frac=body.get("frac"))
+            job.emit(
+                "item_stage",
+                phase="news",
+                symbol=body.get("symbol"),
+                stage=body.get("stage"),
+                frac=body.get("frac"),
+            )
         elif kind in ("market", "symbol"):
             outcome = body.get("outcome") or ("ok" if body.get("sentiment") else "empty")
             if kind == "symbol" and outcome == "ok":
@@ -509,18 +579,31 @@ def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
             elif kind == "symbol" and outcome == "failed":
                 job.bump("news_failed")
             done = job.bump("news_done")
-            job.emit("item", phase="news",
-                     symbol="__market__" if kind == "market" else body.get("symbol"),
-                     state=outcome, done=done, total=len(symbols) + 1,
-                     sentiment=body.get("sentiment"))
+            job.emit(
+                "item",
+                phase="news",
+                symbol="__market__" if kind == "market" else body.get("symbol"),
+                state=outcome,
+                done=done,
+                total=len(symbols) + 1,
+                sentiment=body.get("sentiment"),
+            )
 
-    result = _ns.refresh_sentiment(symbols, context=context, progress_cb=_progress,
-                                   cancel=job.cancel)
+    result = _ns.refresh_sentiment(
+        symbols, context=context, progress_cb=_progress, cancel=job.cancel
+    )
     st = result.get("status") or {}
-    job.emit("phase", phase="news", state="end",
-             scored=st.get("scored"), failed=st.get("failed"), empty=st.get("empty"),
-             total=len(symbols), llm_error=st.get("llm_error") if st.get("failed") else None,
-             reason="cancelled" if result.get("cancelled") else None)
+    job.emit(
+        "phase",
+        phase="news",
+        state="end",
+        scored=st.get("scored"),
+        failed=st.get("failed"),
+        empty=st.get("empty"),
+        total=len(symbols),
+        llm_error=st.get("llm_error") if st.get("failed") else None,
+        reason="cancelled" if result.get("cancelled") else None,
+    )
 
 
 def _build_news_context(job: Job, rows_by_symbol: dict) -> dict:
@@ -537,9 +620,14 @@ def _build_news_context(job: Job, rows_by_symbol: dict) -> dict:
     for sym, r in rows_by_symbol.items():
         if r.get("beta") is not None:
             betas[sym] = r["beta"]
-        rows[sym] = {"name": r.get("name"), "price": r.get("price"),
-                     "pct_1d": r.get("pct_1d"), "pct_1w": r.get("pct_1w"),
-                     "pct_ytd": r.get("pct_ytd"), "delta_ath": r.get("delta_ath")}
+        rows[sym] = {
+            "name": r.get("name"),
+            "price": r.get("price"),
+            "pct_1d": r.get("pct_1d"),
+            "pct_1w": r.get("pct_1w"),
+            "pct_ytd": r.get("pct_ytd"),
+            "delta_ath": r.get("delta_ath"),
+        }
     for view in job.views:
         entry = persistence.load_view(view) or {}
         syms = [s for s in (r.get("symbol") for r in (entry.get("rows") or [])) if s]
@@ -549,14 +637,13 @@ def _build_news_context(job: Job, rows_by_symbol: dict) -> dict:
         for s, v in w.items():
             if v > weights.get(s, 0.0):
                 weights[s] = v
-    return {"weights": weights, "betas": betas, "rows": rows,
-            "lookback_days": job.days}
+    return {"weights": weights, "betas": betas, "rows": rows, "lookback_days": job.days}
 
 
 def _view_weights(entry: dict, syms: list[str], rows_by_symbol: dict) -> dict:
     active = entry.get("active_weight_preset")
     if active:
-        for p in (entry.get("weight_presets") or []):
+        for p in entry.get("weight_presets") or []:
             if p.get("name") == active and isinstance(p.get("weights"), dict):
                 return {s: float(p["weights"].get(s) or 0.0) for s in syms}
     caps = {s: (rows_by_symbol.get(s) or {}).get("market_cap") for s in syms}

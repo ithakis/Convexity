@@ -12,9 +12,11 @@ import pandas as pd
 import yfinance as yf
 
 from convexity.cache import (
-    _BENCH_CACHE, _BENCH_TTL,
+    _BENCH_CACHE,
+    _BENCH_TTL,
     _CACHE_TTL_ANALYTICS,
-    _cache_get, _cache_put,
+    _cache_get,
+    _cache_put,
 )
 from convexity.helpers import (
     _bollinger_pct_b,
@@ -103,8 +105,14 @@ def _earnings_surprise_yf(tk: yf.Ticker, symbol: str) -> list[dict] | None:
             else:
                 surprise_pct = (actual - estimate) / abs(estimate) * 100.0
             period = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
-            out.append({"period": period, "actual": actual,
-                        "estimate": estimate, "surprise_pct": surprise_pct})
+            out.append(
+                {
+                    "period": period,
+                    "actual": actual,
+                    "estimate": estimate,
+                    "surprise_pct": surprise_pct,
+                }
+            )
             if len(out) >= 8:
                 break
     except Exception:
@@ -267,6 +275,7 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
                 if recs is not None and not recs.empty:
                     rec_row = recs.iloc[0]
                     row_lower = {str(k).lower(): v for k, v in rec_row.items()}
+
                     def _rd_int(key):
                         v = row_lower.get(key, 0)
                         if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -275,11 +284,12 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
                             return int(v)
                         except (TypeError, ValueError):
                             return 0
+
                     d = {
-                        "strongBuy":  _rd_int("strongbuy"),
-                        "buy":        _rd_int("buy"),
-                        "hold":       _rd_int("hold"),
-                        "sell":       _rd_int("sell"),
+                        "strongBuy": _rd_int("strongbuy"),
+                        "buy": _rd_int("buy"),
+                        "hold": _rd_int("hold"),
+                        "sell": _rd_int("sell"),
                         "strongSell": _rd_int("strongsell"),
                     }
                     if any(d.values()):
@@ -381,8 +391,14 @@ def stream_quotes(entries, *, workers: int = 5, cancel=None, resolve: bool = Tru
 # one and the request comes back empty rather than erroring, so we check first
 # and let the caller fall back to the daily payload instead of drawing nothing.
 _INTERVAL_MAX_DAYS = {
-    "1m": 7, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "90m": 60,
-    "60m": 730, "1h": 730,
+    "1m": 7,
+    "2m": 60,
+    "5m": 60,
+    "15m": 60,
+    "30m": 60,
+    "90m": 60,
+    "60m": 730,
+    "1h": 730,
 }
 
 # Range -> (interval, fetch period). Two entries in practice: 3M and 6M share
@@ -421,7 +437,7 @@ def _period_days(period: str) -> float:
     for suffix, mult in _PERIOD_UNITS:
         if p.endswith(suffix):
             try:
-                return float(p[:-len(suffix)]) * mult
+                return float(p[: -len(suffix)]) * mult
             except ValueError:
                 return 10_000.0
     return 10_000.0
@@ -443,17 +459,18 @@ def intraday_history(symbol: str, interval: str, period: str) -> dict | None:
     cache_key = f"intraday|{symbol}|{interval}|{period}"
     cached = _cache_get(cache_key)
     if cached is not None:
-        return cached or None          # {} is the cached "no data" marker
+        return cached or None  # {} is the cached "no data" marker
 
     cap = _INTERVAL_MAX_DAYS.get(interval)
     if cap is not None and _period_days(period) > cap:
-        return None                    # caller's problem to fall back; don't cache
+        return None  # caller's problem to fall back; don't cache
 
     try:
         hist = yf.Ticker(symbol).history(
-            period=period, interval=interval, auto_adjust=True, actions=False)
+            period=period, interval=interval, auto_adjust=True, actions=False
+        )
     except Exception:
-        return None                    # transient — don't cache, retry next open
+        return None  # transient — don't cache, retry next open
     if hist is None or hist.empty or "Close" not in hist:
         # Cache the miss so a symbol with no intraday data doesn't re-hit Yahoo
         # on every range tab click. Short TTL via the default.
@@ -485,23 +502,36 @@ def range_history(symbol: str, rng: str, benchmarks: list[str] | None = None) ->
     """
     spec = _RANGE_INTRADAY.get((rng or "").upper())
     if spec is None:
-        return {"symbol": symbol, "range": rng, "fallback": True,
-                "reason": "range is served from the daily payload"}
+        return {
+            "symbol": symbol,
+            "range": rng,
+            "fallback": True,
+            "reason": "range is served from the daily payload",
+        }
     interval, period = spec
     main = intraday_history(symbol, interval, period)
     if main is None:
-        return {"symbol": symbol, "range": rng, "interval": interval,
-                "fallback": True, "reason": "no intraday data"}
+        return {
+            "symbol": symbol,
+            "range": rng,
+            "interval": interval,
+            "fallback": True,
+            "reason": "no intraday data",
+        }
 
     out = {
-        "symbol": symbol, "range": rng, "interval": interval, "period": period,
+        "symbol": symbol,
+        "range": rng,
+        "interval": interval,
+        "period": period,
         "fallback": False,
-        "history": main["history"], "volume": main["volume"],
+        "history": main["history"],
+        "volume": main["volume"],
         "benchmarks": {},
     }
     # Benchmarks must be on the SAME bar frequency or the overlay steps against
     # a smooth line. The client passes the ones it's actually showing.
-    for b in (benchmarks or []):
+    for b in benchmarks or []:
         b = (b or "").strip().upper()
         if not b or b == symbol.upper():
             continue
@@ -551,7 +581,9 @@ def _aligned_pct(a: pd.Series, b: pd.Series, days: int) -> tuple[float | None, f
 def _beta_corr(stock_close: pd.Series, bench_close: pd.Series) -> tuple[float | None, float | None]:
     if stock_close is None or bench_close is None:
         return (None, None)
-    df = pd.concat([stock_close.rename("s"), bench_close.rename("b")], axis=1, join="inner").dropna()
+    df = pd.concat(
+        [stock_close.rename("s"), bench_close.rename("b")], axis=1, join="inner"
+    ).dropna()
     if len(df) < 30:
         return (None, None)
     df = df.tail(252)
@@ -686,7 +718,10 @@ def fetch_detail(symbol: str) -> dict:
     out["beta"] = _safe_num(info.get("beta"))
     out["dividend_yield"] = _normalize_dividend_yield(
         info.get("dividendYield"),
-        price=out.get("price") or info.get("currentPrice") or info.get("regularMarketPrice") or info.get("last_price"),
+        price=out.get("price")
+        or info.get("currentPrice")
+        or info.get("regularMarketPrice")
+        or info.get("last_price"),
         dividend_rate=info.get("dividendRate"),
         trailing_yield=info.get("trailingAnnualDividendYield"),
         trailing_rate=info.get("trailingAnnualDividendRate"),
@@ -696,7 +731,9 @@ def fetch_detail(symbol: str) -> dict:
     ex_div = info.get("exDividendDate")
     if ex_div:
         try:
-            out["ex_div_date"] = datetime.fromtimestamp(int(ex_div), tz=timezone.utc).strftime("%Y-%m-%d")
+            out["ex_div_date"] = datetime.fromtimestamp(int(ex_div), tz=timezone.utc).strftime(
+                "%Y-%m-%d"
+            )
         except Exception:
             out["ex_div_date"] = None
 
@@ -731,15 +768,19 @@ def fetch_detail(symbol: str) -> dict:
             quarterly_income_stmt = None
 
         equity_labels = [
-            "Stockholders Equity", "Common Stock Equity",
-            "Total Stockholder Equity", "Total Equity Gross Minority Interest",
+            "Stockholders Equity",
+            "Common Stock Equity",
+            "Total Stockholder Equity",
+            "Total Equity Gross Minority Interest",
         ]
         debt_labels = ["Total Debt"]
         current_debt_labels = ["Current Debt", "Current Debt And Capital Lease Obligation"]
         long_debt_labels = ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"]
         net_income_labels = [
-            "Net Income", "Diluted NI Availto Com Stockholders",
-            "Net Income Common Stockholders", "Net Income Continuous Operations",
+            "Net Income",
+            "Diluted NI Availto Com Stockholders",
+            "Net Income Common Stockholders",
+            "Net Income Continuous Operations",
         ]
 
         equity = _latest_statement_value(balance_sheet, equity_labels)
@@ -836,7 +877,9 @@ def fetch_detail(symbol: str) -> dict:
                 pt = n.get("providerPublishTime")
                 ts = datetime.fromtimestamp(int(pt), tz=timezone.utc).isoformat() if pt else None
             if title:
-                news_out.append({"title": title, "publisher": pub or "", "link": link or "", "time": ts or ""})
+                news_out.append(
+                    {"title": title, "publisher": pub or "", "link": link or "", "time": ts or ""}
+                )
     except Exception:
         pass
     out["news"] = news_out
@@ -852,26 +895,38 @@ def fetch_detail(symbol: str) -> dict:
         out["benchmark_sector"] = _series_to_points(sector_close)
 
     horizons = {
-        "1d": 1, "1w": 7, "1m": 30, "3m": 91,
-        "6m": 182, "ytd": 0, "1y": 365, "5y": 1825,
+        "1d": 1,
+        "1w": 7,
+        "1m": 30,
+        "3m": 91,
+        "6m": 182,
+        "ytd": 0,
+        "1y": 365,
+        "5y": 1825,
     }
     perf: dict[str, dict] = {}
     for label, days in horizons.items():
         if label == "ytd":
             if not close.empty:
-                year_start = pd.Timestamp(year=close.index[-1].year, month=1, day=1, tz=close.index.tz)
+                year_start = pd.Timestamp(
+                    year=close.index[-1].year, month=1, day=1, tz=close.index.tz
+                )
                 s_w = close[close.index >= year_start]
                 s_pct = float((s_w.iloc[-1] / s_w.iloc[0] - 1.0) * 100.0) if len(s_w) >= 2 else None
             else:
                 s_pct = None
             if spy_close is not None and not spy_close.empty:
-                ys = pd.Timestamp(year=spy_close.index[-1].year, month=1, day=1, tz=spy_close.index.tz)
+                ys = pd.Timestamp(
+                    year=spy_close.index[-1].year, month=1, day=1, tz=spy_close.index.tz
+                )
                 b_w = spy_close[spy_close.index >= ys]
                 b_pct = float((b_w.iloc[-1] / b_w.iloc[0] - 1.0) * 100.0) if len(b_w) >= 2 else None
             else:
                 b_pct = None
             if sector_close is not None and not sector_close.empty:
-                ys = pd.Timestamp(year=sector_close.index[-1].year, month=1, day=1, tz=sector_close.index.tz)
+                ys = pd.Timestamp(
+                    year=sector_close.index[-1].year, month=1, day=1, tz=sector_close.index.tz
+                )
                 k_w = sector_close[sector_close.index >= ys]
                 k_pct = float((k_w.iloc[-1] / k_w.iloc[0] - 1.0) * 100.0) if len(k_w) >= 2 else None
             else:

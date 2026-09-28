@@ -11,6 +11,7 @@ is working" should mean in CI, not just "the modules import."
 Exits non-zero (with a traceback) on any failure, before ever reaching
 shutdown_server() — see the comment above that call for why.
 """
+
 from __future__ import annotations
 
 import json
@@ -84,8 +85,7 @@ def main() -> None:
             json.loads(body)
             print(f"[smoke] GET /api/fx-rates -> {status} (best-effort, network)")
         except Exception as exc:
-            print(f"[smoke] GET /api/fx-rates skipped/failed (non-fatal, "
-                  f"network-dependent): {exc}")
+            print(f"[smoke] GET /api/fx-rates skipped/failed (non-fatal, network-dependent): {exc}")
 
         print("[smoke] all checks passed")
     except Exception:

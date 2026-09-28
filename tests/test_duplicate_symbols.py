@@ -12,6 +12,7 @@ and load, and again at the top of every consumer that indexes a price frame by
 symbol — and each layer is pinned here. No network: every yfinance-touching
 seam is monkeypatched.
 """
+
 from __future__ import annotations
 
 import sys
@@ -26,9 +27,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from convexity import analytics, helpers, jobs, persistence  # noqa: E402
 
 # The real repro, in the order the saved view actually held it.
-_DUP_SYMBOLS = ["IRM", "EQIX", "IREN", "DLR", "GDS", "ETN", "VRT", "POWL", "SMCI",
-                "CARR", "ACM", "J", "VPN", "DTCR", "GDS", "AMT", "DLR", "IRM",
-                "IREN", "BABA"]
+_DUP_SYMBOLS = [
+    "IRM",
+    "EQIX",
+    "IREN",
+    "DLR",
+    "GDS",
+    "ETN",
+    "VRT",
+    "POWL",
+    "SMCI",
+    "CARR",
+    "ACM",
+    "J",
+    "VPN",
+    "DTCR",
+    "GDS",
+    "AMT",
+    "DLR",
+    "IRM",
+    "IREN",
+    "BABA",
+]
 _UNIQUE = list(dict.fromkeys(_DUP_SYMBOLS))
 
 
@@ -65,8 +85,16 @@ def fake_market(monkeypatch):
 
 
 def _rows(symbols):
-    return [{"symbol": s, "price": 10.0 + i, "market_cap": 1e9 * (i + 1),
-             "currency": "USD", "sector": ""} for i, s in enumerate(symbols)]
+    return [
+        {
+            "symbol": s,
+            "price": 10.0 + i,
+            "market_cap": 1e9 * (i + 1),
+            "currency": "USD",
+            "sector": "",
+        }
+        for i, s in enumerate(symbols)
+    ]
 
 
 # ------------------------------ analytics -----------------------------------
@@ -74,7 +102,8 @@ def _rows(symbols):
 
 def test_analytics_multi_survives_duplicate_rows(fake_market):
     out = analytics.analyze_portfolios_multi(
-        _rows(_DUP_SYMBOLS), {"equal": {}, "custom": {"GDS": 3.0, "DLR": 1.0}}, "1Y")
+        _rows(_DUP_SYMBOLS), {"equal": {}, "custom": {"GDS": 3.0, "DLR": 1.0}}, "1Y"
+    )
     assert "error" not in out, out
     eq = out["equal"]
     assert eq["active_symbols"] == _UNIQUE
@@ -103,24 +132,30 @@ def test_frontier_dedupes_rows_before_counting_assets(monkeypatch):
     """Two rows for ONE ticker used to pass the `need at least 2 symbols` gate
     and then fail later with a confusing "1 assets" data error."""
     from convexity import frontier
+
     seen = []
-    monkeypatch.setattr(frontier, "_bulk_close",
-                        lambda syms, period: seen.append(list(syms)) or pd.DataFrame())
-    msgs = list(frontier.compute_efficient_frontier_stream(
-        [{"symbol": "AAA"}, {"symbol": "AAA"}], budget="light"))
+    monkeypatch.setattr(
+        frontier, "_bulk_close", lambda syms, period: seen.append(list(syms)) or pd.DataFrame()
+    )
+    msgs = list(
+        frontier.compute_efficient_frontier_stream(
+            [{"symbol": "AAA"}, {"symbol": "AAA"}], budget="light"
+        )
+    )
     assert msgs[-1]["type"] == "error"
     assert "at least 2 symbols" in msgs[-1]["error"]
-    assert seen == []                       # rejected before any fetch
+    assert seen == []  # rejected before any fetch
 
 
 # ------------------------------ helper --------------------------------------
 
 
 def test_dedupe_rows_keeps_first_position_and_latest_row():
-    rows = [{"symbol": "A", "price": 1}, {"symbol": "B", "price": 2},
-            {"symbol": "A", "price": 3}]
+    rows = [{"symbol": "A", "price": 1}, {"symbol": "B", "price": 2}, {"symbol": "A", "price": 3}]
     assert helpers._dedupe_rows_by_symbol(rows) == [
-        {"symbol": "A", "price": 3}, {"symbol": "B", "price": 2}]
+        {"symbol": "A", "price": 3},
+        {"symbol": "B", "price": 2},
+    ]
 
 
 def test_dedupe_rows_never_trades_a_good_row_for_an_error_row():
@@ -148,8 +183,9 @@ def isolated_state(tmp_path, monkeypatch):
 
 
 def test_save_view_never_persists_duplicate_rows(isolated_state):
-    saved = persistence.save_view("DC", "A,B", [{"symbol": "A", "price": 1},
-                                                {"symbol": "B"}, {"symbol": "A", "price": 2}])
+    saved = persistence.save_view(
+        "DC", "A,B", [{"symbol": "A", "price": 1}, {"symbol": "B"}, {"symbol": "A", "price": 2}]
+    )
     assert [r["symbol"] for r in saved["rows"]] == ["A", "B"]
     assert [r["symbol"] for r in persistence.load_view("DC")["rows"]] == ["A", "B"]
     assert persistence.list_views()["views"]["DC"]["row_count"] == 2
@@ -159,8 +195,12 @@ def test_load_view_heals_a_view_saved_before_the_fix(isolated_state):
     """Views already on disk with duplicates (the real one) must load clean —
     the table, analytics and the Excel export all read them through here."""
     import json
-    (isolated_state / "views.json").write_text(json.dumps({"views": {"DC": {
-        "entries": "A,B", "rows": _rows(["A", "B", "A"]), "saved_at": "x"}}}))
+
+    (isolated_state / "views.json").write_text(
+        json.dumps(
+            {"views": {"DC": {"entries": "A,B", "rows": _rows(["A", "B", "A"]), "saved_at": "x"}}}
+        )
+    )
     assert [r["symbol"] for r in persistence.load_view("DC")["rows"]] == ["A", "B"]
     assert persistence.list_views()["views"]["DC"]["row_count"] == 2
 
@@ -176,8 +216,12 @@ def test_stream_quotes_collapses_names_that_resolve_to_one_ticker(monkeypatch):
     """'microsoft' and 'MSFT' are one instrument: the build must fetch it once,
     or equal-weight silently doubles its allocation."""
     from convexity import fetcher, resolver
-    monkeypatch.setattr(resolver, "resolve_symbol",
-                        lambda e: {"microsoft": "MSFT"}.get(e.strip(), e.strip().upper()))
+
+    monkeypatch.setattr(
+        resolver,
+        "resolve_symbol",
+        lambda e: {"microsoft": "MSFT"}.get(e.strip(), e.strip().upper()),
+    )
     monkeypatch.setattr(fetcher, "fetch_one", lambda s: {"symbol": s, "price": 1.0})
     msgs = list(fetcher.stream_quotes(["microsoft", "MSFT", "aapl", "AAPL"]))
     assert msgs[0]["symbols"] == ["MSFT", "AAPL"]

@@ -15,6 +15,7 @@ daily series (Newey-West for overlapping 5-day returns).
 A verdict is only given once there are enough dates to mean something
 (VERDICT_MIN_DAYS); before that the answer is "too early", with the count.
 """
+
 from __future__ import annotations
 
 import math
@@ -88,12 +89,11 @@ def clustered_mean_t(series: list[float], horizon: int = 1) -> dict:
     mu = sum(series) / n
     e = [x - mu for x in series]
     if horizon <= 1:
-        var = sum(v * v for v in e) / (n - 1)          # the textbook daily-series t
+        var = sum(v * v for v in e) / (n - 1)  # the textbook daily-series t
     else:
         var = sum(v * v for v in e) / n
         for lag in range(1, horizon):
-            var += 2.0 * (1.0 - lag / horizon) * sum(e[i] * e[i - lag]
-                                                     for i in range(lag, n)) / n
+            var += 2.0 * (1.0 - lag / horizon) * sum(e[i] * e[i - lag] for i in range(lag, n)) / n
     t = mu / math.sqrt(var / n) if var > 0 else None
     return {"mean": mu, "t": t, "n_days": n}
 
@@ -107,8 +107,7 @@ def wilson(k: int, n: int, z: float = 1.96) -> dict:
     den = 1 + z * z / n
     centre = (p + z * z / (2 * n)) / den
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
-    return {"k": k, "n": n, "rate": p, "lo": max(0.0, centre - half),
-            "hi": min(1.0, centre + half)}
+    return {"k": k, "n": n, "rate": p, "lo": max(0.0, centre - half), "hi": min(1.0, centre + half)}
 
 
 def verdict(ic: dict) -> dict:
@@ -116,8 +115,10 @@ def verdict(ic: dict) -> dict:
     n = ic.get("n_days") or 0
     mean, t = ic.get("mean"), ic.get("t")
     if n < VERDICT_MIN_DAYS:
-        return {"key": "too_early",
-                "text": f"Too early — {n} of ~{VERDICT_TARGET_DAYS} trading days"}
+        return {
+            "key": "too_early",
+            "text": f"Too early — {n} of ~{VERDICT_TARGET_DAYS} trading days",
+        }
     if t is not None and t >= 2 and (mean or 0) > 0:
         return {"key": "edge", "text": "Evidence of an edge"}
     if t is not None and 1 <= t < 2:
@@ -160,9 +161,15 @@ def long_short(rows: list[dict], tier_key: str, horizon: int = 1) -> list[dict]:
             continue
         spread = sum(legs["long"]) / len(legs["long"]) - sum(legs["short"]) / len(legs["short"])
         cum += spread
-        out.append({"date": d, "spread_pct": round(spread * 100, 3),
-                    "cum_pct": round(cum * 100, 3),
-                    "n_long": len(legs["long"]), "n_short": len(legs["short"])})
+        out.append(
+            {
+                "date": d,
+                "spread_pct": round(spread * 100, 3),
+                "cum_pct": round(cum * 100, 3),
+                "n_long": len(legs["long"]),
+                "n_short": len(legs["short"]),
+            }
+        )
     return out
 
 
@@ -181,14 +188,14 @@ def hit_rates(rows: list[dict], tier_of) -> dict:
         elif t in _BEAR:
             sn += 1
             sk += f < 0
-    return {"bullish": wilson(bk, bn), "bearish": wilson(sk, sn),
-            "all": wilson(bk + sk, bn + sn)}
+    return {"bullish": wilson(bk, bn), "bearish": wilson(sk, sn), "all": wilson(bk + sk, bn + sn)}
 
 
 def _news_tier(score: float | None) -> str | None:
     # Local import keeps this module free of the network-facing engine at
     # import time (the engine loads caches from disk on import).
     from convexity.news_sentiment import tier_for
+
     return tier_for(score)
 
 
@@ -204,6 +211,7 @@ def compute(raw_records: list[dict], closes=None, market_horizon: int = 5) -> di
         return _empty(out)
     if closes is None:
         from convexity.analytics import _bulk_close
+
         try:
             closes = _bulk_close(sorted({r["symbol"] for r in records}) + ["SPY"], "1Y")
         except Exception:
@@ -222,14 +230,15 @@ def compute(raw_records: list[dict], closes=None, market_horizon: int = 5) -> di
         if s is None or len(s) < h + 2:
             return None
         ts = pd.Timestamp(rec["date"])
-        pos = s.index.searchsorted(ts, side="right") - 1      # last close <= date
+        pos = s.index.searchsorted(ts, side="right") - 1  # last close <= date
         spos = spy.index.searchsorted(ts, side="right") - 1
         if pos < 0 or pos + h >= len(s) or spos < 0 or spos + h >= len(spy):
             return None
         beta = rec.get("beta")
         beta = float(beta) if isinstance(beta, (int, float)) else 1.0
-        return (float(s.iloc[pos + h] / s.iloc[pos] - 1.0)
-                - beta * float(spy.iloc[spos + h] / spy.iloc[spos] - 1.0))
+        return float(s.iloc[pos + h] / s.iloc[pos] - 1.0) - beta * float(
+            spy.iloc[spos + h] / spy.iloc[spos] - 1.0
+        )
 
     rows = []
     for rec in records:
@@ -237,22 +246,32 @@ def compute(raw_records: list[dict], closes=None, market_horizon: int = 5) -> di
         # Rank on the raw model score: z is re-anchored when the percentile
         # switches from the training knots to live history, the score never
         # is. Pre-v1.12 records only carry the raw v1 SAR.
-        row["market_rank"] = next((rec[k] for k in ("market_score", "market_sar")
-                                   if isinstance(rec.get(k), (int, float))), None)
+        row["market_rank"] = next(
+            (
+                rec[k]
+                for k in ("market_score", "market_sar")
+                if isinstance(rec.get(k), (int, float))
+            ),
+            None,
+        )
         rows.append(row)
 
-    engines = {"news": ("news_score", "news_tier", 1),
-               "market": ("market_rank", "market_tier", market_horizon)}
+    engines = {
+        "news": ("news_score", "news_tier", 1),
+        "market": ("market_rank", "market_tier", market_horizon),
+    }
     quants: dict[str, Any] = {"daily_ic": {}, "tier_table": {}}
     for eng, (key, tier_key, h) in engines.items():
         ic_by_h = {}
         for hh in (1, 5):
             ics = daily_ics(rows, key, hh)
             st = clustered_mean_t([ic for _, ic, _ in ics], hh)
-            ic_by_h[f"{hh}d"] = {**{k: (round(v, 4) if isinstance(v, float) else v)
-                                    for k, v in st.items()}}
+            ic_by_h[f"{hh}d"] = {
+                **{k: (round(v, 4) if isinstance(v, float) else v) for k, v in st.items()}
+            }
             quants["daily_ic"].setdefault(eng, {})[f"{hh}d"] = [
-                {"date": d, "ic": round(ic, 4), "n": n} for d, ic, n in ics]
+                {"date": d, "ic": round(ic, 4), "n": n} for d, ic, n in ics
+            ]
         scored = [r for r in rows if isinstance(r.get(key), (int, float))]
         latest = max((r["date"] for r in scored), default=None)
         out[eng] = {
@@ -261,25 +280,30 @@ def compute(raw_records: list[dict], closes=None, market_horizon: int = 5) -> di
             "verdict": verdict(ic_by_h[f"{h}d"]),
             "hit_rate": hit_rates(rows, lambda r, tk=tier_key: r.get(tk)),
             "long_short": long_short(rows, tier_key, 1),
-            "coverage": {"n_records": len(scored),
-                         "pct_records": round(100.0 * len(scored) / max(1, len(rows)), 1),
-                         "latest_date": latest},
+            "coverage": {
+                "n_records": len(scored),
+                "pct_records": round(100.0 * len(scored) / max(1, len(rows)), 1),
+                "latest_date": latest,
+            },
         }
         quants["tier_table"][eng] = _tier_table(rows, tier_key)
 
     # News read per-lens hit rates (a lens call = its score's tier)
     out["news"]["lens_hit_rate"] = {
-        lens: hit_rates(rows, lambda r, ln=lens: _news_tier(((r.get("lens") or {})
-                                                             .get(ln))))
-        for lens in ("financials", "outlook", "competition", "regulation", "street")}
-    agreements = [float(r["agreement"]) for r in rows
-                  if isinstance(r.get("agreement"), (int, float))]
+        lens: hit_rates(rows, lambda r, ln=lens: _news_tier(((r.get("lens") or {}).get(ln))))
+        for lens in ("financials", "outlook", "competition", "regulation", "street")
+    }
+    agreements = [
+        float(r["agreement"]) for r in rows if isinstance(r.get("agreement"), (int, float))
+    ]
     bins = [0] * 10
     for a in agreements:
         bins[min(9, int(a * 10))] += 1
     out["news"]["consistency"] = {
         "mean": round(sum(agreements) / len(agreements), 3) if agreements else None,
-        "n": len(agreements), "hist": {"edges": [i / 10 for i in range(11)], "counts": bins}}
+        "n": len(agreements),
+        "hist": {"edges": [i / 10 for i in range(11)], "counts": bins},
+    }
     quants["market_calibration"] = _calibration(rows, market_horizon)
     out["quants"] = quants
     return out
@@ -293,37 +317,50 @@ def _tier_table(rows: list[dict], tier_key: str) -> dict:
             continue
         f1 = [r["fwd_1d"] for r in grp if isinstance(r.get("fwd_1d"), (int, float))]
         f5 = [r["fwd_5d"] for r in grp if isinstance(r.get("fwd_5d"), (int, float))]
-        out[t] = {"n": len(grp),
-                  "fwd_1d_pct": round(100 * sum(f1) / len(f1), 3) if f1 else None,
-                  "fwd_5d_pct": round(100 * sum(f5) / len(f5), 3) if f5 else None,
-                  "n_days": len({r["date"] for r in grp})}
+        out[t] = {
+            "n": len(grp),
+            "fwd_1d_pct": round(100 * sum(f1) / len(f1), 3) if f1 else None,
+            "fwd_5d_pct": round(100 * sum(f5) / len(f5), 3) if f5 else None,
+            "n_days": len({r["date"] for r in grp}),
+        }
     return out
 
 
 def _calibration(rows: list[dict], h: int) -> list[dict]:
     """Market read z (quintile bins) vs the realized forward idio return."""
-    pts = sorted((float(r["market_z"]), float(r[f"fwd_{h}d"])) for r in rows
-                 if isinstance(r.get("market_z"), (int, float))
-                 and isinstance(r.get(f"fwd_{h}d"), (int, float)))
+    pts = sorted(
+        (float(r["market_z"]), float(r[f"fwd_{h}d"]))
+        for r in rows
+        if isinstance(r.get("market_z"), (int, float))
+        and isinstance(r.get(f"fwd_{h}d"), (int, float))
+    )
     if len(pts) < 25:
         return []
     k = 5
     out = []
     for b in range(k):
-        grp = pts[b * len(pts) // k:(b + 1) * len(pts) // k]
+        grp = pts[b * len(pts) // k : (b + 1) * len(pts) // k]
         if grp:
-            out.append({"z_mean": round(sum(p[0] for p in grp) / len(grp), 2),
-                        "realized_pct": round(100 * sum(p[1] for p in grp) / len(grp), 3),
-                        "n": len(grp)})
+            out.append(
+                {
+                    "z_mean": round(sum(p[0] for p in grp) / len(grp), 2),
+                    "realized_pct": round(100 * sum(p[1] for p in grp) / len(grp), 3),
+                    "n": len(grp),
+                }
+            )
     return out
 
 
 def _empty(out: dict) -> dict:
     for eng in ("news", "market"):
-        out[eng] = {"horizon_days": 1 if eng == "news" else out["market_horizon_days"],
-                    "ic": {}, "verdict": verdict({"n_days": 0}),
-                    "hit_rate": hit_rates([], lambda r: None), "long_short": [],
-                    "coverage": {"n_records": 0, "pct_records": 0.0, "latest_date": None}}
+        out[eng] = {
+            "horizon_days": 1 if eng == "news" else out["market_horizon_days"],
+            "ic": {},
+            "verdict": verdict({"n_days": 0}),
+            "hit_rate": hit_rates([], lambda r: None),
+            "long_short": [],
+            "coverage": {"n_records": 0, "pct_records": 0.0, "latest_date": None},
+        }
     out["news"]["lens_hit_rate"] = {}
     out["news"]["consistency"] = {"mean": None, "n": 0, "hist": {"edges": [], "counts": []}}
     out["quants"] = {"daily_ic": {}, "tier_table": {}, "market_calibration": []}
