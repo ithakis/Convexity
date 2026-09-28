@@ -451,12 +451,8 @@ not reintroduce one; the engines answer different questions.
   (`ok/rejected/rate_limited/unavailable/network_error/no_key/error`); the key
   is only ever in a header, never a URL, and a full limiter reports
   `rate_limited` instead of blocking the click. These branches never put
-  `str(exc)` or a traceback in a response or log. Both POSTs go through
-  `Handler._same_origin_json()` (403 otherwise): `Content-Type: application/json`
-  (a text/plain cross-site POST needs no CORS preflight, so any open web page
-  could otherwise swap or delete a key), a loopback `Host` (DNS rebinding) and,
-  when the browser sends one, an `Origin` equal to this server. Older
-  state-changing routes predate this and don't have it yet. `tests/test_keys.py`'s leak
+  `str(exc)` or a traceback in a response or log. Like every route, they sit behind the
+  request-origin guard (§4 HTTP routes). `tests/test_keys.py`'s leak
   test posts a sentinel and greps every response, stdout/stderr and the log ring.
   `keys._FINNHUB_BASE` / `_NVIDIA_BASE` are module constants so tests point them
   at a local stub. First-run banner: `/api/health` `finnhub_key_set` /
@@ -731,6 +727,31 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
   old "no data sticks forever" bug.
 
 ### HTTP routes (`Handler` in `server.py`, ~line 92)
+
+**Request-origin guard (v1.15) — runs before dispatch in `do_GET` / `do_POST`
+/ `do_DELETE` (`Handler._request_allowed`, 403 `{"error": "cross-origin
+request refused"}` plus a `refused cross-origin …` stderr line):**
+- **Every method:** `Host` must be a loopback name (`127.0.0.1`, `localhost`,
+  `[::1]`, any port). A DNS-rebinding page is *same-origin* with us — without
+  this it could read `/api/watchlists` (the user's holdings) and skip every
+  CORS rule. Browsers can't forge `Host`.
+- **POST / DELETE:** an `Origin`, when sent, must equal `http://<Host>`.
+  Browsers send it on every non-GET fetch, same-origin included.
+- **POST:** `Content-Type` must be `application/json`. text/plain, form and
+  multipart POSTs are CORS "simple requests" — sent cross-site with no
+  preflight — so without this any web page open in the user's browser could
+  overwrite, rename or delete portfolios or start quota-spending jobs. JSON
+  forces a preflight, and there is **deliberately no `do_OPTIONS`** (501), so
+  it fails. DELETE is never a simple request, so it needs no JSON rule.
+- A missing `Host` / `Origin` passes: only non-browser local clients (curl,
+  tests, the desktop readiness probe) omit them.
+
+Consequences: **every frontend POST must send `Content-Type:
+application/json`, bodyless ones too** (they send `body: "{}"`), and nothing
+may use `sendBeacon` (it can't set that header) —
+`tests/test_origin_guard.py::test_every_frontend_post_sends_json` scans
+`app.js` for both. A new route needs nothing: the guard is at the method
+level. Never add a `do_OPTIONS` or CORS headers.
 **GET**
 - `/`                              — serves `static/index.html`
 - `/api/views`                     — list of saved views (metadata only)
@@ -2402,6 +2423,11 @@ GitHub's side needs a GitHub Support request by the owner.
 ### Code rules that keep the attack surface near zero
 - The server binds **127.0.0.1 only**. Never `0.0.0.0`, never a tunnel, never
   CORS `*` on anything that reads or writes user state.
+- Binding to loopback does not keep *the user's browser* out: any open web page
+  can send requests to 127.0.0.1. The request-origin guard (§4 HTTP routes:
+  loopback `Host`, same-origin `Origin`, JSON-only POSTs, no `do_OPTIONS`)
+  is what stops cross-site writes and DNS-rebinding reads. Don't weaken it,
+  and don't add a route handler that bypasses `do_GET`/`do_POST`/`do_DELETE`.
 - Keys load only through `helpers._load_local_secret` (env var, then
   `config.json` in the data folder, then a gitignored legacy file). They never appear in code, logs, `/api/*` responses or the
   frontend — `/api/runtime-status` and `/api/keys` expose booleans only, and the

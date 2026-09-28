@@ -13,6 +13,7 @@ Roadmap Phase 6 (`distribution` branch): API keys in Settings.
 - **Keys take effect immediately** — no restart. Saving a new NVIDIA key also clears an earlier "key rejected" state, so the News read retries straight away.
 - **First-run banner**: "Add your free API keys to enable News" until both keys are set; it can be dismissed.
 - Keys stay private: stored only in `config.json` in the data folder (readable only by you), never shown back, logged or sent anywhere but the provider — the page shows only whether a key is set and where it comes from. A key set by environment variable still wins, and Settings says so. A `config.json` that is not valid JSON is never overwritten; Settings says to fix or delete it. The key routes only accept requests from the app's own page, so another website open in the same browser cannot change or remove a key.
+- **Other websites can no longer touch your portfolios.** The app's server only listens on your own machine, but any web page open in your browser could still send it requests — enough to overwrite, rename or delete a saved portfolio, start refreshes that spend your API quota, or (by a trick called DNS rebinding) read your holdings. Every request now has to come from the app's own page; anything else is refused.
 
 ## 1.14.2 — 2026-09-28
 

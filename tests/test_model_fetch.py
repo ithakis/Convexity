@@ -394,7 +394,8 @@ def test_retry_route(server, monkeypatch):
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
         req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/api/model-download",
-                                     data=b"", method="POST")
+                                     data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as r:
             assert r.status == 202
             assert json.loads(r.read())["state"] in ("downloading", "installed")

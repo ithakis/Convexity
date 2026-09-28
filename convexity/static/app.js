@@ -6522,7 +6522,7 @@ function setupRefreshControl() {
   const chip = $("#rf-chip");
   $("#rf-chip-cancel").onclick = (e) => {
     e.stopPropagation();
-    if (REFRESH.id) fetch(`/api/refresh-job/${REFRESH.id}/cancel`, {method: "POST"});
+    if (REFRESH.id) fetch(`/api/refresh-job/${REFRESH.id}/cancel`, {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
   };
   // Clicking the chip body opens the detailed per-ticker view — opt-in now,
   // rather than a modal thrown up on every refresh.
@@ -10160,7 +10160,7 @@ function modelDownloadLine(dl) {
 
 function retryModelDownload(btn) {
   if (btn) btn.disabled = true;
-  fetch("/api/model-download", { method: "POST" }).then(r => r.json()).catch(() => null)
+  fetch("/api/model-download", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then(r => r.json()).catch(() => null)
     .then(() => loadRuntimeStatus(true));
 }
 

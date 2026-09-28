@@ -252,6 +252,9 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        if not self._request_allowed():
+            self._refuse_cross_origin()
+            return
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
             fpath = _STATIC_DIR / "index.html"
@@ -599,34 +602,74 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def _same_origin_json(self) -> bool:
-        """Guard for routes that change secrets. Any web page open in the
-        user's browser can send a "simple" cross-site POST to 127.0.0.1 (a
-        text/plain body needs no CORS preflight), which could swap or delete a
-        key. Requiring application/json forces a preflight this server never
-        approves; the Host check stops DNS rebinding; and a browser's Origin
-        header, when sent, must be this server itself."""
-        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if ctype != "application/json":
-            return False
-        host = (self.headers.get("Host") or "").strip().lower()
-        hostname = host.rsplit(":", 1)[0] if not host.endswith("]") else host
-        if hostname not in ("127.0.0.1", "localhost", "[::1]"):
-            return False
+    # ------------------------- request-origin guard -------------------------
+    # The server binds 127.0.0.1, but the user's browser is a client too: any
+    # web page open in it can send requests here. Three layers, applied at the
+    # top of do_GET / do_POST / do_DELETE (v1.15):
+    #   * Host must be a loopback name (all methods). A DNS-rebinding page makes
+    #     its own hostname resolve to 127.0.0.1, which makes it *same-origin*
+    #     with us — it could then read /api/watchlists (real holdings) and
+    #     skip every CORS check. It cannot forge the Host header, though.
+    #   * Origin, when the browser sends one (every non-GET fetch does, even
+    #     same-origin), must be this server (POST/DELETE).
+    #   * POST bodies must be application/json. A text/plain / form POST is a
+    #     CORS "simple request": sent cross-site with no preflight. JSON forces
+    #     a preflight, and there is no do_OPTIONS, so it fails (501).
+    # DELETE needs no JSON rule: it is never a simple request, so a
+    # cross-site DELETE always preflights and fails the same way.
+    # A missing Host/Origin is allowed: browsers always send Host and send
+    # Origin on every request that matters here, so only non-browser local
+    # clients (curl, tests, the desktop readiness probe) omit them.
+
+    _LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
+
+    def _host(self) -> str:
+        return (self.headers.get("Host") or "").strip().lower()
+
+    def _host_ok(self) -> bool:
+        host = self._host()
+        if not host:
+            return True
+        name = host if host.endswith("]") else host.rsplit(":", 1)[0]
+        return name in self._LOOPBACK_NAMES
+
+    def _origin_ok(self) -> bool:
         origin = (self.headers.get("Origin") or "").strip().lower()
-        if origin and origin not in (f"http://{host}", f"https://{host}"):
+        if not origin:
+            return True
+        host = self._host()
+        return bool(host) and origin in (f"http://{host}", f"https://{host}")
+
+    def _request_allowed(self, require_json: bool = False) -> bool:
+        if not self._host_ok():
             return False
+        if self.command != "GET" and not self._origin_ok():
+            return False
+        if require_json:
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                return False
         return True
 
+    def _refuse_cross_origin(self) -> None:
+        # Drain a declared body so the connection stays well-formed.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if 0 < length <= 1 << 20:
+                self.rfile.read(length)
+        except (ValueError, OSError):
+            pass
+        print(f"[{self.log_date_time_string()}] refused cross-origin {self.command} "
+              f"{urlparse(self.path).path}", file=sys.stderr)
+        self._send_json(403, {"error": "cross-origin request refused"})
+
     def _handle_keys_post(self, path: str) -> None:
-        """POST /api/keys and /api/keys/test. Nothing in these branches may put
+        """POST /api/keys and /api/keys/test (do_POST has already applied the
+        origin guard). Nothing in these branches may put
         the request body, a key or an exception message into a response or a
         log line: every error answer is fixed text (keys.InvalidKey carries
         fixed text too), and no traceback is printed — a frame's locals would
         be one repr away from the key."""
-        if not self._same_origin_json():
-            self._send_json(403, {"error": "cross-origin request refused"})
-            return
         try:
             payload = self._read_json()
             if not isinstance(payload, dict):
@@ -658,6 +701,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
 
     def do_POST(self):
+        # Every POST, not just the key routes: watchlists, views, rename,
+        # presets, jobs … all change saved state or spend API quota.
+        if not self._request_allowed(require_json=True):
+            self._refuse_cross_origin()
+            return
         parsed = urlparse(self.path)
         if parsed.path in ("/api/keys", "/api/keys/test"):
             self._handle_keys_post(parsed.path)
@@ -1034,6 +1082,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_DELETE(self):
+        if not self._request_allowed():
+            self._refuse_cross_origin()
+            return
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/views/"):
             name = unquote(parsed.path[len("/api/views/"):])

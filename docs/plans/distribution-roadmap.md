@@ -451,8 +451,9 @@ Findings (2026-09-28, implemented on `distribution` after v1.14.2):
   open in the user's browser could have swapped or deleted a key. They now
   require JSON, a loopback Host and a same-origin Origin (403 otherwise; tested
   for text/plain, a foreign Origin, another local port and a rebinding Host).
-  The older state-changing routes (watchlists, views, …) have the same exposure
-  and are not guarded yet — a follow-up. Also: the LLM's "NVIDIA key missing"
+  Follow-up done the same day: the guard now covers every route (Host check
+  on all methods — a rebinding page could otherwise *read* the holdings —
+  Origin on POST/DELETE, JSON on every POST); see CLAUDE.md §4 HTTP routes. Also: the LLM's "NVIDIA key missing"
   reason still pointed at hand-editing config.json; it now points at Settings.
 - Not done here: `install.sh`'s copy of legacy keys still writes `config.json`
   itself rather than through `keys.py` (same fields and mode). Browsers may
