@@ -1451,8 +1451,8 @@ Two places have the contract documented; keep them in sync:
   "could this end up in the per-row hot loop?"
 
 ### Workflow
-- After non-trivial edits: `python -c "import ast; ast.parse(open(f).read())"`
-  on every changed `.py` file (or run `scripts/check_syntax.py`).
+- After non-trivial edits: `uv run ruff check . && uv run ruff format .`
+  (CI blocks on both) and `scripts/check_syntax.py`.
 - After backend edits that change behaviour: restart the server you started
   (`kill <its pid>`, then `CONVEXITY_HOME=<tmp> uv run convexity &`). §3
   gotcha 3: never pkill the user's installed app.
@@ -1756,7 +1756,7 @@ fails in seconds instead of waiting on the platform-specific jobs first:
 | Job | Runner | What it proves |
 |---|---|---|
 | `secrets` | ubuntu | gitleaks (checksum-pinned binary) over the **full history**, plus a filename check that no runtime-state / key / `settings.local.json` file exists in any commit — §18. Independent of the others so a leak fails fast |
-| `lint` | ubuntu | Every `.py` parses (`scripts/check_syntax.py`); `pyflakes` on all `src/convexity/*.py` + `scripts/*.py` (non-blocking); dependency manifests cover `envcheck.REQUIRED`; `uv lock --check` (lockfile matches pyproject); `dashboard.py` parses; `install.ps1`/`update.ps1` parse via PowerShell Core's own `Parser.ParseFile`; `install.sh`/`update.sh`/`Launch Dashboard.command` pass `bash -n`. Runs `uv run --no-project` — no dependency install |
+| `lint` | ubuntu | Every `.py` parses (`scripts/check_syntax.py`); `ruff check .` and `ruff format --check .` (**blocking**, ruff pinned to the uv.lock version); dependency manifests cover `envcheck.REQUIRED`; `uv lock --check` (lockfile matches pyproject); `packaging/install.ps1`/`update.ps1` parse via PowerShell Core's own `Parser.ParseFile`; `install.sh`/`packaging/update.sh`/`packaging/Launch Dashboard.command` pass `bash -n`. Runs `uv run --no-project` — no dependency install |
 | `test` | ubuntu | `uv sync --locked --extra dev` then `uv run pytest tests/` — the full unit suite |
 | `server-smoke` | ubuntu | Real HTTP requests against a real running server (`scripts/smoke_test_server.py`) — `/`, `/api/watchlists`, `/api/views`, `/static/*` must return real 200s with real bodies. This is the answer to "is the app actually working," not just "does it import." |
 | `desktop-import-smoke` | ubuntu | `convexity.desktop` imports cleanly under a real (headless, `QT_QPA_PLATFORM=offscreen`) `QApplication` — catches PySide6/QtWebEngine API breakage the plain lint job can't see, since lint never installs PySide6. Needs a handful of system graphics libraries (`libegl1`, `libgl1`, etc.) installed via `apt-get` first — the bare runner has none, not even for the offscreen platform plugin |
@@ -1774,12 +1774,16 @@ an empty `HOME` and a minimal `PATH` with the installer piped in, as a
 `cat install.sh | env -i HOME=<tmp>/home PATH=/usr/bin:/bin CONVEXITY_SOURCE=<checkout> INSTALL_APPS_DIR=<tmp>/Apps CONVEXITY_HOME=<tmp>/data bash`
 — that exercises the official uv installer and a managed Python download too.
 
-`pyflakes` stays `|| true` (non-blocking) — tighten by removing that once
-the false-positive rate on the wider `src/convexity/*.py` glob has been
-measured over a few weeks.
+**ruff replaced pyflakes in Phase 7** and is blocking: `ruff check` (rules
+in `[tool.ruff.lint]` — ruff's default pyflakes + pycodestyle-error set, E741
+off for the LP's `l`/`h` bounds, E402 allowed in `server.py` and tests) and
+`ruff format --check` (line length 100). Run `uv run ruff format .` before
+committing; the formatting commit is listed in `.git-blame-ignore-revs`. The
+CI pin (`uvx ruff@<ver>`) must match the ruff version in `uv.lock` — bump both
+together, or CI and local formatting can disagree.
 
-**To tighten a check:** remove `|| true` from the relevant step in `ci.yml`
-and commit — the next push will enforce it.
+**To add a check:** add a step to `ci.yml` without `|| true` — the next push
+will enforce it.
 
 ### Pre-commit hooks (`.claude/settings.json`)
 

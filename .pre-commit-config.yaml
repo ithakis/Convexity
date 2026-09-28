@@ -25,7 +25,27 @@ repos:
         stages: [pre-commit]
 
   # -------------------------------------------------------------------------
-  # 2. pytest — metrics unit tests
+  # 2. ruff — lint + format check (config in pyproject.toml), as in CI
+  # -------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        language: system
+        entry: uv run ruff check .
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: ruff-format
+        name: ruff format --check
+        language: system
+        entry: uv run ruff format --check .
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+  # -------------------------------------------------------------------------
+  # 3. pytest — metrics unit tests
   # -------------------------------------------------------------------------
   - repo: local
     hooks:

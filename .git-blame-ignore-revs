@@ -1,0 +1,4 @@
+# Commits that only reformat code; `git blame --ignore-revs-file .git-blame-ignore-revs`
+# (GitHub applies this file automatically).
+# style: ruff format (Phase 7)
+2421f6fd282450f0823c8de362457ad8627c2d6f

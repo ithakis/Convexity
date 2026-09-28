@@ -57,10 +57,14 @@ jobs:
       - name: Python syntax check (all .py files)
         run: uv run --no-project python scripts/check_syntax.py
 
-      # Pyflakes catches undefined names, unused imports, etc.
-      - name: Pyflakes on package modules
-        run: |
-          uvx pyflakes src/convexity/*.py scripts/*.py 2>&1 || true
+      # ruff (config in pyproject.toml) replaced the non-blocking pyflakes
+      # step in Phase 7: undefined names, unused imports, etc. now fail CI,
+      # and so does unformatted code. Pinned to the version in uv.lock (dev
+      # extra) so CI and `uv run ruff` agree; bump both together.
+      - name: ruff check
+        run: uvx ruff@0.16.9 check .
+      - name: ruff format --check
+        run: uvx ruff@0.16.9 format --check .
 
       # The check that would have caught the v1.10.0 bug: two manifests that
       # were never compared, so lightgbm/scikit-learn lived only in the one CI
