@@ -1,0 +1,529 @@
+# Frontend
+
+[← CLAUDE.md](../../CLAUDE.md) · part of the engineering notes; `§N` references name the original CLAUDE.md sections (map in CLAUDE.md).
+
+Sections: §5 (frontend), §8 (CSS / theming), §11 (line landmarks).
+
+## 5. Frontend (`src/convexity/static/`)
+
+Real static files served by `server.py` — `index.html`, `app.js`,
+`style.css`. No frameworks, no build step. KaTeX is the only external
+dependency (loaded from CDN, used only for column-guide formulas).
+
+### State (`STATE`, `DATA`, `VIEWS`, `WATCHLISTS`)
+- `DATA` — currently-rendered rows
+- `VIEWS` — server-side view metadata (mirrors `/api/views` response)
+- `WATCHLISTS` — `{name: entries_string}`
+- `STATE.activeView` — current portfolio name, or `AD_HOC_KEY`
+  (`"__current__"`) for the unsaved tab
+- `STATE.mode` — `"equal" | "cap" | "custom" | "preset:<name>"`. `"custom"`
+  is the legacy ad-hoc path (anonymous, Apply-without-Save). Named modes
+  use the `preset:` prefix and resolve via `STATE.weightPresets`.
+- `STATE.customWeights` — `{symbol: fraction}` after the user applies the
+  weights popup without saving (ad-hoc Custom only)
+- `STATE.weightPresets` — `[{name, weights, saved_at}]` for the active
+  portfolio. Loaded by `loadPresetsForView()` when the tab changes; lives
+  inside the view JSON on disk.
+- `STATE.period` — `"1M" | "3M" | "6M" | "YTD" | "1Y" | "3Y" | "5Y" | "MAX"`
+- `STATE.analyticsByTab` — `{tabName: {cacheKey: result}}` — keeps each
+  tab's analytics warm so switching tabs is instant. Cache key is
+  `${mode}|${period}|${fxQuote}` and `mode` may be `"preset:<name>"`.
+- `STATE.fitColumns` — boolean toggle for the optional "Fit to screen"
+  table mode. When enabled, the frontend scales column widths, font size,
+  and chart cells down just enough to keep the active view inside the
+  current table width. Preference lives in `localStorage.fit_columns`.
+- `MPT` (separate top-level) — overlay state: `{result, selectedIdx,
+  hoverIdx, view, runs, busy}`. `result` is the latest
+  `/api/efficient-frontier` payload; `selectedIdx` is the frontier index
+  controlled by the slider.
+- `SORT` — `{key, dir}` for the row table
+
+### Column registry (`COLS` + `BUILTIN_VIEWS`)
+`COLS` (≈line 3714) is the single source of truth for every available
+column — `key`, `label`, `w`, `align`, `sortable`, `render(r)`, optional
+`heat`, `bg`, `sortValue`, `td_cls`. A `heat.kind === "yo_dyn"` column exposes
+a per-view background mode in Customize: **Off / 2C-Quantile / Quantile /
+Min-Max** (`getHeatMode`/`cellStyleHeat`). "Quantile" = single-blue quintile
+buckets, "2C-Quantile" = orange↔blue diverging quintiles, "Min-Max" =
+continuous 10th/90th-clipped blue. `favor:"low"` flips which end is best (e.g.
+`analyst_rating`: 1 = Strong Buy reads blue). The old `"percentile"` mode +
+`kind:"yo"` fixed-orange ramp were removed; a stored `"percentile"` migrates to
+`"quantile"` on read. New modes must also be whitelisted in
+`persistence._HEAT_MODES`. `BUILTIN_VIEWS` (just below COLS)
+maps each preset (`Default`, `Fundamentals`, `Momentum`) to an ordered
+list of column keys.
+
+**The column bar is one flat row of chips (v1.11.1).** `renderColumnViewBar()`
+emits the three built-ins, a `.cv-seg-div` hairline, then every custom preset
+(`customViewNames()`, **creation order** so a new one lands at the end) as a
+`.cv-custom-chip` in `var(--pos)`. The `Custom ▾` dropdown is gone; deleting a
+preset lives in Settings → Column Presets (`deleteCustomView`), so the bar holds
+no destructive control. The two green rules must stay **below**
+`.cv-seg button.active` in `style.css` — the first is the same (0,2,1)
+specificity and source order is what breaks the tie.
+
+**Built-ins are edited in place and saved instantly**, so the amber pill is
+purely informational and the two predicates deliberately differ:
+`builtinIsModified()` (differs from factory — drives Settings' Revert, always)
+vs `builtinShowsDirtyPill()` (that, minus an `acked` flag — drives the pill).
+**Save = acknowledge**, not "write": `ackViewOverride` → `POST
+/api/column-views/builtin-ack` only sets `acked`. Any later edit must re-arm the
+pill, which is free in `upsert_column_view` (it rebuilds the entry) but has to be
+done **by hand** in `set_builtin_view_heat` (it mutates one). An override
+carrying only `acked` is dropped on read, preserving the
+empty-override-disappears invariant. Reset/Revert is still
+`DELETE /api/column-views/<name>`; `resetViewOverride(name)` takes an optional
+name so Settings can revert a preset without switching to it.
+**Wire these through arrow functions** — `onclick = resetViewOverride` passes
+the MouseEvent as the `name` argument. Legacy names (`IB View`, `Trader View`) are still
+accepted and normalised through the alias helpers so saved state migrates
+without user intervention. `COLS_BY_KEY` is the lookup table; rendering goes
+through `getActiveColumns()` which resolves the active view from
+`STATE.activeViewName` / `STATE.customViews` / `STATE.activeColumnOverride`
+(set when the user drags headers on a built-in preset — kept
+in-memory until they Save-as-new or Reset). User-defined views persist
+to `<data>/state/column_views.json` via `/api/column-views`.
+
+**To add a new column**: append an entry to `COLS`, add a `COL_INFO`
+tooltip, and (if it belongs in a preset) include its key in
+`BUILTIN_VIEWS`. The XLSX export auto-discovers row-payload keys via
+`HOLDINGS_PRIMARY_COLS` + the extras pass — add it to that list (or to
+`HOLDINGS_SKIP_EXTRAS` if it's duplicated elsewhere, e.g. analyst
+columns).
+
+### Key UI behaviours added in Passes A/B/C
+- **Smart primary button**: `#build` swaps label between "Build
+  Dashboard" / "Update Portfolio" based on `primaryButtonMode()`.
+  `runPrimary()` routes to the right handler; Cmd/Ctrl+Enter triggers it.
+  **Cmd/Ctrl+Enter bypasses the disabled button**, so `build()` calls can
+  overlap. `BUILD_GEN` means only the newest build writes `DATA`, saves and
+  requests analytics; a superseded one cancels its reader and leaves
+  progress/disabled state alone. `BUILD_STREAMING` keeps refresh-job row
+  frames out while a build repopulates `DATA`. Both write through
+  `upsertDataRow()`, never `push()`. Before this, overlapping writers left
+  symbols in `DATA` twice and the build persisted them (§4 "One row per
+  symbol").
+- **Inline tab rename**: double-click a `.pf-tab-label` →
+  `beginTabRename()` swaps the span for an input; Enter commits, Esc
+  cancels, blur commits. Calls `/api/portfolio/rename`.
+- **Loading chip** (`lc-anchor`, `lc-spin`, `lcHtml`, `lcShow`,
+  `lcHide`): a small terminal-flavoured indicator. Braille spinner cycles
+  ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ via CSS keyframes on `content`. Optional shimmer bar +
+  tabular-numerics counter (e.g. `21·47`). Used in: streaming status,
+  startup, analytics empty state, modal detail load, FX hover load,
+  Excel export button. CSS in `style.css` (~line 313), JS helpers
+  (`lcHtml`/`lcShow`/`lcHide`) in `app.js` (~line 591).
+- **Export → Excel** (`exportXlsx`): client just hits
+  `/api/export-xlsx`; server handles everything. Button shows the
+  loading chip during the ~40s cold-cache export. The maintenance
+  contract for "what goes in the file" lives both in the inline HTML
+  comment next to the button AND in `xlsx_export.py`'s module docstring.
+- **Topbar + column-bar hover copy**: actionable hover text on
+  `Portfolio`, `Refresh`, `Export`, `Sort`, and `Fit to screen` uses the
+  custom `data-tip` pseudo-element pattern, not native `title`, so the
+  help text is consistently visible in-browser.
+- **Settings overlay** (`#settings-btn` gear, `openSettings`/`closeSettings`):
+  78vw × 76vh over a blurred backdrop; search box at the top of the sidebar,
+  grouped nav below it, right pane titled + described. Follows the
+  `openMptOverlay` idiom (the `document.body.style.overflow` lock +
+  `dataset.*PrevOverflow` restore) and registers in the global Esc handler.
+  See §16 for why Logs exists. Rebuilt in v1.10.1 — five load-bearing rules:
+  1. **`SETTINGS_SECTIONS` is the only place a section is declared**
+     (`{id, group, label, icon, description, keywords, items, render}`).
+     `renderSettingsNav()` rebuilds the nav from it. Add a section there, never
+     back in `index.html`. Sections today: General, Column Presets, Models & Data, API keys, Logs, About.
+  2. **The search `<input>` stays static in `index.html`.** Only
+     `#settings-nav-list` is re-rendered; an input inside that subtree would be
+     destroyed mid-keystroke, blurring the field. For the same reason typing
+     re-renders the **nav only** — re-rendering the pane per keystroke would
+     tear down `#log-body` and restart the log poller ~10×/second.
+  3. **`renderSettingsPane()` calls `stopLogPolling()` unconditionally as its
+     first statement**; only `renderSettingsLogs` restarts it. A new section can
+     therefore never leak a 1.5s timer against `/api/logs`.
+  4. **Nav clicks are delegated** on `#settings-nav-list` — per-node handlers
+     would be bound to detached elements after the first search.
+  5. **Esc**: the search field clears a non-empty query and stops there; on an
+     empty query it must **bubble** to the global handler (`app.js` ~line 1999)
+     which closes seven overlays in one pass. Never `preventDefault` it.
+  Mirrored controls (theme, Fit to screen) follow a strict
+  **single-mutator / single-painter** rule: `setTheme()` and
+  `toggleFitColumns()` remain the only mutators; `syncThemeControls()` /
+  `syncFitControls()` paint *both* the topbar and the settings widgets. The
+  settings controls must never write `STATE.fitColumns` or the theme directly.
+  **Gotcha:** the theme segmented control uses `data-theme-opt`, NOT
+  `data-theme` — `style.css` themes via unscoped `[data-theme="dark"]` /
+  `[data-theme="bloomberg"]` attribute selectors, so a button carrying
+  `data-theme="bloomberg"` silently adopts the whole Bloomberg palette while
+  sitting inside a dark-theme page. Verified in all three themes.
+- **Topbar single-class overrides lose the cascade.** `.topbar button` is
+  (0,1,1) and sets `font-size: 12.5px`; a bare `.gear-btn` / `.info-btn` rule is
+  (0,1,0) and is silently ignored. The gear's declared `font-size: 15px` never
+  applied for that reason and it rendered at 12.5px until v1.10.1, which added
+  `.topbar button.gear-btn { font-size: 20px }`. Measure computed styles in the
+  browser rather than trusting a declaration.
+  **This has now bitten twice — assume it, don't rediscover it.** The refresh
+  status chip's cancel button was the second case (fixed v1.11.1): `.rf-chip-x`
+  (0,1,0) lost *every* declaration to `.topbar button`, including its own
+  `border: none; background: transparent`, so it rendered as a bordered 30px
+  `--r-md` square with the canvas background inside a 999px pill. It is now
+  `.topbar .rf-chip-x` (0,2,0), draws an **inline SVG** mark rather than a `×`
+  glyph (whose size and baseline vary by system font), and hovers to
+  `rgba(var(--neg-rgb), 0.16)` instead of a solid red fill. Any new control
+  placed inside the topbar needs the `.topbar` prefix on its rules.
+  A cheap way to iterate on one of these without touching the app: build a
+  standalone lab page that inlines the real `:root`/`[data-theme]` variable
+  blocks plus the competing `.topbar button` rule, render the candidates side by
+  side in all three themes at 1× and 3×, and open it in the browser pane. Write
+  the losing/shipping variant at its **real** specificity or the lab will
+  "fix" the bug for you and prove nothing.
+- **Terminology (v1.12): the engines are the "News read" and the "Market
+  read"** in all UI copy. Engine names (LLM, statistical model) appear only in
+  the Methodology and Settings → Models & Data. The middle News tier is
+  labelled "Mixed" (`neutral` in data), the middle Market tier "No edge"
+  (`no_edge`). The shared vocabulary (`NS_COLORS` from the theme's `--ns-*`
+  variables, `NS_LABELS`, `NS_LENSES`, `nsTierDot`, `nsPill`, `nsScale`) sits
+  in one block near the top of `app.js`; the `--ns-*` colours are defined per
+  theme in `style.css` and must stay in all three.
+- **NS column + hover card.** `nsDot(s, sym)` renders two dots, **Market read
+  first, then News read**; faded = stale, hollow = no read. There is no
+  per-dot tooltip: one delegated handler opens a single `.ns-hc-tip` card
+  (`nsHoverCardHtml`, positioned by `placeTip`) with a lens row per lens (score
+  cells + the fact, "No news" when empty), two-pass agreement, the Market
+  tiles (expected move, percentile + what it is ranked against, tier), the
+  divergence sentence, the stale notice and both ages. Escape and scroll hide it.
+- **Timeline and Flash Tape show only headlines the News read read and found
+  to be about a holding** (`nsReadAbout`). Unread headlines (outside the 15 per
+  ticker) and "not about it" ones are half the feed on a mega-cap; the tape's
+  "Not about it" chip still shows the latter. One dot per headline (the News
+  score); tier chips filter on it, lens chips replace the old event chips.
+- **Flash Tape full-screen** (`openTapeFullscreen`, 99vw × 99vh): clicking the
+  `#ns-tape-card` body opens it; `e.target.closest("a, select, button, input,
+  label")` guards the links and filter controls. `renderNsTape({fullscreen})`
+  is ONE function serving both surfaces — the inline panel keeps its 120-row cap
+  and single-line ellipsised headlines, the overlay lifts the cap to 1000 and
+  adds a numeric score column plus a 2-line-clamped summary. Filter changes in
+  either view re-render the other so the two never diverge.
+- **Track record and Methodology.** "Model Diagnostics" is now the Track
+  record (`toggleTrackRecord` / `renderTrackRecord`): two verdict cards, a
+  long-short chart (`svgLine`), per-lens hit rates, consistency, and a
+  collapsed "For quants" block — all from `/api/news-diagnostics`. The
+  Methodology modal (`openMethodology`) is two side-by-side explainers with
+  frozen validation numbers and KaTeX formulas in collapsed `<details>`; live
+  numbers belong in the Track record, not there.
+
+- **Overlays: `showOverlay()` / `hideOverlay()` are the ONLY way to open and
+  close one** (v1.11.0). They own `lockBodyScroll`/`unlockBodyScroll`, a single
+  **nesting counter** on `document.body`'s overflow. Never write
+  `body.style.overflow`, and never toggle the `show` class by hand — both are
+  enforced by `tests/test_frontend_overlays.py`, which also asserts the overlay
+  inventory in that test matches every `id="*-bg"` in `index.html`, so a new
+  backdrop can't skip the contract.
+  Why a counter: overlays nest (About-MPT over MPT, the inline prompt over the
+  weights popup) and the global Escape handler (`app.js` ~line 2087) closes
+  seven of them in one **unconditional** pass. The old design had three
+  overlays each stashing `dataset.<name>PrevOverflow` and the other nine
+  locking nothing at all — so the detail modal scroll-chained to the page, and
+  a nested pair could restore each other's value. Both helpers no-op when the
+  overlay is already in the requested state, which is what makes the
+  seven-closer pass safe.
+  Second half of the fix is CSS: the grouped `overscroll-behavior: contain`
+  rule in `style.css` (just above `/* ===== Detail modal ===== */`). **Every
+  new overlay scroll container goes in that list.** Both halves are needed —
+  the body lock alone still lets the trackpad's elastic bounce chain out, and
+  containment alone does nothing for a gesture starting on the backdrop.
+  Scroll *position* needs no saving: `overflow:hidden` on `<body>` freezes the
+  viewport where it is (it propagates because `html` is `overflow: visible`).
+  The `padding-right` compensation replaces the scrollbar's width, without
+  which the page visibly jumps ~15px wider the instant anything opens.
+
+- **Detail-modal header shows the ACTIVE RANGE's return**, not `pct_1d`
+  (v1.11.0). `modalPriceBlockHtml()` / `renderModalPriceBlock()` own
+  `#m-price-block`; a drag in progress (the brush's `onUpdate(sel)`) wins over
+  the range tab, and the `.p-range` badge names whichever period is being reported. It
+  also reads price from `DETAIL.data` once the detail payload lands — the
+  skeleton is never re-rendered after the fetch resolves, so the old code kept
+  the table row's cached price for the modal's whole lifetime. It computes from
+  **`activeChartSeries().full`**, not `d.history`: on an intraday range those
+  two disagree about where the window starts, and a header contradicting the
+  summary line right beneath it is worse than no header.
+
+- **Chart granularity ladder** (v1.11.0). Everything was hardcoded
+  `interval="1d"`, so 1M was ~21 points on an 800px-wide chart.
+
+  | Range | Source | Fetch | Displayed |
+  |---|---|---|---|
+  | 1M | `GET /api/history` | `30m` / `60d` | last 1M (~280 of 780 bars) |
+  | 3M | `GET /api/history` | `1h` / `1y` | last 3M (~435 of 1749) |
+  | 6M | *same cached payload as 3M* | — | last 6M (~870) |
+  | YTD · 1Y · 5Y · MAX | the daily `period="max"` payload from `/api/detail` | — | client slice, thinned to ≤1500 |
+
+  **The fetch window is deliberately far wider than the display window, and
+  that is load-bearing, not waste** — an SMA 200 over 30m bars needs 200 bars of
+  warm-up, so computing on exactly the visible window leaves the line empty on
+  every short range. It also means a symbol costs at most **two** intraday
+  fetches no matter how the user tabs around. `fetcher._RANGE_INTRADAY` is the
+  table; `fetcher._INTERVAL_MAX_DAYS` holds Yahoo's own caps (`1m ≤ 7d`,
+  `2–90m ≤ 60d`, `1h ≤ 730d`). Exceeding a cap returns an **empty frame, not an
+  error**, which is why `_period_days()` returns 10 000 for anything it can't
+  parse — guessing small would let an over-cap request through and blank the
+  chart instead of falling back. `range_history()` returns `fallback: true` for
+  the daily ranges, for a cap violation, and for listings with no intraday data;
+  the client then just draws the daily series and the legend says "daily".
+  Benchmarks are fetched at the **same interval** (the client passes `bench=`,
+  since it already knows the sector ETF) or the overlay renders as a staircase
+  against a smooth line. Modal open stays instant: intraday is fetched lazily
+  only when 1M/3M/6M is picked, with a loading chip on the range tab.
+
+- **Both charts share their interaction code**: `attachChartHover()`
+  (crosshair + tooltip) and `attachRangeBrush()` (drag-to-measure), each fed
+  `lines: [{label, pts, dot}]` with `lines[0]` the main series. The measure is
+  **TradingView-style and transient** (the user's call): while the button
+  is held a band and a floating `.chart-measure` badge show every line's return
+  over the span; both vanish on release. There is deliberately no persisted
+  selection state, no Escape handler and nothing to `destroy()` — every
+  listener sits on the chart's own overlay element, rebuilt each render. (The
+  earlier persistent design needed an AbortController, a capture-phase Escape
+  handler with a `SCROLL_LOCK` guard, and teardown in `closeModal()`; all of
+  that went with it.) The `.sel`/`.pf-sel` rect carries its own `y`/`height` in
+  the markup. `setPointerCapture` stays in try/catch — it throws for a dead
+  pointer id.
+
+- **Benchmark picker.** "vs <select>" in the Risk & Return header is a native
+  `<select>` (`benchSelectHtml`) — keyboard/Esc/outside-click for free, no
+  popover code. `STATE.bench` (localStorage `pf_bench`) drives the "/ x"
+  column, Beta/R²/TE (the portfolio's `rel` against it) and the chart's purple
+  comparison line; `activeBench(a)` falls back to SPY. The Nasdaq / Sector-mix
+  pills add extra lines (`pfBenchLines`, deduped), and their period returns
+  are listed *under* Risk & Return, not in the chart legend. The first overlay
+  pill (`#pf-show-bench`) is relabelled with the chosen benchmark on render.
+
+- **`thinPoints(pts, maxN)` must pin BOTH endpoints.** A 45-year MAX window is
+  ~11.5k daily closes. Last-in-bucket downsampling naturally starts at index
+  `ceil(step)-1`, which silently moved AAPL's MAX start date forward ~7 trading
+  days and changed the reported return from +339417% to +316048%. The window the
+  header and chart report must be the window the user asked for.
+
+- **SMAs (20/50/200)** are off by default and share **one object**, `CHART_SMA`
+  — `DETAIL.sma` and `STATE.pfSma` are both that same reference, persisted to
+  `localStorage.chart_sma`. A shared *key* was not enough: two independent
+  copies read at different times silently clobbered each other (enable SMA 200
+  in the modal, then click a portfolio pill, and the pill's stale page-load
+  copy was written back over it). Toggling from the modal calls
+  `syncSmaPills()` so the pills' `data-on` repaints too.
+  `smaSeries()` takes the **full** series and the caller slices the result —
+  never the other way round. Legends name the bar frequency ("SMA 50 · 30m
+  bars"), since the same period means something very different on 30m vs daily
+  bars. The portfolio chart's SMAs are computed **server-side** (`series.sma`,
+  see §4 "One wide fetch") since the client only ever has the period slice.
+  At the true start of a series `smaSeries` averages what exists so far.
+  `SMA_COLORS` in `app.js` and `.swatch.sma*` in `style.css` must stay in sync.
+- **Fit to screen toggle** (`#cv-fit-toggle`): optional table compaction
+  mode for dense presets. `applyTableFitMode()` computes a scale from the
+  active columns' declared widths versus `.table-wrap` width and applies
+  it through the `--table-scale` CSS variable. The active view should
+  remain readable, but the explicit goal is "keep the current preset on
+  screen before falling back to horizontal overflow."
+
+- **The limits panel PUSHES the workspace down; it never takes height from it.**
+  `.pf-mpt-scroll` (wrapping `.pf-mpt-bounds` + `.pf-mpt-body`) is the single
+  scroll column under the controls strip. `mptPinBodyHeight(true)` — called
+  **before** `panel.hidden` flips, or it measures the already-pushed height —
+  freezes `.pf-mpt-body` at its current height via `--mpt-body-h`, which the CSS
+  reads as its `min-height`; `flex-shrink:0` is what makes the body refuse to
+  yield. The column then overflows by exactly the panel's height, so the chart,
+  slider and legend keep their **exact geometry** and simply move below the fold.
+  Measured across an open/close cycle: backing store, CSS box, host height and
+  `MPT._proj` all byte-identical; only `scrollHeight` changes.
+  Closing must still call `mptRender()` — releasing the pin is a no-op unless the
+  window was resized while the panel was up, in which case the body lands at a new
+  height and the chart has to be re-measured (verified: 531px pinned during a
+  860→1180px resize, correctly re-rendered at 851px on close).
+- **The canvases CROP, they never rescale** — the second line of defence, and
+  still load-bearing. They used to be `inset:0; width:100%; height:100%`, but
+  their backing stores are only resized inside `mptSizeCanvases()`. The limits
+  panel used to be a flow sibling in the `flex-column` modal, stole ~450px from
+  `.pf-mpt-chart`, and nothing re-measured — so the browser rescaled a stale
+  bitmap and the entire plot visibly squashed; `MPT._proj` also kept the old
+  `cssH`, so hover/click hit-testing silently drifted off the frontier.
+  The contract: `mptSizeCanvases` publishes the height it actually drew at
+  to `--mpt-chart-h`, the canvases read **that** rather than `100%`, and
+  `.pf-mpt-chart` is `min-height:0; overflow:hidden`. A shorter parent therefore
+  clips the canvas instead of stretching it, and it returns intact.
+  While the panel is open the height is **locked** (`MPT._chartH` +
+  `mptBoundsPanelOpen()`) so a reflow of the obstructed box (a window resize)
+  cannot re-measure it.
+  **`mptSettleChartHeight()` must be called after anything that paints the side
+  panel** — `mptRenderSide()` writes the legend *below* the chart, shrinking the
+  host ~22px after `mptRenderChart()` already locked it, which left the x-axis
+  label (drawn at `cssH − 6`) clipped. It is called from `mptRender()` **and**
+  from the streaming `done` handler, which finalises via
+  `mptRenderChart({fixedProj})` and so never reaches `mptRender()` — that is the
+  path every completed run takes, so missing it there fixes nothing.
+  **Do not "improve" this with a ResizeObserver.** RO delivery is tied to the
+  frame lifecycle and is throttled or dropped outright in a backgrounded window
+  — measured here as *zero* callbacks for a real 1185→735px change — so the
+  correction would fail exactly when the user tabs away and back. The settle
+  pass is synchronous and deterministic instead.
+
+- **`textOnHeat` measures contrast; it does not guess a threshold**.
+  It used to flip to white above a fixed `|t|` (0.55 light / 0.65 dark). That was
+  wrong: on the light theme's green ramp `--text` beats white at *every*
+  saturation (4.14:1 vs 3.82:1 even at full tint), so the rule went white
+  precisely where dark text was still winning 6-8:1 and a mid-range cell (a +20%
+  upside) rendered white-on-light-green at **2.2:1**. It now reproduces the
+  background `colorDiverging` will paint and keeps whichever of `--text` / white
+  / near-black actually measures best (`relLuminance` + `contrastRatio`, ~10
+  float ops per cell). Near-black is a candidate because a saturated tint on
+  dark/bloomberg is a *bright* green/red where both white and the near-white
+  `--text` fail — the same problem `--on-accent` solves with `#050505` (§8).
+  Two consequences: **`THEME_COLORS` now carries a `text` triple per theme and
+  it must stay in sync with `--text` in style.css**, and the `0.9` mix factor is
+  duplicated from `colorDiverging` — change one, change both. Measured floor
+  across the analyst table went 2.2 → 5.28 (light) / 4.7 (dark) / 4.04 (bbg).
+
+- **Per-position limits grid is a spreadsheet, not a form.** `.pf-mpt-bnd`
+  inputs are borderless/transparent with the spinners suppressed; `:focus` draws
+  an inset accent outline (Excel active-cell) and `.pf-mpt-bnd-row:focus-within`
+  tints the row — `:focus-within` so keyboard tabbing highlights without any JS.
+  `:not(:placeholder-shown)` colours a *set* constraint in `--accent`, which is
+  why the `0` / `100` placeholders are load-bearing, not decoration. Rows carry
+  `logoImg(sym)` + the company name pulled from `DATA`. Values and their column
+  headers are both centred, and `align-self:stretch` makes the input fill the
+  row's **full** height (the row is `align-items:center`, which otherwise leaves a
+  dead strip above and below) — verified by hit-testing a 96×23 cell on a 6×4 grid,
+  96/96 points resolve to the input, so a click anywhere in the column lands in the
+  number.
+  Focusing a cell **selects its value** (`focusin` on the grid + a rAF-deferred
+  `select()`), so typing over `25` yields `4`, not `254`. Three non-obvious bits:
+  `focusin` rather than `click` covers keyboard Tab and does not re-fire inside an
+  already-focused cell (which would wipe a deliberate caret placement mid-edit);
+  the rAF is required because the browser sets the caret from the click position
+  *after* focus and would undo a synchronous `select()`; and on `type="number"`
+  **`selectionStart` reads `null`** — that is an API limitation, not a failure, so
+  assert the behaviour by typing over the value, not by reading the selection.
+  **It is the only box left in the overlay, and that is deliberate** — a
+  transient editor dropped on the tool should read as a distinct sheet, whereas
+  `.pf-mpt-chartwrap` / `.pf-mpt-side` are the workspace itself and are now
+  boxless (transparent, no border; the side panel keeps a single hairline
+  `border-left` as a gutter rule). Padding on `.pf-mpt-bounds` is symmetric so
+  the head and the last row sit the same distance from the frame.
+  **Do NOT wire `mptWireAssetTips` to this grid, and do not give the rows
+  `data-mpt-sym`.** That tooltip fires on `mousemove` and each event rebuilds the
+  tip's `innerHTML` and calls `placeTip()` (a forced synchronous layout), i.e. a
+  parse + reflow per frame while the pointer rests over the list. The stats it
+  showed belong to the chart anyway.
+  **The grid is not a scroller.** It used to have its own `max-height` *and*
+  `overscroll-behavior: contain`, which is what made scrolling feel broken: a
+  short inner scroller hits its end after ~100px and then **stops dead** instead
+  of chaining to the parent, so getting down a 20-name book took a stack of
+  separate gestures. One surface (`.pf-mpt-scroll`), one gesture. `.pf-mpt-bnd-head`
+  is correspondingly non-sticky — `.pf-mpt-bounds` is `overflow:hidden`, so it is
+  the sticky containing block and never scrolls; sticky there would be inert
+  anyway, just with a promoted layer for nothing.
+
+- **Analyst consensus table** (`renderAnalystDashboard`): Weight uses the blue
+  quintile ramp, and Upside **and Upside (median)** share the diverging ramp
+  anchored at 30 — all via `cellStyleHeat` with a synthetic column literal, so
+  they read identically to the main grid's heat columns. The two upside columns
+  must keep the **same ramp and the same anchor**: they are the same quantity on
+  the same scale, and reading them as a pair is the point of the median column —
+  a visibly weaker median tint means the mean is being dragged up by one high
+  outlier. `setTheme()` re-renders this table, because
+  `render()` only rebuilds the main grid and the tints are baked into inline
+  styles at build time. **There is no true q25/q75 of analyst targets** — Yahoo
+  publishes only low/mean/median/high and no per-analyst data exists in the feed
+  — so nothing quartile-shaped is fabricated. The median and the low/high band
+  are reported **as upside, not as target price** (`Upside (median)` and
+  `Upside range`, both immediately right of `Upside`): upside is the decision
+  variable — a target of 768 means nothing until you know the price it is
+  measured against — and three upside figures side by side make the median-vs-mean
+  skew and the width of the band readable in one scan. Raw target prices stay in
+  the hover. `Upside range` sorts on `(high−low)/mean`, the same dispersion
+  `frontier.py` uses for BL view confidence. `quickAnalystPreview()` nulls the
+  trio (the streaming row payload has only the mean) so the optimistic paint
+  shows `—` and fills in. **Do not add them to `fetch_one`** — that is the hot
+  loop; they come from `analytics._analyst_for`.
+- **`_analyst_for`'s target trio needs its retry** (`analytics.py`). It runs on 8
+  pool threads, and Yahoo answers a burst of `.info` calls by handing some of them
+  an **empty dict** rather than an error — a throttle, not "this name publishes no
+  range". Verified directly: names that came back thin returned a full
+  low/median/high on a sequential call moments later. Without the retry the
+  biggest holdings rendered `—` in exactly the two columns above, and the 300 s
+  negative cache meant the next refresh usually failed the same way. Two jittered
+  escalating retries, **only** on the all-None path: one is not enough, because
+  the retries themselves collide. Live coverage went 10/15 → 15/15.
+
+## 8. CSS / theming patterns
+
+- CSS variables (`--accent`, `--bg-canvas`, `--text`, `--muted`,
+  `--border`, `--pos`, `--neg`) defined in `:root` and overridden under
+  `[data-theme="dark"]`.
+- **Corner-radius scale** (`--r-lg` / `--r-md` / `--r-sm` / `--r-xs` in the base
+  `:root`, currently the "Sharp" 6/4/2/1 px tier). Every non-circular
+  `border-radius` reads a token, so app-wide roundness tunes from these four
+  values alone; pills/circles (`999px` / `50%`) stay literal on purpose.
+- **Three themes: `light`, `dark`, `bloomberg`** (a Bloomberg-terminal
+  palette added in v1.5.3). Because the whole app is variable-driven, a
+  theme is a `[data-theme="…"]` block plus a matching `THEME_COLORS.<name>`
+  RGB-triplet entry in `app.js` (the latter feeds the JS-computed
+  heatmap/spark/RS-bar/delta-bar colours). To add a fourth theme, copy those
+  two blocks. **Bloomberg's colour hierarchy is the point — don't flatten
+  it**: `--text` is WHITE (data values), `--muted` is AMBER (labels/headers/
+  secondary), `--hover` is the terminal's dark selection blue, borders are
+  neutral gray. The first cut made body text amber too and the user rejected
+  it ("everything is the same color"). A short fidelity-override block right
+  under the variable block additionally paints table `th`, ticker `.sym`
+  cells, and the `#tickers` textarea amber ("amber = editable" is the
+  terminal's own convention). `--on-accent` is
+  the text/thumb colour placed *on* an `--accent` fill (white in light/dark,
+  near-black in Bloomberg so text stays legible on the bright orange); any
+  new accent-filled control must use `color: var(--on-accent)`, never a
+  hardcoded `#fff`. Two JS branches that ask "is this a dark canvas?" use the
+  `isDarkTheme(t)` helper (true for `dark` **and** `bloomberg`) rather than
+  `=== "dark"`.
+- **Theme switch interaction** (`setupThemeSwitch` in `app.js`): a short
+  click toggles light↔dark (Bloomberg counts as non-light, so a click exits
+  it to light); a **long-press (≥500ms)** on the switch activates the hidden
+  Bloomberg theme (pointer events cover mouse+touch; the terminating click is
+  swallowed via a `longFired` flag). Choice persists in `localStorage.theme`
+  and is restored by `readTheme()` (which accepts all of `THEME_NAMES`).
+- Tooltips use TWO patterns:
+  - **Pseudo-element `::after`** on `[data-tip]` — fast, declarative.
+    Used for header tooltips and overlay-pill info icons.
+  - **JS-rendered `.pf-metric-tip` div** — heavier but supports rich
+    content (LaTeX formulas, etc.). Used for analytics metric labels.
+- Hover-tooltip cursor is `cursor: default` — explicitly NOT `cursor:
+  help`. The user dislikes the question-mark cursor.
+
+## 11. Quick reference — current line landmarks
+
+The frontend (HTML/CSS/JS) lives in `src/convexity/static/` (it was once
+embedded in the monolithic `dashboard.py`, since removed — see §1/§2). Landmarks below are within `src/convexity/static/app.js` unless
+noted otherwise. (Approximate. Use `grep -n` to confirm before editing.)
+
+| What | File | Where |
+|---|---|---|
+| Process-global cache dicts | `cache.py` | ~14–16 |
+| Views/weight-presets persistence | `persistence.py` | `save_view` ~109, `save_mpt_run` ~501 |
+| Watchlists persistence | `persistence.py` | `load_watchlists` ~379 |
+| Google-colon normaliser | `resolver.py` | `_normalize_google_colon` ~153 |
+| `resolve_symbol` pipeline | `resolver.py` | ~164 |
+| `fetch_one` (per-symbol row) | `fetcher.py` | ~117 |
+| `fetch_detail` (modal payload) | `fetcher.py` | ~398 |
+| FX layer (spot rates, basket index) | `fx.py` | `fx_rates` ~139, `fx_index_history` ~198 |
+| Analytics (`analyze_portfolios_multi`) | `analytics.py` | ~214 |
+| `compute_efficient_frontier` | `frontier.py` | ~72 |
+| HTTP `Handler` (GET/POST/DELETE) | `server.py` | ~92 |
+| `_pick_port` | `server.py` | ~689 |
+| `main()` (browser-mode entry) | `server.py` | ~739 |
+| Topbar HTML | `static/index.html` | ~13 |
+| Loading-chip CSS (`.lc-*`, spinner keyframes) | `static/style.css` | ~313–332 |
+| Tab rendering + rename | `static/app.js` | `renderTabs` ~2768, `beginTabRename` ~2814 |
+| `exportXlsx` | `static/app.js` | ~3032 |
+| Analytics request / render | `static/app.js` | `requestAnalytics` ~3108 |
+| Mode pill bar (`renderModeBar`) | `static/app.js` | ~4454 |
+| `runPrimary` (Build/Update button router) | `static/app.js` | ~4571 |
+
+Use `grep -n "<symbol>" src/convexity/*.py src/convexity/static/*.{js,html,css}`
+to relocate anything not listed above — the package is small enough that
+this is faster than trusting a stale line table.

@@ -12,6 +12,7 @@ Roadmap Phase 7 (`distribution` branch): repository tidy-up, for the v2.0.0 rele
 - The package moved to `src/convexity/` (the standard `src/` layout). Nothing changes for installed apps or your data; developers run the same `uv sync` / `uv run convexity`.
 - **Tidier repository root.** The Windows installer, the update scripts and the macOS dev launcher moved to `packaging/`. `install.sh` stays at the root, so the macOS/Linux one-liner is unchanged; the **Windows one-liner is now** `irm https://raw.githubusercontent.com/ithakis/Convexity/main/packaging/install.ps1 | iex` (the old `main/install.ps1` address stops working with this release).
 - `build_symbol_db.py` is now a command, `convexity build-symbols`, so an installed app can build its fuzzy ticker database too. The old `dashboard.py` shim is gone: run `convexity` (or `python -m convexity`).
+- The engineering notes are split: `CLAUDE.md` keeps the rules, the file map and an index of the gotchas; the deep sections moved unchanged to `docs/architecture/` (backend, news, security, frontend, mpt, ci, desktop, jobs).
 - Developer tooling: ruff replaces pyflakes (config in `pyproject.toml`); lint and formatting are now blocking in CI, after a one-off `ruff format` of the codebase.
 
 ## 1.15.0 — 2026-09-28
