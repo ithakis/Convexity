@@ -73,7 +73,7 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 _ZOOM_LADDER = (0.67, 0.75, 0.80, 0.90, 1.00, 1.10, 1.25, 1.50, 1.75, 2.00)
 _ZOOM_DEFAULT_IDX = _ZOOM_LADDER.index(1.00)
 
-# Dashboard theme (convexity/static/style.css [data-theme="dark"]) —
+# Dashboard theme (src/convexity/static/style.css [data-theme="dark"]) —
 # the splash mirrors the app's own look, including the accent used by the
 # in-app streaming progress bar.
 _BG = "#0d1117"

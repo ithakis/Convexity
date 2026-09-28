@@ -33,7 +33,7 @@ ENV/
 # Regenerated at runtime; never meant to ship in the repo (a fresh clone
 # should start with an empty dashboard, not the previous owner's portfolio).
 # The repo is PUBLIC: these files hold real holdings. Keep both name sets —
-# the legacy ones can still exist in a checkout until convexity/migrate.py
+# the legacy ones can still exist in a checkout until src/convexity/migrate.py
 # renames them on first launch.
 .convexity_*.json
 .portfolio_tracker_*.json
@@ -86,7 +86,7 @@ ml/**/*.npz
 *.sqlite-shm
 *.sqlite-wal
 
-# Desktop app icons generated from convexity/assets/icon.png. Since v1.14 the
+# Desktop app icons generated from src/convexity/assets/icon.png. Since v1.14 the
 # installers write them outside the checkout; kept for older checkouts/dev use.
 icon.icns
 icon.ico

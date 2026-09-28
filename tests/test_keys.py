@@ -1,4 +1,4 @@
-"""Settings -> API keys (convexity/keys.py, POST/GET /api/keys).
+"""Settings -> API keys (src/convexity/keys.py, POST/GET /api/keys).
 
 The contract under test: a key value is written to config.json (0600, merged,
 atomic) and sent to the provider in a header — and appears nowhere else. No

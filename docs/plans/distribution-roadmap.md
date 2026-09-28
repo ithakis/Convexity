@@ -565,7 +565,7 @@ and model version before use; anything that fails is ignored and logged.
 Tasks:
 - [ ] Workflow + a `convexity build-reference-pack` subcommand it runs (so it
       can be run and tested locally with `CONVEXITY_HOME=$(mktemp -d)`).
-- [ ] App: `convexity/reference_pack.py` fetches the pack when older than 24 h,
+- [ ] App: `src/convexity/reference_pack.py` fetches the pack when older than 24 h,
       verifies manifest hashes + size cap, validates schema + model version,
       parses as data only.
 - [ ] Market read anchor: `reference` when local history < 200, `live` after;

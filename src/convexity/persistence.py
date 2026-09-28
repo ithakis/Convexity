@@ -42,7 +42,7 @@ def _atomic_write(path: Path, body: str) -> None:
 
 # ----------------------------- File paths -----------------------------------
 
-# All under <data>/state/ (convexity/paths.py) — never next to the code. The
+# All under <data>/state/ (src/convexity/paths.py) — never next to the code. The
 # pre-1.14 repo-root ``.convexity_*.json`` files are moved here by migrate.py.
 _WATCHLISTS_FILE = paths.state_file("watchlists")
 _VIEWS_FILE = paths.state_file("views")

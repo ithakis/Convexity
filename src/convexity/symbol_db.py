@@ -56,7 +56,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 _PROVIDER = "yfinance"
-# In the user data dir (convexity/paths.py), not beside the code: an installed
+# In the user data dir (src/convexity/paths.py), not beside the code: an installed
 # package has no repo root. build_symbol_db.py writes it there by default.
 _DB_PATH = paths.symbol_db_file()
 _DB_LOCK = threading.Lock()

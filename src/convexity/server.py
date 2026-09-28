@@ -1168,7 +1168,7 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
     """Bind the dashboard server on a free loopback port and begin serving on
     a daemon background thread. Returns (server, port). Callers should stop
     it via shutdown_server() — shared by browser-mode main() and the desktop
-    app (convexity/desktop.py), which both need the same port-pick +
+    app (src/convexity/desktop.py), which both need the same port-pick +
     construction but manage their own lifecycle.
     """
     # Tee stdout/stderr into the in-memory ring FIRST, so the Settings -> Logs

@@ -7289,7 +7289,7 @@ function renderPortfolioSentiment(symbols) {
 
 /* ===== Track record ======================================================
  * Has either engine predicted anything? Date-clustered statistics only
- * (convexity/news_diagnostics.py): one date is one observation, and
+ * (src/convexity/news_diagnostics.py): one date is one observation, and
  * no verdict is given before ~40 trading days exist. */
 async function toggleTrackRecord() {
   const body = $("#ns-diag-body");
@@ -9539,7 +9539,7 @@ function loadAppVersion() {
   fetch("/api/health").then(r => r.json()).then(d => {
     if (!d) return;
     syncKeysBanner(d);
-    // env_ok is the cheap find_spec-only self-check from convexity/
+    // env_ok is the cheap find_spec-only self-check from src/convexity/
     // envcheck.py. It rides on /api/health precisely so a stale environment
     // announces itself on page load rather than waiting for the user to open
     // the one panel that would have explained it.
@@ -9705,7 +9705,7 @@ function checkLlmHealth() {
  * exists: the whole backend logs via print(), and in the desktop app those
  * writes go to a file descriptor with no terminal attached — so when the ML
  * model failed to load, the one line explaining why was unreadable. The
- * server tees stdout/stderr into a ring buffer (convexity/logbuf.py)
+ * server tees stdout/stderr into a ring buffer (src/convexity/logbuf.py)
  * and this panel tails it.
  *
  * Polling only runs while the Logs section is visible; closing the overlay

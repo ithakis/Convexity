@@ -60,7 +60,7 @@ jobs:
       # Pyflakes catches undefined names, unused imports, etc.
       - name: Pyflakes on package modules
         run: |
-          uvx pyflakes convexity/*.py build_symbol_db.py scripts/*.py 2>&1 || true
+          uvx pyflakes src/convexity/*.py build_symbol_db.py scripts/*.py 2>&1 || true
 
       # The check that would have caught the v1.10.0 bug: two manifests that
       # were never compared, so lightgbm/scikit-learn lived only in the one CI
@@ -242,7 +242,7 @@ jobs:
           done
           kill "$pid" || true
           if [ -z "$ok" ]; then cat server.log; exit 1; fi
-          expected=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$GITHUB_WORKSPACE/convexity/__init__.py")
+          expected=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$GITHUB_WORKSPACE/src/convexity/__init__.py")
           python3 - "$expected" <<'EOF'
           import json, os, sys
           h = json.load(open("health.json"))
@@ -285,7 +285,7 @@ jobs:
           target=$(sed -n 's/^exec "\(.*\)" .*/\1/p' "$launcher")
           test -x "$target" || { echo "launcher target not executable: $target"; exit 1; }
           ver=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")
-          expected=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' convexity/__init__.py)
+          expected=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/convexity/__init__.py)
           [ "$ver" = "$expected" ] || { echo "bundle version $ver != $expected"; exit 1; }
           echo "Convexity.app OK: v$ver -> $target"
 

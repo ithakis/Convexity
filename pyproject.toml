@@ -1,7 +1,7 @@
 # The single dependency manifest (since v1.14; requirements.txt and
 # environment.yml are gone).
 #
-# `dependencies` must cover every entry of convexity/envcheck.REQUIRED —
+# `dependencies` must cover every entry of src/convexity/envcheck.REQUIRED —
 # scripts/check_dependency_manifests.py enforces it in CI. The installers
 # (install.sh / install.ps1) `uv tool install` from these ranges, NOT from
 # uv.lock; CI's tool-install-smoke job exercises that resolution.
@@ -63,19 +63,25 @@ convexity-app = "convexity.desktop:main"
 Repository = "https://github.com/ithakis/Convexity"
 
 [tool.hatch.version]
-path = "convexity/__init__.py"
+path = "src/convexity/__init__.py"
 
 # Every non-gitignored file inside the package ships, so static/ and
 # data/lm_lexicon.json are package data without further configuration.
 [tool.hatch.build.targets.wheel]
-packages = ["convexity"]
+packages = ["src/convexity"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "convexity/",
+    "src/",
     "tests/",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
     "pyproject.toml",
 ]
+
+[tool.pytest.ini_options]
+# src layout: tests import the package from src/ even without the editable
+# install, and `tests.` / `ml.` helpers from the repo root.
+pythonpath = ["src", "."]
+testpaths = ["tests"]

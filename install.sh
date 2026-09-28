@@ -12,7 +12,7 @@
 # Safe to re-run: that is also how you update (see update.sh).
 #
 # Works piped from curl, so nothing here may depend on a checkout. User data
-# lives in the per-user data folder (convexity/paths.py) and is never touched.
+# lives in the per-user data folder (src/convexity/paths.py) and is never touched.
 #
 # Undocumented overrides, for development and for testing this script against
 # throwaway locations (uv's own UV_TOOL_DIR / UV_TOOL_BIN_DIR isolate the tool):

@@ -9,11 +9,11 @@ gates and has no export path: the app cannot serve it
 feature_schema.json is regenerated from convexity.ml_features here,
 so the bundle states the exact feature contract the app verifies on load.
 meta.json records provenance and the tier-cut verification. With --deploy the
-bundle is copied to <data>/models/mlsent-v1.1/ (convexity/paths.py; or
+bundle is copied to <data>/models/mlsent-v1.1/ (src/convexity/paths.py; or
 MLSENT_MODEL_DIR), where convexity.ml_sentiment loads it.
 
 With --tarball the bundle is packed into the release asset that
-convexity/model_fetch.py downloads on first run (deterministic, so the same
+src/convexity/model_fetch.py downloads on first run (deterministic, so the same
 files always give the same SHA-256). --from packs an existing bundle directory
 instead of exporting one — that is how the published asset was built, from a
 copy of the deployed model. The printed SHA-256 goes into
@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from ml import config  # noqa: E402
 
 ENCODER_FILES = ("model.lgbm.txt", "idf.npy", "col_mask.npy")

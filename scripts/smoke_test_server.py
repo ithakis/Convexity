@@ -23,7 +23,7 @@ from pathlib import Path
 # Make `convexity` importable regardless of cwd/invocation style
 # (running `python scripts/smoke_test_server.py` puts scripts/ on sys.path,
 # not the repo root).
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from convexity.server import shutdown_server, start_server  # noqa: E402
 

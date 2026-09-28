@@ -8,7 +8,7 @@ desktop app's `pt` env from). lightgbm and scikit-learn were listed only in
 the former, so CI ran with the ML model working while every installed copy of
 the desktop app ran with it dead.
 
-convexity/envcheck.REQUIRED is the single source of truth. Since v1.14 the one
+src/convexity/envcheck.REQUIRED is the single source of truth. Since v1.14 the one
 manifest is pyproject.toml's `[project].dependencies` (what uv.lock, CI and the
 `uv tool install` installers all resolve from); requirements.txt and
 environment.yml are gone.
@@ -29,7 +29,7 @@ import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "src"))
 
 from convexity.envcheck import REQUIRED  # noqa: E402
 
@@ -62,7 +62,7 @@ def main() -> int:
 
     if problems:
         print("pyproject.toml is out of sync with "
-              "convexity/envcheck.REQUIRED:\n", file=sys.stderr)
+              "src/convexity/envcheck.REQUIRED:\n", file=sys.stderr)
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
         print("\nAdd the missing specs, or drop the entry from REQUIRED if the "

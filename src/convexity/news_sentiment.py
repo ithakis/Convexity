@@ -181,7 +181,7 @@ def _cache_restore(cache: dict, key: str, entry: tuple[float, float, Any] | None
 
 
 # ---------------------------------------------------------------------------
-# Disk persistence — `<data>/state/news.json` (convexity/paths.py)
+# Disk persistence — `<data>/state/news.json` (src/convexity/paths.py)
 # ---------------------------------------------------------------------------
 
 _PERSIST_FILE = paths.state_file("news")

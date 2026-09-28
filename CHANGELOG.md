@@ -2,8 +2,14 @@
 
 Version scheme: `1.X.Y` — X bumps on a major new feature/release, Y bumps on
 smaller polish/fixes/infra in between. Inferred retroactively from merged PR
-history; going forward, bump `__version__` in `convexity/__init__.py`
+history; going forward, bump `__version__` in `src/convexity/__init__.py`
 when merging a PR and add a line here.
+
+## Unreleased
+
+Roadmap Phase 7 (`distribution` branch): repository tidy-up, for the v2.0.0 release.
+
+- The package moved to `src/convexity/` (the standard `src/` layout). Nothing changes for installed apps or your data; developers run the same `uv sync` / `uv run convexity`.
 
 ## 1.15.0 — 2026-09-28
 

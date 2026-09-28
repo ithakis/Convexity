@@ -13,7 +13,7 @@ Single-user, local-only portfolio dashboard. Runs as a Python HTTP server
 on `127.0.0.1:8765` and prints its URL — it does **not** auto-open a browser
 (removed in v1.12.3 at the user's request); or runs in a native PySide6 window — §14. No accounts, no network calls except to yfinance
 (Yahoo Finance), Finnhub (news), and NVIDIA NIM (the News read), no build
-step. Almost all logic lives in the `convexity/` package, split
+step. Almost all logic lives in the `src/convexity/` package, split
 into focused modules (server, fetcher, analytics, fx, persistence, etc. —
 see the table below); `dashboard.py` at the repo root is a thin
 backward-compat shim (`python dashboard.py` still works).
@@ -32,7 +32,7 @@ sub-decision.
 .
 ├── dashboard.py                 ← Backward-compat shim: `python dashboard.py` → convexity.server.main()
 ├── build_symbol_db.py           ← CLI to (re)build symbol_db.sqlite from public sources
-├── convexity/           ← The package. Everything below is imported by server.py or desktop.py.
+├── src/convexity/           ← The package. Everything below is imported by server.py or desktop.py.
 │   ├── __init__.py
 │   ├── __main__.py              ← `python -m convexity` entry point
 │   ├── server.py                ← HTTP server, route handlers, start_server()/shutdown_server() — §4, §14
@@ -85,7 +85,7 @@ sub-decision.
 ```
 
 **User data is not in the repo (v1.14, roadmap Phase 3).** It lives in the
-per-user data folder resolved by `convexity/paths.py` (`CONVEXITY_HOME`
+per-user data folder resolved by `src/convexity/paths.py` (`CONVEXITY_HOME`
 overrides it):
 
 ```
@@ -200,7 +200,7 @@ own app keeps running on 8765 meanwhile; `_pick_port` moves yours to 8766+.
 
 ---
 
-## 4. Backend (`convexity/` package — server side)
+## 4. Backend (`src/convexity/` package — server side)
 
 ### Caching layers (in order of speed)
 - **`_CACHE`** — generic TTL cache, default 300s, 1800s for analytics.
@@ -220,7 +220,7 @@ own app keeps running on 8765 meanwhile; `_pick_port` moves yours to 8766+.
 Nothing is ever written next to the code. Before 1.14 every path came from
 `helpers._repo_root()` (walk up to `.git`, else the package dir), so an
 installed wheel wrote the user's watchlists into `site-packages/convexity/`,
-where the next upgrade deletes them. Now `convexity/paths.py` is the only place
+where the next upgrade deletes them. Now `src/convexity/paths.py` is the only place
 a data path is built: `data_dir()`, `state_file(name)`, `models_dir()`,
 `logs_dir()`, `config_file()`, `symbol_db_file()`. Stdlib only, no import-time
 side effects, never creates a directory — writers `mkdir` their own parent.
@@ -340,8 +340,8 @@ ps_ratio, pe_ratio,
 error  (only on failure)
 ```
 
-Adding a new field: extend `fetch_one` (`convexity/fetcher.py`), add
-it to the column registry (`COLS` in `convexity/static/app.js`,
+Adding a new field: extend `fetch_one` (`src/convexity/fetcher.py`), add
+it to the column registry (`COLS` in `src/convexity/static/app.js`,
 line ~6), and `xlsx_export.py`'s `HOLDINGS_PRIMARY_COLS` auto-picks up
 extras through the "extras pass" mechanism.
 
@@ -377,7 +377,7 @@ trend). They come from the Finnhub free API via
 `_load_api_key()`:
 `FINNHUB_API_KEY` env var first, then a `.finnhub_key` file found by
 **walking up** from the module directory (one line, the raw key). Walking
-up matters: the key lives at the repo root, not inside `convexity/`,
+up matters: the key lives at the repo root, not inside `src/convexity/`,
 and in a worktree run the package sits several levels below the checkout —
 this mirrors `news_sentiment._load_key`. (Previously `_load_api_key` only
 checked the module's own directory, so it never found the repo-root key and
@@ -607,7 +607,7 @@ not reintroduce one; the engines answer different questions.
 - **A dependency declaration is not a dependency** (the v1.10 lesson: the ML
   model was dead in every installed copy for weeks because `lightgbm` was only
   in `requirements.txt`, and the fix then sat unsolved in the `pt` env).
-  `convexity/envcheck.py` is the single runtime-dependency manifest,
+  `src/convexity/envcheck.py` is the single runtime-dependency manifest,
   enforced at boot, on `/api/health` (`env_ok` → banner), by
   `install.sh`/`install.ps1` (run with the installed tool's interpreter), and
   in CI by `scripts/check_dependency_manifests.py` (every `REQUIRED` entry must
@@ -818,7 +818,7 @@ level. Never add a `do_OPTIONS` or CORS headers.
 
 ---
 
-## 5. Frontend (`convexity/static/`)
+## 5. Frontend (`src/convexity/static/`)
 
 Real static files served by `server.py` — `index.html`, `app.js`,
 `style.css`. No frameworks, no build step. KaTeX is the only external
@@ -1345,7 +1345,7 @@ dashboard, extend `xlsx_export.py` so the export stays comprehensive.
 
 Two places have the contract documented; keep them in sync:
 1. Inline HTML comment next to the topbar `#export` button
-   (`convexity/static/app.js`)
+   (`src/convexity/static/app.js`)
 2. Module docstring at the top of `xlsx_export.py`
 
 ### Per-sheet structure
@@ -1429,7 +1429,7 @@ Two places have the contract documented; keep them in sync:
 ## 9. Conventions
 
 ### Code style
-- **Modular by concern** — the backend lives in `convexity/` as
+- **Modular by concern** — the backend lives in `src/convexity/` as
   one module per concern (server, fetcher, analytics, fx, persistence,
   resolver, cache, mpt, frontier, xlsx_export, finnhub_adapter,
   news_sentiment, symbol_db, desktop). Put new logic in the module it
@@ -1506,9 +1506,9 @@ issues, never back into a file. Distribution/packaging work follows
 
 ## 11. Quick reference — current line landmarks
 
-The frontend (HTML/CSS/JS) is embedded in `convexity/static/`, not
+The frontend (HTML/CSS/JS) is embedded in `src/convexity/static/`, not
 in `dashboard.py` (that file is now an 11-line backward-compat shim — see
-§1/§2). Landmarks below are within `convexity/static/app.js` unless
+§1/§2). Landmarks below are within `src/convexity/static/app.js` unless
 noted otherwise. (Approximate. Use `grep -n` to confirm before editing.)
 
 | What | File | Where |
@@ -1534,7 +1534,7 @@ noted otherwise. (Approximate. Use `grep -n` to confirm before editing.)
 | Mode pill bar (`renderModeBar`) | `static/app.js` | ~4454 |
 | `runPrimary` (Build/Update button router) | `static/app.js` | ~4571 |
 
-Use `grep -n "<symbol>" convexity/*.py convexity/static/*.{js,html,css}`
+Use `grep -n "<symbol>" src/convexity/*.py src/convexity/static/*.{js,html,css}`
 to relocate anything not listed above — the package is small enough that
 this is faster than trusting a stale line table.
 
@@ -1544,7 +1544,7 @@ this is faster than trusting a stale line table.
 
 Standalone module (dependency-light, testable in isolation) implementing the two
 engines behind the Optimize tab. Used by `compute_efficient_frontier` in
-`convexity/frontier.py`. **No scipy on the hot path** — the LP solver is a
+`src/convexity/frontier.py`. **No scipy on the hot path** — the LP solver is a
 custom numba interior-point method; scipy/HiGHS lives only in
 `tests/_cvar_reference.py` and certifies the fast solver to 1e-6 in CI.
 
@@ -1752,7 +1752,7 @@ fails in seconds instead of waiting on the platform-specific jobs first:
 | Job | Runner | What it proves |
 |---|---|---|
 | `secrets` | ubuntu | gitleaks (checksum-pinned binary) over the **full history**, plus a filename check that no runtime-state / key / `settings.local.json` file exists in any commit — §18. Independent of the others so a leak fails fast |
-| `lint` | ubuntu | Every `.py` parses (`scripts/check_syntax.py`); `pyflakes` on all `convexity/*.py` + `build_symbol_db.py` + `scripts/*.py` (non-blocking); dependency manifests cover `envcheck.REQUIRED`; `uv lock --check` (lockfile matches pyproject); `dashboard.py` parses; `install.ps1`/`update.ps1` parse via PowerShell Core's own `Parser.ParseFile`; `install.sh`/`update.sh`/`Launch Dashboard.command` pass `bash -n`. Runs `uv run --no-project` — no dependency install |
+| `lint` | ubuntu | Every `.py` parses (`scripts/check_syntax.py`); `pyflakes` on all `src/convexity/*.py` + `build_symbol_db.py` + `scripts/*.py` (non-blocking); dependency manifests cover `envcheck.REQUIRED`; `uv lock --check` (lockfile matches pyproject); `dashboard.py` parses; `install.ps1`/`update.ps1` parse via PowerShell Core's own `Parser.ParseFile`; `install.sh`/`update.sh`/`Launch Dashboard.command` pass `bash -n`. Runs `uv run --no-project` — no dependency install |
 | `test` | ubuntu | `uv sync --locked --extra dev` then `uv run pytest tests/` — the full unit suite |
 | `server-smoke` | ubuntu | Real HTTP requests against a real running server (`scripts/smoke_test_server.py`) — `/`, `/api/watchlists`, `/api/views`, `/static/*` must return real 200s with real bodies. This is the answer to "is the app actually working," not just "does it import." |
 | `desktop-import-smoke` | ubuntu | `convexity.desktop` imports cleanly under a real (headless, `QT_QPA_PLATFORM=offscreen`) `QApplication` — catches PySide6/QtWebEngine API breakage the plain lint job can't see, since lint never installs PySide6. Needs a handful of system graphics libraries (`libegl1`, `libgl1`, etc.) installed via `apt-get` first — the bare runner has none, not even for the offscreen platform plugin |
@@ -1771,7 +1771,7 @@ an empty `HOME` and a minimal `PATH` with the installer piped in, as a
 — that exercises the official uv installer and a managed Python download too.
 
 `pyflakes` stays `|| true` (non-blocking) — tighten by removing that once
-the false-positive rate on the wider `convexity/*.py` glob has been
+the false-positive rate on the wider `src/convexity/*.py` glob has been
 measured over a few weeks.
 
 **To tighten a check:** remove `|| true` from the relevant step in `ci.yml`
@@ -1870,7 +1870,7 @@ with the app process, so an update takes effect on the next launch. (Until
 v1.13 this was a Miniforge `pt` conda env built from a checkout; that is
 retired — see "Installers" below.)
 
-### The `start_server()` / `shutdown_server()` seam (`convexity/server.py`)
+### The `start_server()` / `shutdown_server()` seam (`src/convexity/server.py`)
 
 `main()` (browser mode) and `desktop.py` (app mode) both need the same
 port-pick + `ThreadingHTTPServer` construction but manage their own
@@ -1909,7 +1909,7 @@ lifecycle, so that piece is factored into two small functions:
 loop instead of calling `serve_forever()` directly, since that call moved
 into `start_server()` — Ctrl+C behavior is unchanged.
 
-### `convexity/desktop.py`
+### `src/convexity/desktop.py`
 
 Run via `python -m convexity.desktop` (what the installed launcher
 actually invokes). Single file, ~160 lines:
@@ -1941,7 +1941,7 @@ actually invokes). Single file, ~160 lines:
   `QDesktopServices.openUrl()` then `deleteLater()` — no in-app popup
   window is ever shown. Verified directly against both code paths with
   `QDesktopServices.openUrl` mocked (not just by clicking through the UI).
-- **Icon**: `convexity/assets/icon.png` — **package data** since v1.14 (it
+- **Icon**: `src/convexity/assets/icon.png` — **package data** since v1.14 (it
   was at the repo root, which an installed package cannot reach, so a tool
   install would have run iconless). Resolved relative to `desktop.py`, set on
   both `QApplication` (dock/taskbar) and the window. Both call sites guard on
@@ -2147,7 +2147,7 @@ desktop window itself renders (CI never starts the GUI on Windows).
 
 ## 15. Version tracking
 
-Single source of truth: `__version__` in `convexity/__init__.py`
+Single source of truth: `__version__` in `src/convexity/__init__.py`
 (read it there — do not trust a hardcoded number in this doc). Scheme is `1.X.Y` — X bumps on a major new
 feature/release, Y bumps on smaller polish/fixes in between. `CHANGELOG.md`
 maps every version to the PR(s) it came from.
@@ -2163,7 +2163,7 @@ formats them with its own `fmtDateDMY()` helper, so both sides format from
 the same two source values without duplicating the format string.
 
 **Where it's surfaced:**
-- Terminal startup banner (`convexity/server.py`'s `main()`) — uses `__version_display__`.
+- Terminal startup banner (`src/convexity/server.py`'s `main()`) — uses `__version_display__`.
 - `GET /api/health` → `{"ok", "ts", "version", "version_date"}` — the frontend's source.
 - The app footer/version tag lives in the Analyst Sentiment section's
   coverage-footer row (`.an-coverage-foot` in `app.js`'s
@@ -2173,7 +2173,7 @@ the same two source values without duplicating the format string.
   exist); the version tag now only renders where the Analyst Sentiment
   section is in view, which was a deliberate user-requested tradeoff.
 - Desktop app splash subtitle and main window title
-  (`convexity/desktop.py`), both via `__version_display__`.
+  (`src/convexity/desktop.py`), both via `__version_display__`.
 
 **When bumping:** update `__version__` and `__version_date__`, add a line
 to `CHANGELOG.md`. No other files need touching — every surface above reads
@@ -2468,7 +2468,7 @@ Report the results plainly, including "all clean".
 ### Rename history (for context)
 v1.13.0 renamed `portfolio_tracker` → `convexity` everywhere (package, state
 files, `~/.convexity/`, bundle ID `com.ithakis.convexity`, log
-`~/Library/Logs/Convexity.log`). `convexity/migrate.py` moves old files on first
+`~/Library/Logs/Convexity.log`). `src/convexity/migrate.py` moves old files on first
 launch (delete after 2027-06-30).
 v1.14 then moved all of it out of the checkout into the data folder (§2, §4
 "Where user data lives"); the same module does that, copy → verify → remove.

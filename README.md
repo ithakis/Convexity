@@ -114,7 +114,7 @@ On macOS you can also double-click **`Launch Dashboard.command`**, which runs
 ## Requirements
 
 Python 3.11–3.14 (the installer fetches 3.11 through uv). Every dependency is
-declared in `pyproject.toml` and locked in `uv.lock`; `convexity/envcheck.py`
+declared in `pyproject.toml` and locked in `uv.lock`; `src/convexity/envcheck.py`
 lists the ones the running app checks for at startup.
 
 ---
