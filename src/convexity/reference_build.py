@@ -128,7 +128,20 @@ def _load_previous(prev: Path | None, model_version: str) -> list[dict]:
         if "scored by" in str(e):
             print(f"[reference] previous pack not reusable ({e}) — starting a fresh history")
             return []
-        raise
+        # A publish that broke off between the data files and the manifest
+        # leaves new data under the old manifest. Failing here would fail every
+        # later run too (the release never changes again), and starting afresh
+        # would drop up to HISTORY_DAYS of forward returns; the history file on
+        # its own still carries gzip's CRC and passes the full schema check.
+        try:
+            history = rp.load_history_file(prev, model_version)
+        except rp.PackError:
+            raise e from None
+        print(
+            f"::warning::[reference] previous pack inconsistent ({e}); carried its "
+            f"history.json.gz forward on its own ({len(history)} records)"
+        )
+        return history
     print(f"[reference] previous pack {manifest['date']}: {len(history)} records")
     return history
 

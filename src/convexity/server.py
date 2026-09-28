@@ -1309,6 +1309,10 @@ def _pick_port(preferred: int = 8765) -> int:
 
 
 _REF_DIAG_CACHE: dict = {}
+# One computation at a time: a second request for the same pack (a reopened
+# panel, a double click) waits for the first and then hits the cache, instead
+# of computing the same ~1-2 s of statistics again in parallel.
+_REF_DIAG_LOCK = threading.Lock()
 
 
 def _reference_diagnostics(horizon: int) -> dict:
@@ -1324,31 +1328,27 @@ def _reference_diagnostics(horizon: int) -> dict:
         if not st.get("enabled"):
             why = "Reference data is switched off (Settings → Models & Data)."
         elif st.get("installed_error"):
-            why = f"The downloaded reference data is not usable: {st['installed_error']}"
+            why = f"The downloaded reference data is not usable: {st['installed_error']}."
         elif (st.get("installed") or {}).get("stale"):
             why = "The reference data is too old to use — the daily build has not published lately."
         elif st.get("state") == "failed":
-            why = f"The reference data could not be downloaded: {st.get('error')}"
+            why = f"The reference data could not be downloaded: {st.get('error')}."
         else:
             why = "The reference data has not been downloaded yet."
         out = _nd.compute([], market_horizon=horizon)
         out.update(source="reference", reference=None, unavailable=why)
         return out
-    key = (
-        info["date"],
-        (info.get("rows") or {}).get("history"),
-        info.get("model_version"),
-        horizon,
-    )
-    hit = _REF_DIAG_CACHE.get("key") == key and _REF_DIAG_CACHE.get("out")
-    if hit:
-        return {**hit, "reference": info}  # the pack's age moves on; the stats do not
-    out = _nd.compute(
-        reference_pack.history_records(), market_horizon=horizon, forward_from_records=True
-    )
-    out.update(source="reference", reference=info)
-    _REF_DIAG_CACHE.update(key=key, out=out)
-    return out
+    key = (info.get("history_sha256"), info.get("model_version"), horizon)
+    with _REF_DIAG_LOCK:
+        hit = _REF_DIAG_CACHE.get("key") == key and _REF_DIAG_CACHE.get("out")
+        if hit:
+            return {**hit, "reference": info}  # the pack's age moves on; the stats do not
+        out = _nd.compute(
+            reference_pack.history_records(), market_horizon=horizon, forward_from_records=True
+        )
+        out.update(source="reference", reference=info)
+        _REF_DIAG_CACHE.update(key=key, out=out)
+        return out
 
 
 def start_server() -> tuple[ThreadingHTTPServer, int]:

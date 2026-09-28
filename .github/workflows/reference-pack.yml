@@ -11,18 +11,11 @@ name: Reference pack
 # - Never commits: data goes only to the release asset. Only `publish` can
 #   write, and it has no secrets; it never creates the release.
 # - Scheduled runs happen only on the default branch. Before that, test with
-#   workflow_dispatch: first `yahoo-check`, then `build`.
+#   workflow_dispatch: first `yahoo-check`, then `build`. The web UI's "Run
+#   workflow" button needs this file on main; the CLI works from any branch:
+#   gh workflow run reference-pack.yml --ref <branch> -f mode=yahoo-check
 
 on:
-  # TEMPORARY (remove before the v2.0.0 PR): workflow_dispatch only works once
-  # this file is on main, so until then a push to `distribution` that touches
-  # the builder runs the yahoo-check job alone — no secrets, no publish.
-  push:
-    branches: ["distribution"]
-    paths:
-      - ".github/workflows/reference-pack.yml"
-      - "src/convexity/reference_build.py"
-      - "src/convexity/data/sp500.json"
   schedule:
     - cron: "30 22 * * 1-5" # weekdays, after the US close (22:30 UTC)
   workflow_dispatch:
@@ -43,7 +36,7 @@ concurrency:
 jobs:
   yahoo-check:
     name: Yahoo check (prices for the full universe, no publish)
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'yahoo-check')
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'yahoo-check'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -80,19 +73,31 @@ jobs:
         run: uv sync --locked
 
       # The history grows by carrying the previous pack forward; the builder
-      # verifies it (manifest hashes + schema) before using it.
+      # verifies it (manifest hashes + schema) before using it. Only a missing
+      # release or an empty one means "fresh history": any other failure (a
+      # network error, an API outage) fails the run, or the next publish would
+      # replace up to 400 days of history with one day.
       - name: Fetch the previous pack
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p prev
-          if gh release download reference-pack --repo "$GITHUB_REPOSITORY" --dir prev \
-               --pattern manifest.json --pattern anchor.json.gz --pattern history.json.gz; then
-            ls -l prev
-          else
-            echo "::notice::No previous pack — this run starts a fresh history."
-            rm -rf prev && mkdir prev
+          if ! assets=$(gh release view reference-pack --repo "$GITHUB_REPOSITORY" \
+                          --json assets --jq '.assets[].name' 2> view.err); then
+            if grep -q "release not found" view.err; then
+              echo "::notice::No reference-pack release yet — this run starts a fresh history."
+              exit 0
+            fi
+            cat view.err
+            exit 1
           fi
+          if ! grep -qx "manifest.json" <<< "$assets"; then
+            echo "::notice::The release holds no pack yet — this run starts a fresh history."
+            exit 0
+          fi
+          gh release download reference-pack --repo "$GITHUB_REPOSITORY" --dir prev \
+            --pattern manifest.json --pattern anchor.json.gz --pattern history.json.gz
+          ls -l prev
 
       - name: Build
         env:

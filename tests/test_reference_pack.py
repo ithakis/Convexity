@@ -463,6 +463,45 @@ def test_reference_track_record(monkeypatch):
     assert out["news"]["coverage"]["n_records"] == 0  # the pack has no News read
     again = server._reference_diagnostics(1)  # cached per pack
     assert again["market"] is out["market"]
+    # A same-day rebuild with the same row count is still new content.
+    h = _scored_history()
+    for r in h["records"]:
+        r["fwd_1d"] = -r["fwd_1d"]
+    make_pack(paths.reference_dir(), history=h, date=_today())
+    flipped = server._reference_diagnostics(1)
+    assert flipped["market"] is not out["market"]
+    assert flipped["market"]["ic"]["1d"]["mean"] < 0 < out["market"]["ic"]["1d"]["mean"]
+    rp.reset_for_tests()
+
+
+def test_concurrent_reference_track_record_requests_compute_once(monkeypatch):
+    from convexity import news_diagnostics as nd
+    from convexity import server
+
+    monkeypatch.setenv("CONVEXITY_REFERENCE_PACK", "1")
+    rp.reset_for_tests()
+    server._REF_DIAG_CACHE.clear()
+    make_pack(paths.reference_dir(), history=_scored_history(), date=_today())
+    calls = []
+    real = nd.compute
+
+    def slow(*a, **k):
+        calls.append(1)
+        time.sleep(0.2)
+        return real(*a, **k)
+
+    monkeypatch.setattr(nd, "compute", slow)
+    outs = []
+    ts = [
+        threading.Thread(target=lambda: outs.append(server._reference_diagnostics(1)))
+        for _ in range(4)
+    ]
+    for th in ts:
+        th.start()
+    for th in ts:
+        th.join()
+    assert len(calls) == 1 and len(outs) == 4
+    assert all(o["market"] is outs[0]["market"] for o in outs)
     rp.reset_for_tests()
 
 

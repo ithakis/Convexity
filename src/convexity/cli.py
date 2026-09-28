@@ -18,7 +18,7 @@ import sys
 
 USAGE = """\
 usage: convexity [build-symbols [--sources S1,S2] [--db PATH]]
-       convexity build-reference-pack --out DIR [--limit N] [--previous DIR]
+       convexity build-reference-pack (--out DIR [--previous DIR] | --returns-only) [--limit N]
 
   (no command)          run the dashboard server and print its URL
   build-symbols         build / refresh the local symbol database

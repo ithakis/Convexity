@@ -7319,9 +7319,11 @@ function trackRecordSource() {
   catch { return "holdings"; }
 }
 
+let _trLoadSeq = 0;  // only the newest loadTrackRecord() call may render
 async function loadTrackRecord() {
   const body = $("#ns-diag-body");
   const src = trackRecordSource();
+  const seq = ++_trLoadSeq;
   body.innerHTML = trackSourceSwitch(src)
     + lcHtml(src === "reference" ? "scoring 500 names against realized returns"
                                  : "scoring the history against realized returns", { bar: true });
@@ -7329,9 +7331,10 @@ async function loadTrackRecord() {
   try {
     const url = src === "reference" ? "/api/news-diagnostics?source=reference" : "/api/news-diagnostics";
     const d = await fetch(url).then(r => r.json());
-    if (trackRecordSource() !== src) return;  // switched while loading
+    if (seq !== _trLoadSeq) return;  // switched or reopened while loading
     renderTrackRecord(d);
   } catch {
+    if (seq !== _trLoadSeq) return;
     body.innerHTML = trackSourceSwitch(src) + '<div class="ns-panel-empty">Track record unavailable.</div>';
     wireTrackSourceSwitch(body);
   }
@@ -7372,7 +7375,7 @@ function trackVerdictCard(title, eng, explain, portfolioCov) {
     <div class="ns-tr-kv"><span>Trading days scored</span><b>${days}</b></div>
     <div class="ns-tr-kv"><span>Daily IC (${eng ? eng.horizon_days : 1}d)</span><b>${ic.mean != null ? fmtSig(ic.mean, 3) : "—"}${ic.t != null ? ` <span class="ns-muted">t ${ic.t.toFixed(1)}</span>` : ""}</b></div>
     <div class="ns-tr-kv"><span>Hit rate (5d)</span><b>${hrTxt}</b></div>
-    <div class="ns-tr-kv"><span>Coverage</span><b>${portfolioCov}<span class="ns-muted"> · ${cov.n_records || 0} records</span></b></div>
+    <div class="ns-tr-kv"><span>Coverage</span><b>${portfolioCov}<span class="ns-muted"> · ${(cov.n_records || 0).toLocaleString()} records</span></b></div>
     <div class="ns-tr-explain">${explain}</div>
   </div>`;
 }
@@ -10648,6 +10651,7 @@ function renderSettingsAbout(el) {
           ${kv("Optimizer runs", "<code>state/mpt.json</code>")}
           ${kv("News cache", "<code>state/news.json</code>")}
           ${kv("ML model", "<code>models/</code>")}
+          ${kv("Reference data", "<code>reference/</code>")}
           ${kv("API keys", "<code>config.json</code>")}
         </div>
         <div class="settings-row-help">One folder per user, outside the app's own

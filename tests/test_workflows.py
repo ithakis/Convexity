@@ -70,10 +70,30 @@ def test_reference_pack_schedule_and_manual_modes():
     assert "--out pack --previous prev" in jobs["build"]
 
 
-def test_a_push_can_only_run_the_yahoo_check():
-    """The temporary push trigger (until the file is on main) must never
-    build or publish: those jobs are gated on schedule / dispatch explicitly."""
-    jobs = _jobs(REF.read_text())
-    assert "github.event_name == 'push'" in jobs["yahoo-check"]
-    assert "'push'" not in jobs["build"] and "if:" not in jobs["publish"].split("steps:")[0]
+def test_reference_pack_runs_only_on_schedule_or_dispatch():
+    """A collector never runs on push or pull_request: the builder spends the
+    Finnhub secret and the publish job writes the release. (A temporary push
+    trigger existed on `distribution` until dispatch was confirmed to work
+    from a branch through the CLI.)"""
+    text = REF.read_text()
+    on = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    triggers = set(re.findall(r"(?m)^  ([a-z_]+):", on))
+    assert triggers == {"schedule", "workflow_dispatch"}, triggers
+    jobs = _jobs(text)
+    assert "inputs.mode == 'yahoo-check'" in jobs["yahoo-check"]
+    assert "github.event_name == 'schedule'" in jobs["build"]
+    assert "if:" not in jobs["publish"].split("steps:")[0]
     assert "needs: build" in jobs["publish"]
+
+
+def test_only_a_missing_release_starts_a_fresh_history():
+    """A transient `gh` failure while fetching the previous pack must fail the
+    run: treating it as "no previous pack" would publish one day of history
+    over up to 400."""
+    step = _jobs(REF.read_text())["build"].split("- name: Fetch the previous pack", 1)[1]
+    step = step.split("- name:", 1)[0]
+    assert 'grep -q "release not found"' in step
+    assert "exit 1" in step
+    assert "rm -rf prev" not in step
+    # the download itself is not wrapped in an `if`: its failure fails the step
+    assert "\n          gh release download reference-pack" in step

@@ -287,6 +287,22 @@ def load_dir(d: Path, model_version: str) -> tuple[dict, list[dict], list[list]]
     return manifest, history, anchor
 
 
+def load_history_file(d: Path, model_version: str) -> list[dict]:
+    """history.json.gz alone, without its manifest: gzip's own CRC plus the
+    full schema check. The builder's fallback when a publish broke off after
+    the data files and before the manifest (the release then holds new data
+    under yesterday's manifest, so the hashes cannot match). Never used by the
+    app, which trusts only a complete, hash-matched pack."""
+    p = Path(d) / HISTORY
+    try:
+        if p.stat().st_size > MAX_FILE_BYTES:
+            raise PackError(f"{HISTORY} too large")
+        data = p.read_bytes()
+    except OSError as e:
+        raise PackError(f"{HISTORY} unreadable ({e.strerror or e})") from None
+    return validate_history(gunzip_json(data), model_version)
+
+
 # =================================================================== app side
 BASE_URL = "https://github.com/ithakis/Convexity/releases/download/reference-pack/"
 FRESH_S = 24 * 3600  # re-check at most once a day
@@ -601,6 +617,8 @@ def info() -> dict | None:
         "n_names": (m.get("universe") or {}).get("n"),
         "rows": m.get("rows"),
         "model_version": m.get("model_version"),
+        # Identifies the content (a same-day rebuild keeps the date).
+        "history_sha256": m["files"][HISTORY]["sha256"],
     }
 
 

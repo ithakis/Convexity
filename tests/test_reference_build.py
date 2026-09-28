@@ -149,8 +149,10 @@ def test_missing_key_is_a_usage_error(env, monkeypatch, tmp_path, capsys):
 
 
 def test_tampered_previous_pack_is_refused(env, tmp_path):
+    # The history itself damaged: nothing to salvage, so the run fails
+    # (loudly, nothing written) rather than publish a truncated history.
     rb.build(tmp_path / "prev", limit=6, today="2026-01-02")
-    p = tmp_path / "prev" / rp.ANCHOR
+    p = tmp_path / "prev" / rp.HISTORY
     b = bytearray(p.read_bytes())
     b[len(b) // 2] ^= 0xFF
     p.write_bytes(bytes(b))
@@ -158,6 +160,22 @@ def test_tampered_previous_pack_is_refused(env, tmp_path):
     args = ["build-reference-pack", "--out", str(out), "--limit", "6"]
     assert cli.main([*args, "--previous", str(tmp_path / "prev")]) == 1
     assert not out.exists()
+
+
+def test_a_half_published_previous_pack_still_carries_its_history(env, tmp_path, capsys):
+    """A publish that broke off after the data files: new data, old manifest.
+    The history is carried forward on its own rather than failing every later
+    run (the release would never change again) or restarting from scratch."""
+    rb.build(tmp_path / "old", limit=6, today="2026-01-02")
+    rb.build(tmp_path / "prev", limit=6, today="2026-01-05", previous=tmp_path / "old")
+    (tmp_path / "prev" / rp.MANIFEST).write_bytes((tmp_path / "old" / rp.MANIFEST).read_bytes())
+    with pytest.raises(rp.PackError):
+        rp.load_dir(tmp_path / "prev", ml.ARTIFACT_VERSION)
+    m = rb.build(tmp_path / "now", limit=6, today="2026-01-06", previous=tmp_path / "prev")
+    assert "carried its history.json.gz forward" in capsys.readouterr().out
+    dates = {r["date"] for r in rp.load_dir(tmp_path / "now", ml.ARTIFACT_VERSION)[1]}
+    assert dates == {"2026-01-02", "2026-01-05", "2026-01-06"}
+    assert m["rows"]["history"] == 18
 
 
 def test_stub_base_url_must_be_loopback_http(env, monkeypatch, tmp_path):
