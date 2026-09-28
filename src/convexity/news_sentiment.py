@@ -545,25 +545,27 @@ def _fetch_yf_news(symbol: str, days: int, cancel=None) -> list[dict]:
     return out
 
 
-def fetch_company_news(symbol: str, days: int = 7, cancel=None) -> list[dict] | None:
-    """Fetch recent news for a single ticker from Finnhub + yfinance,
-    deduplicated. Returns normalised article list (most recent first).
+def collect_company_news(
+    symbol: str, days: int = 7, cancel=None, finnhub_symbol: str | None = None
+) -> tuple[list[dict], bool, int]:
+    """Uncached Finnhub + yfinance fetch for one ticker, deduplicated and
+    window-sampled exactly as the app retains it. Returns (articles, finnhub
+    answered, number of yfinance items).
 
-    Keyed by `days` — a 7d and 30d GET must not collide/shadow each other."""
-    cache_key = f"news|{symbol}|{days}"
-    cached = _cache_get(_NEWS_CACHE, cache_key)
-    if cached is _MISS:
-        return None
-    if cached is not None:
-        return cached
-
+    Shared by the app's cached `fetch_company_news` and the reference-pack
+    builder (reference_build.py), so the pack's Market read scores the SAME
+    article set the app would — train/serve-style parity for the anchor.
+    `finnhub_symbol` lets the builder pass Finnhub's class-share spelling
+    (BRK.B) for a Yahoo ticker (BRK-B)."""
     to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     raw = _fh_call(
-        "company-news", {"symbol": symbol, "from": from_date, "to": to_date}, cancel=cancel
+        "company-news",
+        {"symbol": finnhub_symbol or symbol, "from": from_date, "to": to_date},
+        cancel=cancel,
     )
     articles: list[dict] = []
-    fh_failed = raw is None  # transient failure vs "returned but empty"
+    fh_ok = raw is not None  # None = transient failure, [] = "returned but empty"
     if isinstance(raw, list):
         # Deep, window-scaled slice, NOT a flat newest-N — Finnhub returns
         # newest-first within the range, so a fixed cap would collapse a wide
@@ -580,13 +582,33 @@ def fetch_company_news(symbol: str, days: int = 7, cancel=None) -> list[dict] | 
                     "related": a.get("related", ""),
                 }
             )
-    articles.extend(_fetch_yf_news(symbol, days, cancel=cancel))
+    yf_items = _fetch_yf_news(symbol, days, cancel=cancel)
+    articles.extend(yf_items)
+    if not articles:
+        return [], fh_ok, 0
+    articles = window_sample(_dedup_articles(articles), cap=_ARTICLE_CAP, min_recent=_SCORE_BATCH)
+    return articles, fh_ok, len(yf_items)
+
+
+def fetch_company_news(symbol: str, days: int = 7, cancel=None) -> list[dict] | None:
+    """Fetch recent news for a single ticker from Finnhub + yfinance,
+    deduplicated. Returns normalised article list (most recent first).
+
+    Keyed by `days` — a 7d and 30d GET must not collide/shadow each other."""
+    cache_key = f"news|{symbol}|{days}"
+    cached = _cache_get(_NEWS_CACHE, cache_key)
+    if cached is _MISS:
+        return None
+    if cached is not None:
+        return cached
+
+    articles, fh_ok, _ = collect_company_news(symbol, days, cancel=cancel)
+    fh_failed = not fh_ok
     if not articles:
         if fh_failed:
             return None  # transient — don't negative-cache
         _cache_put(_NEWS_CACHE, cache_key, _MISS, _NEG_TTL)
         return None
-    articles = window_sample(_dedup_articles(articles), cap=_ARTICLE_CAP, min_recent=_SCORE_BATCH)
     # A Finnhub outage still lets yfinance-only articles through (better than
     # nothing), but that's a DEGRADED result — cache it briefly, not for the
     # full 30-day _NEWS_TTL, so a real Finnhub recovery isn't masked.

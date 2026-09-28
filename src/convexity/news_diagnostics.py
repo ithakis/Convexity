@@ -200,15 +200,49 @@ def _news_tier(score: float | None) -> str | None:
 
 
 # ----------------------------------------------------------------- main entry
-def compute(raw_records: list[dict], closes=None, market_horizon: int = 5) -> dict[str, Any]:
+def forward_idio(s, spy, date: str, beta, h: int) -> float | None:
+    """Forward h-day idiosyncratic return r_i - beta * r_SPY from the last
+    close ON OR BEFORE `date` — a ticker-day is scored against what happened
+    after the read, never the same day's close. `s` / `spy` are close Series
+    with a DatetimeIndex. None until h later closes exist (a young record, or a
+    missing price). Shared by the Track record and the reference-pack builder,
+    so the pack's forward returns are defined exactly like the local ones."""
+    import pandas as pd
+
+    if s is None or spy is None or len(s) < h + 2:
+        return None
+    ts = pd.Timestamp(date)
+    pos = s.index.searchsorted(ts, side="right") - 1  # last close <= date
+    spos = spy.index.searchsorted(ts, side="right") - 1
+    if pos < 0 or pos + h >= len(s) or spos < 0 or spos + h >= len(spy):
+        return None
+    b = float(beta) if isinstance(beta, (int, float)) else 1.0
+    return float(s.iloc[pos + h] / s.iloc[pos] - 1.0) - b * float(
+        spy.iloc[spos + h] / spy.iloc[spos] - 1.0
+    )
+
+
+def compute(
+    raw_records: list[dict],
+    closes=None,
+    market_horizon: int = 5,
+    forward_from_records: bool = False,
+) -> dict[str, Any]:
     """The Track record payload. `closes` is a daily close frame (columns =
-    symbols + SPY); None means "fetch it" (the route) — tests pass a frame."""
+    symbols + SPY); None means "fetch it" (the route) — tests pass a frame.
+
+    `forward_from_records`: the records already carry `fwd_1d` / `fwd_5d`
+    (the reference pack's history, whose builder joined them with
+    forward_idio) — no price download, which for 500 names would be the
+    expensive part of this call."""
     records = load_records(raw_records)
     out: dict[str, Any] = {"n_records": len(records), "market_horizon_days": market_horizon}
     dates = sorted({r["date"] for r in records if r.get("date")})
     out["date_range"] = [dates[0], dates[-1]] if dates else None
     if not records:
         return _empty(out)
+    if forward_from_records:
+        return _score(records, out, market_horizon, lambda rec, h: rec.get(f"fwd_{h}d"))
     if closes is None:
         from convexity.analytics import _bulk_close
 
@@ -220,29 +254,26 @@ def compute(raw_records: list[dict], closes=None, market_horizon: int = 5) -> di
         out["note"] = "price history unavailable"
         return _empty(out)
 
-    import pandas as pd
-
     spy = closes["SPY"].dropna()
     series = {s: closes[s].dropna() for s in closes.columns}
 
     def fwd_idio(rec: dict, h: int) -> float | None:
-        s = series.get(rec["symbol"])
-        if s is None or len(s) < h + 2:
-            return None
-        ts = pd.Timestamp(rec["date"])
-        pos = s.index.searchsorted(ts, side="right") - 1  # last close <= date
-        spos = spy.index.searchsorted(ts, side="right") - 1
-        if pos < 0 or pos + h >= len(s) or spos < 0 or spos + h >= len(spy):
-            return None
-        beta = rec.get("beta")
-        beta = float(beta) if isinstance(beta, (int, float)) else 1.0
-        return float(s.iloc[pos + h] / s.iloc[pos] - 1.0) - beta * float(
-            spy.iloc[spos + h] / spy.iloc[spos] - 1.0
-        )
+        return forward_idio(series.get(rec["symbol"]), spy, rec["date"], rec.get("beta"), h)
 
+    return _score(records, out, market_horizon, fwd_idio)
+
+
+def _score(records: list[dict], out: dict, market_horizon: int, fwd) -> dict[str, Any]:
+    """Everything after the forward returns are known: `fwd(rec, h)` gives
+    the h-day forward idiosyncratic return of a record (or None)."""
     rows = []
     for rec in records:
-        row = dict(rec, fwd_1d=fwd_idio(rec, 1), fwd_5d=fwd_idio(rec, 5))
+        f1, f5 = fwd(rec, 1), fwd(rec, 5)
+        row = dict(
+            rec,
+            fwd_1d=f1 if isinstance(f1, (int, float)) else None,
+            fwd_5d=f5 if isinstance(f5, (int, float)) else None,
+        )
         # Rank on the raw model score: z is re-anchored when the percentile
         # switches from the training knots to live history, the score never
         # is. Pre-v1.12 records only carry the raw v1 SAR.

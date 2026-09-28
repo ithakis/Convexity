@@ -2,6 +2,8 @@
 
     convexity                   run the dashboard server (browser mode)
     convexity build-symbols     build / refresh the local fuzzy ticker DB
+    convexity build-reference-pack
+                                build the daily S&P 500 reference pack (CI)
 
 The desktop window is the separate `convexity-app` command (desktop.py).
 
@@ -16,10 +18,14 @@ import sys
 
 USAGE = """\
 usage: convexity [build-symbols [--sources S1,S2] [--db PATH]]
+       convexity build-reference-pack --out DIR [--limit N] [--previous DIR]
 
-  (no command)     run the dashboard server and print its URL
-  build-symbols    build / refresh the local symbol database
-                   (`convexity build-symbols --help` for its options)
+  (no command)          run the dashboard server and print its URL
+  build-symbols         build / refresh the local symbol database
+                        (`convexity build-symbols --help` for its options)
+  build-reference-pack  build the reference pack (the Market read of the
+                        S&P 500) — run by CI; needs FINNHUB_API_KEY in the
+                        environment (`--help` for its options)
 """
 
 
@@ -110,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args[0] == "build-symbols":
         return build_symbols(args[1:])
+    if args[0] == "build-reference-pack":
+        from .reference_build import main as build_reference_pack
+
+        return build_reference_pack(args[1:])
     if args[0] in ("-h", "--help", "help"):
         print(USAGE, end="")
         return 0

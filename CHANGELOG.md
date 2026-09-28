@@ -10,6 +10,7 @@ when merging a PR and add a line here.
 Roadmap Phase 8 (`distribution` branch): the reference pack.
 
 - The S&P 500 constituent list ships with the app (`src/convexity/data/sp500.json`, source and date recorded in the file) as the fixed universe of the daily reference pack. Public index membership only.
+- New command `convexity build-reference-pack --out DIR [--limit N] [--previous DIR]` builds the reference pack: news for the universe (Finnhub + yfinance, the app's own fetch and rate limits), the Market read only (the local model, SHA-256 checked — no LLM), forward returns once known, written as `anchor.json.gz`, `history.json.gz` and `manifest.json`. Only tickers, dates and scores — never a headline, summary or link. It reads its Finnhub key from the `FINNHUB_API_KEY` environment variable only, and a degraded run (fewer than half the names scored) writes nothing. `--returns-only` just checks that the prices can be fetched.
 
 Roadmap Phase 7 (`distribution` branch): repository tidy-up, for the v2.0.0 release.
 

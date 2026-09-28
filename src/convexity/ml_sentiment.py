@@ -278,8 +278,14 @@ def _article_context(closes, symbol: str, day) -> dict:
 
 
 # ---------------------------------------------------------------- scoring
-def score_articles(articles: list[dict], symbol: str, closes=None) -> list[dict]:
+def score_articles(
+    articles: list[dict], symbol: str, closes=None, company_name: str | None = None
+) -> list[dict]:
     """Encoder pass over a window's articles -> window items (one predict call).
+
+    `company_name` feeds the relevance heuristic; None looks it up in the
+    local symbol DB, as the app always has. The reference-pack builder passes
+    the name from sp500.json because CI has no symbol DB.
 
     Every live article is encoded as `dateonly_cc`: 98.5% of FNSPID rows carry
     a date without a time, so the encoder learned timed-session effects from
@@ -294,7 +300,7 @@ def score_articles(articles: list[dict], symbol: str, closes=None) -> list[dict]
     from convexity import ml_features as mf
     from convexity.relevance import is_boilerplate, load_company_names, relevance_score
 
-    name = load_company_names().get((symbol or "").upper())
+    name = company_name or load_company_names().get((symbol or "").upper())
     ctx_by_day: dict = {}
     dense_rows, texts, items = [], [], []
     for a in articles:
@@ -401,6 +407,7 @@ def market_read(
     closes=None,
     now: float | None = None,
     history: list[float] | None = None,
+    company_name: str | None = None,
 ) -> tuple[dict | None, float | None]:
     """The Market read for one ticker from its 7-day articles.
 
@@ -431,7 +438,7 @@ def market_read(
             >= first
         ]
         recent = window_sample(recent, mf.WINDOW_CAP, mf.WINDOW_MIN_RECENT)
-        items = score_articles(recent, symbol, closes)
+        items = score_articles(recent, symbol, closes, company_name=company_name)
         score, wsum = mf.weighted_sar(items, now)
         if score is None:
             return None, None

@@ -173,3 +173,31 @@ def test_per_lens_hit_rates_use_lens_scores():
     fin = out["news"]["lens_hit_rate"]["financials"]
     assert fin["all"]["n"] > 0 and fin["all"]["rate"] > 0.5
     assert out["news"]["lens_hit_rate"]["outlook"]["all"]["n"] == 0
+
+
+def test_precomputed_forward_returns_match_the_closes_path():
+    """The reference pack's history carries fwd_1d/fwd_5d joined by the
+    builder with forward_idio; compute() must score them exactly as it scores
+    the same records from closes."""
+    closes, _, idx = _world()
+    rng = random.Random(1)
+    recs = _records(idx, closes, lambda f: f + rng.gauss(0, 0.02))
+    spy = closes["SPY"]
+    pre = [
+        dict(
+            r,
+            fwd_1d=nd.forward_idio(closes[r["symbol"]], spy, r["date"], r["beta"], 1),
+            fwd_5d=nd.forward_idio(closes[r["symbol"]], spy, r["date"], r["beta"], 5),
+        )
+        for r in recs
+    ]
+    a = nd.compute(recs, closes=closes, market_horizon=1)
+    b = nd.compute(pre, closes=None, market_horizon=1, forward_from_records=True)
+    assert a["market"] == b["market"] and a["news"]["ic"] == b["news"]["ic"]
+
+
+def test_forward_idio_is_none_until_the_closes_exist():
+    closes, _, idx = _world()
+    last = idx[-1].strftime("%Y-%m-%d")
+    assert nd.forward_idio(closes["S0"], closes["SPY"], last, 1.0, 1) is None
+    assert nd.forward_idio(None, closes["SPY"], last, 1.0, 1) is None
