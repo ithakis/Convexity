@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest something Convexity should do.
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Not sure yet? File it anyway — it may be relabelled `idea` until it is
+        scoped. This repository is public: keep real holdings out of examples.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The decision or workflow this would help with.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to see?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you do today instead?

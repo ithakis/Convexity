@@ -168,7 +168,7 @@ sub-decision.
 ├── SECURITY.md                   ← How to report a vulnerability (public repo)
 ├── AGENTS.md                     ← Pointer to this file for non-Claude agents
 ├── CLAUDE.md                     ← This file (rules + map); deep sections in docs/architecture/
-├── .github/                      ← CI workflow, Dependabot, issue templates — §13
+├── .github/                      ← CI workflow, Dependabot, issue forms (bug, feature) — §13
 ├── LICENSE
 ├── .finnhub_key / .nvidia_key     ← LEGACY key files (gitignored); read as a logged fallback in 1.14, then config.json
 └── .openrouter_key               ← Legacy OpenRouter key (superseded, still gitignored)

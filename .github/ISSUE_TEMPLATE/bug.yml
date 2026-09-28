@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in Convexity is broken or behaves wrongly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **This repository is public** — please do not
+        paste API keys, your holdings or portfolio names, account numbers, or
+        screenshots of your real portfolio. Replace them with public tickers
+        (AAPL, MSFT, NVDA…) if they matter to the bug.
+
+        Found a security problem? Don't open an issue — see
+        [SECURITY.md](https://github.com/ithakis/Convexity/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Convexity version
+      description: Settings (gear) → About, e.g. "1.15.0 (28 Sep 2026)".
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How are you running it?
+      options:
+        - Installed app (install.sh / install.ps1)
+        - Browser mode (`convexity` in a terminal)
+        - From a development checkout (`uv run …`)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Build a portfolio with AAPL, MSFT
+        2. Open the Optimize tab
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines
+      description: |
+        Settings → Logs shows the app's console. Copy the lines around the
+        problem — check them first for anything private (keys never appear
+        there, but ticker lists can).
+      render: text
