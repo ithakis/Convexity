@@ -5,7 +5,7 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `convexity/__init__.py`
 when merging a PR and add a line here.
 
-## Unreleased
+## 1.14.2 — 2026-09-28
 
 Fixes from the Phase 3 verification findings (`distribution` branch).
 

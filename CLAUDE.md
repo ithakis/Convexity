@@ -178,7 +178,7 @@ own app keeps running on 8765 meanwhile; `_pick_port` moves yours to 8766+.
 1. **System Python is missing yfinance** — always go through `uv run`
    (or the tool's own interpreter). `python dashboard.py` with a bare
    interpreter crashes on import.
-2. **Port 8765 after a restart** — fixed after v1.14.1: `_pick_port()`'s probe
+2. **Port 8765 after a restart** — fixed in v1.14.2: `_pick_port()`'s probe
    used to bind without `SO_REUSEADDR` while the real server binds with it, so
    the ~30 s of TIME_WAIT after any restart pushed the app to 8766+. The probe
    now matches the server; a port something is *listening* on is still refused

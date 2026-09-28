@@ -368,7 +368,25 @@ Deviations and findings:
 
 ## Phase 6 — API keys in Settings (v1.15.0)
 
-Depends on: Phase 3.
+Depends on: Phase 3. Start from `distribution` at v1.14.2 or later — it
+already has the pieces below; build on them rather than re-creating them:
+- Key order is fixed in `helpers._load_local_secret`: env var → `config.json`
+  (`finnhub_api_key`, `nvidia_api_key`; `helpers._CONFIG_KEYS`) → legacy
+  `.finnhub_key` / `.nvidia_key` (logged fallback). `POST /api/keys` writes
+  those same two names, via `paths.config_file()`; don't invent a new file or
+  new key names.
+- A malformed `config.json` is logged once (`helpers._CONFIG_WARNED`). The
+  no-restart reload must reset that flag, or a fixed file stays "ignored" in
+  the log.
+- Banners follow one pattern: a field on `/api/health`, a `sync…Banner()` in
+  `app.js` built on `.env-banner`, and a **Details** button that opens the
+  right Settings section. See `syncMigrationBanner` (1.14.2) and
+  `syncLlmBanner`. The first-run keys banner should be the same shape and go
+  to the new API-keys section.
+- Settings → About already lists `config.json` under "Where your data lives".
+- Test runs: `tests/conftest.py` gives every test its own `CONVEXITY_HOME`, so
+  a test can write `config.json` freely. Manual runs: `CONVEXITY_HOME=$(mktemp -d)`,
+  never the real data folder (CLAUDE.md §3).
 
 - [ ] Settings → "API keys" section (add it to `SETTINGS_SECTIONS`): Finnhub and
       NVIDIA NIM fields, masked, with "Test" buttons (one cheap call each) and
