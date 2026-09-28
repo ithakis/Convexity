@@ -34,6 +34,16 @@ Flows worth driving (browser pane on the printed URL):
   press Test) / Logs.
 - `convexity build-symbols` (public NASDAQ/SEC lists) then a build with
   `Microsft, DaVita, Alphabet`.
+- Reference pack, app side: serve a pack directory with
+  `python3 -m http.server <port> --bind 127.0.0.1` and start the app with
+  `CONVEXITY_REFERENCE_URL=http://127.0.0.1:<port>/<dir>/` → Settings → Models &
+  Data → Reference data, the News tab's Market read label, Track record →
+  Model (500 names). A synthetic pack is quickest (`reference_pack.gzip_json`
+  + a manifest of `sha256`/`bytes`); flip a byte to see a rejected download.
+- `convexity build-reference-pack --out <dir> --limit 5` with a fake
+  `FINNHUB_API_KEY` and `CONVEXITY_FINNHUB_BASE=http://127.0.0.1:<port>/api/v1/`
+  pointing at a small stub that returns synthetic `/company-news` JSON — never
+  a real key without asking.
 - Migration: `CONVEXITY_LEGACY_ROOT=<dir with a synthetic .convexity_watchlists.json>`.
 - Desktop: `QT_QPA_PLATFORM=offscreen CONVEXITY_HOME=... $S/bin/convexity-app`,
   then read `$CONVEXITY_HOME/logs/desktop.log` for `loadFinished ok=True`.

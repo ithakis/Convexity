@@ -254,3 +254,67 @@ not reintroduce one; the engines answer different questions.
 - The Excel export writes `SENTIMENT_COLS` (News read, one column per lens,
   Market read, its z, divergence) via `xlsx_export._sentiment_value`; the raw
   payload is in `HOLDINGS_SKIP_EXTRAS`.
+
+*Reference pack (roadmap Phase 8, v2.0.0).* A new install has < 200 Market
+reads of its own, so without help its percentile sits on the 2023 knots and
+its Track record says "too early" for months. The reference pack is the
+same model run daily over the S&P 500, built in CI and downloaded by the app.
+- **Format** (`src/convexity/reference_pack.py`, the one definition, schema
+  version 1): `manifest.json` (date, generated_at, model version, universe,
+  row counts, per-source counts, `anchor_basis`, and `{sha256, bytes}` of the
+  two data files), `anchor.json.gz` (`[[date, symbol, score], …]`, the last
+  90 days) and `history.json.gz` (one record per ticker-day: `market_score,
+  market_sar, market_z, market_pct, market_tier, market_model, n_articles,
+  price, beta, fwd_1d, fwd_5d`). The history validator is an **allow-list**:
+  any other key (a headline, a URL) makes the whole pack invalid, so article
+  text can neither be published nor loaded. Deterministic gzip (mtime 0).
+- **Builder** (`reference_build.py`, `convexity build-reference-pack --out DIR
+  [--limit N] [--previous DIR] [--returns-only]`), run by
+  `.github/workflows/reference-pack.yml` (ci.md). Parity by construction: the
+  same commit as the app, news through `news_sentiment.collect_company_news`
+  (Finnhub + yfinance, dedup, `window_sample` — the uncached core of
+  `fetch_company_news`, split out for this) under the app's limiters, the
+  Market read through `ml_sentiment.market_read`, forward returns through
+  `news_diagnostics.forward_idio` (the Track record's own definition). Known,
+  deliberate differences: the company name for the relevance heuristic comes
+  from `sp500.json` (CI has no symbol DB; `market_read(company_name=…)`),
+  beta is a 1-year daily OLS vs SPY (the local history stores the quote's
+  beta), and Finnhub gets the dot spelling of class shares (BRK.B).
+- **No look-ahead.** Each run's tiers are anchored on the *previous* pack's
+  last-90-day scores only (rows dated today are dropped first, so a same-day
+  rerun does not rank against itself); forward returns are joined only once
+  the closes exist and are never recomputed.
+- **Key and safety.** The builder reads `FINNHUB_API_KEY` from the
+  environment only — never `config.json` or a legacy key file — so a run
+  from a checkout cannot spend the owner's key. A run with fewer than half
+  the names scored, or Finnhub answering for fewer than half, writes nothing
+  (exit 1); a previous pack that fails verification aborts (exit 1) unless it
+  is merely another model's (then the history starts fresh).
+  `CONVEXITY_FINNHUB_BASE` (loopback http only) points it at a local stub for
+  verification runs.
+- **App side.** `reference_pack.start()` (boot warm-up and the start of each
+  news refresh; daemon thread, single-flight) checks at most once a day
+  (`manifest.json` mtime; an unchanged manifest downloads nothing and is only
+  touched) from `BASE_URL` (`CONVEXITY_REFERENCE_URL` overrides, http for
+  loopback only; redirects re-checked). Caps: manifest 64 KB, each file 32 MB
+  (Content-Length and streamed), 256 MB decompressed (zlib `max_length`; a
+  truncated stream fails on EOF). Then hash + size against the manifest,
+  schema + model version, staging dir, `os.replace` with the manifest last.
+  Any failure: one `[reference_pack]` line, `status()["state"] = "failed"`
+  with the reason (Settings shows it, "— ignored"), previous copy kept. A copy
+  older than `MAX_AGE_DAYS = 14` or for another model version is not used.
+- **The switch** (Settings → Models & Data → Reference data;
+  `<data>/state/reference_pack.json`, `CONVEXITY_REFERENCE_PACK=0` forces it
+  off, `tests/conftest.py` sets that) turns off the download **and** its use.
+  Privacy note in the UI: GitHub sees that a copy is running, never holdings.
+- **Anchor.** `calibrate(score, cal, history, reference, reference_date)`:
+  own reads ≥ 200 → `live`; else the pack's scores (≥ 200) → `reference`
+  (`n_reference`, `reference_date`; `n_history` stays the app's own count);
+  else `training`. `_market_read` asks for the pack only while the app's own
+  history is short, excluding the (today, symbol) being scored. The News tab
+  says "vs 500 S&P names, last 90 days (reference data, N days old)".
+- **Track record "Model (500 names)".** `GET /api/news-diagnostics?source=reference`
+  → `compute(history, forward_from_records=True)` (no price download), cached
+  per pack in `server._REF_DIAG_CACHE`. Market read only — the News read is an
+  LLM on the user's keys and is never built in CI; the card says so. Without a
+  usable pack the payload carries `unavailable` with the reason.

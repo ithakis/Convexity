@@ -47,6 +47,45 @@ together, or CI and local formatting can disagree.
 **To add a check:** add a step to `ci.yml` without `|| true` — the next push
 will enforce it.
 
+### Reference pack workflow (`.github/workflows/reference-pack.yml`, Phase 8)
+
+Builds the daily reference pack (news.md, "Reference pack") and replaces the
+three assets of the rolling release `reference-pack`. `schedule` 22:30 UTC
+Monday–Friday (after the US close) plus `workflow_dispatch` with
+`mode: yahoo-check | build`. **Scheduled runs only fire on the default
+branch**, so it goes live with the v2.0.0 merge.
+
+| Job | Permissions / secrets | What it does |
+|---|---|---|
+| `yahoo-check` | `contents: read`, none | Dispatch only: `convexity build-reference-pack --returns-only` — a year of closes for all ~500 names + SPY, plus yfinance news on 20 names; fails under 90% coverage. Run this first: Yahoo sometimes blocks cloud IPs |
+| `build` | `contents: read`; `FINNHUB_API_KEY` on the Build step only | `uv sync --locked` (the same commit as the app), `gh release download reference-pack` into `prev/` (absent on the first run), `build-reference-pack --out pack --previous prev` with `CONVEXITY_HOME=$RUNNER_TEMP/…`, upload `pack/` as a 7-day artifact. ~15 min: bound by the yfinance-news limiter (40/min) and Finnhub (55/min) |
+| `publish` | `contents: write`, none | Download the artifact, re-verify the three files against the manifest, fail if the release does not exist (it **never** creates it), then `gh release upload reference-pack … --clobber` — data files first, manifest last. Never commits |
+
+`tests/test_workflows.py` pins these rules (SHA pins with a tag comment on
+every workflow, read-only default token, only `publish` writes, the secret
+only in `build`, no `git commit`/`push`/`gh release create`). PyYAML is not a
+dependency, so the checks are textual; `actionlint` (Homebrew) is the
+stronger local check.
+
+First run, after the branch is pushed (each step needs the owner):
+1. Create the release once — a public release with no assets, marked
+   **pre-release and not latest**:
+   `gh release create reference-pack --title "Reference pack (rolling)" --notes "…" --prerelease --latest=false`.
+   `install.sh` / `install.ps1` install whatever `/releases/latest` returns;
+   were this release ever "Latest", new installs would try to install a data
+   tag. A pre-release can never be "Latest", and `--clobber` uploads do not
+   change that (the model's `model-*` release is already not-latest).
+2. Confirm the `FINNHUB_API_KEY` Actions secret is the **separate** free key.
+3. Actions → Reference pack → Run workflow, branch `distribution`,
+   mode `yahoo-check`; then mode `build`, and check the three assets, their
+   sizes and `manifest.json` (date, `sources`, `rows`).
+4. Failed runs email the owner (GitHub's default); the app shows the pack's
+   age in Settings → Models & Data and stops using it after 14 days.
+
+`server-smoke` / `tool-install-smoke` boot the app, whose warm-up calls
+`reference_pack.start()`: until the release exists that is one 404, logged
+and ignored.
+
 ### Pre-commit hooks (`.claude/settings.json`)
 
 Two hooks fire on every `git commit` inside a Claude Code session:

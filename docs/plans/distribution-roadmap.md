@@ -1,6 +1,6 @@
 # Distribution roadmap: from "clone + conda" to an installable app
 
-Status: **Phases 0–7 done** on the local `distribution` branch (code at
+Status: **Phases 0–8 done** on the local `distribution` branch (code at
 1.15.0, 2026-09-28); written 2026-09-26, v1.13.0. One phase = one Claude Code
 session. Do them in order; each phase lists what it depends on.
 
@@ -616,23 +616,87 @@ over HTTPS, checks each file against the manifest's SHA-256 and a size cap,
 parses it with `json` only (never pickle, never executed), and validates schema
 and model version before use; anything that fails is ignored and logged.
 
+**Done 2026-09-28** on `distribution` (code, tests, docs, local end-to-end
+verification). What remains needs the push and the owner: creating the
+release, the first `workflow_dispatch` runs (ci.md, "First run").
+
 Tasks:
-- [ ] Workflow + a `convexity build-reference-pack` subcommand (in `cli.py`,
+- [x] Universe: `src/convexity/data/sp500.json` — 503 constituents in Yahoo
+      format, from the `datasets/s-and-p-500-companies` CSV (commit and date
+      recorded in the file).
+- [x] Workflow + a `convexity build-reference-pack` subcommand (in `cli.py`,
       next to `build-symbols`) it runs (so it
       can be run and tested locally with `CONVEXITY_HOME=$(mktemp -d)`).
-- [ ] App: `src/convexity/reference_pack.py` fetches the pack when older than 24 h,
+- [x] App: `src/convexity/reference_pack.py` fetches the pack when older than 24 h,
       verifies manifest hashes + size cap, validates schema + model version,
       parses as data only.
-- [ ] Market read anchor: `reference` when local history < 200, `live` after;
+- [x] Market read anchor: `reference` when local history < 200, `live` after;
       the UI names which one (extends the `anchor` values).
-- [ ] Track record: add a "Model (500 names)" view from the pack next to "Your
+- [x] Track record: add a "Model (500 names)" view from the pack next to "Your
       holdings" (local).
-- [ ] Settings toggle to disable the download (privacy: it only reveals that
+- [x] Settings toggle to disable the download (privacy: it only reveals that
       the app is running, not what you hold — say so).
-- [ ] Tests with a local HTTP stub only (bad hash, oversize, wrong schema,
+- [x] Tests with a local HTTP stub only (bad hash, oversize, wrong schema,
       wrong model version, offline) — no real network, as with model_fetch.
-- [ ] CLAUDE.md: the rolling-asset exception in §18; the workflow in §13
+      Also truncated gzip, gzip bomb, truncated transfer, stream without
+      Content-Length, 404, plain http to a real host, stale pack.
+- [x] CLAUDE.md: the rolling-asset exception in §18; the workflow in §13
       (since Phase 7: `docs/architecture/ci.md`).
+- [ ] After the push (owner): create the release, run `yahoo-check`, then
+      `build` (ci.md "First run"). The schedule starts with the v2.0.0 merge.
+
+Deviations and findings (2026-09-28, seven commits plus a small fix):
+- **Finnhub + yfinance, not Finnhub only** (decided with the owner): the pack
+  scores exactly the article set the app would, through
+  `news_sentiment.collect_company_news` — the uncached core split out of
+  `fetch_company_news`. Cost: the yfinance-news limiter (40/min) sets the
+  pace, ~13 min for 503 names instead of ~9, and Yahoo is needed from the
+  runner for news as well as prices; `--returns-only` probes both. A ticker
+  where Yahoo returns nothing is scored on Finnhub alone; the manifest counts
+  `finnhub_ok` / `yf_nonempty` per run.
+- **Remaining parity gaps, deliberate:** the relevance heuristic's company
+  name comes from `sp500.json` (CI has no symbol DB; an app without
+  `build-symbols` has no names either — the pack is then slightly *better*
+  informed than such an app); beta is a 1-year OLS vs SPY from the same
+  closes (the local history stores the quote's beta); Finnhub is asked for
+  the dot spelling of class shares (BRK.B).
+- **No look-ahead inside the pack:** each run's tiers are anchored on the
+  previous pack's scores only (today's rows are dropped first, so a same-day
+  rerun never ranks against itself). The first run is therefore
+  training-anchored, and the pack's own anchor becomes meaningful after one
+  run (~500 scores ≥ 200).
+- **The builder's key comes from the environment only**, never
+  `config.json` or a legacy key file, so no checkout run can spend the owner's
+  key by accident. Degraded runs (< 50% scored, or Finnhub < 50%) write
+  nothing and exit 1 — the publish job never runs.
+- **The "Latest" trap.** `install.sh` / `install.ps1` install whatever
+  `/releases/latest` returns. The `reference-pack` release must be created as
+  a pre-release with `--latest=false` or new installs would try to install a
+  data tag; the workflow never creates it (ci.md, CLAUDE.md §18).
+- **Switch semantics:** off means neither downloaded nor used (the Market read
+  falls back to its own history / the 2023 knots, the Model view says it is
+  off). A pack older than 14 days is not used either, and says so.
+- **Upload order:** data files first, manifest last. A client racing the
+  upload sees a hash mismatch, ignores it and retries next day — never a
+  mixed pack.
+- **Sizes:** a synthetic 503 × 60-day pack is 0.83 MB (history) + 0.18 MB
+  (anchor) gzipped; a full 400-day history extrapolates to ~5–6 MB, well
+  under the 32 MB per-file cap.
+- **Verified end to end** from a clean `git archive` install (no keys, scratch
+  `CONVEXITY_HOME`): the real builder with `--limit 5` against a loopback
+  Finnhub stub (model downloaded and SHA-checked, real yfinance news and
+  prices) — hashes matched, no stub headline or URL anywhere in the output, a
+  second run carried the first forward, no key ⇒ exit 2; `--returns-only` on
+  25 names 100%. The app against a locally served synthetic full pack:
+  Settings → Models & Data showed the pack (date, age, 503 names), the switch
+  persisted off and on without re-downloading, a News refresh on AAPL/MSFT/NVDA
+  labelled the Market read "vs 500 S&P names, last 90 days (reference data,
+  1 day old)", the Track record's Model view rendered, and a corrupted served
+  file was rejected (checksum mismatch, logged, shown as "ignored") while the
+  previous copy stayed in use. Found and fixed there: re-enabling left the
+  status on its old label.
+- CI's `server-smoke` / `tool-install-smoke` boot the app, so they make one
+  GET to the release; until it exists that is a logged 404, nothing more.
 
 ---
 

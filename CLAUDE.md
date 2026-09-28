@@ -84,6 +84,11 @@ Each of these has cost real debugging time; the link goes to the full story.
   convert to `logging` without keeping the tee. [jobs.md](docs/architecture/jobs.md)
 - **After a merge, the new version is not live** until pulled, tagged and
   reinstalled. [ci.md](docs/architecture/ci.md#merging-prs-without-leaving-claude-code)
+- **The reference pack is data, never code** — allow-listed JSON only, any
+  failure ignored and logged; the builder reads its Finnhub key from the
+  environment only; the `reference-pack` release must never become "Latest"
+  (the installers install `/releases/latest`).
+  [news.md](docs/architecture/news.md) · [ci.md](docs/architecture/ci.md#reference-pack-workflow-githubworkflowsreference-packyml-phase-8)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -93,11 +98,13 @@ Each of these has cost real debugging time; the link goes to the full story.
 Single-user, local-only portfolio dashboard. Runs as a Python HTTP server
 on `127.0.0.1:8765` and prints its URL — it does **not** auto-open a browser
 (removed in v1.12.3 at the user's request); or runs in a native PySide6 window — §14. No accounts, no network calls except to yfinance
-(Yahoo Finance), Finnhub (news), and NVIDIA NIM (the News read), no build
-step. Almost all logic lives in the `src/convexity/` package, split
+(Yahoo Finance), Finnhub (news), NVIDIA NIM (the News read) and this repo's
+GitHub Releases (the one-time model download and the daily reference pack),
+no build step. Almost all logic lives in the `src/convexity/` package, split
 into focused modules (server, fetcher, analytics, fx, persistence, etc. —
 see the table below). The `convexity` command is `cli.main()`: no
-arguments runs the server, `convexity build-symbols` builds the symbol DB.
+arguments runs the server, `convexity build-symbols` builds the symbol DB,
+`convexity build-reference-pack` builds the reference pack (CI).
 (The root `dashboard.py` shim and `build_symbol_db.py` were removed in
 Phase 7.)
 
@@ -116,7 +123,7 @@ sub-decision.
 ├── src/convexity/               ← The package (src layout since Phase 7). Everything below is imported by server.py or desktop.py.
 │   ├── __init__.py
 │   ├── __main__.py              ← `python -m convexity [build-symbols]` → cli.main()
-│   ├── cli.py                   ← The `convexity` command: no args = server, `build-symbols` = symbol DB builder — §6
+│   ├── cli.py                   ← The `convexity` command: no args = server, `build-symbols` = symbol DB builder — §6, `build-reference-pack`
 │   ├── server.py                ← HTTP server, route handlers, start_server()/shutdown_server() — §4, §14
 │   ├── fetcher.py                ← fetch_one() per-symbol row builder — §4
 │   ├── analytics.py             ← analyze_portfolios_multi(), bulk close, analyst blocks — §4
@@ -142,6 +149,9 @@ sub-decision.
 │   ├── lexicon.py               ← Loughran-McDonald scorer (data/lm_lexicon.json), an encoder feature
 │   ├── news_diagnostics.py      ← Track record statistics (date-clustered IC, verdicts, hit rates) — §4
 │   ├── model_fetch.py           ← First-run download of the Market read model (pinned URL + SHA-256) — §4
+│   ├── reference_pack.py        ← Reference pack: format + allow-list validators, daily download, anchor/Track record readers — §4
+│   ├── reference_build.py       ← `convexity build-reference-pack` (run by CI): S&P 500 Market read → the pack — §4, §13
+│   ├── data/                    ← Package data: lm_lexicon.json, sp500.json (the pack's universe, source + date inside)
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
@@ -168,7 +178,7 @@ sub-decision.
 ├── SECURITY.md                   ← How to report a vulnerability (public repo)
 ├── AGENTS.md                     ← Pointer to this file for non-Claude agents
 ├── CLAUDE.md                     ← This file (rules + map); deep sections in docs/architecture/
-├── .github/                      ← CI workflow, Dependabot, issue forms (bug, feature) — §13
+├── .github/                      ← CI + reference-pack workflows, Dependabot, issue forms (bug, feature) — §13
 ├── LICENSE
 ├── .finnhub_key / .nvidia_key     ← LEGACY key files (gitignored); read as a logged fallback in 1.14, then config.json
 └── .openrouter_key               ← Legacy OpenRouter key (superseded, still gitignored)
@@ -188,8 +198,10 @@ overrides it):
 │   ├── mpt.json                ← Saved MPT efficient-frontier runs per portfolio
 │   ├── column_views.json       ← Custom column-view definitions
 │   ├── news.json               ← News + sentiment cache, LLM status
-│   └── sentiment_history.json  ← One record per ticker-day read: Track record + live anchor
+│   ├── sentiment_history.json  ← One record per ticker-day read: Track record + live anchor
+│   └── reference_pack.json     ← {"enabled": bool} — the Settings switch for the reference pack
 ├── models/mlsent-v1.1/         ← The Market read artifact (was ~/.convexity/ml_model/)
+├── reference/                  ← The downloaded reference pack (a cache; reference_pack.py)
 └── logs/desktop.log            ← Desktop-app boot log (was ~/Library/Logs/Convexity.log)
 ```
 
@@ -263,6 +275,11 @@ and verification run sets `CONVEXITY_HOME` to a temp dir (§4 "Where user data
 lives"); without it a run reads and writes the real data folder, and the first
 launch of 1.14 code migrates the checkout's state files into it. The user's
 own app keeps running on 8765 meanwhile; `_pick_port` moves yours to 8766+.
+**Never run `convexity build-reference-pack` or a news refresh from the
+checkout** with its legacy key files in reach: use a clean `git archive`
+install (`.claude/skills/verify/SKILL.md`), a `--limit` of a few names and a
+local Finnhub stub (`CONVEXITY_FINNHUB_BASE`); for the app, point
+`CONVEXITY_REFERENCE_URL` at a locally served pack.
 
 **Critical gotchas when restarting:**
 
@@ -348,9 +365,9 @@ Tracked as GitHub Issues on `ithakis/Convexity` — label `feature` (planned) or
 old root wishlist file was retired in v1.13.1; file new wishlist items as
 issues, never back into a file (the issue forms in `.github/ISSUE_TEMPLATE/`
 apply `bug` / `feature`). Distribution/packaging work follows
-`docs/plans/distribution-roadmap.md` — Phases 0–7 done on `distribution`;
-Phase 8 (reference pack) and 9 (website) remain, then the single v2.0.0
-release.
+`docs/plans/distribution-roadmap.md` — Phases 0–8 done on `distribution`
+(Phase 8's workflow still needs its first dispatch runs after the push);
+Phase 9 (website) remains, then the single v2.0.0 release.
 
 ### Done / archived (don't redo)
 - News v2 (v1.12) — two peer engines (News read with five lenses, Market read
@@ -502,13 +519,28 @@ GitHub's side needs a GitHub Support request by the owner.
   Only `keys.py` writes `config.json`.
 - No new outbound hosts, CDNs, analytics or telemetry without asking (today:
   Yahoo Finance, Finnhub, NVIDIA NIM, KaTeX CDN, and GitHub Releases for the
-  one-time model download — `model_fetch.py`, §4).
+  one-time model download — `model_fetch.py` — and the daily reference pack —
+  `reference_pack.py`, §4; the latter can be switched off in Settings).
 - No `eval`/`exec`, `shell=True`, `pickle`/`joblib.load` of anything downloaded,
   or `yaml.load` without `SafeLoader`. Anything downloaded at runtime (model
-  artifact — `model_fetch.MODEL_SHA256`, checked before the archive is opened;
-  future reference packs) is verified against a SHA-256 pinned in code.
+  artifact — `model_fetch.MODEL_SHA256`, checked before the archive is opened)
+  is verified against a SHA-256 pinned in code — except the daily reference
+  pack, which cannot be pinned (next bullet).
   Release assets are public the moment they are uploaded: creating one needs
   the user's OK, and an existing tag's asset is never replaced.
+- **The one exception: the rolling `reference-pack` release.** Its three
+  assets (`manifest.json`, `anchor.json.gz`, `history.json.gz`) are replaced
+  by `reference-pack.yml` every weekday with `gh release upload --clobber`.
+  The never-replace rule protects **code** that old installs pin by hash (the
+  model); the pack is **data** that changes daily and cannot be pinned. What
+  protects the app instead: HTTPS to this repo's releases only, the manifest's
+  SHA-256 + size per file, hard size caps (download and decompressed), JSON
+  only (never pickle, never executed), an allow-list schema (tickers, dates,
+  numbers — no text field can load) and the model version; anything that fails
+  is logged and ignored. It holds ticker, date and derived scores only —
+  never headline, summary or URL — and nothing from users is ever uploaded.
+  Creating the release is the owner's call (pre-release, not latest: the
+  installers install `/releases/latest`); the workflow never creates it.
 - Dependencies: only well-known packages, declared in both manifests (§4
   envcheck rule). Review Dependabot PRs like any other change; never auto-merge.
   Version updates are configured in `.github/dependabot.yml` (pip + github-actions, weekly).
@@ -518,10 +550,12 @@ GitHub's side needs a GitHub Support request by the owner.
   needed. Third-party actions pinned to a **commit SHA** with the tag in a
   comment. Never `pull_request_target`, never echo secrets, never write
   secrets into artifacts or caches. Downloaded tools are checksum-verified.
-- Collector/scheduled workflows (future, roadmap Phase 8: in this repo, not a
-  separate one) read keys from Actions secrets only, publish derived data to a
-  release asset — never raw licensed article text — and **never commit** to
-  the repo.
+- Collector/scheduled workflows (today: `reference-pack.yml`, roadmap Phase 8
+  — in this repo, not a separate one) read keys from Actions secrets only, in
+  the one step that needs them; only the publishing job gets `contents:
+  write`; they publish derived data to a release asset — never raw licensed
+  article text — and **never commit** to the repo. `tests/test_workflows.py`
+  checks these rules.
 
 ### Periodic check (before each release, or when the user asks "is it secure?")
 ```bash
