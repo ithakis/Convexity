@@ -39,7 +39,7 @@ logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 from convexity import paths as _paths
 from convexity import __version__, __version_date__, __version_display__
-from convexity import envcheck, logbuf
+from convexity import envcheck, keys as _keys, logbuf
 from convexity.analytics import (
     analyze_portfolio,
     analyze_portfolios_multi,
@@ -293,7 +293,15 @@ class Handler(BaseHTTPRequestHandler):
                 # different copy was already in the data folder (banner +
                 # Settings -> About). Empty on a normal launch.
                 "migration_conflicts": _migration_conflicts(),
+                # Drives the first-run "Add your free API keys" banner. Module
+                # globals, so still cheap; booleans only.
+                "finnhub_key_set": bool(getattr(_ns, "FINNHUB_API_KEY", "")),
+                "nvidia_key_set": bool(getattr(_ns, "NVIDIA_API_KEY", "")),
             })
+            return
+        if parsed.path == "/api/keys":
+            # Settings -> API keys. Booleans + source names only (keys.status).
+            self._send_json(200, _keys.status())
             return
         if parsed.path == "/api/watchlists":
             self._send_json(200, {"watchlists": load_watchlists()})
@@ -591,8 +599,47 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def _handle_keys_post(self, path: str) -> None:
+        """POST /api/keys and /api/keys/test. Nothing in these branches may put
+        the request body, a key or an exception message into a response or a
+        log line: every error answer is fixed text (keys.InvalidKey carries
+        fixed text too), and no traceback is printed — a frame's locals would
+        be one repr away from the key."""
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                raise ValueError
+        except Exception:
+            self._send_json(400, {"error": "request body must be a JSON object"})
+            return
+        provider = payload.get("provider")
+        try:
+            if path == "/api/keys/test":
+                self._send_json(200, _keys.check(provider))
+                return
+            action = payload.get("action")
+            if action == "set":
+                self._send_json(200, _keys.save(provider, payload.get("key")))
+            elif action == "clear":
+                self._send_json(200, _keys.clear(provider))
+            else:
+                self._send_json(400, {"error": "action must be \"set\" or \"clear\""})
+        except _keys.InvalidKey as exc:
+            self._send_json(400, {"error": str(exc)})
+        except _keys.ConfigMalformed:
+            self._send_json(409, {
+                "error": "config.json is not valid JSON, so it was left untouched. "
+                         "Fix or delete it, then save the key again.",
+                "config_path": str(_paths.config_file())})
+        except Exception as exc:
+            print(f"[keys] {path} failed: {type(exc).__name__}", file=sys.stderr)
+            self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
+
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path in ("/api/keys", "/api/keys/test"):
+            self._handle_keys_post(parsed.path)
+            return
         if parsed.path == "/api/model-download":
             # Settings -> Models & Data "Retry download". Harmless to trigger:
             # it does nothing when the model is present, is single-flight, and

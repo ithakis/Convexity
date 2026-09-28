@@ -26,8 +26,8 @@ def _repo_root() -> Path:
     return current.parent
 
 
-# config.json key for each env var. Phase 6 (Settings -> API keys) writes
-# this file; until then it can be created by hand (mode 0600).
+# config.json key for each env var. Settings -> API keys (keys.py) writes
+# this file (mode 0600); it can also be edited by hand.
 _CONFIG_KEYS = {
     "FINNHUB_API_KEY": "finnhub_api_key",
     "NVIDIA_API_KEY": "nvidia_api_key",
@@ -59,23 +59,21 @@ def _config_secret(env_var: str) -> str:
     return val.strip() if isinstance(val, str) else ""
 
 
-def _load_local_secret(env_var: str, filename: str) -> str:
-    """Resolve a secret: env var, then ``config.json`` in the data dir, then a
-    legacy key file.
+def _resolve_secret(env_var: str, filename: str) -> tuple[str, str | None]:
+    """(value, source) — source is "env", "config", "legacy" or None.
 
     The legacy step finds ``filename`` by walking upward from this module's
     directory (NOT via ``_repo_root()`` — a worktree run needs the key from
     the worktree checkout itself, which ``_repo_root()``'s ``.git``-boundary
     search would skip past). It is kept for one release (1.14) and logged when
-    used — by name only, never the value. Shared by finnhub_adapter.py and
-    news_sentiment.py so both resolve secrets identically.
+    used — by name only, never the value.
     """
     env = os.environ.get(env_var, "").strip()
     if env:
-        return env
+        return env, "env"
     cfg = _config_secret(env_var)
     if cfg:
-        return cfg
+        return cfg, "config"
     search = Path(__file__).resolve().parent
     for _ in range(6):
         try:
@@ -88,11 +86,25 @@ def _load_local_secret(env_var: str, filename: str) -> str:
                         f"key file {filename}", p,
                         f"move it to {paths.config_file().name} "
                         f"(\"{_CONFIG_KEYS.get(env_var, '?')}\") or set {env_var}")
-                return val
+                    return val, "legacy"
+                return "", None
         except Exception:
             pass
         search = search.parent
-    return ""
+    return "", None
+
+
+def _load_local_secret(env_var: str, filename: str) -> str:
+    """Resolve a secret: env var, then ``config.json`` in the data dir, then a
+    legacy key file (see ``_resolve_secret``). Shared by finnhub_adapter.py,
+    news_sentiment.py and keys.py so all resolve secrets identically."""
+    return _resolve_secret(env_var, filename)[0]
+
+
+def secret_source(env_var: str, filename: str) -> dict:
+    """{"set": bool, "source": ...} — never the value. What /api/keys serves."""
+    val, src = _resolve_secret(env_var, filename)
+    return {"set": bool(val), "source": src if val else None}
 
 
 # ----------------------------- FX constants ---------------------------------

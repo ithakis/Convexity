@@ -851,6 +851,29 @@ def llm_unblock() -> None:
         _LLM_STATUS["permanent"] = False
 
 
+def reload_keys() -> None:
+    """Re-read both keys (Settings -> API keys saved or cleared one; they used
+    to be read once at import, so a new key needed a restart).
+
+    The cached OpenAI client captured the old NVIDIA key at construction, so it
+    is dropped and rebuilt lazily. A changed NVIDIA key also clears the
+    recorded LLM outcome: a persisted "key rejected" is permanent and would
+    otherwise keep short-circuiting every call (and the banner) until the next
+    refresh. A retired model simply re-records itself on the next call."""
+    global FINNHUB_API_KEY, NVIDIA_API_KEY, _nvidia_client
+    fh = _load_local_secret("FINNHUB_API_KEY", ".finnhub_key")
+    nv = _load_local_secret("NVIDIA_API_KEY", ".nvidia_key")
+    FINNHUB_API_KEY = fh
+    with _client_lock:
+        changed = nv != NVIDIA_API_KEY
+        NVIDIA_API_KEY = nv
+        _nvidia_client = None
+    if changed:
+        with _LLM_STATUS_LOCK:
+            _LLM_STATUS.update({"ok": None, "error": None, "permanent": False, "at": None})
+        _schedule_persist()  # or a restart would reload the old "key rejected"
+
+
 def _get_client() -> Any:
     """Lazy OpenAI-compatible client. The `openai` import is deferred (~1.2 s)
     so it never sits on the desktop app's startup path."""

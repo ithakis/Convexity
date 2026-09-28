@@ -3059,6 +3059,21 @@
   .settings-status-pill.bad { color: var(--neg); }
   .settings-ok-text { color: var(--pos); }
   .settings-bad-text { color: var(--neg); }
+  /* Settings -> API keys. */
+  .settings-key-form { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  .settings-key-input {
+    flex: 1; min-width: 0; max-width: 420px;
+    background: var(--bg-canvas); border: 1px solid var(--border); color: var(--text);
+    font: 12px ui-monospace, "SF Mono", Menlo, monospace; padding: 5px 8px;
+    border-radius: var(--r-sm);
+  }
+  .settings-key-input::placeholder { color: var(--muted); font-family: inherit; }
+  .settings-key-input:focus { outline: none; border-color: var(--accent); }
+  .settings-key-src code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px;
+  }
+  .settings-key-src { font-size: 11px; color: var(--muted); }
+  .settings-row-help a { color: var(--accent); }
   /* Settings -> About: old files the data-folder migration left in place. */
   .settings-migrate-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
   .settings-migrate-list li { margin: 0 0 6px; }

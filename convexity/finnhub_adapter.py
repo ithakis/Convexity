@@ -56,6 +56,17 @@ _MISS = object()
 _NEG_TTL = 1800.0
 
 
+def reload_keys() -> None:
+    """Re-read the key after Settings -> API keys changed it (it used to be
+    read once at import). A changed key drops the cache: its _MISS entries may
+    have been recorded while the old key was being rejected."""
+    global FINNHUB_API_KEY
+    new = _load_local_secret("FINNHUB_API_KEY", ".finnhub_key")
+    if new != FINNHUB_API_KEY:
+        _FH_CACHE.clear()
+    FINNHUB_API_KEY = new
+
+
 def _fh_get(key: str):
     hit = _FH_CACHE.get(key)
     if hit is None:

@@ -60,6 +60,7 @@ sub-decision.
 │   ├── lexicon.py               ← Loughran-McDonald scorer (data/lm_lexicon.json), an encoder feature
 │   ├── news_diagnostics.py      ← Track record statistics (date-clustered IC, verdicts, hit rates) — §4
 │   ├── model_fetch.py           ← First-run download of the Market read model (pinned URL + SHA-256) — §4
+│   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
 │       ├── index.html           ← Main HTML template
@@ -89,7 +90,7 @@ overrides it):
 
 ```
 ~/Library/Application Support/Convexity/   (macOS; Windows %APPDATA%\Convexity\, Linux $XDG_DATA_HOME/convexity/)
-├── config.json                 ← API keys {finnhub_api_key, nvidia_api_key} (Settings writes it in Phase 6)
+├── config.json                 ← API keys {finnhub_api_key, nvidia_api_key}, 0600 — written by Settings → API keys (keys.py)
 ├── symbol_db.sqlite            ← Built by `python build_symbol_db.py` — §6
 ├── state/
 │   ├── views.json              ← Per-portfolio cached rows + metadata + weight presets
@@ -428,8 +429,34 @@ not reintroduce one; the engines answer different questions.
   the streaming build never triggers a fetch.
 - Keys resolve through `helpers._load_local_secret` (env var, then
   `config.json` in the data folder, then — 1.14 only, logged — `.finnhub_key` /
-  `.nvidia_key` found by walking up) **once, at import** —
-  changing a key needs a restart.
+  `.nvidia_key` found by walking up). Read at import, and **re-read without a
+  restart** whenever Settings → API keys saves or clears one:
+  `keys.reload_all()` calls `news_sentiment.reload_keys()` (also drops the
+  cached OpenAI client, which captured the old key, and — when the NVIDIA key
+  changed — clears the persisted LLM status, so a "key rejected" stops
+  short-circuiting) and `finnhub_adapter.reload_keys()` (drops `_FH_CACHE` on
+  a change), and re-arms both one-time "malformed config.json" warnings.
+  **Any new module that caches a key needs a `reload_keys()` hooked in there.**
+- **`keys.py` (Settings → API keys, v1.15).** `POST /api/keys`
+  `{provider, action: "set"|"clear", key?}` merges one field into
+  `config.json` (`_CONFIG_KEYS` names only; other fields and the other key kept)
+  via `persistence._atomic_write` + `chmod 0600`; strips padding, rejects empty /
+  inner-whitespace / control chars (400, fixed text). A `config.json` that exists
+  but isn't a JSON object is **never overwritten** (409, logged once). The
+  explicit `action` means an empty submit can never clear a key. `GET /api/keys`
+  = `{set, source: env|config|legacy|null, in_config, env_overrides}` per
+  provider — never a value. `POST /api/keys/test` makes one cheap call through
+  the shared limiters (Finnhub `quote?symbol=AAPL` with `X-Finnhub-Token`; NIM a
+  `max_tokens: 1` completion with Bearer) and returns a fixed status word
+  (`ok/rejected/rate_limited/unavailable/network_error/no_key/error`); the key
+  is only ever in a header, never a URL, and a full limiter reports
+  `rate_limited` instead of blocking the click. These branches never put
+  `str(exc)` or a traceback in a response or log. `tests/test_keys.py`'s leak
+  test posts a sentinel and greps every response, stdout/stderr and the log ring.
+  `keys._FINNHUB_BASE` / `_NVIDIA_BASE` are module constants so tests point them
+  at a local stub. First-run banner: `/api/health` `finnhub_key_set` /
+  `nvidia_key_set` → `syncKeysBanner` (dismissal in localStorage until both are
+  set; `syncLlmBanner` stands down while the NVIDIA key is missing).
 - Finnhub 429: 3 attempts × 5 s, each `_FH_LIMITER.penalize()` backfills the
   rolling window so the next acquire waits out the minute, then a 65 s breaker.
   Measured: ~125 s inside one call. That is the budget working as designed, and
@@ -724,6 +751,8 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/weight-presets`            — upsert `{view, name, weights, rename_from?, set_active?}`
 - `/api/weight-presets/active`     — set `{view, name|null}` as the active preset for a portfolio
 - `/api/efficient-frontier`        — **streams NDJSON** (`progress`/`done`/`error`) for the mean-CVaR frontier. Body `{rows, lookback, rf, alpha, fully_invested, bounds, cov_model, haircut, budget, current_weights, display_ccy}` where `bounds` = `{sym:{min,max}}` per-position weight fractions and `budget` is a wall-clock tier (light≈5s/standard≈15s/dense≈60s). Client renders a real pct/ETA bar; aborting the request cancels the 8-core compute.
+- `/api/keys`                      — `{provider, action: set|clear, key?}` → key booleans; 400 bad key, 409 malformed config.json (§4 keys.py)
+- `/api/keys/test`                 — `{provider}` → `{status, http, ms}`, one cheap provider call
 - `/api/model-download`            — start (or retry) the first-run model download; `202` + `model_fetch.status()` (§4 Market read)
 - `/api/mpt-runs`                  — save `{view, run}` onto the portfolio's **last-3 run history** (newest-first, cap 3; a run whose `params` match the newest replaces it instead of duplicating)
 
@@ -738,6 +767,7 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/weight-presets?view=…`     — `{presets: [...], active: name|null}` for a portfolio
 - `/api/mpt-runs?view=…`           — `{last: run|null, runs: [...]}` — newest run + the last-3 history (rendered under *Apply to Portfolio*)
 - `/api/logs?since=<seq>&limit=<n>` — backend console tail from `logbuf` (§16)
+- `/api/keys`                      — `{config_ok, config_path, finnhub|nvidia: {set, source, in_config, env_overrides}}` — booleans only (§4 keys.py)
 - `/api/runtime-status`            — cheap ML availability + `envcheck.status()` +
   provider-key booleans + LLM model/status + version. Powers Settings → Models & Data. Deliberately
   separate from `/api/news-diagnostics` (pandas + `_bulk_close`, possibly networked)
@@ -889,7 +919,7 @@ columns).
   1. **`SETTINGS_SECTIONS` is the only place a section is declared**
      (`{id, group, label, icon, description, keywords, items, render}`).
      `renderSettingsNav()` rebuilds the nav from it. Add a section there, never
-     back in `index.html`. Sections today: General, Models & Data, Logs, About.
+     back in `index.html`. Sections today: General, Column Presets, Models & Data, API keys, Logs, About.
   2. **The search `<input>` stays static in `index.html`.** Only
      `#settings-nav-list` is re-rendered; an input inside that subtree would be
      destroyed mid-keystroke, blurring the field. For the same reason typing
@@ -2369,7 +2399,9 @@ GitHub's side needs a GitHub Support request by the owner.
   CORS `*` on anything that reads or writes user state.
 - Keys load only through `helpers._load_local_secret` (env var, then
   `config.json` in the data folder, then a gitignored legacy file). They never appear in code, logs, `/api/*` responses or the
-  frontend — `/api/runtime-status` exposes booleans only.
+  frontend — `/api/runtime-status` and `/api/keys` expose booleans only, and the
+  Settings inputs are never prefilled and are emptied as soon as they are sent.
+  Only `keys.py` writes `config.json`.
 - No new outbound hosts, CDNs, analytics or telemetry without asking (today:
   Yahoo Finance, Finnhub, NVIDIA NIM, KaTeX CDN, and GitHub Releases for the
   one-time model download — `model_fetch.py`, §4).

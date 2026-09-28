@@ -6590,8 +6590,8 @@ function setNewsUpdatedLabel(marketSentiment, portfolioSentiment) {
 /* Why a card is empty — names the real cause instead of "check API keys". */
 function nsKeyDiagnostic(status) {
   if (!status) return "Refresh to read the news.";
-  if (!status.finnhub_key_set) return "Finnhub key missing — add finnhub_api_key to config.json in the data folder (or FINNHUB_API_KEY).";
-  if (!status.nvidia_key_set) return "NVIDIA key missing — add nvidia_api_key to config.json in the data folder (or NVIDIA_API_KEY).";
+  if (!status.finnhub_key_set) return "Finnhub key missing — add it in Settings → API keys.";
+  if (!status.nvidia_key_set) return "NVIDIA key missing — add it in Settings → API keys.";
   if (status.llm_ok === false) return `News read unavailable: ${status.llm_error || "unknown"}.`;
   if (status.finnhub_backoff_s > 0) {
     return `Finnhub rate-limited — retry in ~${status.finnhub_backoff_s}s.`;
@@ -9538,6 +9538,7 @@ function versionLabel() {
 function loadAppVersion() {
   fetch("/api/health").then(r => r.json()).then(d => {
     if (!d) return;
+    syncKeysBanner(d);
     // env_ok is the cheap find_spec-only self-check from convexity/
     // envcheck.py. It rides on /api/health precisely so a stale environment
     // announces itself on page load rather than waiting for the user to open
@@ -9584,7 +9585,10 @@ function showEnvBanner() {
    package gets. It clears itself on the next health check that reads ok. */
 function syncLlmBanner(health) {
   const old = document.getElementById("llm-banner");
-  if (!health || health.llm_ok !== false) { if (old) old.remove(); return; }
+  // A missing NVIDIA key is the keys banner's job (syncKeysBanner): one cause,
+  // one banner, and that one leads to the place the key is entered.
+  const keyMissing = health && health.nvidia_key_set === false;
+  if (!health || health.llm_ok !== false || keyMissing) { if (old) old.remove(); return; }
   if (old) {
     old.querySelector(".llm-banner-reason").textContent = health.llm_error || "unknown reason";
     return;
@@ -9646,6 +9650,50 @@ function migrationConflictsHtml() {
       overwritten). If the old file holds changes you want, quit the app, move it over
       the file in use, and relaunch. If not, delete the old file and this notice goes away.</div>
     <ul class="settings-migrate-list">${rows}</ul>`;
+}
+
+/* First run: no keys, so no News read and no Finnhub news. Same shape as the
+   other banners; Details opens Settings -> API keys. It disappears as soon as
+   /api/health reports both keys set (Settings re-runs the health check after a
+   save, so no reload). Dismissal is remembered in this browser until both keys
+   are set — someone who does not want News should not be asked every launch. */
+const KEYS_BANNER_DISMISSED = "keys_banner_dismissed";
+function syncKeysBanner(health) {
+  const old = document.getElementById("keys-banner");
+  const bothSet = !!(health && health.finnhub_key_set && health.nvidia_key_set);
+  if (!health || bothSet) {
+    if (bothSet) { try { localStorage.removeItem(KEYS_BANNER_DISMISSED); } catch (e) {} }
+    if (old) old.remove();
+    return;
+  }
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(KEYS_BANNER_DISMISSED) === "1"; } catch (e) {}
+  if (dismissed || old) return;
+  const bar = document.createElement("div");
+  bar.id = "keys-banner";
+  bar.className = "env-banner";
+  bar.innerHTML = `<span>Add your free API keys to enable News — Finnhub for headlines and
+    NVIDIA NIM for the News read. Everything else works without them.</span>
+    <button class="env-banner-link" id="keys-banner-open">Add keys</button>
+    <button class="env-banner-x" id="keys-banner-x" aria-label="Dismiss">&times;</button>`;
+  const topbar = document.getElementById("topbar");
+  if (topbar && topbar.parentNode) topbar.parentNode.insertBefore(bar, topbar.nextSibling);
+  else document.body.insertBefore(bar, document.body.firstChild);
+  document.getElementById("keys-banner-x").onclick = () => {
+    try { localStorage.setItem(KEYS_BANNER_DISMISSED, "1"); } catch (e) {}
+    bar.remove();
+  };
+  document.getElementById("keys-banner-open").onclick = () => {
+    selectSettingsSection("keys");
+    openSettings();
+  };
+}
+
+/* Re-run the health-driven banners after something that changes them (a key
+   saved or cleared in Settings). */
+function refreshHealthBanners() {
+  fetch("/api/health").then(r => r.json()).then(d => { syncKeysBanner(d); syncLlmBanner(d); })
+    .catch(() => {});
 }
 
 function checkLlmHealth() {
@@ -9719,7 +9767,7 @@ const SETTINGS_SECTIONS = [
                + "and the Market read (statistical model) — and which news providers are "
                + "configured. If reads are missing or stale, the reason is here.",
     keywords: ["ml", "machine learning", "lightgbm", "sklearn", "model", "sentiment", "news",
-               "llm", "nvidia", "finnhub", "api key", "artifact", "not running", "broken",
+               "llm", "nvidia", "finnhub", "artifact", "not running", "broken",
                "dependencies", "environment", "news read", "market read", "stale", "retired"],
     items: [
       { id: "llm-runtime", label: "News read (LLM)",
@@ -9729,9 +9777,25 @@ const SETTINGS_SECTIONS = [
       { id: "env", label: "Runtime dependencies",
         keywords: ["packages", "missing", "install.sh", "uv", "environment"] },
       { id: "providers", label: "News providers",
-        keywords: ["finnhub", "nvidia", "nim", "api key", "lexicon"] },
+        keywords: ["finnhub", "nvidia", "nim", "lexicon"] },
     ],
     render: renderSettingsModels,
+  },
+  {
+    id: "keys",
+    group: "Data & models",
+    label: "API keys",
+    icon: "⚿",
+    description: "The two free keys News needs: Finnhub for headlines and NVIDIA NIM for the "
+               + "News read. They are stored in config.json in the data folder (readable only "
+               + "by you) and take effect immediately — no restart.",
+    keywords: ["api key", "keys", "token", "secret", "finnhub", "nvidia", "nim", "news",
+               "config.json", "credentials", "test key", "free key"],
+    items: [
+      { id: "key-finnhub", label: "Finnhub", keywords: ["finnhub", "headlines", "news", "token"] },
+      { id: "key-nvidia", label: "NVIDIA NIM", keywords: ["nvidia", "nim", "llm", "news read"] },
+    ],
+    render: renderSettingsKeys,
   },
   {
     id: "logs",
@@ -10178,11 +10242,9 @@ function renderSettingsModels(el) {
       ${kv("NVIDIA NIM (News read)", yn(keys.nvidia_key_set))}
       ${kv("LM lexicon (Market read feature)", keys.lexicon_available ? "loaded" : "unavailable")}
     </div>
-    <div class="settings-row-help">Keys are read from environment variables, then
-      <code>config.json</code> in the data folder (<code>finnhub_api_key</code>,
-      <code>nvidia_api_key</code>), then — for this release only — the legacy
-      <code>.finnhub_key</code> / <code>.nvidia_key</code> files beside the app. Only
-      whether they were found is shown here — never their values.</div>`;
+    <div class="settings-row-help">Add, test or remove keys in
+      <a href="#" id="settings-goto-keys">Settings → API keys</a>. Only whether they were
+      found is shown — never their values.</div>`;
 
   const llmBody = `<div class="settings-kv">
       ${kv("Model", escapeHtml(keys.llm_model || "—"))}
@@ -10203,8 +10265,152 @@ function renderSettingsModels(el) {
   if (ol) ol.onclick = () => selectSettingsSection("logs");
   const rd = $("#settings-model-retry");
   if (rd) rd.onclick = () => retryModelDownload(rd);
+  const gk = $("#settings-goto-keys");
+  if (gk) gk.onclick = (e) => { e.preventDefault(); selectSettingsSection("keys"); };
   if (dlActive) SETTINGS.modelTimer = setTimeout(() => loadRuntimeStatus(true), 1500);
   highlightSettingsMatches(el);
+}
+
+/* Settings -> API keys. The rule for this pane: a key value exists in the page
+   only between the keystroke and the POST. Inputs are never prefilled (the
+   server cannot return a key anyway — /api/keys is booleans and a source
+   name), the value is read at click time, the input is emptied as soon as the
+   request is sent, and nothing about it goes into SETTINGS or localStorage. */
+const KEY_PROVIDERS = [
+  { id: "finnhub", label: "Finnhub", item: "key-finnhub",
+    what: "Company headlines for the News tab (plus the Rec Δ6M and MSPR columns).",
+    link: "https://finnhub.io/register", linkText: "finnhub.io/register" },
+  { id: "nvidia", label: "NVIDIA NIM", item: "key-nvidia",
+    what: "The News read: an LLM reads each holding's headlines through five lenses.",
+    link: "https://build.nvidia.com/", linkText: "build.nvidia.com (Get API Key)" },
+];
+const KEY_TEST_TEXT = {
+  ok: ["ok", "Key works."],
+  rejected: ["bad", "Key rejected by the provider — check it was copied whole."],
+  rate_limited: ["", "Rate-limited right now — try again in a minute."],
+  unavailable: ["bad", "The provider is unavailable right now (the key may still be fine)."],
+  network_error: ["bad", "Could not reach the provider — check the connection."],
+  no_key: ["bad", "No key set."],
+  error: ["bad", "Unexpected answer from the provider."],
+};
+
+function keySourceText(p) {
+  if (!p || !p.set) return `<span class="settings-status-pill bad">Not set</span>`;
+  const src = p.source === "env" ? `environment variable <code>${escapeHtml(p.env_var || "")}</code>`
+            : p.source === "legacy" ? "legacy key file beside the app"
+            : "config.json";
+  return `<span class="settings-status-pill ok">Set</span> <span class="settings-key-src">from ${src}</span>`;
+}
+
+function renderSettingsKeys(el) {
+  el.innerHTML = lcHtml("reading key status", { bar: true });
+  fetch("/api/keys").then(r => r.json()).then(st => {
+    if (!el.isConnected) return;
+    paintSettingsKeys(el, st);
+  }).catch(() => {
+    if (el.isConnected) el.innerHTML = `<div class="settings-row-help">Could not reach the backend.</div>`;
+  });
+}
+
+function paintSettingsKeys(el, st, notes = {}) {
+  const rows = KEY_PROVIDERS.map(p => {
+    const s = st[p.id] || {};
+    const envNote = s.source === "env"
+      ? `<div class="settings-row-help">The environment variable wins over config.json while it is
+          set${s.in_config ? " — the key saved here is used once it is unset" : ""}.</div>` : "";
+    const legacyNote = s.source === "legacy"
+      ? `<div class="settings-row-help">Save the key here to move it into config.json; the old
+          file is read for this release only.</div>` : "";
+    const note = notes[p.id];
+    const noteHtml = note ? `<div class="settings-row-help settings-key-note ${note.cls || ""}">${escapeHtml(note.text)}</div>` : "";
+    const help = `<div>${keySourceText(s)}</div>
+      <div class="settings-row-help">${escapeHtml(p.what)} Free key:
+        <a href="${p.link}" target="_blank" rel="noopener noreferrer">${escapeHtml(p.linkText)}</a></div>
+      ${envNote}${legacyNote}
+      <form class="settings-key-form" data-provider="${p.id}" autocomplete="off">
+        <input type="password" class="settings-key-input" id="key-input-${p.id}"
+          autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"
+          placeholder="${s.set ? "Paste a new key to replace it" : "Paste your key"}"
+          aria-label="${escapeHtml(p.label)} API key">
+        <button type="submit" class="settings-btn" data-key-act="save">Save</button>
+        <button type="button" class="settings-btn" data-key-act="test" ${s.set ? "" : "disabled"}>Test</button>
+        ${s.in_config ? `<button type="button" class="settings-btn danger" data-key-act="clear">Remove</button>` : ""}
+      </form>
+      ${noteHtml}`;
+    return settingsRow({ id: p.item, label: p.label, help });
+  }).join("");
+  const cfgWarn = st.config_ok === false
+    ? `<div class="settings-row-help settings-bad-text">config.json in the data folder is not
+        valid JSON, so nothing can be saved into it. Fix or delete
+        <code>${escapeHtml(st.config_path || "config.json")}</code>, then save again.</div>` : "";
+  el.innerHTML = cfgWarn + rows;
+  el.querySelectorAll(".settings-key-form").forEach(form => {
+    const provider = form.dataset.provider;
+    form.addEventListener("submit", (e) => { e.preventDefault(); keyAction(el, form, provider, "save"); });
+    form.querySelectorAll("button[type=button]").forEach(b =>
+      b.addEventListener("click", () => keyAction(el, form, provider, b.dataset.keyAct)));
+  });
+  highlightSettingsMatches(el);
+}
+
+async function keyAction(el, form, provider, act) {
+  if (form.dataset.busy) return;  // double submit: one request at a time per provider
+  const input = form.querySelector(".settings-key-input");
+  let body;
+  if (act === "save") {
+    const key = input.value.trim();
+    if (!key) { paintKeyNote(form, "bad", "Paste a key first."); input.focus(); return; }
+    body = { provider, action: "set", key };
+  } else if (act === "clear") {
+    body = { provider, action: "clear" };
+  } else {
+    body = { provider };
+  }
+  input.value = "";
+  form.dataset.busy = "1";
+  form.querySelectorAll("button").forEach(b => { b.disabled = true; });
+  paintKeyNote(form, "", act === "test" ? "Testing…" : "Saving…");
+  try {
+    const r = await fetch(act === "test" ? "/api/keys/test" : "/api/keys", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    body = null;
+    const d = await r.json().catch(() => ({}));
+    if (act === "test") {
+      const [cls, text] = KEY_TEST_TEXT[d.status] || KEY_TEST_TEXT.error;
+      const st = await fetch("/api/keys").then(x => x.json());
+      if (el.isConnected) paintSettingsKeys(el, st, { [provider]: { cls: cls === "ok" ? "settings-ok-text" : cls === "bad" ? "settings-bad-text" : "", text: text + (d.http ? ` (HTTP ${d.http})` : "") } });
+      return;
+    }
+    if (!r.ok) {
+      const st = await fetch("/api/keys").then(x => x.json()).catch(() => ({}));
+      if (el.isConnected) paintSettingsKeys(el, st, { [provider]: { cls: "settings-bad-text", text: d.error || `Failed (HTTP ${r.status})` } });
+      return;
+    }
+    SETTINGS.runtime = null;  // Models & Data re-reads the key booleans
+    refreshHealthBanners();
+    const s = d[provider] || {};
+    const text = act === "clear"
+      ? (s.set ? "Removed from config.json — a key from another source is still in effect." : "Removed.")
+      : (s.source === "env" ? "Saved to config.json, but the environment variable is still in effect."
+                            : "Saved. It is in use now — no restart needed.");
+    if (el.isConnected) paintSettingsKeys(el, d, { [provider]: { cls: "settings-ok-text", text } });
+  } catch (e) {
+    if (el.isConnected) paintKeyNote(form, "bad", "Could not reach the backend.");
+    form.querySelectorAll("button").forEach(b => { b.disabled = false; });
+  } finally {
+    delete form.dataset.busy;
+  }
+}
+
+function paintKeyNote(form, cls, text) {
+  let n = form.parentNode.querySelector(".settings-key-note");
+  if (!n) {
+    n = document.createElement("div");
+    n.className = "settings-row-help settings-key-note";
+    form.after(n);
+  }
+  n.className = `settings-row-help settings-key-note ${cls === "bad" ? "settings-bad-text" : cls === "ok" ? "settings-ok-text" : ""}`;
+  n.textContent = text;
 }
 
 function renderSettingsLogs(el) {

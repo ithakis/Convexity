@@ -388,15 +388,62 @@ already has the pieces below; build on them rather than re-creating them:
   a test can write `config.json` freely. Manual runs: `CONVEXITY_HOME=$(mktemp -d)`,
   never the real data folder (CLAUDE.md §3).
 
-- [ ] Settings → "API keys" section (add it to `SETTINGS_SECTIONS`): Finnhub and
+- [x] Settings → "API keys" section (add it to `SETTINGS_SECTIONS`): Finnhub and
       NVIDIA NIM fields, masked, with "Test" buttons (one cheap call each) and
       links to where to get a free key.
-- [ ] `POST /api/keys` writes `config.json` (file mode 0600) — the key is never
+- [x] `POST /api/keys` writes `config.json` (file mode 0600) — the key is never
       echoed back; `GET` returns booleans only (same as `/api/runtime-status`).
-- [ ] Keys reload **without a restart** (today they're read once at import —
+- [x] Keys reload **without a restart** (today they're read once at import —
       add a reload hook in `news_sentiment` and `finnhub_adapter`).
-- [ ] First-run banner: "Add your free API keys to enable News" when missing.
-- [ ] Tests: key never appears in any response or log line.
+- [x] First-run banner: "Add your free API keys to enable News" when missing.
+- [x] Tests: key never appears in any response or log line.
+
+Findings (2026-09-28, implemented on `distribution` after v1.14.2):
+- New `convexity/keys.py` owns the write/clear/reload/test logic; the server
+  routes are thin. `helpers._resolve_secret` now returns `(value, source)` so
+  Settings can say *where* a key comes from (env / config.json / legacy file)
+  without ever returning it; `_load_local_secret` is unchanged for callers.
+- `POST /api/keys` takes an explicit `action: "set"|"clear"` — with a
+  "key present means set, empty means clear" shape, an accidental empty submit
+  would have deleted a working key.
+- A malformed `config.json` is refused with 409 and left byte-identical; while it
+  is broken the reader ignores it, so both keys show "Not set" alongside a red
+  "fix or delete <path>" line. Saving again after the fix works (the one-time
+  warnings are re-armed by every reload).
+- Reload has three parts beyond re-reading the globals, each found by reading
+  the call paths: the lazy OpenAI client had captured the old key; a persisted
+  "key rejected" LLM status is *permanent* and would have kept short-circuiting
+  (and kept its banner up) until the next refresh; and it is persisted, so it
+  is re-saved after clearing or a restart would bring it back.
+- `/v1/models` on NIM is not auth-gated, so it cannot validate a key; the Test
+  button sends a `max_tokens: 1` completion instead. Finnhub's test sends the
+  key as `X-Finnhub-Token`, not `?token=`, so it can't surface in a URL.
+- Test buttons go through the shared limiters but never wait on them: a full
+  minute reports "rate-limited" instead of freezing the click for up to 60 s.
+- With the NVIDIA key missing, the LLM banner stands down in favour of the keys
+  banner (one cause, one banner, and it leads to where the key is entered).
+  The keys banner's dismissal is remembered in localStorage until both keys are
+  set.
+- The legacy walk-up fallback is untouched (one-release rule). It matters for
+  testing: the dev checkout holds real `.finnhub_key` / `.nvidia_key`, so
+  `tests/test_keys.py` moves `helpers.__file__` into tmp, and the E2E launcher
+  did the same — otherwise a "no keys" run silently loads the real ones.
+- Verified end to end (fresh `CONVEXITY_HOME`, headless Chrome over CDP at
+  DPR 1, all providers pointed at a local stub — no real Finnhub/NVIDIA call):
+  banner on first run → Details opens API keys → empty submit refused in the
+  page → a whitespace-padded key saved stripped, double submit wrote once →
+  `config.json` mode 600 holding both fields → wrong Finnhub key tests
+  "rejected (HTTP 401)", right one "works" → banner gone without reload. A
+  news-only refresh with a wrong NVIDIA key produced the "key rejected"
+  banner; saving the right key in Settings cleared it at once and the next
+  refresh sent the new key to the NIM stub (8 calls), `llm_ok` true, no
+  restart. Malformed `config.json` → 409 message, file untouched. Remove both →
+  `config.json` is `{}`, banner back; dismiss survives a reload. The sentinel
+  never appeared in any response body the page received, `/api/logs`, the
+  server's console log, or `localStorage`.
+- Not done here: a Test click with the real keys (awaiting the user's OK), and
+  `install.sh`'s copy of legacy keys still writes `config.json` itself rather
+  than through `keys.py` (same fields and mode; out of scope).
 
 ---
 
