@@ -430,7 +430,7 @@ def start(force: bool = False) -> dict:
             _STATUS.update(state="disabled", error="")
             return dict(_STATUS)
         if fresh:
-            if _STATUS["state"] == "idle":
+            if _STATUS["state"] in ("idle", "disabled"):  # e.g. switched back on
                 _STATUS["state"] = "up_to_date"
             return dict(_STATUS)
         _STATUS.update(state="checking", error="")

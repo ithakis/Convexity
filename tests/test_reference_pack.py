@@ -233,6 +233,7 @@ def test_disabled_makes_no_request_and_hides_the_pack(stub, tmp_path):
     rp.set_enabled(True)
     rp.wait(5)
     assert len(rp.anchor_scores(MV)) == 250
+    assert rp.status()["state"] == "up_to_date" and len(stub.hits) == n
 
 
 def test_env_switch_forces_it_off(stub, monkeypatch, tmp_path):
