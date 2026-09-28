@@ -412,3 +412,58 @@ def test_reference_pack_routes(stub, tmp_path):
         httpd.shutdown()
         httpd.server_close()
         time.sleep(0)
+
+
+# ------------------------------------------------ Track record "Model (500 names)"
+def _scored_history(n_days=45, n_names=12):
+    """A pack history whose Market read score predicts the forward return."""
+    import random
+    from datetime import date, timedelta
+
+    rng = random.Random(4)
+    recs = []
+    d0 = date(2026, 6, 1)
+    for i in range(n_days):
+        day = (d0 + timedelta(days=i)).isoformat()
+        for k in range(n_names):
+            f = rng.gauss(0, 0.02)
+            s = f + rng.gauss(0, 0.01)
+            recs.append(
+                {
+                    "date": day,
+                    "symbol": f"S{k}",
+                    "market_score": s,
+                    "market_tier": "bullish" if s > 0.01 else "bearish" if s < -0.01 else "no_edge",
+                    "market_model": MV,
+                    "fwd_1d": f,
+                    "fwd_5d": f,
+                }
+            )
+    return {"schema": rp.SCHEMA_VERSION, "records": recs}
+
+
+def test_reference_track_record(monkeypatch):
+    from convexity import server
+
+    monkeypatch.setenv("CONVEXITY_REFERENCE_PACK", "1")
+    rp.reset_for_tests()
+    server._REF_DIAG_CACHE.clear()
+    make_pack(paths.reference_dir(), history=_scored_history(), date=_today())
+    out = server._reference_diagnostics(1)
+    assert out["source"] == "reference" and out["reference"]["date"] == _today()
+    assert out["market"]["ic"]["1d"]["n_days"] == 45
+    assert out["market"]["verdict"]["key"] == "edge"
+    assert out["news"]["coverage"]["n_records"] == 0  # the pack has no News read
+    again = server._reference_diagnostics(1)  # cached per pack
+    assert again["market"] is out["market"]
+    rp.reset_for_tests()
+
+
+def test_reference_track_record_explains_a_missing_pack(monkeypatch):
+    from convexity import server
+
+    server._REF_DIAG_CACHE.clear()
+    rp.reset_for_tests()
+    assert "switched off" in server._reference_diagnostics(1)["unavailable"]
+    monkeypatch.setenv("CONVEXITY_REFERENCE_PACK", "1")
+    assert "not been downloaded" in server._reference_diagnostics(1)["unavailable"]

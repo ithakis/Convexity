@@ -7308,12 +7308,52 @@ async function toggleTrackRecord() {
   body.classList.toggle("hidden");
   arrow.innerHTML = willOpen ? "&#9662;" : "&#9656;";
   if (!willOpen) return;
-  body.innerHTML = lcHtml("scoring the history against realized returns", { bar: true });
+  loadTrackRecord();
+}
+
+/* Which history the Track record scores: "holdings" (this app's own reads)
+   or "reference" (the S&P 500 reference pack, Market read only). Remembered
+   per browser; the storage accessors can throw (private mode), hence try. */
+function trackRecordSource() {
+  try { return localStorage.getItem("tr_source") === "reference" ? "reference" : "holdings"; }
+  catch { return "holdings"; }
+}
+
+async function loadTrackRecord() {
+  const body = $("#ns-diag-body");
+  const src = trackRecordSource();
+  body.innerHTML = trackSourceSwitch(src)
+    + lcHtml(src === "reference" ? "scoring 500 names against realized returns"
+                                 : "scoring the history against realized returns", { bar: true });
+  wireTrackSourceSwitch(body);
   try {
-    renderTrackRecord(await fetch("/api/news-diagnostics").then(r => r.json()));
+    const url = src === "reference" ? "/api/news-diagnostics?source=reference" : "/api/news-diagnostics";
+    const d = await fetch(url).then(r => r.json());
+    if (trackRecordSource() !== src) return;  // switched while loading
+    renderTrackRecord(d);
   } catch {
-    body.innerHTML = '<div class="ns-panel-empty">Track record unavailable.</div>';
+    body.innerHTML = trackSourceSwitch(src) + '<div class="ns-panel-empty">Track record unavailable.</div>';
+    wireTrackSourceSwitch(body);
   }
+}
+
+function trackSourceSwitch(src) {
+  const b = (v, label, tip) => `<button type="button" data-tr-src="${v}" class="${src === v ? "active" : ""}" data-tip="${tip}">${label}</button>`;
+  return `<div class="ns-tr-src" role="group" aria-label="Track record history">
+    ${b("holdings", "Your holdings", "Both engines, scored on the reads this app has made of your holdings.")}
+    ${b("reference", "Model (500 names)", "The Market read alone, scored on the S&amp;P 500 every weekday by the daily reference build — a far larger sample than one portfolio.")}
+  </div>`;
+}
+
+function wireTrackSourceSwitch(root) {
+  root.querySelectorAll("[data-tr-src]").forEach(btn => {
+    btn.onclick = () => {
+      const v = btn.dataset.trSrc;
+      if (v === trackRecordSource()) return;
+      try { localStorage.setItem("tr_source", v); } catch { /* per-view only */ }
+      loadTrackRecord();
+    };
+  });
 }
 
 function nsPct(x, digits = 0) { return x == null ? "—" : `${(x * 100).toFixed(digits)}%`; }
@@ -7339,11 +7379,17 @@ function trackVerdictCard(title, eng, explain, portfolioCov) {
 
 function renderTrackRecord(d) {
   const body = $("#ns-diag-body");
+  const src = d && d.source === "reference" ? "reference" : "holdings";
   if (!d || d.error) {
-    body.innerHTML = '<div class="ns-panel-empty">Track record unavailable.</div>';
+    body.innerHTML = trackSourceSwitch(src) + '<div class="ns-panel-empty">Track record unavailable.</div>';
+    wireTrackSourceSwitch(body);
     return;
   }
-  const parts = [];
+  if (src === "reference") {
+    renderReferenceTrackRecord(d, body);
+    return;
+  }
+  const parts = [trackSourceSwitch(src)];
   const mr = d.market_runtime, nr = d.news_runtime;
   if (mr && !mr.available) {
     parts.push(`<div class="ns-ml-banner"><b>Market read is not running.</b>
@@ -7439,6 +7485,73 @@ function renderTrackRecord(d) {
     <div class="ns-diag-sec"><h5>Market read calibration (z quintiles vs realized ${d.market_horizon_days || 1}d)</h5>${calChart}</div>
   </details>`);
   body.innerHTML = parts.join("");
+  wireTrackSourceSwitch(body);
+}
+
+/* Track record -> "Model (500 names)": the same date-clustered statistics
+   (news_diagnostics.compute) over the reference pack's S&P 500 history. The
+   pack holds the Market read only — the News read is an LLM run on the
+   user's own keys, never in CI — so there is one engine to show. */
+function renderReferenceTrackRecord(d, body) {
+  const parts = [trackSourceSwitch("reference")];
+  if (d.unavailable) {
+    parts.push(`<div class="ns-panel-empty">${escapeHtml(d.unavailable)}
+      <a href="#" id="ns-tr-ref-settings">Settings → Models &amp; Data</a></div>`);
+    body.innerHTML = parts.join("");
+    wireTrackSourceSwitch(body);
+    const a = $("#ns-tr-ref-settings");
+    if (a) a.onclick = (e) => { e.preventDefault(); openSettings(); selectSettingsSection("models"); };
+    return;
+  }
+  const ref = d.reference || {};
+  const h = d.market_horizon_days || 1;
+  const cov = `${ref.n_names || "—"} names · data from ${escapeHtml(ref.date || "—")} (${referenceAgeText(ref.age_days)})`;
+  parts.push(`<div class="ns-tr-cards">
+    <div class="ns-tr-card ns-tr-too_early">
+      <div class="ns-tr-title">News read</div>
+      <div class="ns-tr-verdict">Not in the reference data</div>
+      <div class="ns-tr-explain">The News read runs an LLM on your own keys, so it is only scored on your holdings (“Your holdings”).</div>
+    </div>
+    ${trackVerdictCard("Market read", d.market,
+      `The Market read's daily rank correlation with the next ${h > 1 ? `${h}-day` : "day's"} market-neutral move, across the S&amp;P 500 — the same test as “Your holdings”, on a far larger sample. Each day's tiers were set using earlier days only.`,
+      cov)}
+  </div>`);
+  const lsM = (d.market || {}).long_short || [];
+  if (lsM.length) {
+    const step = Math.max(1, Math.floor(lsM.length / 5));
+    const xLabels = lsM.filter((_, i) => i % step === 0).map(p => ({ x: lsM.indexOf(p), label: p.date.slice(5) }));
+    parts.push(`<div class="ns-diag-sec"><h5>Long-short, cumulative</h5>
+      ${svgLine([{ name: "Market read", color: "var(--ns-vbull)", points: lsM.map((p, i) => ({ x: i, y: p.cum_pct,
+        tip: `${p.date}: ${fmtSig(p.cum_pct, 2)}% cumulative (${p.n_long} long / ${p.n_short} short)` })) }],
+        { y0: true, xLabels, fmt: v => v.toFixed(1) + "%" })}
+      <div class="ns-diag-note">Each day: the average next-day market-neutral return of the names rated bullish or better, minus those rated bearish or worse.</div></div>`);
+  } else {
+    parts.push(`<div class="ns-diag-sec"><h5>Long-short, cumulative</h5><div class="ns-panel-empty">Needs days with a realized next-day return.</div></div>`);
+  }
+  const ic = ((d.quants || {}).daily_ic || {}).market || {};
+  const pts = ic["1d"] || [];
+  const icRow = ["1d", "5d"].map(k => {
+    const o = ((d.market || {}).ic || {})[k] || {};
+    return `<td class="r">${o.mean != null ? fmtSig(o.mean, 3) : "—"}</td><td class="r">${o.t != null ? o.t.toFixed(2) : "—"}</td><td class="r">${o.n_days || 0}</td>`;
+  }).join("");
+  const t = ((d.quants || {}).tier_table || {}).market || {};
+  const order = ["very_bearish", "bearish", "no_edge", "bullish", "very_bullish"].filter(k => t[k]);
+  const tierTbl = order.length
+    ? `<table class="ns-table ns-diag-table"><thead><tr><th>Tier</th><th class="r">n</th><th class="r">days</th><th class="r">fwd 1d</th><th class="r">fwd 5d</th></tr></thead><tbody>${
+        order.map(k => `<tr><td>${nsTierDot(k)} ${NS_LABELS[k]}</td><td class="r">${t[k].n}</td><td class="r">${t[k].n_days}</td><td class="r">${t[k].fwd_1d_pct != null ? fmtSig(t[k].fwd_1d_pct, 2) + "%" : "—"}</td><td class="r">${t[k].fwd_5d_pct != null ? fmtSig(t[k].fwd_5d_pct, 2) + "%" : "—"}</td></tr>`).join("")}</tbody></table>`
+    : '<div class="ns-panel-empty">No tiered records yet.</div>';
+  parts.push(`<details class="ns-quants"><summary>For quants</summary>
+    <div class="ns-diag-sec"><h5>Daily cross-sectional IC (1d)</h5>${pts.length
+      ? svgLine([{ name: "Market read", color: "var(--ns-vbull)", points: pts.map((p, i) => ({ x: i, y: p.ic, tip: `${p.date}: IC ${fmtSig(p.ic, 3)} (n=${p.n})` })) }], { y0: true, fmt: v => v.toFixed(2) })
+      : '<div class="ns-panel-empty">No dated IC yet.</div>'}</div>
+    <div class="ns-diag-sec"><h5>Date-clustered IC</h5>
+      <table class="ns-table ns-diag-table"><thead><tr><th>Engine</th><th class="r">IC 1d</th><th class="r">t</th><th class="r">days</th><th class="r">IC 5d</th><th class="r">t (NW)</th><th class="r">days</th></tr></thead>
+      <tbody><tr><td>Market read</td>${icRow}</tr></tbody></table>
+      <div class="ns-diag-note">Mean of each day's Spearman correlation across the S&amp;P 500 names scored that day; forward returns are net of beta × SPY, beta estimated from a year of daily closes.</div></div>
+    <div class="ns-diag-sec"><h5>Forward return by tier — Market read</h5>${tierTbl}</div>
+  </details>`);
+  body.innerHTML = parts.join("");
+  wireTrackSourceSwitch(body);
 }
 
 /* ===== Methodology modal (90% viewport) ==================================

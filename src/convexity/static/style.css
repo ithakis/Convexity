@@ -2553,6 +2553,18 @@
     font-variant-numeric: tabular-nums;
   }
   .ns-lookback button:hover { border-color: var(--accent); color: var(--text); }
+  /* Track record source switch: "Your holdings" | "Model (500 names)".
+     Same look as the News window buttons above. */
+  .ns-tr-src { display: inline-flex; gap: 4px; margin: 2px 0 10px; }
+  .ns-tr-src button {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: var(--r-sm); font-size: 10.5px; padding: 3px 8px; cursor: pointer;
+  }
+  .ns-tr-src button:hover { border-color: var(--accent); color: var(--text); }
+  .ns-tr-src button.active {
+    border-color: var(--accent); color: var(--accent); font-weight: 700;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
   .ns-lookback button.active {
     border-color: var(--accent); color: var(--accent); font-weight: 700;
     background: color-mix(in srgb, var(--accent) 10%, transparent);

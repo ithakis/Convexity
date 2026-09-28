@@ -631,6 +631,11 @@ class Handler(BaseHTTPRequestHandler):
 
                 ml = _ml._load()
                 horizon = int((ml.get("cal") or {}).get("horizon_days") or 1)
+                if (parse_qs(parsed.query).get("source") or [""])[0] == "reference":
+                    # Track record -> "Model (500 names)": the reference
+                    # pack's history, forward returns already joined.
+                    self._send_json(200, _reference_diagnostics(horizon))
+                    return
                 out = _nd.compute(_ns._history_load(), market_horizon=horizon)
                 # Why each engine is (not) producing reads — set on every
                 # response so the UI can tell "not running" from "too early".
@@ -1301,6 +1306,49 @@ def _pick_port(preferred: int = 8765) -> int:
             except OSError:
                 continue
     return preferred
+
+
+_REF_DIAG_CACHE: dict = {}
+
+
+def _reference_diagnostics(horizon: int) -> dict:
+    """The Track record over the reference pack's ~500 names. Computed from
+    the records alone (no price download) and cached per pack: the pack
+    changes once a day, the panel may be opened many times."""
+    from convexity import news_diagnostics as _nd
+    from convexity import reference_pack
+
+    info = reference_pack.info()
+    if info is None:
+        st = reference_pack.status()
+        if not st.get("enabled"):
+            why = "Reference data is switched off (Settings → Models & Data)."
+        elif st.get("installed_error"):
+            why = f"The downloaded reference data is not usable: {st['installed_error']}"
+        elif (st.get("installed") or {}).get("stale"):
+            why = "The reference data is too old to use — the daily build has not published lately."
+        elif st.get("state") == "failed":
+            why = f"The reference data could not be downloaded: {st.get('error')}"
+        else:
+            why = "The reference data has not been downloaded yet."
+        out = _nd.compute([], market_horizon=horizon)
+        out.update(source="reference", reference=None, unavailable=why)
+        return out
+    key = (
+        info["date"],
+        (info.get("rows") or {}).get("history"),
+        info.get("model_version"),
+        horizon,
+    )
+    hit = _REF_DIAG_CACHE.get("key") == key and _REF_DIAG_CACHE.get("out")
+    if hit:
+        return {**hit, "reference": info}  # the pack's age moves on; the stats do not
+    out = _nd.compute(
+        reference_pack.history_records(), market_horizon=horizon, forward_from_records=True
+    )
+    out.update(source="reference", reference=info)
+    _REF_DIAG_CACHE.update(key=key, out=out)
+    return out
 
 
 def start_server() -> tuple[ThreadingHTTPServer, int]:
