@@ -288,8 +288,12 @@ same model run daily over the S&P 500, built in CI and downloaded by the app.
   environment only — never `config.json` or a legacy key file — so a run
   from a checkout cannot spend the owner's key. A run with fewer than half
   the names scored, or Finnhub answering for fewer than half, writes nothing
-  (exit 1); a previous pack that fails verification aborts (exit 1) unless it
-  is merely another model's (then the history starts fresh).
+  (exit 1). A previous pack that fails verification aborts (exit 1), with two
+  exceptions: another model's pack starts a fresh history, and a pack whose
+  manifest does not match its files (a publish that broke off between the
+  data files and the manifest) carries `history.json.gz` forward on its own
+  (gzip CRC + full schema, `load_history_file`, a `::warning::` in the log) —
+  otherwise every later run would fail on the same unchanged release.
   `CONVEXITY_FINNHUB_BASE` (loopback http only) points it at a local stub for
   verification runs.
 - **App side.** `reference_pack.start()` (boot warm-up and the start of each
@@ -316,6 +320,7 @@ same model run daily over the S&P 500, built in CI and downloaded by the app.
   says "vs 500 S&P names, last 90 days (reference data, N days old)".
 - **Track record "Model (500 names)".** `GET /api/news-diagnostics?source=reference`
   → `compute(history, forward_from_records=True)` (no price download), cached
-  per pack in `server._REF_DIAG_CACHE`. Market read only — the News read is an
+  per pack in `server._REF_DIAG_CACHE` (keyed by the history file's SHA-256:
+  a same-day rebuild keeps the date and may keep the row count). Market read only — the News read is an
   LLM on the user's keys and is never built in CI; the card says so. Without a
   usable pack the payload carries `unavailable` with the reason.

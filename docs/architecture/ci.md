@@ -53,16 +53,19 @@ Builds the daily reference pack (news.md, "Reference pack") and replaces the
 three assets of the rolling release `reference-pack`. `schedule` 22:30 UTC
 Monday–Friday (after the US close) plus `workflow_dispatch` with
 `mode: yahoo-check | build`. **Scheduled runs only fire on the default
-branch**, so it goes live with the v2.0.0 merge. `workflow_dispatch` likewise only
-appears once the file is on `main`, so while v2 is on `distribution` a
-**temporary `push` trigger** (paths: the workflow, `reference_build.py`,
-`sp500.json`) runs `yahoo-check` alone — remove it before the v2.0.0 PR. CI
-(`ci.yml`) also runs on pushes to `distribution` until it merges.
+branch**, so it goes live with the v2.0.0 merge. The web UI's **Run workflow**
+button likewise only appears once the file is on `main`, but the CLI dispatches
+it from any branch GitHub has seen it on — verified 2026-09-28 from
+`distribution`: `gh workflow run reference-pack.yml --ref distribution -f
+mode=yahoo-check`. (A temporary `push` trigger that ran `yahoo-check` before
+that was known was removed the same day; `tests/test_workflows.py` now pins
+the triggers to `schedule` + `workflow_dispatch`.) CI (`ci.yml`) also runs on
+pushes to `distribution` until it merges.
 
 | Job | Permissions / secrets | What it does |
 |---|---|---|
 | `yahoo-check` | `contents: read`, none | Dispatch only: `convexity build-reference-pack --returns-only` — a year of closes for all ~500 names + SPY, plus yfinance news on 20 names; fails under 90% coverage. Run this first: Yahoo sometimes blocks cloud IPs |
-| `build` | `contents: read`; `FINNHUB_API_KEY` on the Build step only | `uv sync --locked` (the same commit as the app), `gh release download reference-pack` into `prev/` (absent on the first run), `build-reference-pack --out pack --previous prev` with `CONVEXITY_HOME=$RUNNER_TEMP/…`, upload `pack/` as a 7-day artifact. ~15 min: bound by the yfinance-news limiter (40/min) and Finnhub (55/min) |
+| `build` | `contents: read`; `FINNHUB_API_KEY` on the Build step only | `uv sync --locked` (the same commit as the app), `gh release download reference-pack` into `prev/` — only a missing release, or one with no `manifest.json`, starts a fresh history; any other `gh` failure fails the run, so a network blip can never publish one day over 400, `build-reference-pack --out pack --previous prev` with `CONVEXITY_HOME=$RUNNER_TEMP/…`, upload `pack/` as a 7-day artifact. ~15 min: bound by the yfinance-news limiter (40/min) and Finnhub (55/min) |
 | `publish` | `contents: write`, none | Download the artifact, re-verify the three files against the manifest, fail if the release does not exist (it **never** creates it), then `gh release upload reference-pack … --clobber` — data files first, manifest last. Never commits |
 
 `tests/test_workflows.py` pins these rules (SHA pins with a tag comment on
@@ -80,9 +83,11 @@ First run, after the branch is pushed (each step needs the owner):
    tag. A pre-release can never be "Latest", and `--clobber` uploads do not
    change that (the model's `model-*` release is already not-latest).
 2. Confirm the `FINNHUB_API_KEY` Actions secret is the **separate** free key.
-3. Actions → Reference pack → Run workflow, branch `distribution`,
-   mode `yahoo-check`; then mode `build`, and check the three assets, their
-   sizes and `manifest.json` (date, `sources`, `rows`).
+3. `gh workflow run reference-pack.yml --ref distribution -f mode=yahoo-check`
+   (done 2026-09-28: 501/503 closes, yfinance news 20/20), then
+   `-f mode=build`, and check the three assets, their sizes and
+   `manifest.json` (date, `sources`, `rows`). After the merge the same works
+   from Actions → Reference pack → Run workflow.
 4. Failed runs email the owner (GitHub's default); the app shows the pack's
    age in Settings → Models & Data and stops using it after 14 days.
 

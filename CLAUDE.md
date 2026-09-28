@@ -366,7 +366,8 @@ old root wishlist file was retired in v1.13.1; file new wishlist items as
 issues, never back into a file (the issue forms in `.github/ISSUE_TEMPLATE/`
 apply `bug` / `feature`). Distribution/packaging work follows
 `docs/plans/distribution-roadmap.md` — Phases 0–8 done on `distribution`
-(Phase 8's workflow still needs its first dispatch runs after the push);
+(pushed; CI green; the reference-pack `yahoo-check` passed from GitHub — its
+`build` run waits for the owner to create the `reference-pack` release);
 Phase 9 (website) remains, then the single v2.0.0 release.
 
 ### Done / archived (don't redo)

@@ -171,7 +171,7 @@ stdlib `ThreadingHTTPServer` on `127.0.0.1` — no build step, no framework.
 
 ```
 src/convexity/
-├── cli.py            `convexity` command: the server, or `convexity build-symbols`
+├── cli.py            `convexity` command: the server, `build-symbols`, `build-reference-pack` (CI)
 ├── server.py         HTTP routes (NDJSON streaming for the table, jobs, the optimizer)
 ├── desktop.py        the native window (`convexity-app`): same server, in-process
 ├── fetcher.py        per-symbol yfinance rows (5-worker streaming build)
@@ -179,14 +179,20 @@ src/convexity/
 ├── frontier.py/mpt.py  Black-Litterman returns + mean-CVaR frontier (numba solver)
 ├── news_sentiment.py the News read (Finnhub + yfinance headlines, NVIDIA NIM LLM)
 ├── ml_sentiment.py   the Market read (LightGBM model, downloaded on first run)
+├── reference_pack.py the daily S&P 500 reference pack (download + validation)
 ├── jobs.py           background refresh jobs (cancellable, survive a reload)
 ├── persistence.py    portfolios and settings as JSON in the data folder
 └── static/           index.html, app.js, style.css
 ```
 
 Network access is limited to Yahoo Finance, Finnhub, NVIDIA NIM, the KaTeX CDN
-(column-guide formulas) and GitHub Releases (the one-time model download). The
-full design notes are in [docs/architecture/](docs/architecture/).
+(column-guide formulas) and this repository's GitHub Releases: the one-time model
+download, and a small daily *reference pack* — the Market read of the S&P 500,
+built here by a scheduled workflow — that calibrates the Market read until you
+have history of your own and adds a 500-name view to the Track record. It reveals
+only that a copy of Convexity is running, never what you hold, and can be switched
+off in Settings → Models & Data. The full design notes are in
+[docs/architecture/](docs/architecture/).
 
 ---
 

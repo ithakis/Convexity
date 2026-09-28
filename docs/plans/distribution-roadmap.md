@@ -1,20 +1,23 @@
 # Distribution roadmap: from "clone + conda" to an installable app
 
-Status: **Phases 0–8 done** on the local `distribution` branch (code at
-1.15.0, 2026-09-28); written 2026-09-26, v1.13.0. One phase = one Claude Code
-session. Do them in order; each phase lists what it depends on.
+Status: **Phases 0–8 done** on the `distribution` branch (code at 1.15.0,
+2026-09-28), which was **pushed on 2026-09-28** with the owner's OK; full CI is
+green on it. Written 2026-09-26, v1.13.0. One phase = one Claude Code session.
+Do them in order; each phase lists what it depends on.
 
-**Release plan (decided 2026-09-28): one big v2.0.0.** Nothing after v1.13.0
-has been pushed or released — 1.14.x/1.15.0 exist only as commits on the local
-`distribution` branch. The phases below, then the v2 features (to be listed
-by the user), all land on `distribution`; at the end: one version bump to
-2.0.0, the 1.14–1.15 CHANGELOG sections folded into a single 2.0.0 section
-(no tag ever pointed at them), one PR to `main`, full CI, tag + GitHub release
-per CLAUDE.md §15. Until then: **no push, no PR, no tags, no version bumps.**
+**Release plan (decided 2026-09-28): one big v2.0.0.** No app release after
+v1.13.0 exists — 1.14.x/1.15.0 are commits on `distribution` only. The phases
+below, then the v2 features (to be listed by the user), all land on
+`distribution`; at the end: one version bump to 2.0.0, the 1.14–1.15 CHANGELOG
+sections folded into a single 2.0.0 section (no tag ever pointed at them), one
+PR to `main`, full CI, tag + GitHub release per CLAUDE.md §15. Until then:
+**no PR, no tags, no version bumps**; pushing `distribution` is fine (CI runs
+on it).
 One repository only: everything — app, installers, the reference-pack
 workflow (Phase 8) and the website (Phase 9) — lives in `ithakis/Convexity`.
-Consequence to keep in mind: CI's macOS/Windows installer jobs only run on
-GitHub, so each phase runs their local equivalents (CLAUDE.md §13) instead.
+CI's macOS/Windows installer jobs only run on GitHub; before the push each
+phase ran their local equivalents (CLAUDE.md §13). Since the push they run on
+every push to `distribution` — all eight jobs passed on the first run.
 
 How to run a phase with Claude Code:
 
@@ -232,9 +235,9 @@ after using the app (`git status` shows nothing new, even untracked).
 Depends on: Phases 2–3.
 
 **Done 2026-09-27** (v1.14.0) — committed on the `distribution` branch. The
-installer only works for everyone once `v1.14.0` is tagged and released: it
-installs the latest release and refuses anything older than v1.14.0 (no
-pyproject). Deviations and findings:
+installer only works for everyone once a release ≥ v1.14.0 exists — now the
+v2.0.0 release: it installs the latest release and refuses anything older
+than v1.14.0 (no pyproject). Deviations and findings:
 - **Source archive, not `git+https`.** The installers install from
   `github.com/ithakis/Convexity/archive/refs/tags/<tag>.tar.gz`. A clean Mac
   has no git (`/usr/bin/git` only offers the Xcode tools), and uv needs it for
@@ -256,7 +259,7 @@ pyproject). Deviations and findings:
 - CI: rather than keeping icon-only jobs next to new ones, the macOS and
   Windows jobs now run the **whole** installer (uv made that ~2 min instead of
   10-15); `tool-install-smoke` (ubuntu) installs the package and boots it
-  outside the checkout. Not run yet — nothing was pushed.
+  outside the checkout. First run after the push (2026-09-28): all green.
 - Verified locally: full suite; a simulated clean account (empty `HOME`,
   `PATH=/usr/bin:/bin`, installer piped as `curl | bash` would) — official uv
   installer, managed Python 3.11 download, envcheck, `.app` with v1.14.0,
@@ -642,8 +645,15 @@ Tasks:
       Content-Length, 404, plain http to a real host, stale pack.
 - [x] CLAUDE.md: the rolling-asset exception in §18; the workflow in §13
       (since Phase 7: `docs/architecture/ci.md`).
-- [ ] After the push (owner): create the release, run `yahoo-check`, then
-      `build` (ci.md "First run"). The schedule starts with the v2.0.0 merge.
+- [x] `yahoo-check` on a GitHub runner (the risk to check first): 501/503
+      names with a year of closes (FDXF and HONA are 2026 spin-offs with
+      under 200 trading days — scored, forward returns once prices exist),
+      SPY ok, yfinance news 20/20, ~35 s. Run twice: from the temporary push
+      trigger and from `gh workflow run --ref distribution`.
+- [ ] Owner: create the `reference-pack` release (pre-release, not latest),
+      then `gh workflow run reference-pack.yml --ref distribution -f
+      mode=build` (ci.md "First run"). The schedule starts with the v2.0.0
+      merge.
 
 Deviations and findings (2026-09-28, seven commits plus a small fix):
 - **Finnhub + yfinance, not Finnhub only** (decided with the owner): the pack
@@ -697,6 +707,39 @@ Deviations and findings (2026-09-28, seven commits plus a small fix):
   status on its old label.
 - CI's `server-smoke` / `tool-install-smoke` boot the app, so they make one
   GET to the release; until it exists that is a logged 404, nothing more.
+
+Verification pass after the push (2026-09-28, all phases, `/verify`):
+- **GitHub side.** `main` protected (no force-push/deletion, three required
+  checks), secret scanning + push protection on, private vulnerability
+  reporting on, default Actions token read-only, 0 secret-scanning and 0 open
+  Dependabot alerts, the `FINNHUB_API_KEY` secret present. `/releases/latest`
+  is v1.13.0 (so today's README one-liner stops with "predates the uv
+  installer" — expected until v2.0.0); `model-mlsent-v1.1` is not latest and
+  its asset digest equals `model_fetch.MODEL_SHA256`.
+- **Runtime, from a clean `git archive` install with no keys:** the model
+  downloaded from the real release and installed (Phase 5); the real
+  reference URL gave the logged 404 and the app carried on (Phase 8); build /
+  dedupe / save / reload / optimize; Settings → About, Models & Data, API keys
+  (a fake key saved at 0600, never in a response or log, then removed);
+  migration of a synthetic legacy file; desktop window offscreen
+  (`loadFinished ok=True`); `install.sh` / `update.sh` from source into
+  scratch dirs; `build-symbols` + fuzzy names (Microsft → MSFT, DaVita → DVA,
+  Alphabet → GOOG); the builder against a Finnhub stub; a served fake pack
+  (reference anchor on 30,179 scores, Model view, switch, corrupted and older
+  packs refused, origin guard on the route).
+- **Found and fixed:** (1) the build job treated *any* `gh release download`
+  failure as "no previous pack" — a network blip would have published one day
+  of history over up to 400; now only a missing release (or one without
+  `manifest.json`) starts afresh. (2) A publish that broke off between the
+  data files and the manifest would have failed every later build (the
+  release never changes again); the builder now carries `history.json.gz`
+  forward on its own (gzip CRC + full schema) with a warning. (3) The Model
+  view's cache was keyed by date + row count, so a same-day rebuild could
+  show stale statistics; now keyed by the history file's SHA-256. (4)
+  `workflow_dispatch` works from `distribution` through the CLI, so the
+  temporary push trigger was removed and the triggers pinned by a test.
+  (5) README's network statement did not mention the daily download; small
+  UI fixes (About lists `reference/`, number formatting, punctuation).
 
 ---
 
