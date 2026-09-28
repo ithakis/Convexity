@@ -35,6 +35,13 @@ def test_build_symbols_rejects_an_unknown_source(tmp_path, capsys):
     assert not db.exists()
 
 
+def test_build_symbols_rejects_empty_sources(tmp_path, capsys):
+    db = tmp_path / "syms.sqlite"
+    assert cli.main(["build-symbols", "--sources", " , ", "--db", str(db)]) == 2
+    assert "--sources is empty" in capsys.readouterr().err
+    assert not db.exists()
+
+
 def test_build_symbols_writes_the_requested_db(tmp_path, monkeypatch):
     def stub_source(session):
         yield sdb.SymbolRow(ticker="AAPL", name="Apple Inc.", exchange="NASDAQ")

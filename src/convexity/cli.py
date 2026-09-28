@@ -53,6 +53,12 @@ def build_symbols(argv: list[str]) -> int:
 
     requested = [s.strip() for s in args.sources.split(",") if s.strip()]
     unknown = [s for s in requested if s not in sdb.SOURCES]
+    if not requested:
+        # `--sources ""` (e.g. an unset shell variable) would otherwise create
+        # an empty DB and report success.
+        sys.stderr.write("error: --sources is empty\n")
+        sys.stderr.write(f"available: {list(sdb.SOURCES.keys())}\n")
+        return 2
     if unknown:
         sys.stderr.write(f"error: unknown source(s): {unknown}\n")
         sys.stderr.write(f"available: {list(sdb.SOURCES.keys())}\n")
