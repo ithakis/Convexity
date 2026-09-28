@@ -1,0 +1,147 @@
+name: Reference pack
+
+# Builds the daily reference pack (the Market read over the S&P 500) and
+# publishes it to the rolling release `reference-pack` — CLAUDE.md §18
+# (rolling-asset exception) and docs/architecture/ci.md.
+#
+# - Runs the convexity package from THIS commit (`uv sync --locked`), so the
+#   featurizer and the model pin are the app's own.
+# - Reads FINNHUB_API_KEY from Actions secrets, in the build step only; never
+#   echoed. A separate free key from the owner's own (it has its own 60/min).
+# - Never commits: data goes only to the release asset. Only `publish` can
+#   write, and it has no secrets; it never creates the release.
+# - Scheduled runs happen only on the default branch. Before that, test with
+#   workflow_dispatch: first `yahoo-check`, then `build`.
+
+on:
+  schedule:
+    - cron: "30 22 * * 1-5" # weekdays, after the US close (22:30 UTC)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "yahoo-check: only test that Yahoo answers from GitHub's runners. build: build and publish the pack."
+        type: choice
+        options: [yahoo-check, build]
+        default: yahoo-check
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reference-pack
+  cancel-in-progress: false
+
+jobs:
+  yahoo-check:
+    name: Yahoo check (prices for the full universe, no publish)
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'yahoo-check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (locked)
+        run: uv sync --locked
+
+      - name: Fetch forward-return prices for the S&P 500
+        env:
+          CONVEXITY_HOME: ${{ runner.temp }}/convexity-home
+          CONVEXITY_REFERENCE_PACK: "0"
+        run: uv run convexity build-reference-pack --returns-only
+
+  build:
+    name: Build the pack
+    if: github.event_name == 'schedule' || inputs.mode == 'build'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (locked)
+        run: uv sync --locked
+
+      # The history grows by carrying the previous pack forward; the builder
+      # verifies it (manifest hashes + schema) before using it.
+      - name: Fetch the previous pack
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prev
+          if gh release download reference-pack --repo "$GITHUB_REPOSITORY" --dir prev \
+               --pattern manifest.json --pattern anchor.json.gz --pattern history.json.gz; then
+            ls -l prev
+          else
+            echo "::notice::No previous pack — this run starts a fresh history."
+            rm -rf prev && mkdir prev
+          fi
+
+      - name: Build
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          CONVEXITY_HOME: ${{ runner.temp }}/convexity-home
+          CONVEXITY_REFERENCE_PACK: "0"
+        run: uv run convexity build-reference-pack --out pack --previous prev
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reference-pack
+          path: |
+            pack/manifest.json
+            pack/anchor.json.gz
+            pack/history.json.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to the reference-pack release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: reference-pack
+          path: pack
+
+      - name: Verify the files against their manifest
+        run: |
+          python3 - <<'EOF'
+          import hashlib, json, pathlib
+          d = pathlib.Path("pack")
+          names = sorted(p.name for p in d.iterdir())
+          assert names == ["anchor.json.gz", "history.json.gz", "manifest.json"], names
+          m = json.loads((d / "manifest.json").read_text())
+          for name, meta in m["files"].items():
+              data = (d / name).read_bytes()
+              assert len(data) == meta["bytes"], name
+              assert hashlib.sha256(data).hexdigest() == meta["sha256"], name
+          print("pack", m["date"], m["rows"], m["sources"])
+          EOF
+
+      # Data files first, manifest last: a client that sees the new manifest
+      # finds the files it describes (and one that races us fails its hash
+      # check, ignores the pack and retries the next day).
+      - name: Upload (replaces the previous assets)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view reference-pack --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::The reference-pack release does not exist. The owner creates it once (docs/architecture/ci.md); this workflow never does."
+            exit 1
+          fi
+          gh release upload reference-pack pack/anchor.json.gz pack/history.json.gz \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload reference-pack pack/manifest.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
