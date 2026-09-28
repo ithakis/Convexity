@@ -33,6 +33,10 @@ os.environ["PORTFOLIO_SYMBOL_DB"] = os.path.join(
 # drives model_fetch directly against a local server.
 os.environ["CONVEXITY_MODEL_DOWNLOAD"] = "0"
 os.environ.pop("CONVEXITY_MODEL_URL", None)
+# Same for the daily reference pack; test_reference_pack.py turns it on
+# against a local stub.
+os.environ["CONVEXITY_REFERENCE_PACK"] = "0"
+os.environ.pop("CONVEXITY_REFERENCE_URL", None)
 
 
 @pytest.fixture(autouse=True)

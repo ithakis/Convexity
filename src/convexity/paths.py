@@ -79,6 +79,12 @@ def logs_dir() -> Path:
     return data_dir() / "logs"
 
 
+def reference_dir() -> Path:
+    """The downloaded reference pack (reference_pack.py) — a cache: deleting
+    it only means the next launch downloads it again."""
+    return data_dir() / "reference"
+
+
 def config_file() -> Path:
     return data_dir() / "config.json"
 

@@ -598,16 +598,28 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 except Exception:
                     keys = {}
+            try:
+                from convexity import reference_pack
+
+                reference = reference_pack.status()
+            except Exception as exc:
+                reference = {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
             self._send_json(
                 200,
                 {
                     "ml": ml,
+                    "reference": reference,
                     "env": envcheck.status(),
                     "keys": keys,
                     "version": __version__,
                     "version_date": __version_date__,
                 },
             )
+            return
+        if parsed.path == "/api/reference-pack":
+            from convexity import reference_pack
+
+            self._send_json(200, reference_pack.status())
             return
         if parsed.path == "/api/news-diagnostics":
             if _ns is None:
@@ -795,6 +807,27 @@ class Handler(BaseHTTPRequestHandler):
             from convexity import model_fetch
 
             self._send_json(202, model_fetch.start(force=True))
+            return
+        if parsed.path == "/api/reference-pack":
+            # Settings -> Models & Data: the download switch and "Check now".
+            # Nothing is sent anywhere but the GET of the public pack.
+            from convexity import reference_pack
+
+            try:
+                payload = self._read_json()
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            payload = payload if isinstance(payload, dict) else {}
+            if isinstance(payload.get("enabled"), bool):
+                self._send_json(200, reference_pack.set_enabled(payload["enabled"]))
+            elif payload.get("action") == "refresh":
+                reference_pack.start(force=True)
+                self._send_json(202, reference_pack.status())
+            else:
+                self._send_json(
+                    400, {"error": 'expected {"enabled": bool} or {"action": "refresh"}'}
+                )
             return
         if parsed.path == "/api/watchlists":
             try:
@@ -1302,6 +1335,15 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
         # main()'s _warm_optimizer has never warmed numba for the desktop app.
         # Best-effort — _load() never raises, and a failure just leaves the
         # model unavailable with a real reason on /api/runtime-status.
+        try:
+            # The daily reference pack (Market read anchor + the "Model (500
+            # names)" Track record): its own daemon thread, at most once a
+            # day, skipped when switched off in Settings (reference_pack.py).
+            from convexity import reference_pack
+
+            reference_pack.start()
+        except Exception as exc:
+            print(f"[reference_pack] start failed: {type(exc).__name__}: {exc}")
         try:
             from convexity import ml_sentiment as _mls
 

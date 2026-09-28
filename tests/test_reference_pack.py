@@ -116,3 +116,299 @@ def test_non_finite_numbers_are_rejected():
     a["rows"][0][2] = float("nan")
     with pytest.raises(rp.PackError):
         rp.validate_anchor(a, MV)
+
+
+# ------------------------------------------------------------ app-side fetch
+import http.server  # noqa: E402
+import os  # noqa: E402
+import socket  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import urllib.request  # noqa: E402
+
+from convexity import paths  # noqa: E402
+
+
+class _Stub:
+    """Serves ``files`` {name: bytes} on 127.0.0.1; counts requests.
+    ``lie_length`` sends a Content-Length larger than the body (truncation)."""
+
+    def __init__(self):
+        self.files: dict[str, bytes] = {}
+        self.hits: list[str] = []
+        self.lie_length: dict[str, int] = {}
+        stub = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                name = self.path.rsplit("/", 1)[-1]
+                stub.hits.append(name)
+                data = stub.files.get(name)
+                if data is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                n = stub.lie_length.get(name, len(data))
+                if n is not None:  # None: no Content-Length, body until close
+                    self.send_header("Content-Length", str(n))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except OSError:
+                    pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/pack/"
+
+    def publish(self, tmp, **kw):
+        src = tmp / "src"
+        m = make_pack(src, **kw)
+        self.files = {p.name: p.read_bytes() for p in src.iterdir()}
+        return m
+
+
+def _today():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+@pytest.fixture()
+def stub(monkeypatch):
+    s = _Stub()
+    monkeypatch.setenv("CONVEXITY_REFERENCE_PACK", "1")
+    monkeypatch.setenv("CONVEXITY_REFERENCE_URL", s.url)
+    monkeypatch.setattr(rp, "_BACKOFF_S", 0.01)
+    rp.reset_for_tests()
+    yield s
+    rp.reset_for_tests()
+    s.httpd.shutdown()
+    s.httpd.server_close()
+
+
+def _fetch(force=False):
+    rp.start(force=force)
+    return rp.wait(10)
+
+
+def test_good_pack_installs_and_feeds_the_readers(stub, tmp_path):
+    stub.publish(tmp_path, date=_today(), anchor=_anchor(250))
+    st = _fetch()
+    assert st["state"] == "installed", st
+    assert (paths.reference_dir() / rp.MANIFEST).exists()
+    assert len(rp.anchor_scores(MV)) == 250
+    assert len(rp.anchor_scores(MV, exclude=("2026-09-28", "MSFT"))) == 0
+    assert len(rp.history_records()) == 3
+    assert rp.status()["in_use"] is True
+    assert rp.anchor_scores("mlsent-v9") == []
+
+
+def test_fresh_copy_is_not_fetched_again(stub, tmp_path):
+    stub.publish(tmp_path, date=_today())
+    _fetch()
+    n = len(stub.hits)
+    assert rp.start()["state"] in ("installed", "up_to_date")
+    rp.wait(5)
+    assert len(stub.hits) == n
+    # "Check now" does ask, but an unchanged manifest downloads no data file.
+    _fetch(force=True)
+    assert stub.hits[n:] == [rp.MANIFEST]
+    assert rp.status()["state"] == "up_to_date"
+
+
+def test_disabled_makes_no_request_and_hides_the_pack(stub, tmp_path):
+    stub.publish(tmp_path, date=_today(), anchor=_anchor(250))
+    _fetch()
+    rp.set_enabled(False)
+    n = len(stub.hits)
+    assert _fetch(force=True)["state"] == "disabled"
+    assert len(stub.hits) == n
+    assert rp.anchor_scores(MV) == [] and rp.history_records() == []
+    assert json.loads(paths.state_file("reference_pack").read_text()) == {"enabled": False}
+    rp.set_enabled(True)
+    rp.wait(5)
+    assert len(rp.anchor_scores(MV)) == 250
+
+
+def test_env_switch_forces_it_off(stub, monkeypatch, tmp_path):
+    stub.publish(tmp_path, date=_today())
+    monkeypatch.setenv("CONVEXITY_REFERENCE_PACK", "0")
+    assert _fetch(force=True)["state"] == "disabled" and stub.hits == []
+
+
+def _fails_and_keeps_previous(stub, tmp_path, mutate, reason, after=None):
+    stub.publish(tmp_path, date=_today(), anchor=_anchor(250))
+    _fetch()
+    before = (paths.reference_dir() / rp.ANCHOR).read_bytes()
+    mutate(stub)
+    st = _fetch(force=True)
+    assert st["state"] == "failed" and re.search(reason, st["error"]), st
+    if after:
+        after()
+    assert (paths.reference_dir() / rp.ANCHOR).read_bytes() == before
+    assert len(rp.anchor_scores(MV)) == 250  # the previous copy stays in use
+
+
+import re  # noqa: E402
+
+
+def _new_manifest(stub, **changes):
+    m = json.loads(stub.files[rp.MANIFEST])
+    for k, v in changes.items():
+        m[k] = v
+    stub.files[rp.MANIFEST] = json.dumps(m).encode()
+
+
+def test_bad_hash_fails_and_keeps_previous(stub, tmp_path):
+    def mutate(s):
+        s.files[rp.ANCHOR] = rp.gzip_json(_anchor(251))
+        m = json.loads(s.files[rp.MANIFEST])
+        m["date"] = "2026-09-29"
+        m["files"][rp.ANCHOR]["bytes"] = len(s.files[rp.ANCHOR])
+        s.files[rp.MANIFEST] = json.dumps(m).encode()
+
+    _fails_and_keeps_previous(stub, tmp_path, mutate, "checksum mismatch")
+
+
+def _serve_oversize(s, monkeypatch):
+    """The manifest claims a small file (under the cap); 5000 bytes arrive."""
+    monkeypatch.setattr(rp, "MAX_FILE_BYTES", 400)
+    s.files[rp.ANCHOR] = os.urandom(5000)
+    m = json.loads(s.files[rp.MANIFEST])
+    m["date"] = "2026-09-29"
+    m["files"][rp.ANCHOR]["bytes"] = 300
+    s.files[rp.MANIFEST] = json.dumps(m).encode()
+
+
+_CAP = rp.MAX_FILE_BYTES
+
+
+def test_oversize_fails(stub, tmp_path, monkeypatch):
+    _fails_and_keeps_previous(
+        stub,
+        tmp_path,
+        lambda s: _serve_oversize(s, monkeypatch),
+        "too large",
+        after=lambda: monkeypatch.setattr(rp, "MAX_FILE_BYTES", _CAP),
+    )
+
+
+def test_oversize_without_content_length_fails(stub, tmp_path, monkeypatch):
+    def mutate(s):
+        _serve_oversize(s, monkeypatch)
+        s.lie_length[rp.ANCHOR] = None  # no Content-Length: only the stream cap stops it
+
+    _fails_and_keeps_previous(
+        stub,
+        tmp_path,
+        mutate,
+        "exceeded",
+        after=lambda: monkeypatch.setattr(rp, "MAX_FILE_BYTES", _CAP),
+    )
+
+
+def test_wrong_schema_fails(stub, tmp_path):
+    _fails_and_keeps_previous(
+        stub, tmp_path, lambda s: _new_manifest(s, schema_version=2), "schema_version"
+    )
+
+
+def test_wrong_model_version_fails(stub, tmp_path):
+    _fails_and_keeps_previous(
+        stub, tmp_path, lambda s: _new_manifest(s, model_version="mlsent-v2"), "scored by"
+    )
+
+
+def test_truncated_gzip_fails(stub, tmp_path):
+    def mutate(s):
+        blob = rp.gzip_json(_anchor(260))[:-30]
+        s.files[rp.ANCHOR] = blob
+        m = json.loads(s.files[rp.MANIFEST])
+        m["files"][rp.ANCHOR] = {"sha256": rp.sha256(blob), "bytes": len(blob)}
+        s.files[rp.MANIFEST] = json.dumps(m).encode()
+
+    _fails_and_keeps_previous(stub, tmp_path, mutate, "truncated|gzip")
+
+
+def test_truncated_transfer_fails(stub, tmp_path):
+    def mutate(s):
+        s.lie_length[rp.HISTORY] = len(s.files[rp.HISTORY]) + 100
+        _new_manifest(s, date="2026-09-29")
+
+    _fails_and_keeps_previous(stub, tmp_path, mutate, "truncated|network")
+
+
+def test_offline_fails_quietly(stub, monkeypatch):
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    monkeypatch.setenv("CONVEXITY_REFERENCE_URL", f"http://127.0.0.1:{port}/x/")
+    st = _fetch()
+    assert st["state"] == "failed" and "network" in st["error"]
+    assert rp.anchor_scores(MV) == [] and rp.history_records() == []
+
+
+def test_not_published_yet_is_a_404_not_a_crash(stub):
+    st = _fetch()
+    assert st["state"] == "failed" and "404" in st["error"]
+
+
+def test_plain_http_to_a_real_host_is_refused(stub, monkeypatch):
+    monkeypatch.setenv("CONVEXITY_REFERENCE_URL", "http://example.com/pack/")
+    st = _fetch()
+    assert st["state"] == "failed" and "https required" in st["error"]
+
+
+def test_old_pack_is_not_used(stub, tmp_path):
+    stub.publish(tmp_path, date="2026-01-02", anchor=_anchor(250))
+    assert _fetch()["state"] == "installed"
+    assert rp.anchor_scores(MV) == [] and rp.status()["installed"]["stale"] is True
+
+
+def test_reference_pack_routes(stub, tmp_path):
+    from convexity import server
+
+    stub.publish(tmp_path, date=_today())
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+
+        def post(body, ctype="application/json"):
+            req = urllib.request.Request(
+                base + "/api/reference-pack",
+                data=json.dumps(body).encode(),
+                method="POST",
+                headers={"Content-Type": ctype},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, None
+
+        assert post({"enabled": False}, ctype="text/plain")[0] == 403
+        assert rp.enabled() is True
+        code, st = post({"enabled": False})
+        assert code == 200 and st["enabled"] is False
+        code, st = post({"enabled": True})
+        assert code == 200 and st["enabled"] is True
+        rp.wait(5)
+        code, _ = post({"action": "refresh"})
+        assert code == 202
+        rp.wait(5)
+        assert post({"what": 1})[0] == 400
+        with urllib.request.urlopen(base + "/api/reference-pack", timeout=10) as r:
+            st = json.loads(r.read())
+        assert st["installed"]["date"] == _today() and st["in_use"] is True
+        with urllib.request.urlopen(base + "/api/runtime-status", timeout=30) as r:
+            assert "reference" in json.loads(r.read())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        time.sleep(0)

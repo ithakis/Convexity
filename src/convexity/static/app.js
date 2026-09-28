@@ -9778,6 +9778,9 @@ const SETTINGS_SECTIONS = [
         keywords: ["packages", "missing", "install.sh", "uv", "environment"] },
       { id: "providers", label: "News providers",
         keywords: ["finnhub", "nvidia", "nim", "lexicon"] },
+      { id: "reference", label: "Reference data (S&P 500)",
+        keywords: ["reference", "pack", "s&p 500", "sp500", "anchor", "download", "github",
+                   "privacy", "track record", "calibration", "disable"] },
     ],
     render: renderSettingsModels,
   },
@@ -10257,7 +10260,15 @@ function renderSettingsModels(el) {
     settingsRow({ id: "llm-runtime", label: `News read (LLM) ${llmPill}`, control: "", help: llmBody }) +
     settingsRow({ id: "ml-runtime", label: `Market read (statistical model) ${pill}`, control: "", help: mlBody }) +
     settingsRow({ id: "env", label: "Runtime dependencies", help: envBody }) +
-    settingsRow({ id: "providers", label: "News providers", help: provBody });
+    settingsRow({ id: "providers", label: "News providers", help: provBody }) +
+    settingsRow({
+      id: "reference",
+      label: `Reference data (S&P 500) ${referencePill(d.reference)}`,
+      control: `<label class="settings-check"><input type="checkbox" id="settings-reference"
+        ${(d.reference || {}).enabled ? "checked" : ""}
+        ${(d.reference || {}).env_disabled ? "disabled" : ""}></label>`,
+      help: referenceBody(d.reference || {}),
+    });
 
   const rc = $("#settings-recheck");
   if (rc) rc.onclick = () => { SETTINGS.runtime = null; renderSettingsPane(); loadRuntimeStatus(true); };
@@ -10267,8 +10278,62 @@ function renderSettingsModels(el) {
   if (rd) rd.onclick = () => retryModelDownload(rd);
   const gk = $("#settings-goto-keys");
   if (gk) gk.onclick = (e) => { e.preventDefault(); selectSettingsSection("keys"); };
-  if (dlActive) SETTINGS.modelTimer = setTimeout(() => loadRuntimeStatus(true), 1500);
+  const rf = $("#settings-reference");
+  if (rf) rf.onchange = () => postReferencePack({ enabled: rf.checked });
+  const rn = $("#settings-reference-now");
+  if (rn) rn.onclick = () => { rn.disabled = true; postReferencePack({ action: "refresh" }); };
+  const refBusy = ["checking", "downloading"].includes((d.reference || {}).state);
+  if (dlActive || refBusy) SETTINGS.modelTimer = setTimeout(() => loadRuntimeStatus(true), 1500);
   highlightSettingsMatches(el);
+}
+
+/* Settings -> Models & Data -> Reference data: the daily S&P 500 pack
+   (src/convexity/reference_pack.py). The switch turns off both the download
+   and its use; the status comes from /api/runtime-status. */
+function referencePill(r) {
+  if (!r || !r.enabled) return `<span class="settings-status-pill">Off</span>`;
+  if (["checking", "downloading"].includes(r.state)) return `<span class="settings-status-pill">Checking</span>`;
+  if (r.in_use) return `<span class="settings-status-pill ok">In use</span>`;
+  return `<span class="settings-status-pill bad">Not in use</span>`;
+}
+
+function referenceAgeText(days) {
+  if (days == null) return "";
+  return days <= 0 ? "today" : days === 1 ? "1 day old" : `${days} days old`;
+}
+
+function referenceBody(r) {
+  const kv = (k, v) => `<div class="settings-kv-k">${k}</div><div class="settings-kv-v">${v}</div>`;
+  const inst = r.installed;
+  const rows = [];
+  if (inst) {
+    rows.push(kv("Data from", `${escapeHtml(inst.date)} · ${referenceAgeText(inst.age_days)}`
+      + (inst.stale ? ` <span class="settings-bad-text">(too old to use)</span>` : "")));
+    rows.push(kv("Coverage", `${inst.n_names || "—"} names · ${((inst.rows || {}).history || 0).toLocaleString()} ticker-days`));
+  } else {
+    rows.push(kv("Data", r.enabled ? "not downloaded yet" : "—"));
+  }
+  if (r.state === "failed" && r.error) {
+    rows.push(kv("Last check", `<span class="settings-bad-text">${escapeHtml(r.error)}</span> — ignored`));
+  }
+  if (r.installed_error) rows.push(kv("Installed copy", `<span class="settings-bad-text">${escapeHtml(r.installed_error)}</span>`));
+  return `A daily Market read of the S&amp;P 500, built by this project on GitHub: it anchors the
+    Market read percentile until you have 200 reads of your own, and adds a “Model (500 names)”
+    view to the Track record.
+    <div class="settings-kv">${rows.join("")}</div>
+    <div class="settings-row-help">Downloads a public file from GitHub once a day — GitHub sees
+      that a copy of Convexity is running, never what you hold.${r.env_disabled
+      ? " Switched off by <code>CONVEXITY_REFERENCE_PACK=0</code>." : ""}</div>
+    ${r.enabled ? `<div class="settings-btn-row"><button class="settings-btn" id="settings-reference-now">Check now</button></div>` : ""}`;
+}
+
+async function postReferencePack(body) {
+  try {
+    await fetch("/api/reference-pack", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+  } catch { /* the re-read below shows the state either way */ }
+  loadRuntimeStatus(true);
 }
 
 /* Settings -> API keys. The rule for this pane: a key value exists in the page

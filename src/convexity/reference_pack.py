@@ -23,6 +23,20 @@ not even be loaded. Nothing from users is ever uploaded.
 This module is the one place that defines the format. The builder writes
 through it and verifies a previous pack with it; the app validates every
 download with it. Stdlib only, json only — never pickle, never exec.
+
+App side (bottom half): `start()` downloads the pack in a daemon thread when
+the local copy is older than 24 h — at boot and at the start of each news
+refresh. Trust model: the release asset is REPLACED every day, so unlike the
+model (model_fetch.MODEL_SHA256) no hash can be pinned in code; what protects
+the app is HTTPS to GitHub, the manifest's SHA-256 + size for each file, hard
+size caps, and full schema validation of data that is only ever parsed as JSON
+into numbers. Any failure is logged (`[reference_pack]`), shown in Settings ->
+Models & Data, and otherwise ignored: the previous copy stays, and without one
+the Market read simply keeps its training anchor.
+
+Privacy: the download reveals to GitHub that a copy of Convexity is running —
+never what it holds; nothing is sent but the GET. Settings has the switch
+(`<data>/state/reference_pack.json`); CONVEXITY_REFERENCE_PACK=0 forces it off.
 """
 
 from __future__ import annotations
@@ -30,9 +44,19 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import shutil
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zlib
+from datetime import datetime, timezone
 from pathlib import Path
+
+from convexity import paths
 
 SCHEMA_VERSION = 1
 MANIFEST = "manifest.json"
@@ -261,3 +285,345 @@ def load_dir(d: Path, model_version: str) -> tuple[dict, list[dict], list[list]]
             raise PackError(f"{name} unreadable ({e.strerror or e})") from None
     history, anchor = verify_files(manifest, blobs, model_version)
     return manifest, history, anchor
+
+
+# =================================================================== app side
+BASE_URL = "https://github.com/ithakis/Convexity/releases/download/reference-pack/"
+FRESH_S = 24 * 3600  # re-check at most once a day
+MAX_AGE_DAYS = 14  # an older pack is not used (the workflow has been failing)
+
+_TIMEOUT_S = 30.0
+_CHUNK = 64 * 1024
+_ATTEMPTS = 2
+_BACKOFF_S = 3.0
+
+_LOCK = threading.Lock()
+_THREAD: threading.Thread | None = None
+_STATUS: dict = {"state": "idle", "error": "", "checked_at": None, "source": ""}
+_LOADED: dict = {"key": None, "manifest": None, "history": None, "anchor": None, "error": ""}
+IN_FLIGHT = ("checking", "downloading")
+
+
+def _log(msg: str) -> None:
+    print(f"[reference_pack] {msg}", flush=True)
+
+
+def _model_version() -> str:
+    from convexity import ml_sentiment  # module import is cheap; the model is lazy
+
+    return ml_sentiment.ARTIFACT_VERSION
+
+
+def source_url() -> str:
+    base = os.environ.get("CONVEXITY_REFERENCE_URL", "").strip() or BASE_URL
+    return base if base.endswith("/") else base + "/"
+
+
+def _settings_file() -> Path:
+    return paths.state_file("reference_pack")
+
+
+def env_disabled() -> bool:
+    return os.environ.get("CONVEXITY_REFERENCE_PACK", "").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def enabled() -> bool:
+    """On unless switched off in Settings or by CONVEXITY_REFERENCE_PACK=0.
+    Off means neither downloaded NOR used — the Market read goes back to its
+    own history and the training anchor."""
+    if env_disabled():
+        return False
+    try:
+        return json.loads(_settings_file().read_text("utf-8")).get("enabled", True) is not False
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
+def set_enabled(on: bool) -> dict:
+    f = _settings_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"enabled": bool(on)}) + "\n", encoding="utf-8")
+    os.replace(tmp, f)
+    _log(f"download {'enabled' if on else 'disabled'} in Settings")
+    if on:
+        start()
+    return status()
+
+
+def _set(**kw) -> None:
+    with _LOCK:
+        _STATUS.update(kw)
+
+
+# ------------------------------------------------------------------ download
+def _get(url: str, cap: int) -> bytes:
+    """GET with a byte cap. https only (http for loopback: the test stub),
+    re-checked after GitHub's redirect to its CDN."""
+    from convexity.model_fetch import FetchError, check_url
+
+    check_url(url)
+    req = urllib.request.Request(url, headers={"User-Agent": "convexity-reference-pack"})
+    last: Exception | None = None
+    for attempt in range(1, _ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
+                check_url(resp.geturl())
+                total = resp.headers.get("Content-Length")
+                if total and total.isdigit() and int(total) > cap:
+                    raise PackError(f"{url.rsplit('/', 1)[-1]} too large ({total} bytes)")
+                buf = bytearray()
+                while True:
+                    chunk = resp.read(_CHUNK)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    if len(buf) > cap:
+                        raise PackError(f"{url.rsplit('/', 1)[-1]} exceeded {cap} bytes")
+                if total and total.isdigit() and len(buf) != int(total):
+                    raise PackError(f"download truncated ({len(buf)} of {total} bytes)")
+                return bytes(buf)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise PackError("no reference pack published yet (HTTP 404)") from None
+            last = PackError(f"HTTP {e.code}")
+            if e.code < 500 and e.code != 429:
+                raise last from None
+        except urllib.error.URLError as e:
+            last = PackError(f"network unavailable ({e.reason})")
+        except FetchError as e:
+            raise PackError(str(e)) from None
+        except OSError as e:
+            last = PackError(f"network error ({type(e).__name__}: {e})")
+        if attempt < _ATTEMPTS:
+            time.sleep(_BACKOFF_S * attempt)
+    raise last or PackError("download failed")
+
+
+def _fresh() -> bool:
+    try:
+        age = time.time() - (paths.reference_dir() / MANIFEST).stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < FRESH_S
+
+
+def start(force: bool = False) -> dict:
+    """Check for a newer pack in a daemon thread. No-op while disabled, while
+    one is running, or (unless `force`, the Settings "Check now") when the
+    local copy was checked in the last 24 h. Never blocks, never raises."""
+    global _THREAD
+    on = enabled()
+    # A copy checked in the last 24 h is left alone — unless it is not usable
+    # (e.g. scored by a model this app no longer runs). Outside _LOCK:
+    # _load_local takes it.
+    fresh = on and not force and _fresh() and _load_local(quiet=True)
+    with _LOCK:
+        if _STATUS["state"] in IN_FLIGHT:
+            return dict(_STATUS)
+        if not on:
+            _STATUS.update(state="disabled", error="")
+            return dict(_STATUS)
+        if fresh:
+            if _STATUS["state"] == "idle":
+                _STATUS["state"] = "up_to_date"
+            return dict(_STATUS)
+        _STATUS.update(state="checking", error="")
+        _THREAD = threading.Thread(target=_run, name="pt-reference-pack", daemon=True)
+        _THREAD.start()
+        return dict(_STATUS)
+
+
+def wait(timeout: float | None = None) -> dict:
+    """Test hook: block until the current check ends."""
+    t = _THREAD
+    if t is not None:
+        t.join(timeout)
+    return dict(_STATUS)
+
+
+def _run() -> None:
+    base = source_url()
+    try:
+        _set(source=urllib.parse.urlparse(base).hostname or "")
+        mv = _model_version()
+        raw = _get(base + MANIFEST, MAX_MANIFEST_BYTES)
+        try:
+            manifest = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as e:
+            raise PackError(f"manifest is not valid JSON ({e})") from None
+        validate_manifest(manifest, mv)
+        dest = paths.reference_dir()
+        try:
+            same = (dest / MANIFEST).read_bytes() == raw
+        except OSError:
+            same = False
+        if same and _load_local(quiet=True):
+            os.utime(dest / MANIFEST)  # re-checked: fresh for another 24 h
+            _set(state="up_to_date", error="", checked_at=time.time())
+            return
+        _set(state="downloading")
+        blobs = {name: _get(base + name, MAX_FILE_BYTES) for name in DATA_FILES}
+        verify_files(manifest, blobs, mv)  # hash, size, gunzip caps, schema
+        _install(dest, raw, blobs)
+        _invalidate()
+        _set(state="installed", error="", checked_at=time.time())
+        _log(
+            f"installed the {manifest['date']} pack ({manifest['rows']['history']} history "
+            f"rows, {manifest['rows']['anchor']} anchor rows)"
+        )
+    except PackError as e:
+        _fail(str(e))
+    except Exception as e:  # never let the thread die without a status
+        _fail(f"{type(e).__name__}: {e}")
+
+
+def _fail(reason: str) -> None:
+    _set(state="failed", error=reason, checked_at=time.time())
+    _log(f"not updated: {reason} — ignored; the previous copy (if any) stays in use")
+
+
+def _install(dest: Path, manifest_raw: bytes, blobs: dict[str, bytes]) -> None:
+    """Staging dir + per-file os.replace, manifest LAST: a reader that sees
+    the new manifest also sees the files it describes (and load_dir re-verifies
+    the hashes anyway, so a crash in between is caught, not trusted)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    staging = dest / f".staging-{os.getpid()}"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir()
+    try:
+        for name, data in blobs.items():
+            (staging / name).write_bytes(data)
+        (staging / MANIFEST).write_bytes(manifest_raw)
+        for name in (*DATA_FILES, MANIFEST):
+            os.replace(staging / name, dest / name)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ readers
+def _invalidate() -> None:
+    with _LOCK:
+        _LOADED.update(key=None, manifest=None, history=None, anchor=None, error="")
+
+
+def _load_local(quiet: bool = False) -> bool:
+    """Load (and fully re-verify) the installed copy, cached until it changes."""
+    d = paths.reference_dir()
+    try:
+        raw = (d / MANIFEST).read_bytes()[: MAX_MANIFEST_BYTES + 1]
+    except OSError:
+        with _LOCK:
+            _LOADED.update(key=None, manifest=None, history=None, anchor=None, error="")
+        return False
+    # Keyed by the manifest's own bytes: a re-check that only touched its
+    # mtime keeps the loaded copy; a new pack (new hashes) reloads it.
+    key = (str(d), sha256(raw))
+    with _LOCK:
+        if _LOADED["key"] == key:
+            return _LOADED["manifest"] is not None
+    try:
+        manifest, history, anchor = load_dir(d, _model_version())
+        err = ""
+    except PackError as e:
+        manifest = history = anchor = None
+        err = str(e)
+        if not quiet:
+            _log(f"installed copy not usable: {err} — ignored")
+    with _LOCK:
+        _LOADED.update(key=key, manifest=manifest, history=history, anchor=anchor, error=err)
+    return manifest is not None
+
+
+def _age_days(manifest: dict) -> int | None:
+    try:
+        d = datetime.strptime(manifest["date"], "%Y-%m-%d").date()
+    except (KeyError, ValueError, TypeError):
+        return None
+    return (datetime.now(timezone.utc).date() - d).days
+
+
+def _usable() -> dict | None:
+    """The loaded pack when it may be used: enabled, valid, this model's, and
+    no older than MAX_AGE_DAYS."""
+    if not enabled() or not _load_local():
+        return None
+    with _LOCK:
+        m = _LOADED["manifest"]
+        if m is None:
+            return None
+        age = _age_days(m)
+        if age is None or age > MAX_AGE_DAYS:
+            return None
+        return {"manifest": m, "history": _LOADED["history"], "anchor": _LOADED["anchor"]}
+
+
+def anchor_scores(model_version: str, exclude: tuple[str, str] | None = None) -> list[float]:
+    """The pack's last-90-day Market read scores (the `reference` anchor), or
+    [] when there is no usable pack for this model."""
+    p = _usable()
+    if p is None or p["manifest"].get("model_version") != model_version:
+        return []
+    return [float(r[2]) for r in p["anchor"] if exclude is None or (r[0], r[1]) != tuple(exclude)]
+
+
+def history_records() -> list[dict]:
+    p = _usable()
+    return list(p["history"]) if p else []
+
+
+def info() -> dict | None:
+    """{date, age_days, n_names, rows} of the usable pack, for the UI labels."""
+    p = _usable()
+    if p is None:
+        return None
+    m = p["manifest"]
+    return {
+        "date": m["date"],
+        "age_days": _age_days(m),
+        "n_names": (m.get("universe") or {}).get("n"),
+        "rows": m.get("rows"),
+        "model_version": m.get("model_version"),
+    }
+
+
+def status() -> dict:
+    """Settings -> Models & Data: switch, last check, installed copy."""
+    on = enabled()
+    _load_local(quiet=True)
+    with _LOCK:
+        st = dict(_STATUS)
+        m, err = _LOADED["manifest"], _LOADED["error"]
+    if not on and st["state"] not in IN_FLIGHT:
+        st["state"] = "disabled"
+    age = _age_days(m) if m else None
+    return {
+        **st,
+        "enabled": on,
+        "env_disabled": env_disabled(),
+        "installed": None
+        if m is None
+        else {
+            "date": m["date"],
+            "age_days": age,
+            "n_names": (m.get("universe") or {}).get("n"),
+            "rows": m.get("rows"),
+            "model_version": m.get("model_version"),
+            "stale": age is None or age > MAX_AGE_DAYS,
+        },
+        "installed_error": err,
+        "in_use": on and m is not None and age is not None and age <= MAX_AGE_DAYS,
+    }
+
+
+def reset_for_tests() -> None:
+    global _THREAD
+    wait(10)
+    _THREAD = None
+    _invalidate()
+    _set(state="idle", error="", checked_at=None, source="")

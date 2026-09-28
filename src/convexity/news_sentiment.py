@@ -1773,6 +1773,15 @@ def refresh_sentiment(
     weights = ctx.get("weights") or {}
     ordered = sorted(symbols, key=lambda s: -(weights.get(s) or 0.0))
     llm_unblock()
+    try:
+        # A refresh is the moment the Market read needs its anchor: make sure
+        # a day-old reference pack is being replaced (background, no-op when
+        # fresh or switched off — reference_pack.py).
+        from convexity import reference_pack
+
+        reference_pack.start()
+    except Exception as exc:
+        print(f"[reference_pack] start failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     if progress_cb:
         progress_cb("plan", {"market": refresh_market, "symbols": ordered, "days": days})
 
