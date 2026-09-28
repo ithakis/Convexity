@@ -1,6 +1,6 @@
 # Distribution roadmap: from "clone + conda" to an installable app
 
-Status: **Phases 0–6 done** on the local `distribution` branch (code at
+Status: **Phases 0–7 done** on the local `distribution` branch (code at
 1.15.0, 2026-09-28); written 2026-09-26, v1.13.0. One phase = one Claude Code
 session. Do them in order; each phase lists what it depends on.
 
@@ -483,9 +483,9 @@ Findings (2026-09-28, implemented on `distribution` after v1.14.2):
 Goal: looks and behaves like a maintained product. Can run any time after
 Phase 4.
 
-- [ ] `src/` layout: move `convexity/` → `src/convexity/`; fix pyproject, CI,
+- [x] `src/` layout: move `convexity/` → `src/convexity/`; fix pyproject, CI,
       hooks, tests, CLAUDE.md paths.
-- [ ] Root contains only: README, LICENSE, CHANGELOG, SECURITY, AGENTS.md,
+- [x] Root contains only: README, LICENSE, CHANGELOG, SECURITY, AGENTS.md,
       CLAUDE.md, pyproject.toml, uv.lock, install.sh, `.github/`, `src/`,
       `tests/`, `docs/`, `ml/`, `scripts/`, `packaging/`, `assets/`.
   - `install.ps1`, `update.*`, `Launch Dashboard.command` → `packaging/`
@@ -493,17 +493,71 @@ Phase 4.
   - `icon.png` → `assets/` (and into package data).
   - `build_symbol_db.py` → `convexity build-symbols` subcommand.
   - `dashboard.py` shim → delete.
-- [ ] ruff replaces pyflakes (config in pyproject); make lint blocking; run
+- [x] ruff replaces pyflakes (config in pyproject); make lint blocking; run
       `ruff format` in its own commit.
-- [ ] Split CLAUDE.md: keep a short CLAUDE.md (rules, map, gotchas index) and
+- [x] Split CLAUDE.md: keep a short CLAUDE.md (rules, map, gotchas index) and
       move deep sections to `docs/architecture/*.md` (backend, frontend, news,
       mpt, desktop, jobs, security). Nothing is deleted, only moved and linked.
-- [ ] README: badges (CI, release, license), screenshot (synthetic portfolio),
+- [x] README: badges (CI, release, license), screenshot (synthetic portfolio),
       one-line install per OS, "what you need" (free Finnhub + NVIDIA keys),
       uninstall instructions.
-- [ ] `.github/ISSUE_TEMPLATE/` (bug, feature).
+- [x] `.github/ISSUE_TEMPLATE/` (bug, feature).
 - [ ] Optional, later: split `static/app.js` (~490 KB) into ES modules, no
-      build step.
+      build step. (Skipped in Phase 7 by decision.)
+
+Deviations and findings (2026-09-28, eight commits on `distribution` plus this note):
+- **src layout.** hatch builds from `src/convexity` and still ships
+  `static/`, `assets/icon.png` and `data/lm_lexicon.json` as package data.
+  Proof, as CI's `tool-install-smoke` does it: `uv tool install .` from a
+  clean copy of the tree into scratch `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`, the
+  installed `convexity` booted from outside the checkout with
+  `CONVEXITY_HOME=$(mktemp -d)` → `/api/health` version 1.15.0 and the temp
+  `data_dir`, `/` and `/static/app.js` 200. `install.sh` end to end into
+  throwaway dirs gave a valid `.app` (icns, exec target, bundle version).
+  `paths.legacy_root()` and the legacy key walk-up still find the repo root
+  (they walk up to `.git`), so no logic changed. pytest gets
+  `pythonpath = ["src", "."]`; scripts and `ml/scripts` add `src/` to
+  `sys.path` (the lint job runs them with `--no-project`).
+- **No `assets/` at the root.** The icon stays only in
+  `src/convexity/assets/icon.png` (package data, what the installers read
+  through the tool's interpreter); a second copy would drift.
+- **The Windows one-liner URL changes** to
+  `…/main/packaging/install.ps1`. The old `…/main/install.ps1` 404s once
+  v2.0.0 reaches `main`; README, CHANGELOG and the in-app hints say so. A root
+  stub was not added (the task said `packaging/`); revisit only if old links
+  are known to be in circulation. `packaging/install.ps1` looks for legacy key
+  files beside itself and in its parent (the checkout root) — verified with a
+  fake key in a scratch copy under pwsh.
+- **pwsh on macOS**: `install.ps1` reaches the Windows-only `WScript.Shell`
+  step (icon.ico generated) only with a `uv` shim on `PATH` that symlinks
+  `Scripts\python.exe` / `convexity-app.exe` *after* `uv tool install`:
+  symlinking beforehand is useless, `--force` recreates the tool env. Noted in
+  docs/architecture/desktop.md.
+- **`convexity build-symbols`** lives in the new `cli.py`, which is now the
+  `convexity` entry point (`python -m convexity` too): no arguments runs the
+  server exactly as before, the builder's imports stay off the server's start
+  path, an unknown command exits 2. Phase 8's `convexity build-reference-pack`
+  belongs next to it.
+- **ruff**: the default rule set (F + E4/E7/E9) found no pyflakes-class issue
+  at all; it found 63 E702 (semicolon statements, all removed by the
+  formatter), 12 E402 (deliberate: `server.py`'s warnings filter precedes its
+  imports; tests set `sys.path` first → per-file ignores) and 10 E741 (the
+  LP's `l`/`h` bounds → ignored, named as in the maths). `ruff format` (line
+  length 100) touched 67 files, 643 tests pass unchanged; it is its own commit
+  and is listed in `.git-blame-ignore-revs`. CI pins `ruff@0.16.9` to match
+  uv.lock — bump both together.
+- **CLAUDE.md split**: 2493 → ~530 lines. Kept: intro, §1–3, §9, §10, §15,
+  §18, plus a new §0 (section map + linked gotcha index). Moved unchanged:
+  §4–8, §11–14, §16–17 to `docs/architecture/{backend,news,security,frontend,
+  mpt,ci,desktop,jobs}.md`. `§N` references keep their numbers (the §0 table
+  maps them) rather than being rewritten as links — every code comment that
+  says "CLAUDE.md §18" etc. stays correct. Checked mechanically: all 2251
+  non-empty lines of the old file exist verbatim in the new set; every
+  relative link and heading anchor resolves.
+- **README**: the existing screenshots already show a synthetic 12-name
+  mega-cap book of public tickers, so they were kept rather than regenerated.
+  Stale lines fixed along with the architecture section (localStorage
+  watchlists, CSV export, "Save Watchlist").
 
 ---
 
@@ -563,7 +617,8 @@ parses it with `json` only (never pickle, never executed), and validates schema
 and model version before use; anything that fails is ignored and logged.
 
 Tasks:
-- [ ] Workflow + a `convexity build-reference-pack` subcommand it runs (so it
+- [ ] Workflow + a `convexity build-reference-pack` subcommand (in `cli.py`,
+      next to `build-symbols`) it runs (so it
       can be run and tested locally with `CONVEXITY_HOME=$(mktemp -d)`).
 - [ ] App: `src/convexity/reference_pack.py` fetches the pack when older than 24 h,
       verifies manifest hashes + size cap, validates schema + model version,
@@ -576,7 +631,8 @@ Tasks:
       the app is running, not what you hold — say so).
 - [ ] Tests with a local HTTP stub only (bad hash, oversize, wrong schema,
       wrong model version, offline) — no real network, as with model_fetch.
-- [ ] CLAUDE.md: the rolling-asset exception in §18, the workflow in §13.
+- [ ] CLAUDE.md: the rolling-asset exception in §18; the workflow in §13
+      (since Phase 7: `docs/architecture/ci.md`).
 
 ---
 

@@ -346,8 +346,11 @@ own app keeps running on 8765 meanwhile; `_pick_port` moves yours to 8766+.
 Tracked as GitHub Issues on `ithakis/Convexity` — label `feature` (planned) or
 `idea` (not yet scoped): `gh issue list --label feature` / `--label idea`. The
 old root wishlist file was retired in v1.13.1; file new wishlist items as
-issues, never back into a file. Distribution/packaging work follows
-`docs/plans/distribution-roadmap.md`.
+issues, never back into a file (the issue forms in `.github/ISSUE_TEMPLATE/`
+apply `bug` / `feature`). Distribution/packaging work follows
+`docs/plans/distribution-roadmap.md` — Phases 0–7 done on `distribution`;
+Phase 8 (reference pack) and 9 (website) remain, then the single v2.0.0
+release.
 
 ### Done / archived (don't redo)
 - News v2 (v1.12) — two peer engines (News read with five lenses, Market read
