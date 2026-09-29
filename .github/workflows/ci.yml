@@ -5,7 +5,8 @@ on:
     # `distribution`: the v2.0.0 integration branch, until it merges.
     branches: ["main", "claude/**", "distribution"]
   pull_request:
-    branches: ["main"]
+    # `distribution` too, so PRs into the integration branch get CI before merge.
+    branches: ["main", "distribution"]
 
 # The repo is public: the default token is read-only, third-party actions are
 # pinned to a commit SHA (a moved tag cannot change what runs here), and no
