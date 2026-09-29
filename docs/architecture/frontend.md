@@ -89,7 +89,42 @@ tooltip, and (if it belongs in a preset) include its key in
 `BUILTIN_VIEWS`. The XLSX export auto-discovers row-payload keys via
 `HOLDINGS_PRIMARY_COLS` + the extras pass — add it to that list (or to
 `HOLDINGS_SKIP_EXTRAS` if it's duplicated elsewhere, e.g. analyst
-columns).
+columns). An exported column also needs a `COLUMN_DEFS` entry (and an
+`EXTRA_LABELS` header if it is an extra) for its Excel header comment and the
+Definitions sheet; `tests/test_xlsx_definitions.py` fails until it has one.
+
+### Metric explanations (hover tips) — one registry per surface
+Every number the app shows explains itself on hover; the registries are:
+
+| Surface | Registry | Rendered by |
+|---|---|---|
+| Holdings table headers | `COL_INFO` (plain text) | shared `[data-tip]` (`_APP_TIP`) |
+| Analytics panels (Risk & return, Valuation, Concentration) | `METRIC_INFO` | `statRowHtml` → in-place `.pf-metric-tip` |
+| Stock detail modal grids | `DETAIL_METRIC_INFO` | `renderDetailMetricGrid` → in-place `.pf-metric-tip` |
+| Optimize side panel | `MPT_METRIC_INFO` (functions: read α / `n_boot` at hover) | `[data-rich-tip="mpt:<key>"]` |
+| Optimize → Compute budget "i" | `MPT_BUDGET_INFO` (mirrors `frontier._BUDGETS`) | `[data-rich-tip="mpt-budget"]` |
+| Contribution table headers | `CONTRIB_INFO` | `[data-rich-tip="contrib:<key>"]` |
+| Excel export | `xlsx_export.COLUMN_DEFS` / `METRIC_DEFS` (plain-text mirror) | header comments + Definitions sheet |
+
+`.pf-metric-tip` entries are `{formula (KaTeX), desc, range}` through
+`metricTipHtml()`. The in-place card is absolutely positioned inside its host,
+so a scrolling ancestor clips it; hosts inside the Optimize overlay (side panel
+is `overflow-y: auto`) and anywhere else that clips use **`[data-rich-tip]`**
+instead: `_RICH_TIP` renders `RICH_TIPS[key]()` into one body-level fixed box
+placed by `placeTip()`, KaTeX cached per HTML string. KaTeX fonts load on the
+first formula shown, so the very first hover can paint the formula a beat
+late. `tests/test_frontend_tips.py` checks every `COLS` key has a `COL_INFO`,
+every detail-grid label a `DETAIL_METRIC_INFO`, every `data-rich-tip` key a
+provider, and that the budget tip's numbers match `frontier.py`.
+
+### Contribution to return (`renderContribHtml`)
+Rows are `analytics.contribution` (Carino-linked, sums to the period return)
+plus two client-side columns: **W×R** = weight × the holding's own period
+return (pp) and **Compounding** = contribution − W×R, so each row reconciles
+exactly. Sort (`pf_contrib_sort`) and the Table | Chart toggle
+(`pf_contrib_view`) live in `CONTRIB_UI` + localStorage; clicks re-render only
+`#pf-contrib-body`. The chart is an HTML/CSS horizontal waterfall
+(`renderContribChartHtml`) in contribution order, ending in a Total bar.
 
 ### Key UI behaviours added in Passes A/B/C
 - **Smart primary button**: `#build` swaps label between "Build

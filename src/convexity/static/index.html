@@ -40,11 +40,13 @@
        read and Market read (per lens, tier, z, divergence) PLUS the
        analyst recommendations and the portfolio analytics ratios shown in the
        Portfolio tab, with static 1Y and 5Y portfolio statistics but no exported
-       time-series payloads. Intent: user feeds the file to an AI/chatbot for
+       time-series payloads. Every header carries a hover comment with its
+       definition and a last "Definitions" sheet lists them all (COLUMN_DEFS /
+       METRIC_DEFS in xlsx_export.py). Intent: user feeds the file to an AI/chatbot for
        agentic analysis and portfolio discussion. Future maintainers — when new
        columns or analytics are added to the UI, extend the export accordingly so
        this stays the "everything you see in the app" artifact. -->
-  <button id="export" data-tip="Create one Excel workbook with every saved portfolio, full holdings data, analyst fields, and static 1Y and 5Y portfolio statistics. Useful as structured input to an AI agent.">⬇ Export</button>
+  <button id="export" data-tip="Create one Excel workbook with every saved portfolio, full holdings data, analyst fields, and static 1Y and 5Y portfolio statistics. Every header explains its metric (hover comments, plus a Definitions sheet). Useful as structured input to an AI agent.">⬇ Export</button>
   <span class="spacer"></span>
   <span class="status" id="status">Idle</span>
   <div class="fx-menu" id="fx-menu">
@@ -342,7 +344,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         </div>
       </div>
       <div class="pf-mpt-ctl">
-        <label>Compute budget <span class="pf-mpt-rf-info" data-tip="How much 8-core work to spend on the frontier's bootstrap stability band + Monte-Carlo cloud. Light ≈ 5s, Standard ≈ 15s, Dense ≈ 60s. More budget = more bootstrap replicas (tighter uncertainty band) and a denser cloud. Data fetch (~1s) is on top.">i</span></label>
+        <label>Compute budget <span class="pf-mpt-rf-info" data-rich-tip="mpt-budget" tabindex="0" aria-label="What the compute budgets change: Light about 5 seconds, Standard about 15, Dense about 60. More budget means a finer frontier, a denser cloud and more bootstrap replicas for a steadier CVaR band; the optimisation itself is the same.">i</span></label>
         <div class="pf-mpt-select" id="pf-mpt-budget" data-value="standard" tabindex="0" role="combobox" aria-expanded="false" aria-haspopup="listbox">
           <span class="pf-mpt-select-label">Standard — ~15s</span>
           <span class="pf-mpt-select-caret" aria-hidden="true">▾</span>
@@ -706,6 +708,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <ul class="info-feature-list">
           <li>Overview sheet plus one sheet per saved portfolio.</li>
           <li>Holdings data, analyst fields, exposure, concentration, and portfolio analytics blocks.</li>
+          <li>Every header has a hover comment explaining the metric, and a Definitions sheet lists formula, meaning and typical range for each.</li>
           <li>Designed as a portable input artifact for spreadsheet work or AI-assisted review.</li>
         </ul>
         <div class="info-card-why"><span class="label">Useful because:</span>it gives you a complete offline snapshot of what the app can already see, without re-querying everything manually.</div>

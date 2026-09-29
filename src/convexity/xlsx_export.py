@@ -19,10 +19,17 @@ static/app.js — keep them in sync when extending):
   • The first sheet ("Overview") lists every portfolio with the headline
     analytics side-by-side, for quick cross-portfolio comparison.
 
+  • Every header carries a hover comment explaining the metric, and a last
+    "Definitions" sheet lists them all (Metric | Formula | Meaning | Typical
+    range). The text lives in COLUMN_DEFS / METRIC_DEFS below and mirrors the
+    app's hover tips (COL_INFO / METRIC_INFO in static/app.js).
+
 When new columns / analytics / fields land in the dashboard, add them
 here so the file stays the comprehensive view. The format is forgiving:
 unknown row keys go into the holdings table automatically (see
 ``HOLDINGS_PRIMARY_COLS`` + the "extras" pass at the end of each row).
+A new column also needs a COLUMN_DEFS entry (and a readable EXTRA_LABELS
+header if it is an extra): tests/test_xlsx_definitions.py fails without one.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from typing import Iterable, Optional
 # openpyxl is an optional dep; the export endpoint will surface a friendly
 # error if it's missing.
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -128,6 +136,11 @@ EXTRA_LABELS: dict[str, str] = {
     "macd_hist_pct": "MACD Hist (% of price)",
     "bb_pct_b": "Bollinger %B",
     "beta": "Beta (Yahoo, 5Y monthly)",
+    "current_ratio": "Current Ratio",
+    "quick_ratio": "Quick Ratio",
+    "sma_20": "SMA 20",
+    "sma_50": "SMA 50",
+    "sma_200": "SMA 200",
 }
 FRACTION_KEYS = {
     "roe",
@@ -159,6 +172,18 @@ HOLDINGS_SKIP_EXTRAS = {
     # Rendered as the dedicated SENTIMENT_COLS block below instead of a
     # "[5 keys]" blob.
     "news_sentiment",
+    # Also in ANALYST_COLS, which reads the same row fields: exporting them
+    # again as extras gave two columns with the same numbers.
+    "peg",
+    "dividend_yield",
+    "n_analysts",
+    "rec_key",
+    # Nested payloads (rating counts, EPS surprises, Finnhub insider and
+    # recommendation history) that could only export as "[n keys]".
+    "rating_dist",
+    "earnings_surprise",
+    "insider_mspr",
+    "rec_trend_fh",
 }
 
 # News read (LLM, five lenses) + Market read (statistical) — the two engines
@@ -234,6 +259,458 @@ CONCENTRATION_KEYS: list[tuple[str, str]] = [
     ("herfindahl", "Herfindahl Index"),
     ("effective_n", "Effective N (1/HHI)"),
 ]
+
+
+# --------------------------------------------------------------------------
+# Definitions: the hover comment on every header and the "Definitions" sheet.
+# (formula, meaning, typical range) in plain text, because Excel cannot render
+# the app's KaTeX. Keyed by column key, not label: `beta` is Yahoo's beta in
+# the holdings table but the portfolio's beta vs SPY in the metrics block, so
+# holdings columns and portfolio metrics have separate tables.
+# --------------------------------------------------------------------------
+
+_RET = "Price return over the window, in %, from dividend-adjusted closes ({} back)."
+_LENS = "-2 very negative, 0 neutral, +2 very positive."
+COLUMN_DEFS: dict[str, tuple[str, str, str]] = {
+    "symbol": (
+        "",
+        "Yahoo Finance ticker, with the exchange suffix outside the US (e.g. SHEL.L).",
+        "",
+    ),
+    "name": ("", "Company or fund name as Yahoo reports it.", ""),
+    "exchange": ("", "Listing exchange.", ""),
+    "currency": (
+        "",
+        "Quote currency. GBp / ZAc / ILA are pence, cents and agorot: those prices are in the minor unit.",
+        "",
+    ),
+    "price": ("last close", "Last close in the quote currency.", ""),
+    "change_abs_1d": ("price - previous close", "One-day price change in the quote currency.", ""),
+    "pct_1d": ("price / previous close - 1", "Return over the last trading session, in %.", ""),
+    "pct_2d": (
+        "price / close 2 sessions ago - 1",
+        "Return over the last two trading sessions, in %. Trading bars, so weekends do not shorten it.",
+        "",
+    ),
+    "pct_1w": ("price / close 7 days ago - 1", _RET.format("7 calendar days"), ""),
+    "pct_1m": ("price / close 30 days ago - 1", _RET.format("30 calendar days"), ""),
+    "pct_3m": ("price / close 91 days ago - 1", _RET.format("91 calendar days"), ""),
+    "pct_6m": ("price / close 182 days ago - 1", _RET.format("182 calendar days"), ""),
+    "pct_ytd": ("price / last close of the previous year - 1", "Year-to-date return, in %.", ""),
+    "pct_1y": ("price / close 365 days ago - 1", _RET.format("365 calendar days"), ""),
+    "market_cap": (
+        "price x shares outstanding",
+        "Equity market value in the listing's major currency (pounds, not pence).",
+        "Compare across listings with Market Cap (USD).",
+    ),
+    "ps_ratio": (
+        "market cap / revenue (TTM)",
+        "Price-to-sales, both in the statements' currency.",
+        "Lower is generally cheaper; compare within a sector.",
+    ),
+    "pe_ratio": (
+        "price / EPS (TTM)",
+        "Trailing price-to-earnings. Empty when earnings are negative.",
+        "Lower is generally cheaper; above ~50 prices in heavy growth.",
+    ),
+    "sector": ("", "GICS sector reported by Yahoo.", ""),
+    "industry": ("", "GICS sub-industry, narrower than sector.", ""),
+    "w52_high": (
+        "max close over 52 weeks",
+        "Highest dividend-adjusted close over the trailing 52 weeks (Yahoo's quoted high uses intraday prices).",
+        "",
+    ),
+    "w52_low": (
+        "min close over 52 weeks",
+        "Lowest dividend-adjusted close over the trailing 52 weeks.",
+        "",
+    ),
+    "ath": (
+        "max close over 2 years",
+        "Highest dividend-adjusted close in the 2-year history the app downloads.",
+        "",
+    ),
+    "delta_ath": (
+        "price / 2Y high - 1",
+        "Distance below the 2-year high, in %.",
+        "0% = at the high.",
+    ),
+    "above_sma_20": (
+        "price > mean of last 20 closes",
+        "True when the price is above its 20-day simple moving average (about a month).",
+        "Short-term trend flag.",
+    ),
+    "above_sma_50": (
+        "price > mean of last 50 closes",
+        "True when the price is above its 50-day simple moving average.",
+        "Medium-term trend flag.",
+    ),
+    "above_sma_200": (
+        "price > mean of last 200 closes",
+        "True when the price is above its 200-day simple moving average.",
+        "Long-term trend flag.",
+    ),
+    "above_1m": (
+        "price > close 21 sessions ago",
+        "True when the price is above where it was one month (21 trading sessions) ago.",
+        "",
+    ),
+    "volume": (
+        "shares traded",
+        "Shares traded in the latest session.",
+        "Compare with the usual volume; spikes often mean news.",
+    ),
+    "quote_type": ("", "Yahoo instrument type: EQUITY, ETF, MUTUALFUND, INDEX, ...", ""),
+    "website": ("", "Company website.", ""),
+    # News & Sentiment (SENTIMENT_COLS)
+    "ns:news_tier": (
+        "tier of the overall News read score",
+        "What the news says: the LLM News read of recent headlines across five lenses. "
+        "'(stale)' = assessed before the lookback window.",
+        "Very bearish ... Very bullish.",
+    ),
+    "ns:lens:financials": (
+        "mean lens score",
+        "News read, Financials lens: results, guidance, margins.",
+        _LENS,
+    ),
+    "ns:lens:outlook": (
+        "mean lens score",
+        "News read, Outlook lens: forward-looking business prospects.",
+        _LENS,
+    ),
+    "ns:lens:competition": (
+        "mean lens score",
+        "News read, Competition lens: market share, rivals, pricing power.",
+        _LENS,
+    ),
+    "ns:lens:regulation": (
+        "mean lens score",
+        "News read, Regulation lens: legal, regulatory and political risk.",
+        _LENS,
+    ),
+    "ns:lens:street": (
+        "mean lens score",
+        "News read, Street view lens: analyst actions and targets in the news.",
+        _LENS,
+    ),
+    "ns:market_tier": (
+        "tier from the Market read z",
+        "How prices have historically reacted to news like this (statistical model). Only the tails are called.",
+        "No edge in the middle; bullish / bearish in the tails.",
+    ),
+    "ns:market_z": (
+        "(score - mean) / sd of recent reads",
+        "The Market read score as a z-score against the app's recent reads.",
+        "Larger |z| = further into the tail.",
+    ),
+    "ns:divergence": (
+        "",
+        "Set when the two reads disagree, or the stock sold off on good news.",
+        "",
+    ),
+    # Extras (EXTRA_LABELS)
+    "debt_equity": (
+        "total debt / shareholders' equity x 100",
+        "Debt-to-equity in percent, most recent quarter. Empty when equity is negative.",
+        "Below ~50% conservative; above ~200% heavily levered. Banks, utilities, REITs run higher.",
+    ),
+    "market_cap_usd": (
+        "market cap x FX rate to USD",
+        "Market cap in US dollars at spot, for comparing listings in different currencies.",
+        "",
+    ),
+    "financial_currency": (
+        "",
+        "Currency of the financial statements (differs from the quote currency for ADRs).",
+        "",
+    ),
+    "roe": (
+        "net income (TTM) / shareholders' equity",
+        "Return on equity.",
+        "Higher is better, but leverage inflates it; read with D/E.",
+    ),
+    "roa": (
+        "net income (TTM) / total assets",
+        "Return on assets; not inflated by leverage.",
+        "Above ~5% solid, 10%+ strong; banks run near 1%.",
+    ),
+    "gross_margin": (
+        "(revenue - cost of goods) / revenue",
+        "Gross margin, trailing 12 months.",
+        "Higher means more pricing power.",
+    ),
+    "operating_margin": (
+        "operating income / revenue",
+        "Operating margin, trailing 12 months.",
+        "Higher means more profit after core operating costs.",
+    ),
+    "profit_margin": ("net income / revenue", "Net margin, trailing 12 months.", ""),
+    "fcf_yield": (
+        "free cash flow (TTM) / market cap",
+        "Free-cash-flow yield, both in the statements' currency.",
+        "Higher means more cash generated per unit of price.",
+    ),
+    "revenue_growth": (
+        "revenue(q) / revenue(q-4) - 1",
+        "Year-over-year revenue growth of the most recent quarter.",
+        "Mid-single digits is mature; 30%+ is high growth.",
+    ),
+    "earnings_growth": (
+        "EPS(q) / EPS(q-4) - 1",
+        "Year-over-year earnings growth of the most recent quarter.",
+        "Noisy: a small base gives huge values.",
+    ),
+    "payout_ratio": (
+        "dividends / net income",
+        "Share of earnings paid out as dividends.",
+        "Below ~60% is sustainable; above 100% pays out more than it earns.",
+    ),
+    "price_book": (
+        "market cap / book equity",
+        "Price-to-book.",
+        "Below 1 can signal value or distress; weak for asset-light businesses.",
+    ),
+    "ev_revenue": (
+        "(market cap + debt - cash) / revenue (TTM)",
+        "Enterprise value to sales.",
+        "Lower is usually cheaper on sales.",
+    ),
+    "rsi_14": (
+        "100 - 100 / (1 + avg gain / avg loss), 14-day Wilder smoothing",
+        "Relative Strength Index.",
+        "Below 30 oversold, above 70 overbought.",
+    ),
+    "macd_hist_pct": (
+        "(MACD - signal) / price; MACD = EMA12 - EMA26, signal = EMA9 of MACD",
+        "MACD histogram as a percent of price.",
+        "Positive = momentum above its signal line.",
+    ),
+    "bb_pct_b": (
+        "(price - lower band) / (upper band - lower band); 20-day, 2 sd",
+        "Bollinger %B.",
+        "0 lower band, 0.5 middle, 1 upper; outside 0..1 = outside the bands.",
+    ),
+    "beta": (
+        "Cov(stock, S&P 500) / Var(S&P 500), 5 years monthly",
+        "Yahoo-reported beta against the S&P 500.",
+        "1 moves with the market; above 1 amplifies it.",
+    ),
+    "current_ratio": (
+        "current assets / current liabilities",
+        "Short-term liquidity, most recent quarter.",
+        "Below 1 can signal a funding squeeze; 1.5-3 is typical.",
+    ),
+    "quick_ratio": (
+        "(current assets - inventory) / current liabilities",
+        "A stricter liquidity test than the current ratio.",
+        "Above 1 covers near-term obligations without selling inventory.",
+    ),
+    "sma_20": (
+        "mean of last 20 closes",
+        "20-day simple moving average, in the quote currency.",
+        "",
+    ),
+    "sma_50": (
+        "mean of last 50 closes",
+        "50-day simple moving average, in the quote currency.",
+        "",
+    ),
+    "sma_200": (
+        "mean of last 200 closes",
+        "200-day simple moving average, in the quote currency.",
+        "",
+    ),
+    # Analyst block (ANALYST_COLS)
+    "recommendation_key": ("", "Consensus analyst recommendation (strong_buy ... sell).", ""),
+    "recommendation_mean": (
+        "mean of analyst ratings",
+        "Mean sell-side rating on Yahoo's 1-5 scale.",
+        "1 Strong Buy, 2 Buy, 3 Hold, 4 Underperform, 5 Sell.",
+    ),
+    "num_analysts": (
+        "",
+        "Number of analysts with an opinion.",
+        "More analysts = a better-sampled consensus.",
+    ),
+    "target_mean": (
+        "mean of 12-month price targets",
+        "Mean analyst price target, in the quote currency.",
+        "",
+    ),
+    "target_high": ("max of 12-month price targets", "Highest analyst price target.", ""),
+    "target_low": ("min of 12-month price targets", "Lowest analyst price target.", ""),
+    "target_upside_pct": (
+        "target mean / price - 1",
+        "Upside to the mean analyst target, in %. A price return: dividends excluded.",
+        "Sell-side targets are optimism-biased.",
+    ),
+    "forward_pe": (
+        "price / next fiscal year's consensus EPS",
+        "Forward price-to-earnings. Empty when the estimate is negative.",
+        "Lower is generally cheaper.",
+    ),
+    "ev_ebitda": (
+        "(market cap + debt - cash) / EBITDA (TTM)",
+        "Enterprise value to EBITDA; capital-structure neutral. Empty when EBITDA is negative.",
+        "",
+    ),
+    "peg": (
+        "P/E / expected annual EPS growth (%)",
+        "PEG ratio, using Yahoo's 5-year growth estimate.",
+        "Around 1 is the classic 'fair' mark.",
+    ),
+    "beta_info": (
+        "Cov(stock, S&P 500) / Var(S&P 500), 5 years monthly",
+        "Yahoo-reported beta (the same figure as the Beta column).",
+        "",
+    ),
+    "dividend_yield": (
+        "annual dividend per share / price",
+        "Forward dividend yield.",
+        "2-4% is typical for mature payers; far above the sector often prices in a cut.",
+    ),
+}
+
+METRIC_DEFS: dict[str, tuple[str, str, str]] = {
+    # STATS_KEYS (Portfolio Metrics); the SPY / NASDAQ columns use the same definitions.
+    "total_return": (
+        "prod_t(1 + sum_i w_i r_i,t) - 1",
+        "Total return over the period in the display currency, dividend-adjusted, rebalanced to the weights daily.",
+        "",
+    ),
+    "ann_return": (
+        "(V_T / V_0)^(365.25 / calendar days) - 1",
+        "Compound annual growth rate.",
+        "On short periods it extrapolates to a year; read with care.",
+    ),
+    "ann_vol": ("sqrt(252) x sd(daily returns)", "Annualised volatility of daily returns.", ""),
+    "sharpe": (
+        "252 x mean(r - rf) / (sqrt(252) x sd(r - rf))",
+        "Excess return per unit of total volatility, from daily returns.",
+        "Above 1 is good; above 2 is rare over long periods.",
+    ),
+    "sortino": (
+        "252 x mean(x) / (sqrt(252) x sqrt(mean(min(x, 0)^2))), x = r - rf",
+        "Like Sharpe, but only downside volatility counts.",
+        "Above Sharpe when losses are rarer or smaller than gains.",
+    ),
+    "calmar": (
+        "annualised return / |max drawdown|",
+        "Return per unit of worst peak-to-trough loss over the period.",
+        "Noisy on short periods.",
+    ),
+    "max_dd": (
+        "min_t(V_t / max_(s<=t) V_s - 1)",
+        "Worst peak-to-trough loss over the period, in %.",
+        "",
+    ),
+    "beta": (
+        "Cov(r_p, r_SPY) / Var(r_SPY)",
+        "Sensitivity of the portfolio to SPY, from daily returns.",
+        "1 moves with SPY; 1.3 moves 30% more.",
+    ),
+    "r2": (
+        "Corr(r_p, r_SPY)^2",
+        "Share of the portfolio's variance explained by SPY.",
+        "Low R2 means beta describes the portfolio poorly.",
+    ),
+    "te": (
+        "sqrt(252) x sd(r_p - r_SPY)",
+        "Tracking error: how far the portfolio wanders from SPY, annualised.",
+        "",
+    ),
+    "ir": (
+        "252 x mean(r_p - r_SPY) / tracking error",
+        "Information ratio: active return per unit of tracking error.",
+        "Above ~0.5 is good for an active portfolio.",
+    ),
+    "rf_ann": (
+        "prod_t(1 + rf_t)^(1 / years) - 1, daily short-rate returns compounded",
+        "Risk-free rate used for Sharpe and Sortino, % a year (13-week T-bill, ^IRX, for USD).",
+        "",
+    ),
+    "excess_vs_spy": (
+        "total return - SPY total return",
+        "Period return minus SPY's, in percentage points.",
+        "",
+    ),
+    # ANALYST_AGG_KEYS
+    "mean_rating": (
+        "sum_i w_i R_i / sum_i w_i over rated holdings",
+        "Weighted mean analyst rating.",
+        "1 Strong Buy, 2 Buy, 3 Hold, 4 Underperform, 5 Sell.",
+    ),
+    "rating_coverage_weight": (
+        "sum of weights of holdings with a rating",
+        "Share of the portfolio the mean rating is based on.",
+        "",
+    ),
+    "weighted_target_upside_pct": (
+        "sum_i w_i (TP_i / P_i - 1) / sum_i w_i over covered holdings",
+        "Weighted upside to the analysts' mean price targets, in %.",
+        "A price return; sell-side targets are optimism-biased.",
+    ),
+    "target_coverage_weight": (
+        "sum of weights of holdings with a price target",
+        "Share of the portfolio the target upside is based on.",
+        "",
+    ),
+    "n_analysts_total": (
+        "sum_i n_i",
+        "Sum of each holding's analyst count (one analyst covering two holdings counts twice).",
+        "",
+    ),
+    "covered_count": ("", "Holdings with analyst coverage.", ""),
+    "active_count": ("", "Holdings with usable price history for the analytics.", ""),
+    # CONCENTRATION_KEYS
+    "top5": (
+        "sum of the five largest weights",
+        "Combined weight of the five largest holdings.",
+        "",
+    ),
+    "herfindahl": (
+        "sum_i w_i^2",
+        "Herfindahl index of concentration.",
+        "Near 0 = spread out; 1 = a single holding.",
+    ),
+    "effective_n": (
+        "1 / sum_i w_i^2",
+        "The number of equal-weighted holdings that would be as concentrated.",
+        "Below the raw count whenever weights are uneven.",
+    ),
+}
+
+# Overview sheet: header suffix (after the period prefix) → METRIC_DEFS key.
+OVERVIEW_METRICS: tuple[tuple[str, str], ...] = (
+    ("Ann Return %", "ann_return"),
+    ("Ann Vol %", "ann_vol"),
+    ("Sharpe", "sharpe"),
+    ("Max DD %", "max_dd"),
+    ("Excess vs SPY %", "excess_vs_spy"),
+)
+
+
+def _def_text(d: tuple[str, str, str] | None) -> str | None:
+    """One definition as the text of a header comment."""
+    if not d:
+        return None
+    formula, meaning, rng = d
+    parts = [meaning]
+    if formula:
+        parts.append(f"Formula: {formula}")
+    if rng:
+        parts.append(f"Typical: {rng}")
+    return "\n".join(parts)
+
+
+def _add_comment(cell, d: tuple[str, str, str] | None) -> None:
+    """Attach a definition to a cell as an Excel hover comment."""
+    text = _def_text(d)
+    if text:
+        c = Comment(text, "Convexity")
+        c.width, c.height = 320, 150
+        cell.comment = c
 
 
 # --------------------------------------------------------------------------
@@ -404,18 +881,13 @@ def _write_overview(wb: Workbook, summaries: list[dict], metric_periods: list[st
     ws["A2"].font = Font(italic=True, color="6B7280")
 
     headers = ["Portfolio", "Rows", "Cached At"]
+    defs: list = [None, None, None]
     for period in metric_periods:
-        headers.extend(
-            [
-                f"{period} Ann Return %",
-                f"{period} Ann Vol %",
-                f"{period} Sharpe",
-                f"{period} Max DD %",
-                f"{period} Excess vs SPY %",
-            ]
-        )
+        for suffix, key in OVERVIEW_METRICS:
+            headers.append(f"{period} {suffix}")
+            defs.append(METRIC_DEFS[key])
     row = 4
-    _write_header_cells(ws, row, headers)
+    _write_header_cells(ws, row, headers, defs)
     for s in summaries:
         row += 1
         ws.cell(row=row, column=1, value=s.get("name"))
@@ -442,11 +914,12 @@ def _write_overview(wb: Workbook, summaries: list[dict], metric_periods: list[st
     ws.column_dimensions["A"].width = 28
 
 
-def _write_kv(ws, r: int, label: str, value, label_bold: bool = True) -> int:
+def _write_kv(ws, r: int, label: str, value, label_bold: bool = True, definition=None) -> int:
     """Single key/value row helper. Returns the next row index."""
     a = ws.cell(row=r, column=1, value=label)
     if label_bold:
         a.font = Font(bold=True)
+    _add_comment(a, definition)
     ws.cell(row=r, column=2, value=value)
     return r + 1
 
@@ -457,16 +930,20 @@ def _write_section(ws, r: int, title: str) -> int:
     return r + 1
 
 
-def _write_header_cells(ws, r: int, labels: Iterable[str]) -> None:
+def _write_header_cells(ws, r: int, labels: Iterable[str], defs: Iterable = ()) -> None:
     """Write one styled table-header row (bold white on dark, centered) from
     column 1. Shared by the overview, per-period metrics, and holdings tables
     so the three headers stay visually identical without repeating the
-    fill/font/alignment triple at each call site."""
+    fill/font/alignment triple at each call site. `defs`, aligned with
+    `labels`, attaches each column's definition as a hover comment."""
+    defs = list(defs)
     for col_idx, label in enumerate(labels, 1):
         c = ws.cell(row=r, column=col_idx, value=label)
         c.font = _HEADER_FONT
         c.fill = _HEADER_FILL
         c.alignment = Alignment(horizontal="center")
+        if col_idx <= len(defs):
+            _add_comment(c, defs[col_idx - 1])
 
 
 def _per_symbol_analyst(analytics: dict) -> dict[str, dict]:
@@ -548,7 +1025,9 @@ def _write_portfolio_sheet(
             _write_header_cells(ws, r, ["Metric", "Portfolio", "SPY", "NASDAQ"])
             r += 1
             for key, label in STATS_KEYS:
-                ws.cell(row=r, column=1, value=label).font = Font(bold=True)
+                lc = ws.cell(row=r, column=1, value=label)
+                lc.font = Font(bold=True)
+                _add_comment(lc, METRIC_DEFS.get(key))
                 for col, stats in enumerate(columns, start=2):
                     ws.cell(row=r, column=col, value=_maybe_num(stats.get(key)))
                 r += 1
@@ -561,7 +1040,7 @@ def _write_portfolio_sheet(
                 v = analyst_block.get(key)
                 if v is None:
                     continue
-                r = _write_kv(ws, r, label, _maybe_num(v))
+                r = _write_kv(ws, r, label, _maybe_num(v), definition=METRIC_DEFS.get(key))
             # Rating distribution
             dist = analyst_block.get("distribution_pct") or {}
             if dist:
@@ -591,7 +1070,7 @@ def _write_portfolio_sheet(
                 v = concentration.get(key)
                 if v is None:
                     continue
-                r = _write_kv(ws, r, label, _maybe_num(v))
+                r = _write_kv(ws, r, label, _maybe_num(v), definition=METRIC_DEFS.get(key))
             r += 1
 
     # 6) Holdings table — every row field + per-symbol analyst data
@@ -608,7 +1087,9 @@ def _write_portfolio_sheet(
     extra_cols = [(k, EXTRA_LABELS.get(k, k)) for k in extra_keys]
 
     headers = HOLDINGS_PRIMARY_COLS + SENTIMENT_COLS + extra_cols + ANALYST_COLS
-    _write_header_cells(ws, r, [label for _key, label in headers])
+    _write_header_cells(
+        ws, r, [label for _key, label in headers], [COLUMN_DEFS.get(key) for key, _ in headers]
+    )
     header_row = r
 
     analyst_col_keys = {k for k, _ in ANALYST_COLS}
@@ -633,12 +1114,27 @@ def _write_portfolio_sheet(
                         tgt = _maybe_num(fallback_row.get("target_mean"))
                         if price and tgt and price > 0:
                             v = (tgt / price - 1.0) * 100.0
+                # The row's own fields are the last resort: they are no longer
+                # exported as extras (HOLDINGS_SKIP_EXTRAS), so a failed info
+                # pull must not leave these columns empty.
                 elif key == "recommendation_key":
-                    v = ana_row.get("rec_key") or fallback_row.get("recommendation_key")
+                    v = (
+                        ana_row.get("rec_key")
+                        or fallback_row.get("recommendation_key")
+                        or row_data.get("rec_key")
+                    )
                 elif key == "recommendation_mean":
-                    v = ana_row.get("mean_rating") or fallback_row.get("recommendation_mean")
+                    v = (
+                        ana_row.get("mean_rating")
+                        or fallback_row.get("recommendation_mean")
+                        or row_data.get("recommendation_mean")
+                    )
                 elif key == "num_analysts":
-                    v = ana_row.get("n_analysts") or fallback_row.get("num_analysts")
+                    v = (
+                        ana_row.get("n_analysts")
+                        or fallback_row.get("num_analysts")
+                        or row_data.get("n_analysts")
+                    )
                 elif key in {"target_mean", "target_high", "target_low"}:
                     v = ana_row.get(key) or fallback_row.get(key)
                 else:
@@ -664,6 +1160,56 @@ def _write_portfolio_sheet(
     ws.column_dimensions["B"].width = 32
     # Freeze the header row + the ticker column.
     ws.freeze_panes = ws.cell(row=header_row + 1, column=2)
+
+
+def definition_rows() -> list[tuple[str, str, str, str, str]]:
+    """Every definition the workbook uses, as (section, label, formula,
+    meaning, range) rows in sheet order: holdings columns, then portfolio
+    metrics. Extras only appear when EXTRA_LABELS names them, so a row key
+    without a label never reaches the sheet as a raw key."""
+    out: list[tuple[str, str, str, str, str]] = []
+    holdings = (
+        HOLDINGS_PRIMARY_COLS
+        + SENTIMENT_COLS
+        + sorted(EXTRA_LABELS.items(), key=lambda kv: kv[1])
+        + ANALYST_COLS
+    )
+    for key, label in holdings:
+        d = COLUMN_DEFS.get(key)
+        if d:
+            out.append(("Holdings columns", label, *d))
+    for section, keys in (
+        ("Portfolio metrics", STATS_KEYS + [("excess_vs_spy", "Excess vs SPY (%)")]),
+        ("Analyst coverage", ANALYST_AGG_KEYS),
+        ("Concentration", CONCENTRATION_KEYS),
+    ):
+        for key, label in keys:
+            d = METRIC_DEFS.get(key)
+            if d:
+                out.append((section, label, *d))
+    return out
+
+
+def _write_definitions(wb: Workbook, sheet_name: str) -> None:
+    """The last sheet: every metric in the workbook, with its formula, what it
+    means and a typical range, so the file explains itself when handed on."""
+    ws = wb.create_sheet(title=sheet_name)
+    ws["A1"] = "Definitions"
+    ws["A1"].font = _TITLE_FONT
+    ws["A2"] = "The same text is on each header as a hover comment."
+    ws["A2"].font = Font(italic=True, color="6B7280")
+    r = 4
+    _write_header_cells(ws, r, ["Section", "Metric", "Formula", "Meaning", "Typical range"])
+    wrap = Alignment(wrap_text=True, vertical="top")
+    for row in definition_rows():
+        r += 1
+        for col, v in enumerate(row, 1):
+            c = ws.cell(row=r, column=col, value=v or None)
+            c.alignment = wrap
+        ws.cell(row=r, column=2).font = Font(bold=True)
+    for col, width in zip("ABCDE", (18, 30, 44, 60, 44)):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A5"
 
 
 # --------------------------------------------------------------------------
@@ -824,6 +1370,7 @@ def build_workbook(
     _write_overview(wb, summaries, metric_periods)
     # Move Overview to the front (openpyxl appends it after creation).
     wb.move_sheet("Overview", offset=-len(wb.sheetnames) + 1)
+    _write_definitions(wb, _sanitize_sheet_name("Definitions", used_names))
 
     buf = io.BytesIO()
     wb.save(buf)

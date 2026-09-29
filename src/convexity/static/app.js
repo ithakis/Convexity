@@ -728,6 +728,92 @@ document.addEventListener("keydown", (ev) => {
 }, true);
 
 /* ---------------------------------------------------------------------------
+ * Floating formula tips: [data-rich-tip="<key>"] shows RICH_TIPS[key]() — the
+ * same .pf-metric-tip card (KaTeX formula + meaning + range) the analytics
+ * panels use — in one body-level box positioned by placeTip().
+ *
+ * Why not the in-place .pf-metric-tip: that card is absolutely positioned
+ * inside its host, so a scrolling ancestor clips it. The Optimize side panel
+ * (overflow-y: auto) and the control row cut it off. Providers run at hover
+ * time, so a tip can read live state (α, bootstrap count) without re-rendering
+ * the host. KaTeX output is cached per HTML string.
+ * --------------------------------------------------------------------------- */
+const RICH_TIPS = Object.create(null);
+const _RICH_TIP = (() => {
+  let el = null, current = null;
+  const katexCache = new Map();
+  function ensure() {
+    if (el && document.body.contains(el)) return el;
+    el = document.createElement("div");
+    el.className = "rich-tip-float";
+    el.id = "rich-tip-float";
+    el.setAttribute("role", "tooltip");
+    document.body.appendChild(el);
+    return el;
+  }
+  function render(html) {
+    if (katexCache.has(html)) return katexCache.get(html);
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    if (!window.renderMathInElement) return html;  // KaTeX not loaded yet: don't cache raw $$
+    try {
+      renderMathInElement(tmp, { delimiters: [{ left: "$$", right: "$$", display: true }], throwOnError: false });
+    } catch (_) {}
+    katexCache.set(html, tmp.innerHTML);
+    return tmp.innerHTML;
+  }
+  function show(host) {
+    const fn = RICH_TIPS[host.getAttribute("data-rich-tip")];
+    const html = fn ? fn(host) : "";
+    if (!html) return;
+    const tip = ensure();
+    if (current && current !== host) current.removeAttribute("aria-describedby");
+    current = host;
+    host.setAttribute("aria-describedby", tip.id);
+    tip.innerHTML = render(html);
+    tip.classList.add("show");
+    const place = () => placeTip(tip, host.getBoundingClientRect(), {preferred: "below", offset: 6, gap: 8});
+    place();
+    // KaTeX's fonts load on the first formula shown; until then the glyphs
+    // are blank and narrower, so measure again once they are in.
+    if (document.fonts && document.fonts.status !== "loaded") {
+      document.fonts.ready.then(() => { if (current === host) place(); });
+    }
+  }
+  function hide(host) {
+    if (host && current && host !== current) return;
+    if (el) el.classList.remove("show");
+    if (current) current.removeAttribute("aria-describedby");
+    current = null;
+  }
+  return {show, hide};
+})();
+document.addEventListener("mouseover", (ev) => {
+  const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
+  if (t) _RICH_TIP.show(t);
+}, true);
+document.addEventListener("mouseout", (ev) => {
+  const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
+  if (!t) return;
+  if (ev.relatedTarget && t.contains(ev.relatedTarget)) return;
+  _RICH_TIP.hide(t);
+}, true);
+document.addEventListener("focusin", (ev) => {
+  const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
+  if (t) _RICH_TIP.show(t);
+}, true);
+document.addEventListener("focusout", (ev) => {
+  const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
+  if (t) _RICH_TIP.hide(t);
+}, true);
+document.addEventListener("scroll", () => _RICH_TIP.hide(), true);
+window.addEventListener("resize", () => _RICH_TIP.hide());
+document.addEventListener("mousedown", () => _RICH_TIP.hide(), true);
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") _RICH_TIP.hide();
+}, true);
+
+/* ---------------------------------------------------------------------------
  * .pf-metric-tip is a richer hover popover (LaTeX + description). Keep its
  * existing CSS-driven show/hide but route position through placeTip so it
  * stops clipping near viewport edges.
@@ -3120,6 +3206,41 @@ const DETAIL_METRIC_INFO = {
     desc: "Debt-to-equity in percent, most recent quarter. 100% means debt equals equity (a 1.0× ratio); total debt includes lease liabilities. n/a when equity is negative.",
     range: "Below ~50% is conservative for most industries; above ~200% is heavily levered. Banks, utilities and REITs run structurally higher. High values amplify returns in good times and pain in bad times."
   },
+  "Earnings Growth": {
+    formula: String.raw`g_E = \dfrac{\text{EPS}_{q}}{\text{EPS}_{q-4}} - 1`,
+    desc: "Year-over-year growth of the most recent quarter's earnings per share against the same quarter a year earlier (net income growth when Yahoo has no EPS figure).",
+    range: "Noisier than revenue growth: one-offs, tax items and a small base can swing it by hundreds of percent. Read it next to Revenue Growth; earnings outgrowing revenue means margins are expanding."
+  },
+  "ROA": {
+    formula: String.raw`ROA = \dfrac{\text{Net Income}_{TTM}}{\text{Total Assets}}`,
+    desc: "Return on assets: earnings generated per unit of everything the company owns, however it is financed. Unlike ROE it is not inflated by leverage.",
+    range: "Above ~5% is solid for most industries, 10%+ strong. Banks and insurers run near 1% by construction; asset-light software can exceed 15%."
+  },
+  "Current Ratio": {
+    formula: String.raw`\text{Current Ratio} = \dfrac{\text{Current Assets}}{\text{Current Liabilities}}`,
+    desc: "Short-term liquidity, most recent quarter: whether assets turning into cash within a year cover obligations due within a year.",
+    range: "Below 1 can signal a funding squeeze, though retailers and subscription businesses run below 1 comfortably. 1.5–3 is typical; very high can mean idle cash."
+  },
+  "Yield": {
+    formula: String.raw`\text{Yield} = \dfrac{\text{Annual dividend per share}}{\text{Price}}`,
+    desc: "Forward annual dividend as a percentage of today's price (trailing when no forward rate is published).",
+    range: "2–4% is typical for mature payers. A yield far above the sector's often prices in a cut; check Payout alongside it."
+  },
+  "Rate": {
+    formula: String.raw`\text{Rate} = \text{forward annual dividend per share}`,
+    desc: "The dividend per share paid over the next twelve months at the current declared rate, in the listing currency.",
+    range: "Look for a record of steady increases; a cut is usually a bigger price event than a missed raise."
+  },
+  "Payout": {
+    formula: String.raw`\text{Payout} = \dfrac{\text{Dividends}_{TTM}}{\text{Net Income}_{TTM}}`,
+    desc: "Share of trailing earnings paid out as dividends.",
+    range: "Below ~60% leaves room to keep raising it. Above 100% means the dividend is paid from more than earnings and is at risk unless cash flow is much higher than earnings (REITs, MLPs)."
+  },
+  "Ex-Div Date": {
+    formula: String.raw`\text{own the share before this date}`,
+    desc: "The first trading day on which a buyer no longer receives the upcoming dividend. The price typically drops by about the dividend on that morning.",
+    range: "A date in the past means the last payment; the next is usually a quarter later."
+  },
 };
 function metricTipHtml(label, info) {
   if (!info) return "";
@@ -3300,7 +3421,7 @@ function renderSections() {
     divHtml = `
       <div class="m-sec">
         <h3>Dividend</h3>
-        <div class="m-kv">${divItems.map(([k,v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join("")}</div>
+        ${renderDetailMetricGrid(divItems)}
       </div>`;
   }
 
@@ -3362,7 +3483,7 @@ function renderSections() {
     ${analystHtml}
     <div class="m-sec">
       <h3>Fundamentals</h3>
-      <div class="m-kv">${funda.map(([k,v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join("")}</div>
+      ${renderDetailMetricGrid(funda)}
     </div>
     ${divHtml || `<div class="m-sec"><h3>Profile</h3><div class="m-kv">
       <div><div class="k">Country</div><div class="v">${escapeHtml(d.country || "—")}</div></div>
@@ -4436,8 +4557,8 @@ function renderAnalyticsBody() {
         ${renderBarsHtml(a.exposure && a.exposure.by_bucket)}
       </div>
       <div class="pf-card" style="grid-column: 1 / -1;">
-        <h4>Contribution to ${escapeHtml(STATE.period)} return <span class="sub">${escapeHtml(a.display_ccy || FX_QUOTE)}</span></h4>
-        ${renderContribHtml(a)}
+        <h4>Contribution to ${escapeHtml(STATE.period)} return <span class="sub">${escapeHtml(a.display_ccy || FX_QUOTE)}</span>${contribToggleHtml()}</h4>
+        <div id="pf-contrib-body">${renderContribHtml(a)}</div>
       </div>
     </div>
   `;
@@ -5188,19 +5309,189 @@ function renderBarsHtml(map) {
     </div>`).join("")}</div>`;
 }
 
+/* Contribution to return (#8). Each holding's linked contribution (Carino,
+   from analytics._linked_contribution) is split into W×R, the naive
+   weight × own-period-return, and Compounding, the rest: what daily
+   rebalancing and compounding add or take away. The three columns reconcile
+   exactly per row, and the Contribution column sums to the period return.
+   Sort and the Table/Chart choice are per-viewer conveniences in localStorage;
+   re-rendering touches only #pf-contrib-body, not the whole analytics grid. */
+const CONTRIB_INFO = {
+  wxr: {
+    label: "W×R",
+    formula: String.raw`\text{W×R}_i = w_i \cdot R_i`,
+    desc: "The holding's weight times its own return over the period, in percentage points. The contribution you would get if the weights were set once at the start and each holding's return simply scaled by its weight.",
+    range: "Summed over holdings it is not the portfolio's return: the portfolio is rebalanced to its weights daily, and that compounds differently.",
+  },
+  comp: {
+    label: "Compounding",
+    formula: String.raw`\text{Compounding}_i = \text{Contribution}_i - w_i R_i`,
+    desc: "What daily rebalancing and compounding add to or take from the holding's W×R: the gap between the holding compounding on its own and its daily contributions to a portfolio reset to its weights every day (then Carino-linked).",
+    range: "Small for calm holdings and short periods. It grows with the size of the holding's move, its volatility and the length of the period, and can have either sign.",
+  },
+  contribution: {
+    label: "Contribution",
+    formula: String.raw`C_i = \sum_t \dfrac{k_t}{k}\, w_i\, r_{i,t},\quad k_t = \dfrac{\ln(1+r_{p,t})}{r_{p,t}},\ k = \dfrac{\ln(1+R_p)}{R_p}`,
+    desc: "Percentage points of the portfolio's period return from this holding: daily contributions w·r of the daily-rebalanced portfolio, linked across days with Carino's log scaling so they add up to the period return exactly.",
+    range: "The column sums to the period return shown in Risk & return. Negative means the holding cost the portfolio return over the period.",
+  },
+};
+for (const [k, info] of Object.entries(CONTRIB_INFO)) {
+  RICH_TIPS["contrib:" + k] = () => metricTipHtml(info.label, info);
+}
+
+const CONTRIB_COLS = [
+  {k: "symbol", label: "Symbol", sv: (c) => (c.symbol || "").toLowerCase()},
+  {k: "weight", label: "Weight", sv: (c) => c.weight},
+  {k: "period_return", label: "Return", sv: (c) => c.period_return},
+  {k: "wxr", label: "W×R", tip: "contrib:wxr", sv: (c) => c.wxr},
+  {k: "comp", label: "Compounding", tip: "contrib:comp", sv: (c) => c.comp},
+  {k: "contribution", label: "Contribution", tip: "contrib:contribution", sv: (c) => c.contribution},
+];
+const CONTRIB_UI = (() => {
+  const ui = {sort: {k: "contribution", dir: -1}, view: "table", last: null};
+  try {
+    const s = JSON.parse(localStorage.getItem("pf_contrib_sort") || "null");
+    if (s && CONTRIB_COLS.some(c => c.k === s.k) && (s.dir === 1 || s.dir === -1)) ui.sort = s;
+    if (localStorage.getItem("pf_contrib_view") === "chart") ui.view = "chart";
+  } catch { /* private mode / bad JSON: defaults */ }
+  return ui;
+})();
+
+function contribRows(a) {
+  const num = (v) => (v != null && isFinite(v)) ? Number(v) : null;
+  return (a.contribution || []).map(c => {
+    const w = num(c.weight), r = num(c.period_return), ct = num(c.contribution);
+    // A missing return must read n/a in W×R and Compounding too, not a
+    // confident 0.00% next to an n/a Return.
+    const wxr = (w != null && r != null) ? w * r : null;  // pp, same units as contribution
+    return {...c, wxr, comp: (ct != null && wxr != null) ? ct - wxr : null};
+  });
+}
+
+function contribToggleHtml() {
+  const b = (v, label) => `<button type="button" data-contrib-view="${v}" class="${CONTRIB_UI.view === v ? "active" : ""}" aria-pressed="${CONTRIB_UI.view === v}">${label}</button>`;
+  return `<span class="pf-contrib-toggle" role="group" aria-label="Contribution view">${b("table", "Table")}${b("chart", "Chart")}</span>`;
+}
+
 function renderContribHtml(a) {
-  const list = a.contribution || [];
-  if (!list.length) return `<div class="pf-empty" style="padding:6px 0;">No contribution data</div>`;
+  CONTRIB_UI.last = a;
+  const rows = contribRows(a || {});
+  if (!rows.length) return `<div class="pf-empty" style="padding:6px 0;">No contribution data</div>`;
+  return CONTRIB_UI.view === "chart" ? renderContribChartHtml(rows) : renderContribTableHtml(rows);
+}
+
+function renderContribTableHtml(rows) {
+  const {k: sk, dir} = CONTRIB_UI.sort;
+  const col = CONTRIB_COLS.find(c => c.k === sk) || CONTRIB_COLS[CONTRIB_COLS.length - 1];
+  const sorted = rows.slice().sort((x, y) => {
+    const a = col.sv(x), b = col.sv(y);
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;   // missing values sink, whatever the direction
+    if (b == null) return -1;
+    return (a < b ? -1 : a > b ? 1 : 0) * dir;
+  });
+  const maxAbs = Math.max(1e-9, ...rows.map(c => Math.abs(c.contribution || 0)));
+  const sum = (f) => rows.reduce((t, c) => t + (c[f] != null && isFinite(c[f]) ? c[f] : 0), 0);
+  const cls = (v) => (v == null || !isFinite(v)) ? "" : v >= 0 ? "pos" : "neg";
+  const th = (c) => {
+    const arrow = c.k === sk ? `<span class="arrow">${dir > 0 ? "▲" : "▼"}</span>` : "";
+    const label = c.tip ? `<span data-rich-tip="${c.tip}" tabindex="0">${c.label}</span>` : c.label;
+    const ret = c.k === "period_return" ? `${escapeHtml(STATE.period)} return` : null;
+    return `<th data-contrib-sort="${c.k}" tabindex="0" aria-sort="${c.k === sk ? (dir > 0 ? "ascending" : "descending") : "none"}">${ret || label}${arrow}</th>`;
+  };
+  const bar = (v) => {
+    const w = Math.min(50, Math.abs(v) / maxAbs * 50);
+    const left = v >= 0 ? 50 : 50 - w;
+    return `<span class="pf-cbar" aria-hidden="true"><span class="pf-cbar-fill ${cls(v)}" style="left:${left.toFixed(2)}%;width:${w.toFixed(2)}%"></span></span>`;
+  };
   return `<table class="pf-contrib-table">
-    <thead><tr><th>Symbol</th><th>Weight</th><th>${escapeHtml(STATE.period)} return</th><th title="Percentage points of the portfolio's period return, from the daily-rebalanced portfolio with Carino log-linking, so the column adds up to the period return exactly">Contribution</th></tr></thead>
-    <tbody>${list.map(c => `<tr>
+    <thead><tr>${CONTRIB_COLS.map(th).join("")}</tr></thead>
+    <tbody>${sorted.map(c => `<tr>
       <td title="${escapeHtml(c.name || c.symbol)}">${escapeHtml(c.symbol)} <span style="color:var(--muted)">${escapeHtml(c.sector || "")}</span></td>
-      <td>${(c.weight*100).toFixed(2)}%</td>
-      <td class="${c.period_return >= 0 ? 'pos':'neg'}">${fmtPctSigned(c.period_return)}</td>
-      <td class="${c.contribution >= 0 ? 'pos':'neg'}">${fmtPctSigned(c.contribution)}</td>
+      <td>${c.weight != null ? (c.weight*100).toFixed(2) + "%" : "—"}</td>
+      <td class="${cls(c.period_return)}">${fmtPctSigned(c.period_return)}</td>
+      <td class="${cls(c.wxr)}">${fmtPctSigned(c.wxr)}</td>
+      <td class="${cls(c.comp)}">${fmtPctSigned(c.comp)}</td>
+      <td class="${cls(c.contribution)} pf-contrib-c"><span class="pf-contrib-cwrap">${bar(c.contribution)}<span>${fmtPctSigned(c.contribution)}</span></span></td>
     </tr>`).join("")}</tbody>
+    <tfoot><tr>
+      <td>Total</td>
+      <td>${(sum("weight")*100).toFixed(2)}%</td>
+      <td></td>
+      <td class="${cls(sum("wxr"))}">${fmtPctSigned(sum("wxr"))}</td>
+      <td class="${cls(sum("comp"))}">${fmtPctSigned(sum("comp"))}</td>
+      <td class="${cls(sum("contribution"))}">${fmtPctSigned(sum("contribution"))}</td>
+    </tr></tfoot>
   </table>`;
 }
+
+/* Horizontal waterfall: holdings in contribution order (largest first), each
+   bar spanning the running total before → after it, then a Total bar from 0.
+   Plain HTML bars so the shared [data-tip] tooltip works per row. */
+function renderContribChartHtml(rows) {
+  const ordered = rows.slice().sort((x, y) => (y.contribution || 0) - (x.contribution || 0));
+  let cum = 0;
+  const steps = ordered.map(c => {
+    const from = cum; cum += (c.contribution || 0);
+    return {c, from, to: cum};
+  });
+  const total = cum;
+  const lo = Math.min(0, ...steps.map(s => Math.min(s.from, s.to)));
+  const hi = Math.max(0, ...steps.map(s => Math.max(s.from, s.to)));
+  const span = Math.max(1e-9, hi - lo);
+  const pos = (v) => ((v - lo) / span * 100);
+  const zero = pos(0).toFixed(2);
+  const fmt = (v) => fmtPctSigned(v);
+  const bar = (from, to, cls, tip, label, value) => `
+    <div class="pf-wf-row" data-tip="${escapeHtml(tip)}">
+      <span class="pf-wf-name">${label}</span>
+      <span class="pf-wf-track"><span class="pf-wf-zero" style="left:${zero}%"></span><span class="pf-wf-bar ${cls}" style="left:${pos(Math.min(from, to)).toFixed(2)}%;width:${Math.max(0.3, Math.abs(to - from) / span * 100).toFixed(2)}%"></span></span>
+      <span class="pf-wf-val ${value >= 0 ? "pos" : "neg"}">${fmt(value)}</span>
+    </div>`;
+  const plain = (v) => (v == null || !isFinite(v)) ? "n/a" : (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
+  return `<div class="pf-wf">
+    ${steps.map(({c, from, to}) => bar(from, to, (c.contribution || 0) >= 0 ? "pos" : "neg",
+      `${c.symbol}: contribution ${plain(c.contribution)} = W×R ${plain(c.wxr)} + compounding ${plain(c.comp)}. Running total ${plain(to)}.`,
+      escapeHtml(c.symbol), c.contribution)).join("")}
+    ${bar(0, total, "total", `Portfolio ${STATE.period} return: ${plain(total)}`, "Total", total)}
+  </div>`;
+}
+
+function rerenderContrib() {
+  const host = document.getElementById("pf-contrib-body");
+  if (host && CONTRIB_UI.last) host.innerHTML = renderContribHtml(CONTRIB_UI.last);
+  document.querySelectorAll(".pf-contrib-toggle button").forEach(b => {
+    const on = b.dataset.contribView === CONTRIB_UI.view;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-pressed", String(on));
+  });
+}
+// Enter / Space on a focused sort header (or its tip label) sorts, like a click.
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Enter" && ev.key !== " ") return;
+  const th = ev.target.closest && ev.target.closest("#pf-contrib-body th[data-contrib-sort]");
+  if (!th) return;
+  ev.preventDefault();
+  th.click();
+});
+document.addEventListener("click", (ev) => {
+  const th = ev.target.closest && ev.target.closest("#pf-contrib-body th[data-contrib-sort]");
+  if (th) {
+    const k = th.dataset.contribSort;
+    const s = CONTRIB_UI.sort;
+    CONTRIB_UI.sort = s.k === k ? {k, dir: -s.dir} : {k, dir: k === "symbol" ? 1 : -1};
+    try { localStorage.setItem("pf_contrib_sort", JSON.stringify(CONTRIB_UI.sort)); } catch { /* private mode */ }
+    rerenderContrib();
+    return;
+  }
+  const btn = ev.target.closest && ev.target.closest(".pf-contrib-toggle button[data-contrib-view]");
+  if (btn && btn.dataset.contribView !== CONTRIB_UI.view) {
+    CONTRIB_UI.view = btn.dataset.contribView;
+    try { localStorage.setItem("pf_contrib_view", CONTRIB_UI.view); } catch { /* private mode */ }
+    rerenderContrib();
+  }
+});
 
 /* The benchmark key Risk & Return and the chart compare against: the user's
    pick when this payload has it, else SPY. */
@@ -7925,6 +8216,110 @@ const MPT_BUDGET_LABEL = {
   dense: "Dense — ~60s",
 };
 
+// What each budget buys, for the "i" next to Compute budget. The numbers
+// mirror frontier.py's _BUDGETS / _BOOT_MIN / _BOOT_CAP; change them together.
+const MPT_BUDGET_INFO = [
+  {name: "Light",    secs: "~5 s",  nf: 24, cloud: "20k", use: "while iterating on bounds, views or the lookback"},
+  {name: "Standard", secs: "~15 s", nf: 40, cloud: "40k", use: "the default: a steady band for most portfolios"},
+  {name: "Dense",    secs: "~60 s", nf: 60, cloud: "80k", use: "before acting on a result, with 30+ holdings, a 1Y lookback, or when the band looks wide or jagged"},
+];
+RICH_TIPS["mpt-budget"] = () => `
+  <div class="pf-metric-tip" role="tooltip">
+    <div class="mt-name">Compute budget</div>
+    <table class="mt-table">
+      <thead><tr><th></th><th>Time</th><th>Frontier pts</th><th>Cloud pts</th></tr></thead>
+      <tbody>${MPT_BUDGET_INFO.map(b => `<tr><th>${b.name}</th><td>${b.secs}</td><td>${b.nf}</td><td>${b.cloud}</td></tr>`).join("")}</tbody>
+    </table>
+    <div class="mt-desc">The time left after the frontier and cloud goes to <b>bootstrap replicas</b> (at least 24, up to about 8,000): the daily returns are resampled and each frontier point's CVaR recomputed. The CVaR band is the 10th–90th percentile across them, so more replicas give a steadier band. Portfolios with more holdings fit fewer replicas into the same time.</div>
+    <div class="mt-desc">The optimisation itself is the same at every budget: same inputs, constraints and solver. A bigger budget buys a finer frontier, a denser cloud and a more reliable band, not a different answer.</div>
+    <ul class="mt-list">${MPT_BUDGET_INFO.map(b => `<li><b>${b.name}</b>: ${b.use}.</li>`).join("")}</ul>
+    <div class="mt-range">Fetching prices (~1 s) comes on top of these times.</div>
+  </div>`;
+
+/* Formula tips for the Optimize side panel (mptRenderSide). Functions, not
+   objects, where the text depends on the run: α, the bootstrap count. */
+function mptAlpha() { return MPT.result?.params?.alpha || 0.95; }
+const MPT_METRIC_INFO = {
+  ret: () => ({
+    label: "Expected return (Black-Litterman)",
+    formula: String.raw`\mu_p = \sum_i w_i\,\mu_i^{BL}`,
+    desc: "Annual expected return of this frontier point from the Black-Litterman posterior: market-implied equilibrium returns blended with analyst price-target views, in proportion to the analyst-trust setting. Cash, when allowed, earns the risk-free rate.",
+    range: "A model estimate, not a forecast to bank on: it moves with the trust setting and the views. Use it to compare points along the frontier.",
+  }),
+  var: () => {
+    const a = mptAlpha(), n = Math.max(1, Math.round(1 / (1 - a)));
+    return {
+      label: `VaR ${Math.round(a * 100)}% (30-day)`,
+      formula: String.raw`\text{VaR}_{${Math.round(a * 100)}\%} = -\,q_{${(1 - a).toFixed(2)}}\!\left(r^{10d}\right)\cdot\sqrt{30/10}`,
+      desc: `Value-at-Risk: the loss exceeded in only 1 of every ${n} thirty-day periods. The empirical quantile of overlapping 10-day compounded returns over the lookback, scaled to 30 days (FRTB style).`,
+      range: "A threshold, not the size of the loss beyond it; CVaR is the average past it. Ask whether you could sit through this loss in a bad month.",
+    };
+  },
+  cvar: () => {
+    const a = mptAlpha(), tail = Math.round((1 - a) * 100);
+    return {
+      label: `CVaR ${Math.round(a * 100)}% (30-day)`,
+      formula: String.raw`\text{CVaR}_{${Math.round(a * 100)}\%} = -\,\mathbb{E}\!\left[\,r^{10d} \mid r^{10d} \le -\text{VaR}\,\right]\cdot\sqrt{30/10}`,
+      desc: `Conditional VaR (expected shortfall): the average loss in the worst ${tail}% of thirty-day periods, from the same overlapping 10-day windows as VaR. The optimizer minimises CVaR on daily returns; this 30-day figure is for reading.`,
+      range: "Always at least VaR. The frontier shows how much expected return each extra point of CVaR buys; the band row below shows how well the history pins it down.",
+    };
+  },
+  "cvar-legacy": () => ({
+    label: "CVaR (annualized, legacy run)",
+    formula: String.raw`\text{CVaR}_{ann} = \text{CVaR}_{daily}\cdot\sqrt{252}`,
+    desc: "This run was saved before 30-day figures existed, so it shows the daily CVaR scaled to a year.",
+    range: "Re-run the optimization to get the 30-day VaR and CVaR.",
+  }),
+  band: () => {
+    const nBoot = MPT.result?.meta?.n_boot || 0;
+    return {
+      label: "CVaR band (bootstrap)",
+      formula: String.raw`\left[\,P_{10},\ P_{90}\,\right] \text{ of CVaR over } ${nBoot || "B"} \text{ replicas}`,
+      desc: `Sampling uncertainty of the CVaR at this point. The daily returns were resampled ${nBoot ? nBoot.toLocaleString() + " times" : "repeatedly"} and CVaR recomputed each time; the band's relative width is applied to the 30-day figure.`,
+      range: "Narrow: the history pins the tail risk down. Wide: a handful of bad days drive it, so treat the CVaR (and the ranking of nearby points) as rough. A bigger compute budget steadies the band's edges; it does not narrow it.",
+    };
+  },
+  mdd: () => ({
+    label: "Max drawdown",
+    formula: String.raw`\text{MDD} = \max_t\left(1 - \dfrac{V_t}{\max_{s \le t} V_s}\right)`,
+    desc: "The largest peak-to-trough fall of this portfolio's value over the lookback, compounding daily returns at these weights.",
+    range: "One path, one number: it depends on which crashes the window contains, so a lookback that starts after a sell-off looks calmer.",
+  }),
+  cdar: () => ({
+    label: "CDaR (95%)",
+    formula: String.raw`\text{CDaR}_{95\%} = \text{mean of the worst } 5\% \text{ of daily drawdowns } \left(1 - \tfrac{V_t}{\max_{s \le t} V_s}\right)`,
+    desc: "Conditional Drawdown-at-Risk: how far below its running peak the portfolio sits, averaged over its worst 5% of days.",
+    range: "Never above max drawdown. Less driven by a single crash, so it is the better read of how deep underwater a bad stretch usually gets.",
+  }),
+  vol: () => ({
+    label: "Volatility (reference)",
+    formula: String.raw`\sigma_p = \sqrt{w^{\top} \Sigma\, w}`,
+    desc: "Annualized volatility from the covariance model selected above (sample, Ledoit-Wolf or EWMA). Shown for reference: the optimizer does not use it.",
+    range: "Treats gains and losses alike and understates fat tails, which is why the frontier is built on CVaR instead.",
+  }),
+  cash: () => ({
+    label: "Invested / cash",
+    formula: String.raw`\text{cash} = 1 - \sum_i w_i`,
+    desc: "Fully invested is off, so part of the portfolio can sit in cash earning the risk-free rate.",
+    range: "Cash usually grows toward the low-risk end of the frontier, where it is the cheapest way to cut CVaR.",
+  }),
+  views: () => ({
+    label: "Analyst views",
+    formula: String.raw`\text{views} = \#\{\,i : \text{analyst price target available}\,\}`,
+    desc: "Holdings with an analyst price-target view feeding Black-Litterman, out of all active assets, with the analyst-trust setting. A holding without a view keeps its market-implied prior return.",
+    range: "Few views or low trust keeps expected returns near the equilibrium prior; high trust lets the analyst targets dominate.",
+  }),
+  assets: () => ({
+    label: "Active assets",
+    formula: String.raw`N = \#\{\,i : \text{daily price history over the lookback}\,\}`,
+    desc: "Holdings the optimizer used. Dropped holdings had no usable daily price history for the lookback window.",
+    range: "A shorter lookback keeps recently listed names; a longer one gives CVaR more tail observations to work with.",
+  }),
+};
+for (const [k, fn] of Object.entries(MPT_METRIC_INFO)) {
+  RICH_TIPS["mpt:" + k] = () => { const i = fn(); return metricTipHtml(i.label, i); };
+}
+
 function mptSetBudget(value) {
   const root = document.getElementById("pf-mpt-budget");
   if (!root) return;
@@ -8885,22 +9280,21 @@ function mptRenderSide() {
   }
   const cash = d.params?.fully_invested === false;
   const invested = Object.values(sel.weights || {}).reduce((a, b) => a + b, 0);
-  const nBoot = d.meta?.n_boot || 0;
   const lo = mptCvarLo(sel), hi = mptCvarHi(sel);
   const bandRow = (lo != null && hi != null)
-    ? `<span class="k">CVaR band (bootstrap)</span><span class="v" title="10th–90th percentile of CVaR across ${nBoot} bootstrap-resampled scenario sets — the frontier's sampling uncertainty at this point.">${mptFmtLoss(lo)}–${mptFmtLoss(hi)}</span>`
+    ? `<span class="k" tabindex="0" data-rich-tip="mpt:band">CVaR band (bootstrap)</span><span class="v">${mptFmtLoss(lo)}–${mptFmtLoss(hi)}</span>`
     : "";
   stats.innerHTML = `
-    <span class="k">Expected return (BL)</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
-    ${sel.var30 != null ? `<span class="k" title="Value-at-Risk: the loss you'd exceed 1-in-${Math.max(1, Math.round(1/(1-(d.params?.alpha||0.95))))} months. Empirical, on overlapping 10-day returns scaled to 30 days (FRTB style).">VaR ${aConf}% (30-day)</span><span class="v neg">${mptFmtLoss(sel.var30, 2)}</span>` : ""}
-    <span class="k" title="${sel.cvar30 != null ? `Conditional VaR / expected shortfall: the average loss in the worst ${Math.round((1-(d.params?.alpha||0.95))*100)}% of months. Overlapping 10-day returns scaled to 30 days (FRTB style).` : "Legacy saved run — annualized CVaR (√252-scaled daily). Re-run to get the 30-day figures."}">CVaR ${aConf}% ${sel.cvar30 != null ? "(30-day)" : "(annualized · legacy)"}</span><span class="v neg">${mptFmtLoss(mptCvar(sel), 2)}</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:ret">Expected return (BL)</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
+    ${sel.var30 != null ? `<span class="k" tabindex="0" data-rich-tip="mpt:var">VaR ${aConf}% (30-day)</span><span class="v neg">${mptFmtLoss(sel.var30, 2)}</span>` : ""}
+    <span class="k" tabindex="0" data-rich-tip="${sel.cvar30 != null ? "mpt:cvar" : "mpt:cvar-legacy"}">CVaR ${aConf}% ${sel.cvar30 != null ? "(30-day)" : "(annualized · legacy)"}</span><span class="v neg">${mptFmtLoss(mptCvar(sel), 2)}</span>
     ${bandRow}
-    <span class="k">Max drawdown</span><span class="v neg">${(sel.mdd * 100).toFixed(1)}%</span>
-    <span class="k">CDaR (95%)</span><span class="v neg">${(sel.cdar * 100).toFixed(1)}%</span>
-    <span class="k">Volatility (ref.)</span><span class="v">${sel.vol != null ? (sel.vol * 100).toFixed(2) + "%" : "—"}</span>
-    ${cash ? `<span class="k">Invested / cash</span><span class="v">${(invested*100).toFixed(0)}% / ${((1-invested)*100).toFixed(0)}%</span>` : ""}
-    <span class="k">Analyst views</span><span class="v">${(bl.viewed || []).length}/${(d.symbols || []).length}${bl.haircut != null ? ` <span style="color:var(--muted);font-weight:400">@ ${Math.round(bl.haircut*100)}% trust</span>` : ""}</span>
-    <span class="k">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:mdd">Max drawdown</span><span class="v neg">${(sel.mdd * 100).toFixed(1)}%</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:cdar">CDaR (95%)</span><span class="v neg">${(sel.cdar * 100).toFixed(1)}%</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:vol">Volatility (ref.)</span><span class="v">${sel.vol != null ? (sel.vol * 100).toFixed(2) + "%" : "—"}</span>
+    ${cash ? `<span class="k" tabindex="0" data-rich-tip="mpt:cash">Invested / cash</span><span class="v">${(invested*100).toFixed(0)}% / ${((1-invested)*100).toFixed(0)}%</span>` : ""}
+    <span class="k" tabindex="0" data-rich-tip="mpt:views">Analyst views</span><span class="v">${(bl.viewed || []).length}/${(d.symbols || []).length}${bl.haircut != null ? ` <span style="color:var(--muted);font-weight:400">@ ${Math.round(bl.haircut*100)}% trust</span>` : ""}</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:assets">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
   `;
   // Weights bars (sorted descending; zero-weight rows hidden). Each row's symbol
   // carries a rich hover (mptAssetTip) with the asset's risk/return/analyst stats.
