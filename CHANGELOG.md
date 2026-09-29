@@ -10,6 +10,7 @@ when merging a PR and add a line here.
 One logo (icon.svg).
 
 - **The Dock icon now matches the loading screen**: the four candlesticks on the dark tile, instead of on the light grey plate macOS 26 added around the old transparent icon. The logo now has one master, `icon.svg`, and the app icon, splash, window icon, Windows icon and the README header are all generated from it; a test fails if they drift or a second logo appears. Re-run the installer to get the new Dock icon.
+- **README**: the logo sits beside the title, every screenshot is in dark mode, a new one shows the stock detail view, and the column table gives each Default-view column's definition in LaTeX, checked against the code (it had P/S, which is not in the Default view, and missed EPS Surp., Rec Δ6M, MSPR and NS).
 
 Metric explanations and the contribution table (#5, #7, #8).
 
