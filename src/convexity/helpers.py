@@ -303,6 +303,29 @@ def _safe_num(v) -> float | None:
         return None
 
 
+# Yahoo quotes some exchanges in the currency's minor unit: LSE prices in pence
+# (GBp / GBX), JSE in cents (ZAc), Tel Aviv in agorot (ILA). Per-share prices
+# and price targets come in that minor unit, but marketCap, dividendRate and the
+# statements are in the MAJOR unit — verified on SHEL.L: price 3654.5 GBp,
+# marketCap 208e9 (GBP), dividendRate 1.16 (GBP).
+MINOR_UNIT_CCY = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ILA": "ILS"}
+
+
+def major_ccy(ccy: str | None) -> str:
+    """The major-unit ISO code for a Yahoo currency ("GBp" -> "GBP")."""
+    c = (ccy or "USD").strip()
+    return MINOR_UNIT_CCY.get(c) or MINOR_UNIT_CCY.get(c.upper()) or c.upper()
+
+
+def price_in_major(price, ccy: str | None) -> float | None:
+    """A per-share price converted from a minor unit to the major one."""
+    px = _safe_num(price)
+    if px is None:
+        return None
+    c = (ccy or "").strip()
+    return px / 100.0 if (c in MINOR_UNIT_CCY or c.upper() in MINOR_UNIT_CCY) else px
+
+
 def _normalize_dividend_yield(
     raw_yield,
     *,
@@ -310,26 +333,49 @@ def _normalize_dividend_yield(
     dividend_rate=None,
     trailing_yield=None,
     trailing_rate=None,
+    currency: str | None = None,
+    financial_currency: str | None = None,
 ) -> float | None:
-    """Return dividend yield as a fraction (0.0315 = 3.15%).
+    """Forward dividend yield as a fraction (0.0315 = 3.15%).
 
-    Yahoo sometimes returns dividendYield as a fraction and sometimes as a
-    percent-like number. Prefer the explicit dividend-rate/price ratio when
-    available, then fall back to raw yield fields with percent-to-fraction
-    correction for values above 1.
+    Sources, most reliable first:
+
+    1. ``dividendRate / price`` — the forward indicated annual dividend over the
+       last close. Both are per-share amounts in the listing's currency, except
+       that a minor-unit listing (GBp, ZAc, ILA) quotes the price in pence /
+       cents and the rate in pounds / rand, so the price is scaled to the major
+       unit first (SHEL.L: 1.16 / 36.545 = 3.2%, not 1.16 / 3654.5 = 0.03%).
+    2. ``dividendYield`` — Yahoo's own forward yield. yfinance >= 1.0 (the
+       pyproject floor) reports it in PERCENT (AAPL 0.32 means 0.32%), so it is
+       always divided by 100; guessing the unit from its size misread every
+       yield under 1% as a fraction (0.32 -> 32%).
+    3. The trailing fields — only when the statements are in the listing's
+       currency. For an ADR the trailing rate is in the home currency (TSM: 26
+       TWD over a 452.88 USD price), so rate / price mixes currencies.
     """
-    px = _safe_num(price)
-    if px is not None and px > 0:
-        for rate_value in (dividend_rate, trailing_rate):
-            rate = _safe_num(rate_value)
-            if rate is not None and rate >= 0:
-                return float(rate / px)
+    px = price_in_major(price, currency) if currency else _safe_num(price)
+    rate = _safe_num(dividend_rate)
+    if px is not None and px > 0 and rate is not None and rate >= 0:
+        return float(rate / px)
 
-    for yield_value in (raw_yield, trailing_yield):
-        val = _safe_num(yield_value)
-        if val is None or val < 0:
-            continue
-        return float(val / 100.0) if val > 1.0 else float(val)
+    val = _safe_num(raw_yield)
+    if val is not None and val >= 0:
+        return float(val / 100.0)
+
+    same_ccy = (
+        not currency
+        or not financial_currency
+        or major_ccy(currency) == major_ccy(financial_currency)
+    )
+    if not same_ccy:
+        return None
+    trate = _safe_num(trailing_rate)
+    if px is not None and px > 0 and trate is not None and trate >= 0:
+        return float(trate / px)
+    tval = _safe_num(trailing_yield)
+    if tval is not None and tval >= 0:
+        # trailingAnnualDividendYield is a fraction (KO 0.0237 = 2.37%).
+        return float(tval)
     return None
 
 
@@ -349,14 +395,23 @@ def _pct_change(series: pd.Series, lookback_days: int) -> float | None:
 
 
 def _ytd_change(series: pd.Series) -> float | None:
+    """Year-to-date return, measured from the LAST CLOSE OF THE PREVIOUS YEAR —
+    the convention of every index provider and broker. Using the first close of
+    the new year as the base drops the first session's move from YTD. Only a
+    security listed this year (no earlier close) falls back to its first close."""
     if series is None or series.empty:
         return None
     last = series.iloc[-1]
     year_start = pd.Timestamp(year=series.index[-1].year, month=1, day=1, tz=series.index.tz)
-    prior = series[series.index >= year_start]
-    if prior.empty:
-        return None
-    return float((last / prior.iloc[0] - 1.0) * 100.0)
+    before = series[series.index < year_start]
+    if not before.empty:
+        base = before.iloc[-1]
+    else:
+        this_year = series[series.index >= year_start]
+        if len(this_year) < 2:
+            return None
+        base = this_year.iloc[0]
+    return float((last / base - 1.0) * 100.0)
 
 
 def _rsi(series: pd.Series, period: int = 14) -> float | None:
@@ -372,7 +427,9 @@ def _rsi(series: pd.Series, period: int = 14) -> float | None:
     if pd.isna(last_gain) or pd.isna(last_loss):
         return None
     if float(last_loss) == 0.0:
-        return 100.0
+        # No losses in the window: 100 if there were gains; a flat series has
+        # neither, and RSI is undefined there — 50 (neutral), not "overbought".
+        return 100.0 if float(last_gain) > 0.0 else 50.0
     rs = float(last_gain / last_loss)
     return float(100.0 - (100.0 / (1.0 + rs)))
 

@@ -51,6 +51,10 @@ Each of these has cost real debugging time; the link goes to the full story.
   changes nothing the user runs until reinstalled. §3 below.
 - **One row per symbol, everywhere** — duplicate symbols 500 the analytics.
   [backend.md → Persistence](docs/architecture/backend.md#persistence)
+- **Yahoo's units are not uniform** — `debtToEquity` and `dividendYield` are
+  percent, margins are fractions, LSE prices are pence while caps are pounds, and
+  ADR multiples mix currencies. Store one unit at ingestion; compare caps in USD.
+  [backend.md → Streaming row build](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
 - **Don't put heavy fetches in `fetch_one`** (the streaming hot path).
   [backend.md → Streaming row build](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
 - **Request-origin guard** — every frontend POST sends

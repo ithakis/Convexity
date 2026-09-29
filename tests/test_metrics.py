@@ -254,24 +254,15 @@ def test_relative_partial_and_identity():
 # ===========================================================================
 
 
-def test_dividend_yield_fraction_input():
+def test_dividend_yield_raw_is_percent():
     """
-    Yahoo returns yield as fraction 0.035 → pass through unchanged (<=1 branch).
+    yfinance >= 1.0 reports dividendYield in PERCENT (AAPL 0.32 = 0.32%, KO
+    2.41 = 2.41%): always / 100. The old size heuristic read 0.32 as 32%.
     Source: helpers._normalize_dividend_yield
     """
     _require_dashboard()
-    result = _normalize_dividend_yield(0.035)
-    assert abs(result - 0.035) < 1e-12
-
-
-def test_dividend_yield_percent_input():
-    """
-    Yahoo returns yield as 3.5 (i.e. 3.5%) → divide by 100.
-    Source: helpers._normalize_dividend_yield  (val > 1.0 branch)
-    """
-    _require_dashboard()
-    result = _normalize_dividend_yield(3.5)
-    assert abs(result - 0.035) < 1e-12
+    assert abs(_normalize_dividend_yield(0.32) - 0.0032) < 1e-12
+    assert abs(_normalize_dividend_yield(2.41) - 0.0241) < 1e-12
 
 
 def test_dividend_yield_none():
@@ -283,111 +274,83 @@ def test_dividend_yield_none():
 def test_dividend_yield_zero():
     """Yield of 0 is valid (no dividend) → 0.0."""
     _require_dashboard()
-    result = _normalize_dividend_yield(0.0)
-    assert result == 0.0
+    assert _normalize_dividend_yield(0.0) == 0.0
 
 
 def test_dividend_yield_rate_over_price():
     """
-    Prefer dividend_rate / price over raw yield field.
-    dividend_rate=1.0, price=20.0  →  yield = 1.0/20.0 = 0.05
-    Source: helpers._normalize_dividend_yield
+    Prefer dividend_rate / price over the (2-decimal) raw yield field.
+    dividend_rate=1.0, price=20.0  →  1.0/20.0 = 0.05
     """
     _require_dashboard()
-    result = _normalize_dividend_yield(
-        raw_yield=0.99,  # should be ignored
-        price=20.0,
-        dividend_rate=1.0,
-    )
+    result = _normalize_dividend_yield(raw_yield=0.99, price=20.0, dividend_rate=1.0)
     assert abs(result - 0.05) < 1e-12
 
 
-def test_dividend_yield_high_percent():
+def test_dividend_yield_minor_unit_price():
     """
-    Yahoo occasionally returns yields like 150 (meaning 150% — synthetic/error).
-    divide by 100: 150 → 1.5 (kept as-is for caller to filter).
-    Source: helpers._normalize_dividend_yield
-    """
-    _require_dashboard()
-    result = _normalize_dividend_yield(150.0)
-    assert abs(result - 1.5) < 1e-12
-
-
-def test_dividend_yield_trailing_rate_fallback():
-    """
-    When dividend_rate is not provided, trailing_rate is tried next.
-    trailing_rate=2.0, price=40.0 → yield = 2.0/40.0 = 0.05
-    Source: helpers._normalize_dividend_yield
+    SHEL.L (live, 2026-09-29): price 3654.5 GBp, dividendRate 1.16 GBP,
+    dividendYield 3.2. The price is in pence, the rate in pounds: 1.16/36.545.
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
-        raw_yield=0.99,  # should be ignored (rate/price takes priority)
-        price=40.0,
-        trailing_rate=2.0,
+        3.2, price=3654.5, dividend_rate=1.16, currency="GBp", financial_currency="USD"
     )
-    assert abs(result - 0.05) < 1e-12
+    assert abs(result - 1.16 / 36.545) < 1e-12
+    assert 0.03 < result < 0.034
 
 
-def test_dividend_yield_trailing_yield_fallback():
+def test_dividend_yield_trailing_skipped_across_currencies():
     """
-    When price/rate are unavailable, fall through to trailing_yield.
-    trailing_yield=0.035 (already a fraction) → 0.035.
-    Source: helpers._normalize_dividend_yield
+    TSM (live): USD price, TWD statements; the trailing rate is 26 TWD. With no
+    forward fields the trailing ones must NOT be used (26/452.88 = 5.7%).
     """
     _require_dashboard()
     result = _normalize_dividend_yield(
-        raw_yield=None,
-        trailing_yield=0.035,
+        None,
+        price=452.88,
+        trailing_rate=26.0,
+        trailing_yield=0.0577,
+        currency="USD",
+        financial_currency="TWD",
     )
-    assert abs(result - 0.035) < 1e-12
+    assert result is None
 
 
-def test_dividend_yield_trailing_yield_percent():
-    """
-    trailing_yield=3.5 (percent representation) → 0.035.
-    Source: helpers._normalize_dividend_yield (val > 1.0 branch)
-    """
+def test_dividend_yield_trailing_same_currency():
+    """KO-style: forward fields missing, same currency → trailing rate / price."""
     _require_dashboard()
     result = _normalize_dividend_yield(
-        raw_yield=None,
-        trailing_yield=3.5,
+        None, price=87.18, trailing_rate=2.08, currency="USD", financial_currency="USD"
     )
-    assert abs(result - 0.035) < 1e-12
+    assert abs(result - 2.08 / 87.18) < 1e-12
+
+
+def test_dividend_yield_trailing_yield_is_fraction():
+    """trailingAnnualDividendYield is a fraction (KO 0.0237 = 2.37%)."""
+    _require_dashboard()
+    result = _normalize_dividend_yield(raw_yield=None, trailing_yield=0.0237)
+    assert abs(result - 0.0237) < 1e-12
 
 
 def test_dividend_yield_negative_raw_skipped():
-    """
-    Negative raw_yield is skipped; trailing_yield is used.
-    Source: helpers._normalize_dividend_yield (val < 0 → continue)
-    """
+    """Negative raw_yield is skipped; the trailing yield is used."""
     _require_dashboard()
-    result = _normalize_dividend_yield(
-        raw_yield=-0.5,
-        trailing_yield=0.02,
-    )
+    result = _normalize_dividend_yield(raw_yield=-0.5, trailing_yield=0.02)
     assert abs(result - 0.02) < 1e-12
 
 
 def test_dividend_yield_price_zero_falls_to_raw():
-    """
-    price=0 means rate/price path is skipped; falls back to raw_yield.
-    dividend_rate=1.0, price=0 → can't divide; raw_yield=0.04 → 0.04
-    Source: helpers._normalize_dividend_yield (px > 0 guard)
-    """
+    """price=0 skips rate/price; raw 4.0 (percent) → 0.04."""
     _require_dashboard()
-    result = _normalize_dividend_yield(
-        raw_yield=0.04,
-        price=0.0,
-        dividend_rate=1.0,
-    )
+    result = _normalize_dividend_yield(raw_yield=4.0, price=0.0, dividend_rate=1.0)
     assert abs(result - 0.04) < 1e-12
 
 
 def test_dividend_yield_both_none_returns_none():
     """All inputs unavailable → None."""
     _require_dashboard()
-    result = _normalize_dividend_yield(None, trailing_yield=None)
-    assert result is None
+    assert _normalize_dividend_yield(None, trailing_yield=None) is None
 
 
 # ===========================================================================

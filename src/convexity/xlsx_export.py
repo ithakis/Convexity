@@ -46,7 +46,9 @@ import yfinance as yf
 # Numeric coercion + dividend-yield normalisation live in helpers.py — the
 # canonical copies. `_maybe_num` is an alias for `_safe_num` (identical finite-
 # float-or-None semantics) kept only so the many call sites below read the same.
-from convexity.helpers import _normalize_dividend_yield, _safe_num as _maybe_num
+from convexity.analytics import _market_cap_usd
+from convexity.fetcher import _positive
+from convexity.helpers import _normalize_dividend_yield, major_ccy, _safe_num as _maybe_num
 
 
 # --------------------------------------------------------------------------
@@ -62,7 +64,7 @@ HOLDINGS_PRIMARY_COLS: list[tuple[str, str]] = [
     ("exchange", "Exchange"),
     ("currency", "Currency"),
     ("price", "Price"),
-    ("change_abs_1d", "Change ($)"),
+    ("change_abs_1d", "Change (quote ccy)"),
     ("pct_1d", "% 1D"),
     ("pct_2d", "% 2D"),
     ("pct_1w", "% 1W"),
@@ -71,7 +73,7 @@ HOLDINGS_PRIMARY_COLS: list[tuple[str, str]] = [
     ("pct_6m", "% 6M"),
     ("pct_ytd", "% YTD"),
     ("pct_1y", "% 1Y"),
-    ("market_cap", "Market Cap"),
+    ("market_cap", "Market Cap (listing ccy)"),
     ("ps_ratio", "P/S"),
     ("pe_ratio", "P/E"),
     ("sector", "Sector"),
@@ -92,7 +94,7 @@ HOLDINGS_PRIMARY_COLS: list[tuple[str, str]] = [
 # Analyst columns appended to the right of the holdings table.
 ANALYST_COLS: list[tuple[str, str]] = [
     ("recommendation_key", "Analyst Rating"),
-    ("recommendation_mean", "Rec. Mean (1=Buy,5=Sell)"),
+    ("recommendation_mean", "Rec. Mean (1=Strong Buy, 5=Sell)"),
     ("num_analysts", "# Analysts"),
     ("target_mean", "Target Mean"),
     ("target_high", "Target High"),
@@ -104,6 +106,41 @@ ANALYST_COLS: list[tuple[str, str]] = [
     ("beta_info", "Beta (info)"),
     ("dividend_yield", "Dividend Yield"),
 ]
+
+# Headers for the auto-discovered "extras" row fields whose unit is not
+# obvious from the raw key. Fractions (0.42 = 42%) get a percent cell format.
+EXTRA_LABELS: dict[str, str] = {
+    "debt_equity": "D/E (%)",
+    "market_cap_usd": "Market Cap (USD)",
+    "financial_currency": "Statement Currency",
+    "roe": "ROE",
+    "roa": "ROA",
+    "gross_margin": "Gross Margin",
+    "operating_margin": "Operating Margin",
+    "profit_margin": "Net Margin",
+    "fcf_yield": "FCF Yield",
+    "revenue_growth": "Revenue Growth (YoY, mrq)",
+    "earnings_growth": "Earnings Growth (YoY, mrq)",
+    "payout_ratio": "Payout Ratio",
+    "price_book": "P/B",
+    "ev_revenue": "EV/Revenue",
+    "rsi_14": "RSI 14",
+    "macd_hist_pct": "MACD Hist (% of price)",
+    "bb_pct_b": "Bollinger %B",
+    "beta": "Beta (Yahoo, 5Y monthly)",
+}
+FRACTION_KEYS = {
+    "roe",
+    "roa",
+    "gross_margin",
+    "operating_margin",
+    "profit_margin",
+    "fcf_yield",
+    "revenue_growth",
+    "earnings_growth",
+    "payout_ratio",
+    "dividend_yield",
+}
 
 # Fields explicitly skipped from the holdings "extras" pass — these are
 # either large arrays (charts) or already reported elsewhere in the
@@ -174,13 +211,15 @@ STATS_KEYS: list[tuple[str, str]] = [
     ("beta", "Beta vs SPY"),
     ("r2", "R² vs SPY"),
     ("te", "Tracking Error vs SPY (%)"),
+    ("ir", "Information Ratio vs SPY"),
+    ("rf_ann", "Risk-free Rate used (% p.a.)"),
 ]
 
 EXPORT_STATS_PERIODS: tuple[str, ...] = ("1Y", "5Y")
 
 # Aggregated analyst-coverage keys (under analytics["analyst"]).
 ANALYST_AGG_KEYS: list[tuple[str, str]] = [
-    ("mean_rating", "Mean Analyst Rating (1=Buy,5=Sell)"),
+    ("mean_rating", "Mean Analyst Rating (1=Strong Buy, 5=Sell)"),
     ("rating_coverage_weight", "Rating Coverage (weight)"),
     ("weighted_target_upside_pct", "Weighted Target Upside (%)"),
     ("target_coverage_weight", "Target Coverage (weight)"),
@@ -226,9 +265,15 @@ def _analyst_info_one(symbol: str) -> dict:
     out["target_mean"] = _maybe_num(info.get("targetMeanPrice"))
     out["target_high"] = _maybe_num(info.get("targetHighPrice"))
     out["target_low"] = _maybe_num(info.get("targetLowPrice"))
-    out["forward_pe"] = _maybe_num(info.get("forwardPE"))
-    out["ev_ebitda"] = _maybe_num(info.get("enterpriseToEbitda"))
-    out["peg"] = _maybe_num(info.get("pegRatio") or info.get("trailingPegRatio"))
+    # Negative multiples are not meaningful (fetcher._positive); Yahoo's
+    # EV/EBITDA is only trusted when the statements share the listing
+    # currency (see fetcher._currency_consistent).
+    same_ccy = major_ccy(info.get("currency")) == major_ccy(
+        info.get("financialCurrency") or info.get("currency")
+    )
+    out["forward_pe"] = _positive(info.get("forwardPE"))
+    out["ev_ebitda"] = _positive(info.get("enterpriseToEbitda")) if same_ccy else None
+    out["peg"] = _positive(info.get("pegRatio") or info.get("trailingPegRatio"))
     out["beta_info"] = _maybe_num(info.get("beta"))
     out["dividend_yield"] = _normalize_dividend_yield(
         info.get("dividendYield"),
@@ -236,6 +281,8 @@ def _analyst_info_one(symbol: str) -> dict:
         dividend_rate=info.get("dividendRate"),
         trailing_yield=info.get("trailingAnnualDividendYield"),
         trailing_rate=info.get("trailingAnnualDividendRate"),
+        currency=info.get("currency"),
+        financial_currency=info.get("financialCurrency"),
     )
     _ANALYST_CACHE[symbol] = out
     return out
@@ -558,7 +605,7 @@ def _write_portfolio_sheet(
         if isinstance(row, dict):
             extra_keys_all.update(row.keys())
     extra_keys = sorted(extra_keys_all - primary_keys - HOLDINGS_SKIP_EXTRAS)
-    extra_cols = [(k, k) for k in extra_keys]
+    extra_cols = [(k, EXTRA_LABELS.get(k, k)) for k in extra_keys]
 
     headers = HOLDINGS_PRIMARY_COLS + SENTIMENT_COLS + extra_cols + ANALYST_COLS
     _write_header_cells(ws, r, [label for _key, label in headers])
@@ -596,13 +643,19 @@ def _write_portfolio_sheet(
                     v = ana_row.get(key) or fallback_row.get(key)
                 else:
                     # forward_pe, ev_ebitda, peg, beta_info, dividend_yield —
-                    # not in the per-portfolio analyst block; rely on fallback.
-                    v = fallback_row.get(key)
+                    # not in the per-portfolio analyst block. The row carries
+                    # them (fetch_one, with the ADR currency repair); the info
+                    # pull only fills a row that lacks them. Reading only the
+                    # fallback left these columns empty whenever analytics ran.
+                    rv = row_data.get("beta" if key == "beta_info" else key)
+                    v = rv if rv is not None else analyst_fallback.get(sym, {}).get(key)
             elif key.startswith("ns:"):
                 v = _sentiment_value(key, row_data.get("news_sentiment"))
             else:
                 v = row_data.get(key)
-            ws.cell(row=r, column=col_idx, value=_flatten_value(v))
+            cell = ws.cell(row=r, column=col_idx, value=_flatten_value(v))
+            if key in FRACTION_KEYS and isinstance(v, (int, float)):
+                cell.number_format = "0.00%"
 
     # Approximate column widths.
     for col_idx, (_key, label) in enumerate(headers, 1):
@@ -787,7 +840,9 @@ def _cap_weights(rows: list[dict]) -> dict[str, float]:
         sym = r.get("symbol")
         if not sym:
             continue
-        mc = _maybe_num(r.get("market_cap"))
+        # In USD: raw caps are in each listing's own currency (the frontend's
+        # capWeightsOf and analytics do the same).
+        mc = _market_cap_usd(r)
         if mc and mc > 0:
             caps[sym] = mc
         else:

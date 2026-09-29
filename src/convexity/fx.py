@@ -6,6 +6,7 @@ import random
 import time
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -17,18 +18,67 @@ from convexity.cache import (
     _FX_RATES_CACHE,
     _FX_RATES_TTL,
 )
-from convexity.helpers import SUPPORTED_FX
+from convexity.helpers import SUPPORTED_FX, major_ccy
 
 _FX_BASKET_MAJORS: list[str] = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD"]
 
 
 def _norm_ccy_for_fx(ccy: str) -> str:
-    c = (ccy or "USD").upper()
-    if c in ("GBP", "GBX"):
-        return "GBP"
-    if c == "ZAC":
-        return "ZAR"
-    return c
+    """Major-unit code for FX lookups (GBp/GBX -> GBP, ZAc -> ZAR, ILA -> ILS).
+    Returns only need the currency, not the unit: a pence series and a pound
+    series have the same daily returns."""
+    return major_ccy(ccy)
+
+
+# Spot "USD per one unit of ccy", for converting single amounts (market caps,
+# statement figures) rather than whole close series. Checked against the shared
+# fx_rates("USD") cache first — the frontend loads it on every page open — and
+# only falls back to one ccyUSD=X download for currencies outside that basket
+# (TWD, KRW, DKK, …). A miss is cached for 10 minutes, a hit for the FX TTL.
+_SPOT_CACHE: dict[str, tuple[float, float | None]] = {}
+_SPOT_MISS_TTL = 600.0
+
+
+def usd_per_unit(ccy: str | None, *, allow_fetch: bool = True) -> float | None:
+    c = _norm_ccy_for_fx(ccy or "USD")
+    if c == "USD":
+        return 1.0
+    now = time.time()
+    hit = _SPOT_CACHE.get(c)
+    if hit is not None:
+        ttl = _FX_RATES_TTL if hit[1] is not None else _SPOT_MISS_TTL
+        if now - hit[0] < ttl:
+            return hit[1]
+    shared = _FX_RATES_CACHE.get("rates|USD")
+    if shared and now - shared[0] < _FX_RATES_TTL:
+        r = (shared[1].get("rates") or {}).get(c)
+        if r and r > 0:
+            _SPOT_CACHE[c] = (now, 1.0 / float(r))
+            return 1.0 / float(r)
+    if not allow_fetch:
+        return None
+    v = None
+    if c in SUPPORTED_FX:
+        r = (fx_rates("USD").get("rates") or {}).get(c)
+        v = 1.0 / float(r) if r and r > 0 else None
+    if v is None:
+        v = _fx_latest_close(c, "USD")
+        v = v if (v is not None and v > 0) else None
+    _SPOT_CACHE[c] = (now, v)
+    return v
+
+
+def convert_amount(amount, from_ccy: str | None, to_ccy: str | None) -> float | None:
+    """A major-unit amount from one currency to another, or None without a rate."""
+    if amount is None:
+        return None
+    a, b = _norm_ccy_for_fx(from_ccy or "USD"), _norm_ccy_for_fx(to_ccy or "USD")
+    if a == b:
+        return float(amount)
+    ua, ub = usd_per_unit(a), usd_per_unit(b)
+    if not ua or not ub:
+        return None
+    return float(amount) * ua / ub
 
 
 def _fx_usd_series(ccy: str, period_yf: str) -> pd.Series | None:
@@ -296,7 +346,11 @@ def fx_index_history(base: str, period: str = "1y") -> list:
         if not sliced.empty:
             combined = sliced
         combined = combined.div(combined.iloc[0]).fillna(1.0)
-    basket = combined.mean(axis=1) * 100.0
+    # Geometric mean of the relatives, the convention of currency indices (the
+    # ICE Dollar Index is a weighted geometric mean). An arithmetic mean of
+    # price relatives is biased upward: offsetting moves (x2 against one
+    # currency, x0.5 against another) read as +25% instead of 0%.
+    basket = np.exp(np.log(combined.where(combined > 0)).mean(axis=1)) * 100.0
     out: list[list[float]] = []
     for ts, v in basket.items():
         if pd.isna(v):

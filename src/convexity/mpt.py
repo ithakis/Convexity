@@ -122,10 +122,23 @@ def _ewma_cov(returns: pd.DataFrame, freq: str, halflife: float = 60.0) -> pd.Da
 
 
 def ledoit_wolf_shrink(cov: pd.DataFrame, returns: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Ledoit-Wolf shrinkage toward the constant-correlation target.
+    """Ledoit-Wolf (2004) shrinkage toward the constant-correlation target.
 
-    If ``returns`` is provided we estimate the optimal shrinkage intensity from
-    it; otherwise we use a fixed 0.2 prior. Pure NumPy.
+    Target F: every pair gets the average sample correlation r̄, each asset
+    keeps its own variance. Shrunk Σ = δ·F + (1−δ)·S with the optimal
+    intensity δ = max(0, min(1, κ/T)), κ = (π − ρ)/γ, estimated as in
+    Ledoit & Wolf, "Honey, I Shrunk the Sample Covariance Matrix" (J. Portfolio
+    Management, 2004) and their reference code (covCor.m):
+
+      π = Σ_ij π_ij,  π_ij = (1/T) Σ_t (x_it x_jt − s_ij)²   (noise in S)
+      ρ = Σ_i π_ii + r̄ Σ_{i≠j} √(s_jj/s_ii) θ_ij,
+          θ_ij = (1/T) Σ_t x_it³ x_jt − s_ii s_ij               (F's own noise)
+      γ = ‖F − S‖²_F                                           (misspecification)
+
+    The ρ term matters: F is itself estimated from the same data, and leaving
+    ρ out (as this function did before 2026-09-29) overstates δ. The moments
+    use the 1/T sample covariance of the paper; the returned matrix shrinks
+    the ``cov`` passed in. Without ``returns`` a fixed δ = 0.2 is used.
     """
     s = cov.values.astype(float)
     n = s.shape[0]
@@ -141,12 +154,24 @@ def ledoit_wolf_shrink(cov: pd.DataFrame, returns: pd.DataFrame | None = None) -
     if returns is None or len(returns) < 4:
         alpha = 0.2
     else:
-        x = returns.values - returns.values.mean(axis=0, keepdims=True)
+        x = returns.values.astype(float)
+        x = x - x.mean(axis=0, keepdims=True)
         t = x.shape[0]
-        phi_mat = ((x[:, :, None] * x[:, None, :]) - s[None, :, :]) ** 2
-        phi = phi_mat.sum() / t
-        gamma = float(((s - target) ** 2).sum())
-        alpha = float(np.clip(phi / (gamma * t + 1e-18), 0.0, 1.0)) if gamma > 0 else 0.0
+        sample = x.T @ x / t
+        v = np.diag(sample)
+        sd = np.sqrt(np.clip(v, 1e-30, None))
+        c = sample / np.outer(sd, sd)
+        rb = float(c[mask].mean())
+        prior = rb * np.outer(sd, sd)
+        np.fill_diagonal(prior, v)
+        y = x * x
+        phi_mat = y.T @ y / t - sample**2
+        phi = float(phi_mat.sum())
+        theta = (x**3).T @ x / t - v[:, None] * sample
+        np.fill_diagonal(theta, 0.0)
+        rho = float(np.trace(phi_mat) + rb * ((sd[None, :] / sd[:, None]) * theta).sum())
+        gamma = float(((sample - prior) ** 2).sum())
+        alpha = float(np.clip((phi - rho) / gamma / t, 0.0, 1.0)) if gamma > 0 else 1.0
     shrunk = alpha * target + (1.0 - alpha) * s
     return pd.DataFrame(shrunk, index=cov.index, columns=cov.columns)
 

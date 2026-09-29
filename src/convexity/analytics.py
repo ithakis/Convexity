@@ -7,6 +7,7 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -19,11 +20,12 @@ from convexity.cache import (
     _cache_put,
 )
 from convexity.fetcher import _SECTOR_ETF
-from convexity.fx import _apply_fx_to_closes, _norm_ccy_for_fx
+from convexity.fx import _apply_fx_to_closes, _norm_ccy_for_fx, convert_amount
 from convexity.helpers import (
     _dedupe_rows_by_symbol,
     _safe_num,
     _series_to_points,
+    major_ccy,
 )
 
 _PERIOD_YF = {
@@ -64,55 +66,110 @@ _BENCHMARKS = {
 
 
 def _period_start(period_u: str, last: pd.Timestamp) -> pd.Timestamp | None:
-    """First date of the reported window, mirroring yfinance's own trimming."""
+    """Start date of the reported window (Jan 1 for YTD, last − N months)."""
     if period_u == "YTD":
         return pd.Timestamp(year=last.year, month=1, day=1)
     months = _PERIOD_MONTHS.get(period_u)
     return last - pd.DateOffset(months=months) if months else None
 
 
-def _stats(ret: pd.Series, val: pd.Series) -> dict:
-    """Return/risk stats from daily returns `ret` and a value index `val`."""
+def _period_slice(frame: pd.DataFrame, start: pd.Timestamp | None) -> pd.DataFrame:
+    """The reported window: from the last close ON OR BEFORE `start` — the base
+    a period return is measured from (YTD from the previous year's last close,
+    1Y from the close a year ago) — to the end. Starting at the first bar
+    AFTER `start` dropped that first session's move from every period return
+    (YTD missed the year's first trading day). A holding with no earlier bar
+    starts at its first one."""
+    if start is None or frame.empty:
+        return frame
+    pos = int(frame.index.searchsorted(start, side="right")) - 1  # last bar <= start
+    return frame.iloc[max(pos, 0) :]
+
+
+# Risk-free rate for Sharpe / Sortino in USD: the 13-week T-bill yield (^IRX,
+# annualised percent), fetched with the benchmarks in the same download. Yahoo
+# has no comparable short-rate series for the other display currencies, so
+# they use 0 and the payload says so ("rf_source").
+_RF_TICKER = "^IRX"
+
+
+def _daily_rf(wide: pd.DataFrame, index: pd.DatetimeIndex, display_ccy: str) -> pd.Series | None:
+    """Daily risk-free return on `index`: (1 + y/100)^(1/252) − 1, y the ^IRX
+    yield carried forward over holidays."""
+    if display_ccy != "USD" or _RF_TICKER not in wide.columns:
+        return None
+    y = wide[_RF_TICKER].ffill().reindex(index).ffill().bfill()
+    if y.isna().all():
+        return None
+    return (1.0 + y.fillna(0.0) / 100.0) ** (1.0 / 252.0) - 1.0
+
+
+def _stats(ret: pd.Series, val: pd.Series, rf: pd.Series | None = None) -> dict:
+    """Return/risk stats from daily returns `ret` and a value index `val`.
+
+    Sharpe and Sortino use EXCESS returns r_t − rf_t (rf: daily risk-free
+    returns aligned to `ret`; None = 0). Both annualise the arithmetic mean
+    (×252) over the volatility (×√252) — the standard daily-data Sharpe —
+    while "ann_return" is the compound (geometric) rate. Sortino's downside
+    deviation is the root-mean-square of excess returns below 0 over ALL
+    observations (Sortino & Price 1994), not the std of the negative ones.
+    """
     if ret.empty or val.empty:
         return {}
     years = max(((val.index[-1] - val.index[0]).days or 1) / 365.25, 1e-6)
     growth = float(val.iloc[-1] / val.iloc[0])
     ann_return = (growth ** (1.0 / years) - 1.0) * 100.0
+    ex = ret - rf.reindex(ret.index).fillna(0.0) if rf is not None else ret
     std = ret.std()
-    downside = math.sqrt((ret.clip(upper=0) ** 2).mean())
+    ex_std = ex.std()
+    downside = math.sqrt((ex.clip(upper=0) ** 2).mean())
     max_dd = float((val / val.cummax() - 1.0).min() * 100.0)
     return {
         "total_return": (growth - 1.0) * 100.0,
         "ann_return": ann_return,
         "ann_vol": float(std * math.sqrt(252)) * 100.0,
-        "sharpe": float(ret.mean() * 252 / (std * math.sqrt(252))) if std else None,
-        "sortino": float(ret.mean() * 252 / (downside * math.sqrt(252))) if downside > 0 else None,
+        "sharpe": float(ex.mean() * 252 / (ex_std * math.sqrt(252))) if ex_std else None,
+        "sortino": float(ex.mean() * 252 / (downside * math.sqrt(252))) if downside > 0 else None,
         "max_dd": max_dd,
         "calmar": (ann_return / abs(max_dd)) if max_dd < 0 else None,
+        "rf_ann": float(((1.0 + rf.reindex(ret.index).fillna(0.0)).prod()) ** (1.0 / years) - 1.0)
+        * 100.0
+        if rf is not None
+        else 0.0,
     }
 
 
 def _relative(rp: pd.Series, rb: pd.Series) -> dict:
-    """Beta, R² and annualised tracking error (%) of daily returns `rp` vs `rb`."""
+    """Beta, R², annualised tracking error (%) and information ratio of daily
+    returns `rp` vs `rb`. IR = annualised mean active return / TE (both on
+    the daily active series r_p − r_b, so the ratio is scale-consistent)."""
     common = rp.index.intersection(rb.index)
     if len(common) < 30:
         return {}
     rp, rb = rp.loc[common], rb.loc[common]
-    var_b, corr, te = rb.var(), rp.corr(rb), (rp - rb).std()
+    active = rp - rb
+    var_b, corr, te = rb.var(), rp.corr(rb), active.std()
     return {
         "beta": float(rp.cov(rb) / var_b) if var_b else None,
         "r2": float(corr * corr) if pd.notna(corr) else None,
         "te": float(te * math.sqrt(252) * 100.0) if pd.notna(te) else None,
+        "ir": float(active.mean() * 252 / (te * math.sqrt(252)))
+        if (pd.notna(te) and te > 0)
+        else None,
     }
 
 
 def _bench_block(
-    label: str, val: pd.Series, spy_ret: pd.Series | None, port_ret: pd.Series
+    label: str,
+    val: pd.Series,
+    spy_ret: pd.Series | None,
+    port_ret: pd.Series,
+    rf: pd.Series | None = None,
 ) -> dict:
     """One benchmark: its stats (+ beta/R²/TE vs SPY) and the portfolio's
-    beta/R²/TE against it. `val` is its value index on the period."""
+    beta/R²/TE/IR against it. `val` is its value index on the period."""
     ret = val.pct_change().dropna()
-    stats = _stats(ret, val)
+    stats = _stats(ret, val, rf)
     if spy_ret is not None:
         stats.update(_relative(ret, spy_ret))
     return {
@@ -141,7 +198,86 @@ def _normalize_weights(weights_in: dict, symbols: list[str]) -> dict[str, float]
     return {s: v / total for s, v in raw.items()}
 
 
+def _usable(v) -> float | None:
+    x = _safe_num(v)
+    return x if (x is not None and math.isfinite(x)) else None
+
+
+def _w_avg(values: dict, weights: dict) -> float | None:
+    """Weighted arithmetic mean over the holdings that have a value,
+    renormalised over their weights (uncovered names drop out of both)."""
+    num = den = 0.0
+    for s, v in values.items():
+        x = _usable(v)
+        if x is None:
+            continue
+        num += x * weights.get(s, 0.0)
+        den += weights.get(s, 0.0)
+    return num / den if den > 0 else None
+
+
+def _w_harmonic(values: dict, weights: dict) -> float | None:
+    """Weighted harmonic mean Σw / Σ(w/x) over holdings with a POSITIVE
+    multiple x. For P/E this is the portfolio's look-through multiple: the
+    weighted average of earnings YIELDS (w·E/P, which do add up), inverted.
+    Negative multiples are not meaningful and are excluded, as by the index
+    providers that report a portfolio P/E."""
+    num = den = 0.0
+    for s, v in values.items():
+        x = _usable(v)
+        w = weights.get(s, 0.0)
+        if x is None or x <= 0 or w <= 0:
+            continue
+        num += w
+        den += w / x
+    return num / den if den > 0 else None
+
+
+def _coverage(values: dict, weights: dict) -> float:
+    """Share of the portfolio's weight with a usable (positive) multiple."""
+    return float(sum(weights.get(s, 0.0) for s, v in values.items() if (x := _usable(v)) and x > 0))
+
+
+def _market_cap_usd(row: dict) -> float | None:
+    """A row's market cap in USD: the fetcher's `market_cap_usd`, else the
+    local cap converted (rows cached before that field existed). The local cap
+    is in the currency's major unit (GBP for a GBp quote)."""
+    v = _usable(row.get("market_cap_usd"))
+    if v is not None and v > 0:
+        return v
+    cap = _usable(row.get("market_cap"))
+    if cap is None or cap <= 0:
+        return None
+    return convert_amount(cap, major_ccy(row.get("currency")), "USD")
+
+
+def _linked_contribution(win_ret: pd.DataFrame, w: pd.Series) -> dict[str, float]:
+    """Each holding's contribution (percentage points) to the portfolio's
+    period return, adding up to it exactly.
+
+    The portfolio is rebalanced to its weights daily, so its return is
+    compounded from daily returns r_p,t = Σ_i w_i·r_i,t. The daily
+    contributions w_i·r_i,t add up within a day but not across days
+    (compounding), and `weight x the holding's own period return` adds up to
+    neither. Carino (1999) logarithmic linking scales each day by
+    k_t / k, with k_t = ln(1+r_p,t)/r_p,t and k = ln(1+R)/R, so that
+    Σ_i Σ_t (k_t/k)·w_i·r_i,t = R, the period return shown above it.
+    """
+    if win_ret is None or win_ret.empty:
+        return {}
+    w = w.reindex(win_ret.columns).fillna(0.0)
+    daily = win_ret.mul(w, axis=1)
+    rp = daily.sum(axis=1).to_numpy(dtype=float)
+    total = float(np.prod(1.0 + rp) - 1.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kt = np.where(np.abs(rp) > 1e-12, np.log1p(rp) / rp, 1.0)
+    k = math.log1p(total) / total if abs(total) > 1e-12 else 1.0
+    scaled = daily.mul(kt / k, axis=0)
+    return {s: float(scaled[s].sum()) * 100.0 for s in win_ret.columns}
+
+
 def _mcap_bucket(mcap: float | None) -> str:
+    """Size bucket of a market cap IN USD (the thresholds are dollar ones)."""
     if mcap is None or not math.isfinite(mcap) or mcap <= 0:
         return "Unknown"
     if mcap >= 2e11:
@@ -402,7 +538,10 @@ def analyze_portfolios_multi(
         {_SECTOR_ETF[sec] for r in rows if (sec := (r.get("sector") or "").strip()) in _SECTOR_ETF}
     )
     bench_tickers = [t for t, _, _ in _BENCHMARKS.values()]
-    wide = _bulk_close(list(dict.fromkeys(symbols + bench_tickers + sec_etfs)), warmup_yf)
+    rf_tickers = [_RF_TICKER] if display_ccy == "USD" else []
+    wide = _bulk_close(
+        list(dict.fromkeys(symbols + bench_tickers + sec_etfs + rf_tickers)), warmup_yf
+    )
     warnings: list[str] = []
     missing = [s for s in symbols if s not in wide.columns]
     if missing:
@@ -419,11 +558,13 @@ def analyze_portfolios_multi(
     if len(wide_sym) < 3:
         return {"error": "insufficient overlapping history", "warnings": warnings}
     start = _period_start(period_u, wide_sym.index[-1])
-    sym_closes = wide_sym if start is None else wide_sym[wide_sym.index >= start]
+    sym_closes = _period_slice(wide_sym, start)
     if len(sym_closes) < 3:
         return {"error": "insufficient overlapping history", "warnings": warnings}
     common_index = sym_closes.index
     wide_ret = wide_sym.pct_change().fillna(0.0)
+    rf_daily = _daily_rf(wide, common_index, display_ccy)
+    rf_source = "US 13-week T-bill (^IRX)" if rf_daily is not None else "0 (no short-rate series)"
 
     def _on_period(col: str) -> pd.Series | None:
         """A benchmark column aligned to the portfolio's calendar, or None."""
@@ -456,11 +597,16 @@ def analyze_portfolios_multi(
     ps_vals = {s: _safe_num(by_sym.get(s, {}).get("ps_ratio")) for s in active}
     ev_vals = {s: analyst_blocks.get(s, {}).get("ev_ebitda") for s in active}
     div_vals = {s: analyst_blocks.get(s, {}).get("div_yield") for s in active}
-    mcap_vals = {s: _safe_num(by_sym.get(s, {}).get("market_cap")) for s in active}
+    # Market caps come in each listing's own currency (a Tokyo cap in yen is
+    # ~150x its dollar value), so they are compared and averaged in USD.
+    mcap_usd = {s: _market_cap_usd(by_sym.get(s, {})) for s in active}
 
     period_returns = {
         s: float(sym_closes[s].iloc[-1] / sym_closes[s].iloc[0] - 1.0) * 100.0 for s in active
     }
+    # Daily holding returns inside the window (the base bar excluded), for the
+    # linked contribution below.
+    win_ret = wide_ret.loc[common_index[1:], active]
 
     results: dict[str, dict] = dict(cached_results)
     for name, weights in normalized_sets.items():
@@ -488,7 +634,8 @@ def analyze_portfolios_multi(
         }
 
         benchmarks = {
-            k: _bench_block(label, v, spy_ret, port_ret) for k, (label, v) in shared_bench.items()
+            k: _bench_block(label, v, spy_ret, port_ret, rf_daily)
+            for k, (label, v) in shared_bench.items()
         }
         if sec_ret_df is not None:
             sector_alloc: dict[str, float] = {}
@@ -500,27 +647,30 @@ def analyze_portfolios_multi(
             if total > 0:
                 blend = sum(sec_ret_df[etf] * (w / total) for etf, w in sector_alloc.items())
                 benchmarks["SECTOR"] = _bench_block(
-                    "Sector mix", (1.0 + blend).cumprod(), spy_ret, port_ret
+                    "Sector mix", (1.0 + blend).cumprod(), spy_ret, port_ret, rf_daily
                 )
 
-        pf_stats = _stats(port_ret, port_val)
+        pf_stats = _stats(port_ret, port_val, rf_daily)
+        pf_stats["rf_source"] = rf_source
 
-        def _w_avg(values, _w=weights):
-            num = 0.0
-            denom = 0.0
-            for s, v in values.items():
-                if v is None or not math.isfinite(float(v)):
-                    continue
-                num += float(v) * _w.get(s, 0.0)
-                denom += _w.get(s, 0.0)
-            return num / denom if denom > 0 else None
-
+        mcap_avg_usd = _w_avg(mcap_usd, weights)
         weighted = {
-            "pe": _w_avg(pe_vals),
-            "ps": _w_avg(ps_vals),
-            "ev_ebitda": _w_avg(ev_vals),
-            "div_yield": _w_avg(div_vals),
-            "market_cap": _w_avg(mcap_vals),
+            # Price multiples: weighted HARMONIC mean, the portfolio's
+            # look-through multiple (see _w_harmonic). The arithmetic mean of
+            # P/Es overweights the expensive names.
+            "pe": _w_harmonic(pe_vals, weights),
+            "ps": _w_harmonic(ps_vals, weights),
+            "ev_ebitda": _w_harmonic(ev_vals, weights),
+            # Yields add up, so they average arithmetically.
+            "div_yield": _w_avg(div_vals, weights),
+            "market_cap": convert_amount(mcap_avg_usd, "USD", display_ccy)
+            if mcap_avg_usd is not None
+            else None,
+            "market_cap_ccy": display_ccy,
+            "coverage": {
+                k: _coverage(v, weights)
+                for k, v in (("pe", pe_vals), ("ps", ps_vals), ("ev_ebitda", ev_vals))
+            },
         }
 
         rating_num = rating_w = upside_num = upside_w = 0.0
@@ -554,8 +704,11 @@ def analyze_portfolios_multi(
             if dist and isinstance(dist, dict):
                 tot_votes = sum(int(v or 0) for v in dist.values())
                 if tot_votes > 0:
+                    # Each holding's SHARE of votes, weighted by the holding:
+                    # weighting raw counts let a name with 50 analysts outvote
+                    # an equal-weight name with 5 ten to one.
                     for k in dist_sum:
-                        dist_sum[k] += float(dist.get(k, 0) or 0) * w
+                        dist_sum[k] += float(dist.get(k, 0) or 0) / tot_votes * w
                     dist_w += w
             has_coverage = bool((na and na > 0) or mr is not None or tgt or dist)
             if has_coverage:
@@ -611,7 +764,7 @@ def analyze_portfolios_multi(
             sec = (r.get("sector") or "Unknown").strip() or "Unknown"
             ind = (r.get("industry") or "Unknown").strip() or "Unknown"
             country = (r.get("country") or "Unknown").strip() or "Unknown"
-            bucket = _mcap_bucket(_safe_num(r.get("market_cap")))
+            bucket = _mcap_bucket(mcap_usd.get(s))
             by_sector[sec] = by_sector.get(sec, 0.0) + w
             by_industry[ind] = by_industry.get(ind, 0.0) + w
             by_country[country] = by_country.get(country, 0.0) + w
@@ -622,6 +775,7 @@ def analyze_portfolios_multi(
         herfindahl = float(sum(w * w for w in weights.values()))
         effective_n = (1.0 / herfindahl) if herfindahl > 0 else 0.0
 
+        linked = _linked_contribution(win_ret, w_vec)
         contribution = []
         for s in active:
             w = weights.get(s, 0.0)
@@ -632,7 +786,7 @@ def analyze_portfolios_multi(
                     "name": by_sym.get(s, {}).get("name") or s,
                     "weight": w,
                     "period_return": pr,
-                    "contribution": w * pr,
+                    "contribution": linked.get(s, w * pr),
                     "sector": by_sym.get(s, {}).get("sector") or "",
                 }
             )

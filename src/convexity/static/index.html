@@ -459,16 +459,21 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         </div>
         <div class="info-card-desc">
           <b>Views</b> come from 12-month analyst price targets — one absolute view
-          per covered asset, <b>q<sub>i</sub> = target<sub>i</sub>/price<sub>i</sub> − 1 − r<sub>f</sub></b>
-          (excess). Each view's uncertainty <b>Ω<sub>ii</sub></b> tightens with more
-          analysts and lower target dispersion. The posterior combines prior and views:
+          per covered asset, <b>q<sub>i</sub> = target<sub>i</sub>/price<sub>i</sub> − 1 + dy<sub>i</sub> − r<sub>f</sub></b>:
+          the expected excess <i>total</i> return, with the forward dividend yield
+          <b>dy<sub>i</sub></b> added because a price target is a price and the prior
+          <b>Π</b> is a total-return premium. Each view's uncertainty <b>Ω<sub>ii</sub></b>
+          tightens with more analysts and lower target dispersion. The posterior
+          combines prior and views:
         </div>
         <div class="info-formula">$$\mu_{\mathrm{BL}} = \Pi + \tau\Sigma P^\top\!\left(P\,\tau\Sigma\,P^\top + \Omega\right)^{-1}\!\left(Q - P\Pi\right)$$</div>
         <div class="info-card-why">
           The <b>Analyst trust</b> dial is a single global scalar in [0, 1] that
           scales Ω. At 0% the views vanish (Ω → ∞) and the posterior collapses to the
-          pure market prior; at 100% (Ω → 0) it snaps to the analyst targets. Assets
-          with no target simply keep the prior — no view is invented for them.
+          pure market prior; at 100% (Ω → 0) each viewed asset's return equals its
+          view. Assets with no target get no view of their own, but their expected
+          return still moves with the correlated assets that have one — that is what
+          the <b>τΣPᵀ</b> term does.
         </div>
       </div>
 
@@ -482,9 +487,11 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
           is empirical — no normality assumption. The X-axis reports that tail on a
           <b>30-day horizon</b>, not annualised: empirical VaR/CVaR over
           <b>overlapping 10-day compounded</b> returns (the FRTB liquidity-horizon
-          convention), scaled 10d→30d by <b>√3</b>. So a reading of 12% means
-          "a 12% loss over a month" — a number you can actually size a position
-          against, unlike the old ×√252 figure which routinely exceeded 100%.
+          convention), scaled 10d→30d by <b>√3</b> (square-root-of-time, which
+          assumes independent 10-day blocks). So a reading of 12% at 95% means
+          "in the worst 5% of months, the average loss is about 12%" — a number you
+          can size a position against, unlike the old ×√252 figure which routinely
+          exceeded 100%.
         </div>
         <div class="info-card-desc">
           For a target expected return, the minimum-CVaR portfolio is the
@@ -517,9 +524,9 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
               shortfall at the chosen confidence (10-day overlapping, ×√3).</li>
           <li><b>VaR<sub>95</sub></b> — the same 30-day horizon at the quantile itself:
               the loss the tail starts at, where CVaR is its average.</li>
-          <li><b>CDaR / Max drawdown</b> — the deepest and average-worst peak-to-trough
-              declines of the selected weights over the lookback path. Shown, not
-              optimised.</li>
+          <li><b>CDaR / Max drawdown</b> — the average of the worst 5% of drawdowns
+              (CDaR at 95%) and the deepest one, for the selected weights held at a
+              daily-rebalanced mix over the lookback path. Shown, not optimised.</li>
           <li><b>Vol (reference)</b> — annualised standard deviation, for context only.</li>
           <li><b>Cloud</b> — random long-only portfolios rebased into (CVaR, return)
               space, so you can see the frontier really is the upper edge.</li>
@@ -736,19 +743,19 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
       </div>
       <div class="info-card">
         <div class="info-card-name">P/S &mdash; Price-to-Sales</div>
-        <div class="info-card-desc">How much investors pay per dollar of trailing-12-month revenue. Useful for companies with zero or negative earnings. Heat anchors at P/S = 10 (expensive); n/a is also flagged.</div>
+        <div class="info-card-desc">How much investors pay per dollar of trailing-12-month revenue. Useful for companies with zero or negative earnings. The heat ramp is relative to the names on screen: the cheapest is the most blue.</div>
         <div class="info-formula">$$P/S = \dfrac{\text{Market Cap}}{\text{TTM Revenue}}$$</div>
       </div>
       <div class="info-card">
         <div class="info-card-name">P/E &mdash; Price-to-Earnings</div>
-        <div class="info-card-desc">Most widely-used valuation multiple. Heat anchors at P/E = 40; values above 50 imply heavy growth expectations being priced in.</div>
+        <div class="info-card-desc">Most widely-used valuation multiple, on trailing earnings. n/a for loss-makers, where P/E is not meaningful. The heat ramp is relative to the names on screen; values above 50 imply heavy growth expectations being priced in.</div>
         <div class="info-formula">$$P/E = \dfrac{P}{\text{EPS}_{\text{TTM}}}$$</div>
       </div>
       <div class="info-card">
         <div class="info-card-name">% YTD</div>
-        <div class="info-card-desc">Return from the first trading day of the current calendar year to today. Green = positive, red = negative, white = flat.</div>
+        <div class="info-card-desc">Total return since the end of last year, on dividend-adjusted closes. Green = positive, red = negative, white = flat.</div>
         <div class="info-formula">$$\text{YTD} = \left(\dfrac{P_1}{P_0} - 1\right) \times 100$$
-          <span class="formula-note">P&#8320; = first close of the calendar year</span></div>
+          <span class="formula-note">P&#8320; = last close of the previous calendar year</span></div>
       </div>
       <div class="info-card">
         <div class="info-card-name">Chart 1Y</div>
@@ -756,9 +763,9 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
       </div>
       <div class="info-card">
         <div class="info-card-name">% 1Y</div>
-        <div class="info-card-desc">Total price return over the last 365 calendar days. Same diverging color scale as % YTD.</div>
+        <div class="info-card-desc">Total return over the last 365 calendar days, on dividend-adjusted closes (dividends count). Same diverging color scale as % YTD.</div>
         <div class="info-formula">$$\text{1Y} = \left(\dfrac{P_1}{P_0} - 1\right) \times 100$$
-          <span class="formula-note">P&#8320; = close 365 calendar days ago</span></div>
+          <span class="formula-note">P&#8320; = last close on or before the date 365 days ago</span></div>
       </div>
       <div class="info-card">
         <div class="info-card-name">&#916; Highs &mdash; Distance from 2Y High</div>
@@ -777,22 +784,22 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
       </div>
       <div class="info-card">
         <div class="info-card-name">Forward P/E</div>
-        <div class="info-card-desc">Price divided by consensus forward earnings. It tells you what multiple the market is paying on the next year rather than the trailing year.</div>
-        <div class="info-formula">$$\text{Forward P/E} = \dfrac{P}{\text{EPS}_{\text{NTM}}}$$</div>
+        <div class="info-card-desc">Price divided by the consensus EPS estimate for the next fiscal year. It tells you what multiple the market is paying on the next year rather than the trailing year. n/a when that estimate is negative.</div>
+        <div class="info-formula">$$\text{Forward P/E} = \dfrac{P}{\widehat{\text{EPS}}_{\text{next FY}}}$$</div>
       </div>
       <div class="info-card">
         <div class="info-card-name">EV/EBITDA</div>
-        <div class="info-card-desc">Enterprise-value multiple that normalises for capital structure. Useful when debt loads differ materially across peers.</div>
-        <div class="info-formula">$$\text{EV/EBITDA} = \dfrac{\text{Enterprise Value}}{\text{EBITDA}}$$</div>
+        <div class="info-card-desc">Enterprise-value multiple that normalises for capital structure. Useful when debt loads differ materially across peers. n/a when EBITDA is negative.</div>
+        <div class="info-formula">$$\text{EV/EBITDA} = \dfrac{\text{Market Cap} + \text{Total Debt} - \text{Cash}}{\text{EBITDA}_{\text{TTM}}}$$</div>
       </div>
       <div class="info-card">
         <div class="info-card-name">Analyst Rating</div>
-        <div class="info-card-desc">Mean sell-side recommendation on Yahoo's 1 to 5 scale, where 1 is Strong Buy and 5 is Sell.</div>
-        <div class="info-formula">$$R = \dfrac{\sum_{j=1}^{N} r_j}{N},\quad 1=\text{Strong Buy},\; 5=\text{Sell}$$</div>
+        <div class="info-card-desc">Mean sell-side recommendation on Yahoo's 1 to 5 scale: 1 Strong Buy, 2 Buy, 3 Hold, 4 Underperform, 5 Sell.</div>
+        <div class="info-formula">$$R = \dfrac{1}{N}\sum_{j=1}^{N} r_j,\quad r_j \in \{1, \dots, 5\}$$</div>
       </div>
       <div class="info-card">
         <div class="info-card-name">Target Δ</div>
-        <div class="info-card-desc">Distance from the current price to the mean analyst target price. Positive values imply upside to consensus fair value.</div>
+        <div class="info-card-desc">Distance from the current price to the mean analyst target price. Positive values imply upside to consensus fair value. A price return: dividends are not included.</div>
         <div class="info-formula">$$\Delta_{target} = \left(\dfrac{TP_{mean}}{P} - 1\right) \times 100$$</div>
       </div>
     </div>

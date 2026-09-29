@@ -27,7 +27,7 @@ const COLS = [
   { key: "price",       label: "Price",     w: 90,  align: "right", sortable: true,
     render: (r) => fmtMoney(r.price, r.currency) },
   { key: "market_cap",  label: "Market Cap",w: 86,  align: "right", sortable: true,
-    render: (r) => fmtCompactMoney(r.market_cap, r.currency) },
+    render: (r) => fmtCompactMoney(r.market_cap, majorCcy(r.currency)) },
   /* P/S: dynamic blue ramp — cheapest P/S currently on screen is most blue,
      priciest is neutral. n/a renders with no background. */
   ynum("ps_ratio", "P/S", 56, "low"),
@@ -112,7 +112,7 @@ const COLS = [
   ynum("ev_revenue", "EV/Rev", 68, "low"),
   ynum("ev_ebitda", "EV/EBITDA", 78, "low"),
   ynum("operating_margin", "Op Mgn", 68, "high", fmtPctDirect),
-  ynum("debt_equity", "D/E", 56, "low"),
+  ynum("debt_equity", "D/E", 64, "low", fmtPctNum),
   ynum("current_ratio", "Curr Ratio", 78, "high"),
   ynum("dividend_yield", "Div Yield", 78, "high", fmtPctDirect),
   /* Extended fundamentals — same yo_dyn ramp family as the block above, so
@@ -172,38 +172,38 @@ const COL_INFO = {
   logo:          "Brand logo for the company or fund (resolved from Yahoo's website field). Purely visual — no data column behind it.",
   name:          "Full company or fund name from Yahoo Finance.",
   price:         "Last available closing price, converted to the selected display currency (see FX selector in the top bar).",
-  market_cap:    "Total market value of all outstanding shares (Price × Shares Outstanding).",
+  market_cap:    "Total market value of all outstanding shares (Price × Shares Outstanding), converted to the display currency.",
   ps_ratio:      "Price-to-Sales: market cap ÷ trailing-12-month revenue. Lower is generally cheaper.",
-  pe_ratio:      "Price-to-Earnings: price ÷ trailing-12-month EPS. Lower is generally cheaper; above 50 implies heavy growth pricing.",
-  pct_ytd:       "Return from the first trading day of the current calendar year to today.",
+  pe_ratio:      "Price-to-Earnings: price ÷ trailing-12-month EPS. n/a when earnings are negative (not meaningful). Lower is generally cheaper; above 50 implies heavy growth pricing.",
+  pct_ytd:       "Total return since the last close of the previous year (dividend-adjusted closes).",
   spark:         "Sparkline of the last 252 trading days. Green if 1Y return is positive, red otherwise.",
-  pct_1y:        "Total price return over the last 365 calendar days.",
+  pct_1y:        "Total return over the last 365 calendar days, from the last close on or before that date (dividend-adjusted closes, so dividends count).",
   delta_ath:     "Distance from the highest close in the table row's 2-year history window. 0% = at that high; full bar = 50% below it.",
   rs_rank:       "Relative Strength: 12 monthly bars showing where each month's close ranked within its trailing-12-month price range.",
   earnings_surprise: "EPS Surprise history: up to 8 quarters, most-recent right. Green bar = beat, red = miss. Height = magnitude (capped ±10%). Source: Yahoo Finance.",
-  rec_trend_fh:      "Recommendation Trend Δ6M: change in analyst consensus score over the last 6 months. Score = (2×Strong Buy + Buy − Sell − 2×Strong Sell) / total. Requires FINNHUB_API_KEY.",
-  insider_mspr:      "MSPR — Monthly Share Purchase Ratio. Finnhub aggregates Form 4 filings into a single score: +100 = all insiders buying, −100 = all selling. Positive = net insider buying signal. Requires FINNHUB_API_KEY.",
+  rec_trend_fh:      "Recommendation Trend Δ6M: change in the analyst consensus score between the oldest and newest of Finnhub's monthly snapshots (up to 6). Score = (2×Strong Buy + Buy − Sell − 2×Strong Sell) / total, from −2 to +2. Requires a Finnhub key.",
+  insider_mspr:      "MSPR — Monthly Share Purchase Ratio. Finnhub aggregates Form 4 filings into a single score: +100 = all insiders buying, −100 = all selling. Positive = net insider buying signal. Requires a Finnhub key.",
   above_sma_20:  "20-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 month of trading days.",
   above_sma_50:  "50-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 quarter of trading days.",
   above_sma_200: "200-day Simple Moving Average flag. ▲ price above SMA (bullish), ▼ below (bearish). ~1 year of trading days.",
   pct_1d:        "Price return over the last trading session (latest close vs. the prior close).",
   pct_2d:        "Price return over the last two trading sessions. Trading bars, not calendar days, so weekends and holidays don't shorten the window.",
-  pct_1w:        "Total price return over the last 7 calendar days.",
-  pct_1m:        "Total price return over the last 30 calendar days.",
-  pct_3m:        "Total price return over the last 91 calendar days.",
-  pct_6m:        "Total price return over the last 182 calendar days.",
+  pct_1w:        "Total return over the last 7 calendar days (dividend-adjusted closes).",
+  pct_1m:        "Total return over the last 30 calendar days (dividend-adjusted closes).",
+  pct_3m:        "Total return over the last 91 calendar days (dividend-adjusted closes).",
+  pct_6m:        "Total return over the last 182 calendar days (dividend-adjusted closes).",
   rsi_14:        "14-day Relative Strength Index. Below 30 is oversold, above 70 is overbought.",
   macd_hist_pct: "MACD histogram as a percent of price. Positive means MACD is above its signal line; negative means momentum is fading.",
   bb_pct_b:      "Bollinger %B. 0 = lower band, 0.5 = middle band, 1 = upper band. Above 1 or below 0 means price is outside the bands.",
-  beta:          "Yahoo-reported beta versus the market. Around 1 moves with the market; above 1 is more volatile.",
+  beta:          "Yahoo-reported beta: 5 years of monthly returns against the S&P 500. Around 1 moves with the market; above 1 amplifies market moves, below 1 dampens them. Beta measures market sensitivity, not total volatility.",
   sector:        "GICS sector (e.g. Technology, Energy) reported by Yahoo Finance.",
   industry:      "GICS sub-industry — narrower than sector.",
-  forward_pe:    "Forward Price/Earnings: price ÷ consensus next-12-month EPS. Lower is generally cheaper.",
-  peg:           "PEG ratio: P/E divided by expected earnings growth. Lower can mean cheaper growth, though very low values can also reflect weak forecasts.",
-  ev_revenue:    "Enterprise Value ÷ Revenue. Useful when earnings are noisy or negative; lower usually means cheaper on sales.",
-  ev_ebitda:     "Enterprise Value ÷ EBITDA. Cap-structure-neutral valuation multiple.",
-  operating_margin: "Operating margin as a percent of revenue. Higher means more profit retained after core operating costs.",
-  debt_equity:   "Debt-to-equity ratio. Higher means more leverage relative to shareholder equity.",
+  forward_pe:    "Forward Price/Earnings: price ÷ the consensus EPS estimate for the next fiscal year. n/a when that estimate is negative. Lower is generally cheaper.",
+  peg:           "PEG ratio: P/E ÷ expected annual EPS growth in percent (Yahoo's 5-year estimate). Around 1 is the classic 'fair' mark; n/a when growth is negative. Very low values can also reflect weak forecasts.",
+  ev_revenue:    "Enterprise Value ÷ trailing-12-month revenue, EV = market cap + total debt − cash. Useful when earnings are noisy or negative; lower usually means cheaper on sales.",
+  ev_ebitda:     "Enterprise Value ÷ trailing-12-month EBITDA, EV = market cap + total debt − cash. Capital-structure-neutral; n/a when EBITDA is negative.",
+  operating_margin: "Operating income ÷ revenue, trailing 12 months. Higher means more profit retained after core operating costs.",
+  debt_equity:   "Debt-to-equity, in percent: total debt ÷ shareholders' equity × 100, most recent quarter. 100% means debt equals equity (1.0×); higher means more leverage. n/a when equity is negative.",
   current_ratio: "Current assets divided by current liabilities. Above 1 usually signals better short-term liquidity.",
   dividend_yield: "Annual cash dividend divided by price. Higher yields can support total return but may also reflect risk.",
   price_book:    "Price-to-Book: market cap ÷ book value of equity. Below 1 can signal value (or distressed assets); less meaningful for asset-light businesses.",
@@ -211,15 +211,15 @@ const COL_INFO = {
   roa:           "Return on Assets: trailing net income ÷ total assets. Leverage-neutral profitability — useful to cross-check a high ROE.",
   gross_margin:  "Gross margin: (revenue − cost of goods) ÷ revenue. Higher means more pricing power and production efficiency.",
   profit_margin: "Net profit margin: trailing net income ÷ revenue. The bottom-line margin after all costs, interest, and tax.",
-  fcf_yield:     "Free-cash-flow yield: trailing free cash flow ÷ market cap. A cash-based valuation check — higher means more cash generated per dollar of price.",
+  fcf_yield:     "Free-cash-flow yield: trailing free cash flow ÷ market cap, both in the currency of the financial statements (converted at spot for ADRs). A cash-based valuation check — higher means more cash generated per dollar of price.",
   revenue_growth: "Year-over-year revenue growth (most recent quarter vs the same quarter last year).",
   earnings_growth: "Year-over-year earnings growth (most recent quarter vs the same quarter last year). Very large values usually reflect a small base-year number.",
   quick_ratio:   "Quick ratio: (current assets − inventory) ÷ current liabilities. Stricter liquidity test than the current ratio; above 1 covers near-term obligations without selling inventory.",
   payout_ratio:  "Dividend payout ratio: dividends ÷ net income. Lower is more sustainable and leaves room to grow the dividend; above 100% means paying out more than earned.",
-  analyst_rating:"Mean analyst recommendation, 1 (Strong Buy) → 5 (Sell). Lower is more bullish.",
-  target_upside_pct: "Distance from current price to mean analyst price target, signed (positive = upside).",
-  w52_high:      "Highest closing price over the trailing 52 weeks.",
-  w52_low:       "Lowest closing price over the trailing 52 weeks.",
+  analyst_rating:"Mean analyst recommendation on Yahoo's scale: 1 Strong Buy, 2 Buy, 3 Hold, 4 Underperform, 5 Sell. Lower is more bullish.",
+  target_upside_pct: "Mean analyst price target ÷ current price − 1, signed (positive = upside). A price return: dividends are not included.",
+  w52_high:      "Highest daily close over the trailing 52 weeks (dividend-adjusted closes; Yahoo's quoted 52-week high uses intraday prices, so it can sit slightly above).",
+  w52_low:       "Lowest daily close over the trailing 52 weeks (dividend-adjusted closes; Yahoo's quoted 52-week low uses intraday prices).",
   news_sentiment: "Two dots, two independent reads of the same headlines. Left: the Market read — how prices have historically reacted to news like this, as a percentile of its own history (only the tails are called; the middle is \"No edge\"). Right: the News read — what the news says, lens by lens (Financials, Outlook, Competition, Regulation, Street view). Green = bullish, grey = mixed / no edge, red = bearish, hollow = no read. Hover for the full card. Sorts by the News read.",
 };
 
@@ -233,7 +233,7 @@ const COL_INFO_SHORT = {
   market_cap: "Price × shares outstanding",
   ps_ratio: "Price ÷ trailing sales",
   pe_ratio: "Price ÷ trailing EPS",
-  pct_ytd: "Return since Jan 1",
+  pct_ytd: "Return since last year's close",
   spark: "252-day price sparkline",
   pct_1y: "Total return, last 365 days",
   delta_ath: "% below 2Y high",
@@ -253,15 +253,15 @@ const COL_INFO_SHORT = {
   rsi_14: "14-day Relative Strength Index",
   macd_hist_pct: "MACD histogram, % of price",
   bb_pct_b: "Position within Bollinger Bands",
-  beta: "Volatility vs. the market",
+  beta: "Market sensitivity (5Y monthly β)",
   sector: "GICS sector",
   industry: "GICS sub-industry",
-  forward_pe: "Price ÷ forward EPS estimate",
+  forward_pe: "Price ÷ next-FY EPS estimate",
   peg: "P/E ÷ expected earnings growth",
   ev_revenue: "Enterprise value ÷ revenue",
   ev_ebitda: "Enterprise value ÷ EBITDA",
   operating_margin: "Operating profit ÷ revenue",
-  debt_equity: "Leverage vs. equity",
+  debt_equity: "Total debt ÷ equity, in %",
   current_ratio: "Current assets ÷ liabilities",
   dividend_yield: "Annual dividend ÷ price",
   price_book: "Price ÷ book value of equity",
@@ -1034,6 +1034,7 @@ function fxConvert(amount, fromCcy) {
   let scale = 1;
   if (from === "GBp" || from === "GBX") { from = "GBP"; scale = 0.01; }
   else if (from === "ZAc") { from = "ZAR"; scale = 0.01; }
+  else if (from === "ILA") { from = "ILS"; scale = 0.01; }
   from = String(from).toUpperCase();
   const base = amount * scale;
   const to = FX_QUOTE;
@@ -1042,6 +1043,21 @@ function fxConvert(amount, fromCcy) {
   const rTo = FX_RATES[to];       // to per USD
   if (!rFrom || !rTo) return base;  // graceful: no conversion data
   return base * (rTo / rFrom);
+}
+
+/* Yahoo quotes LSE / JSE / TASE prices in pence / cents / agorot, but market
+   caps, dividend rates and statement figures in the major unit (SHEL.L:
+   price 3654.5 GBp, market cap 208e9 GBP). Amounts of the second kind are
+   formatted with majorCcy(), or they would be shown 100x too small. */
+const MINOR_CCY = { GBp: "GBP", GBX: "GBP", ZAc: "ZAR", ILA: "ILS" };
+function majorCcy(ccy) { return MINOR_CCY[ccy] || String(ccy || "USD").toUpperCase(); }
+/* An amount in `ccy` expressed in USD, or null without a rate. */
+function toUsd(amount, ccy) {
+  if (amount == null || !isFinite(amount)) return null;
+  const c = majorCcy(ccy);
+  if (c === "USD") return Number(amount);
+  const r = FX_RATES[c];  // units of c per USD
+  return r ? Number(amount) / r : null;
 }
 
 function fxDecimals(ccy) {
@@ -1070,6 +1086,8 @@ function fmtCompactMoney(v, ccy) {
   return sym + scaled.toFixed(1) + unit;
 }
 function fmt2(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed(2); }
+/* A value that is already in percent (Yahoo's debtToEquity: 78.4 = 78.4%). */
+function fmtPctNum(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed(1) + "%"; }
 
 /* Canonical user-visible date format across the app: "Jul 7, 2026".
    Accepts a Date, epoch ms, or ISO string; bare YYYY-MM-DD strings are
@@ -3003,28 +3021,28 @@ const DETAIL_METRIC_INFO = {
     range: "Compare it with Avg Volume. A large spike often means news, earnings, rebalancing, or stress."
   },
   "Avg Volume": {
-    formula: String.raw`\overline{V} = \dfrac{1}{n}\sum_{t=1}^{n} V_t`,
-    desc: "Average daily trading volume over Yahoo's lookback window, used as the baseline liquidity reference.",
+    formula: String.raw`\overline{V} = \dfrac{1}{30}\sum_{t=1}^{30} V_t`,
+    desc: "Average daily trading volume over the last 30 sessions, used as the baseline liquidity reference.",
     range: "If current volume is far above this level, participation is unusual and the move may be more informative."
   },
   "52W High": {
-    formula: String.raw`\max(P_t),\; t \in \text{last 52 weeks}`,
-    desc: "Highest price reached in the trailing 52-week window.",
+    formula: String.raw`\max_{t \,\in\, \text{last 52 weeks}} P_t`,
+    desc: "Highest daily close in the trailing 52 weeks, on dividend-adjusted closes. Yahoo's quoted 52-week high uses intraday prices, so it can sit slightly above.",
     range: "Names near the high are often in strong trends; deep gaps below it indicate a prior drawdown."
   },
   "52W Low": {
-    formula: String.raw`\min(P_t),\; t \in \text{last 52 weeks}`,
-    desc: "Lowest price reached in the trailing 52-week window.",
+    formula: String.raw`\min_{t \,\in\, \text{last 52 weeks}} P_t`,
+    desc: "Lowest daily close in the trailing 52 weeks, on dividend-adjusted closes.",
     range: "Useful for judging whether a stock is still washed out or already recovering from its low."
   },
   "ATH": {
-    formula: String.raw`\max(P_t),\; t \in \text{available history}`,
-    desc: "Highest price in the full available price history, not just the trailing year.",
+    formula: String.raw`\max_{t} P_t,\; t \in \text{full history}`,
+    desc: "Highest daily close in the full available history (dividend-adjusted), not just the trailing year.",
     range: "The gap between spot and ATH is a quick read on how much prior optimism has been unwound."
   },
   "Market Cap": {
     formula: String.raw`MC = P \times \text{Shares Outstanding}`,
-    desc: "Total equity value of the company at the current price.",
+    desc: "Total equity value of the company at the current price, converted to the display currency.",
     range: "Useful for sizing the business and understanding whether you are buying a mega-cap, mid-cap, or micro-cap risk profile."
   },
   "Shares Out": {
@@ -3034,8 +3052,8 @@ const DETAIL_METRIC_INFO = {
   },
   "Beta": {
     formula: String.raw`\beta = \dfrac{\mathrm{Cov}(r_i, r_m)}{\mathrm{Var}(r_m)}`,
-    desc: "Yahoo-reported market beta. It estimates how sensitively the stock tends to move versus the market benchmark.",
-    range: "Around 1 behaves like the market. Below 1 is more defensive; above 1.3 is usually high-beta growth or cyclicality."
+    desc: "Yahoo-reported beta: 5 years of monthly returns against the S&P 500. The β(SPY) in the Performance header is computed here from the last year of daily returns, so the two can differ.",
+    range: "Around 1 behaves like the market. Below 1 is more defensive; above 1.3 is usually high-beta growth or cyclicality. Beta is market sensitivity, not total volatility."
   },
   "Revenue (TTM)": {
     formula: String.raw`\text{sales over the trailing 12 months}`,
@@ -3043,8 +3061,8 @@ const DETAIL_METRIC_INFO = {
     range: "Best used with growth and margin metrics. Sales alone say nothing about quality or profitability."
   },
   "Revenue Growth": {
-    formula: String.raw`g = \dfrac{\text{Revenue}_{TTM} - \text{Revenue}_{prior}}{\text{Revenue}_{prior}}`,
-    desc: "Year-over-year revenue growth rate.",
+    formula: String.raw`g = \dfrac{\text{Revenue}_{q}}{\text{Revenue}_{q-4}} - 1`,
+    desc: "Year-over-year growth of the most recent quarter's revenue against the same quarter a year earlier.",
     range: "Mid-single digits is mature; teens are healthy; 30%+ usually implies high-growth expectations and tougher comps ahead."
   },
   "Free Cash Flow": {
@@ -3054,26 +3072,26 @@ const DETAIL_METRIC_INFO = {
   },
   "FCF Yield": {
     formula: String.raw`FCF\ Yield = \dfrac{FCF}{\text{Market Cap}}`,
-    desc: "Free cash flow scaled by equity value. It is the cash-flow analogue of an earnings yield.",
+    desc: "Free cash flow scaled by equity value — the cash-flow analogue of an earnings yield. Both in the statement currency (an ADR's market cap is converted at spot).",
     range: "Low single digits is common for quality growth. High single digits can mean cheap cash generation or market skepticism."
   },
   "Fwd P/E": {
-    formula: String.raw`\text{Fwd P/E} = \dfrac{P}{\text{EPS}_{NTM}}`,
-    desc: "Price divided by consensus next-12-month earnings per share.",
+    formula: String.raw`\text{Fwd P/E} = \dfrac{P}{\widehat{\text{EPS}}_{\text{next FY}}}`,
+    desc: "Price divided by the consensus EPS estimate for the next fiscal year. n/a when that estimate is negative.",
     range: "Lower than trailing P/E can indicate expected earnings growth; higher can mean analysts see an earnings dip ahead."
   },
   "P/E (TTM)": {
     formula: String.raw`P/E = \dfrac{P}{\text{EPS}_{TTM}}`,
-    desc: "Trailing price-to-earnings multiple using the last 12 months of earnings.",
+    desc: "Trailing price-to-earnings multiple using the last 12 months of earnings. n/a for loss-makers (not meaningful).",
     range: "Broad-market quality names often live in the high teens to mid-20s. Very high multiples imply strong growth expectations."
   },
   "EV/EBITDA": {
-    formula: String.raw`\dfrac{EV}{EBITDA}`,
-    desc: "Enterprise value divided by EBITDA. It compares the total business value to an operating cash-earnings proxy.",
+    formula: String.raw`\dfrac{EV}{\text{EBITDA}_{TTM}},\quad EV = MC + \text{Debt} - \text{Cash}`,
+    desc: "Enterprise value divided by trailing EBITDA. It compares the total business value to an operating cash-earnings proxy. n/a when EBITDA is negative.",
     range: "Useful across peers with different debt loads. Higher values usually mean better growth, higher quality, or richer pricing."
   },
   "EV/Revenue": {
-    formula: String.raw`\dfrac{EV}{Revenue}`,
+    formula: String.raw`\dfrac{EV}{\text{Revenue}_{TTM}},\quad EV = MC + \text{Debt} - \text{Cash}`,
     desc: "Enterprise value divided by revenue. Often more informative than earnings multiples when margins are still immature.",
     range: "Best used for software, platforms, and cyclical turnarounds where earnings are temporarily noisy."
   },
@@ -3093,14 +3111,14 @@ const DETAIL_METRIC_INFO = {
     range: "A compact measure of business efficiency, but it can swing with tax effects, interest costs, and one-off items."
   },
   "ROE": {
-    formula: String.raw`ROE = \dfrac{\text{Net Income}}{\text{Shareholders' Equity}}`,
+    formula: String.raw`ROE = \dfrac{\text{Net Income}_{TTM}}{\text{Shareholders' Equity}}`,
     desc: "Return on equity measures how efficiently management converts book equity into earnings.",
     range: "Higher is usually better, but leverage can inflate ROE, so read it together with D/E."
   },
   "D/E": {
-    formula: String.raw`D/E = \dfrac{\text{Total Debt}}{\text{Shareholders' Equity}}`,
-    desc: "Debt-to-equity ratio. It shows how much leverage sits on top of the equity base.",
-    range: "Low values imply balance-sheet flexibility. High values can amplify returns in good times and pain in bad times."
+    formula: String.raw`D/E = \dfrac{\text{Total Debt}}{\text{Shareholders' Equity}} \times 100\%`,
+    desc: "Debt-to-equity in percent, most recent quarter. 100% means debt equals equity (a 1.0× ratio); total debt includes lease liabilities. n/a when equity is negative.",
+    range: "Below ~50% is conservative for most industries; above ~200% is heavily levered. Banks, utilities and REITs run structurally higher. High values amplify returns in good times and pain in bad times."
   },
 };
 function metricTipHtml(label, info) {
@@ -3127,9 +3145,14 @@ function renderDetailMetricGrid(items) {
 function renderSections() {
   const d = DETAIL.data;
   const sec = $("#m-sections");
-  const fcfYield = (d.free_cashflow != null && d.market_cap != null && isFinite(d.free_cashflow) && isFinite(d.market_cap) && d.market_cap !== 0)
-    ? d.free_cashflow / d.market_cap
-    : null;
+  // Statement figures (revenue, FCF) are in the reporting currency, which for
+  // an ADR is not the trading one (TSM: TWD); market cap and dividend rate are
+  // in the listing currency's major unit (GBP for a GBp quote).
+  const finCcy = d.financial_currency || majorCcy(d.currency);
+  const capCcy = majorCcy(d.currency);
+  const fcfYield = d.fcf_yield !== undefined ? d.fcf_yield
+    : ((finCcy === capCcy && d.free_cashflow != null && d.market_cap && isFinite(d.free_cashflow))
+        ? d.free_cashflow / d.market_cap : null);
 
   // ---- Snapshot
   const snap = [
@@ -3138,16 +3161,16 @@ function renderSections() {
     ["52W High", fmtMoney(d.w52_high, d.currency)],
     ["52W Low", fmtMoney(d.w52_low, d.currency)],
     ["ATH", fmtMoney(d.ath, d.currency)],
-    ["Market Cap", fmtCompactMoney(d.market_cap, d.currency)],
+    ["Market Cap", fmtCompactMoney(d.market_cap, capCcy)],
     ["Shares Out", fmtCompactNum(d.shares)],
     ["Beta", fmt2(d.beta)],
   ];
 
   // ---- Valuation
   const val = [
-    ["Revenue (TTM)", fmtCompactMoney(d.total_revenue, d.currency)],
+    ["Revenue (TTM)", fmtCompactMoney(d.total_revenue, finCcy)],
     ["Revenue Growth", fmtPctFrac(d.revenue_growth)],
-    ["Free Cash Flow", fmtCompactMoney(d.free_cashflow, d.currency)],
+    ["Free Cash Flow", fmtCompactMoney(d.free_cashflow, finCcy)],
     ["FCF Yield", fmtPctFrac(fcfYield)],
     ["Fwd P/E", fmt2(d.forward_pe)],
     ["P/E (TTM)", fmt2(d.pe)],
@@ -3157,7 +3180,7 @@ function renderSections() {
     ["Gross Margin", fmtPctFrac(d.gross_margin)],
     ["Profit Margin", fmtPctFrac(d.profit_margin)],
     ["ROE", fmtPctFrac(d.roe)],
-    ["D/E", fmt2(d.debt_equity)],
+    ["D/E", fmtPctNum(d.debt_equity)],
   ];
 
   // ---- Performance table
@@ -3167,11 +3190,11 @@ function renderSections() {
   const perfRows = labels.map(([k,lbl]) => {
     const row = perf[k] || {};
     const s = row.stock, b = row.spy, c = row.sector;
-    const dvs = (s != null && b != null) ? (s - b) : null;
+    const dvs = (s != null && b != null) ? (s - b) : null;  // percentage points
     return `<tr>
       <td>${lbl}</td>
       ${pctCell(s)}${pctCell(b)}${pctCell(c)}
-      ${dvs == null ? `<td class="na">—</td>` : `<td class="${dvs>=0?'pos':'neg'}">${(dvs>=0?'+':'')+dvs.toFixed(2)}</td>`}
+      ${dvs == null ? `<td class="na">—</td>` : `<td class="${dvs>=0?'pos':'neg'}">${(dvs>=0?'+':'')+dvs.toFixed(2)} pp</td>`}
     </tr>`;
   }).join("");
 
@@ -3257,10 +3280,10 @@ function renderSections() {
 
   // ---- Fundamentals
   const funda = [
-    ["Revenue (TTM)", fmtCompactMoney(d.total_revenue, d.currency)],
+    ["Revenue (TTM)", fmtCompactMoney(d.total_revenue, finCcy)],
     ["Revenue Growth", fmtPctFrac(d.revenue_growth)],
     ["Earnings Growth", fmtPctFrac(d.earnings_growth)],
-    ["Free Cash Flow", fmtCompactMoney(d.free_cashflow, d.currency)],
+    ["Free Cash Flow", fmtCompactMoney(d.free_cashflow, finCcy)],
     ["ROA", fmtPctFrac(d.roa)],
     ["Current Ratio", fmt2(d.current_ratio)],
   ];
@@ -3270,7 +3293,7 @@ function renderSections() {
   if (d.dividend_yield != null || d.dividend_rate != null || d.ex_div_date) {
     const divItems = [
       ["Yield", fmtPctDirect(d.dividend_yield)],
-      ["Rate", fmtMoney(d.dividend_rate, d.currency)],
+      ["Rate", fmtMoney(d.dividend_rate, capCcy)],
       ["Payout", fmtPctFrac(d.payout_ratio)],
       ["Ex-Div Date", d.ex_div_date || "—"],
     ];
@@ -3331,7 +3354,7 @@ function renderSections() {
           <th><span class="legend" style="background:${getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()}"></span>${d.symbol}</th>
           <th><span class="legend" style="background:#8b5cf6"></span>S&amp;P 500</th>
           <th><span class="legend" style="background:#f59e0b"></span>${sectorETF}</th>
-          <th>vs SPY</th>
+          <th title="The holding's return minus the S&amp;P 500's, in percentage points">vs SPY</th>
         </tr></thead>
         <tbody>${perfRows}</tbody>
       </table>
@@ -4463,40 +4486,30 @@ function fmtNumOr(v, d, suffix) {
   d = d == null ? 2 : d;
   return Number(v).toFixed(d) + (suffix || "");
 }
-function fmtCapBig(v) {
-  if (v == null || !isFinite(v)) return "—";
-  const abs = Math.abs(v);
-  if (abs >= 1e12) return (v/1e12).toFixed(2) + "T";
-  if (abs >= 1e9)  return (v/1e9).toFixed(2) + "B";
-  if (abs >= 1e6)  return (v/1e6).toFixed(2) + "M";
-  if (abs >= 1e3)  return (v/1e3).toFixed(2) + "K";
-  return v.toFixed(0);
-}
-
 const METRIC_INFO = {
   "Period return": {
-    formula: String.raw`R = \dfrac{V_T}{V_0} - 1`,
-    desc: "Total return of the portfolio over the chosen period, FX-adjusted to the display currency.",
+    formula: String.raw`R = \dfrac{V_T}{V_0} - 1 = \prod_{t=1}^{T}\Bigl(1 + \sum_i w_i\, r_{i,t}\Bigr) - 1`,
+    desc: "Total return of the portfolio over the chosen period, in the display currency, on dividend-adjusted closes. The portfolio is rebalanced to its weights every day. V₀ is the last close on or before the period start (for YTD, the previous year's last close).",
     range: "Compare to the benchmark in the same period. A positive read with low volatility is the cleanest win."
   },
   "Ann. return": {
-    formula: String.raw`R_{ann} = \left(\dfrac{V_T}{V_0}\right)^{\frac{1}{y}} - 1`,
-    desc: "Compound annual growth rate. Normalises returns across periods of different length so 3M, 1Y and 5Y are comparable.",
+    formula: String.raw`R_{ann} = \left(\dfrac{V_T}{V_0}\right)^{1/y} - 1,\quad y = \dfrac{\text{calendar days}}{365.25}`,
+    desc: "Compound annual growth rate (geometric). Normalises returns across periods of different length; on 3M or 6M it extrapolates a short window to a year, so read it with care.",
     range: "Above 10% sustained is strong; above the risk-free rate (~5%) is the bar for active equity."
   },
   "Ann. vol": {
-    formula: String.raw`\sigma_{ann} = \sigma_{daily} \cdot \sqrt{252}`,
-    desc: "Annualised standard deviation of daily returns — the headline risk measure.",
+    formula: String.raw`\sigma_{ann} = \sqrt{252}\;\cdot\;\mathrm{sd}(r_t)`,
+    desc: "Annualised sample standard deviation of daily returns — the headline risk measure.",
     range: "Equities cluster 15–25%. Below 12% is unusually smooth, above 35% is a high-octane book."
   },
   "Sharpe": {
-    formula: String.raw`S = \dfrac{\overline{R} - R_f}{\sigma}`,
-    desc: "Excess return per unit of total volatility. Risk-free rate treated as 0 here, so it’s a pure return/vol ratio.",
+    formula: String.raw`S = \dfrac{252\cdot\overline{(r_t - r_{f,t})}}{\sqrt{252}\cdot \mathrm{sd}(r_t - r_{f,t})}`,
+    desc: "Excess return over the risk-free rate per unit of total volatility, from daily returns (arithmetic mean ×252 over sd ×√252). In USD the risk-free rate is the 13-week T-bill yield (^IRX) day by day; Yahoo has no comparable series for the other display currencies, which use 0.",
     range: "0.5 mediocre · 1.0 good · 2.0 excellent · >3.0 suspect (curve-fit or short sample)."
   },
   "Sortino": {
-    formula: String.raw`S_o = \dfrac{\overline{R} - R_f}{\sigma_{down}}`,
-    desc: "Like Sharpe but penalises only downside volatility — closer to how an investor actually feels risk.",
+    formula: String.raw`S_o = \dfrac{252\cdot\overline{x_t}}{\sqrt{252}\cdot\sqrt{\tfrac{1}{T}\sum_t \min(x_t, 0)^2}},\quad x_t = r_t - r_{f,t}`,
+    desc: "Like Sharpe but penalises only downside volatility: the denominator is the downside deviation below the risk-free rate, averaged over all days (Sortino & Price), not the sd of the losing days alone.",
     range: "Usually higher than Sharpe. >1.0 is good, >2.0 is excellent. The Sortino/Sharpe gap reveals upside-skew."
   },
   "Max drawdown": {
@@ -4506,7 +4519,7 @@ const METRIC_INFO = {
   },
   "Calmar": {
     formula: String.raw`C = \dfrac{R_{ann}}{|\text{DD}_{max}|}`,
-    desc: "Annualised return divided by max drawdown — return per unit of worst-case pain.",
+    desc: "Annualised return divided by max drawdown over the same selected period — return per unit of worst-case pain. The textbook Calmar uses 36 months; on short periods it is noisy.",
     range: ">0.5 acceptable · >1.0 good · >2.0 exceptional. Penalises managers who run wild during crashes."
   },
   "Beta": {
@@ -4520,24 +4533,29 @@ const METRIC_INFO = {
     range: ">0.85 → portfolio is essentially the benchmark plus leverage. <0.4 → diversification/idiosyncratic exposure. <0.1 → unrelated."
   },
   "Tracking err": {
-    formula: String.raw`\mathrm{TE} = \sqrt{252}\cdot\sigma\!\left(r_p - r_m\right)`,
-    desc: "Annualised standard deviation of the portfolio’s return *minus* the benchmark’s — how far you wander from the benchmark.",
-    range: "Index funds <2%. Active managers 4–8% typical. Concentrated stock picks 10–20%+. Pair with information ratio."
+    formula: String.raw`\mathrm{TE} = \sqrt{252}\cdot\mathrm{sd}\!\left(r_{p,t} - r_{b,t}\right)`,
+    desc: "Annualised standard deviation of the portfolio’s daily return minus the benchmark’s — how far you wander from the benchmark.",
+    range: "Index funds <2%. Active managers 4–8% typical. Concentrated stock picks 10–20%+. Pair with the information ratio."
+  },
+  "Info ratio": {
+    formula: String.raw`IR = \dfrac{252\cdot\overline{(r_{p,t} - r_{b,t})}}{\mathrm{TE}}`,
+    desc: "Annualised active return (portfolio minus benchmark, arithmetic) per unit of tracking error — how efficiently the portfolio earns its difference from the benchmark.",
+    range: "Above 0.5 is good, above 1.0 exceptional and rarely sustained. Over one year it is noisy: a t-stat is roughly IR × √years."
   },
   /* --- Valuation & analyst (weighted) --- */
   "P/E (wtd)": {
-    formula: String.raw`PE_{port} = \dfrac{\sum_i w_i \cdot PE_i}{\sum_i w_i \;:\; PE_i \text{ defined}}`,
-    desc: "Portfolio-weighted trailing price-to-earnings. Names without an earnings figure (loss-makers, missing data) drop out of both numerator and denominator.",
+    formula: String.raw`PE_{port} = \dfrac{\sum_{i} w_i}{\sum_{i} w_i / PE_i},\quad PE_i > 0`,
+    desc: "Portfolio trailing price-to-earnings as a weighted HARMONIC mean — the look-through multiple: the weighted average earnings yield (E/P, which adds up), inverted. An arithmetic average of P/Es overweights the expensive names. Loss-makers and missing data drop out of both sums.",
     range: "S&P 500 average sits around 20–25. Above 30 is growth-tilt; below 15 is value-tilt. Heavily skewed by megacaps when cap-weighted."
   },
   "P/S (wtd)": {
-    formula: String.raw`PS_{port} = \dfrac{\sum_i w_i \cdot PS_i}{\sum_i w_i \;:\; PS_i \text{ defined}}`,
-    desc: "Portfolio-weighted price-to-sales. Useful when earnings are noisy or negative — sales are more stable across the cycle.",
+    formula: String.raw`PS_{port} = \dfrac{\sum_{i} w_i}{\sum_{i} w_i / PS_i}`,
+    desc: "Portfolio price-to-sales as a weighted harmonic mean (the look-through multiple). Useful when earnings are noisy or negative — sales are more stable across the cycle.",
     range: "Broad market ~2–3×. Tech / high-margin software often 8–15×. Above 20× is rare outside hyper-growth."
   },
   "EV/EBITDA (wtd)": {
-    formula: String.raw`\dfrac{\sum_i w_i \cdot (EV/EBITDA)_i}{\sum_i w_i \;:\; EV/EBITDA_i \text{ defined}}`,
-    desc: "Portfolio-weighted average EV/EBITDA across covered names. This is a weighted average of constituent multiples, not a reconstructed aggregate enterprise-value-to-aggregate-EBITDA ratio.",
+    formula: String.raw`\dfrac{\sum_{i} w_i}{\sum_{i} w_i \,/\, (EV/EBITDA)_i},\quad EBITDA_i > 0`,
+    desc: "Weighted harmonic mean of the holdings' EV/EBITDA — the average EBITDA yield, inverted. Names with negative EBITDA (not meaningful) or no figure drop out.",
     range: "Mature businesses 8–14×. Quality compounders 15–25×. Above 25× requires sustained growth to justify."
   },
   "Div yield (wtd)": {
@@ -4546,23 +4564,23 @@ const METRIC_INFO = {
     range: "S&P 500 ~1.3–1.8%. Income-tilted books 3–5%. Above 6% often signals stress or capital return at the expense of growth."
   },
   "Market cap (wtd avg)": {
-    formula: String.raw`MC_{port} = \sum_i w_i \cdot MC_i`,
-    desc: "Portfolio-weighted average market capitalisation. Useful as a quick read on how mega-cap-heavy a book really is.",
+    formula: String.raw`MC_{port} = \dfrac{\sum_i w_i \cdot MC_i}{\sum_i w_i},\quad MC_i \text{ in one currency}`,
+    desc: "Portfolio-weighted average market capitalisation, every cap converted to the display currency first (a yen cap is ~150× its dollar value). Useful as a quick read on how mega-cap-heavy a book really is.",
     range: "Equal-weighted S&P sits in the low tens of billions; cap-weighted is dragged into the hundreds of billions by the top 7 names."
   },
   "Analyst rating (1=SB, 5=SS)": {
     formula: String.raw`R_{port} = \dfrac{\sum_i w_i \cdot R_i}{\sum_i w_i \;:\; R_i \text{ defined}}`,
-    desc: "Mean sell-side analyst rating across covered names. Yahoo's 1–5 scale: 1 Strong Buy → 5 Strong Sell.",
+    desc: "Mean sell-side analyst rating across covered names, weighted by holding. Yahoo's 1–5 scale: 1 Strong Buy, 2 Buy, 3 Hold, 4 Underperform, 5 Sell.",
     range: "Most large caps cluster 1.8–2.4 (Buy). Below 1.5 is unusually bullish; above 3.0 leans bearish."
   },
   "Weighted target upside": {
     formula: String.raw`U_{port} = \dfrac{\sum_i w_i \cdot \left(\dfrac{TP_i}{P_i} - 1\right)}{\sum_i w_i \;:\; TP_i, P_i \text{ defined}}`,
-    desc: "Coverage-weighted average of analysts' 12-month price-target upside versus current price. Computed in each holding's local currency before weighting; uncovered names drop out of the denominator.",
+    desc: "Coverage-weighted average of analysts' 12-month price-target upside versus current price — a price return, dividends excluded. Computed in each holding's local currency before weighting; uncovered names drop out of the denominator.",
     range: "Single-digit positive is typical. >20% upside often reflects beaten-down names or aggressive growth assumptions."
   },
   "Analysts covering (sum)": {
     formula: String.raw`N = \sum_i n_i`,
-    desc: "Total count of unique analyst opinions across all covered holdings. A coverage-density gauge — high numbers mean the consensus is well-sampled.",
+    desc: "Sum of each holding's analyst count. Not unique analysts: one analyst covering two holdings counts twice. A coverage-density gauge — high numbers mean the consensus is well-sampled.",
     range: "Megacap names alone often have 30–50 analysts. A diverse 20-name book commonly clears 300+."
   },
   /* --- Concentration --- */
@@ -4582,8 +4600,8 @@ const METRIC_INFO = {
     range: "Equal-weight: N_eff equals the holding count. Cap-weighted megacap books often have N_eff of 3–6 even with 20+ holdings."
   },
   "Active holdings": {
-    formula: String.raw`|\{i : w_i > 0\}|`,
-    desc: "Number of positions with non-zero weight that have usable price history (i.e. survived the analytics download).",
+    formula: String.raw`|\{i : \text{price history available}\}|`,
+    desc: "Number of holdings with usable price history (i.e. that survived the analytics download), whatever their weight.",
     range: "Anything below your input count means some symbols were dropped — see 'Dropped (no history)' for the list."
   },
   "Dropped (no history)": {
@@ -4657,6 +4675,7 @@ function renderStatsHtml(a) {
     ["Beta", fmtNumOr(rel.beta, 2), ""],
     ["R²", fmtNumOr(rel.r2, 2), ""],
     ["Tracking err", fmtPctPlain(rel.te), ""],
+    ["Info ratio", fmtNumOr(rel.ir, 2), ""],
   ];
   const html = rows.map(([label, v, c, bv]) => `
     <div class="pf-stat-row" data-info="1" data-metric="${escapeHtml(label)}">
@@ -4728,7 +4747,8 @@ function quickAnalystPreview() {
     if (rowDist && typeof rowDist === "object") {
       const totVotes = (rowDist.strongBuy||0) + (rowDist.buy||0) + (rowDist.hold||0) + (rowDist.sell||0) + (rowDist.strongSell||0);
       if (totVotes > 0) {
-        for (const k of Object.keys(distSum)) distSum[k] += (rowDist[k] || 0) * weight;
+        // Each holding's share of votes x its weight (as analytics.py does).
+        for (const k of Object.keys(distSum)) distSum[k] += (rowDist[k] || 0) / totVotes * weight;
         distW += weight;
       }
     }
@@ -5135,7 +5155,7 @@ function renderValuationAnalystHtml(a) {
     ["P/S (wtd)", fmtNumOr(w.ps, 2)],
     ["EV/EBITDA (wtd)", fmtNumOr(w.ev_ebitda, 2)],
     ["Div yield (wtd)", w.div_yield == null ? "—" : fmtPctFrac(w.div_yield)],
-    ["Market cap (wtd avg)", fmtCapBig(w.market_cap)],
+    ["Market cap (wtd avg)", w.market_cap_ccy ? fmtCompactMoney(w.market_cap, w.market_cap_ccy) : "—"],
     ["Analyst rating (1=SB, 5=SS)", fmtNumOr(an.mean_rating, 2)],
     ["Weighted target upside", fmtPctSigned(an.weighted_target_upside_pct), an.weighted_target_upside_pct == null ? "" : (an.weighted_target_upside_pct >= 0 ? "pos" : "neg")],
     ["Analysts covering (sum)", an.n_analysts_total != null ? an.n_analysts_total : "—"],
@@ -5172,7 +5192,7 @@ function renderContribHtml(a) {
   const list = a.contribution || [];
   if (!list.length) return `<div class="pf-empty" style="padding:6px 0;">No contribution data</div>`;
   return `<table class="pf-contrib-table">
-    <thead><tr><th>Symbol</th><th>Weight</th><th>${escapeHtml(STATE.period)} return</th><th>Contribution</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>Weight</th><th>${escapeHtml(STATE.period)} return</th><th title="Percentage points of the portfolio's period return, from the daily-rebalanced portfolio with Carino log-linking, so the column adds up to the period return exactly">Contribution</th></tr></thead>
     <tbody>${list.map(c => `<tr>
       <td title="${escapeHtml(c.name || c.symbol)}">${escapeHtml(c.symbol)} <span style="color:var(--muted)">${escapeHtml(c.sector || "")}</span></td>
       <td>${(c.weight*100).toFixed(2)}%</td>
@@ -5285,8 +5305,16 @@ function drawPortfolioChart(a, hostEl, legendEl) {
  * --------------------------------------------------------------------------- */
 let WEIGHTS_DRAFT = null;  // [{symbol, name, weight (0-1), locked}]
 
+/* Cap weights on USD market caps. Raw caps are in each listing's currency, so
+   a yen-quoted cap (~150x its dollar value) would dominate the book. Rows
+   cached before `market_cap_usd` existed are converted with the FX rates
+   the page already holds; a cap with no rate at all counts as missing. */
 function capWeightsOf(rows) {
-  const caps = rows.map(r => Math.max(0, Number(r.market_cap) || 0));
+  const caps = rows.map(r => {
+    const usd = (r.market_cap_usd != null && isFinite(r.market_cap_usd)) ? Number(r.market_cap_usd)
+      : toUsd(r.market_cap, r.currency);
+    return Math.max(0, Number(usd) || 0);
+  });
   const total = caps.reduce((a, b) => a + b, 0);
   if (total > 0) return Object.fromEntries(rows.map((r, i) => [r.symbol, caps[i] / total]));
   return Object.fromEntries(rows.map(r => [r.symbol, 1 / Math.max(1, rows.length)]));
@@ -7366,7 +7394,7 @@ function trackVerdictCard(title, eng, explain, portfolioCov) {
   const ic = (eng && eng.ic && eng.ic[`${eng.horizon_days}d`]) || {};
   const days = ic.n_days || 0;
   const hr = (eng && eng.hit_rate && eng.hit_rate.all) || {};
-  const hrTxt = hr.n ? `${nsPct(hr.rate)} <span class="ns-muted">(${hr.k}/${hr.n}; 95% CI ${nsPct(hr.lo)}–${nsPct(hr.hi)})</span>` : `<span class="ns-muted">no matured calls yet</span>`;
+  const hrTxt = hr.n ? `${nsPct(hr.rate)} <span class="ns-muted" title="95% Wilson interval on the date-clustered effective sample${hr.n_eff != null ? ` (≈${hr.n_eff} independent calls)` : ""}">(${hr.k}/${hr.n}; 95% CI ${nsPct(hr.lo)}–${nsPct(hr.hi)})</span>` : `<span class="ns-muted">no matured calls yet</span>`;
   const cov = (eng && eng.coverage) || {};
   return `<div class="ns-tr-card ns-tr-${v.key}">
     <div class="ns-tr-title">${title}</div>
@@ -7447,7 +7475,7 @@ function renderTrackRecord(d) {
   parts.push(`<div class="ns-diag-sec"><h5>News read hit rate by lens (5-day)</h5>
     ${lensBars.some(b => b.value != null) ? svgBars(lensBars, { h: 170, vmin: 0, vmax: 100, base: 50, fmt: v => v.toFixed(0) + "%" })
       : '<div class="ns-panel-empty">No lens call has a matured 5-day return yet.</div>'}
-    <div class="ns-diag-note">Share of bullish lens calls followed by a positive 5-day market-neutral return (and bearish by a negative one), with 95% Wilson intervals. The baseline is 50%.</div></div>`);
+    <div class="ns-diag-note">Share of bullish lens calls followed by a positive 5-day market-neutral return (and bearish by a negative one), with 95% Wilson intervals on the date-clustered effective sample (same-day calls are not independent). The baseline is 50%.</div></div>`);
 
   const cons = (d.news || {}).consistency || {};
   parts.push(`<div class="ns-diag-sec"><h5>Consistency</h5>
@@ -7691,7 +7719,7 @@ function methodologyHtml() {
         <ul>
           <li>Ground truth is each stock's own next-day move after the news, net of the market and divided by its normal volatility (the standardized abnormal return, SAR).</li>
           <li>An encoder (gradient-boosted trees on word and phrase counts, a finance dictionary and ~16 event flags) predicts each headline's SAR. The ticker's score is the recency × source × novelty × relevance weighted mean over its last 7 days.</li>
-          <li>The score is placed as a <b>percentile</b>: against the app's own last 90 days of Market reads once it has 200 of them, and against the Jul–Sep 2023 backtest until then. Every card says which.</li>
+          <li>The score is placed as a <b>percentile</b>: against the app's own last 90 days of Market reads once it has 200 of them; until then against the same model's last 90 days over the S&amp;P 500 (the reference data, refreshed daily); and only without either, against the Jul–Sep 2023 backtest. Every card says which.</li>
           <li>Only the tails speak: ≤ 5th percentile very bearish, ≤ 15th bearish, ≥ 85th bullish, ≥ 95th very bullish. The middle 70% is <b>No edge</b>.</li>
         </ul>
       </section>

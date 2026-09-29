@@ -178,6 +178,14 @@ def _today():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _tomorrow():
+    """A pack date newer than the installed one (published with _today()).
+    A fixed date here turned into a time bomb on the day it was reached."""
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 @pytest.fixture()
 def stub(monkeypatch):
     s = _Stub()
@@ -269,7 +277,7 @@ def test_bad_hash_fails_and_keeps_previous(stub, tmp_path):
     def mutate(s):
         s.files[rp.ANCHOR] = rp.gzip_json(_anchor(251))
         m = json.loads(s.files[rp.MANIFEST])
-        m["date"] = "2026-09-29"
+        m["date"] = _tomorrow()
         m["files"][rp.ANCHOR]["bytes"] = len(s.files[rp.ANCHOR])
         s.files[rp.MANIFEST] = json.dumps(m).encode()
 
@@ -281,7 +289,7 @@ def _serve_oversize(s, monkeypatch):
     monkeypatch.setattr(rp, "MAX_FILE_BYTES", 400)
     s.files[rp.ANCHOR] = os.urandom(5000)
     m = json.loads(s.files[rp.MANIFEST])
-    m["date"] = "2026-09-29"
+    m["date"] = _tomorrow()
     m["files"][rp.ANCHOR]["bytes"] = 300
     s.files[rp.MANIFEST] = json.dumps(m).encode()
 
@@ -345,7 +353,7 @@ def test_truncated_gzip_fails(stub, tmp_path):
 def test_truncated_transfer_fails(stub, tmp_path):
     def mutate(s):
         s.lie_length[rp.HISTORY] = len(s.files[rp.HISTORY]) + 100
-        _new_manifest(s, date="2026-09-29")
+        _new_manifest(s, date=_tomorrow())
 
     _fails_and_keeps_previous(stub, tmp_path, mutate, "truncated|network")
 

@@ -7,6 +7,20 @@ when merging a PR and add a line here.
 
 ## Unreleased
 
+Metrics audit (`distribution` branch): every formula, unit and explanation checked against corporate-finance and quant conventions and against live Yahoo data (details in `docs/METRICS_AUDIT.md`).
+
+- **D/E is a percentage** and now says so: "78.4%", with the formula × 100% (Yahoo's figure; 100% means debt equals equity).
+- **Foreign listings are right.** For ADRs and London names that report in another currency (TSM, TM, BABA, NVO, SHEL.L…), EV/EBITDA, EV/Revenue, P/S, P/B and FCF yield are recomputed in one currency — Yahoo's own figures mixed dollars with yen or Taiwan dollars (Toyota's ADR showed P/B 15.3 instead of 0.9). London market caps are no longer shown 100× too small, and revenue and free cash flow in the detail view are converted from the currency they are reported in.
+- **Cap-weighting across currencies** uses dollar market caps: a Tokyo-listed name no longer swamps the portfolio because its cap is quoted in yen. The same applies to the size buckets, the average market cap, the optimiser's market prior and the Excel export.
+- **Dividend yields** under 1% and on London listings are right (Yahoo reports them in percent).
+- **YTD and every period return** now start from the previous close (YTD from the end of last year), so the first day's move is no longer missed.
+- **Sharpe and Sortino** subtract the risk-free rate (the 13-week T-bill in USD; 0 for other currencies, as stated in the tooltip). New: the **information ratio** against the selected benchmark.
+- **Portfolio P/E, P/S and EV/EBITDA** are look-through (weighted harmonic) multiples, the index-provider convention; negative multiples show n/a instead of looking cheapest; the P/E column no longer slips in a forward P/E for loss-makers.
+- **Contribution to return** now adds up to the portfolio's return exactly; the analyst rating mix weights each holding's share of ratings, not its analyst count.
+- Optimiser: analyst views include the dividend yield (a price target is a price return), and the Ledoit-Wolf covariance shrinkage uses the full published estimator.
+- Track record hit-rate intervals account for same-day calls not being independent.
+- Tooltips, the Guide, the optimiser Guide and the Excel headers corrected where they described a different calculation (forward P/E, growth rates, beta, 52-week range, units).
+
 Roadmap Phase 8 (`distribution` branch): the reference pack.
 
 - The S&P 500 constituent list ships with the app (`src/convexity/data/sp500.json`, source and date recorded in the file) as the fixed universe of the daily reference pack. Public index membership only.

@@ -98,16 +98,57 @@ def clustered_mean_t(series: list[float], horizon: int = 1) -> dict:
     return {"mean": mu, "t": t, "n_days": n}
 
 
+def _wilson_bounds(p: float, n: float, z: float) -> tuple[float, float]:
+    den = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / den
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
 def wilson(k: int, n: int, z: float = 1.96) -> dict:
     """Hit rate with its Wilson 95% interval (well-behaved at small n, unlike
     the normal approximation that goes below 0 on 2 hits out of 3)."""
     if n <= 0:
         return {"k": 0, "n": 0, "rate": None, "lo": None, "hi": None}
     p = k / n
-    den = 1 + z * z / n
-    centre = (p + z * z / (2 * n)) / den
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
-    return {"k": k, "n": n, "rate": p, "lo": max(0.0, centre - half), "hi": min(1.0, centre + half)}
+    lo, hi = _wilson_bounds(p, n, z)
+    return {"k": k, "n": n, "rate": p, "lo": lo, "hi": hi}
+
+
+def wilson_clustered(calls: list[tuple[str, bool]], z: float = 1.96) -> dict:
+    """Hit rate over (date, hit) calls, with a Wilson interval on the
+    date-clustered EFFECTIVE sample size.
+
+    Calls made on the same day share that day's market and are not
+    independent draws — the reason every IC in this module is date-clustered.
+    The plain Wilson interval over n ticker-days would be too narrow by the
+    same mechanism. Here the variance of the hit rate is the cluster-robust
+    one, Σ_d (k_d − p·n_d)² / n² × G/(G−1) over G dates; the design effect
+    deff = var_clustered / (p(1−p)/n), floored at 1, turns n into
+    n_eff = n / deff, and the Wilson bounds use n_eff (Korn & Graubard 1998).
+    With calls from a single date there is one independent observation.
+    """
+    n = len(calls)
+    if n == 0:
+        return {"k": 0, "n": 0, "rate": None, "lo": None, "hi": None, "n_eff": 0.0}
+    k = sum(1 for _, hit in calls if hit)
+    p = k / n
+    by_date: dict[str, list[int]] = {}
+    for d, hit in calls:
+        kd = by_date.setdefault(d, [0, 0])
+        kd[0] += int(bool(hit))
+        kd[1] += 1
+    g = len(by_date)
+    var_iid = p * (1 - p) / n
+    if g < 2:
+        n_eff = 1.0
+    elif var_iid <= 0:
+        n_eff = float(n)  # all hits or all misses: no spread to cluster
+    else:
+        var_cl = sum((kd - p * nd) ** 2 for kd, nd in by_date.values()) / (n * n) * g / (g - 1)
+        n_eff = n / max(1.0, var_cl / var_iid)
+    lo, hi = _wilson_bounds(p, n_eff, z)
+    return {"k": k, "n": n, "rate": p, "lo": lo, "hi": hi, "n_eff": round(n_eff, 1)}
 
 
 def verdict(ic: dict) -> dict:
@@ -175,20 +216,23 @@ def long_short(rows: list[dict], tier_key: str, horizon: int = 1) -> list[dict]:
 
 def hit_rates(rows: list[dict], tier_of) -> dict:
     """Bullish calls followed by a positive 5d idio return, bearish calls by a
-    negative one; each with a Wilson interval."""
-    bk = bn = sk = sn = 0
+    negative one; each with a date-clustered Wilson interval."""
+    bull: list[tuple[str, bool]] = []
+    bear: list[tuple[str, bool]] = []
     for r in rows:
         f = r.get("fwd_5d")
         t = tier_of(r)
         if not isinstance(f, (int, float)) or t is None:
             continue
         if t in _BULL:
-            bn += 1
-            bk += f > 0
+            bull.append((r.get("date") or "", f > 0))
         elif t in _BEAR:
-            sn += 1
-            sk += f < 0
-    return {"bullish": wilson(bk, bn), "bearish": wilson(sk, sn), "all": wilson(bk + sk, bn + sn)}
+            bear.append((r.get("date") or "", f < 0))
+    return {
+        "bullish": wilson_clustered(bull),
+        "bearish": wilson_clustered(bear),
+        "all": wilson_clustered(bull + bear),
+    }
 
 
 def _news_tier(score: float | None) -> str | None:

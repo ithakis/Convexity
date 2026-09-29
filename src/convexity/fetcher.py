@@ -28,7 +28,10 @@ from convexity.helpers import (
     _safe_num,
     _series_to_points,
     _ytd_change,
+    major_ccy,
+    price_in_major,
 )
+from convexity.fx import convert_amount, usd_per_unit
 from convexity.resolver import _ordered_resolve
 
 try:
@@ -79,6 +82,81 @@ def _safe_info(tk: yf.Ticker) -> dict:
     except Exception:
         pass
     return info
+
+
+def _market_cap(info: dict, currency: str) -> float | None:
+    """Market cap in the MAJOR unit of the listing currency.
+
+    Yahoo's ``marketCap`` is already in the major unit (SHEL.L: GBP, not GBp).
+    The ``fast_info`` fallback ``_safe_info`` copies in when it is missing is
+    shares x last price, i.e. in the QUOTE unit — pence for an LSE name — so it
+    is scaled like a price."""
+    mc = _safe_num(info.get("marketCap"))
+    if mc is not None:
+        return mc
+    return price_in_major(info.get("market_cap"), currency)
+
+
+def _positive(v) -> float | None:
+    """A valuation multiple, or None when it is not meaningful.
+
+    A negative P/E, EV/EBITDA or PEG (losses, negative EBITDA, shrinking
+    earnings) is reported as "NM" by convention: it is not cheap, and a heat
+    ramp that favours low values would otherwise colour it as the best on
+    screen."""
+    x = _safe_num(v)
+    return x if (x is not None and x > 0) else None
+
+
+def _currency_consistent(info: dict, out: dict, currency: str) -> None:
+    """Fill the fields that combine a market price with the financial statements.
+
+    Most listings report in their trading currency. Those that do not — ADRs
+    (TSM reports in TWD, TM in JPY, BABA in CNY, NVO in DKK) and London names
+    reporting in USD (SHEL.L) — get multiples from Yahoo that divide a
+    trading-currency market cap by home-currency statements. Verified on
+    2026-09-29: TM's EV/EBITDA 6.3 and P/B 15.3 against 11.9 and 0.91 for the
+    same company's Tokyo line (7203.T); TSM's EV/EBITDA 5.2 against ~23.
+
+    For those listings the multiples are rebuilt from their components with
+    the market cap converted into the statement currency (fx.usd_per_unit —
+    cache first, one FX download at most per currency per few hours):
+
+        EV = MC + Total Debt - Total Cash            (statement currency)
+        EV/EBITDA = EV / EBITDA,  EV/Revenue = EV / Revenue,  P/S = MC / Revenue
+        P/B = MC / Equity,  Equity = Total Debt / (D/E / 100)
+
+    and set to None when no rate is available rather than shown wrong. The
+    trailing P/E, forward P/E and PEG are per-share ratios Yahoo computes in
+    one currency and are kept. FCF yield and the USD market cap (the common
+    unit for cap-weighting and size buckets across currencies) are computed
+    here for every row.
+    """
+    trade = major_ccy(currency)
+    fin = major_ccy(info.get("financialCurrency") or currency)
+    out["financial_currency"] = fin
+    mcap = _market_cap(info, currency)
+    usd = usd_per_unit(trade) if mcap else None
+    out["market_cap_usd"] = mcap * usd if (mcap and usd) else None
+    if fin == trade:
+        mcap_fin = mcap
+    else:
+        mcap_fin = convert_amount(mcap, trade, fin) if mcap else None
+        rev = _safe_num(info.get("totalRevenue"))
+        ebitda = _safe_num(info.get("ebitda"))
+        debt = _safe_num(info.get("totalDebt"))
+        cash = _safe_num(info.get("totalCash"))
+        ev = None
+        if mcap_fin is not None and debt is not None and cash is not None:
+            ev = mcap_fin + debt - cash
+        out["ev_ebitda"] = _positive(ev / ebitda) if (ev is not None and ebitda) else None
+        out["ev_revenue"] = _positive(ev / rev) if (ev is not None and rev) else None
+        out["ps_ratio"] = _positive(mcap_fin / rev) if (mcap_fin and rev) else None
+        de = _safe_num(info.get("debtToEquity"))
+        equity = debt / (de / 100.0) if (debt and de and de > 0) else None
+        out["price_book"] = _positive(mcap_fin / equity) if (mcap_fin and equity) else None
+    fcf = _safe_num(info.get("freeCashflow"))
+    out["fcf_yield"] = (fcf / mcap_fin) if (fcf is not None and mcap_fin) else None
 
 
 def _earnings_surprise_yf(tk: yf.Ticker, symbol: str) -> list[dict] | None:
@@ -204,29 +282,26 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
 
             info = _safe_info(tk)
             out["name"] = info.get("longName") or info.get("shortName") or symbol
-            out["market_cap"] = info.get("marketCap") or info.get("market_cap")
             out["currency"] = info.get("currency") or "USD"
+            out["market_cap"] = _market_cap(info, out["currency"])
             out["exchange"] = info.get("exchange") or info.get("fullExchangeName") or ""
             out["sector"] = info.get("sector") or ""
             out["industry"] = info.get("industry") or ""
             out["quote_type"] = (info.get("quoteType") or "").upper()
             out["website"] = info.get("website") or ""
 
-            ps = info.get("priceToSalesTrailing12Months")
-            try:
-                out["ps_ratio"] = float(ps) if ps not in (None, "") else None
-            except (TypeError, ValueError):
-                out["ps_ratio"] = None
-            pe = info.get("trailingPE") or info.get("forwardPE")
-            try:
-                out["pe_ratio"] = float(pe) if pe not in (None, "") and float(pe) > 0 else None
-            except (TypeError, ValueError):
-                out["pe_ratio"] = None
+            out["ps_ratio"] = _positive(info.get("priceToSalesTrailing12Months"))
+            # Trailing only. The old `trailingPE or forwardPE` put a FORWARD
+            # multiple in the trailing column whenever trailing EPS was
+            # negative (Yahoo then omits trailingPE) — exactly the loss-makers
+            # where the two differ most. Loss-makers are n/a here, as P/E is
+            # not meaningful for them; the Fwd P/E column still has theirs.
+            out["pe_ratio"] = _positive(info.get("trailingPE"))
 
-            out["forward_pe"] = _safe_num(info.get("forwardPE"))
-            out["peg"] = _safe_num(info.get("pegRatio") or info.get("trailingPegRatio"))
-            out["ev_ebitda"] = _safe_num(info.get("enterpriseToEbitda"))
-            out["ev_revenue"] = _safe_num(info.get("enterpriseToRevenue"))
+            out["forward_pe"] = _positive(info.get("forwardPE"))
+            out["peg"] = _positive(info.get("pegRatio") or info.get("trailingPegRatio"))
+            out["ev_ebitda"] = _positive(info.get("enterpriseToEbitda"))
+            out["ev_revenue"] = _positive(info.get("enterpriseToRevenue"))
             out["beta"] = _safe_num(info.get("beta"))
             out["dividend_yield"] = _normalize_dividend_yield(
                 info.get("dividendYield"),
@@ -234,34 +309,37 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
                 dividend_rate=info.get("dividendRate"),
                 trailing_yield=info.get("trailingAnnualDividendYield"),
                 trailing_rate=info.get("trailingAnnualDividendRate"),
+                currency=out["currency"],
+                financial_currency=info.get("financialCurrency"),
             )
             out["operating_margin"] = _safe_num(info.get("operatingMargins"))
+            # Yahoo reports debtToEquity in PERCENT (AAPL 78.4 = total debt is
+            # 0.78x equity); kept in that unit and shown with a % sign.
             out["debt_equity"] = _safe_num(info.get("debtToEquity"))
             out["current_ratio"] = _safe_num(info.get("currentRatio"))
             # Extended fundamentals (all straight from the same info dict —
             # zero extra network cost on the streaming path). Margins/growth/
             # returns come back as fractions (0.42 = 42%); the frontend
             # formats them, never re-detects units.
-            out["price_book"] = _safe_num(info.get("priceToBook"))
+            out["price_book"] = _positive(info.get("priceToBook"))
             out["roe"] = _safe_num(info.get("returnOnEquity"))
             out["roa"] = _safe_num(info.get("returnOnAssets"))
             out["gross_margin"] = _safe_num(info.get("grossMargins"))
             out["profit_margin"] = _safe_num(info.get("profitMargins"))
             out["revenue_growth"] = _safe_num(info.get("revenueGrowth"))
-            # Prefer annual earningsGrowth; fall back to quarterly ONLY when
-            # annual is truly absent — `or` would wrongly discard a legitimate
-            # 0.0 (flat YoY) and substitute the quarterly figure instead.
+            # Both Yahoo fields are year-over-year growth of the most recent
+            # quarter (earningsGrowth: EPS, earningsQuarterlyGrowth: net
+            # income). The first is preferred; the second only when it is
+            # truly absent — `or` would discard a legitimate 0.0.
             _eg = info.get("earningsGrowth")
             if _eg is None:
                 _eg = info.get("earningsQuarterlyGrowth")
             out["earnings_growth"] = _safe_num(_eg)
             out["quick_ratio"] = _safe_num(info.get("quickRatio"))
             out["payout_ratio"] = _safe_num(info.get("payoutRatio"))
-            # FCF yield = free cash flow / market cap, both from info. Only
-            # computed when both legs are present and positive-denominator.
-            fcf = _safe_num(info.get("freeCashflow"))
-            mcap = _safe_num(out.get("market_cap"))
-            out["fcf_yield"] = (fcf / mcap) if (fcf is not None and mcap) else None
+            # FCF yield, USD market cap, and the multiples Yahoo gets wrong
+            # for listings whose statements are in another currency.
+            _currency_consistent(info, out, out["currency"])
             out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
             out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
             out["rec_key"] = (info.get("recommendationKey") or "").strip().lower() or None
@@ -630,10 +708,12 @@ def _latest_statement_value(df: pd.DataFrame | None, labels: list[str]) -> float
 
 
 def _ttm_statement_value(df: pd.DataFrame | None, labels: list[str]) -> float | None:
+    """Sum of the last four quarters, or None with fewer: one quarter is not a
+    twelve-month figure (it would put a quarterly profit over annual equity)."""
     vals = _statement_values(df, labels)
     if len(vals) >= 4:
         return float(sum(vals[:4]))
-    return vals[0] if vals else None
+    return None
 
 
 def fetch_detail(symbol: str) -> dict:
@@ -703,17 +783,28 @@ def fetch_detail(symbol: str) -> dict:
     out["employees"] = _safe_num(info.get("fullTimeEmployees"))
     out["quote_type"] = (info.get("quoteType") or "").upper()
 
-    out["market_cap"] = _safe_num(info.get("marketCap") or info.get("market_cap"))
+    out["market_cap"] = _market_cap(info, out["currency"])
     out["shares"] = _safe_num(info.get("sharesOutstanding"))
     out["float_shares"] = _safe_num(info.get("floatShares"))
 
-    out["pe"] = _safe_num(info.get("trailingPE"))
-    out["forward_pe"] = _safe_num(info.get("forwardPE"))
-    out["ps"] = _safe_num(info.get("priceToSalesTrailing12Months"))
-    out["pb"] = _safe_num(info.get("priceToBook"))
-    out["peg"] = _safe_num(info.get("pegRatio") or info.get("trailingPegRatio"))
-    out["ev_ebitda"] = _safe_num(info.get("enterpriseToEbitda"))
-    out["ev_revenue"] = _safe_num(info.get("enterpriseToRevenue"))
+    out["pe"] = _positive(info.get("trailingPE"))
+    out["forward_pe"] = _positive(info.get("forwardPE"))
+    out["ps"] = _positive(info.get("priceToSalesTrailing12Months"))
+    out["pb"] = _positive(info.get("priceToBook"))
+    out["peg"] = _positive(info.get("pegRatio") or info.get("trailingPegRatio"))
+    out["ev_ebitda"] = _positive(info.get("enterpriseToEbitda"))
+    out["ev_revenue"] = _positive(info.get("enterpriseToRevenue"))
+    # Same currency repair as the table row (ADRs, LSE names reporting in USD);
+    # it writes the row-style keys, mapped back onto the detail ones here.
+    fixed = {"ps_ratio": out["ps"], "price_book": out["pb"]}
+    _currency_consistent(info, fixed, out["currency"])
+    out["ps"], out["pb"] = fixed["ps_ratio"], fixed["price_book"]
+    for k in ("ev_ebitda", "ev_revenue"):
+        if k in fixed:
+            out[k] = fixed[k]
+    out["financial_currency"] = fixed["financial_currency"]
+    out["market_cap_usd"] = fixed["market_cap_usd"]
+    out["fcf_yield"] = fixed["fcf_yield"]
 
     out["beta"] = _safe_num(info.get("beta"))
     out["dividend_yield"] = _normalize_dividend_yield(
@@ -725,6 +816,8 @@ def fetch_detail(symbol: str) -> dict:
         dividend_rate=info.get("dividendRate"),
         trailing_yield=info.get("trailingAnnualDividendYield"),
         trailing_rate=info.get("trailingAnnualDividendRate"),
+        currency=out["currency"],
+        financial_currency=info.get("financialCurrency"),
     )
     out["dividend_rate"] = _safe_num(info.get("dividendRate"))
     out["payout_ratio"] = _safe_num(info.get("payoutRatio"))
@@ -783,30 +876,38 @@ def fetch_detail(symbol: str) -> dict:
             "Net Income Continuous Operations",
         ]
 
-        equity = _latest_statement_value(balance_sheet, equity_labels)
+        # Balance-sheet items from the most recent quarter first (Yahoo's own
+        # D/E is "mrq"), the last annual report only when that is missing.
+        equity = _latest_statement_value(quarterly_balance_sheet, equity_labels)
         if equity is None:
-            equity = _latest_statement_value(quarterly_balance_sheet, equity_labels)
+            equity = _latest_statement_value(balance_sheet, equity_labels)
 
-        debt = _latest_statement_value(balance_sheet, debt_labels)
+        debt = _latest_statement_value(quarterly_balance_sheet, debt_labels)
         if debt is None:
-            debt = _latest_statement_value(quarterly_balance_sheet, debt_labels)
+            debt = _latest_statement_value(balance_sheet, debt_labels)
         if debt is None:
-            current_debt = _latest_statement_value(balance_sheet, current_debt_labels)
-            long_debt = _latest_statement_value(balance_sheet, long_debt_labels)
+            current_debt = _latest_statement_value(quarterly_balance_sheet, current_debt_labels)
+            long_debt = _latest_statement_value(quarterly_balance_sheet, long_debt_labels)
             if current_debt is None:
-                current_debt = _latest_statement_value(quarterly_balance_sheet, current_debt_labels)
+                current_debt = _latest_statement_value(balance_sheet, current_debt_labels)
             if long_debt is None:
-                long_debt = _latest_statement_value(quarterly_balance_sheet, long_debt_labels)
+                long_debt = _latest_statement_value(balance_sheet, long_debt_labels)
             if current_debt is not None or long_debt is not None:
                 debt = float((current_debt or 0.0) + (long_debt or 0.0))
 
-        net_income = _latest_statement_value(income_stmt, net_income_labels)
+        # Trailing twelve months (sum of the last four quarters), like Yahoo's
+        # returnOnEquity; the last fiscal year only when quarters are missing.
+        net_income = _ttm_statement_value(quarterly_income_stmt, net_income_labels)
         if net_income is None:
-            net_income = _ttm_statement_value(quarterly_income_stmt, net_income_labels)
+            net_income = _latest_statement_value(income_stmt, net_income_labels)
 
-        if out["roe"] is None and equity not in (None, 0) and net_income is not None:
+        # Negative equity makes both ratios meaningless (a loss-maker would
+        # show a positive ROE, a levered one a negative D/E): n/a, as Yahoo
+        # itself does.
+        if out["roe"] is None and equity is not None and equity > 0 and net_income is not None:
             out["roe"] = float(net_income / equity)
-        if out["debt_equity"] is None and equity not in (None, 0) and debt is not None:
+        if out["debt_equity"] is None and equity is not None and equity > 0 and debt is not None:
+            # Percent, the unit of Yahoo's debtToEquity (78.4 = 0.784x).
             out["debt_equity"] = float((debt / equity) * 100.0)
 
     out["yf_52w_change"] = _safe_num(info.get("52WeekChange") or info.get("fiftyTwoWeekChange"))
@@ -908,29 +1009,11 @@ def fetch_detail(symbol: str) -> dict:
     for label, days in horizons.items():
         if label == "ytd":
             if not close.empty:
-                year_start = pd.Timestamp(
-                    year=close.index[-1].year, month=1, day=1, tz=close.index.tz
-                )
-                s_w = close[close.index >= year_start]
-                s_pct = float((s_w.iloc[-1] / s_w.iloc[0] - 1.0) * 100.0) if len(s_w) >= 2 else None
+                s_pct = _ytd_change(close)
             else:
                 s_pct = None
-            if spy_close is not None and not spy_close.empty:
-                ys = pd.Timestamp(
-                    year=spy_close.index[-1].year, month=1, day=1, tz=spy_close.index.tz
-                )
-                b_w = spy_close[spy_close.index >= ys]
-                b_pct = float((b_w.iloc[-1] / b_w.iloc[0] - 1.0) * 100.0) if len(b_w) >= 2 else None
-            else:
-                b_pct = None
-            if sector_close is not None and not sector_close.empty:
-                ys = pd.Timestamp(
-                    year=sector_close.index[-1].year, month=1, day=1, tz=sector_close.index.tz
-                )
-                k_w = sector_close[sector_close.index >= ys]
-                k_pct = float((k_w.iloc[-1] / k_w.iloc[0] - 1.0) * 100.0) if len(k_w) >= 2 else None
-            else:
-                k_pct = None
+            b_pct = _ytd_change(spy_close) if spy_close is not None else None
+            k_pct = _ytd_change(sector_close) if sector_close is not None else None
         else:
             s_pct, b_pct = _aligned_pct(close, spy_close if spy_close is not None else close, days)
             _, k_pct = (

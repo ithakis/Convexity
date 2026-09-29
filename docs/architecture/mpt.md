@@ -115,14 +115,24 @@ at the next chunk boundary.
   total returns. Prior **Π = δ·Σ·w_mkt** (reverse optimization). δ calibrated from a
   target market risk premium / market variance (`risk_premium / (w_mktᵀΣw_mkt)`,
   clamped, default fallback ~2.5). `w_mkt` = market-cap weights — **caps are
-  FX-normalized to USD in frontier.py** first (yfinance reports marketCap in native
-  currency; a ¥ cap is ~150× a $ cap numerically and would swamp the prior).
+  FX-normalized to USD** first (`frontier._market_cap_weights` →
+  `analytics._market_cap_usd`, the same conversion the app's cap-weighting uses;
+  yfinance reports marketCap in native currency and a ¥ cap is ~150× a $ cap
+  numerically). A cap with no FX rate counts as 0, never at the wrong scale.
 - Views: P = identity rows for assets with a valid analyst target;
-  q_i = target/price − 1 − rf. Ω diagonal, per-asset confidence from analyst count
+  q_i = target/price − 1 + dy_i − rf. The forward dividend yield dy_i (row
+  `dividend_yield`) is added since 2026-09-29: a price target is a price, while
+  Π is a total-return premium, so without it every payer's view was too low by
+  its yield. Ω diagonal, per-asset confidence from analyst count
   (`n/(n+k0)`) × dispersion (`1/(1+((hi-lo)/tgt)/d0)`). The **analyst-trust haircut**
   H ∈ [0,1] scales Ω by `(1-H)/H`: H→0 ⇒ Ω→∞ ⇒ posterior→prior; H→1 ⇒ Ω→0 ⇒
   posterior→views. Posterior μ_BL = Π + τΣPᵀ(PτΣPᵀ+Ω)⁻¹(Q−PΠ), k×k inverse (k≤N).
 - Posterior covariance is **not** used for risk — risk is empirical CVaR.
+- **Ledoit-Wolf** (`ledoit_wolf_shrink`) is the full 2004 constant-correlation
+  estimator: δ = max(0, min(1, (π − ρ)/γ / T)). Before 2026-09-29 the ρ term
+  (the target's own estimation noise) was left out, which overstated δ.
+  `tests/test_finance_math.py` checks it against a line-by-line transcription of
+  the authors' `covCor.m`.
 
 ### Mean-CVaR frontier (risk engine)
 - Scenarios = **daily** FX-adjusted returns (~750/3Y). CVaR_α is optimized in daily

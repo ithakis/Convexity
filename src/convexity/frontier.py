@@ -19,14 +19,9 @@ import time
 import numpy as np
 
 from convexity import mpt
-from convexity.analytics import _analyst_for, _bulk_close
+from convexity.analytics import _analyst_for, _bulk_close, _market_cap_usd
 from convexity.cache import _cache_get, _cache_put
-from convexity.fx import (
-    _apply_fx_to_closes,
-    _fx_latest_close,
-    _norm_ccy_for_fx,
-    fx_rates,
-)
+from convexity.fx import _apply_fx_to_closes, _norm_ccy_for_fx
 from convexity.helpers import _dedupe_rows_by_symbol
 
 _MPT_LOOKBACK_YF = {"1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}
@@ -109,54 +104,21 @@ def _risk_free_history(ccy: str, lookback: str) -> dict:
     return out
 
 
-def _usd_per_unit(ccy: str, rates: dict) -> float | None:
-    """USD value of one unit of ``ccy`` (for FX-normalising market caps).
-
-    ``rates`` is fx_rates("USD")["rates"] = {ccy: units-of-ccy per 1 USD}. So the
-    USD value of 1 unit of ccy is 1/rates[ccy]. Falls back to a direct
-    ccyUSD=X spot for currencies outside the majors basket.
-    """
-    ccy = _norm_ccy_for_fx(ccy)
-    if ccy == "USD":
-        return 1.0
-    r = rates.get(ccy)
-    if r and r > 0:
-        return 1.0 / float(r)
-    return _fx_latest_close(ccy, "USD")
-
-
 def _market_cap_weights(active: list[str], by_sym: dict) -> dict[str, float]:
-    """Market-cap weights, FX-normalised to a common currency (USD).
+    """Market caps in USD, the BL equilibrium weights (renormalised there).
 
-    yfinance reports marketCap in each security's native listing currency, so raw
-    caps are numerically incomparable across currencies (a ¥ cap is ~150× a $ cap
-    for the same value). Convert every cap to USD before weighting, else the BL
-    equilibrium prior is dominated by whichever assets happen to quote in a
-    small-unit currency.
+    yfinance reports marketCap in each security's own currency, so raw caps
+    are incomparable (a yen cap is ~150x its dollar value) and the prior would
+    be dominated by whichever assets quote in a small-unit currency. The
+    conversion is analytics._market_cap_usd — the same one cap-weighting,
+    size buckets and the Excel export use. A cap with no FX rate counts as 0
+    (the asset keeps a prior through its covariance with the others) rather
+    than entering at the wrong scale.
     """
-    ccys = {_norm_ccy_for_fx(by_sym.get(s, {}).get("currency") or "USD") for s in active}
-    rates: dict = {}
-    if ccys - {"USD"}:
-        try:
-            rates = (fx_rates("USD") or {}).get("rates", {})
-        except Exception:
-            rates = {}
-    fx_cache: dict[str, float | None] = {"USD": 1.0}
     caps: dict[str, float] = {}
     for s in active:
-        cap = by_sym.get(s, {}).get("market_cap")
-        try:
-            cap = float(cap or 0.0)
-        except (TypeError, ValueError):
-            cap = 0.0
-        if cap <= 0:
-            caps[s] = 0.0
-            continue
-        ccy = _norm_ccy_for_fx(by_sym.get(s, {}).get("currency") or "USD")
-        if ccy not in fx_cache:
-            fx_cache[ccy] = _usd_per_unit(ccy, rates)
-        rate = fx_cache[ccy]
-        caps[s] = cap * float(rate) if rate else cap  # last-resort: raw cap
+        v = _market_cap_usd(by_sym.get(s, {}))
+        caps[s] = float(v) if v and v > 0 else 0.0
     return caps
 
 
@@ -166,9 +128,13 @@ def _analyst_views(
     """Per-asset BL views + a richer analyst-detail block, in ONE fetch pass.
 
     Returns ``(views, detail)``:
-      * ``views[s]`` = ``{q, n, disp}`` — the BL inputs (view q_i (excess) =
-        target_mean_i / price_i − 1 − rf; confidence from analyst count and the
-        low/high dispersion). Assets without a usable target get no view.
+      * ``views[s]`` = ``{q, n, disp}`` — the BL inputs: the expected 12-month
+        excess TOTAL return q_i = target_mean_i / price_i − 1 + dy_i − rf.
+        A price target is a price, so the dividend yield dy_i (the row's forward
+        yield, 0 when it pays none) is added to make the view the same kind of
+        return as the equilibrium prior Π, which is a total-return premium.
+        Confidence comes from the analyst count and the low/high dispersion.
+        Assets without a usable target get no view.
       * ``detail[s]`` = ``{price, target_mean, target_low, target_high,
         upside_pct, n_analysts, disp}`` — surfaced to the per-company hover in
         the Optimize tab. Same fetch (one ``_analyst_for`` call per symbol), so
@@ -191,7 +157,12 @@ def _analyst_views(
             return s, None, None
         if price <= 0 or tgt <= 0:
             return s, None, None
-        q = tgt / price - 1.0 - float(rf)
+        try:
+            dy = float(by_sym.get(s, {}).get("dividend_yield") or 0.0)
+        except (TypeError, ValueError):
+            dy = 0.0
+        dy = dy if (dy == dy and 0.0 <= dy < 0.5) else 0.0  # NaN / absurd -> 0
+        q = tgt / price - 1.0 + dy - float(rf)
         lo, hi = blk.get("target_low"), blk.get("target_high")
         disp = None
         try:
@@ -206,6 +177,7 @@ def _analyst_views(
             "target_low": (float(lo) if lo is not None else None),
             "target_high": (float(hi) if hi is not None else None),
             "upside_pct": (tgt / price - 1.0) * 100.0,
+            "div_yield": dy,
             "n_analysts": (int(n) if n else 0),
             "disp": disp,
         }

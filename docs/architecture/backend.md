@@ -139,8 +139,10 @@ w52_high, w52_low, ath, delta_ath,
 sparkline (list of 252 closes), volume,
 sma_20, above_sma_20, sma_50, above_sma_50, sma_200, above_sma_200,
 above_1m, rs_rank (list of 12 monthly samples),
-market_cap, currency, exchange, sector, industry, quote_type, website,
-ps_ratio, pe_ratio,
+market_cap, market_cap_usd, currency, financial_currency,
+exchange, sector, industry, quote_type, website,
+ps_ratio, pe_ratio, forward_pe, peg, ev_ebitda, ev_revenue, price_book,
+dividend_yield, debt_equity, fcf_yield, roe, roa, … (fundamentals),
 error  (only on failure)
 ```
 
@@ -149,14 +151,45 @@ it to the column registry (`COLS` in `src/convexity/static/app.js`,
 line ~6), and `xlsx_export.py`'s `HOLDINGS_PRIMARY_COLS` auto-picks up
 extras through the "extras pass" mechanism.
 
-**Dividend-yield contract:** normalise Yahoo dividend yields to a
-fraction at ingestion (`0.0315` = `3.15%`). Yahoo sometimes returns
-`dividendYield` as a fraction and sometimes as a percent-like number
-(e.g. `11.15` for `11.15%`); `_normalize_dividend_yield(...)` is the
-shared guardrail. Prefer `dividendRate / price` when available, then
-fall back to the raw yield fields with a `> 1 => divide by 100` fixup.
-UI formatters and analytics should assume the normalized fractional
-value, not re-detect units downstream.
+**Yahoo's units and currencies — the contract (audit of 2026-09-29).**
+Every value is stored in ONE unit, decided here, and the frontend formats it
+without re-detecting anything:
+
+| Field | Yahoo gives | Stored as |
+|---|---|---|
+| `debtToEquity` → `debt_equity` | percent (AAPL 78.4 = 0.78×) | percent, shown "78.4%" (`fmtPctNum`) |
+| `dividendYield` | percent since yfinance 0.2.54 (AAPL 0.32 = 0.32%) | fraction, via `_normalize_dividend_yield` |
+| margins, ROE/ROA, growth, payout, `trailingAnnualDividendYield` | fraction | fraction |
+| `marketCap`, `dividendRate`, statement figures | MAJOR unit (GBP for an LSE name) | major unit — format with `majorCcy()` |
+| price, targets, 52-week range | QUOTE unit (GBp / ZAc / ILA pence) | quote unit — format with the row currency |
+| statement figures (revenue, FCF, debt, EBITDA) | `financialCurrency` | `financial_currency` on the row |
+
+- `_normalize_dividend_yield`: `dividendRate / price` first (the price scaled
+  from pence to pounds for minor-unit listings — SHEL.L: 1.16 / 36.545 =
+  3.2%, not 0.03%), then `dividendYield / 100` **always** (the old `> 1`
+  guess read every yield under 1% as a fraction: 0.32 → 32%), then the
+  trailing fields only when the statements share the listing currency (an
+  ADR's trailing rate is in the home currency: TSM 26 TWD over a USD price).
+- **ADRs and cross-currency listings** (TSM/TWD, TM/JPY, BABA/CNY, NVO/DKK,
+  SHEL.L reporting in USD): Yahoo's own EV/EBITDA, EV/Revenue, P/S and P/B
+  divide a trading-currency market cap by home-currency statements (TM: 6.3 and
+  15.3 against 11.9 and 0.91 on the Tokyo line). `fetcher._currency_consistent`
+  rebuilds them in the statement currency — EV = MC·fx + Total Debt − Total
+  Cash, P/B = MC·fx / (Total Debt / (D/E/100)) — and sets them to None when no
+  FX rate exists. Trailing/forward P/E and PEG are per-share ratios Yahoo gets
+  right and are kept. It also writes `fcf_yield`, `market_cap_usd` (the one
+  comparable size: cap-weighting, buckets, the BL prior, the Excel cap
+  weights all use it via `analytics._market_cap_usd`) and `financial_currency`.
+- **Not meaningful → None** (`fetcher._positive`): negative P/E, forward
+  P/E, PEG, EV/EBITDA, P/B. A heat ramp that favours low values would
+  otherwise paint a loss-maker as the cheapest name on screen.
+- `pe_ratio` is trailing only (it used to fall back to `forwardPE`, putting a
+  forward multiple in the trailing column for exactly the loss-makers).
+- The 52-week range and ATH are the max/min of **dividend-adjusted daily
+  closes** (`auto_adjust=True`), not Yahoo's intraday `fiftyTwoWeekHigh`
+  (which is 0.0 for SHEL.L's low — unusable). Returns (`pct_*`) are
+  therefore total returns; YTD is measured from the previous year's last
+  close (`helpers._ytd_change`).
 
 **EPS surprise (`_earnings_surprise_yf`, yfinance):** `fetch_one`'s
 `earnings_surprise` row field (8-quarter EPS surprise list, most-recent
@@ -236,17 +269,37 @@ warnings
 ```
 
 **One wide fetch, then slice.** `_bulk_close` pulls holdings + every
-benchmark + the sector ETFs over `_WARMUP_YF[period]` (≥200 trading days
-before the period start), FX-converts all of it (`_apply_fx_to_closes` — the
-indices quote in EUR/JPY/KRW, and a USD display still converts non-USD
-holdings), then slices to `_period_start()` for every stat. Only the SMAs use
+benchmark + the sector ETFs (+ `^IRX` in USD) over `_WARMUP_YF[period]`
+(≥200 trading days before the period start), FX-converts all of it
+(`_apply_fx_to_closes` — the indices quote in EUR/JPY/KRW, and a USD display
+still converts non-USD holdings), then `_period_slice()` keeps the window from
+the **last close on or before** `_period_start()` — the base every period
+return is measured from (YTD: the previous year's last close). Only the SMAs use
 the warm-up, which is why SMA 200 spans the whole chart; `min_periods=1` means
 an average starts on fewer bars only where nothing earlier exists (MAX, a
 young holding). The calendar is days *a holding* traded — foreign indices are
 ffilled onto it, never allowed to add their own holidays as zero-return days.
 Same-day beta vs Nikkei/KOSPI is understated (they close before the US
 opens); the Beta tooltip says so. `_stats` / `_relative` are module-level and
-tested directly in `tests/test_metrics.py`.
+tested directly in `tests/test_metrics.py` and `tests/test_finance_math.py`.
+
+The conventions (audit of 2026-09-29, `docs/METRICS_AUDIT.md`):
+- **Portfolio** = daily-rebalanced to the weights (Σ w_i r_i,t, compounded).
+- **Sharpe / Sortino** on excess returns r_t − rf_t: in USD rf_t is the
+  13-week T-bill (`^IRX`, (1+y/100)^(1/252) − 1 per day); other display
+  currencies have no Yahoo short-rate series and use 0. `stats.rf_source`
+  and `stats.rf_ann` say which. Mean ×252 over sd ×√252; Sortino's
+  downside deviation is the RMS of min(x, 0) over all days.
+- `rel.ir` — information ratio: mean active return ×252 / TE.
+- **Weighted P/E, P/S, EV/EBITDA** — weighted HARMONIC means over positive
+  multiples (the look-through multiple); `weighted.coverage` gives the
+  weight share behind each. Dividend yield stays an arithmetic mean.
+- **Weighted market cap** — averaged in USD, returned in the display
+  currency (`weighted.market_cap_ccy`); the size buckets use USD caps.
+- **Rating distribution** — each holding's share of votes × its weight
+  (raw vote counts let a 50-analyst name outvote a 5-analyst one 10:1).
+- **Contribution** — Carino log-linked from the daily-rebalanced portfolio,
+  so the column adds up to `stats.total_return` exactly.
 
 The `analyst.holdings` list is a HUGE win for Excel export — it means we
 don't need a separate parallel `Ticker.info` fetch when analytics
@@ -254,8 +307,14 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 
 ### FX
 - **`fx_rates(base)`** — spot rates against the 6 majors. 30-min cache.
-- **`fx_index_history(base, period)`** — synthetic trade-weighted index
-  level (base vs the basket of other majors), normalised to 100 at
+- **`usd_per_unit(ccy)` / `convert_amount(x, a, b)`** — spot conversion of
+  single amounts (market caps, statement figures): the `fx_rates("USD")`
+  cache first, one `ccyUSD=X` download for currencies outside it (TWD, KRW,
+  DKK…), cached for the FX TTL (a miss for 10 min). Minor units map to
+  their major currency (`helpers.major_ccy`: GBp→GBP, ZAc→ZAR, ILA→ILS).
+- **`fx_index_history(base, period)`** — synthetic equal-weight index
+  level (base vs the basket of other majors), the GEOMETRIC mean of the
+  price relatives (as currency indices are), normalised to 100 at
   window start. 4-hour cache. Has a "bulk download → if empty, retry
   sequentially with jittered sleep + per-pair retry" hardening for
   yfinance rate limits.

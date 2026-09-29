@@ -245,7 +245,10 @@ not reintroduce one; the engines answer different questions.
   forward idiosyncratic return, t from the daily series (Newey-West, lag h−1,
   at horizons > 1), verdict < 40 days "Too early — N of ~60 trading days",
   t ≥ 2 and mean > 0 "Evidence of an edge", 1 ≤ t < 2 "Weak evidence", else
-  "No evidence"; long-short curve; hit rates with Wilson CIs (also per lens);
+  "No evidence"; long-short curve; hit rates with Wilson CIs (also per lens) —
+  on the date-clustered EFFECTIVE sample (`wilson_clustered`: cluster-robust
+  variance over dates → design effect → n_eff; same-day calls are not
+  independent, so the plain Wilson interval was too narrow);
   two-pass agreement; a collapsed "For quants" block (daily IC, tier table,
   Market calibration). The Market read is ranked on the raw `market_score` —
   z is re-anchored when the anchor switches, the score never is.

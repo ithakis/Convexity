@@ -16,7 +16,7 @@ Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny st
 
 ![Portfolio optimization](docs/screenshots/optimize.png)
 
-**Portfolio analytics.** Performance against the S&P 500 (plus Nasdaq and a sector-mix overlay), moving averages, drawdown, and a risk & return card with Sharpe, Sortino, Calmar, beta and tracking error against any benchmark.
+**Portfolio analytics.** Performance against the S&P 500 (plus Nasdaq and a sector-mix overlay), moving averages, drawdown, and a risk & return card with Sharpe and Sortino (over the T-bill rate in USD), Calmar, beta, tracking error and information ratio against any benchmark.
 
 ![Portfolio analytics](docs/screenshots/analytics.png)
 
@@ -35,11 +35,11 @@ Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny st
 | Column | Description |
 |---|---|
 | **Price / Market Cap** | Last close price and total market capitalisation |
-| **P/S** | Price-to-Sales — heat map anchored at 10× (expensive) |
-| **P/E** | Price-to-Earnings — heat map anchored at 40× |
-| **% YTD / % 1Y** | Diverging colour scale: green = positive, red = negative |
+| **P/S** | Price-to-Sales — market cap ÷ trailing-12-month revenue; cheapest on screen is most blue |
+| **P/E** | Price-to-Earnings on trailing EPS (n/a for loss-makers); cheapest on screen is most blue |
+| **% YTD / % 1Y** | Total return (dividend-adjusted); YTD from last year's close. Green = positive, red = negative |
 | **Chart 1Y** | 252-day sparkline, coloured by 1-year return sign |
-| **Δ Highs** | Distance from all-time high — bar grows as drawdown deepens |
+| **Δ Highs** | Distance from the 2-year high — bar grows as drawdown deepens |
 | **RS Rank 1M** | 12-month relative-strength histogram |
 | **20 / 50 / 200 SMA** | Moving-average flags (▲ above, ▼ below) |
 
