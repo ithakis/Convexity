@@ -7,6 +7,13 @@ when merging a PR and add a line here.
 
 ## Unreleased
 
+Metric explanations and the contribution table (#5, #7, #8).
+
+- **Optimize → Compute budget** has a proper explanation on the "i": a table of what Light / Standard / Dense buy (time, frontier points, cloud points), what the bootstrap replicas and the CVaR band are, that the optimisation itself is the same at every budget, and when each one is worth it.
+- **Every metric explains itself.** Formula tips (formula, meaning, typical range) on the Optimize side panel (expected return, VaR, CVaR, the bootstrap band, max drawdown, CDaR, volatility, cash, analyst views, active assets) and on the stock detail rows that had none (earnings growth, ROA, current ratio, dividend yield / rate / payout / ex-dividend date). Tips inside the Optimize panel no longer get cut off by its scroll area.
+- **Excel export explains itself**: every header has a hover comment with the definition, and a new last sheet, **Definitions**, lists every metric with its formula, meaning and typical range. The holdings sheet drops columns that repeated the analyst block (PEG, dividend yield, analyst count and rating) and nested data that could only show as "[n keys]", and gives the remaining ones readable headers (Current Ratio, Quick Ratio, SMA 20/50/200).
+- **Contribution to return**: each holding's contribution is split into **W×R** (weight × its own return) and **Compounding** (what daily rebalancing and compounding add or take away), which add up exactly; a Total row; every column sortable; a bar in each contribution cell; and a **Table | Chart** toggle whose chart is a waterfall building up to the period return. Sort and view are remembered.
+
 Metrics audit (`distribution` branch): every formula, unit and explanation checked against corporate-finance and quant conventions and against live Yahoo data (details in `docs/METRICS_AUDIT.md`).
 
 - **D/E is a percentage** and now says so: "78.4%", with the formula × 100% (Yahoo's figure; 100% means debt equals equity).

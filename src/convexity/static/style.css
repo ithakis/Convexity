@@ -833,6 +833,33 @@
   .pf-metric-tip .mt-desc { color: var(--text); margin-bottom: 4px; }
   .pf-metric-tip .mt-range { color: var(--muted); font-size: 11px; }
   .pf-metric-tip .mt-range b { color: var(--text); font-weight: 600; }
+  /* Floating variant ([data-rich-tip], _RICH_TIP in app.js): the same card in a
+     body-level fixed box, for hosts inside scrolling/clipping containers. */
+  .rich-tip-float {
+    position: fixed; left: 0; top: 0; z-index: 9000; pointer-events: none;
+    opacity: 0; transition: opacity 0.12s ease;
+  }
+  .rich-tip-float.show { opacity: 1; }
+  .rich-tip-float .pf-metric-tip { display: block; position: static; width: 360px; max-width: calc(100vw - 16px); }
+  [data-rich-tip] {
+    cursor: help;
+    text-decoration: underline dotted rgba(125, 125, 125, 0.75);
+    text-underline-offset: 3px;
+  }
+  .pf-mpt-rf-info[data-rich-tip] { text-decoration: none; }
+  .pf-mpt-rf-info[data-rich-tip]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .pf-metric-tip .mt-table {
+    width: 100%; border-collapse: collapse; margin: 6px 0 8px;
+    font-size: 11px; font-variant-numeric: tabular-nums;
+  }
+  .pf-metric-tip .mt-table th, .pf-metric-tip .mt-table td {
+    padding: 3px 6px; border-bottom: 1px solid var(--border); text-align: right;
+  }
+  .pf-metric-tip .mt-table thead th { color: var(--muted); font-weight: 600; }
+  .pf-metric-tip .mt-table th:first-child { text-align: left; }
+  .pf-metric-tip .mt-table tbody th { font-weight: 700; }
+  .pf-metric-tip .mt-list { margin: 4px 0 6px; padding-left: 16px; }
+  .pf-metric-tip .mt-list li { margin: 2px 0; }
   /* Right-side metric: anchor tooltip to the right edge so it doesn't clip */
   .pf-stats .pf-stat-row:nth-child(2n)[data-info] .pf-metric-tip { left: auto; right: 0; }
   .m-kv .metric-tip-host .pf-metric-tip {
@@ -968,10 +995,57 @@
     background: var(--bg-canvas);
   }
   .pf-contrib-table th:first-child, .pf-contrib-table td:first-child { text-align: left; }
-  .pf-contrib-table td { padding: 3px 6px; border-bottom: 1px dashed var(--border); }
+  .pf-contrib-table td { padding: 3px 6px; border-bottom: 1px dashed var(--border); text-align: right; white-space: nowrap; }
   .pf-contrib-table tr:last-child td { border-bottom: none; }
   .pf-contrib-table td.pos { color: var(--pos); }
   .pf-contrib-table td.neg { color: var(--neg); }
+  .pf-contrib-table th[data-contrib-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+  .pf-contrib-table th[data-contrib-sort]:hover { color: var(--accent); }
+  .pf-contrib-table th .arrow { color: var(--accent); margin-left: 3px; font-size: 9px; }
+  .pf-contrib-table tfoot td {
+    font-weight: 700; border-top: 1px solid var(--border); border-bottom: none; padding-top: 5px;
+  }
+  /* Contribution cell: a diverging bar (centre = 0) left of the number. */
+  .pf-contrib-cwrap { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; }
+  .pf-contrib-cwrap > span:last-child { min-width: 52px; }
+  .pf-cbar {
+    position: relative; display: inline-block; width: 110px; height: 8px;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-xs);
+    overflow: hidden;
+  }
+  .pf-cbar::after {  /* the zero line */
+    content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border);
+  }
+  .pf-cbar-fill { position: absolute; top: 0; bottom: 0; }
+  .pf-cbar-fill.pos { background: var(--pos); }
+  .pf-cbar-fill.neg { background: var(--neg); }
+  @media (max-width: 700px) { .pf-cbar { display: none; } }
+
+  /* Table | Chart toggle in the Contribution card header. */
+  .pf-contrib-toggle { display: inline-flex; margin-left: auto; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+  .pf-contrib-toggle button {
+    background: var(--bg-canvas); border: none; color: var(--muted); cursor: pointer;
+    font-size: 10.5px; padding: 3px 9px; text-transform: none; letter-spacing: 0;
+  }
+  .pf-contrib-toggle button + button { border-left: 1px solid var(--border); }
+  .pf-contrib-toggle button.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .pf-contrib-toggle button:hover:not(.active) { color: var(--text); }
+
+  /* Contribution waterfall (renderContribChartHtml). */
+  .pf-wf { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .pf-wf-row { display: grid; grid-template-columns: minmax(56px, 90px) 1fr 64px; gap: 8px; align-items: center; }
+  .pf-wf-row:hover .pf-wf-track { background: var(--bg-canvas); }
+  .pf-wf-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pf-wf-track { position: relative; height: 14px; border-radius: var(--r-xs); }
+  .pf-wf-zero { position: absolute; top: -1px; bottom: -1px; width: 1px; background: var(--muted); opacity: 0.6; }
+  .pf-wf-bar { position: absolute; top: 2px; bottom: 2px; border-radius: 2px; }
+  .pf-wf-bar.pos { background: var(--pos); }
+  .pf-wf-bar.neg { background: var(--neg); }
+  .pf-wf-bar.total { background: var(--accent); top: 0; bottom: 0; }
+  .pf-wf-row:last-child { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); font-weight: 700; }
+  .pf-wf-val { text-align: right; }
+  .pf-wf-val.pos { color: var(--pos); }
+  .pf-wf-val.neg { color: var(--neg); }
 
   /* Custom weight popup */
   .pf-weights-bg {
