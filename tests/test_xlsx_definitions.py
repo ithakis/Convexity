@@ -153,3 +153,25 @@ def test_a_portfolio_named_definitions_does_not_collide(monkeypatch):
     views = {"Definitions": {"entries": "AAPL", "rows": [{"symbol": "AAPL", "price": 1.0}]}}
     wb = load_workbook(io.BytesIO(xe.build_workbook(views)))
     assert wb.sheetnames == ["Overview", "Definitions", "Definitions-2"]
+
+
+def test_analyst_columns_fall_back_to_the_row(monkeypatch):
+    """rec_key / n_analysts are no longer exported twice (HOLDINGS_SKIP_EXTRAS);
+    when the export's own info pull comes back empty, the analyst columns still
+    show what the row carries."""
+    monkeypatch.setattr(xe, "gather_analyst_info", lambda symbols, **kw: {})
+    row = {
+        "symbol": "AAPL",
+        "price": 200.0,
+        "rec_key": "buy",
+        "n_analysts": 40,
+        "recommendation_mean": 1.9,
+    }
+    wb = load_workbook(io.BytesIO(xe.build_workbook({"Demo": {"entries": "AAPL", "rows": [row]}})))
+    ws = wb["Demo"]
+    hr = next(r for r in range(1, ws.max_row + 1) if ws.cell(r, 1).value == "Ticker")
+    got = {ws.cell(hr, c).value: ws.cell(hr + 1, c).value for c in range(1, ws.max_column + 1)}
+    assert got["Analyst Rating"] == "buy"
+    assert got["# Analysts"] == 40
+    assert got["Rec. Mean (1=Strong Buy, 5=Sell)"] == 1.9
+    assert "rec_key" not in got and "n_analysts" not in got

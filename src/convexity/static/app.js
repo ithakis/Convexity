@@ -768,7 +768,13 @@ const _RICH_TIP = (() => {
     current = host;
     tip.innerHTML = render(html);
     tip.classList.add("show");
-    placeTip(tip, host.getBoundingClientRect(), {preferred: "below", offset: 6, gap: 8});
+    const place = () => placeTip(tip, host.getBoundingClientRect(), {preferred: "below", offset: 6, gap: 8});
+    place();
+    // KaTeX's fonts load on the first formula shown; until then the glyphs
+    // are blank and narrower, so measure again once they are in.
+    if (document.fonts && document.fonts.status !== "loaded") {
+      document.fonts.ready.then(() => { if (current === host) place(); });
+    }
   }
   function hide(host) {
     if (host && current && host !== current) return;
@@ -5348,9 +5354,13 @@ const CONTRIB_UI = (() => {
 })();
 
 function contribRows(a) {
+  const num = (v) => (v != null && isFinite(v)) ? Number(v) : null;
   return (a.contribution || []).map(c => {
-    const wxr = (c.weight || 0) * (c.period_return || 0);  // pp, same units as contribution
-    return {...c, wxr, comp: (c.contribution || 0) - wxr};
+    const w = num(c.weight), r = num(c.period_return), ct = num(c.contribution);
+    // A missing return must read n/a in W×R and Compounding too, not a
+    // confident 0.00% next to an n/a Return.
+    const wxr = (w != null && r != null) ? w * r : null;  // pp, same units as contribution
+    return {...c, wxr, comp: (ct != null && wxr != null) ? ct - wxr : null};
   });
 }
 
@@ -5377,8 +5387,8 @@ function renderContribTableHtml(rows) {
     return (a < b ? -1 : a > b ? 1 : 0) * dir;
   });
   const maxAbs = Math.max(1e-9, ...rows.map(c => Math.abs(c.contribution || 0)));
-  const sum = (f) => rows.reduce((t, c) => t + (c[f] || 0), 0);
-  const cls = (v) => v >= 0 ? "pos" : "neg";
+  const sum = (f) => rows.reduce((t, c) => t + (c[f] != null && isFinite(c[f]) ? c[f] : 0), 0);
+  const cls = (v) => (v == null || !isFinite(v)) ? "" : v >= 0 ? "pos" : "neg";
   const th = (c) => {
     const arrow = c.k === sk ? `<span class="arrow">${dir > 0 ? "▲" : "▼"}</span>` : "";
     const label = c.tip ? `<span data-rich-tip="${c.tip}">${c.label}</span>` : c.label;
@@ -5394,7 +5404,7 @@ function renderContribTableHtml(rows) {
     <thead><tr>${CONTRIB_COLS.map(th).join("")}</tr></thead>
     <tbody>${sorted.map(c => `<tr>
       <td title="${escapeHtml(c.name || c.symbol)}">${escapeHtml(c.symbol)} <span style="color:var(--muted)">${escapeHtml(c.sector || "")}</span></td>
-      <td>${(c.weight*100).toFixed(2)}%</td>
+      <td>${c.weight != null ? (c.weight*100).toFixed(2) + "%" : "—"}</td>
       <td class="${cls(c.period_return)}">${fmtPctSigned(c.period_return)}</td>
       <td class="${cls(c.wxr)}">${fmtPctSigned(c.wxr)}</td>
       <td class="${cls(c.comp)}">${fmtPctSigned(c.comp)}</td>
@@ -5434,12 +5444,12 @@ function renderContribChartHtml(rows) {
       <span class="pf-wf-track"><span class="pf-wf-zero" style="left:${zero}%"></span><span class="pf-wf-bar ${cls}" style="left:${pos(Math.min(from, to)).toFixed(2)}%;width:${Math.max(0.3, Math.abs(to - from) / span * 100).toFixed(2)}%"></span></span>
       <span class="pf-wf-val ${value >= 0 ? "pos" : "neg"}">${fmt(value)}</span>
     </div>`;
-  const plain = (v) => (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
+  const plain = (v) => (v == null || !isFinite(v)) ? "n/a" : (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
   return `<div class="pf-wf">
     ${steps.map(({c, from, to}) => bar(from, to, (c.contribution || 0) >= 0 ? "pos" : "neg",
       `${c.symbol}: contribution ${plain(c.contribution)} = W×R ${plain(c.wxr)} + compounding ${plain(c.comp)}. Running total ${plain(to)}.`,
       escapeHtml(c.symbol), c.contribution)).join("")}
-    ${bar(0, total, "total", `Portfolio ${escapeHtml(STATE.period)} return: ${plain(total)}`, "Total", total)}
+    ${bar(0, total, "total", `Portfolio ${STATE.period} return: ${plain(total)}`, "Total", total)}
   </div>`;
 }
 

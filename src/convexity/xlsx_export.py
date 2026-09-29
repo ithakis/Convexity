@@ -1114,12 +1114,27 @@ def _write_portfolio_sheet(
                         tgt = _maybe_num(fallback_row.get("target_mean"))
                         if price and tgt and price > 0:
                             v = (tgt / price - 1.0) * 100.0
+                # The row's own fields are the last resort: they are no longer
+                # exported as extras (HOLDINGS_SKIP_EXTRAS), so a failed info
+                # pull must not leave these columns empty.
                 elif key == "recommendation_key":
-                    v = ana_row.get("rec_key") or fallback_row.get("recommendation_key")
+                    v = (
+                        ana_row.get("rec_key")
+                        or fallback_row.get("recommendation_key")
+                        or row_data.get("rec_key")
+                    )
                 elif key == "recommendation_mean":
-                    v = ana_row.get("mean_rating") or fallback_row.get("recommendation_mean")
+                    v = (
+                        ana_row.get("mean_rating")
+                        or fallback_row.get("recommendation_mean")
+                        or row_data.get("recommendation_mean")
+                    )
                 elif key == "num_analysts":
-                    v = ana_row.get("n_analysts") or fallback_row.get("num_analysts")
+                    v = (
+                        ana_row.get("n_analysts")
+                        or fallback_row.get("num_analysts")
+                        or row_data.get("n_analysts")
+                    )
                 elif key in {"target_mean", "target_high", "target_low"}:
                     v = ana_row.get(key) or fallback_row.get(key)
                 else:
