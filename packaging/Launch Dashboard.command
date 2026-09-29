@@ -66,6 +66,10 @@ if [ -d .venv ] && [ ! -L .venv ] \
     ln -s .venv.nosync .venv
     UV_PROJECT_ENVIRONMENT=.venv.nosync "$UV" sync --extra dev --extra desktop
 fi
+# Behind the symlink, point uv at the real folder: when it has to recreate the
+# venv (a new Python in .python-version), a plain `uv run` replaces the .venv
+# symlink with a real .venv folder, which iCloud hides again.
+[ -L .venv ] && export UV_PROJECT_ENVIRONMENT=.venv.nosync
 # Belt and braces for any flag already set (trailing slash: follow the symlink).
 [ -d .venv ] && chflags -R nohidden .venv/ 2>/dev/null || true
 

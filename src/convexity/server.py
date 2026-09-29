@@ -47,7 +47,7 @@ from convexity.analytics import (
     analyze_portfolios_multi,
 )
 from convexity import jobs
-from convexity.fetcher import fetch_detail, fetch_portfolio, range_history
+from convexity.fetcher import fetch_detail, range_history
 from convexity.fetcher import stream_quotes as fetcher_stream_quotes
 
 # NB: convexity.frontier (and its numba/mpt dependency, ~1.7s to
@@ -87,6 +87,9 @@ from convexity.persistence import (
 )
 
 _STATIC_DIR = Path(__file__).parent / "static"
+# Largest POST body accepted (Handler._read_json). The biggest real one, a
+# saved view carrying its cached rows, is a few megabytes at most.
+_MAX_BODY_BYTES = 32 << 20
 
 
 def _rows_summary(rows, period=None) -> str:
@@ -106,14 +109,32 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[{self.log_date_time_string()}] {msg}")
 
     def _read_json(self) -> dict:
-        """Read + JSON-parse the request body, returning ``{}`` for an empty
-        body. Collapses the Content-Length read + ``json.loads(... or b"{}")``
-        that every POST branch repeated verbatim. Malformed JSON raises
-        json.JSONDecodeError (a ValueError subclass) exactly as the inline code
-        did, so each caller's existing except-clauses map it to the same
-        400/500 response — external behavior is unchanged."""
-        length = int(self.headers.get("Content-Length") or 0)
-        return json.loads(self.rfile.read(length) or b"{}")
+        """The POST body as a dict (``{}`` when empty), parsed once by
+        do_POST before any route runs."""
+        return self._body
+
+    def _parse_body(self) -> dict:
+        """Read and validate the POST body; ValueError → do_POST answers 400.
+
+        Done once, up front, so a malformed body is a 400 on every route: inside
+        a route, the route's own ``except Exception`` turned it into a 500 with
+        a logged traceback. Every route takes a JSON object. The size cap refuses
+        a body before reading it, rather than buffering whatever length a client
+        claims. The messages are fixed text: the key routes must never echo
+        anything from the request back (see _handle_keys_post)."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise ValueError("invalid Content-Length") from None
+        if length > _MAX_BODY_BYTES:
+            raise ValueError("request body too large")
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:  # JSONDecodeError, UnicodeDecodeError
+            raise ValueError("request body is not valid JSON") from None
+        if not isinstance(body, dict):
+            raise ValueError("request body must be a JSON object")
+        return body
 
     def _log_exception(self, route: str, detail: str = "") -> None:
         """Print the in-flight exception's traceback to stderr (→ logbuf, so it
@@ -149,14 +170,17 @@ class Handler(BaseHTTPRequestHandler):
     # ----------------------------- refresh jobs -----------------------------
 
     def _handle_refresh_job_create(self) -> None:
-        try:
-            payload = self._read_json()
-        except Exception as exc:
-            self._send_json(400, {"error": str(exc)})
-            return
+        payload = self._read_json()
         scope = "all" if payload.get("scope") == "all" else "current"
-        phases = payload.get("phases") or ["quotes", "news"]
-        days = int(payload.get("days") or 7)
+        # Validated here, not in the job thread: a bad value there fails the
+        # job long after this request answered 202.
+        asked = payload.get("phases")
+        asked = asked if isinstance(asked, list) else ["quotes", "news"]
+        phases = [p for p in ("quotes", "news") if p in asked]
+        if not phases:
+            self._send_json(400, {"error": "phases must include quotes or news"})
+            return
+        days = _ns._clamp_lookback(payload.get("days"))
         on_conflict = "supersede" if payload.get("on_conflict") == "supersede" else "reject"
         context = payload.get("context") if isinstance(payload.get("context"), dict) else None
 
@@ -172,8 +196,12 @@ class Handler(BaseHTTPRequestHandler):
             entries_by_view = {n: watch[n] for n in names}
             context = None
         else:
-            view = (payload.get("view") or "").strip() or "__current__"
-            entries_by_view = {view: str(payload.get("entries") or "")}
+            view = str(payload.get("view") or "").strip() or "__current__"
+            entries = payload.get("entries") or ""
+            if not isinstance(entries, str):
+                self._send_json(400, {"error": "entries must be a string"})
+                return
+            entries_by_view = {view: entries}
         if not any(v.strip() for v in entries_by_view.values()):
             self._send_json(400, {"error": "nothing to refresh"})
             return
@@ -730,13 +758,7 @@ class Handler(BaseHTTPRequestHandler):
         log line: every error answer is fixed text (keys.InvalidKey carries
         fixed text too), and no traceback is printed — a frame's locals would
         be one repr away from the key."""
-        try:
-            payload = self._read_json()
-            if not isinstance(payload, dict):
-                raise ValueError
-        except Exception:
-            self._send_json(400, {"error": "request body must be a JSON object"})
-            return
+        payload = self._read_json()
         provider = payload.get("provider")
         try:
             if path == "/api/keys/test":
@@ -770,6 +792,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._request_allowed(require_json=True):
             self._refuse_cross_origin()
             return
+        try:
+            self._body = self._parse_body()
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
         parsed = urlparse(self.path)
         if parsed.path in ("/api/keys", "/api/keys/test"):
             self._handle_keys_post(parsed.path)
@@ -787,12 +814,7 @@ class Handler(BaseHTTPRequestHandler):
             # Nothing is sent anywhere but the GET of the public pack.
             from convexity import reference_pack
 
-            try:
-                payload = self._read_json()
-            except ValueError as exc:
-                self._send_json(400, {"error": str(exc)})
-                return
-            payload = payload if isinstance(payload, dict) else {}
+            payload = self._read_json()
             if isinstance(payload.get("enabled"), bool):
                 self._send_json(200, reference_pack.set_enabled(payload["enabled"]))
             elif payload.get("action") == "refresh":
@@ -813,16 +835,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"watchlists": watchlists, "entries_changed": changed})
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
-            except Exception as exc:
-                self._send_json(500, {"error": str(exc)})
-            return
-
-        if parsed.path == "/api/quotes":
-            try:
-                payload = self._read_json()
-                entries = payload.get("entries") or []
-                rows = fetch_portfolio([str(e) for e in entries])
-                self._send_json(200, {"rows": rows})
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return

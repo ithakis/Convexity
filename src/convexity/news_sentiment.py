@@ -87,7 +87,7 @@ _ARTICLE_CAP = 60
 def _clamp_lookback(days) -> int:
     try:
         d = int(days)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: int(inf)
         return _DEFAULT_LOOKBACK_DAYS
     return max(1, min(30, d))
 

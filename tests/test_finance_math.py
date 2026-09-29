@@ -405,3 +405,41 @@ def test_black_litterman_view_adds_the_dividend_yield(monkeypatch):
     assert abs(views["A"]["q"] - (0.08 + 0.03 - 0.04)) < 1e-12
     assert abs(views["B"]["q"] - (0.08 - 0.04)) < 1e-12
     assert abs(detail["A"]["upside_pct"] - 8.0) < 1e-9  # the price upside stays price-only
+
+
+def _closes(returns, dates, tz):
+    idx = pd.DatetimeIndex(dates).tz_localize(tz)
+    return pd.Series(100 * np.cumprod(1 + returns), index=idx)
+
+
+def test_by_trading_date_aligns_exchanges_on_their_local_date():
+    from convexity.helpers import by_trading_date
+
+    dates = pd.bdate_range("2026-01-05", periods=5)
+    ldn, nyc = (
+        _closes(np.zeros(5), dates, "Europe/London"),
+        _closes(np.zeros(5), dates, "America/New_York"),
+    )
+    assert pd.concat([ldn, nyc], axis=1, join="inner").empty  # raw stamps never match
+    joined = pd.concat([by_trading_date(ldn), by_trading_date(nyc)], axis=1, join="inner")
+    assert list(joined.index) == list(dates)
+
+
+def test_beta_of_a_foreign_listing_is_estimated_not_missing():
+    """Was (None, None) for every non-US listing: the join on raw timestamps
+    was empty. Across sessions it now uses weekly returns."""
+    rng = np.random.default_rng(0)
+    dates = pd.bdate_range("2024-01-01", periods=600)
+    rb = rng.normal(0, 0.01, 600)
+    spy = _closes(rb, dates, "America/New_York")
+    same = _closes(1.5 * rb + rng.normal(0, 0.002, 600), dates, "America/New_York")
+    beta, corr = fetcher._beta_corr(same, spy)
+    assert beta == pytest.approx(1.5, abs=0.05) and corr > 0.95
+    # Tokyo trades on New York's news a day later: same-date daily returns are
+    # unrelated (β ~ 0), weekly ones carry 4 of each week's 5 lagged days, so
+    # β ~ 1.2 * 4/5.
+    lagged = np.concatenate([[0.0], 1.2 * rb[:-1]]) + rng.normal(0, 0.002, 600)
+    tokyo = _closes(lagged, dates, "Asia/Tokyo")
+    beta, corr = fetcher._beta_corr(tokyo, spy)
+    assert beta == pytest.approx(0.96, abs=0.2) and corr > 0.5
+    assert fetcher._beta_corr(tokyo, None) == (None, None)

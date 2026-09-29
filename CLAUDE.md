@@ -268,8 +268,13 @@ tracks (7k files in 4 min), while a venv *created* as `.nosync` stayed at 0.
 **Setup on this Mac:** the real venv is `.venv.nosync`, built fresh
 (`UV_PROJECT_ENVIRONMENT=.venv.nosync uv sync --extra dev --extra desktop`),
 and `.venv` is a symlink to it, so plain `uv sync` / `uv run` work unchanged
-(uv keeps the symlink). Both names are gitignored. `Launch Dashboard.command`
-does this rebuild by itself when it finds a real `.venv` carrying the flag.
+(uv keeps the symlink) — **except when uv must recreate the venv** (a new
+Python in `.python-version`, e.g. the 3.14 move): then it replaces the symlink
+with a real `.venv` folder that iCloud hides again (verified 2026-09-29). After
+such a change run it once as `UV_PROJECT_ENVIRONMENT=.venv.nosync uv sync
+--extra dev --extra desktop`. Both names are gitignored. `Launch
+Dashboard.command` exports that variable whenever `.venv` is the symlink, and
+does the full rebuild by itself when it finds a real `.venv` carrying the flag.
 Diagnose with `find .venv/ -flags +hidden | wc -l` (trailing slash: follow the
 symlink); a checkout outside `~/Documents` (e.g. `/private/tmp`) is unaffected.
 `QT_DEBUG_PLUGINS=1` shows Qt scanning the right directory and finding nothing.

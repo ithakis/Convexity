@@ -3138,7 +3138,7 @@ const DETAIL_METRIC_INFO = {
   },
   "Beta": {
     formula: String.raw`\beta = \dfrac{\mathrm{Cov}(r_i, r_m)}{\mathrm{Var}(r_m)}`,
-    desc: "Yahoo-reported beta: 5 years of monthly returns against the S&P 500. The β(SPY) in the Performance header is computed here from the last year of daily returns, so the two can differ.",
+    desc: "Yahoo-reported beta: 5 years of monthly returns against the S&P 500. The β(SPY) in the Performance header is computed here from the last year of daily returns (two years of weekly returns for a listing outside US trading hours, whose daily moves lag New York's), so the two can differ.",
     range: "Around 1 behaves like the market. Below 1 is more defensive; above 1.3 is usually high-beta growth or cyclicality. Beta is market sensitivity, not total volatility."
   },
   "Revenue (TTM)": {

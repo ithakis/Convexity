@@ -469,6 +469,22 @@ def _bollinger_pct_b(series: pd.Series, period: int = 20, width: float = 2.0) ->
 # ----------------------------- Series conversion ----------------------------
 
 
+def by_trading_date(s: pd.Series) -> pd.Series:
+    """A daily close series indexed by its exchange's calendar date, tz-naive.
+
+    ``Ticker.history`` stamps each bar at local midnight (00:00+01:00 London,
+    00:00-04:00 New York), so two listings on different exchanges share no
+    timestamp and an inner join between them is empty; ``tz_convert(None)``
+    does not help (UTC puts London's bar on the previous day). Dropping the
+    tz keeps the local date — the same key ``yf.download`` uses.
+    """
+    idx = s.index
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    s = s.set_axis(idx.normalize())
+    return s[~s.index.duplicated(keep="last")]
+
+
 def _series_to_points(s: pd.Series) -> list[list[float]]:
     """Compact [[ts_ms, close], ...] list, dropping NaN."""
     out: list[list[float]] = []

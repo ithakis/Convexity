@@ -25,7 +25,6 @@ APP_JS = Path(server.__file__).parent / "static" / "app.js"
 # not be valid for the 403 cases.
 POST_PATHS = [
     "/api/watchlists",
-    "/api/quotes",
     "/api/quotes-stream",
     "/api/column-views",
     "/api/column-views/builtin-heat",
@@ -213,3 +212,61 @@ def test_every_frontend_post_sends_json():
         if "application/json" not in opts:
             missing.append(src.count("\n", 0, pos) + 1)
     assert not missing, f"app.js POSTs without Content-Type application/json at lines {missing}"
+
+
+@pytest.mark.parametrize("body", [b"[1, 2]", b"null", b'"x"', b"{bad", b"\xff\xfe"])
+@pytest.mark.parametrize("path", POST_PATHS)
+def test_malformed_body_is_a_400_on_every_route(srv, path, body):
+    """do_POST parses the body before dispatch: inside a route, its own
+    `except Exception` turned a non-object body into a 500 with a logged
+    traceback. Fixed text only, so nothing from the request is echoed."""
+    code, resp = _req(srv, "POST", path, {"Content-Type": "application/json"}, body)
+    assert code == 400, (path, body, code)
+    assert json.loads(resp)["error"] in (
+        "request body is not valid JSON",
+        "request body must be a JSON object",
+    )
+
+
+def test_oversized_body_is_refused_unread(srv):
+    import http.client
+
+    c = http.client.HTTPConnection("127.0.0.1", int(srv.rsplit(":", 1)[1]), timeout=5)
+    c.putrequest("POST", "/api/watchlists")
+    c.putheader("Content-Type", "application/json")
+    c.putheader("Content-Length", str(server._MAX_BODY_BYTES + 1))
+    c.endheaders()  # no body follows: an unbounded read would hang here
+    r = c.getresponse()
+    assert r.status == 400 and json.loads(r.read()) == {"error": "request body too large"}
+    c.close()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"phases": [], "entries": "AAPL"},
+        {"phases": ["bogus"], "entries": "AAPL"},
+        {"phases": ["quotes"], "entries": "", "view": 5},
+        {"phases": ["quotes"], "entries": "", "view": {"a": 1}, "days": "abc"},
+        {"phases": ["quotes"], "entries": ["AAPL"]},
+    ],
+)
+def test_refresh_job_rejects_bad_fields_instead_of_crashing(srv, payload):
+    """Wrong types used to raise inside the handler: the connection dropped
+    with no answer at all."""
+    code, _ = _req(
+        srv,
+        "POST",
+        "/api/refresh-job",
+        {"Content-Type": "application/json"},
+        json.dumps(payload).encode(),
+    )
+    assert code == 400, (payload, code)
+
+
+def test_lookback_clamp_survives_infinity():
+    from convexity import news_sentiment as ns
+
+    assert ns._clamp_lookback(float("inf")) == ns._DEFAULT_LOOKBACK_DAYS
+    assert ns._clamp_lookback(float("nan")) == ns._DEFAULT_LOOKBACK_DAYS
+    assert (ns._clamp_lookback(1e300), ns._clamp_lookback(-4)) == (30, 1)

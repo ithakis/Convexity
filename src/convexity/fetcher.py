@@ -27,6 +27,7 @@ from convexity.helpers import (
     _safe_num,
     _series_to_points,
     _ytd_change,
+    by_trading_date,
     major_ccy,
     price_in_major,
 )
@@ -388,25 +389,6 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
     return out
 
 
-def fetch_portfolio(entries: list[str]) -> list[dict]:
-    cache_key = "|".join(sorted(set(entries)))
-    cached = _cache_get(cache_key)
-    if cached:
-        return cached["rows"]
-    symbols = _ordered_resolve(entries)
-    rows: list[dict] = []
-    if symbols:
-        workers = min(5, len(symbols))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(fetch_one, s): s for s in symbols}
-            for fut in as_completed(futures):
-                rows.append(fut.result())
-        order = {s: i for i, s in enumerate(symbols)}
-        rows.sort(key=lambda r: order.get(r["symbol"], 9999))
-    _cache_put(cache_key, {"rows": rows})
-    return rows
-
-
 # ----------------------------- Quote streaming ------------------------------
 
 
@@ -645,28 +627,31 @@ def _aligned_pct(a: pd.Series, b: pd.Series, days: int) -> tuple[float | None, f
 
 
 def _beta_corr(stock_close: pd.Series, bench_close: pd.Series) -> tuple[float | None, float | None]:
+    """β and ρ of a stock's returns on a benchmark's.
+
+    Same exchange session: the last 252 daily returns. Different sessions (a
+    London or Tokyo listing against SPY): the last 104 weekly returns. Markets
+    that close hours apart give non-synchronous daily returns, which bias both
+    numbers toward zero (Toyota on SPY: β -0.09 daily, 0.37 weekly); that is
+    why international betas are estimated on weekly data.
+    """
     if stock_close is None or bench_close is None:
         return (None, None)
+    tz = [str(getattr(c.index, "tz", None)) for c in (stock_close, bench_close)]
+    # By date: two exchanges' raw timestamps never match, which made beta and
+    # correlation None for every non-US listing.
     df = pd.concat(
-        [stock_close.rename("s"), bench_close.rename("b")], axis=1, join="inner"
+        [by_trading_date(stock_close).rename("s"), by_trading_date(bench_close).rename("b")],
+        axis=1,
+        join="inner",
     ).dropna()
-    if len(df) < 30:
+    df = df.tail(253) if tz[0] == tz[1] else df.resample("W-FRI").last().dropna().tail(105)
+    r = df.pct_change().dropna()
+    var_b = float(r["b"].var()) if len(r) >= 20 else 0.0
+    if not var_b:
         return (None, None)
-    df = df.tail(252)
-    rs = df["s"].pct_change().dropna()
-    rb = df["b"].pct_change().dropna()
-    common = rs.index.intersection(rb.index)
-    rs, rb = rs.loc[common], rb.loc[common]
-    if len(rs) < 20:
-        return (None, None)
-    var_b = float(rb.var())
-    cov = float(rs.cov(rb))
-    beta = cov / var_b if var_b else None
-    try:
-        corr = float(rs.corr(rb))
-    except Exception:
-        corr = None
-    return (beta, corr)
+    corr = float(r["s"].corr(r["b"]))
+    return (float(r["s"].cov(r["b"])) / var_b, corr if math.isfinite(corr) else None)
 
 
 def _statement_values(df: pd.DataFrame | None, labels: list[str]) -> list[float]:

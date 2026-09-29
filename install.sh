@@ -52,6 +52,15 @@ tag_at_least() {
 
 say "Convexity installer"
 
+# numba/llvmlite publish macOS wheels for Apple Silicon only. On an Intel Mac,
+# or in a Rosetta (x86_64) terminal on Apple Silicon, uv would pick an x86_64
+# Python and fail minutes later compiling LLVM from source.
+if [ "$OS" = "Darwin" ] && [ "$(uname -m)" != "arm64" ]; then
+    [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ] \
+        && die "this terminal runs under Rosetta (x86_64); open a native Terminal and run the installer again."
+    die "Convexity needs a Mac with Apple silicon: numba ships no Intel macOS build."
+fi
+
 # ---------------------------------------------------------------------------
 # 1. uv
 # ---------------------------------------------------------------------------

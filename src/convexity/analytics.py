@@ -1,6 +1,5 @@
 """Portfolio analytics — bulk close, analyst blocks, multi-weight analysis."""
 
-import contextlib
 import math
 import random
 import time
@@ -24,6 +23,7 @@ from convexity.helpers import (
     _dedupe_rows_by_symbol,
     _safe_num,
     _series_to_points,
+    by_trading_date,
     major_ccy,
 )
 
@@ -358,13 +358,10 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
                     if h is not None and not h.empty:
                         col = h["Close"].dropna()
                         if not col.empty:
-                            try:
-                                if getattr(col.index, "tz", None) is not None:
-                                    col.index = col.index.tz_convert(None)
-                            except Exception:
-                                with contextlib.suppress(Exception):
-                                    col.index = col.index.tz_localize(None)
-                            ser = col
+                            # Same date keys as the yf.download path above; the
+                            # old tz_convert(None) moved bars to UTC, off by a
+                            # day for London and off-midnight for New York.
+                            ser = by_trading_date(col)
                             break
                 except Exception:
                     pass
@@ -754,17 +751,14 @@ def analyze_portfolios_multi(
         by_sector: dict[str, float] = {}
         by_industry: dict[str, float] = {}
         by_bucket: dict[str, float] = {}
-        by_country: dict[str, float] = {}
         for s in active:
             r = by_sym.get(s, {})
             w = weights.get(s, 0.0)
             sec = (r.get("sector") or "Unknown").strip() or "Unknown"
             ind = (r.get("industry") or "Unknown").strip() or "Unknown"
-            country = (r.get("country") or "Unknown").strip() or "Unknown"
             bucket = _mcap_bucket(mcap_usd.get(s))
             by_sector[sec] = by_sector.get(sec, 0.0) + w
             by_industry[ind] = by_industry.get(ind, 0.0) + w
-            by_country[country] = by_country.get(country, 0.0) + w
             by_bucket[bucket] = by_bucket.get(bucket, 0.0) + w
 
         weights_sorted = sorted(weights.values(), reverse=True)
@@ -808,7 +802,6 @@ def analyze_portfolios_multi(
                 "by_sector": by_sector,
                 "by_industry": by_industry,
                 "by_bucket": by_bucket,
-                "by_country": by_country,
             },
             "concentration": {"top5": top5, "herfindahl": herfindahl, "effective_n": effective_n},
             "contribution": contribution,

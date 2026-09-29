@@ -13,6 +13,15 @@ Python 3.14 (#17).
 - **Fixed a SQLite handle leak** in the symbol database: `with sqlite3.connect(...)` commits but never closes, so every lookup reload left a connection open (3.14 now warns about it). Connections are closed after each use.
 - **Tidied, no behaviour change**: dropped `from __future__ import annotations` (62 files; PEP 649 makes it redundant), `datetime.UTC`, `X | None`, `collections.abc`, `contextlib.suppress`, and removed fallbacks for "optional" packages that are in fact required (rapidfuzz, openpyxl, the app's own news modules): their untested code paths could never run. ruff now enforces these idioms in CI (`UP`, `C4`, `PIE`, `SIM`, `FURB`). About 240 fewer lines.
 
+Adversarial review of 3.14 (#17).
+
+- **β(SPY) and ρ(SPY) now show for non-US stocks** (the stock detail header). They were blank for every London, Tokyo, Frankfurt… listing: the two price series were joined on timestamps stamped at each exchange's local midnight, which never match. Listings outside US hours now use two years of weekly returns, because their daily moves lag New York's and a daily beta understates it (Toyota: −0.09 daily, 0.37 weekly). The same timezone slip put London prices one day early in the portfolio chart whenever a symbol missed the bulk download.
+- **The API answers bad requests with 400, not 500 or silence**: every POST validates its body up front (a JSON object, under 32 MB, read no further than that), and `/api/refresh-job` with wrongly typed fields no longer drops the connection. Found by fuzzing every route; a regression test covers each one.
+- **The Mac installer stops at once on an Intel Mac or a Rosetta terminal** with a plain message, instead of failing minutes later compiling LLVM (numba ships no Intel macOS build).
+- **`Launch Dashboard.command` keeps the iCloud workaround working across Python upgrades**: when uv had to rebuild the venv it replaced the `.venv` → `.venv.nosync` link with a real folder that iCloud then hides.
+- Removed the unused `/api/quotes` route and the portfolio's country exposure, which was always 100% "Unknown" and shown nowhere.
+- Checked unchanged: the Market read scores are bit-identical on 3.11 and 3.14, and portfolio analytics agree to the last bit apart from Python 3.12+'s more exact `sum()`.
+
 One logo (icon.svg).
 
 - **The Dock icon now matches the loading screen**: the four candlesticks on the dark tile, instead of on the light grey plate macOS 26 added around the old transparent icon. The logo now has one master, `icon.svg`, and the app icon, splash, window icon, Windows icon and the README header are all generated from it; a test fails if they drift or a second logo appears. Re-run the installer to get the new Dock icon.

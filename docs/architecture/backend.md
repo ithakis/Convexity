@@ -263,7 +263,7 @@ analyst {mean_rating, rating_coverage_weight, weighted_target_upside_pct,
          holdings [{symbol, name, weight, price, target_mean,
                     target_low, target_high, upside_pct, mean_rating,
                     rec_key, n_analysts, dist}, ...]},
-exposure {by_sector, by_industry, by_country, by_currency},
+exposure {by_sector, by_industry, by_bucket},
 concentration {top5, herfindahl, effective_n},
 warnings
 ```
@@ -338,7 +338,6 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/export-xlsx`               — Excel export of every saved portfolio
 
 **POST**
-- `/api/quotes` (legacy, blocking) — `{entries: [...]}` → `{rows: [...]}`
 - `/api/quotes-stream` (preferred) — NDJSON streaming, the fast path
 - `/api/watchlists`                — upsert `{name, entries}`
 - `/api/views/<name>`              — save view body `{entries, rows, set_last?}`
