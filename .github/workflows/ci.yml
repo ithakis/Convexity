@@ -203,6 +203,14 @@ jobs:
           print('desktop module import OK under offscreen QApplication')
           "
 
+      # The one-logo tests that re-render assets/icon.svg with QtSvg and
+      # compare it with the shipped PNGs. They skip in the `test` job (no
+      # PySide6 there), so this is where they actually run.
+      - name: Icon PNGs match icon.svg (QtSvg render)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: uv run --with pytest pytest tests/test_icon.py -v
+
   tool-install-smoke:
     name: "uv tool install . + boot and /api/health (what the installers do)"
     runs-on: ubuntu-latest
