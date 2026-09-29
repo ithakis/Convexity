@@ -19,8 +19,7 @@ hand-edited file the user broke would silently throw away whatever else it
 held.
 """
 
-from __future__ import annotations
-
+import contextlib
 import json
 import os
 import sys
@@ -148,10 +147,8 @@ def _write(provider: str, key: str | None) -> None:
         from convexity.persistence import _atomic_write
 
         _atomic_write(cfg, json.dumps(data, indent=2) + "\n")
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(cfg, 0o600)
-        except OSError:
-            pass
 
 
 def _warn_malformed(cfg, what: str) -> None:
@@ -189,12 +186,10 @@ def reload_all() -> None:
     not reported as ignored forever — and a newly broken one is reported."""
     del helpers._CONFIG_WARNED[:]
     del _MALFORMED_WARNED[:]
-    for mod in ("news_sentiment", "finnhub_adapter"):
-        try:
-            m = __import__(f"convexity.{mod}", fromlist=["reload_keys"])
-        except ImportError:
-            continue
-        m.reload_keys()
+    from convexity import finnhub_adapter, news_sentiment
+
+    news_sentiment.reload_keys()
+    finnhub_adapter.reload_keys()
 
 
 # ----------------------------- Test buttons ---------------------------------
@@ -251,10 +246,8 @@ def check(provider) -> dict:
         )
         res = _call(req, _FH_TIMEOUT_S, helpers._FH_LIMITER)
     else:
-        try:
-            from convexity.news_sentiment import _MODEL as model
-        except ImportError:
-            model = "nvidia/nemotron-3-super-120b-a12b"
+        from convexity.news_sentiment import _MODEL as model
+
         body = json.dumps(
             {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]}
         ).encode()

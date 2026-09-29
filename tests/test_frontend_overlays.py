@@ -15,8 +15,6 @@ invisible in review and obvious in use, which is exactly the kind a cheap
 static guard should catch.
 """
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 
@@ -105,7 +103,7 @@ def test_overlay_scroll_containers_contain_their_overscroll():
     block = re.search(
         r"/\* ===== Overlay scroll containment.*?\*/\s*(.*?)\{\s*overscroll-behavior:\s*contain;",
         _CSS,
-        re.S,
+        re.DOTALL,
     )
     assert block, "the grouped overscroll-containment rule is gone from style.css"
     listed = {s.strip() for s in block.group(1).split(",") if s.strip()}
@@ -125,7 +123,7 @@ def test_overlay_scroll_containers_contain_their_overscroll():
 def test_contribution_header_is_sticky_and_opaque():
     """The sticky topbar (z 30) used to scroll straight through these headers,
     which had no background at all."""
-    m = re.search(r"\.pf-contrib-table th \{(.*?)\}", _CSS, re.S)
+    m = re.search(r"\.pf-contrib-table th \{(.*?)\}", _CSS, re.DOTALL)
     assert m, ".pf-contrib-table th rule not found"
     body = m.group(1)
     assert "position: sticky" in body

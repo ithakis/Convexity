@@ -30,8 +30,6 @@ which is exactly the failure mode that shipped. Version *ranges* are the
 manifest's job and are enforced by the resolver (uv).
 """
 
-from __future__ import annotations
-
 import importlib.util
 import sys
 from typing import NamedTuple

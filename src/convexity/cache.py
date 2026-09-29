@@ -5,8 +5,6 @@ object (Python module singletons guarantee identity). Never reassign a
 cache dict — only mutate via [] / .pop / .get.
 """
 
-from __future__ import annotations
-
 import time
 
 # ----------------------------- Generic TTL cache ----------------------------

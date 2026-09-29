@@ -1,8 +1,6 @@
 """Unit tests for convexity.ml_features — the shared featurizer whose
 train/serve parity the deployed model depends on."""
 
-from __future__ import annotations
-
 import math
 import sys
 from pathlib import Path

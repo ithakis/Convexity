@@ -24,8 +24,6 @@ Startup is staged so the splash appears as fast as possible:
 Run via: python -m convexity.desktop
 """
 
-from __future__ import annotations
-
 import logging
 import os
 import sys
@@ -262,7 +260,7 @@ class _ExternalLinkPage(QWebEnginePage):
         return popup
 
 
-def _handle_download(download: "QWebEngineDownloadRequest", window: "_MainWindow") -> None:
+def _handle_download(download: QWebEngineDownloadRequest, window: "_MainWindow") -> None:
     # QWebEngineProfile.downloadRequested is auto-cancelled (silently — no
     # error, no file) unless a connected slot calls accept(). The Export
     # button (server.py's /api/export-xlsx, sent with a Content-Disposition

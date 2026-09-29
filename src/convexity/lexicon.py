@@ -14,8 +14,6 @@ Word lists are vendored in data/lm_lexicon.json (2024 vintage, positive /
 negative / uncertainty; license note inside the file). Pure stdlib.
 """
 
-from __future__ import annotations
-
 import json
 import re
 from pathlib import Path

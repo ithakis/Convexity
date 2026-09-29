@@ -50,8 +50,7 @@ def _launched_as_app() -> bool:
         return i + 1 < len(argv) and argv[i + 1] in _APP_MODULES
     name = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ""
     for suffix in (".exe", "-script.pyw", "-script.py"):  # Windows launchers
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
+        name = name.removesuffix(suffix)
     return name in _APP_SCRIPTS
 
 

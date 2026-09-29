@@ -31,8 +31,6 @@ fallback that never goes away is visible in Settings -> Logs rather than
 silent. Delete them with the fallbacks after the 1.14 release cycle.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 import threading

@@ -146,8 +146,8 @@ One command on a clean account, and safe to re-run (that is the update):
    the first with a pyproject) are refused with a clear message.
    `uv tool upgrade` cannot move a tag-pinned URL requirement, so updating
    re-runs `uv tool install --force` at the newest tag.
-4. `uv tool install --force --python 3.11 "convexity[desktop] @ <src>"` —
-   uv downloads a managed 3.11 when the machine has none.
+4. `uv tool install --force --python 3.14 "convexity[desktop] @ <src>"` —
+   uv downloads a managed 3.14 when the machine has none.
 5. **Verify** with the tool's own interpreter: `python -m convexity.envcheck`
    (fails the install on a critical miss) and `import lightgbm` (warning).
 6. **Keys from an old checkout** — when the script runs from a checkout that

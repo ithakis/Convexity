@@ -237,7 +237,7 @@ $\alpha$ = 95%, and $r_f$ = 4.50% (**Auto** sets it to the lookback's average
 
 ## Requirements
 
-Python 3.11–3.14 (the installer fetches 3.11 through uv). Every dependency is
+Python 3.14 (the installer fetches it through uv). Every dependency is
 declared in `pyproject.toml` and locked in `uv.lock`; `src/convexity/envcheck.py`
 lists the ones the running app checks for at startup.
 

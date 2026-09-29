@@ -12,7 +12,7 @@ drive the app from a key-free install of a clean tree instead:
 ```bash
 S=<scratchpad>/v; mkdir -p $S/tree $S/tools $S/bin $S/home $S/run
 git archive HEAD | tar -xf - -C $S/tree          # clean tree: no keys, no state
-(cd $S/tree && UV_TOOL_DIR=$S/tools UV_TOOL_BIN_DIR=$S/bin uv tool install --python 3.11 ".[desktop]")
+(cd $S/tree && UV_TOOL_DIR=$S/tools UV_TOOL_BIN_DIR=$S/bin uv tool install --python 3.14 ".[desktop]")
 cd $S/run && CONVEXITY_HOME=$S/home PYTHONUNBUFFERED=1 $S/bin/convexity > server.log 2>&1 &
 lsof -nP -iTCP -sTCP:LISTEN | grep python       # 8765 is usually the user's own app; yours lands on 8766+
 ```

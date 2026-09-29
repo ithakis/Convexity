@@ -38,14 +38,12 @@ Artifact bundle (ml/scripts/07 + 09 + 10), <data>/models/<ver>/ (paths.py):
     meta.json             provenance and gate results
 """
 
-from __future__ import annotations
-
 import json
 import math
 import os
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from convexity import paths
@@ -221,17 +219,10 @@ def price_features(closes, symbol: str, today=None) -> dict:
     """ml_features.PRICE_COLUMNS as of the last COMPLETED session before
     `today` (ET) — the training panel's as-of-D-1 convention (05 stage D)."""
     today = today or datetime.now(_ET).date()
-    out = {
-        c: math.nan
-        for c in (
-            "tkr_ret_1d",
-            "tkr_ret_5d",
-            "tkr_ret_20d",
-            "tkr_vol_20d",
-            "spy_ret_5d",
-            "spy_vol_20d",
-        )
-    }
+    out = dict.fromkeys(
+        ("tkr_ret_1d", "tkr_ret_5d", "tkr_ret_20d", "tkr_vol_20d", "spy_ret_5d", "spy_vol_20d"),
+        math.nan,
+    )
     s, spy = _series(closes, symbol), _series(closes, "SPY")
     if s is not None:
         c = [float(v) for d, v in zip(s.index, s.values) if d.date() < today]
@@ -312,7 +303,7 @@ def score_articles(
             title, summary, symbol, name, co_mention_count=n_co, publisher_tier=tier
         )
         ts = a.get("datetime") or time.time()
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(_ET)
+        dt = datetime.fromtimestamp(ts, tz=UTC).astimezone(_ET)
         if dt.date() not in ctx_by_day:
             ctx_by_day[dt.date()] = _article_context(closes, symbol, dt.date())
         row = mf.dense_vector(
@@ -454,15 +445,14 @@ def market_read(
         now = float(now) if now is not None else time.time()
         # The calibration panel's window is articles dated D-6..D (ET days),
         # capped exactly like the app's retained set.
-        first = datetime.fromtimestamp(now, tz=timezone.utc).astimezone(_ET).date() - timedelta(
+        first = datetime.fromtimestamp(now, tz=UTC).astimezone(_ET).date() - timedelta(
             days=mf.WINDOW_DAYS - 1
         )
         recent = [
             a
             for a in sorted(articles, key=lambda a: a.get("datetime") or 0, reverse=True)
             if a.get("datetime")
-            and datetime.fromtimestamp(a["datetime"], tz=timezone.utc).astimezone(_ET).date()
-            >= first
+            and datetime.fromtimestamp(a["datetime"], tz=UTC).astimezone(_ET).date() >= first
         ]
         recent = window_sample(recent, mf.WINDOW_CAP, mf.WINDOW_MIN_RECENT)
         items = score_articles(recent, symbol, closes, company_name=company_name)
@@ -478,7 +468,7 @@ def market_read(
             "confidence": round(1.0 - math.exp(-wsum / _CONF_SCALE), 3),
             "n_articles": len(items),
             "model_version": ARTIFACT_VERSION,
-            "assessed_at": datetime.now(timezone.utc).isoformat(),
+            "assessed_at": datetime.now(UTC).isoformat(),
         }, (vol if isinstance(vol, float) and math.isfinite(vol) else None)
     except Exception as e:
         print(f"[ml_sentiment] market_read failed for {symbol}: {type(e).__name__}: {e}")

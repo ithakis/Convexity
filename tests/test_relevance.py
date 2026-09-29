@@ -1,8 +1,6 @@
 """Unit tests for convexity.relevance — the deterministic relevance
 heuristic and the shared title-dedup primitives (train/serve contract)."""
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

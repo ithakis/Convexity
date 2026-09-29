@@ -26,8 +26,6 @@ Usage:
     python ml/scripts/07_train_flaml.py --stage window     # v2 window model (~20 min)
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import sys

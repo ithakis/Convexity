@@ -42,8 +42,7 @@ Designed for ~2–60 assets and a 10–20 s wall budget per call (data fetch
 dominates; the optimization math here is well under 100 ms).
 """
 
-from __future__ import annotations
-
+import contextlib
 import math
 
 import numpy as np
@@ -259,7 +258,7 @@ def black_litterman(
 
     # Assemble the views: P = identity rows for covered assets.
     H = float(min(max(haircut, 0.0), 1.0))
-    q_map: dict[str, float | None] = {s: None for s in symbols}
+    q_map: dict[str, float | None] = dict.fromkeys(symbols)
     viewed: list[str] = []
     if H > 1e-6 and views:
         rows, qs, omegas = [], [], []
@@ -667,10 +666,7 @@ def _cvar_pdip(R, a_ret, b_ret, l, h, kappa, fully_invested, max_iter):
         Sxx[N, N] += gsum
 
         # augmented KKT matrix M (with budget border if fully invested)
-        if fully_invested == 1:
-            nk = nx + 1
-        else:
-            nk = nx
+        nk = nx + 1 if fully_invested == 1 else nx
         M = np.zeros((nk, nk))
         for i in range(nx):
             for j in range(nx):
@@ -1562,8 +1558,6 @@ def _warm_jit() -> None:
     )
 
 
-try:
+# Warm-up failure must not break import; the first real call JITs lazily.
+with contextlib.suppress(Exception):
     _warm_jit()
-except Exception:
-    # Warm-up failure must not break import; the first real call JITs lazily.
-    pass

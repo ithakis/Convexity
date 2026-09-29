@@ -13,8 +13,6 @@ Writes ml/data/reports/timestamp_audit.json; downstream scripts read the
 decisions (source_tz, dateonly_frac) from there via config.load_timestamp_audit().
 """
 
-from __future__ import annotations
-
 import json
 import sys
 from pathlib import Path

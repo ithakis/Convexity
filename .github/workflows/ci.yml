@@ -230,7 +230,7 @@ jobs:
           enable-cache: true
 
       - name: uv tool install .
-        run: uv tool install --python 3.11 .
+        run: uv tool install --python 3.14 .
 
       - name: Dependency self-check with the tool's interpreter
         run: '"$(uv tool dir)/convexity/bin/python" -m convexity.envcheck'

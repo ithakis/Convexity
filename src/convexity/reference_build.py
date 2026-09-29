@@ -28,8 +28,6 @@ A degraded run is never published: fewer than half the names scored, or
 Finnhub failing for most of them, exits non-zero with nothing written.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import math
@@ -37,7 +35,7 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 
@@ -172,7 +170,7 @@ def build(
     uni = universe()
     names = uni["symbols"][: limit or None]
     symbols = [n["symbol"] for n in names]
-    today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = today or datetime.now(UTC).strftime("%Y-%m-%d")
     t0 = time.time()
 
     prev = [r for r in _load_previous(previous, model_version) if r.get("date") != today]
@@ -287,7 +285,7 @@ def build(
         "schema_version": rp.SCHEMA_VERSION,
         "model_version": model_version,
         "date": today,
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "universe": {"source": "sp500.json", "as_of": uni.get("as_of"), "n": n},
         "rows": {"history": len(records), "anchor": len(anchor_rows)},
         "sources": counts,

@@ -11,8 +11,6 @@ Usage:
     python ml/scripts/00_download_fnspid.py --all
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json

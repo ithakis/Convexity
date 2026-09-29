@@ -1,12 +1,11 @@
 """Data fetching — per-symbol rows, portfolio batches, and detail modal payloads."""
 
-from __future__ import annotations
-
+import contextlib
 import math
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 import yfinance as yf
@@ -34,15 +33,8 @@ from convexity.helpers import (
 from convexity.fx import convert_amount, usd_per_unit
 from convexity.resolver import _ordered_resolve
 
-try:
-    from convexity import finnhub_adapter as _fh
-except ImportError:
-    _fh = None
-
-try:
-    from convexity import news_sentiment as _ns
-except ImportError:
-    _ns = None
+from convexity import finnhub_adapter as _fh
+from convexity import news_sentiment as _ns
 
 
 _SECTOR_ETF = {
@@ -376,15 +368,11 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
                 pass
             out["rating_dist"] = rating_dist
 
-            if _fh is not None:
-                out["insider_mspr"] = _fh.get_insider_sentiment(symbol)
-                out["rec_trend_fh"] = _fh.get_recommendation_trend(symbol)
-            else:
-                out["insider_mspr"] = None
-                out["rec_trend_fh"] = None
+            out["insider_mspr"] = _fh.get_insider_sentiment(symbol)
+            out["rec_trend_fh"] = _fh.get_recommendation_trend(symbol)
 
             # Cache-only read — never triggers a fetch from the hot path.
-            out["news_sentiment"] = _ns.get_cached_sentiment(symbol) if _ns else None
+            out["news_sentiment"] = _ns.get_cached_sentiment(symbol)
 
             return out
 
@@ -824,9 +812,7 @@ def fetch_detail(symbol: str) -> dict:
     ex_div = info.get("exDividendDate")
     if ex_div:
         try:
-            out["ex_div_date"] = datetime.fromtimestamp(int(ex_div), tz=timezone.utc).strftime(
-                "%Y-%m-%d"
-            )
+            out["ex_div_date"] = datetime.fromtimestamp(int(ex_div), tz=UTC).strftime("%Y-%m-%d")
         except Exception:
             out["ex_div_date"] = None
 
@@ -946,10 +932,8 @@ def fetch_detail(symbol: str) -> dict:
         if isinstance(cal, dict):
             edates = cal.get("Earnings Date")
             if isinstance(edates, list) and edates:
-                try:
+                with contextlib.suppress(Exception):
                     out["next_earnings"] = pd.Timestamp(edates[0]).strftime("%Y-%m-%d")
-                except Exception:
-                    pass
     except Exception:
         pass
 
@@ -976,7 +960,7 @@ def fetch_detail(symbol: str) -> dict:
                 pub = n.get("publisher")
                 link = n.get("link")
                 pt = n.get("providerPublishTime")
-                ts = datetime.fromtimestamp(int(pt), tz=timezone.utc).isoformat() if pt else None
+                ts = datetime.fromtimestamp(int(pt), tz=UTC).isoformat() if pt else None
             if title:
                 news_out.append(
                     {"title": title, "publisher": pub or "", "link": link or "", "time": ts or ""}
@@ -1008,10 +992,7 @@ def fetch_detail(symbol: str) -> dict:
     perf: dict[str, dict] = {}
     for label, days in horizons.items():
         if label == "ytd":
-            if not close.empty:
-                s_pct = _ytd_change(close)
-            else:
-                s_pct = None
+            s_pct = _ytd_change(close) if not close.empty else None
             b_pct = _ytd_change(spy_close) if spy_close is not None else None
             k_pct = _ytd_change(sector_close) if sector_close is not None else None
         else:

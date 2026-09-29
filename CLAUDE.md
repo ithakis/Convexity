@@ -171,7 +171,7 @@ sub-decision.
 ├── ml/                           ← FNSPID training pipeline for the Market read — docs/ml_sentiment_design.md
 ├── pyproject.toml                ← THE dependency manifest + entry points (`convexity`, `convexity-app`) — §3, §4
 ├── uv.lock                       ← uv lockfile solved from pyproject.toml (CI installs exactly this) — §13
-├── .python-version               ← 3.11, the interpreter `uv` uses for this checkout
+├── .python-version               ← 3.14, the interpreter `uv` uses for this checkout
 ├── install.sh                    ← Installer, macOS/Linux: uv + `uv tool install` of the latest release + launcher — §14. Stays at the root: it is the curl target
 ├── packaging/
 │   ├── install.ps1               ← The Windows installer (same steps, Start Menu + Desktop shortcuts) — §14

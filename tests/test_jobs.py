@@ -7,8 +7,6 @@ the guard that stops a background job overwriting good holdings with a batch
 Yahoo mostly failed to answer.
 """
 
-from __future__ import annotations
-
 import sys
 import threading
 import time
@@ -533,9 +531,9 @@ def test_unified_progress_never_goes_backwards(fake_quotes, fake_news, isolated_
 
 
 def test_skipped_news_phase_releases_its_reservation(fake_quotes, isolated_state, monkeypatch):
-    """news_sentiment unavailable: the planned news items are never coming, so
+    """No row resolved to a symbol: the planned news items are never coming, so
     they must leave the denominator or the bar can never reach 100%."""
-    monkeypatch.setattr(jobs, "_ns", None)
+    monkeypatch.setattr(fetcher, "fetch_one", lambda sym: {"error": "no data"})
     job, _ = jobs.submit(
         scope="current",
         phases=["quotes", "news"],

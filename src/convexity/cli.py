@@ -12,8 +12,6 @@ an installed app could not run: it lived in the checkout, not the package.
 Its imports are deferred so starting the server pays nothing for it.
 """
 
-from __future__ import annotations
-
 import sys
 
 USAGE = """\

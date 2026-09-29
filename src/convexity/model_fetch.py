@@ -29,8 +29,6 @@ Releasing a new model: CLAUDE.md §4 "Model release procedure".
 Stdlib only.
 """
 
-from __future__ import annotations
-
 import gzip
 import hashlib
 import io
@@ -463,9 +461,11 @@ def pack(src_dir: Path, out: Path) -> str:
             tf.addfile(ti, io.BytesIO(data))
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "wb") as fh:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=fh, mtime=0, compresslevel=9) as gz:
-            gz.write(raw.getvalue())
+    with (
+        open(out, "wb") as fh,
+        gzip.GzipFile(filename="", mode="wb", fileobj=fh, mtime=0, compresslevel=9) as gz,
+    ):
+        gz.write(raw.getvalue())
     return hashlib.sha256(out.read_bytes()).hexdigest()
 
 

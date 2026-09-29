@@ -6,7 +6,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -409,7 +409,7 @@ def test_assess_writes_items_both_engines_and_history(monkeypatch):
 def test_market_history_is_the_running_models_recent_scores(monkeypatch):
     from convexity import ml_sentiment as _ml
 
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     day = lambda n: (today - timedelta(days=n)).isoformat()  # noqa: E731
     recs = [
         {"date": day(1), "symbol": "A", "market_score": 0.1, "market_model": "m1"},

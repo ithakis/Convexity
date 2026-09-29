@@ -1,7 +1,5 @@
 """Shared utility functions used across multiple modules."""
 
-from __future__ import annotations
-
 import json
 import math
 import os

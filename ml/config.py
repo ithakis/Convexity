@@ -6,8 +6,6 @@ import this module — the deployed artifact carries its own feature_schema.json
 so the app never depends on the ml/ tree.
 """
 
-from __future__ import annotations
-
 import json
 import os
 from pathlib import Path

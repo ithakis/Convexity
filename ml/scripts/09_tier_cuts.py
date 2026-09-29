@@ -47,8 +47,6 @@ Usage:
     python ml/scripts/09_tier_cuts.py --model v2 [--horizon 1]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import sys

@@ -12,8 +12,6 @@ Exits non-zero (with a traceback) on any failure, before ever reaching
 shutdown_server() — see the comment above that call for why.
 """
 
-from __future__ import annotations
-
 import json
 import sys
 import time

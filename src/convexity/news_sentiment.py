@@ -22,8 +22,6 @@ the last LLM outcome is tracked (`llm_status()`), rides on /api/health as
 stale instead of passing it off as current.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import math
@@ -35,8 +33,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from rapidfuzz import fuzz as _fuzz
 
 from convexity import paths
 from convexity.helpers import (
@@ -257,7 +257,7 @@ def _save_persisted_caches() -> None:
         body = json.dumps(
             {
                 "version": 3,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "saved_at": datetime.now(UTC).isoformat(),
                 "news": news_out,
                 "sentiment": sent_out,
                 "llm_status": dict(_LLM_STATUS),
@@ -413,15 +413,6 @@ def _fh_call(path: str, params: dict[str, Any], cancel=None) -> Any | None:
     return None
 
 
-# Optional fuzzy title matching for syndication dedup — same optional-dep
-# pattern as symbol_db.py. Without rapidfuzz we fall back to exact
-# normalised-title matching (catches literal reprints, misses paraphrases).
-try:
-    from rapidfuzz import fuzz as _fuzz  # type: ignore
-except ImportError:
-    _fuzz = None
-
-
 def _dedup_articles(articles: list[dict]) -> list[dict]:
     """Collapse syndicated copies of the same story.
 
@@ -439,11 +430,7 @@ def _dedup_articles(articles: list[dict]) -> list[dict]:
             continue
         dup_of = None
         for i, kn in enumerate(kept_norms):
-            if _fuzz is not None:
-                if _fuzz.token_set_ratio(norm, kn) >= DEDUP_SIMILARITY:
-                    dup_of = i
-                    break
-            elif norm == kn:
+            if _fuzz.token_set_ratio(norm, kn) >= DEDUP_SIMILARITY:
                 dup_of = i
                 break
         if dup_of is not None:
@@ -471,7 +458,7 @@ def _parse_yf_epoch(content: dict, item: dict) -> int:
     ts = content.get("pubDate") or content.get("displayTime")
     if isinstance(ts, str) and ts:
         try:
-            return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+            return int(datetime.fromisoformat(ts).timestamp())
         except ValueError:
             pass
     pt = item.get("providerPublishTime")
@@ -506,7 +493,7 @@ def _fetch_yf_news(symbol: str, days: int, cancel=None) -> list[dict]:
                 time.sleep(2.0 + attempt * 2.0 + random.random() * 0.5)
                 continue
             return []
-    cutoff = datetime.now(timezone.utc).timestamp() - days * 86400
+    cutoff = datetime.now(UTC).timestamp() - days * 86400
     out: list[dict] = []
     for n in raw:
         if not isinstance(n, dict):
@@ -557,8 +544,8 @@ def collect_company_news(
     article set the app would — train/serve-style parity for the anchor.
     `finnhub_symbol` lets the builder pass Finnhub's class-share spelling
     (BRK.B) for a Yahoo ticker (BRK-B)."""
-    to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    to_date = datetime.now(UTC).strftime("%Y-%m-%d")
+    from_date = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
     raw = _fh_call(
         "company-news",
         {"symbol": finnhub_symbol or symbol, "from": from_date, "to": to_date},
@@ -901,9 +888,7 @@ def _history_append(record: dict) -> None:
             key = (record.get("date"), record.get("symbol"))
             records = [r for r in records if (r.get("date"), r.get("symbol")) != key]
             records.append(record)
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=_HISTORY_MAX_DAYS)).strftime(
-                "%Y-%m-%d"
-            )
+            cutoff = (datetime.now(UTC) - timedelta(days=_HISTORY_MAX_DAYS)).strftime("%Y-%m-%d")
             records = [r for r in records if (r.get("date") or "") >= cutoff]
             _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
             _HISTORY_FILE.write_text(
@@ -953,7 +938,7 @@ def _llm_record(ok: bool, error: str | None = None, permanent: bool = False) -> 
                 "error": error,
                 "model": _MODEL,
                 "permanent": bool(permanent) and not ok,
-                "at": datetime.now(timezone.utc).isoformat(),
+                "at": datetime.now(UTC).isoformat(),
             }
         )
 
@@ -1353,7 +1338,7 @@ def _build_articles_prompt(batch: list[dict], symbol: str, row_ctx: dict | None 
     for i, a in enumerate(batch, 1):
         ts = a.get("datetime", 0)
         date = (
-            datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
             if isinstance(ts, (int, float)) and ts > 0
             else "?"
         )
@@ -1415,9 +1400,7 @@ def _market_history(model_version: str, exclude: tuple[str, str]) -> list[float]
     (date, symbol) being re-scored, which would rank a ticker against itself."""
     from convexity import ml_sentiment as _ml
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=_ml.LIVE_WINDOW_DAYS)).strftime(
-        "%Y-%m-%d"
-    )
+    cutoff = (datetime.now(UTC) - timedelta(days=_ml.LIVE_WINDOW_DAYS)).strftime("%Y-%m-%d")
     return [
         r["market_score"]
         for r in _history_load()
@@ -1443,7 +1426,7 @@ def _market_read(symbol: str, ctx: dict, cancel=None) -> tuple[dict | None, floa
         closes = ctx.get("closes")
         if closes is None:
             closes = _ml.load_closes([symbol])
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         history = _market_history(_ml.ARTIFACT_VERSION, (today, symbol))
         reference, ref_date = [], None
         if len(history) < _ml.MIN_LIVE_HISTORY:
@@ -1493,7 +1476,7 @@ def _assess_symbol(symbol: str, ctx: dict, stage_cb=None, cancel=None) -> tuple[
 
     row_ctx = ctx.get("row")
     batch = _read_batch(articles, symbol)
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     read = read_headlines(
         _NEWS_READ_PROMPT,
         _build_articles_prompt(batch, symbol, row_ctx),
@@ -1547,7 +1530,7 @@ def _assess_symbol(symbol: str, ctx: dict, stage_cb=None, cancel=None) -> tuple[
         lens_scores = {k: ((news or {}).get("lenses") or {}).get(k, {}) or {} for k in LENSES}
         _history_append(
             {
-                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "date": datetime.now(UTC).strftime("%Y-%m-%d"),
                 "symbol": symbol,
                 "news_score": news.get("score") if (news and outcome == "ok") else None,
                 "news_tier": news.get("tier") if (news and outcome == "ok") else None,
@@ -1648,7 +1631,7 @@ def _assess_market(days: int, stage_cb=None, cancel=None) -> tuple[dict | None, 
         stage_cb=stage_cb,
         cancel=cancel,
     )
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     outcome, news = "ok", None
     if read is not None:
         items, brief, agreement = read
@@ -1688,7 +1671,7 @@ def _assess_market(days: int, stage_cb=None, cancel=None) -> tuple[dict | None, 
     if outcome == "ok":
         _history_append(
             {
-                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "date": datetime.now(UTC).strftime("%Y-%m-%d"),
                 "symbol": "__market__",
                 "news_score": news.get("score"),
                 "news_tier": news.get("tier"),

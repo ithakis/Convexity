@@ -9,8 +9,6 @@ CI (`pytest tests/`) certifies the fast solver on every push without shipping
 scipy in the request path.
 """
 
-from __future__ import annotations
-
 import numpy as np
 from scipy.optimize import linprog
 from scipy.sparse import csr_matrix, eye as speye, hstack as sphstack, vstack as spvstack

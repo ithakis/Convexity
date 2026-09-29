@@ -27,33 +27,23 @@ Adding a new provider
 2. Wrap your source functions to emit rows with the right ``provider``
    field. The schema and lookup code are already provider-aware.
 
-Fuzzy matching uses ``rapidfuzz`` when available and falls back to a
-slower exact-substring scan when not — so the dashboard never hard-depends
-on it for startup, but install it for the good experience.
+Fuzzy matching uses ``rapidfuzz`` (a required dependency).
 """
-
-from __future__ import annotations
 
 import os
 import re
 import sqlite3
 import threading
 import time
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+
+from rapidfuzz import fuzz, process as rf_process
 
 from convexity import paths
-
-try:
-    from rapidfuzz import fuzz, process as rf_process
-
-    _HAS_RAPIDFUZZ = True
-except ImportError:  # pragma: no cover - optional dependency
-    _HAS_RAPIDFUZZ = False
-    fuzz = None  # type: ignore
-    rf_process = None  # type: ignore
 
 
 _PROVIDER = "yfinance"
@@ -71,9 +61,9 @@ class SymbolRow:
 
     ticker: str  # in provider format
     name: str  # canonical human-readable name
-    exchange: Optional[str] = None
-    country: Optional[str] = None
-    instrument_type: Optional[str] = None  # "stock"|"etf"|"adr"|"index"|...
+    exchange: str | None = None
+    country: str | None = None
+    instrument_type: str | None = None  # "stock"|"etf"|"adr"|"index"|...
     provider: str = _PROVIDER
 
 
@@ -81,7 +71,7 @@ class SymbolRow:
 class LookupHit:
     ticker: str
     name: str
-    exchange: Optional[str]
+    exchange: str | None
     score: float  # 0..100, higher is closer
 
 
@@ -108,13 +98,19 @@ def db_path() -> Path:
     return p
 
 
-def _connect(path: Optional[Path] = None) -> sqlite3.Connection:
-    p = path or db_path()
-    conn = sqlite3.connect(str(p))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+@contextmanager
+def _connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    """One transaction, then close. sqlite3's own ``with conn`` commits but
+    never closes, which leaked a handle per call (Python 3.13+ warns)."""
+    conn = sqlite3.connect(str(path or db_path()))
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -152,17 +148,17 @@ def normalize_name(s: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def init_db(path: Optional[Path] = None) -> None:
+def init_db(path: Path | None = None) -> None:
     """Create the schema if missing. Idempotent."""
     (path or db_path()).parent.mkdir(parents=True, exist_ok=True)
     with _connect(path) as conn:
         _ensure_schema(conn)
 
 
-def upsert_rows(rows: Iterable[SymbolRow], source: str, *, path: Optional[Path] = None) -> int:
+def upsert_rows(rows: Iterable[SymbolRow], source: str, *, path: Path | None = None) -> int:
     """Insert/update a batch of rows, tagged with the source name. Returns
     the count actually written."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     payload = []
     for r in rows:
         ticker = (r.ticker or "").strip()
@@ -203,11 +199,10 @@ def upsert_rows(rows: Iterable[SymbolRow], source: str, *, path: Optional[Path] 
             """,
             payload,
         )
-        conn.commit()
     return len(payload)
 
 
-def db_stats(path: Optional[Path] = None) -> dict:
+def db_stats(path: Path | None = None) -> dict:
     """Quick row counts — handy for the CLI summary."""
     try:
         with _connect(path) as conn:
@@ -239,7 +234,7 @@ _CACHE: dict = {"loaded_at": 0.0, "rows": None, "mtime": 0.0}
 _CACHE_RELOAD_AFTER_S = 300.0  # check disk mtime at most every 5 min
 
 
-def _load_cache(force: bool = False) -> list[tuple[str, str, str, Optional[str]]]:
+def _load_cache(force: bool = False) -> list[tuple[str, str, str, str | None]]:
     """Return a list of (name_norm, ticker, name, exchange) tuples. Auto-
     reloads when the on-disk file changes."""
     with _CACHE_LOCK:
@@ -307,7 +302,6 @@ def lookup(query: str, *, min_score: float = 72.0, limit: int = 1) -> list[Looku
       3. Rapidfuzz candidate selection (WRatio, low cutoff), re-ranked by
          a composite that rewards prefix / substring matches with small
          length deltas.
-      4. Substring fallback if rapidfuzz is unavailable.
     """
     q = (query or "").strip()
     if not q:
@@ -338,42 +332,23 @@ def lookup(query: str, *, min_score: float = 72.0, limit: int = 1) -> list[Looku
             if len(exact) >= limit:
                 return exact
 
-    # 3) Fuzzy + composite re-rank.
-    if _HAS_RAPIDFUZZ and rf_process is not None:
-        choices = [r[0] for r in rows]
-        # Lower base cutoff (60) lets typos through; composite re-rank filters.
-        cands = rf_process.extract(
-            q_norm,
-            choices,
-            scorer=fuzz.WRatio,
-            limit=40,
-            score_cutoff=60.0,
-        )
-        scored: list[LookupHit] = []
-        seen_tickers: set[str] = {h.ticker for h in exact}
-        for _matched_value, base_score, idx in cands:
-            nn, tk, nm, xch = rows[idx]
-            if tk in seen_tickers:
-                continue
-            s = _composite_score(q_norm, nn, float(base_score))
-            if s >= min_score:
-                scored.append(LookupHit(tk, nm, xch, s))
-                seen_tickers.add(tk)
-        scored.sort(key=lambda h: h.score, reverse=True)
-        return (exact + scored)[:limit]
-
-    # 4) Substring fallback — slow but always correct-shape.
-    subs: list[LookupHit] = []
+    # 3) Fuzzy + composite re-rank. The low base cutoff (60) lets typos
+    # through; the composite re-rank filters.
+    cands = rf_process.extract(
+        q_norm, [r[0] for r in rows], scorer=fuzz.WRatio, limit=40, score_cutoff=60.0
+    )
+    scored: list[LookupHit] = []
     seen_tickers = {h.ticker for h in exact}
-    for nn, tk, nm, xch in rows:
+    for _matched_value, base_score, idx in cands:
+        nn, tk, nm, xch = rows[idx]
         if tk in seen_tickers:
             continue
-        if q_norm in nn:
-            s = _composite_score(q_norm, nn, 70.0)
-            if s >= min_score:
-                subs.append(LookupHit(tk, nm, xch, s))
-    subs.sort(key=lambda h: h.score, reverse=True)
-    return (exact + subs)[:limit]
+        s = _composite_score(q_norm, nn, float(base_score))
+        if s >= min_score:
+            scored.append(LookupHit(tk, nm, xch, s))
+            seen_tickers.add(tk)
+    scored.sort(key=lambda h: h.score, reverse=True)
+    return (exact + scored)[:limit]
 
 
 # --------------------------------------------------------------------------

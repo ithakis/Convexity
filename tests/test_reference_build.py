@@ -6,7 +6,7 @@ real code path on the tiny test artifact from test_ml_sentiment."""
 import gzip
 import json
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -213,12 +213,12 @@ def test_help_lists_the_command(capsys):
 
 def test_manifest_date_is_utc_today(env, tmp_path):
     m = rb.build(tmp_path / "p", limit=6)
-    assert m["date"] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert m["date"] == datetime.now(UTC).strftime("%Y-%m-%d")
     assert json.loads((tmp_path / "p" / rp.MANIFEST).read_text())["files"].keys() == set(
         rp.DATA_FILES
     )
     assert (
         timedelta(0)
-        <= datetime.now(timezone.utc) - datetime.fromisoformat(m["generated_at"])
+        <= datetime.now(UTC) - datetime.fromisoformat(m["generated_at"])
         < timedelta(minutes=5)
     )

@@ -6,8 +6,6 @@ sheet lists them all. These tests fail when a new column lands without a
 definition, which is the only way the two can drift apart.
 """
 
-from __future__ import annotations
-
 import inspect
 import io
 import re

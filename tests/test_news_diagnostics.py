@@ -1,7 +1,5 @@
 """Track record statistics on synthetic history with a KNOWN answer."""
 
-from __future__ import annotations
-
 import math
 import random
 import sys

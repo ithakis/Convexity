@@ -20,15 +20,13 @@ only thing we log is a single line on HTTP 429 — non-US symbols that
 return empty data are silent (that's expected, not an error).
 """
 
-from __future__ import annotations
-
 import json
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from convexity.helpers import (
@@ -212,7 +210,7 @@ def get_insider_sentiment(symbol: str) -> dict | None:
     if cached is not None:
         return cached
     try:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         frm = (today - timedelta(days=5 * 365)).isoformat()
         to = today.isoformat()
         raw = _fh_call(

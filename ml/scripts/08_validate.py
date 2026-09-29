@@ -38,8 +38,6 @@ Usage:
     python ml/scripts/08_validate.py --stage window --horizons 1,5 --walk-forward
 """
 
-from __future__ import annotations
-
 import argparse
 import importlib.util
 import json
@@ -87,7 +85,7 @@ def test_shuffled_null(results):
     idf = np.load(config.FEATURES_DIR / "idf.npy")
     X, y, w, meta = _load("train", idf, NULL_ROWS)
     Xt, yt, wt, meta_t = _load("test", idf)
-    params = {k: v for k, v in cfg.items() if k not in ("n_estimators",)}
+    params = {k: v for k, v in cfg.items() if k != "n_estimators"}
     params.update({"objective": "regression", "verbosity": -1, "num_threads": config.N_JOBS})
     n_trees = min(300, int(cfg.get("n_estimators", 300)))
     rng = np.random.default_rng(config.SEED)
@@ -200,9 +198,11 @@ def test_leakage_spotcheck(results):
             b = float(np.clip(config.BETA_BLUME[0] * b + config.BETA_BLUME[1], *config.BETA_CLIP))
         else:
             b = None
-        if not np.isclose(sig, sig_stored, rtol=0.15, atol=5e-4):
-            bad += 1
-        elif b is not None and not np.isclose(b, beta_stored, rtol=0.20, atol=0.05):
+        if (
+            not np.isclose(sig, sig_stored, rtol=0.15, atol=5e-4)
+            or b is not None
+            and not np.isclose(b, beta_stored, rtol=0.20, atol=0.05)
+        ):
             bad += 1
     results["3_leakage_spotcheck"] = {
         "checked": len(rows),

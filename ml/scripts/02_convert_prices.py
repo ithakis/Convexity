@@ -11,8 +11,6 @@ Usage:
     python ml/scripts/02_convert_prices.py --sample   # first 50 tickers
 """
 
-from __future__ import annotations
-
 import argparse
 import io
 import json

@@ -25,7 +25,7 @@ set -euo pipefail
 
 REPO="ithakis/Convexity"
 MIN_TAG="v1.14.0"   # first release with pyproject.toml; older tags cannot be installed
-PYTHON_VERSION="3.11"
+PYTHON_VERSION="3.14"
 APP_NAME="${APP_NAME:-Convexity}"
 BUNDLE_ID="com.ithakis.convexity"
 OS="$(uname -s)"

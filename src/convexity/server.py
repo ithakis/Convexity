@@ -1,7 +1,6 @@
 """HTTP server — routes, static file serving, and main() entrypoint."""
 
-from __future__ import annotations
-
+import contextlib
 import json
 import logging
 import mimetypes
@@ -12,7 +11,7 @@ import threading
 import time
 import traceback
 import warnings
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -57,11 +56,7 @@ from convexity.fetcher import stream_quotes as fetcher_stream_quotes
 # cost off desktop-app startup. See the _configure_chromium note in desktop.py.
 from convexity.fx import fx_index_history, fx_rates
 from convexity.helpers import SUPPORTED_FX, _json_default, _safe_json
-
-try:
-    from convexity import news_sentiment as _ns
-except ImportError:
-    _ns = None
+from convexity import news_sentiment as _ns
 from convexity.persistence import (
     _CURRENT_KEY,
     clear_analytics_cache,
@@ -234,7 +229,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             terminal_seen = any(
                 f["type"] in ("done", "error")
-                or (f["type"] == "job" and f.get("state") in ("cancelled",))
+                or (f["type"] == "job" and f.get("state") == "cancelled")
                 for f in replay
             )
             while not terminal_seen:
@@ -309,16 +304,12 @@ class Handler(BaseHTTPRequestHandler):
             # no network. False (with llm_error) drives "News read
             # unavailable: <reason>" — the model was retired once and the app
             # kept showing August's sentiment without a word.
-            llm = (
-                _ns.llm_status()
-                if _ns is not None
-                else {"ok": False, "error": "news module unavailable"}
-            )
+            llm = _ns.llm_status()
             self._send_json(
                 200,
                 {
                     "ok": True,
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": datetime.now(UTC).isoformat(),
                     "version": __version__,
                     "version_date": __version_date__,
                     "env_ok": envcheck.status()["ok"],
@@ -333,8 +324,8 @@ class Handler(BaseHTTPRequestHandler):
                     "migration_conflicts": _migration_conflicts(),
                     # Drives the first-run "Add your free API keys" banner. Module
                     # globals, so still cheap; booleans only.
-                    "finnhub_key_set": bool(getattr(_ns, "FINNHUB_API_KEY", "")),
-                    "nvidia_key_set": bool(getattr(_ns, "NVIDIA_API_KEY", "")),
+                    "finnhub_key_set": bool(_ns.FINNHUB_API_KEY),
+                    "nvidia_key_set": bool(_ns.NVIDIA_API_KEY),
                 },
             )
             return
@@ -368,7 +359,7 @@ class Handler(BaseHTTPRequestHandler):
             # carry news_sentiment: None on disk; pulling from the disk-
             # backed news cache lets the NS column render on launch
             # without forcing the user to open the News tab first.
-            if _ns is not None and isinstance(view, dict):
+            if isinstance(view, dict):
                 rows = view.get("rows")
                 if isinstance(rows, list):
                     for row in rows:
@@ -496,9 +487,6 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/news-sentiment":
             # Cache-only: opening the News tab must never spend NIM quota.
             # Scoring happens in the refresh job (jobs.py), nowhere else.
-            if _ns is None:
-                self._send_json(503, {"error": "news_sentiment module not available"})
-                return
             q = parse_qs(parsed.query)
             symbols = [
                 s.strip().upper() for s in (q.get("symbols") or [""])[0].split(",") if s.strip()
@@ -512,9 +500,6 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path == "/api/news-market":
-            if _ns is None:
-                self._send_json(503, {"error": "news_sentiment module not available"})
-                return
             days = (parse_qs(parsed.query).get("days") or [None])[0]
             self._send_json(
                 200,
@@ -526,9 +511,6 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path == "/api/news-tape":
-            if _ns is None:
-                self._send_json(503, {"error": "news_sentiment module not available"})
-                return
             q = parse_qs(parsed.query)
             symbols = [
                 s.strip().upper() for s in (q.get("symbols") or [""])[0].split(",") if s.strip()
@@ -581,23 +563,21 @@ class Handler(BaseHTTPRequestHandler):
                     "model_dir_exists": False,
                     "version": "",
                 }
-            keys = {}
-            if _ns is not None:
-                try:
-                    st = _ns.status()
-                    # Booleans only — never serve key material to the frontend.
-                    from convexity import lexicon as _lex
+            try:
+                st = _ns.status()
+                # Booleans only — never serve key material to the frontend.
+                from convexity import lexicon as _lex
 
-                    keys = {
-                        "finnhub_key_set": bool(st.get("finnhub_key_set")),
-                        "nvidia_key_set": bool(st.get("nvidia_key_set")),
-                        "llm_model": st.get("llm_model", ""),
-                        "llm_ok": st.get("llm_ok"),
-                        "llm_error": st.get("llm_error"),
-                        "lexicon_available": _lex._load(),
-                    }
-                except Exception:
-                    keys = {}
+                keys = {
+                    "finnhub_key_set": bool(st.get("finnhub_key_set")),
+                    "nvidia_key_set": bool(st.get("nvidia_key_set")),
+                    "llm_model": st.get("llm_model", ""),
+                    "llm_ok": st.get("llm_ok"),
+                    "llm_error": st.get("llm_error"),
+                    "lexicon_available": _lex._load(),
+                }
+            except Exception:
+                keys = {}
             try:
                 from convexity import reference_pack
 
@@ -622,9 +602,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, reference_pack.status())
             return
         if parsed.path == "/api/news-diagnostics":
-            if _ns is None:
-                self._send_json(503, {"error": "news_sentiment module not available"})
-                return
             try:
                 from convexity import ml_sentiment as _ml
                 from convexity import news_diagnostics as _nd
@@ -647,16 +624,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/export-xlsx":
             try:
-                from convexity import xlsx_export
-            except ImportError as exc:
-                self._send_json(
-                    500,
-                    {
-                        "error": f"openpyxl not installed: {exc}. Re-run the installer, or `uv sync` in a checkout"
-                    },
-                )
-                return
-            try:
+                from convexity import xlsx_export  # lazy: openpyxl is slow to import
+
                 meta = list_views().get("views") or {}
                 full: dict[str, dict] = {}
                 for name in meta:
@@ -672,7 +641,7 @@ class Handler(BaseHTTPRequestHandler):
                     period="1Y",
                     display_ccy="USD",
                 )
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
                 fname = f"convexity_export_{stamp}.xlsx"
                 self.send_response(200)
                 self.send_header(
@@ -1202,9 +1171,6 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/news-rescore":
             # Deliberately NOT a job: cache-only, sub-50 ms, no network and no
             # LLM. Changing the News window must repaint immediately.
-            if _ns is None:
-                self._send_json(503, {"error": "news_sentiment module not available"})
-                return
             try:
                 payload = self._read_json()
                 symbols = [str(s).strip().upper() for s in (payload.get("symbols") or []) if s]
@@ -1437,10 +1403,8 @@ def shutdown_server(server: ThreadingHTTPServer) -> None:
     # Cancel background refresh jobs and give an in-flight save_view a moment
     # to land. Persistence writes are atomic, but os._exit(0) below would
     # otherwise abandon one mid-write and leave an orphan temp file beside it.
-    try:
+    with contextlib.suppress(Exception):
         jobs.shutdown(1.5)
-    except Exception:
-        pass
     server.shutdown()
     server.server_close()
     sys.stdout.flush()

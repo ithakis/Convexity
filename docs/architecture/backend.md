@@ -421,7 +421,6 @@ CREATE TABLE symbols (
    re-rank** that rewards exact / prefix / substring matches with small
    length deltas. This is why `"microsoft"` → `MSFT` (not `Smith Micro
    Software`).
-4. Substring scan fallback when rapidfuzz isn't installed.
 
 ### Builder (`convexity build-symbols`, `cli.build_symbols`)
 Was the root script `build_symbol_db.py` until Phase 7; a subcommand ships in

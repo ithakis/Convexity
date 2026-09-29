@@ -32,7 +32,7 @@ $ErrorActionPreference = "Stop"
 
 $Repo = "ithakis/Convexity"
 $MinTag = "v1.14.0"   # first release with pyproject.toml
-$PythonVersion = "3.11"
+$PythonVersion = "3.14"
 
 # $ErrorActionPreference only catches PowerShell-cmdlet errors, not a
 # non-zero exit code from a native command (.exe) invoked via "&" — unlike

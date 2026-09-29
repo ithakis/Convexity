@@ -13,8 +13,6 @@ symbol — and each layer is pinned here. No network: every yfinance-touching
 seam is monkeypatched.
 """
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

@@ -35,8 +35,6 @@ The gold metrics are also reported on the confidently-labelled subset
 (`gold_certain_only`); the gates use the full set.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import random

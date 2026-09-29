@@ -37,8 +37,10 @@ an empty `HOME` and a minimal `PATH` with the installer piped in, as a
 — that exercises the official uv installer and a managed Python download too.
 
 **ruff replaced pyflakes in Phase 7** and is blocking: `ruff check` (rules
-in `[tool.ruff.lint]` — ruff's default pyflakes + pycodestyle-error set, E741
-off for the LP's `l`/`h` bounds, E402 allowed in `server.py` and tests) and
+in `[tool.ruff.lint]` — ruff's default pyflakes + pycodestyle-error set plus
+`UP`/`C4`/`PIE`/`SIM`/`FURB` for current-Python idioms since issue #17, with the
+few exceptions commented there, E741 off for the LP's `l`/`h` bounds, E402
+allowed in `server.py` and tests) and
 `ruff format --check` (line length 100). Run `uv run ruff format .` before
 committing; the formatting commit is listed in `.git-blame-ignore-revs`. The
 CI pin (`uvx ruff@<ver>`) must match the ruff version in `uv.lock` — bump both

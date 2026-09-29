@@ -17,12 +17,10 @@ Run in CI (the `lint` job) and locally:
 
     python scripts/check_dependency_manifests.py
 
-Deliberately dependency-free (tomllib, 3.11+), so it runs in the bare lint job. It only asks "does this
+Deliberately dependency-free (tomllib), so it runs in the bare lint job. It only asks "does this
 package name appear as a declared dependency", not "is the version range
 right", which is the resolvers' job.
 """
-
-from __future__ import annotations
 
 import re
 import sys
@@ -38,7 +36,7 @@ from convexity.envcheck import REQUIRED  # noqa: E402
 def _base_name(spec: str) -> str:
     """'lightgbm>=4.0  # comment' -> 'lightgbm' (normalized, _ and . folded)."""
     spec = spec.split("#", 1)[0].strip()
-    name = re.split(r"[<>=!~\[ ]", spec, 1)[0].strip()
+    name = re.split(r"[<>=!~\[ ]", spec, maxsplit=1)[0].strip()
     return name.lower().replace("_", "-").replace(".", "-")
 
 

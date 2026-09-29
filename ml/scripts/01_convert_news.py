@@ -15,8 +15,6 @@ Usage:
     python ml/scripts/01_convert_news.py --sample   # first 100k rows, smoke test
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import shutil

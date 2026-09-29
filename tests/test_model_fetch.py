@@ -6,8 +6,6 @@ SHA-256 is monkeypatched to each test tarball's hash — the code path is the
 production one, only the trust anchor is swapped.
 """
 
-from __future__ import annotations
-
 import hashlib
 import http.server
 import io
@@ -166,7 +164,7 @@ def test_sha_not_overridable_by_env(monkeypatch):
 
     importlib.reload(mfetch)
     try:
-        assert mfetch.MODEL_SHA256 == before
+        assert before == mfetch.MODEL_SHA256
     finally:
         importlib.reload(mfetch)
 

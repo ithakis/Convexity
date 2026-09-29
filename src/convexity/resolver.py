@@ -1,7 +1,5 @@
 """Symbol resolution pipeline — maps fuzzy human input to Yahoo Finance tickers."""
 
-from __future__ import annotations
-
 import math
 import re
 

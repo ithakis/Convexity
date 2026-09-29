@@ -7,6 +7,12 @@ when merging a PR and add a line here.
 
 ## Unreleased
 
+Python 3.14 (#17).
+
+- **Runs on Python 3.14**, the latest stable release, and only on it: `requires-python = ">=3.14,<3.15"`, and the installers, CI and the dev checkout fetch 3.14 through uv. Re-run the installer to move an existing install. Dependencies re-locked at their latest versions (numpy 2.5, scipy 1.18, openai 3.22). Measured against 3.11, speed is unchanged: the heavy work is numpy / pandas / numba / rapidfuzz, which are compiled, and the network.
+- **Fixed a SQLite handle leak** in the symbol database: `with sqlite3.connect(...)` commits but never closes, so every lookup reload left a connection open (3.14 now warns about it). Connections are closed after each use.
+- **Tidied, no behaviour change**: dropped `from __future__ import annotations` (62 files; PEP 649 makes it redundant), `datetime.UTC`, `X | None`, `collections.abc`, `contextlib.suppress`, and removed fallbacks for "optional" packages that are in fact required (rapidfuzz, openpyxl, the app's own news modules): their untested code paths could never run. ruff now enforces these idioms in CI (`UP`, `C4`, `PIE`, `SIM`, `FURB`). About 240 fewer lines.
+
 One logo (icon.svg).
 
 - **The Dock icon now matches the loading screen**: the four candlesticks on the dark tile, instead of on the light grey plate macOS 26 added around the old transparent icon. The logo now has one master, `icon.svg`, and the app icon, splash, window icon, Windows icon and the README header are all generated from it; a test fails if they drift or a second logo appears. Re-run the installer to get the new Dock icon.

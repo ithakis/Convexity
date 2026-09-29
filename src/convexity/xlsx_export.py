@@ -32,18 +32,14 @@ A new column also needs a COLUMN_DEFS entry (and a readable EXTRA_LABELS
 header if it is an extra): tests/test_xlsx_definitions.py fails without one.
 """
 
-from __future__ import annotations
-
 import io
 import re
 import time
 import warnings
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
-from typing import Iterable, Optional
+from datetime import UTC, datetime
 
-# openpyxl is an optional dep; the export endpoint will surface a friendly
-# error if it's missing.
 from openpyxl import Workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -853,7 +849,7 @@ def _bench(analytics: dict, key: str) -> dict:
     return (analytics.get("benchmarks") or {}).get(key) or {}
 
 
-def _excess_vs_spy(analytics: dict) -> Optional[float]:
+def _excess_vs_spy(analytics: dict) -> float | None:
     if not isinstance(analytics, dict):
         return None
     port_tr = _maybe_num((analytics.get("stats") or {}).get("total_return"))
@@ -877,7 +873,7 @@ def _write_overview(wb: Workbook, summaries: list[dict], metric_periods: list[st
     ws.title = "Overview"
     ws["A1"] = "Convexity — Export"
     ws["A1"].font = _TITLE_FONT
-    ws["A2"] = f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}"
+    ws["A2"] = f"Generated: {datetime.now(UTC).isoformat(timespec='seconds')}"
     ws["A2"].font = Font(italic=True, color="6B7280")
 
     headers = ["Portfolio", "Rows", "Cached At"]

@@ -39,8 +39,6 @@ never what it holds; nothing is sent but the GET. Settings has the switch
 (`<data>/state/reference_pack.json`); CONVEXITY_REFERENCE_PACK=0 forces it off.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import math
@@ -53,7 +51,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from convexity import paths
@@ -573,7 +571,7 @@ def _age_days(manifest: dict) -> int | None:
         d = datetime.strptime(manifest["date"], "%Y-%m-%d").date()
     except (KeyError, ValueError, TypeError):
         return None
-    return (datetime.now(timezone.utc).date() - d).days
+    return (datetime.now(UTC).date() - d).days
 
 
 def _usable() -> dict | None:

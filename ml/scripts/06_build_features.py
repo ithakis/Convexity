@@ -19,8 +19,6 @@ Usage:
     python ml/scripts/06_build_features.py --sample   # 200k-row smoke test
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import math
@@ -668,7 +666,7 @@ def build_panel() -> None:
     td["dday"] = td["date"].astype("datetime64[s]").astype("int64") // 86400
     print(f"panel: {len(td):,} ticker-days loaded", flush=True)
 
-    a_groups = {s: g for s, g in arts.groupby("symbol", sort=False)}
+    a_groups = dict(arts.groupby("symbol", sort=False))
     a_cols = [
         "eday",
         "pred",

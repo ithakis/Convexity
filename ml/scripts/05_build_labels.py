@@ -40,8 +40,6 @@ Usage:
     python ml/scripts/05_build_labels.py --sample     # cap news rows for smoke test
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import sys

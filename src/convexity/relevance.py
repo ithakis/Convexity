@@ -20,17 +20,13 @@ early and prominently, not one ticker among twenty in a "stocks to watch"
 roundup from a low-tier syndicator.
 """
 
-from __future__ import annotations
-
 import re
 import sqlite3
+from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
 
-try:
-    from rapidfuzz import fuzz as _fuzz  # type: ignore
-except ImportError:  # pragma: no cover - optional dep, mirrors news_sentiment
-    _fuzz = None
+from rapidfuzz import fuzz as _fuzz
 
 # Same threshold as news_sentiment._DEDUP_SIMILARITY — keep in sync.
 DEDUP_SIMILARITY = 85
@@ -66,9 +62,7 @@ def is_near_duplicate(title_a: str, title_b: str) -> bool:
     na, nb = norm_title(title_a), norm_title(title_b)
     if not na or not nb:
         return False
-    if _fuzz is not None:
-        return _fuzz.token_set_ratio(na, nb) >= DEDUP_SIMILARITY
-    return na == nb
+    return _fuzz.token_set_ratio(na, nb) >= DEDUP_SIMILARITY
 
 
 def cluster_titles(titles: list[str]) -> tuple[list[int], list[int]]:
@@ -91,11 +85,7 @@ def cluster_titles(titles: list[str]) -> tuple[list[int], list[int]]:
             continue
         dup_of = None
         for j, kn in enumerate(kept_norms):
-            if _fuzz is not None:
-                if _fuzz.token_set_ratio(norm, kn) >= DEDUP_SIMILARITY:
-                    dup_of = j
-                    break
-            elif norm == kn:
+            if _fuzz.token_set_ratio(norm, kn) >= DEDUP_SIMILARITY:
                 dup_of = j
                 break
         if dup_of is not None:
@@ -173,9 +163,8 @@ def load_company_names() -> dict[str, str]:
     if db is None:
         return {}
     try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        rows = con.execute("SELECT ticker, name FROM symbols").fetchall()
-        con.close()
+        with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as con:
+            rows = con.execute("SELECT ticker, name FROM symbols").fetchall()
         return {t.upper(): n for t, n in rows if t and n}
     except Exception:
         return {}
@@ -190,9 +179,7 @@ def _name_hits(clean_name: str, text_norm: str) -> bool:
         return False
     if clean_name in text_norm:
         return True
-    if _fuzz is not None:
-        return _fuzz.partial_ratio(clean_name, text_norm) >= _NAME_MATCH
-    return False
+    return _fuzz.partial_ratio(clean_name, text_norm) >= _NAME_MATCH
 
 
 def _ticker_hits(symbol: str, raw_text: str) -> bool:

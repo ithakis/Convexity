@@ -52,8 +52,7 @@ cannot rewrite the very names this module exists to find.
 Delete step 1 after 2027-06-30, step 2 after the 1.14 release cycle.
 """
 
-from __future__ import annotations
-
+import contextlib
 import errno
 import hashlib
 import os
@@ -469,10 +468,8 @@ def migrate_to_data_dir(
                     )
                 if not dry_run and remove:
                     _prune_empty(old_models, legacy_home / f".{_NEW}")
-                    try:
-                        (legacy_home / f".{_NEW}").rmdir()  # only if now empty
-                    except OSError:
-                        pass
+                    with contextlib.suppress(OSError):  # rmdir: only if now empty
+                        (legacy_home / f".{_NEW}").rmdir()
     except Exception as exc:  # pragma: no cover - defensive, never fatal
         rep.errors.append(str(exc))
         _log(f"ERROR: {exc}")
@@ -493,7 +490,7 @@ def _legacy_sources() -> tuple[Path | None, Path | None]:
 
 # The report of this process's automatic run (``run()``), or None if it did
 # not run. Read by server.py for /api/health's ``migration_conflicts``.
-LAST_REPORT: "Report | None" = None
+LAST_REPORT: Report | None = None
 
 
 def conflicts() -> list[dict]:

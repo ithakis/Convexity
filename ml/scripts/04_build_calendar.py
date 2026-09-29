@@ -14,8 +14,6 @@ Adjusted prices are used (adj factor applied to open as adj_close/close) so
 window returns are dividend/split-consistent with the per-ticker label math.
 """
 
-from __future__ import annotations
-
 import json
 import sys
 from pathlib import Path

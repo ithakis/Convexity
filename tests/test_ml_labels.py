@@ -6,8 +6,6 @@ every stat dated D was computed from data <= D-1 only (the shift(1) contract
 the SAR label depends on).
 """
 
-from __future__ import annotations
-
 import importlib.util
 import sys
 from pathlib import Path

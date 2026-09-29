@@ -20,7 +20,7 @@ not reintroduce one; the engines answer different questions.
 
 *Fetch and cache (`news_sentiment.py`).*
 - Finnhub `/company-news` + yfinance `tk.news`, merged and deduplicated with
-  the title dedup in `relevance.py` (rapidfuzz optional, like symbol_db); the
+  the title dedup in `relevance.py` (rapidfuzz `token_set_ratio`); the
   syndication count survives as `n_duplicates` and every article gets a stable
   `aid` (md5 of url, else normalised title) that lens reads link back to. The
   retained set is `relevance.window_sample(60, min_recent=15)` — a

@@ -25,8 +25,6 @@ Design notes:
     behave exactly as before. This is additive.
 """
 
-from __future__ import annotations
-
 import sys
 import threading
 import time

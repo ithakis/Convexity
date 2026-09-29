@@ -7,8 +7,6 @@ review: a new column or panel row that ships without its tip, or a
 nothing on hover.
 """
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 
@@ -24,7 +22,7 @@ def _block(src: str, start: str, end: str = "\n};") -> str:
 
 def _object_keys(block: str) -> set[str]:
     """Top-level keys of a JS object literal, quoted or bare, two-space indented."""
-    return set(re.findall(r'^  "?([^":\s]+(?: [^":]+)*)"?\s*:', block, re.M))
+    return set(re.findall(r'^  "?([^":\s]+(?: [^":]+)*)"?\s*:', block, re.MULTILINE))
 
 
 def test_every_holdings_column_has_a_header_tip():
@@ -41,13 +39,13 @@ def test_every_detail_metric_has_a_tip():
     fundamentals, dividend) all resolve in DETAIL_METRIC_INFO."""
     info = _object_keys(_block(_APP_JS, "const DETAIL_METRIC_INFO = {"))
     body = _block(_APP_JS, "function renderSections() {", "\nfunction ")
-    grids = re.findall(r"const (\w+) = \[\n(.*?)\n\s*\];", body, re.S)
-    used = {name for name in re.findall(r"renderDetailMetricGrid\((\w+)\)", body)}
+    grids = re.findall(r"const (\w+) = \[\n(.*?)\n\s*\];", body, re.DOTALL)
+    used = set(re.findall(r"renderDetailMetricGrid\((\w+)\)", body))
     labels = [
         lbl
         for name, rows in grids
         if name in used
-        for lbl in re.findall(r'^\s*\["([^"]+)",', rows, re.M)
+        for lbl in re.findall(r'^\s*\["([^"]+)",', rows, re.MULTILINE)
     ]
     assert len(labels) > 20, "parsed too few labels: the detail grid source moved"
     missing = [lbl for lbl in labels if lbl not in info]

@@ -13,15 +13,13 @@ The contracts that matter in production:
    is labelled "no edge".
 """
 
-from __future__ import annotations
-
 import importlib.util
 import json
 import math
 import os
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -184,11 +182,11 @@ def _training_item(a, symbol, sar_pred):
 
 def test_encoder_matches_the_training_featurization(tiny_artifact, monkeypatch):
     d, enc, idf, mask = tiny_artifact
-    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", dict)
     a = _article()
     items = ms.score_articles([a], "AAPL")
     assert len(items) == 1
-    dt = datetime.fromtimestamp(a["datetime"], tz=timezone.utc).astimezone(ms._ET)
+    dt = datetime.fromtimestamp(a["datetime"], tz=UTC).astimezone(ms._ET)
     counts = mf.hash_counts([mf.text_for_hashing(a["headline"], a["summary"])])
     dense = np.asarray(
         [
@@ -216,7 +214,7 @@ def test_served_score_matches_the_calibration_panel(tiny_artifact, monkeypatch):
     """The Market read score (weighted_sar over live items) equals the panel's
     enc_wmean over training-built items for the same articles — the number
     the tier cuts were fitted on."""
-    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", dict)
     arts = [
         _article(1, 1.0),
         _article(
@@ -326,7 +324,7 @@ def test_calibrate_handles_flat_knots():
 
 # ----------------------------------------------------------------- market_read
 def test_market_read_is_the_weighted_encoder_score_over_7_days(tiny_artifact, monkeypatch):
-    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", dict)
     now = time.time()
     fresh = [_article(i, age_h=6 * i) for i in range(1, 6)]
     old = [_article(9, age_h=24 * 12)]
@@ -342,7 +340,7 @@ def test_market_read_is_the_weighted_encoder_score_over_7_days(tiny_artifact, mo
 
 
 def test_market_read_ranks_against_the_history_it_is_given(tiny_artifact, monkeypatch):
-    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", dict)
     arts = [_article(i, age_h=6 * i) for i in range(1, 4)]
     base, _ = ms.market_read("AAPL", arts)
     below = [base["score"] - 1.0] * ms.MIN_LIVE_HISTORY
@@ -352,7 +350,7 @@ def test_market_read_ranks_against_the_history_it_is_given(tiny_artifact, monkey
 
 
 def test_market_read_caps_the_window_like_the_training_panel(tiny_artifact, monkeypatch):
-    monkeypatch.setattr("convexity.relevance.load_company_names", lambda: {})
+    monkeypatch.setattr("convexity.relevance.load_company_names", dict)
     arts = [_article(i, age_h=0.5 + i * 0.9) for i in range(150)]  # ~5.6 days
     market, _ = ms.market_read("AAPL", arts)
     assert market["n_articles"] <= mf.WINDOW_CAP

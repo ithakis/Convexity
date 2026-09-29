@@ -24,8 +24,6 @@ Usage:
     python ml/scripts/10_export_artifact.py --tarball --from <bundle dir> [--out PATH]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

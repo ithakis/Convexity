@@ -1,7 +1,6 @@
 """Portfolio analytics — bulk close, analyst blocks, multi-weight analysis."""
 
-from __future__ import annotations
-
+import contextlib
 import math
 import random
 import time
@@ -194,7 +193,7 @@ def _normalize_weights(weights_in: dict, symbols: list[str]) -> dict[str, float]
         n = len(symbols)
         if not n:
             return {}
-        return {s: 1.0 / n for s in symbols}
+        return dict.fromkeys(symbols, 1.0 / n)
     return {s: v / total for s, v in raw.items()}
 
 
@@ -363,10 +362,8 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
                                 if getattr(col.index, "tz", None) is not None:
                                     col.index = col.index.tz_convert(None)
                             except Exception:
-                                try:
+                                with contextlib.suppress(Exception):
                                     col.index = col.index.tz_localize(None)
-                                except Exception:
-                                    pass
                             ser = col
                             break
                 except Exception:

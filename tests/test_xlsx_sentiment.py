@@ -1,7 +1,5 @@
 """The Excel export's News read / Market read columns (xlsx_export.SENTIMENT_COLS)."""
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

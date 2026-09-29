@@ -6,8 +6,6 @@ back as an EMPTY frame from Yahoo rather than an error, and a symbol with no
 intraday data looks identical to a transient outage.
 """
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

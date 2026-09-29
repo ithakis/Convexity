@@ -15,8 +15,6 @@ sklearn is imported lazily so the app can import this module (and degrade
 gracefully) when sklearn isn't installed.
 """
 
-from __future__ import annotations
-
 import math
 import re
 from functools import lru_cache
@@ -198,7 +196,7 @@ def hash_counts(texts: list[str]):
     return _vectorizer().transform(texts)
 
 
-def fit_idf(count_matrices) -> "object":
+def fit_idf(count_matrices) -> object:
     """Smooth idf (sklearn formula) from an iterable of count CSR matrices —
     TRAIN rows only; the fitted vector ships in the artifact."""
     import numpy as np

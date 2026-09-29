@@ -20,9 +20,10 @@ name = "convexity"
 dynamic = ["version"]
 description = "Local portfolio dashboard: quotes, analytics, news reads and a mean-CVaR optimizer."
 readme = "README.md"
+# 3.14 is the only supported interpreter (the installers fetch it through uv).
 # numba/llvmlite are the binding constraint on the upper bound; re-check it
 # (and lightgbm / PySide6 wheel coverage) before raising it.
-requires-python = ">=3.11,<3.15"
+requires-python = ">=3.14,<3.15"
 license-files = ["LICENSE"]
 authors = [{ name = "Alexander Tsoskounoglou" }]
 classifiers = [
@@ -89,19 +90,34 @@ testpaths = ["tests"]
 [tool.ruff]
 # Replaced pyflakes in Phase 7; CI's lint job runs `ruff check` and
 # `ruff format --check` as blocking gates.
-target-version = "py311"
+# py313, not py314, on purpose: at py314 `ruff format` rewrites
+# `except (A, B):` to PEP 758's bare `except A, B:`, which is valid 3.14 but
+# reads as Python 2 to people and to the pre-commit reviewer. The one cost:
+# forward references in annotations stay quoted ("Job"), since py313 assumes
+# eager evaluation where 3.14 (PEP 649) is lazy.
+target-version = "py313"
 line-length = 100
 src = ["src", "."]
 extend-exclude = ["ml/data"]
 
 [tool.ruff.lint]
 # pyflakes (F) + pycodestyle errors (E4/E7/E9): ruff's defaults, i.e. what
-# pyflakes caught before, plus a handful of real-bug style errors.
-select = ["E4", "E7", "E9", "F"]
-# `l` / `h` are the lower/upper weight bounds of the mean-CVaR LP (mpt.py and
-# its scipy reference), named as in the maths; renaming them would make the
-# numba solver harder to check against the paper, not safer.
-ignore = ["E741"]
+# pyflakes caught before, plus a handful of real-bug style errors. UP, C4,
+# PIE, SIM and FURB (v2.0, issue #17) keep the code on current idioms for the
+# pinned interpreter: `X | None`, `datetime.UTC`, no
+# `from __future__ import annotations` (PEP 649 makes it redundant).
+select = ["E4", "E7", "E9", "F", "UP", "C4", "PIE", "SIM", "FURB"]
+ignore = [
+    # `l` / `h` are the lower/upper weight bounds of the mean-CVaR LP (mpt.py
+    # and its scipy reference), named as in the maths; renaming them would
+    # make the numba solver harder to check against the paper, not safer.
+    "E741",
+    "SIM103", # `return not (a or b)` reads worse than the explicit branches
+    "SIM112", # macOS sets `__CFBundleIdentifier` in exactly that case
+    "SIM113", # a `done` counter that only counts yielded rows is clearer
+    "SIM115", # tarfile.open is split from its `with` to map its errors
+    "SIM300", # flags `T >= h` as a Yoda condition: `T` is a variable, not a constant
+]
 
 [tool.ruff.lint.per-file-ignores]
 # server.py installs its warnings filter before importing yfinance-backed

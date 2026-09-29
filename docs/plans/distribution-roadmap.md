@@ -86,7 +86,8 @@ Depends on: Phase 1.
 Findings:
 - Upper bound is `<3.15`, not `<3.14`: numba 0.67 / llvmlite 0.49 ship cp314
   wheels, lightgbm is `py3`, PySide6 is abi3. The full suite passes on 3.11
-  and 3.14. `.python-version` pins 3.11 for dev and CI.
+  and 3.14. `.python-version` pins 3.11 for dev and CI (3.14 only since
+  issue #17: `>=3.14,<3.15`).
 - `dev` extra omits scipy: it is a runtime dependency (`envcheck.REQUIRED`,
   scipy.sparse in the ML featurizer), so it is already in `dependencies`.
 - The manifest check still also checks requirements.txt/environment.yml while

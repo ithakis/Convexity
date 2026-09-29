@@ -5,6 +5,7 @@ for ~30 s after any restart (the port's last connections in TIME_WAIT) the app
 moved off 8765 although the real bind would have worked.
 """
 
+import contextlib
 import http.server
 import socket
 import threading
@@ -23,10 +24,9 @@ def test_port_in_time_wait_is_reused():
     port = _free_port()
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), http.server.BaseHTTPRequestHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
+    # A 501 is fine: the connection happened, the server closed it.
+    with contextlib.suppress(Exception):
         urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5)
-    except Exception:
-        pass  # a 501 is fine: the connection happened, the server closed it
     srv.shutdown()
     srv.server_close()  # the server-side socket of that connection is now in TIME_WAIT
     assert server._pick_port(port) == port

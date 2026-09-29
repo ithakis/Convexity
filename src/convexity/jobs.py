@@ -47,20 +47,14 @@ Design notes that are load-bearing:
   ``os._exit(0)``, so nothing here may ever be able to block process exit.
 """
 
-from __future__ import annotations
-
 import threading
 import time
 import uuid
 from collections import OrderedDict, deque
 
 from convexity import helpers, persistence
+from convexity import news_sentiment as _ns
 from convexity.fetcher import stream_quotes
-
-try:
-    from convexity import news_sentiment as _ns
-except Exception:  # pragma: no cover - optional at runtime, like everywhere else
-    _ns = None
 
 # A 150-symbol all-scope job emits roughly 1100 frames; the ring is generous so
 # `dropped` is effectively unreachable for realistic portfolios. Memory is
@@ -76,7 +70,7 @@ _MAX_FINISHED = 3
 # replace good data with "no data" while the user was on another tab.
 _MAX_ERROR_FRACTION = 0.20
 
-_JOBS: "OrderedDict[str, Job]" = OrderedDict()
+_JOBS: OrderedDict[str, "Job"] = OrderedDict()
 _REG_LOCK = threading.Lock()
 _CURRENT: "Job | None" = None
 
@@ -243,13 +237,13 @@ def _reap_locked() -> None:
         _JOBS.pop(j.id, None)
 
 
-def get(job_id: str) -> "Job | None":
+def get(job_id: str) -> Job | None:
     with _REG_LOCK:
         _reap_locked()
         return _JOBS.get(job_id)
 
 
-def current() -> "Job | None":
+def current() -> Job | None:
     with _REG_LOCK:
         j = _CURRENT
     return j if (j is not None and not j.is_terminal()) else None
@@ -262,7 +256,7 @@ def cancel(job_id: str, reason: str = "user") -> bool:
 
 def submit(
     *, scope, phases, days, entries_by_view, context=None, on_conflict="reject"
-) -> tuple["Job | None", str]:
+) -> tuple[Job | None, str]:
     """Create and start a job. Returns (job, outcome).
 
     outcome is "created", or "rejected" with the running job returned instead
@@ -524,10 +518,6 @@ def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
     # Every early return releases the planned reservation (_plan_totals seeded
     # it before we knew whether news would run at all): a phase that is skipped
     # must not leave items in the denominator that nothing will ever complete.
-    if _ns is None:
-        job.set_count("news_total", 0)
-        job.emit("phase", phase="news", state="skipped", reason="news_sentiment unavailable")
-        return
     symbols = sorted(rows_by_symbol.keys())
     if not symbols:
         job.set_count("news_total", 0)

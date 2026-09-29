@@ -1,12 +1,11 @@
 """JSON file CRUD for views, watchlists, weight presets, MPT runs, column views, and analytics cache."""
 
-from __future__ import annotations
-
+import contextlib
 import json
 import os
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from convexity import paths
@@ -34,10 +33,8 @@ def _atomic_write(path: Path, body: str) -> None:
             os.fsync(fh.fileno())
         os.replace(tmp, path)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 
@@ -99,10 +96,8 @@ def _read_views_raw() -> dict:
             except OSError:
                 pass
             return views
-        try:
+        with contextlib.suppress(OSError):
             legacy.unlink()
-        except OSError:
-            pass
     return {}
 
 
@@ -157,7 +152,7 @@ def save_view(name: str, entries: str, rows: list, *, set_last: bool = True) -> 
         # single write path for rows, so it is where they stop — a persisted
         # repeat re-breaks analytics on every later load.
         "rows": _dedupe_rows_by_symbol(rows),
-        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "saved_at": datetime.now(UTC).isoformat(),
         "stale": False,
     }
     with _VIEWS_LOCK:
@@ -292,7 +287,7 @@ def upsert_weight_preset(
     payload = {
         "name": clean_name,
         "weights": _normalize_preset_weights(weights),
-        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "saved_at": datetime.now(UTC).isoformat(),
     }
     with _VIEWS_LOCK:
         raw = _read_views_raw()
@@ -387,7 +382,7 @@ def upsert_analytics_cache(view_name: str, key: str, payload: dict) -> dict:
     if not clean_view or not clean_key:
         return {}
     record = {
-        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "saved_at": datetime.now(UTC).isoformat(),
         "payload": payload if isinstance(payload, dict) else {},
     }
     with _VIEWS_LOCK:
@@ -573,8 +568,8 @@ def save_mpt_run(view_name: str, run: dict) -> dict:
     clean_view = (view_name or "").strip()
     if not clean_view:
         raise ValueError("view name required")
-    rid = run.get("id") or ("run_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f"))
-    payload = {**run, "id": rid, "saved_at": datetime.now(timezone.utc).isoformat()}
+    rid = run.get("id") or ("run_" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f"))
+    payload = {**run, "id": rid, "saved_at": datetime.now(UTC).isoformat()}
     with _MPT_LOCK:
         raw = _read_mpt_raw()
         runs_map = raw.get("runs") if isinstance(raw.get("runs"), dict) else {}
@@ -718,7 +713,7 @@ def upsert_column_view(name: str, columns: list, heat=None) -> dict:
             raw["custom_views"][clean_name] = {
                 "columns": clean_cols,
                 "heat": clean_heat,
-                "created_at": existing.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                "created_at": existing.get("created_at") or datetime.now(UTC).isoformat(),
             }
         _write_column_views_raw(raw)
         return raw

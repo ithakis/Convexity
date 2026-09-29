@@ -16,8 +16,6 @@ A verdict is only given once there are enough dates to mean something
 (VERDICT_MIN_DAYS); before that the answer is "too early", with the count.
 """
 
-from __future__ import annotations
-
 import math
 from typing import Any
 
@@ -365,7 +363,7 @@ def _score(records: list[dict], out: dict, market_horizon: int, fwd) -> dict[str
 
     # News read per-lens hit rates (a lens call = its score's tier)
     out["news"]["lens_hit_rate"] = {
-        lens: hit_rates(rows, lambda r, ln=lens: _news_tier(((r.get("lens") or {}).get(ln))))
+        lens: hit_rates(rows, lambda r, ln=lens: _news_tier((r.get("lens") or {}).get(ln)))
         for lens in ("financials", "outlook", "competition", "regulation", "street")
     }
     agreements = [

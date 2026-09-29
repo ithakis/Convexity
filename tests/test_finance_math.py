@@ -5,8 +5,6 @@ or an independent reference implementation — never against the code's own
 output. All offline: the network seams are monkeypatched.
 """
 
-from __future__ import annotations
-
 import math
 
 import numpy as np

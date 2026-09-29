@@ -1,6 +1,7 @@
 """reference_pack.py — the pack format and its validators (and, from the
 app-side fetch on, the download itself against a local HTTP stub)."""
 
+import contextlib
 import gzip
 import json
 
@@ -14,7 +15,7 @@ MV = "mlsent-v1.1"
 def _history(n=3, **extra):
     recs = [
         {
-            "date": "2026-09-2%d" % (i % 9),
+            "date": f"2026-09-2{i % 9}",
             "symbol": "AAPL",
             "market_score": 0.01 * i,
             "market_tier": "no_edge",
@@ -127,6 +128,7 @@ import time  # noqa: E402
 import urllib.request  # noqa: E402
 
 from convexity import paths  # noqa: E402
+from datetime import UTC
 
 
 class _Stub:
@@ -156,10 +158,8 @@ class _Stub:
                 if n is not None:  # None: no Content-Length, body until close
                     self.send_header("Content-Length", str(n))
                 self.end_headers()
-                try:
+                with contextlib.suppress(OSError):
                     self.wfile.write(data)
-                except OSError:
-                    pass
 
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -173,17 +173,17 @@ class _Stub:
 
 
 def _today():
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def _tomorrow():
     """A pack date newer than the installed one (published with _today()).
     A fixed date here turned into a time bomb on the day it was reached."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+    return (datetime.now(UTC) + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 @pytest.fixture()

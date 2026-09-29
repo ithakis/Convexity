@@ -11,8 +11,6 @@ no vol/return cloud. See mpt.py for the math and the module docstring there for
 why the LP solver is a bespoke interior-point method rather than scipy.
 """
 
-from __future__ import annotations
-
 import concurrent.futures as _fut
 import time
 

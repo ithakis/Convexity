@@ -9,8 +9,6 @@ conjure headlines that were never fetched or read, and the result has to SAY so
 rather than presenting a re-weighting of 7 days of evidence as a 30-day read.
 """
 
-from __future__ import annotations
-
 import sys
 import time
 from pathlib import Path

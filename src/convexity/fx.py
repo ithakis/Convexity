@@ -1,10 +1,8 @@
 """FX rates, index history, and currency conversion for the denomination selector."""
 
-from __future__ import annotations
-
 import random
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
@@ -248,7 +246,7 @@ def fx_rates(base: str = "USD") -> dict:
         "base": base,
         "rates": out,
         "supported": SUPPORTED_FX,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
     }
     _FX_RATES_CACHE[key] = (time.time(), payload)
     return payload
