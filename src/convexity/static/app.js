@@ -746,6 +746,8 @@ const _RICH_TIP = (() => {
     if (el && document.body.contains(el)) return el;
     el = document.createElement("div");
     el.className = "rich-tip-float";
+    el.id = "rich-tip-float";
+    el.setAttribute("role", "tooltip");
     document.body.appendChild(el);
     return el;
   }
@@ -765,7 +767,9 @@ const _RICH_TIP = (() => {
     const html = fn ? fn(host) : "";
     if (!html) return;
     const tip = ensure();
+    if (current && current !== host) current.removeAttribute("aria-describedby");
     current = host;
+    host.setAttribute("aria-describedby", tip.id);
     tip.innerHTML = render(html);
     tip.classList.add("show");
     const place = () => placeTip(tip, host.getBoundingClientRect(), {preferred: "below", offset: 6, gap: 8});
@@ -779,6 +783,7 @@ const _RICH_TIP = (() => {
   function hide(host) {
     if (host && current && host !== current) return;
     if (el) el.classList.remove("show");
+    if (current) current.removeAttribute("aria-describedby");
     current = null;
   }
   return {show, hide};
@@ -5391,9 +5396,9 @@ function renderContribTableHtml(rows) {
   const cls = (v) => (v == null || !isFinite(v)) ? "" : v >= 0 ? "pos" : "neg";
   const th = (c) => {
     const arrow = c.k === sk ? `<span class="arrow">${dir > 0 ? "▲" : "▼"}</span>` : "";
-    const label = c.tip ? `<span data-rich-tip="${c.tip}">${c.label}</span>` : c.label;
+    const label = c.tip ? `<span data-rich-tip="${c.tip}" tabindex="0">${c.label}</span>` : c.label;
     const ret = c.k === "period_return" ? `${escapeHtml(STATE.period)} return` : null;
-    return `<th data-contrib-sort="${c.k}" aria-sort="${c.k === sk ? (dir > 0 ? "ascending" : "descending") : "none"}">${ret || label}${arrow}</th>`;
+    return `<th data-contrib-sort="${c.k}" tabindex="0" aria-sort="${c.k === sk ? (dir > 0 ? "ascending" : "descending") : "none"}">${ret || label}${arrow}</th>`;
   };
   const bar = (v) => {
     const w = Math.min(50, Math.abs(v) / maxAbs * 50);
@@ -5462,6 +5467,14 @@ function rerenderContrib() {
     b.setAttribute("aria-pressed", String(on));
   });
 }
+// Enter / Space on a focused sort header (or its tip label) sorts, like a click.
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Enter" && ev.key !== " ") return;
+  const th = ev.target.closest && ev.target.closest("#pf-contrib-body th[data-contrib-sort]");
+  if (!th) return;
+  ev.preventDefault();
+  th.click();
+});
 document.addEventListener("click", (ev) => {
   const th = ev.target.closest && ev.target.closest("#pf-contrib-body th[data-contrib-sort]");
   if (th) {
@@ -8217,7 +8230,7 @@ RICH_TIPS["mpt-budget"] = () => `
       <thead><tr><th></th><th>Time</th><th>Frontier pts</th><th>Cloud pts</th></tr></thead>
       <tbody>${MPT_BUDGET_INFO.map(b => `<tr><th>${b.name}</th><td>${b.secs}</td><td>${b.nf}</td><td>${b.cloud}</td></tr>`).join("")}</tbody>
     </table>
-    <div class="mt-desc">The time left after the frontier and cloud goes to <b>bootstrap replicas</b> (at least 24, at most 8,000): the daily returns are resampled and each frontier point's CVaR recomputed. The CVaR band is the 10th–90th percentile across them, so more replicas give a steadier band. Portfolios with more holdings fit fewer replicas into the same time.</div>
+    <div class="mt-desc">The time left after the frontier and cloud goes to <b>bootstrap replicas</b> (at least 24, up to about 8,000): the daily returns are resampled and each frontier point's CVaR recomputed. The CVaR band is the 10th–90th percentile across them, so more replicas give a steadier band. Portfolios with more holdings fit fewer replicas into the same time.</div>
     <div class="mt-desc">The optimisation itself is the same at every budget: same inputs, constraints and solver. A bigger budget buys a finer frontier, a denser cloud and a more reliable band, not a different answer.</div>
     <ul class="mt-list">${MPT_BUDGET_INFO.map(b => `<li><b>${b.name}</b>: ${b.use}.</li>`).join("")}</ul>
     <div class="mt-range">Fetching prices (~1 s) comes on top of these times.</div>
@@ -9269,19 +9282,19 @@ function mptRenderSide() {
   const invested = Object.values(sel.weights || {}).reduce((a, b) => a + b, 0);
   const lo = mptCvarLo(sel), hi = mptCvarHi(sel);
   const bandRow = (lo != null && hi != null)
-    ? `<span class="k" data-rich-tip="mpt:band">CVaR band (bootstrap)</span><span class="v">${mptFmtLoss(lo)}–${mptFmtLoss(hi)}</span>`
+    ? `<span class="k" tabindex="0" data-rich-tip="mpt:band">CVaR band (bootstrap)</span><span class="v">${mptFmtLoss(lo)}–${mptFmtLoss(hi)}</span>`
     : "";
   stats.innerHTML = `
-    <span class="k" data-rich-tip="mpt:ret">Expected return (BL)</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
-    ${sel.var30 != null ? `<span class="k" data-rich-tip="mpt:var">VaR ${aConf}% (30-day)</span><span class="v neg">${mptFmtLoss(sel.var30, 2)}</span>` : ""}
-    <span class="k" data-rich-tip="${sel.cvar30 != null ? "mpt:cvar" : "mpt:cvar-legacy"}">CVaR ${aConf}% ${sel.cvar30 != null ? "(30-day)" : "(annualized · legacy)"}</span><span class="v neg">${mptFmtLoss(mptCvar(sel), 2)}</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:ret">Expected return (BL)</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
+    ${sel.var30 != null ? `<span class="k" tabindex="0" data-rich-tip="mpt:var">VaR ${aConf}% (30-day)</span><span class="v neg">${mptFmtLoss(sel.var30, 2)}</span>` : ""}
+    <span class="k" tabindex="0" data-rich-tip="${sel.cvar30 != null ? "mpt:cvar" : "mpt:cvar-legacy"}">CVaR ${aConf}% ${sel.cvar30 != null ? "(30-day)" : "(annualized · legacy)"}</span><span class="v neg">${mptFmtLoss(mptCvar(sel), 2)}</span>
     ${bandRow}
-    <span class="k" data-rich-tip="mpt:mdd">Max drawdown</span><span class="v neg">${(sel.mdd * 100).toFixed(1)}%</span>
-    <span class="k" data-rich-tip="mpt:cdar">CDaR (95%)</span><span class="v neg">${(sel.cdar * 100).toFixed(1)}%</span>
-    <span class="k" data-rich-tip="mpt:vol">Volatility (ref.)</span><span class="v">${sel.vol != null ? (sel.vol * 100).toFixed(2) + "%" : "—"}</span>
-    ${cash ? `<span class="k" data-rich-tip="mpt:cash">Invested / cash</span><span class="v">${(invested*100).toFixed(0)}% / ${((1-invested)*100).toFixed(0)}%</span>` : ""}
-    <span class="k" data-rich-tip="mpt:views">Analyst views</span><span class="v">${(bl.viewed || []).length}/${(d.symbols || []).length}${bl.haircut != null ? ` <span style="color:var(--muted);font-weight:400">@ ${Math.round(bl.haircut*100)}% trust</span>` : ""}</span>
-    <span class="k" data-rich-tip="mpt:assets">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:mdd">Max drawdown</span><span class="v neg">${(sel.mdd * 100).toFixed(1)}%</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:cdar">CDaR (95%)</span><span class="v neg">${(sel.cdar * 100).toFixed(1)}%</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:vol">Volatility (ref.)</span><span class="v">${sel.vol != null ? (sel.vol * 100).toFixed(2) + "%" : "—"}</span>
+    ${cash ? `<span class="k" tabindex="0" data-rich-tip="mpt:cash">Invested / cash</span><span class="v">${(invested*100).toFixed(0)}% / ${((1-invested)*100).toFixed(0)}%</span>` : ""}
+    <span class="k" tabindex="0" data-rich-tip="mpt:views">Analyst views</span><span class="v">${(bl.viewed || []).length}/${(d.symbols || []).length}${bl.haircut != null ? ` <span style="color:var(--muted);font-weight:400">@ ${Math.round(bl.haircut*100)}% trust</span>` : ""}</span>
+    <span class="k" tabindex="0" data-rich-tip="mpt:assets">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
   `;
   // Weights bars (sorted descending; zero-weight rows hidden). Each row's symbol
   // carries a rich hover (mptAssetTip) with the asset's risk/return/analyst stats.

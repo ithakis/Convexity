@@ -626,7 +626,7 @@ METRIC_DEFS: dict[str, tuple[str, str, str]] = {
         "Above ~0.5 is good for an active portfolio.",
     ),
     "rf_ann": (
-        "mean of the short-rate proxy over the period",
+        "prod_t(1 + rf_t)^(1 / years) - 1, daily short-rate returns compounded",
         "Risk-free rate used for Sharpe and Sortino, % a year (13-week T-bill, ^IRX, for USD).",
         "",
     ),

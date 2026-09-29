@@ -842,12 +842,12 @@
   .rich-tip-float.show { opacity: 1; }
   .rich-tip-float .pf-metric-tip { display: block; position: static; width: 360px; max-width: calc(100vw - 16px); }
   [data-rich-tip] {
-    cursor: help;
+    cursor: default;  /* never cursor: help: the user dislikes it (frontend.md) */
     text-decoration: underline dotted rgba(125, 125, 125, 0.75);
     text-underline-offset: 3px;
   }
   .pf-mpt-rf-info[data-rich-tip] { text-decoration: none; }
-  .pf-mpt-rf-info[data-rich-tip]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  [data-rich-tip]:focus-visible, .pf-contrib-table th[data-contrib-sort]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .pf-metric-tip .mt-table {
     width: 100%; border-collapse: collapse; margin: 6px 0 8px;
     font-size: 11px; font-variant-numeric: tabular-nums;

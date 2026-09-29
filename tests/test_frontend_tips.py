@@ -84,4 +84,5 @@ def test_budget_tip_matches_the_backend_budgets():
         )
     tip = _APP_JS[_APP_JS.index('RICH_TIPS["mpt-budget"]') :][:2000]
     assert f"at least {frontier._BOOT_MIN}" in tip
-    assert f"at most {frontier._BOOT_CAP:,}" in tip
+    # n_boot grows in whole chunks, so the cap can be overshot by a chunk.
+    assert f"up to about {frontier._BOOT_CAP:,}" in tip
