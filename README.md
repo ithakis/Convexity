@@ -1,16 +1,14 @@
-<img src="src/convexity/assets/icon-rounded.png" alt="Convexity logo: four candlesticks, two green and two red" width="112" align="left">
-
-# Convexity
-
-[![CI](https://github.com/ithakis/Convexity/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ithakis/Convexity/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/ithakis/Convexity?sort=semver)](https://github.com/ithakis/Convexity/releases/latest)
-[![License: all rights reserved](https://img.shields.io/badge/license-all%20rights%20reserved-lightgrey)](LICENSE)
+<h1>
+<img src="src/convexity/assets/icon-rounded.png" alt="Convexity logo: four candlesticks, two green and two red" width="80" align="left" hspace="6" vspace="2">
+Convexity<br>
+<a href="https://github.com/ithakis/Convexity/actions/workflows/ci.yml"><img src="https://github.com/ithakis/Convexity/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+<a href="https://github.com/ithakis/Convexity/releases/latest"><img src="https://img.shields.io/github/v/release/ithakis/Convexity?sort=semver" alt="Release"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-all%20rights%20reserved-lightgrey" alt="License: all rights reserved"></a>
+</h1>
 
 **Convexity** — a portfolio optimization app built for long-term horizon investing. Runs locally: no cloud accounts, no data leaving your machine.
 
 Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny stdlib HTTP server. Open it in any browser, paste your tickers, and get a live heat-mapped table in seconds.
-
-<br clear="left">
 
 ![Holdings table](docs/screenshots/table.png)
 
@@ -40,26 +38,26 @@ Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny st
 
 ## Features
 
-The columns of the **Default** view. $P_t$ is the latest close, adjusted for
+The columns of the **Default** view. $`P_t`$ is the latest close, adjusted for
 splits and dividends, so every return below is a total return. Cells are
 heat-mapped against the other rows on screen.
 
 | Column | Definition | Read it as |
 |---|---|---|
-| **Market Cap** | $P_t \cdot N_{\mathrm{shares}}$ | size, in the display currency |
-| **P/E** | $P_t / \mathrm{EPS}_{\mathrm{TTM}}$ | price per unit of trailing earnings; blank for loss-makers |
-| **% YTD** | $P_t / P_{\mathrm{Dec\ 31}} - 1$ | return since last year's final close |
-| **% 1Y** | $P_t / P_{t - 365\mathrm{d}} - 1$ | return over one calendar year |
-| **Chart 1Y** | $\left( P_{t-251}, \dots, P_t \right)$ | the last 252 closes, coloured by the sign of % 1Y |
-| **Δ Highs** | $P_t / \max_{s \in 2\mathrm{y}} P_s - 1$ | how far below the 2-year high; $0$ means at the high |
-| **RS Rank 1M** | $\dfrac{P_m - \min_{12\mathrm{m}} P}{\max_{12\mathrm{m}} P - \min_{12\mathrm{m}} P}$ | one bar per month $m$: where that month's close sat in its trailing-year range, $0$ at the low, $1$ at the high |
-| **20 / 50 / 200 MA** | $P_t \gtrless \mathrm{SMA}_n$ | ▲ above, ▼ below the $n$-day average $\mathrm{SMA}_n = \frac{1}{n} \sum_{i=0}^{n-1} P_{t-i}$ |
-| **EPS Surp.** | $\left( \mathrm{EPS} - \widehat{\mathrm{EPS}} \right) / \lvert \widehat{\mathrm{EPS}} \rvert$ | last 8 quarters, newest right: green beat, red miss |
-| **Rec Δ6M** | $s_{\mathrm{now}} - s_{\mathrm{6m\ ago}}$ | the move in the analyst score $s = (2 n_{SB} + n_{B} - n_{S} - 2 n_{SS}) / N \in [-2, 2]$ over Finnhub's monthly snapshots |
-| **MSPR** | $\in [-100, 100]$ | Finnhub's monthly insider purchase ratio from Form 4 filings; $+100$ = all buying |
+| **Market Cap** | $`P_t \cdot N_{\mathrm{shares}}`$ | size, in the display currency |
+| **P/E** | $`P_t / \mathrm{EPS}_{\mathrm{TTM}}`$ | price per unit of trailing earnings; blank for loss-makers |
+| **% YTD** | $`P_t / P_{\mathrm{Dec\ 31}} - 1`$ | return since last year's final close |
+| **% 1Y** | $`P_t / P_{t - 365\mathrm{d}} - 1`$ | return over one calendar year |
+| **Chart 1Y** | $`\left( P_{t-251}, \dots, P_t \right)`$ | the last 252 closes, coloured by the sign of % 1Y |
+| **Δ Highs** | $`P_t / \max_{s \in 2\mathrm{y}} P_s - 1`$ | how far below the 2-year high; $`0`$ means at the high |
+| **RS Rank 1M** | $`\dfrac{P_m - \min_{12\mathrm{m}} P}{\max_{12\mathrm{m}} P - \min_{12\mathrm{m}} P}`$ | one bar per month $`m`$: where that month's close sat in its trailing-year range, $`0`$ at the low, $`1`$ at the high |
+| **20 / 50 / 200 MA** | $`P_t \gtrless \mathrm{SMA}_n`$ | ▲ above, ▼ below the $`n`$-day average $`\mathrm{SMA}_n = \frac{1}{n} \sum_{i=0}^{n-1} P_{t-i}`$ |
+| **EPS Surp.** | $`\left( \mathrm{EPS} - \widehat{\mathrm{EPS}} \right) / \lvert \widehat{\mathrm{EPS}} \rvert`$ | last 8 quarters, newest right: green beat, red miss |
+| **Rec Δ6M** | $`s_{\mathrm{now}} - s_{\mathrm{6m\ ago}}`$ | the move in the analyst score $`s = (2 n_{SB} + n_{B} - n_{S} - 2 n_{SS}) / N \in [-2, 2]`$ over Finnhub's monthly snapshots |
+| **MSPR** | $`\in [-100, 100]`$ | Finnhub's monthly insider purchase ratio from Form 4 filings; $`+100`$ = all buying |
 | **NS** | two dots | the Market read and the News read of the holding's headlines (see News & sentiment) |
 
-The **Fundamentals** and **Momentum** views add P/S $= \mathrm{MC} / \mathrm{Revenue}_{\mathrm{TTM}}$,
+The **Fundamentals** and **Momentum** views add P/S $`= \mathrm{MC} / \mathrm{Revenue}_{\mathrm{TTM}}`$,
 forward P/E, PEG, EV/EBITDA, margins, leverage, RSI, MACD, Bollinger %B, beta and
 shorter-horizon returns. The ⓘ column guide in the app has every formula.
 
