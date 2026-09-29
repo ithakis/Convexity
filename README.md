@@ -72,11 +72,11 @@ curl -LsSf https://raw.githubusercontent.com/ithakis/Convexity/main/install.sh |
 powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/ithakis/Convexity/main/packaging/install.ps1 | iex"
 ```
 
-Then launch **Convexity** from Launchpad / Spotlight / the Start Menu or your
-Desktop (on Linux: run `convexity-app`). It opens in its own window (PySide6 + QtWebEngine). The app is
-unsigned: on macOS, right-click → Open the first time; on Windows, SmartScreen
-may ask once. Prefer a browser tab? Run `convexity` in a terminal and open the
-URL it prints.
+Then launch **Convexity** from Launchpad / Spotlight, the Start Menu or your
+Desktop (Linux: run `convexity-app`). It opens in its own window (PySide6 +
+QtWebEngine). The app is unsigned: on macOS right-click → Open the first time;
+on Windows SmartScreen may ask once. Prefer a browser tab? Run `convexity` in a
+terminal and open the URL it prints.
 
 **Update:** run the same command again. It installs the newest release and
 rebuilds the launcher; your data is never touched.
@@ -85,15 +85,15 @@ rebuilds the launcher; your data is never touched.
 
 - **Nothing for prices, analytics and the optimizer** — quotes come from
   Yahoo Finance (via yfinance), no account or key needed.
-- **Two free API keys for News & sentiment**:
+- **Two free API keys for News & sentiment** —
   [Finnhub](https://finnhub.io/register) (company news) and
-  [NVIDIA NIM](https://build.nvidia.com/) (the News read). Add them in the app
-  under **Settings (gear) → API keys**; each has a Test button and they take
-  effect immediately. Everything else works without them.
+  [NVIDIA NIM](https://build.nvidia.com/) (the News read). Add them under
+  **Settings (gear) → API keys**; each has a Test button and takes effect
+  immediately. Everything else works without them.
 - **macOS:** the Market read (a LightGBM model) needs Homebrew's `libomp`
-  (`brew install libomp`); the installer checks for it and offers to install it.
-  The model itself is downloaded once on first launch and checked
-  against a pinned SHA-256.
+  (`brew install libomp`); the installer checks for it and offers to install
+  it. The model itself is downloaded once on first launch and checked against a
+  pinned SHA-256.
 
 **Your data** (portfolios, caches, API keys in `config.json`) lives in a
 per-user folder, never next to the code:
@@ -102,7 +102,7 @@ per-user folder, never next to the code:
 |---|---|
 | macOS | `~/Library/Application Support/Convexity/` |
 | Windows | `%APPDATA%\Convexity\` |
-| Linux | `~/.local/share/convexity/` (or `$XDG_DATA_HOME/convexity/`) |
+| Linux | `$XDG_DATA_HOME/convexity/` (default `~/.local/share/convexity/`) |
 
 ## Uninstall
 
@@ -154,6 +154,67 @@ contributors (and AI agents): [CLAUDE.md](CLAUDE.md) and
 5. **Refresh** (or `R`) updates quotes and news in the background; long-press
    it (or `Shift+R`) to refresh every saved portfolio.
 
+### Reading the numbers
+
+**Risk & Return card** (Portfolio analytics, under the table). $r_t$ is the
+portfolio's daily return (rebalanced daily), $V_t$ its value, $r^b_t$ the
+benchmark's, and $e_t = r_t - r^f_t$ the return over the T-bill rate. A year
+is 252 trading days.
+
+| | Formula | Read it as |
+|---|---|---|
+| **Ann. return** | $\left(V_T / V_0\right)^{1/y} - 1$ | steady yearly growth over the $y$ years shown |
+| **Ann. vol** | $\sqrt{252} \sigma(r_t)$ | typical size of a year's swing |
+| **Sharpe** | $\dfrac{252 \bar{e}}{\sqrt{252} \sigma(e_t)}$ | return over cash per unit of risk |
+| **Sortino** | $\dfrac{252 \bar{e}}{\sqrt{252} \sigma_{-}}$, $\sigma_{-} = \sqrt{\frac{1}{T}\sum_t \min(e_t,0)^2}$ | Sharpe where only bad days count as risk |
+| **Max drawdown** | $\min_t \left( V_t / \max_{s \le t} V_s - 1 \right)$ | worst peak-to-trough fall |
+| **Calmar** | $\text{Ann. return} / \lvert \mathrm{MDD} \rvert$ | growth per unit of that fall |
+| **Beta** | $\mathrm{Cov}(r_t, r^b_t) / \mathrm{Var}(r^b_t)$ | 1.2 means about 1.2% per 1% benchmark move |
+| **R²** | $\rho(r_t, r^b_t)^2$ | how much beta explains |
+| **Tracking err** | $\sqrt{252} \sigma(r_t - r^b_t)$ | drift from the benchmark |
+| **Info ratio** | $252 \overline{(r_t - r^b_t)} / \mathrm{TE}$ | payoff per unit of that drift |
+
+$r^f_t = (1 + y_t/100)^{1/252} - 1$ comes from Yahoo's 13-week T-bill yield
+$y_t$ (`^IRX`). That only applies in a USD display; other currencies use
+$r^f_t = 0$.
+
+**⚙ Optimize** in three steps.
+
+**① Market prior.** These are the returns that would make today's market-cap
+mix the optimal portfolio.
+
+$$\Pi = \delta \Sigma w_{\mathrm{mkt}}, \qquad \delta = \frac{0.05}{w_{\mathrm{mkt}}^\top \Sigma w_{\mathrm{mkt}}}$$
+
+**② Black-Litterman posterior.** The prior is pulled toward the analyst views
+$q_i = \mathrm{target_i} / \mathrm{price_i} - 1 + dy_i - r_f$. The pull is
+stronger when many analysts agree and when the **Analyst trust** slider $H$
+is high.
+
+$$\mu_{BL} = r_f + \Pi + \tau \Sigma P^\top \left( P \tau \Sigma P^\top + \Omega \right)^{-1} \left( Q - P \Pi \right)$$
+
+$$\Omega_{ii} = \frac{\tau \Sigma_{ii}}{c_i} \cdot \frac{1-H}{H}, \qquad c_i = \frac{n_i}{n_i+5} \cdot \frac{1}{1 + d_i/0.25}$$
+
+**③ Mean-CVaR frontier.** For each return floor $m$, the optimizer finds the
+weights with the smallest average loss in the worst $1-\alpha$ of the $T$
+daily scenarios $R_t$.
+
+$$\min_{w, \zeta, u} \quad \zeta + \frac{1}{(1-\alpha) T} \sum_{t=1}^{T} u_t \quad \text{s.t.} \quad u_t \ge -R_t^\top w - \zeta, \quad u_t \ge 0, \quad \mu_{BL}^\top w \ge m, \quad l \le w \le h, \quad \sum_i w_i = 1$$
+
+The chart shows that tail over 30 days: the mean of the worst
+$k = \lceil (1-\alpha) N \rceil$ overlapping 10-day losses, times $\sqrt{3}$.
+At a 95% confidence level, it is the average loss in the worst 5% of 30-day
+stretches.
+
+Symbols: $\Sigma$ is the annualised covariance, $w_{\mathrm{mkt}}$ the
+market-cap weights in USD, $dy_i$ the dividend yield, $n_i$ the analyst count,
+$d_i$ the spread between the highest and lowest target over the mean target,
+and $l, h$ the position limits. **Allow cash** relaxes the budget to
+$\sum_i w_i \le 1$, with the remainder earning $r_f$.
+
+Defaults: 3-year lookback, Ledoit-Wolf covariance, $\tau$ = 0.05, $H$ = 25%,
+$\alpha$ = 95%, and $r_f$ = 4.50% (**Auto** sets it to the lookback's average
+`^IRX`).
+
 ---
 
 ## Requirements
@@ -171,18 +232,18 @@ stdlib `ThreadingHTTPServer` on `127.0.0.1` — no build step, no framework.
 
 ```
 src/convexity/
-├── cli.py            `convexity` command: the server, `build-symbols`, `build-reference-pack` (CI)
-├── server.py         HTTP routes (NDJSON streaming for the table, jobs, the optimizer)
-├── desktop.py        the native window (`convexity-app`): same server, in-process
-├── fetcher.py        per-symbol yfinance rows (5-worker streaming build)
-├── analytics.py      portfolio stats, benchmarks, exposure, analyst consensus
+├── cli.py              `convexity` command: the server, `build-symbols`, `build-reference-pack` (CI)
+├── server.py           HTTP routes (NDJSON streaming for the table, jobs, the optimizer)
+├── desktop.py          the native window (`convexity-app`): same server, in-process
+├── fetcher.py          per-symbol yfinance rows (5-worker streaming build)
+├── analytics.py        portfolio stats, benchmarks, exposure, analyst consensus
 ├── frontier.py/mpt.py  Black-Litterman returns + mean-CVaR frontier (numba solver)
-├── news_sentiment.py the News read (Finnhub + yfinance headlines, NVIDIA NIM LLM)
-├── ml_sentiment.py   the Market read (LightGBM model, downloaded on first run)
-├── reference_pack.py the daily S&P 500 reference pack (download + validation)
-├── jobs.py           background refresh jobs (cancellable, survive a reload)
-├── persistence.py    portfolios and settings as JSON in the data folder
-└── static/           index.html, app.js, style.css
+├── news_sentiment.py   the News read (Finnhub + yfinance headlines, NVIDIA NIM LLM)
+├── ml_sentiment.py     the Market read (LightGBM model, downloaded on first run)
+├── reference_pack.py   the daily S&P 500 reference pack (download + validation)
+├── jobs.py             background refresh jobs (cancellable, survive a reload)
+├── persistence.py      portfolios and settings as JSON in the data folder
+└── static/             index.html, app.js, style.css
 ```
 
 Network access is limited to Yahoo Finance, Finnhub, NVIDIA NIM, the KaTeX CDN
@@ -201,7 +262,7 @@ off in Settings → Models & Data. The full design notes are in
 Yahoo Finance is an unofficial API. To avoid 429 errors:
 
 - Concurrency is capped at **5 parallel requests**
-- Each symbol retries up to **3 times** with exponential back-off
+- Each symbol is tried up to **3 times**, with a growing, jittered pause between tries
 - yfinance 1.0+ uses `curl_cffi` for TLS fingerprinting; no custom session is passed
 
 ---
