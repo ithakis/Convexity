@@ -1,4 +1,8 @@
-# Convexity
+<p align="center">
+  <img src="src/convexity/assets/icon-rounded.png" alt="Convexity logo: four candlesticks, two green and two red" width="128">
+</p>
+
+<h1 align="center">Convexity</h1>
 
 [![CI](https://github.com/ithakis/Convexity/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ithakis/Convexity/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ithakis/Convexity?sort=semver)](https://github.com/ithakis/Convexity/releases/latest)

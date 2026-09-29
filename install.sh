@@ -217,11 +217,10 @@ say "Building $APP_PATH..."
 rm -rf "$APP_PATH"
 mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
 
-# icon.png is a transparent glyph (bars only) packed into the .icns as-is.
-# macOS masks every Dock/Finder icon into its own squircle; that is OS chrome.
-# (Flattening the glyph onto an opaque #0d1117 canvas was tried once to hide a
-# synthesized backing plate — it only added a black square. Don't reintroduce
-# it without re-verifying on-device.)
+# icon.png is the full-bleed dark square generated from assets/icon.svg (the one
+# logo — scripts/build_icon.py). It must stay opaque with no transparent corners:
+# macOS 26 masks a full-bleed icon into its own squircle, but wraps a transparent
+# one in a grey plate (the light tile the Dock used to show). Packed as-is.
 # mktemp -d, then real names inside it: appending a suffix to a mktemp path
 # creates a second path and orphans the first (CLAUDE.md §14).
 if [ -f "$ICON_PNG" ] && command -v iconutil >/dev/null 2>&1; then

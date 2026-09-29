@@ -100,12 +100,23 @@ actually invokes). Single file, ~160 lines:
   `QDesktopServices.openUrl()` then `deleteLater()` — no in-app popup
   window is ever shown. Verified directly against both code paths with
   `QDesktopServices.openUrl` mocked (not just by clicking through the UI).
-- **Icon**: `src/convexity/assets/icon.png` — **package data** since v1.14 (it
-  was at the repo root, which an installed package cannot reach, so a tool
-  install would have run iconless). Resolved relative to `desktop.py`, set on
-  both `QApplication` (dock/taskbar) and the window. Both call sites guard on
-  `.exists()` — the app never crashes if the icon is missing, it just runs
-  iconless. The installers read the same file through the tool's interpreter.
+- **Icon — one logo.** The master is `src/convexity/assets/icon.svg`; nothing
+  else is drawn by hand. `scripts/build_icon.py` (PySide6 QtSvg) renders two
+  1024 px PNGs from it, both **package data** (an installed tool has no
+  checkout): `icon.png`, a **full-bleed opaque** #0d1117 square, and
+  `icon-rounded.png`, the same picture with transparent rounded corners. The
+  glyph is 70% of the tile wide (15% margin each side, chosen in a mock-up
+  review). `icon.png` feeds the macOS `.icns` and the splash; `icon-rounded.png`
+  feeds the window icon (non-bundle launches), the Windows `.ico` and the
+  README. `tests/test_icon.py` fails if either PNG drifts from a fresh render of
+  the SVG, if `icon.png` gains transparent corners, or if a second image/icon
+  file is tracked. Both call sites guard on `.exists()` — a missing icon means
+  iconless, never a crash.
+  **Why full-bleed:** macOS 26 masks a full-bleed opaque icon into its own
+  squircle, but wraps an icon with transparent margins in a light grey plate —
+  that plate was the Dock icon before v1.15. The splash tile is the exact splash
+  background colour (`_BG`), so its edges vanish. Change either colour and the
+  other must follow.
 - **Shutdown**: `app.aboutToQuit.connect(lambda: shutdown_server(server))`.
   Verified via three independent paths: `app.quit()`, `window.close()`
   (which reaches `aboutToQuit` because Qt's `quitOnLastWindowClosed`
@@ -168,7 +179,7 @@ install): `CONVEXITY_SOURCE` (local checkout or archive URL; `-Source`),
 ### Icon generation
 
 - **macOS** (`install.sh`): `sips -z` renders 16/32/128/256/512 (+@2x) PNGs
-  from the unmodified transparent `icon.png` into a `.iconset`, then
+  from the unmodified full-bleed `icon.png` into a `.iconset`, then
   `iconutil -c icns` writes straight into the bundle's `Contents/Resources/`.
   Both tools are macOS built-ins. Nothing is written into a checkout.
   **Non-obvious**: `mktemp`'s printed path must be used directly — appending

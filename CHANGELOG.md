@@ -7,6 +7,10 @@ when merging a PR and add a line here.
 
 ## Unreleased
 
+One logo (icon.svg).
+
+- **The Dock icon now matches the loading screen**: the four candlesticks on the dark tile, instead of on the light grey plate macOS 26 added around the old transparent icon. The logo now has one master, `icon.svg`, and the app icon, splash, window icon, Windows icon and the README header are all generated from it; a test fails if they drift or a second logo appears. Re-run the installer to get the new Dock icon.
+
 Metric explanations and the contribution table (#5, #7, #8).
 
 - **Optimize → Compute budget** has a proper explanation on the "i": a table of what Light / Standard / Dense buy (time, frontier points, cloud points), what the bootstrap replicas and the CVaR band are, that the optimisation itself is the same at every budget, and when each one is worth it.

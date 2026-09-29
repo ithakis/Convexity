@@ -138,7 +138,7 @@ if (-not $lgbmOk) {
 
 $AppVersion = & $ToolPy -c "import convexity; print(convexity.__version__)"
 Assert-Success "read version"
-$IconPng = & $ToolPy -c "import convexity, pathlib; print(pathlib.Path(convexity.__file__).parent / 'assets' / 'icon.png')"
+$IconPng = & $ToolPy -c "import convexity, pathlib; print(pathlib.Path(convexity.__file__).parent / 'assets' / 'icon-rounded.png')"
 Assert-Success "locate icon"
 
 # ---------------------------------------------------------------------------
@@ -193,11 +193,10 @@ if added:
 }
 
 # ---------------------------------------------------------------------------
-# 5. icon.ico from the packaged icon.png. Pillow is not an app dependency, so
+# 5. icon.ico from the packaged icon-rounded.png (the one logo, rounded because
+#    Windows does not mask icons; see scripts/build_icon.py). Pillow is not an app dependency, so
 #    it comes from a throwaway `uv run --with pillow` environment. The icon
 #    lives in %LOCALAPPDATA%\Convexity (app-owned, not user data).
-#    icon.png is a transparent glyph packed as-is — no background compositing
-#    (see install.sh for why that was tried and reverted).
 # ---------------------------------------------------------------------------
 $IconDir = Join-Path $env:LOCALAPPDATA "Convexity"
 New-Item -ItemType Directory -Force -Path $IconDir | Out-Null

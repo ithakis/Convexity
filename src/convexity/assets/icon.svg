@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- THE Convexity logo. Every other icon file is generated from this one by
+       scripts/build_icon.py (tests/test_icon.py fails when they drift).
+       Full-bleed square: macOS 26 masks it into its own squircle. The glyph is
+       70% of the tile wide (15% margin each side), the "E" of the round-2 review. -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ad14a"/><stop offset="1" stop-color="#4a9e40"/></linearGradient>
+    <linearGradient id="r" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f99c9c"/><stop offset="1" stop-color="#f75a5a"/></linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="#0d1117"/>
+  <g transform="translate(112.5 112.5) scale(1.5605)">
+    <rect x="61" y="28" width="24" height="410" rx="12" fill="#90e080"/><rect x="27" y="85" width="92" height="297" rx="30" fill="url(#g)"/>
+    <rect x="183" y="120" width="24" height="257" rx="12" fill="#e84a4a"/><rect x="149" y="158" width="92" height="180" rx="30" fill="url(#r)"/>
+    <rect x="305" y="168" width="24" height="316" rx="12" fill="#e84a4a"/><rect x="271" y="200" width="92" height="253" rx="30" fill="url(#r)"/>
+    <rect x="427" y="28" width="24" height="417" rx="12" fill="#90e080"/><rect x="393" y="78" width="92" height="317" rx="30" fill="url(#g)"/>
+  </g>
+</svg>

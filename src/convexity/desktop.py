@@ -59,7 +59,12 @@ from convexity import __version_display__
 # `convexity-app` finds it without a checkout. icon.icns is optional there
 # (gitignored); the installer puts its .icns in the .app bundle instead.
 _ASSETS = Path(__file__).resolve().parent / "assets"
+# One logo, generated from assets/icon.svg by scripts/build_icon.py:
+# icon.png is the full-bleed square (splash; install.sh packs it into the .icns
+# and macOS masks it), icon-rounded.png has transparent corners for windows
+# that are not masked by the OS.
 _ICON_PNG = _ASSETS / "icon.png"
+_ICON_ROUNDED_PNG = _ASSETS / "icon-rounded.png"
 _ICON_ICNS = _ASSETS / "icon.icns"
 _BUNDLE_ID = "com.ithakis.convexity"
 _MIN_SPLASH_MS = 6000
@@ -112,8 +117,8 @@ def _load_app_icon() -> QIcon:
     # terminal launch gets the same rendition as Finder/Dock.
     if sys.platform == "darwin" and _ICON_ICNS.exists():
         return QIcon(str(_ICON_ICNS))
-    if _ICON_PNG.exists():
-        return QIcon(str(_ICON_PNG))
+    if _ICON_ROUNDED_PNG.exists():
+        return QIcon(str(_ICON_ROUNDED_PNG))
     return QIcon()
 
 
@@ -128,14 +133,17 @@ def _build_splash_pixmap(dpr: float) -> QPixmap:
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
     if _ICON_PNG.exists():
+        # The icon is a full tile in exactly the splash background colour, so
+        # its edges vanish and only the candlesticks show — at 200pt the glyph
+        # is ~140pt wide, the same as before the tile existed.
         icon_pix = QPixmap(str(_ICON_PNG)).scaled(
-            int(160 * dpr),
-            int(160 * dpr),
+            int(200 * dpr),
+            int(200 * dpr),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
         icon_pix.setDevicePixelRatio(dpr)
-        painter.drawPixmap(int((width - icon_pix.width() / dpr) / 2), 36, icon_pix)
+        painter.drawPixmap(int((width - icon_pix.width() / dpr) / 2), 20, icon_pix)
 
     title_font = QFont()
     title_font.setPointSize(20)
