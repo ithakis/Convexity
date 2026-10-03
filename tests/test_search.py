@@ -253,3 +253,50 @@ def test_api_search_round_trip(yahoo):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# ------------------------------------------------------------------ review fixes
+@pytest.mark.parametrize("text", ["deutsche bank", "jp morgan chase"])
+def test_a_company_name_with_category_words_is_a_name_search(yahoo, text):
+    out = s.search(text)
+    assert out["query"]["kind"] == "name" and yahoo["calls"] == []
+    assert out["results"][0]["ticker"] in ("DBK.DE", "JPM")
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("tech with ROE > 1", 1.0),
+        ("tech with ROE > 0.15", 15.0),
+        ("banks with dividend yield > 0.5", 0.5),
+    ],
+)
+def test_fractions_become_percent_only_where_that_is_meant(text, value):
+    assert s.parse_rules(text)[0]["filters"][0]["value"] == pytest.approx(value)
+
+
+def test_ai_is_skipped_while_nim_is_rate_limited(monkeypatch, yahoo):
+    import time
+
+    calls = _ai(monkeypatch, {"kind": "screen"})
+    monkeypatch.setattr(ns, "_nv_rate_limit_until", time.time() + 60)
+    out = s.search("tech companies founded before 1990")
+    assert calls == [] and "founded before 1990" in out["query"]["ignored"]
+
+
+def test_an_ai_theme_carries_no_forced_rank(monkeypatch, yahoo):
+    reply = {"kind": "theme", "filters": [], "sectors": [], "industries": [], "regions": [],
+             "types": [], "rank": {"field": "roe", "dir": "desc", "why": "x"},
+             "picks": [{"ticker": "LLY", "name": "Eli Lilly", "why": "GLP-1"}], "ignored": []}  # fmt: skip
+    _ai(monkeypatch, reply)
+    out = s.search("GLP-1 drug makers")
+    assert out["query"]["rank"] is None and not any(c["kind"] == "rank" for c in out["chips"])
+
+
+def test_an_oversized_or_non_finite_edit_is_capped():
+    q = s.validate({"filters": [{"field": "pe", "op": "lt", "value": float("inf")}] * 100})
+    assert q["filters"] == [] and len(q["ignored"]) <= 50
+
+
+def test_name_results_drop_far_weaker_matches(yahoo):
+    assert [c["ticker"] for c in s.search("microsoft")["results"]] == ["MSFT"]

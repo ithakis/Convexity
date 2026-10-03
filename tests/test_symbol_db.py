@@ -3,6 +3,7 @@
 The fixture is a synthetic pack of well-known public listings (CLAUDE.md §18);
 `install()` is shared with the search and resolver tests."""
 
+import gzip
 import json
 
 import pytest
@@ -218,7 +219,7 @@ ROWS = [
 
 def pack(rows=None, date="2026-10-01"):
     """(manifest bytes, data bytes) for these rows."""
-    blob = rp.gzip_json({"schema": sdb.SCHEMA_VERSION, "columns": list(C), "rows": rows or ROWS})
+    blob = sdb.encode(rows or ROWS)
     m = {
         "schema_version": sdb.SCHEMA_VERSION,
         "date": date,
@@ -229,8 +230,8 @@ def pack(rows=None, date="2026-10-01"):
 
 
 def install(rows=None):
-    raw, _blob = pack(rows)
-    sdb.write_db(sdb.validate_rows({"schema": 1, "columns": list(C), "rows": rows or ROWS}), raw)
+    raw, blob = pack(rows)
+    sdb.write_db(sdb.iter_rows(blob), raw, expect=len(rows or ROWS))
     sdb._invalidate()
 
 
@@ -249,7 +250,7 @@ def db():
         (lambda r: r.__setitem__(1, "x\nimport os"), "printable"),
         (lambda r: r.__setitem__(1, "x" * 161), "printable"),
         (lambda r: r.__setitem__(2, "crypto"), "type"),
-        (lambda r: r.__setitem__(7, float("nan")), "finite"),
+        (lambda r: r.__setitem__(7, "1e9"), "finite"),
         (lambda r: r.__setitem__(9, 2), "home"),
         (lambda r: r.append("extra"), "fields"),
     ],
@@ -258,14 +259,30 @@ def test_validator_rejects_bad_rows(mutate, match):
     rows = [list(r) for r in ROWS]
     mutate(rows[0])
     with pytest.raises(rp.PackError, match=match):
-        sdb.validate_rows({"schema": 1, "columns": list(C), "rows": rows})
+        list(sdb.iter_rows(sdb.encode(rows)))
 
 
-def test_validator_rejects_repeated_tickers_and_extra_columns():
-    with pytest.raises(rp.PackError, match="repeated"):
-        sdb.validate_rows({"schema": 1, "columns": list(C), "rows": [ROWS[0], ROWS[0]]})
+def test_repeated_tickers_extra_columns_and_bad_counts_are_refused():
+    raw, _ = pack()
+    with pytest.raises(rp.PackError, match="twice"):
+        sdb.write_db(sdb.iter_rows(sdb.encode([ROWS[0], ROWS[0]])), raw)
+    with pytest.raises(rp.PackError, match="manifest says"):
+        sdb.write_db(sdb.iter_rows(sdb.encode(ROWS)), raw, expect=len(ROWS) + 1)
+    assert not sdb.db_path().exists()  # nothing half-written was swapped in
+    bad = gzip.compress(json.dumps({"schema": 1, "columns": [*C, "summary"]}).encode() + b"\n")
     with pytest.raises(rp.PackError, match="columns"):
-        sdb.validate_rows({"schema": 1, "columns": [*C, "summary"], "rows": ROWS})
+        list(sdb.iter_rows(bad))
+
+
+def test_the_stream_reader_refuses_bombs_long_lines_and_truncation(monkeypatch):
+    blob = sdb.encode(ROWS)
+    with pytest.raises(rp.PackError, match="truncated"):
+        list(sdb.iter_rows(blob[:-12]))
+    with pytest.raises(rp.PackError, match="longer than"):
+        list(sdb.iter_rows(gzip.compress(b"x" * 10_000)))
+    monkeypatch.setattr(rp, "MAX_JSON_BYTES", 1000)
+    with pytest.raises(rp.PackError, match="cap"):
+        list(sdb.iter_rows(blob))
 
 
 def test_an_old_format_file_reads_as_empty(tmp_path):
@@ -312,7 +329,6 @@ def test_alternates_and_category(db):
         industries=["Banks—Regional", "Banks—Diversified"], regions=["de", "fr", "gb"]
     )
     assert [h.ticker for h in banks] == ["HSBA.L", "BNP.PA", "DBK.DE"]
-    assert "Semiconductors" in sdb.facets()["industry"]
 
 
 def test_no_file_means_no_hits():
@@ -364,3 +380,26 @@ def test_a_tampered_file_is_rejected_and_the_old_copy_stays(stub):
 def test_switched_off_means_no_download(stub, monkeypatch):
     monkeypatch.setenv("CONVEXITY_REFERENCE_PACK", "0")
     assert _fetch()["state"] == "disabled" and stub.hits == []
+
+
+def test_market_read_names_read_through_one_ticker_at_a_time(db):
+    from convexity import relevance
+
+    relevance.load_company_names.cache_clear()
+    names = relevance.load_company_names()
+    assert names.get("msft") == "Microsoft Corporation"
+    assert names.get("NOPE") is None and names.get("NOPE", "x") == "x"
+    install(ROWS[:1])  # a new pack clears the cache: the next read sees it
+    assert relevance.load_company_names().get("AAPL") is None
+
+
+def test_this_python_has_sqlite_fts5_with_the_trigram_tokenizer():
+    """Name search depends on it (SQLite >= 3.34 with FTS5). CI runs this on
+    macOS, Linux and Windows."""
+    import sqlite3
+
+    con = sqlite3.connect(":memory:")
+    con.execute(
+        "CREATE VIRTUAL TABLE t USING fts5(x, tokenize='trigram', content='', detail='none')"
+    )
+    con.close()

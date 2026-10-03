@@ -6227,7 +6227,8 @@ async function coAdd() {
   ta.value = cur ? cur.replace(/[\s,]+$/, "") + ", " + add.join(", ") : add.join(", ");
   updatePrimaryButtonLabels();
   coRender();
-  await build({only: add, keepPanelOpen: true});
+  // Nothing built yet: build everything, or entries typed earlier stay unloaded.
+  await build(DATA.length ? {only: add, keepPanelOpen: true} : {keepPanelOpen: true});
   const name = STATE.activeView;
   if (name && name !== AD_HOC_KEY && name in WATCHLISTS) {
     try {
@@ -10541,6 +10542,9 @@ const SETTINGS_SECTIONS = [
       { id: "reference", label: "Reference data (S&P 500)",
         keywords: ["reference", "pack", "s&p 500", "sp500", "anchor", "download", "github",
                    "privacy", "track record", "calibration", "disable"] },
+      { id: "symbols", label: "Symbol list (company search)",
+        keywords: ["symbol", "ticker", "search", "find companies", "listings", "pack",
+                   "download", "github", "weekly"] },
     ],
     render: renderSettingsModels,
   },
@@ -11028,7 +11032,9 @@ function renderSettingsModels(el) {
         ${(d.reference || {}).enabled ? "checked" : ""}
         ${(d.reference || {}).env_disabled ? "disabled" : ""}></label>`,
       help: referenceBody(d.reference || {}),
-    });
+    }) +
+    settingsRow({ id: "symbols", label: `Symbol list (company search) ${symbolsPill(d.symbols)}`,
+                  control: "", help: symbolsBody(d.symbols || {}) });
 
   const rc = $("#settings-recheck");
   if (rc) rc.onclick = () => { SETTINGS.runtime = null; renderSettingsPane(); loadRuntimeStatus(true); };
@@ -11042,7 +11048,8 @@ function renderSettingsModels(el) {
   if (rf) rf.onchange = () => postReferencePack({ enabled: rf.checked });
   const rn = $("#settings-reference-now");
   if (rn) rn.onclick = () => { rn.disabled = true; postReferencePack({ action: "refresh" }); };
-  const refBusy = ["checking", "downloading"].includes((d.reference || {}).state);
+  const refBusy = ["checking", "downloading"].includes((d.reference || {}).state)
+    || ["checking", "downloading"].includes((d.symbols || {}).state);
   if (dlActive || refBusy) SETTINGS.modelTimer = setTimeout(() => loadRuntimeStatus(true), 1500);
   highlightSettingsMatches(el);
 }
@@ -11082,9 +11089,36 @@ function referenceBody(r) {
     view to the Track record.
     <div class="settings-kv">${rows.join("")}</div>
     <div class="settings-row-help">Downloads a public file from GitHub once a day — GitHub sees
-      that a copy of Convexity is running, never what you hold.${r.env_disabled
+      that a copy of Convexity is running, never what you hold. This switch also covers the
+      weekly symbol list below.${r.env_disabled
       ? " Switched off by <code>CONVEXITY_REFERENCE_PACK=0</code>." : ""}</div>
     ${r.enabled ? `<div class="settings-btn-row"><button class="settings-btn" id="settings-reference-now">Check now</button></div>` : ""}`;
+}
+
+/* Settings -> Models & Data -> Symbol list: the weekly symbol pack
+   (src/convexity/symbol_db.py) behind Find companies. It shares the
+   reference-data switch above; switched off, a copy already downloaded keeps
+   working. */
+function symbolsPill(r) {
+  if (!r) return "";
+  if (["checking", "downloading"].includes(r.state)) return `<span class="settings-status-pill">Checking</span>`;
+  if (r.installed) return `<span class="settings-status-pill ok">In use</span>`;
+  return `<span class="settings-status-pill${r.state === "disabled" ? "" : " bad"}">Not downloaded</span>`;
+}
+
+function symbolsBody(r) {
+  const kv = (k, v) => `<div class="settings-kv-k">${k}</div><div class="settings-kv-v">${v}</div>`;
+  const rows = [r.installed
+    ? kv("Data from", `${escapeHtml(r.installed.date)} · ${Number(r.installed.rows).toLocaleString()} listings`)
+    : kv("Data", r.state === "disabled" ? "switched off" : "not downloaded yet")];
+  if (r.state === "failed" && r.error) {
+    rows.push(kv("Last check", `<span class="settings-bad-text">${escapeHtml(r.error)}</span> — ignored`));
+  }
+  return `Every listing Yahoo has (stocks in 59 regions, ETFs, funds, indices) with sector,
+    industry and size, so Find companies and typed company names work offline.
+    <div class="settings-kv">${rows.join("")}</div>
+    <div class="settings-row-help">Downloaded from GitHub once a week, under the Reference data
+      switch above.</div>`;
 }
 
 async function postReferencePack(body) {

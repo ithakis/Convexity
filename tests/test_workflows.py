@@ -122,4 +122,4 @@ def test_symbol_pack_never_commits_or_creates_the_release():
     assert re.search(r'cron: "\d+ \d+ \* \* 0"', text)  # weekly
     # manifest last, so a reader never sees a manifest without its file
     up = _jobs(text)["publish"]
-    assert up.index("pack/symbols.json.gz \\") < up.index("pack/symbols-manifest.json \\")
+    assert up.index("pack/symbols.ndjson.gz \\") < up.index("pack/symbols-manifest.json \\")

@@ -37,6 +37,9 @@ LISTINGS = [
     # Reports in USD, listed at home in CHF: USD reporting says nothing.
     L("ZURN.SW", "Zurich Insurance Group AG", "EBS", "CHF", "USD", 2e8),
     L("ZURVY", "Zurich Insurance Group AG", "OQX", "USD", "USD", 3e6),
+    # No reporting currency on a regional German line: joins Baxter.
+    L("BAX", "Baxter International Inc.", "NYQ", "USD", "USD", 4e8),
+    L("BTL.SG", "Baxter International Inc", "STU", "EUR", None, 1e5),
     L("XLK", "Technology Select Sector SPDR Fund", "PCX", "USD", None, None, typ="etf"),
 ]
 
@@ -58,20 +61,61 @@ def test_one_home_per_company_and_alternates_share_a_group():
     assert all(sum(r[-1] for r in g) == 1 for g in groups.values())
     novo = next(g for g in groups.values() if any(r[0] == "NVO" for r in g))
     assert {r[0] for r in novo} == {"NOVO-B.CO", "NVO", "NOV.DE"}
+    bax = next(g for g in groups.values() if any(r[0] == "BTL.SG" for r in g))
+    assert {r[0]: r[-1] for r in bax} == {"BAX": 1, "BTL.SG": 0}
 
 
-def test_sweep_pages_until_total_and_fails_short(monkeypatch):
-    data = [{"symbol": f"T{i}"} for i in range(600)]
+class _FakeYahoo:
+    """The screener as it behaves: filters on intradayprice bands, sorts by
+    ticker, and serves at most 10,000 results — deeper offsets repeat the
+    last page (the cap that once cut a 233k sweep to 22k)."""
+
+    def __init__(self, prices):
+        self.rows = [{"symbol": f"T{i:06d}", "p": p} for i, p in enumerate(prices)]
+        self.calls = 0
+
+    def __call__(self, query, offset=0, size=1, asc=True):
+        self.calls += 1
+        lo, hi = 0.0, float("inf")
+        for op in query.to_dict().get("operands", []):
+            if isinstance(op, dict) and op["operands"][0] == "intradayprice":
+                lo = op["operands"][1] if op["operator"] == "GTE" else lo
+                hi = op["operands"][1] if op["operator"] == "LT" else hi
+        rows = sorted(
+            (r for r in self.rows if lo <= r["p"] < hi), key=lambda r: r["symbol"], reverse=not asc
+        )
+        offset = min(offset, 9_750)
+        page = rows[offset : min(offset + size, 10_000)]
+        # Real pages are often a few rows short mid-stream (246 of 250).
+        return {"total": len(rows), "quotes": page[:-1] if len(page) == size and size > 1 else page}
+
+
+def test_sweep_splits_past_yahoos_10k_cap(monkeypatch):
+    from yfinance import EquityQuery as Q
+
+    prices = [1.0 + (i % 997) * 0.37 for i in range(25_000)] + [
+        1.0
+    ] * 12_000  # 12k at $1.00: read both ways
+    fake = _FakeYahoo(prices)
+    monkeypatch.setattr(sb, "_screen", fake)
+    got = sb.sweep(Q("eq", ["region", "us"]), "x")
+    # every page drops one row, as Yahoo's do: the sweep still gets >99%
+    assert len(got) == len({r["symbol"] for r in got}) > 0.99 * len(prices)
+
+
+def test_sweep_limit_and_short_sweeps(monkeypatch):
+    from yfinance import EquityQuery as Q
+
+    monkeypatch.setattr(sb, "_screen", _FakeYahoo([5.0] * 600))
+    assert len(sb.sweep(Q("eq", ["region", "us"]), "x", limit=300)) == 300
+    short = _FakeYahoo([5.0] * 600)
     monkeypatch.setattr(
-        sb, "_screen", lambda q, off, size: {"total": 600, "quotes": data[off : off + size]}
+        sb,
+        "_screen",
+        lambda q, offset=0, size=1, asc=True: {**short(q, offset, size, asc), "total": 900},
     )
-    assert len(sb.sweep(None, "x")) == 600
-    assert len(sb.sweep(None, "x", limit=300)) == 300
-    monkeypatch.setattr(
-        sb, "_screen", lambda q, off, size: {"total": 600, "quotes": data[:250] if off == 0 else []}
-    )
-    with pytest.raises(SystemExit, match="250 of 600"):
-        sb.sweep(None, "x")
+    with pytest.raises(SystemExit, match="of 900 listings"):
+        sb.sweep(Q("eq", ["region", "us"]), "x")
 
 
 def test_cli_builds_a_pack_the_app_can_install(tmp_path, monkeypatch, capsys):
@@ -80,12 +124,12 @@ def test_cli_builds_a_pack_the_app_can_install(tmp_path, monkeypatch, capsys):
     assert cli.main(["build-symbols", "--out", str(out)]) == 0
     raw = (out / sdb.MANIFEST).read_bytes()
     m = sdb.validate_manifest(json.loads(raw))
-    rows = sdb.validate_rows(sdb.rp.gunzip_json((out / sdb.DATA).read_bytes()))
-    assert m["rows"] == len(rows) == len(LISTINGS)
-    sdb.write_db(rows, raw)
+    blob = (out / sdb.DATA).read_bytes()
+    assert m["rows"] == len(list(sdb.iter_rows(blob))) == len(LISTINGS)
+    sdb.write_db(sdb.iter_rows(blob), raw, expect=m["rows"])
     sdb._invalidate()
     assert sdb.lookup("novo nordisk")[0].ticker == "NOVO-B.CO"
-    assert "13 listings" in capsys.readouterr().out
+    assert f"{len(LISTINGS)} listings" in capsys.readouterr().out
 
 
 def test_a_big_drop_against_the_previous_pack_is_not_published(tmp_path, monkeypatch, capsys):

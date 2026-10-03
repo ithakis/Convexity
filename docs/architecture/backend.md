@@ -397,13 +397,21 @@ created, so fresh installs had none and a typo became a literal ticker row.
 
 ### The symbol pack (`symbol_db.py`, built by `symbol_build.py`)
 `convexity build-symbols --out DIR` (run weekly by
-`.github/workflows/symbol-pack.yml`, ~25 min) sweeps Yahoo's screener for
+`.github/workflows/symbol-pack.yml`, ~50 min) sweeps Yahoo's screener for
 every listing: equities in all 59 regions (~236k), the same universe once per
 industry (~145 sweeps — screener quotes carry no sector/industry, this is how
 rows get them), ETFs (~57k, minus `^…-IV` indicative values), mutual funds
 (~338k, minus Nasdaq test funds) and `data/indices.json` (the screener has no
 indices). Two files go to the rolling `reference-pack` release:
-`symbols-manifest.json` and `symbols.json.gz` (`{schema, columns, rows}`).
+`symbols-manifest.json` and `symbols.ndjson.gz` (a `{schema, columns}` line,
+then one JSON array per listing).
+
+**Yahoo serves at most 10,000 results per query** — past offset 9,750 every
+page repeats the last one. `sweep()` therefore counts first and splits any
+larger query into price decades (every listing has `intradayprice`), halving
+a band until it fits; a band that cannot be split (1,000+ funds at $1.00) is
+read ascending and descending by ticker. A first version paged naively and
+turned 630k listings into 22k unique ones without an error.
 
 Columns: ticker, name, type (stock/etf/fund/index), exchange, region, sector,
 industry, mcap_usd, group, home. **Rules learned from the data:**
@@ -423,17 +431,25 @@ industry, mcap_usd, group, home. **Rules learned from the data:**
 App side: `symbol_db.start()` at boot (and with the reference-pack switch /
 "Check now") downloads when the local copy is older than 7 days, verifies the
 manifest hash + size + allow-list (names are the one free-text field:
-printable, ≤160 chars, only displayed or fuzzy-matched), and writes
-`symbol_db.sqlite` as a new file + `os.replace` (stale `-wal`/`-shm` removed
-first). `PRAGMA user_version = 2`; an older file reads as empty. The `symbols`
+printable, ≤160 chars, only displayed or fuzzy-matched) **while streaming**
+the NDJSON into a new SQLite file (parsing it whole took ~550 MB; streamed it
+peaks under 90 MB), checks the row count against the manifest and unique
+tickers via the primary key, then `os.replace`s it in (stale `-wal`/`-shm`
+removed first; retried on Windows). `PRAGMA user_version = 2`; an older file
+reads as empty and is downloaded again. **Bump `DB_VERSION` whenever
+`name_key()` or `acronym()` change** — the file stores their output. The `symbols`
 table keeps `ticker`/`name` because `relevance.load_company_names()` reads it
 for the Market read (its cache is cleared on install).
 
 `lookup(q)`: exact ticker (any listing) or `ALIASES` (google → GOOGL) first;
-then rapidfuzz WRatio over the home listings' cleaned names (legal forms
-dropped: "Novo Nordisk A/S" → "novo nordisk"), plus initials ("tsmc", "ibm"),
-re-ranked exact > prefix > whole word > fuzzy, shorter-is-better, then size
-(+≤6) and type (stock > index > ETF > fund). `category()` lists the largest
+then **candidates from SQLite** — an FTS5 trigram index over the home
+listings' cleaned names (legal forms dropped: "Novo Nordisk A/S" → "novo
+nordisk"), top 300 by bm25, plus initials ("tsmc", "ibm") from a partial
+index — scored with rapidfuzz WRatio and re-ranked exact > prefix > whole
+word > fuzzy, shorter-is-better, then size (+≤6) and type (stock > index >
+ETF > fund). Memoised per file version. An in-memory index of ~400k names
+cost ~300 MB and ~1 s per WRatio scan; this costs ~7 MB and a few hundred ms
+at worst. `category()` lists the largest
 home listings for sectors/industries/regions; `alternates(group)` and
 `home(group)` serve the cards.
 

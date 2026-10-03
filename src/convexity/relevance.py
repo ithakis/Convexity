@@ -156,18 +156,39 @@ def _find_symbol_db() -> Path | None:
     return p if p.exists() else None
 
 
+class _CompanyNames:
+    """{ticker: company name}, read through from symbol_db.sqlite one ticker
+    at a time and memoised. The symbol pack holds every Yahoo listing (~630k):
+    as a dict that was ~100 MB for lookups that need a few hundred names. Only
+    `.get()` is offered — the one call every caller (app and ml/) makes — and
+    the names are the same rows a full read returned."""
+
+    def __init__(self, db: Path | None):
+        self._db, self._memo = db, {}
+
+    def get(self, symbol, default=None):
+        key = (symbol or "").upper()
+        if key not in self._memo:
+            self._memo[key] = self._fetch(key)
+        return default if self._memo[key] is None else self._memo[key]
+
+    def _fetch(self, key: str) -> str | None:
+        if self._db is None or not key:
+            return None
+        try:
+            uri = self._db.as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True)) as con:
+                row = con.execute("SELECT name FROM symbols WHERE ticker = ?", (key,)).fetchone()
+        except Exception:
+            return None
+        return row[0] if row and row[0] else None
+
+
 @lru_cache(maxsize=1)
-def load_company_names() -> dict[str, str]:
-    """{ticker: company name} from symbol_db.sqlite; {} when unavailable."""
-    db = _find_symbol_db()
-    if db is None:
-        return {}
-    try:
-        with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as con:
-            rows = con.execute("SELECT ticker, name FROM symbols").fetchall()
-        return {t.upper(): n for t, n in rows if t and n}
-    except Exception:
-        return {}
+def load_company_names() -> _CompanyNames:
+    """{ticker: company name} from symbol_db.sqlite (`.get()` only); empty
+    when unavailable. symbol_db clears the cache when a new pack lands."""
+    return _CompanyNames(_find_symbol_db())
 
 
 def _clean_name(name: str) -> str:

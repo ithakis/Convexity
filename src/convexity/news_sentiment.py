@@ -1066,6 +1066,7 @@ def _nvidia_call(
     name: str = "news_read",
     record: bool = True,
     tag: str = "news",
+    timeout: float | None = None,
 ) -> dict | None:
     """One schema-constrained NIM completion, parsed.
 
@@ -1080,9 +1081,10 @@ def _nvidia_call(
     timeouts and bad JSON. 404/410 mean the model is gone and 401/403 a bad
     key: no retry, recorded in llm_status for the banner.
 
-    Company search (search.py) reuses it with its own `schema`, `tag` and
-    `record=False`, so a search failure never flips the News LLM banner; the
-    client, the rate limiter and the circuit breaker stay shared."""
+    Company search (search.py) reuses it with its own `schema`, `tag`,
+    `record=False` (a search failure never flips the News LLM banner), a
+    per-request `timeout` and a deadline as `cancel`; the client, the rate
+    limiter and the circuit breaker stay shared."""
     global _nv_rate_limit_until
     rec = _llm_record if record else (lambda *a, **k: None)
     if not NVIDIA_API_KEY:
@@ -1117,6 +1119,7 @@ def _nvidia_call(
                     },
                 },
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                **({"timeout": timeout} if timeout else {}),
             )
             text = (response.choices[0].message.content or "").strip()
             if not text:

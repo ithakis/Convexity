@@ -81,7 +81,7 @@ jobs:
           name: symbol-pack
           path: |
             pack/symbols-manifest.json
-            pack/symbols.json.gz
+            pack/symbols.ndjson.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -104,7 +104,7 @@ jobs:
           import hashlib, json, pathlib
           d = pathlib.Path("pack")
           names = sorted(p.name for p in d.iterdir())
-          assert names == ["symbols-manifest.json", "symbols.json.gz"], names
+          assert names == ["symbols-manifest.json", "symbols.ndjson.gz"], names
           m = json.loads((d / "symbols-manifest.json").read_text())
           for name, meta in m["files"].items():
               data = (d / name).read_bytes()
@@ -122,7 +122,7 @@ jobs:
             echo "::error::The reference-pack release does not exist. The owner creates it once (docs/architecture/ci.md); this workflow never does."
             exit 1
           fi
-          gh release upload reference-pack pack/symbols.json.gz \
+          gh release upload reference-pack pack/symbols.ndjson.gz \
             --repo "$GITHUB_REPOSITORY" --clobber
           gh release upload reference-pack pack/symbols-manifest.json \
             --repo "$GITHUB_REPOSITORY" --clobber

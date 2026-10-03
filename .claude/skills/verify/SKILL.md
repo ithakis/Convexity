@@ -33,10 +33,10 @@ Flows worth driving (browser pane on the printed URL):
 - Settings → About / Models & Data / API keys (save + Remove a fake key; never
   press Test) / Logs.
 - Symbol pack + company search: `convexity build-symbols --out <dir> --limit 250`
-  (live Yahoo screener, ~2 min; the full build is ~25 min) or a synthetic pack
+  (live Yahoo screener, ~2 min; the full build is ~50 min) or a synthetic pack
   (`tests/test_symbol_db.py:pack()`), served like the reference pack below
   (same `CONVEXITY_REFERENCE_URL`, files `symbols-manifest.json` +
-  `symbols.json.gz`). Then Find companies: `microsft`, `european banks`,
+  `symbols.ndjson.gz`). Then Find companies: `microsft`, `european banks`,
   `tech with D/E < 0.8 and current ratio > 1`, edit a chip, Add two cards
   (only those rows stream in), and a build with `Microsft, DaVita, Alphabet`.
 - Reference pack, app side: serve a pack directory with

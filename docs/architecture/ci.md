@@ -100,13 +100,13 @@ and ignored.
 ### Symbol pack workflow (`.github/workflows/symbol-pack.yml`, issue #6)
 
 Builds the weekly symbol pack (backend.md §6) and replaces two more assets of
-the same `reference-pack` release: `symbols.json.gz` first, then
+the same `reference-pack` release: `symbols.ndjson.gz` first, then
 `symbols-manifest.json`. `schedule` Sundays 04:00 UTC plus
 `workflow_dispatch` (no inputs). No secret: Yahoo only.
 
 | Job | Permissions / secrets | What it does |
 |---|---|---|
-| `build` | `contents: read`, none | `uv sync --locked`; fetches only the previous `symbols-manifest.json` (its row count; a missing release or asset is fine, any other `gh` failure fails the run); `convexity build-symbols --out pack [--previous prev]`, which refuses a short sweep or a >20% drop; uploads `pack/` as a 7-day artifact. ~25 min, ~3,000 screener pages |
+| `build` | `contents: read`, none | `uv sync --locked`; fetches only the previous `symbols-manifest.json` (its row count; a missing release or asset is fine, any other `gh` failure fails the run); `convexity build-symbols --out pack [--previous prev]`, which refuses a short sweep or a >20% drop; uploads `pack/` as a 7-day artifact. ~50 min, ~3,500 screener pages (Yahoo caps a query at 10,000 results; `sweep` splits by price) |
 | `publish` | `contents: write`, none | Re-verifies both files against the manifest, fails if the release does not exist, `gh release upload … --clobber`, manifest last. Never commits |
 
 First run needs the release (step 1 above), then

@@ -1,9 +1,10 @@
 """`convexity build-symbols` — build the symbol pack (run weekly by CI).
 
 Sweeps Yahoo's screener for everything it lists and writes
-`symbols-manifest.json` + `symbols.json.gz` (format: symbol_db.py) to `--out`:
+`symbols-manifest.json` + `symbols.ndjson.gz` (format: symbol_db.py) to `--out`:
 
-1. Equities, all regions, paged 250 at a time (~236k listings).
+1. Equities, all regions (~233k listings), 250 per page and split into price
+   bands under Yahoo's 10,000-results-per-query cap (`sweep`).
 2. The same universe once per industry (~145), which is how each listing
    gets its industry and sector: screener quotes carry neither.
 3. ETFs (~57k) and mutual funds (~338k) from their own screeners.
@@ -41,6 +42,7 @@ from convexity import reference_pack as rp, symbol_db as sdb
 from convexity.helpers import major_ccy, price_in_major
 
 _PAGE = 250
+_CAP = 10_000  # results Yahoo serves per query (last page at offset 9,750)
 _PAUSE_S = 0.25
 _ATTEMPTS = 4
 _MIN_SHARE = 0.95
@@ -67,13 +69,13 @@ SECONDARY = {
 }
 
 
-def _screen(query, offset: int, size: int) -> dict:
+def _screen(query, offset: int = 0, size: int = 1, asc: bool = True) -> dict:
     import yfinance as yf
 
     for attempt in range(_ATTEMPTS):
         try:
             time.sleep(_PAUSE_S)
-            return yf.screen(query, offset=offset, size=size)
+            return yf.screen(query, offset=offset, size=size, sortField="ticker", sortAsc=asc)
         except Exception as e:
             if attempt == _ATTEMPTS - 1:
                 raise SystemExit(f"Yahoo screener failed at offset {offset}: {e}") from None
@@ -81,22 +83,50 @@ def _screen(query, offset: int, size: int) -> dict:
     raise AssertionError("unreachable")
 
 
-def sweep(query, label: str, limit: int | None = None) -> list[dict]:
-    """Every quote a query matches, in pages. Fails on a short sweep."""
-    out: list[dict] = []
-    total = None
-    while True:
-        r = _screen(query, len(out), _PAGE if limit is None else min(_PAGE, limit - len(out)))
-        total = r.get("total") or 0
-        page = r.get("quotes") or []
-        out += page
-        if not page or len(out) >= total or (limit is not None and len(out) >= limit):
+def _pages(query, n: int, seen: dict, asc: bool = True) -> None:
+    """Up to the first `_CAP` results of one query, by ticker."""
+    for off in range(0, min(n, _CAP), _PAGE):
+        page = _screen(query, off, _PAGE, asc).get("quotes") or []
+        for q in page:
+            seen.setdefault(q.get("symbol"), q)
+        if not page:  # NOT len(page) < _PAGE: Yahoo returns 246-249 rows mid-stream
             break
+
+
+def sweep(query, label: str, limit: int | None = None) -> list[dict]:
+    """Every listing a query matches.
+
+    Yahoo serves only the first 10,000 results of a query: past offset 9,750
+    every page repeats the last one (a 233k-row sweep came back as 22k unique
+    listings). So a query over `_CAP` is split into price bands — every
+    listing has an intraday price — decade by decade, each halved until it
+    fits. A band that cannot be split further (a thousand funds at exactly
+    $1.00) is read ascending and descending by ticker. Fails when the unique
+    listings fall short of the total Yahoo reports."""
+    Q = type(query)  # EquityQuery / ETFQuery / FundQuery: bands use the same kind
+    total = _screen(query).get("total") or 0
+    seen: dict = {}
+    if limit is not None or total <= _CAP:
+        _pages(query, total if limit is None else min(total, limit), seen)
+    else:
+        bands = [(0.0, 0.01)] + [(10.0**e, 10.0 ** (e + 1)) for e in range(-2, 12)]
+        while bands:
+            lo, hi = bands.pop()
+            band = Q(
+                "and", [query, Q("gte", ["intradayprice", lo]), Q("lt", ["intradayprice", hi])]
+            )
+            n = _screen(band).get("total") or 0
+            if n > _CAP and hi - lo > 1e-4:
+                bands += [(lo, (lo + hi) / 2), ((lo + hi) / 2, hi)]
+            elif n:
+                _pages(band, n, seen)
+                if n > _CAP:
+                    _pages(band, n, seen, asc=False)
     want = total if limit is None else min(total, limit)
-    if len(out) < _MIN_SHARE * want:
-        raise SystemExit(f"{label}: got {len(out)} of {want} rows from Yahoo")
-    print(f"  {label}: {len(out)} rows", flush=True)
-    return out
+    if len(seen) < _MIN_SHARE * want:
+        raise SystemExit(f"{label}: got {len(seen)} of {want} listings from Yahoo")
+    print(f"  {label}: {len(seen)} listings", flush=True)
+    return list(seen.values())[:want]
 
 
 def _maps():
@@ -203,13 +233,22 @@ def group(listings: list[dict]) -> list[list]:
     """Pack rows: listings grouped into companies, one home listing each.
     Only stocks group; every ETF, fund and index is its own home."""
     companies: dict[tuple, list[dict]] = {}
+    orphans: dict[str, list[dict]] = {}  # stocks without a reporting currency
     for r in listings:
-        key = (
-            (sdb.name_key(r["name"]), r.get("fin_ccy"))
-            if r["type"] == "stock"
-            else ("", r["ticker"])
-        )
-        companies.setdefault(key, []).append(r)
+        if r["type"] != "stock":
+            companies[("", r["ticker"])] = [r]
+        elif r.get("fin_ccy"):
+            companies.setdefault((sdb.name_key(r["name"]), r["fin_ccy"]), []).append(r)
+        else:
+            orphans.setdefault(sdb.name_key(r["name"]), []).append(r)
+    # Regional German lines often lack financialCurrency (BTL.SG for Baxter):
+    # they join the largest company of the same name instead of standing
+    # alone as a second "Baxter" with a Stuttgart home listing.
+    size = lambda g: max((m.get("mcap_usd") or 0.0) for m in g)  # noqa: E731
+    for name, members in orphans.items():
+        same = [k for k in companies if k[0] == name] if name else []
+        target = max(same, key=lambda k: size(companies[k])) if same else (name, None)
+        companies.setdefault(target, []).extend(members)
     rows = []
     for gid, members in enumerate(companies.values()):
         home = max(members, key=_home_score)
@@ -228,9 +267,12 @@ def group(listings: list[dict]) -> list[list]:
 
 
 def write(out: Path, rows: list[list]) -> dict:
-    """Validate, then write the data file and its manifest (manifest last)."""
-    sdb.validate_rows({"schema": sdb.SCHEMA_VERSION, "columns": list(sdb.COLUMNS), "rows": rows})
-    blob = rp.gzip_json({"schema": sdb.SCHEMA_VERSION, "columns": list(sdb.COLUMNS), "rows": rows})
+    """Encode, read back exactly as the app will (allow-list, unique
+    tickers), then write the data file and its manifest (manifest last)."""
+    blob = sdb.encode(rows)
+    tickers = [r[0] for r in sdb.iter_rows(blob)]
+    if len(set(tickers)) != len(rows):
+        raise SystemExit("the pack would repeat a ticker or lose a row")
     manifest = {
         "schema_version": sdb.SCHEMA_VERSION,
         "date": datetime.now(UTC).strftime("%Y-%m-%d"),

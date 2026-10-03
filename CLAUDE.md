@@ -60,6 +60,9 @@ Each of these has cost real debugging time; the link goes to the full story.
   fraction), and the screener's market cap is local currency. The LLM may only
   emit registry keys; every AI pick is verified against the symbol pack.
   [backend.md → §6](docs/architecture/backend.md#6-symbol-pack--company-search-symbol_dbpy-symbol_buildpy-searchpy)
+- **Yahoo's screener serves at most 10,000 results per query** — deeper
+  pages silently repeat the last one. Split big queries (`symbol_build.sweep`).
+  [backend.md → §6](docs/architecture/backend.md#6-symbol-pack--company-search-symbol_dbpy-symbol_buildpy-searchpy)
 - **Don't put heavy fetches in `fetch_one`** (the streaming hot path).
   [backend.md → Streaming row build](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
 - **Request-origin guard** — every frontend POST sends
@@ -549,7 +552,7 @@ GitHub's side needs a GitHub Support request by the owner.
 - **The one exception: the rolling `reference-pack` release.** Its three
   assets (`manifest.json`, `anchor.json.gz`, `history.json.gz`) are replaced
   by `reference-pack.yml` every weekday with `gh release upload --clobber`,
-  and two more (`symbols-manifest.json`, `symbols.json.gz` — every Yahoo
+  and two more (`symbols-manifest.json`, `symbols.ndjson.gz` — every Yahoo
   listing's ticker, name, exchange, sector, industry and USD size) by
   `symbol-pack.yml` every Sunday, under the same rules.
   The never-replace rule protects **code** that old installs pin by hash (the

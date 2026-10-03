@@ -189,18 +189,20 @@ def validate(q) -> dict:
         return out
     out["kind"] = q.get("kind") if q.get("kind") in ("name", "screen", "theme") else "name"
     out["engine"] = "ai" if q.get("engine") == "ai" else "rules"
-    out["ignored"] = [str(x)[:80] for x in q.get("ignored") or [] if str(x).strip()][:10]
-    out["notes"] = [str(x)[:160] for x in q.get("notes") or []][:10]
-    for f in q.get("filters") or []:
+    out["ignored"] = [str(x)[:80] for x in (q.get("ignored") or [])[:10] if str(x).strip()]
+    out["notes"] = [str(x)[:160] for x in (q.get("notes") or [])[:10]]
+    for f in (q.get("filters") or [])[:40]:
         ok = isinstance(f, dict) and f.get("field") in FIELDS and f.get("op") in OPS
         v = f.get("value") if ok else None
-        if ok and isinstance(v, (int, float)) and not isinstance(v, bool) and v == v:
+        if len(out["filters"]) >= 20:
+            break
+        if ok and isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) < 1e15:
             out["filters"].append({"field": f["field"], "op": f["op"], "value": float(v)})
         else:
             out["ignored"].append(_chip(f) if ok else f"filter {str(f)[:40]}")
     for key, vocab in (("sectors", SECTORS), ("industries", INDUSTRIES), ("regions", ALL_REGIONS),
                        ("types", sdb.TYPES)):  # fmt: skip
-        vals = [v for v in q.get(key) or [] if isinstance(v, str)]
+        vals = [v for v in (q.get(key) or [])[:80] if isinstance(v, str)]
         out[key] = sorted(v for v in set(vals) if v in vocab)
         out["ignored"] += [v[:40] for v in vals if v not in vocab]
     r = q.get("rank")
@@ -257,7 +259,14 @@ def _value(key: str, num: str, suffix: str | None, notes: list) -> float:
     v, unit, suffix = float(num), FIELDS[key][1], (suffix or "").lower()
     if unit == "$":
         return v * _MULT.get(suffix, 1e9 if v < 10_000 else 1)
-    if unit == "%" and suffix != "%" and 0 < abs(v) <= 1:
+    # "ROE > 0.15" means 15%; "ROE > 1" means 1%. Yields and short interest
+    # are routinely below 1%, so a fraction there is taken as written.
+    if (
+        unit == "%"
+        and suffix != "%"
+        and 0 < abs(v) < 1
+        and key not in ("dividend_yield", "short_float")
+    ):
         notes.append(f"Read {FIELDS[key][0]} {num} as {v * 100:g}%.")
         return v * 100
     if unit == "x" and suffix == "%":
@@ -356,19 +365,41 @@ def ai_available() -> bool:
     return bool(ns.NVIDIA_API_KEY)
 
 
-def parse_llm(text: str, hint: dict) -> dict | None:
-    """The NIM model's reading of `text`, validated; None when it failed."""
-    from convexity import news_sentiment as ns
+class _Deadline:
+    """A `cancel` for _nvidia_call that fires after `s` seconds: a search must
+    not queue behind a news refresh's NIM calls for minutes."""
 
+    def __init__(self, s: float):
+        self.at = time.time() + s
+
+    def is_set(self) -> bool:
+        return time.time() > self.at
+
+
+_AI_DEADLINE_S = 25.0
+
+
+def parse_llm(text: str, hint: dict) -> dict | None:
+    """The NIM model's reading of `text`, validated; None when it failed, timed
+    out, or NIM is rate-limited right now (the news refresh owns the quota)."""
+    from convexity import news_sentiment as ns
+    from convexity.helpers import Cancelled
+
+    if ns._nv_rate_limit_until > time.time():
+        return None
     user = f"Request: {text}\nA rule parser already read: {json.dumps(_brief(hint))}"
-    raw = ns._nvidia_call(_SYSTEM, user, (), schema=_llm_schema(), name="company_search",
-                          record=False, tag="search")  # fmt: skip
+    try:
+        raw = ns._nvidia_call(_SYSTEM, user, (), _Deadline(_AI_DEADLINE_S), schema=_llm_schema(),
+                              name="company_search", record=False, tag="search", timeout=20.0)  # fmt: skip
+    except Cancelled:
+        print("[search] AI step timed out; using the rule parser's reading", flush=True)
+        return None
     if not isinstance(raw, dict):
         return None
     why = (raw.get("rank") or {}).get("why")
-    q = validate(
-        {**raw, "text": text, "engine": "ai", "rank": {**(raw.get("rank") or {}), "by": "ai"}}
-    )
+    # The schema makes the model always send a rank; only a screen uses one.
+    rank = {**(raw.get("rank") or {}), "by": "ai"} if raw.get("kind") == "screen" else None
+    q = validate({**raw, "text": text, "engine": "ai", "rank": rank})
     if q["rank"] and why:
         q["notes"].append(f"Ranked by {FIELDS[q['rank']['field']][0]}: {str(why)[:80]}")
     return q
@@ -384,6 +415,12 @@ def parse(text: str) -> dict:
     """Rules first; the LLM only when a phrase is left over, the query reads
     as a theme, or "best" needs a metric — and only with a key."""
     q, left = parse_rules(text)
+    if left and not q["filters"]:
+        # "deutsche bank", "bank of america", "american express": category
+        # words inside a company name. A near-exact name wins over the parse.
+        top = sdb.lookup(q["text"], limit=1)
+        if top and top[0].score >= 85:
+            return empty(q["text"])
     needs_ai = bool(left) or (q["rank"] or {}).get("by") == "default"
     if q["kind"] == "name":
         top = sdb.lookup(q["text"], limit=1)
@@ -399,11 +436,9 @@ def parse(text: str) -> dict:
         q["notes"].append("This reads like a description: theme search needs an NVIDIA key.")
     if left:
         q["ignored"].append(" ".join(left)[:80])
-        q["kind"] = q["kind"] if q["kind"] != "name" else "theme"
-    if (q["rank"] or {}).get("by") == "default" and not ai_available():
-        q["notes"].append(
-            '"best" is not a metric, so this is ranked by market cap. With an NVIDIA key the AI picks the ranking.'
-        )
+    if (q["rank"] or {}).get("by") == "default":
+        hint = "" if ai_available() else " With an NVIDIA key the AI picks the ranking."
+        q["notes"].append('"best" is not a metric, so this is ranked by market cap.' + hint)
     return q
 
 
@@ -426,7 +461,10 @@ def run(q: dict, offset: int = 0) -> dict:
     warnings = [f'Ignored "{x}": not something Convexity can search on.' for x in q["ignored"]]
     if base is None:
         if q["kind"] == "name" and not q["picks"]:
-            base = [_card(h) for h in sdb.lookup(q["text"], limit=25)]
+            hits = sdb.lookup(q["text"], limit=25)
+            # Near-misses far below the best match are noise ("microsoft" ->
+            # Smith Micro Software); keep the ones within 15 points.
+            base = [_card(h) for h in hits if h.score >= hits[0].score - 15]
         elif q["kind"] in ("name", "theme"):
             base, dropped = _verify_picks(q["picks"])
             if q["regions"]:  # "... in Europe": the company's home, not the AI's say-so
@@ -439,7 +477,11 @@ def run(q: dict, offset: int = 0) -> dict:
                     f"{dropped} AI-named compan{'y' if dropped == 1 else 'ies'} not found, dropped."
                 )
             if not q["picks"]:
-                warnings.append("Theme search needs an NVIDIA key (Settings → API keys).")
+                warnings.append(
+                    "The AI named no companies for this theme."
+                    if ai_available()
+                    else "Theme search needs an NVIDIA key (Settings → API keys)."
+                )
         elif (
             q["filters"]
             and any(f["field"] != "mcap" for f in q["filters"])
@@ -457,6 +499,7 @@ def run(q: dict, offset: int = 0) -> dict:
                     regions=q["regions"], types=q["types"] or ("stock",), limit=250)]  # fmt: skip
             base = [c for c in base if _passes(c, q["filters"], {})]
         with _LOCK:
+            _evict(_CACHE, 50)
             _CACHE[key] = (time.time(), base)
     page = base[offset : offset + _TOP_N]
     _fill_values(page, q)
@@ -567,8 +610,16 @@ def _info(ticker: str) -> dict:
     except Exception:
         info = {}
     with _LOCK:
+        _evict(_INFO, 500)
         _INFO[ticker] = (time.time(), info)
     return info
+
+
+def _evict(cache: dict, cap: int) -> None:
+    """Keep a process-global cache bounded: drop the oldest entries."""
+    if len(cache) >= cap:
+        for k in sorted(cache, key=lambda k: cache[k][0])[: len(cache) - cap + 1]:
+            del cache[k]
 
 
 def _fill_values(cards: list[dict], q: dict) -> None:

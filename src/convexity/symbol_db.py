@@ -8,7 +8,8 @@ equity, ETF and mutual fund in every region, plus a fixed list of indices,
 and publishes two files to the rolling `reference-pack` release:
 
     symbols-manifest.json   date, row count, SHA-256 + size of the data file
-    symbols.json.gz         {"schema", "columns", "rows"}: one row per listing
+    symbols.ndjson.gz       a {"schema", "columns"} line, then one JSON array
+                            per listing (streamed on install: flat memory)
 
 Each row carries ticker, name, type, exchange, region, sector, industry,
 size in USD (market cap; net assets for funds), a company group id and a
@@ -34,10 +35,11 @@ Lookup
 `lookup()` maps fuzzy input to listings: exact ticker, then the fuzzy name
 match re-ranked by size and type (see `_rank`). `category()` lists the
 largest home listings for a sector / industry / region filter. Both read the
-SQLite file; the name index of home listings is held in memory after the
-first search (one string per company, ~25 MB for the full universe).
+SQLite file; a trigram index inside it proposes name candidates, so nothing
+is held in memory.
 """
 
+import gzip
 import json
 import math
 import os
@@ -46,18 +48,25 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import zlib
+from collections.abc import Iterator
 from contextlib import closing
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
-from rapidfuzz import fuzz, process as rf_process
+from rapidfuzz import fuzz
 
 from convexity import paths, reference_pack as rp
 
 SCHEMA_VERSION = 1  # the pack format
-DB_VERSION = 2  # PRAGMA user_version of the local file; 1 was the NASDAQ/SEC table
+# PRAGMA user_version of the local file; 1 was the NASDAQ/SEC table. The file
+# stores name_key()/acronym() of every row, so BUMP THIS whenever either
+# changes: an older file then reads as empty and is downloaded again at boot.
+DB_VERSION = 2
 MANIFEST = "symbols-manifest.json"
-DATA = "symbols.json.gz"
+DATA = "symbols.ndjson.gz"
+_MAX_LINE = 4096  # one row; a longer line is not a row
 COLUMNS = (
     "ticker",
     "name",
@@ -108,23 +117,64 @@ def validate_manifest(m) -> dict:
     return m
 
 
-def validate_rows(d) -> list[list]:
-    """The data file's shape, row by row. Returns the rows."""
-    if not isinstance(d, dict) or d.get("schema") != SCHEMA_VERSION:
+def encode(rows: list[list]) -> bytes:
+    """The data file: gzip (deterministic, mtime 0) of a header line and one
+    JSON array per row — line by line, so the app can stream it: parsed whole,
+    630k rows took ~550 MB of memory to install."""
+    head = json.dumps({"schema": SCHEMA_VERSION, "columns": list(COLUMNS)})
+    body = (json.dumps(r, separators=(",", ":"), ensure_ascii=False, allow_nan=False) for r in rows)
+    return gzip.compress(
+        ("\n".join([head, *body]) + "\n").encode("utf-8"), compresslevel=9, mtime=0
+    )
+
+
+def _lines(blob: bytes) -> Iterator[bytes]:
+    """Decompress a gzip member a megabyte at a time and yield its lines,
+    capped (a small file that expands to gigabytes fails at the cap)."""
+    d, data, buf, total = zlib.decompressobj(wbits=31), blob, b"", 0
+    while True:
+        try:
+            chunk = d.decompress(data, 1 << 20)
+        except zlib.error as e:
+            raise rp.PackError(f"{DATA}: not valid gzip ({e})") from None
+        data, total = d.unconsumed_tail, total + len(chunk)
+        if total > rp.MAX_JSON_BYTES:
+            raise rp.PackError(f"{DATA}: decompresses past the {rp.MAX_JSON_BYTES}-byte cap")
+        *lines, buf = (buf + chunk).split(b"\n")
+        if len(buf) > _MAX_LINE or any(len(x) > _MAX_LINE for x in lines):
+            raise rp.PackError(f"{DATA}: a line longer than {_MAX_LINE} bytes")
+        yield from (x for x in lines if x)
+        if d.eof or (not data and not chunk):
+            break
+    if not d.eof:
+        raise rp.PackError(f"{DATA}: gzip stream truncated")
+    if d.unused_data.strip(b"\0") or buf.strip():
+        raise rp.PackError(f"{DATA}: trailing data")
+
+
+def _json(line: bytes, what: str):
+    try:
+        return json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise rp.PackError(f"{what}: not valid JSON") from None
+
+
+def iter_rows(blob: bytes) -> Iterator[list]:
+    """The data file's rows, each checked against the allow-list as it is
+    read. Repeated tickers are caught by write_db (the primary key)."""
+    lines = _lines(blob)
+    head = _json(next(lines, b"null"), "symbols header")
+    if not isinstance(head, dict) or head.get("schema") != SCHEMA_VERSION:
         raise rp.PackError("symbols: wrong schema")
-    if d.get("columns") != list(COLUMNS):
+    if head.get("columns") != list(COLUMNS):
         raise rp.PackError("symbols: unexpected columns")
-    rows = d.get("rows")
-    if not isinstance(rows, list) or not rows:
-        raise rp.PackError("symbols: rows is not a non-empty list")
-    seen: set[str] = set()
-    for i, r in enumerate(rows):
+    for i, line in enumerate(lines):
+        r = _json(line, f"symbols[{i}]")
         if not isinstance(r, list) or len(r) != len(COLUMNS):
             raise rp.PackError(f"symbols[{i}]: expected {len(COLUMNS)} fields")
         tk, name, typ, *labels, mcap, grp, home = r
-        if not isinstance(tk, str) or not _TICKER.match(tk) or tk in seen:
-            raise rp.PackError(f"symbols[{i}]: bad or repeated ticker")
-        seen.add(tk)
+        if not isinstance(tk, str) or not _TICKER.match(tk):
+            raise rp.PackError(f"symbols[{i}]: bad ticker")
         _text(name, f"symbols[{i}].name", 160, optional=False)
         if typ not in TYPES:
             raise rp.PackError(f"symbols[{i}]: bad type")
@@ -133,43 +183,79 @@ def validate_rows(d) -> list[list]:
         rp._num(mcap, f"symbols[{i}].mcap_usd")
         if isinstance(grp, bool) or not isinstance(grp, int) or grp < 0 or home not in (0, 1):
             raise rp.PackError(f"symbols[{i}]: bad group or home flag")
-    return rows
+        yield r
 
 
-def write_db(rows: list[list], manifest_raw: bytes, path: Path | None = None) -> None:
-    """Replace the local SQLite file with these (validated) rows in one
-    `os.replace`. The old file's -wal/-shm sidecars are removed first: SQLite
-    would otherwise try to apply a stale WAL to the new database."""
+def write_db(rows, manifest_raw: bytes, path: Path | None = None, expect: int | None = None) -> int:
+    """Stream (validated) rows into a new SQLite file, then swap it in with
+    one `os.replace`. Nothing is replaced unless every row is valid, the
+    tickers are unique and, with `expect`, the count matches the manifest.
+    The old file's -wal/-shm sidecars are removed first: SQLite would
+    otherwise try to apply a stale WAL to the new database. Returns the count."""
     path = path or db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.unlink(missing_ok=True)
-    with closing(sqlite3.connect(tmp)) as con:
-        con.executescript(
-            """
-            CREATE TABLE symbols (
-                ticker TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL,
-                acr TEXT NOT NULL, type TEXT NOT NULL, exchange TEXT, region TEXT,
-                sector TEXT, industry TEXT, mcap_usd REAL, grp INTEGER NOT NULL,
-                home INTEGER NOT NULL);
-            CREATE INDEX symbols_grp ON symbols(grp);
-            CREATE INDEX symbols_home ON symbols(home, mcap_usd);
-            CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
-            """
-        )
-        con.executemany(
-            "INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            ((r[0], r[1], name_key(r[1]), acronym(r[1]), *r[2:]) for r in rows),
-        )
-        con.executemany(
-            "INSERT INTO meta VALUES (?,?)",
-            [("manifest", manifest_raw.decode("utf-8")), ("manifest_sha", rp.sha256(manifest_raw))],
-        )
-        con.execute(f"PRAGMA user_version = {DB_VERSION}")
-        con.commit()
-    for side in ("-wal", "-shm"):
-        Path(f"{path}{side}").unlink(missing_ok=True)
-    os.replace(tmp, path)
+    n = 0
+
+    def values():
+        nonlocal n
+        for r in rows:
+            n += 1
+            yield (r[0], r[1], name_key(r[1]), acronym(r[1]), *r[2:])
+
+    try:
+        with closing(sqlite3.connect(tmp)) as con:
+            con.executescript(
+                """
+                CREATE TABLE symbols (
+                    ticker TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL,
+                    acr TEXT NOT NULL, type TEXT NOT NULL, exchange TEXT, region TEXT,
+                    sector TEXT, industry TEXT, mcap_usd REAL, grp INTEGER NOT NULL,
+                    home INTEGER NOT NULL);
+                CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+                """
+            )
+            try:
+                con.executemany("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", values())
+            except sqlite3.IntegrityError:
+                raise rp.PackError(f"{DATA}: a ticker appears twice") from None
+            if not n or (expect is not None and n != expect):
+                raise rp.PackError(f"{DATA}: {n} rows, the manifest says {expect}")
+            # Name search runs in SQLite, not in memory (a Python index of
+            # ~400k names cost ~300 MB): a trigram index proposes candidates,
+            # rapidfuzz ranks them. Home listings only.
+            con.executescript(
+                """
+                CREATE INDEX symbols_grp ON symbols(grp);
+                CREATE INDEX symbols_home ON symbols(home, mcap_usd);
+                CREATE INDEX symbols_acr ON symbols(acr) WHERE home = 1;
+                CREATE VIRTUAL TABLE names USING fts5(key, tokenize='trigram', content='', detail='none');
+                INSERT INTO names(rowid, key) SELECT rowid, key FROM symbols WHERE home = 1;
+                """
+            )
+            con.executemany(
+                "INSERT INTO meta VALUES (?,?)",
+                [
+                    ("manifest", manifest_raw.decode("utf-8")),
+                    ("manifest_sha", rp.sha256(manifest_raw)),
+                ],
+            )
+            con.execute(f"PRAGMA user_version = {DB_VERSION}")
+            con.commit()
+        for side in ("-wal", "-shm"):
+            Path(f"{path}{side}").unlink(missing_ok=True)
+        for attempt in range(5):  # Windows refuses while a reader has the file open
+            try:
+                os.replace(tmp, path)
+                return n
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.5)
+    finally:
+        tmp.unlink(missing_ok=True)
+    raise AssertionError("unreachable")
 
 
 # =================================================================== app side
@@ -188,7 +274,9 @@ def _connect() -> sqlite3.Connection | None:
     if not p.exists():
         return None
     try:
-        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
+        # as_uri(): a "#", "?" or "%" in the data-folder path, or a Windows
+        # path, would otherwise break the file: URI.
+        con = sqlite3.connect(p.as_uri() + "?mode=ro", uri=True, check_same_thread=False)
         if con.execute("PRAGMA user_version").fetchone()[0] != DB_VERSION:
             con.close()
             return None
@@ -255,11 +343,10 @@ def _run() -> None:
         meta = manifest["files"][DATA]
         if len(blob) != meta["bytes"] or rp.sha256(blob) != meta["sha256"]:
             raise rp.PackError(f"{DATA}: size or checksum does not match the manifest")
-        rows = validate_rows(rp.gunzip_json(blob))
-        write_db(rows, raw)
+        n = write_db(iter_rows(blob), raw, expect=manifest["rows"])
         _invalidate()
         _set(state="installed", error="", checked_at=time.time())
-        _log(f"installed the {manifest['date']} symbol pack ({len(rows)} listings)")
+        _log(f"installed the {manifest['date']} symbol pack ({n} listings)")
     except Exception as e:  # never let the thread die without a status
         reason = str(e) if isinstance(e, rp.PackError) else f"{type(e).__name__}: {e}"
         _set(state="failed", error=reason, checked_at=time.time())
@@ -297,7 +384,8 @@ def reset_for_tests() -> None:
 _SUFFIX = re.compile(
     r"\b(the|incorporated|inc|corporation|corp|company|co|limited|ltd|plc|holdings?|group"
     r"|n v|nv|s a|sa|ag|se|s p a|spa|asa|ab|oyj|a s|lp|llc|common stock|ordinary shares"
-    r"|class [a-c]|adr|ads|depositary receipts?)\b"
+    r"|class [a-c]|adr|ads|depositary receipts?|aktiengesellschaft|societe anonyme"
+    r"|public limited company|kabushiki kaisha|naamloze vennootschap|societa per azioni)\b"
 )
 _STOP = {"and", "of", "the", "de", "la"}
 # Brand names whose company name shares no letters with them.
@@ -336,17 +424,14 @@ class Hit:
     score: float  # match quality 0..100, before the size/type tie-breaks
 
 
-_SELECT = (
-    "SELECT ticker, name, type, exchange, region, sector, industry, mcap_usd, grp FROM symbols"
-)
-_INDEX: dict = {"sig": None, "keys": [], "acr": [], "rows": []}
-_INDEX_LOCK = threading.Lock()
+_COLS = "ticker, name, type, exchange, region, sector, industry, mcap_usd, grp"
+_SELECT = f"SELECT {_COLS} FROM symbols"
 
 
 def _invalidate() -> None:
-    with _INDEX_LOCK:
-        _INDEX.update(sig=None, keys=[], acr=[], rows=[])
-    try:  # the Market read's ticker -> name map comes from this file too
+    """A new file: the Market read's ticker -> name memo comes from it too.
+    (Lookups are memoised per file version, so they need nothing.)"""
+    try:
         from convexity import relevance
 
         relevance.load_company_names.cache_clear()
@@ -354,32 +439,14 @@ def _invalidate() -> None:
         pass
 
 
-def _index() -> dict:
-    """Home listings held in memory for fuzzy matching; reloaded when the
-    file changes."""
+def _sig():
+    """Identifies the file's current version (path, mtime, size)."""
+    p = db_path()
     try:
-        st = db_path().stat()
-        sig = (st.st_mtime_ns, st.st_size)
+        st = p.stat()
     except OSError:
-        sig = None
-    with _INDEX_LOCK:
-        if _INDEX["sig"] == sig and sig is not None:
-            return _INDEX
-        con = _connect()
-        rows = []
-        if con is not None:
-            with closing(con):
-                rows = con.execute(
-                    "SELECT ticker, name, type, exchange, region, sector, industry, mcap_usd,"
-                    " grp, key, acr FROM symbols WHERE home = 1"
-                ).fetchall()
-        _INDEX.update(
-            sig=sig,
-            keys=[r[9] for r in rows],
-            acr=[r[10] for r in rows],
-            rows=[r[:9] for r in rows],
-        )
-        return _INDEX
+        return None
+    return (str(p), st.st_mtime_ns, st.st_size)
 
 
 def _structural(q: str, key: str, base: float) -> float:
@@ -411,34 +478,47 @@ def lookup(query: str, *, limit: int = 5, min_score: float = 72.0) -> list[Hit]:
     """Fuzzy listing search. An exact ticker (any listing, NVO as well as
     NOVO-B.CO) comes first; names match home listings only."""
     q = (query or "").strip()
-    if not q:
-        return []
+    return list(_lookup(q, min_score, _sig())[:limit]) if q else []
+
+
+@lru_cache(maxsize=256)
+def _lookup(q: str, min_score: float, sig) -> tuple[Hit, ...]:
+    """Every hit for `q`, best first; memoised per file version (a search asks
+    for the same name up to three times).
+
+    Candidates come from SQLite: the exact ticker (or an alias), up to 300
+    home listings sharing the most trigrams with the cleaned name (typos and
+    partial names: "novo nordsk", "berkshire"), and initials ("tsmc"). Only
+    those are scored with rapidfuzz."""
     out: dict[str, tuple[float, Hit]] = {}
     con = _connect()
     if con is None:
-        return []
+        return ()
+    k = name_key(q)
+    cand: dict = {}
     with closing(con):
-        for tk in dict.fromkeys(t for t in (q.upper(), ALIASES.get(name_key(q))) if t):
+        for tk in dict.fromkeys(t for t in (q.upper(), ALIASES.get(k)) if t):
             row = con.execute(_SELECT + " WHERE ticker = ?", (tk,)).fetchone()
             if row:
                 out[row[0]] = (1000.0, _hit(row, 100.0))
-    idx = _index()
-    k = name_key(q)
-    if k and idx["keys"]:
-        scored: dict[int, float] = {}
-        for _m, base, i in rf_process.extract(
-            k, idx["keys"], scorer=fuzz.WRatio, limit=60, score_cutoff=60.0
-        ):
-            scored[i] = _structural(k, idx["keys"][i], float(base))
+        if len(k) >= 3:  # keys are [a-z0-9 ] only, so the quoting is safe
+            match = " OR ".join(f'"{k[i : i + 3]}"' for i in range(len(k) - 2))
+            cols = ", ".join("s." + c for c in _COLS.split(", "))
+            for *row, key in con.execute(
+                f"SELECT {cols}, s.key FROM names JOIN symbols s ON s.rowid = names.rowid"
+                " WHERE names MATCH ? ORDER BY rank LIMIT 300",
+                (match,),
+            ):
+                cand[row[0]] = (row, _structural(k, key, fuzz.WRatio(k, key)))
         if " " not in k and 3 <= len(k) <= 6:
-            for i, a in enumerate(idx["acr"]):
-                if a.startswith(k):
-                    scored[i] = max(scored.get(i, 0.0), 90.0)
-        for i, s in scored.items():
-            row = idx["rows"][i]
-            if s >= min_score and row[0] not in out:
-                out[row[0]] = (_rank(s, row[7], row[2]), _hit(row, s))
-    return [h for _r, h in sorted(out.values(), key=lambda x: -x[0])][:limit]
+            for row in con.execute(
+                _SELECT + " WHERE home = 1 AND acr >= ? AND acr < ? LIMIT 200", (k, k + "~")
+            ):
+                cand[row[0]] = (row, max(cand.get(row[0], (None, 0.0))[1], 90.0))
+    for row, s in cand.values():
+        if s >= min_score and row[0] not in out:
+            out[row[0]] = (_rank(s, row[7], row[2]), _hit(row, s))
+    return tuple(h for _r, h in sorted(out.values(), key=lambda x: -x[0]))
 
 
 def alternates(group: int, exclude: str = "") -> list[dict]:
@@ -503,17 +583,3 @@ def category(
             (*args, limit, offset),
         ).fetchall()
     return [_hit(r, 100.0) for r in rows]
-
-
-def facets() -> dict[str, list[str]]:
-    """Distinct sector, industry and region values (the search vocabulary)."""
-    con = _connect()
-    if con is None:
-        return {"sector": [], "industry": [], "region": []}
-    with closing(con):
-        return {
-            c: [
-                v for (v,) in con.execute(f"SELECT DISTINCT {c} FROM symbols WHERE {c} IS NOT NULL")
-            ]
-            for c in ("sector", "industry", "region")
-        }
