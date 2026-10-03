@@ -280,7 +280,7 @@ same model run daily over the S&P 500, built in CI and downloaded by the app.
   Market read through `ml_sentiment.market_read`, forward returns through
   `news_diagnostics.forward_idio` (the Track record's own definition). Known,
   deliberate differences: the company name for the relevance heuristic comes
-  from `sp500.json` (CI has no symbol DB; `market_read(company_name=…)`),
+  from `sp500.json` (CI has no symbol pack installed; `market_read(company_name=…)`),
   beta is a 1-year daily OLS vs SPY (the local history stores the quote's
   beta), and Finnhub gets the dot spelling of class shares (BRK.B).
 - **No look-ahead.** Each run's tiers are anchored on the *previous* pack's

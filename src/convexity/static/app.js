@@ -3762,17 +3762,19 @@ function upsertDataRow(row) {
   if (i >= 0) DATA[i] = row; else DATA.push(row);
 }
 
+/* opts.only: stream just these entries and keep the rows already loaded —
+   the company search's Add (the textarea already holds them all). */
 async function build(opts) {
   opts = opts || {};
   const raw = $("#tickers").value.trim();
   if (!raw) { toast("Enter at least one ticker or company name."); return; }
-  const entries = entriesArr(raw);
+  const entries = opts.only || entriesArr(raw);
   const gen = ++BUILD_GEN;
   BUILD_STREAMING = true;
   $("#build").disabled = true; $("#refresh").disabled = true;
   $("#status").innerHTML = lcHtml("resolving symbols", {bar: true, meta: `0·${entries.length}`});
   showProgress(2);
-  DATA = [];
+  if (!opts.only) DATA = [];
   render();
 
   let total = entries.length;
@@ -6076,6 +6078,216 @@ for (const id of ["refresh", "export"]) {
     flashBtn(btn);
   });
 }
+/* ---------------------------------------------------------------------------
+ * Company search (#co-search; search.py behind POST /api/search).
+ * The server picks the search type and returns {query, chips, results,
+ * warnings, notes, fields}. CO.query is kept verbatim: a chip edit changes it
+ * and posts it back as {query}, which the server validates and runs without
+ * the LLM. Add appends the picked tickers to the editor, streams only those
+ * rows (build({only})), and saves a named portfolio like any other edit.
+ * ------------------------------------------------------------------------- */
+const CO = {query: null, chips: [], fields: {}, results: [], offset: 0, total: 0,
+            picked: new Map(), choice: {}, editing: null};
+
+async function coSearch(body, offset = 0) {
+  const go = $("#co-go");
+  go.disabled = true; go.textContent = "Searching…";
+  try {
+    const r = await fetch("/api/search", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({...body, offset}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+    if (offset === 0) CO.picked.clear();
+    Object.assign(CO, {query: d.query, chips: d.chips, fields: d.fields || {}, results: d.results,
+                       offset: d.offset, total: d.total, choice: {}, editing: null, last: d});
+    coRender();
+  } catch (e) {
+    toast("Search failed: " + e.message);
+  } finally {
+    go.disabled = false; go.textContent = "Search";
+  }
+}
+
+function coHeld() {
+  return new Set(entriesArr($("#tickers").value).map(t => t.toUpperCase()).concat(DATA.map(r => r.symbol)));
+}
+
+function coFmt(k, v) {
+  if (v == null || !isFinite(v)) return "—";
+  const unit = (CO.fields[k] || [])[1];
+  return unit === "%" ? Number(v).toFixed(1) + "%" : Number(v).toFixed(2);
+}
+
+function coRender() {
+  const d = CO.last, q = CO.query;
+  $("#co-out").hidden = false;
+  const kind = {name: "Name", screen: "Screen", theme: "Theme"}[q.kind] || "";
+  $("#co-chips").innerHTML = `<span class="co-kind">${kind}${q.engine === "ai" ? " (AI)" : ""} ·</span>` +
+    (CO.chips.length ? "" : `<span class="co-kind">closest matches to "${escapeHtml(q.text)}"</span>`) +
+    CO.chips.map((c, i) => {
+      const fixed = c.kind === "ignored" || c.kind === "picks";
+      return `<button type="button" class="co-chip${c.ai ? " ai" : ""}${c.kind === "ignored" ? " ignored" : ""}` +
+        `${CO.editing === i ? " open" : ""}" data-i="${i}"${fixed ? " disabled" : ""}>${escapeHtml(c.label)}` +
+        `${fixed ? "" : '<span class="x" data-x="1" title="Remove">×</span>'}</button>`;
+    }).join("");
+  $("#co-msg").innerHTML = d.warnings.map(w => `<div class="warn">${escapeHtml(w)}</div>`).join("") +
+    d.notes.map(n => `<div class="note">${escapeHtml(n)}</div>`).join("");
+  const held = coHeld();
+  $("#co-grid").innerHTML = CO.results.map((c, i) => coCard(c, i, held)).join("");
+  const n = CO.results.length;
+  $("#co-meta").textContent = n ? `${CO.offset + 1}–${CO.offset + n} of ${CO.total}` : "";
+  $("#co-more").hidden = CO.offset + n >= CO.total;
+  const add = $("#co-add"), k = CO.picked.size;
+  add.disabled = !k;
+  add.textContent = k ? `Add ${k} to ${viewLabel(STATE.activeView || AD_HOC_KEY)}` : "Add";
+  coRenderEdit();
+}
+
+function coCard(c, i, held) {
+  const q = CO.query, tk = CO.choice[i] || c.ticker;
+  const keys = [...new Set(q.filters.map(f => f.field).concat(q.rank ? [q.rank.field] : []))].filter(k => k !== "mcap");
+  const filtered = new Set(q.filters.map(f => f.field));
+  const rows = keys.map(k => {
+    const v = c.values[k];
+    // No .info figure: a criterion the screener already enforced shows a tick.
+    const shown = v == null && filtered.has(k) ? '<span class="ok">✓</span>' : coFmt(k, v);
+    return `<div class="co-kv"><span>${escapeHtml((CO.fields[k] || [k])[0])}</span><span>${shown}</span></div>`;
+  });
+  if (c.mcap_usd && (!keys.length || (q.rank && q.rank.field === "mcap")))
+    rows.push(`<div class="co-kv"><span>Mkt cap</span><span>$${fmtCompactNum(c.mcap_usd)}</span></div>`);
+  const where = [c.exchange, (c.region || "").toUpperCase()].filter(Boolean).join(" · ");
+  const sub2 = !keys.length && (c.industry || c.sector || (c.type !== "stock" ? c.type.toUpperCase() : ""));
+  const alts = c.alternates.length ? `<div class="co-alts"><button type="button" data-alts="${i}">+${c.alternates.length} listing${c.alternates.length > 1 ? "s" : ""} ▾</button>` +
+    `<ul hidden>${c.alternates.map(a => `<li><button type="button" data-alt="${i}" data-tk="${escapeHtml(a.ticker)}">${escapeHtml(a.ticker)}</button><span>${escapeHtml([a.exchange, (a.region || "").toUpperCase()].filter(Boolean).join(" · "))}</span></li>`).join("")}</ul></div>` : "";
+  const isHeld = held.has(tk);
+  return `<div class="co-card${CO.picked.has(i + CO.offset) ? " sel" : ""}${isHeld ? " held" : ""}" data-card="${i}" role="button" tabindex="0" aria-pressed="${CO.picked.has(i + CO.offset)}">
+    <div class="co-tk">${escapeHtml(tk)}</div>
+    <div class="co-sub" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}${where ? " · " + escapeHtml(where) : ""}</div>
+    ${sub2 ? `<div class="co-sub">${escapeHtml(sub2)}</div>` : ""}${rows.join("")}
+    ${c.why ? `<div class="co-why">${escapeHtml(c.why)}</div>` : ""}
+    ${isHeld ? '<div class="co-sub">In this portfolio</div>' : ""}${alts}</div>`;
+}
+
+/* The inline editor under the chips: operator + value for a criterion, the
+   metric and direction for the ranking. Apply re-runs the edited query. */
+function coRenderEdit() {
+  const box = $("#co-edit"), c = CO.chips[CO.editing];
+  if (!c || !["filter", "rank"].includes(c.kind)) { box.hidden = true; box.innerHTML = ""; return; }
+  const opts = (list, cur) => list.map(([v, l]) => `<option value="${escapeHtml(v)}"${v === cur ? " selected" : ""}>${escapeHtml(l)}</option>`).join("");
+  const metrics = Object.entries(CO.fields).map(([k, [label]]) => [k, label]);
+  if (c.kind === "filter") {
+    const f = CO.query.filters[c.i], unit = (CO.fields[f.field] || [])[1];
+    const hint = {"%": "percent", "x": "multiple", "$": "USD"}[unit] || "";
+    box.innerHTML = `<select id="co-ef">${opts(metrics, f.field)}</select>
+      <select id="co-eo">${opts([["lt", "<"], ["lte", "≤"], ["gt", ">"], ["gte", "≥"]], f.op)}</select>
+      <input id="co-ev" type="number" step="any" value="${f.value}"><span class="co-hint">${hint}</span>`;
+  } else {
+    const r = CO.query.rank;
+    box.innerHTML = `Rank by <select id="co-ef">${opts(metrics, r.field)}</select>
+      <select id="co-eo">${opts([["desc", "highest first"], ["asc", "lowest first"]], r.dir)}</select>`;
+  }
+  box.innerHTML += `<span class="spacer"></span><button type="button" class="co-link" data-e="cancel">Cancel</button>
+    <button type="button" class="co-add" data-e="apply">Apply</button>`;
+  box.hidden = false;
+}
+
+function coApplyEdit() {
+  const c = CO.chips[CO.editing], q = structuredClone(CO.query);
+  if (c.kind === "filter") {
+    const v = parseFloat($("#co-ev").value);
+    if (!isFinite(v)) { toast("Enter a number."); return; }
+    q.filters[c.i] = {field: $("#co-ef").value, op: $("#co-eo").value, value: v};
+  } else {
+    q.rank = {field: $("#co-ef").value, dir: $("#co-eo").value, by: "rules"};
+  }
+  coSearch({query: q});
+}
+
+function coRemove(c) {
+  const q = structuredClone(CO.query);
+  if (c.kind === "filter") q.filters.splice(c.i, 1);
+  else if (c.kind === "sector") q.sectors = q.sectors.filter(v => v !== c.label);
+  else if (c.kind === "industry") q.industries = q.industries.filter(v => v !== c.label);
+  else if (c.kind === "regions") q.regions = [];
+  else if (c.kind === "type") q.types = [];
+  else if (c.kind === "rank") q.rank = null;
+  coSearch({query: q});
+}
+
+async function coAdd() {
+  if (BUILD_STREAMING) { toast("Wait for the current build to finish."); return; }
+  const held = coHeld();
+  const add = [...new Set(CO.picked.values())].filter(t => !held.has(t));
+  CO.picked.clear();
+  if (!add.length) { coRender(); return; }
+  const ta = $("#tickers"), cur = ta.value.trim();
+  ta.value = cur ? cur.replace(/[\s,]+$/, "") + ", " + add.join(", ") : add.join(", ");
+  updatePrimaryButtonLabels();
+  coRender();
+  await build({only: add, keepPanelOpen: true});
+  const name = STATE.activeView;
+  if (name && name !== AD_HOC_KEY && name in WATCHLISTS) {
+    try {
+      const r = await fetch("/api/watchlists", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name, entries: ta.value.trim()}),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Save failed.");
+      WATCHLISTS = d.watchlists || WATCHLISTS;
+      renderTabs(); renderEditorMeta(); updatePrimaryButtonLabels();
+    } catch (e) { toast(e.message || "Save failed."); }
+  }
+  toast(`Added ${add.join(", ")}.`);
+  coRender();
+}
+
+$("#co-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = $("#co-q").value.trim();
+  if (text) coSearch({q: text});
+});
+$("#co-more").onclick = () => coSearch({query: CO.query}, CO.offset + 5);
+$("#co-close").onclick = () => { $("#co-out").hidden = true; };
+$("#co-add").onclick = coAdd;
+$("#co-chips").addEventListener("click", (e) => {
+  const btn = e.target.closest(".co-chip");
+  if (!btn || btn.disabled) return;
+  const i = Number(btn.dataset.i), c = CO.chips[i];
+  if (e.target.closest("[data-x]")) { coRemove(c); return; }
+  CO.editing = CO.editing === i ? null : i;
+  coRender();
+});
+$("#co-edit").addEventListener("click", (e) => {
+  const act = e.target.closest("[data-e]");
+  if (!act) return;
+  if (act.dataset.e === "apply") coApplyEdit();
+  else { CO.editing = null; coRender(); }
+});
+$("#co-grid").addEventListener("click", (e) => {
+  const alts = e.target.closest("[data-alts]");
+  if (alts) { alts.nextElementSibling.hidden = !alts.nextElementSibling.hidden; return; }
+  const alt = e.target.closest("[data-alt]");
+  const card = e.target.closest("[data-card]");
+  if (!card) return;
+  const i = Number(card.dataset.card), key = i + CO.offset;
+  if (alt) {  // another listing of the same company replaces the card's ticker
+    CO.choice[i] = alt.dataset.tk;
+    if (CO.picked.has(key)) CO.picked.set(key, alt.dataset.tk);
+  } else if (!card.classList.contains("held")) {
+    if (CO.picked.has(key)) CO.picked.delete(key);
+    else CO.picked.set(key, CO.choice[i] || CO.results[i].ticker);
+  }
+  coRender();
+});
+$("#co-grid").addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-card]")) { e.preventDefault(); e.target.click(); }
+});
+
 // Keep labels in sync whenever the active view or the textarea changes.
 $("#tickers").addEventListener("input", updatePrimaryButtonLabels);
 $("#edit-btn").onclick = () => {

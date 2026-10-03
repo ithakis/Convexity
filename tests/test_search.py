@@ -94,6 +94,7 @@ def test_names_and_categories_never_call_yahoo(yahoo):
     assert s.search("microsft")["results"][0]["ticker"] == "MSFT"
     out = s.search("european banks")
     assert [c["ticker"] for c in out["results"]] == ["HSBA.L", "BNP.PA", "DBK.DE"]
+    assert {"kind": "regions", "label": "Region: Europe"} in out["chips"]
     nvo = s.search("novo nordisk")["results"][0]
     assert nvo["ticker"] == "NOVO-B.CO" and {a["ticker"] for a in nvo["alternates"]} == {
         "NVO",
@@ -180,6 +181,8 @@ def test_a_theme_goes_to_the_llm_and_its_picks_are_verified(monkeypatch, yahoo):
     }
     calls = _ai(monkeypatch, reply)
     out = s.search("GLP-1 drug makers")
+    eu = s.search("", query={**out["query"], "regions": ["dk"]})  # a chip edit: home region
+    assert [c["ticker"] for c in eu["results"]] == ["NOVO-B.CO"]
     assert calls and calls[0]["record"] is False and calls[0]["tag"] == "search"
     assert "de" in str(calls[0]["schema"])  # the field enum is the registry
     assert out["query"]["engine"] == "ai" and out["query"]["kind"] == "theme"

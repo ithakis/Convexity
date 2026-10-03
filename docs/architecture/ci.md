@@ -97,6 +97,22 @@ First run, after the branch is pushed (each step needs the owner):
 `reference_pack.start()`: until the release exists that is one 404, logged
 and ignored.
 
+### Symbol pack workflow (`.github/workflows/symbol-pack.yml`, issue #6)
+
+Builds the weekly symbol pack (backend.md §6) and replaces two more assets of
+the same `reference-pack` release: `symbols.json.gz` first, then
+`symbols-manifest.json`. `schedule` Sundays 04:00 UTC plus
+`workflow_dispatch` (no inputs). No secret: Yahoo only.
+
+| Job | Permissions / secrets | What it does |
+|---|---|---|
+| `build` | `contents: read`, none | `uv sync --locked`; fetches only the previous `symbols-manifest.json` (its row count; a missing release or asset is fine, any other `gh` failure fails the run); `convexity build-symbols --out pack [--previous prev]`, which refuses a short sweep or a >20% drop; uploads `pack/` as a 7-day artifact. ~25 min, ~3,000 screener pages |
+| `publish` | `contents: write`, none | Re-verifies both files against the manifest, fails if the release does not exist, `gh release upload … --clobber`, manifest last. Never commits |
+
+First run needs the release (step 1 above), then
+`gh workflow run symbol-pack.yml --ref <branch>`. Until a pack exists the app
+logs one 404 at boot and search answers names through `yf.Search` only.
+
 ### Pre-commit hooks (`.claude/settings.json`)
 
 Two hooks fire on every `git commit` inside a Claude Code session:

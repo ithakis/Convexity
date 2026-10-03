@@ -126,6 +126,17 @@ exactly. Sort (`pf_contrib_sort`) and the Table | Chart toggle
 `#pf-contrib-body`. The chart is an HTML/CSS horizontal waterfall
 (`renderContribChartHtml`) in contribution order, ending in a Total bar.
 
+### Company search (`#co-search`, app.js "Company search")
+One box above the Constituents editor posts to `/api/search` (backend.md §6).
+The response's `query` is kept verbatim in `CO.query`: the chips render it
+(purple = chosen by the AI), a chip's × or its inline editor changes it and
+posts `{query}` back, which the server validates and runs without the LLM.
+Cards (top 5, "Show next 5") are selectable; "+N listings" swaps a card to
+another listing of the same company. **Add** appends the tickers to the
+textarea, calls `build({only})` — which streams just those rows and keeps
+`DATA` — and saves a named portfolio's entries without a rebuild. Tickers
+already in the portfolio show as "In this portfolio" and cannot be picked.
+
 ### Key UI behaviours added in Passes A/B/C
 - **Smart primary button**: `#build` swaps label between "Build
   Dashboard" / "Update Portfolio" based on `primaryButtonMode()`.

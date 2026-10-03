@@ -32,8 +32,7 @@ side effects, never creates a directory — writers `mkdir` their own parent.
 
 - **`CONVEXITY_HOME` is mandatory for every test and manual/dev run.**
   `tests/conftest.py` sets it at import time (modules bind paths at import,
-  and `__init__` runs the migration) plus per test, and points
-  `PORTFOLIO_SYMBOL_DB` away from the checkout's DB. A dev run is
+  and `__init__` runs the migration) plus per test. A dev run is
   `CONVEXITY_HOME=$(mktemp -d) uv run convexity`.
 - **Migration** (`migrate.migrate_to_data_dir`, from `__init__`, **only when
   the process is the app** — `convexity._launched_as_app()`: the `convexity` /
@@ -62,10 +61,9 @@ side effects, never creates a directory — writers `mkdir` their own parent.
   `sys.orig_argv`).
 - **One-release fallbacks, each logged once via `paths.note_legacy`:** keys
   (env → `config.json` → walk-up `.finnhub_key` / `.nvidia_key`), the model
-  (`MLSENT_MODEL_DIR` → `models/<ver>` → `~/.convexity/ml_model/<ver>`), the
-  symbol DB (`PORTFOLIO_SYMBOL_DB` → data dir → checkout root; the builder
-  writes to `symbol_db.write_path()`, never the legacy place). Remove them
-  after 1.14. A malformed `config.json` is logged once (`[config] ignoring …`),
+  (`MLSENT_MODEL_DIR` → `models/<ver>` → `~/.convexity/ml_model/<ver>`).
+  Remove them after 1.14. (The symbol DB's fallback went with the old DB in
+  2.0: the file is the downloaded symbol pack, §6.) A malformed `config.json` is logged once (`[config] ignoring …`),
   never silently treated as "no key".
 - `/api/health` carries `data_dir` (Settings → About shows it).
 
@@ -115,9 +113,9 @@ Tries each layer in order, short-circuiting on first hit:
 5. **`_refine_via_search`** — yf.Search if the literal mapping failed.
 6. **`_looks_like_ticker`** — uppercase ticker-shape regex (`AAPL`,
    `BRK-B`, `0700.HK`). Pass through unchanged.
-7. **`_symbol_db_lookup`** — local fuzzy DB via `symbol_db.py`. Handles
-   `"microsoft"`, typos like `"Microsft"`, company names like
-   `"DaVita"`. Threshold 72 (rapidfuzz WRatio re-ranked by composite).
+7. **`_symbol_db_lookup`** — the symbol pack via `symbol_db.lookup()` (§6).
+   Handles `"microsoft"`, typos like `"Microsft"`, initials like `"tsmc"`,
+   company names like `"DaVita"`; returns the home listing. Threshold 72.
 8. **`yf.Search`** — final fallback for anything else.
 9. **Uppercase fallback** — if all else fails, return the input
    uppercased. Yields a row with `error="no data"` in the UI, which
@@ -339,6 +337,7 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 
 **POST**
 - `/api/quotes-stream` (preferred) — NDJSON streaming, the fast path
+- `/api/search`                    — company search `{q}` or `{query}` (an edited chip set), `{offset}` — §6
 - `/api/watchlists`                — upsert `{name, entries}`
 - `/api/views/<name>`              — save view body `{entries, rows, set_last?}`
 - `/api/last-view`                 — set the restore-on-launch target
@@ -389,71 +388,85 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/refresh-job/current`       — `{job: snapshot|null}`; one cheap call on page load is what lets a job survive a full reload
 - `/api/refresh-job/<id>/stream?since=<seq>` — replayable NDJSON progress (§17)
 
-## 6. `symbol_db.py` + `convexity build-symbols`
+## 6. Symbol pack + company search (`symbol_db.py`, `symbol_build.py`, `search.py`)
 
 ### Why
-Map fuzzy human input (`"microsoft"`, `"Microsft"`, `"DaVita"`) to a
-provider ticker without round-tripping every typo to upstream search.
-~20× faster than `yf.Search` for the common case (~25ms vs ~500ms).
+Finding a company should not need its ticker (issue #6). Until 2.0 the
+symbol DB was a US-only NASDAQ/SEC table that only the `build-symbols` CLI
+created, so fresh installs had none and a typo became a literal ticker row.
 
-### Schema (SQLite)
-```
-CREATE TABLE symbols (
-    provider TEXT, ticker TEXT, name TEXT,
-    exchange TEXT, country TEXT, instrument_type TEXT,
-    name_norm TEXT,   -- folded for fuzzy match (lowercase, alnum)
-    source TEXT,
-    updated_at TEXT,
-    PRIMARY KEY (provider, ticker)
-);
-```
+### The symbol pack (`symbol_db.py`, built by `symbol_build.py`)
+`convexity build-symbols --out DIR` (run weekly by
+`.github/workflows/symbol-pack.yml`, ~25 min) sweeps Yahoo's screener for
+every listing: equities in all 59 regions (~236k), the same universe once per
+industry (~145 sweeps — screener quotes carry no sector/industry, this is how
+rows get them), ETFs (~57k, minus `^…-IV` indicative values), mutual funds
+(~338k, minus Nasdaq test funds) and `data/indices.json` (the screener has no
+indices). Two files go to the rolling `reference-pack` release:
+`symbols-manifest.json` and `symbols.json.gz` (`{schema, columns, rows}`).
 
-`provider` is in the PK so the same SQLite can hold multiple providers
-(yfinance today, future Refinitiv/IEX/Polygon mappings tomorrow).
-**Provider-agnostic on purpose.**
+Columns: ticker, name, type (stock/etf/fund/index), exchange, region, sector,
+industry, mcap_usd, group, home. **Rules learned from the data:**
+- A quote's `region` echoes the request; the listing's region comes from its
+  exchange code (yfinance's region → exchange maps, unique per exchange).
+- `marketCap` is in the listing's currency (OTP in HUF); converted to USD once
+  at build time through `fx.usd_per_unit`. ETFs/funds/indices carry no size.
+- **Home listing** per company (group = cleaned name + reporting currency):
+  primary venue first (not .F/.SG/.BE/.MU/.HM/.DU, Cboe/LSE international
+  boards, OTC, Mexico/Santiago foreign boards), then quoted in the reporting
+  currency **unless that is USD** (Shell, Zurich, Genmab report in USD but list
+  at home elsewhere), then the highest 3-month traded value in USD. Gold set:
+  NVO→NOVO-B.CO, TSM→2330.TW, LLY.F→LLY, ZURVY→ZURN.SW (`test_symbol_build.py`).
+- Never published: a sweep under 95% of Yahoo's own total, or a pack >20%
+  smaller than the previous one.
 
-### Lookup ranking
-`lookup(query, min_score=72, limit=1)` runs in this order:
-1. Exact ticker match (case-insensitive) → 100
-2. Exact name_norm match → 100
-3. rapidfuzz WRatio over name_norm with low cutoff (60), then **composite
-   re-rank** that rewards exact / prefix / substring matches with small
-   length deltas. This is why `"microsoft"` → `MSFT` (not `Smith Micro
-   Software`).
+App side: `symbol_db.start()` at boot (and with the reference-pack switch /
+"Check now") downloads when the local copy is older than 7 days, verifies the
+manifest hash + size + allow-list (names are the one free-text field:
+printable, ≤160 chars, only displayed or fuzzy-matched), and writes
+`symbol_db.sqlite` as a new file + `os.replace` (stale `-wal`/`-shm` removed
+first). `PRAGMA user_version = 2`; an older file reads as empty. The `symbols`
+table keeps `ticker`/`name` because `relevance.load_company_names()` reads it
+for the Market read (its cache is cleared on install).
 
-### Builder (`convexity build-symbols`, `cli.build_symbols`)
-Was the root script `build_symbol_db.py` until Phase 7; a subcommand ships in
-the package, so an installed app can build its DB too.
-```bash
-uv run convexity build-symbols                    # all sources
-uv run convexity build-symbols --sources nasdaq
-uv run convexity build-symbols --db /tmp/syms.sqlite
-```
+`lookup(q)`: exact ticker (any listing) or `ALIASES` (google → GOOGL) first;
+then rapidfuzz WRatio over the home listings' cleaned names (legal forms
+dropped: "Novo Nordisk A/S" → "novo nordisk"), plus initials ("tsmc", "ibm"),
+re-ranked exact > prefix > whole word > fuzzy, shorter-is-better, then size
+(+≤6) and type (stock > index > ETF > fund). `category()` lists the largest
+home listings for sectors/industries/regions; `alternates(group)` and
+`home(group)` serve the cards.
 
-### Shipped sources (US-focused today)
-- **NASDAQ Trader** — `nasdaqlisted.txt` + `otherlisted.txt`. ~12k rows.
-- **SEC company_tickers_exchange.json** — ~10k rows.
-- After dedup: ~15.9k unique tickers.
-
-### Adding a new source
-1. Write `def source_xxx(session) -> Iterable[SymbolRow]:` in
-   `symbol_db.py`.
-2. Register it in the `SOURCES` dict at the bottom.
-3. Re-run `convexity build-symbols`.
-
-Good targets when expanding coverage:
-- LSE listings (lseg.com publishes a public CSV)
-- XETRA / Deutsche Börse
-- TSX, ASX, JPX, HKEX — most exchanges publish issuer lists
-- OpenFIGI for ISIN-keyed mapping (free tier, requires API key)
-- Wikipedia constituent lists for index members
+### Company search (`search.py`, `POST /api/search`)
+One query object, two parsers, one executor — the query is the audit trail:
+the page shows it as chips, every search prints one `[search]` line.
+- **`FIELDS`** — the registry (~20 screener fields), one row each: label,
+  unit, screener field + factor, `.info` key + factor, aliases. **Units are
+  verified, not assumed:** the screener stores D/E, ROE, margins, growth in
+  percent; `.info` has D/E and dividend yield in percent but ROE/margins as
+  fractions; growth has no matching `.info` figure (cards show a tick).
+  Market cap never goes to the screener (local currency there): it is filtered
+  and ranked in USD from the pack.
+- **`parse_rules`** — metric/operator/number, sector/industry/region/type
+  words; leftovers become `ignored` (a struck-through chip + a warning).
+- **`parse_llm`** — only when words are left over, the query is a theme, or
+  "best" needs a metric, and only with the NVIDIA key. Strict JSON schema whose
+  enums are the registry and the screener vocabulary; output re-validated.
+  Every AI pick must exist in the pack and is shown as its home listing.
+  Reuses `news_sentiment._nvidia_call(..., record=False, tag="search")`, so a
+  search failure never touches the News LLM banner.
+- **`run`** — names and pure sector/region screens offline on the pack;
+  criteria through `yf.screen`, deduped to home listings, regions checked on
+  the home listing (LLY.DE is not a European company); `Ticker.info` for the
+  five cards shown. Results cached 10 min per query for "Show next 5". A chip
+  edit posts `{query}` back: validated, never sent to the LLM.
 
 ### Wiring
-`resolver._symbol_db_lookup()` is the bridge. Both `symbol_db.py`
-and `symbol_db.sqlite` (in the data folder since v1.14; `symbol_db.db_path()`)
-are OPTIONAL — if either is missing, the dashboard
-still works, the lookup just gracefully returns `None` and the existing
-`yf.Search` fallback runs.
+`resolver._symbol_db_lookup()` uses `lookup()`. With no pack yet (first
+minute of a fresh install, or the switch off before any download) lookups
+return nothing and the resolver falls through to `yf.Search`; search says the
+list is downloading. Switching off stops the download; a copy already on disk
+keeps working.
 
 ## 7. `xlsx_export.py`
 

@@ -44,174 +44,32 @@ from convexity import symbol_db as sdb
 # .info stores D/E and dividend yield in percent but ROE and margins as
 # fractions. Growth has no matching .info figure (it is quarterly there), so
 # its cards show a tick, not a number from another definition.
+# fmt: off
 FIELDS: dict[str, tuple] = {
-    "pe": (
-        "P/E",
-        "x",
-        "peratio.lasttwelvemonths",
-        1,
-        "trailingPE",
-        1,
-        "p/e|pe|pe ratio|price to earnings|price/earnings",
-    ),
-    "pb": (
-        "P/B",
-        "x",
-        "pricebookratio.quarterly",
-        1,
-        "priceToBook",
-        1,
-        "p/b|pb|price to book|price/book",
-    ),
-    "ps": (
-        "P/S",
-        "x",
-        "lastclosemarketcaptotalrevenue.lasttwelvemonths",
-        1,
-        "priceToSalesTrailing12Months",
-        1,
-        "p/s|ps|price to sales|price/sales",
-    ),
-    "ev_ebitda": (
-        "EV/EBITDA",
-        "x",
-        "lastclosetevebitda.lasttwelvemonths",
-        1,
-        "enterpriseToEbitda",
-        1,
-        "ev/ebitda|ev to ebitda",
-    ),
+    "pe": ("P/E", "x", "peratio.lasttwelvemonths", 1, "trailingPE", 1, "p/e|pe|pe ratio|price to earnings|price/earnings"),
+    "pb": ("P/B", "x", "pricebookratio.quarterly", 1, "priceToBook", 1, "p/b|pb|price to book|price/book"),
+    "ps": ("P/S", "x", "lastclosemarketcaptotalrevenue.lasttwelvemonths", 1, "priceToSalesTrailing12Months", 1, "p/s|ps|price to sales|price/sales"),
+    "ev_ebitda": ("EV/EBITDA", "x", "lastclosetevebitda.lasttwelvemonths", 1, "enterpriseToEbitda", 1, "ev/ebitda|ev to ebitda"),
     "peg": ("PEG (5y)", "x", "pegratio_5y", 1, None, 1, "peg|peg ratio"),
-    "de": (
-        "D/E",
-        "x",
-        "totaldebtequity.lasttwelvemonths",
-        100,
-        "debtToEquity",
-        0.01,
-        "d/e|de|debt to equity|debt/equity|debt-to-equity",
-    ),
-    "net_debt_ebitda": (
-        "Net debt / EBITDA",
-        "x",
-        "netdebtebitda.lasttwelvemonths",
-        1,
-        None,
-        1,
-        "net debt/ebitda|net debt to ebitda",
-    ),
-    "current_ratio": (
-        "Current ratio",
-        "x",
-        "currentratio.lasttwelvemonths",
-        1,
-        "currentRatio",
-        1,
-        "current ratio|cr",
-    ),
-    "quick_ratio": (
-        "Quick ratio",
-        "x",
-        "quickratio.lasttwelvemonths",
-        1,
-        "quickRatio",
-        1,
-        "quick ratio",
-    ),
-    "roe": (
-        "ROE",
-        "%",
-        "returnonequity.lasttwelvemonths",
-        1,
-        "returnOnEquity",
-        100,
-        "roe|return on equity",
-    ),
-    "roa": (
-        "ROA",
-        "%",
-        "returnonassets.lasttwelvemonths",
-        1,
-        "returnOnAssets",
-        100,
-        "roa|return on assets",
-    ),
-    "gross_margin": (
-        "Gross margin",
-        "%",
-        "grossprofitmargin.lasttwelvemonths",
-        1,
-        "grossMargins",
-        100,
-        "gross margin|gross margins|gross profit margin",
-    ),
-    "ebitda_margin": (
-        "EBITDA margin",
-        "%",
-        "ebitdamargin.lasttwelvemonths",
-        1,
-        "ebitdaMargins",
-        100,
-        "ebitda margin",
-    ),
-    "net_margin": (
-        "Net margin",
-        "%",
-        "netincomemargin.lasttwelvemonths",
-        1,
-        "profitMargins",
-        100,
-        "net margin|profit margin|net profit margin",
-    ),
-    "revenue_growth": (
-        "Revenue growth 1y",
-        "%",
-        "totalrevenues1yrgrowth.lasttwelvemonths",
-        1,
-        None,
-        1,
-        "revenue growth|sales growth",
-    ),
-    "eps_growth": (
-        "EPS growth 1y",
-        "%",
-        "epsgrowth.lasttwelvemonths",
-        1,
-        None,
-        1,
-        "eps growth|earnings growth",
-    ),
-    "dividend_yield": (
-        "Dividend yield",
-        "%",
-        "forward_dividend_yield",
-        1,
-        "dividendYield",
-        1,
-        "dividend yield|yield",
-    ),
+    "de": ("D/E", "x", "totaldebtequity.lasttwelvemonths", 100, "debtToEquity", 0.01, "d/e|de|debt to equity|debt/equity|debt-to-equity"),
+    "net_debt_ebitda": ("Net debt / EBITDA", "x", "netdebtebitda.lasttwelvemonths", 1, None, 1, "net debt/ebitda|net debt to ebitda"),
+    "current_ratio": ("Current ratio", "x", "currentratio.lasttwelvemonths", 1, "currentRatio", 1, "current ratio|cr"),
+    "quick_ratio": ("Quick ratio", "x", "quickratio.lasttwelvemonths", 1, "quickRatio", 1, "quick ratio"),
+    "roe": ("ROE", "%", "returnonequity.lasttwelvemonths", 1, "returnOnEquity", 100, "roe|return on equity"),
+    "roa": ("ROA", "%", "returnonassets.lasttwelvemonths", 1, "returnOnAssets", 100, "roa|return on assets"),
+    "gross_margin": ("Gross margin", "%", "grossprofitmargin.lasttwelvemonths", 1, "grossMargins", 100, "gross margin|gross margins|gross profit margin"),
+    "ebitda_margin": ("EBITDA margin", "%", "ebitdamargin.lasttwelvemonths", 1, "ebitdaMargins", 100, "ebitda margin"),
+    "net_margin": ("Net margin", "%", "netincomemargin.lasttwelvemonths", 1, "profitMargins", 100, "net margin|profit margin|net profit margin"),
+    "revenue_growth": ("Revenue growth 1y", "%", "totalrevenues1yrgrowth.lasttwelvemonths", 1, None, 1, "revenue growth|sales growth"),
+    "eps_growth": ("EPS growth 1y", "%", "epsgrowth.lasttwelvemonths", 1, None, 1, "eps growth|earnings growth"),
+    "dividend_yield": ("Dividend yield", "%", "forward_dividend_yield", 1, "dividendYield", 1, "dividend yield|yield"),
     "beta": ("Beta", "x", "beta", 1, "beta", 1, "beta"),
-    "perf_52w": (
-        "52-week change",
-        "%",
-        "fiftytwowkpercentchange",
-        1,
-        "52WeekChange",
-        100,
-        "52 week change|52-week change|1 year return",
-    ),
-    "short_float": (
-        "Short % of float",
-        "%",
-        "short_percentage_of_float.value",
-        1,
-        "shortPercentOfFloat",
-        100,
-        "short interest|short float",
-    ),
+    "perf_52w": ("52-week change", "%", "fiftytwowkpercentchange", 1, "52WeekChange", 100, "52 week change|52-week change|1 year return"),
+    "short_float": ("Short % of float", "%", "short_percentage_of_float.value", 1, "shortPercentOfFloat", 100, "short interest|short float"),
     # Market cap: the screener's is in local currency, so it never goes there.
     "mcap": ("Market cap", "$", None, 1, None, 1, "market cap|market capitalization|mcap"),
 }
+# fmt: on
 OPS = {"lt": "<", "lte": "≤", "gt": ">", "gte": "≥"}
 _OP_WORDS = {
     "lt": r"<|under|below|less than|lower than|smaller than",
@@ -448,7 +306,6 @@ def parse_rules(text: str) -> tuple[dict, list[str]]:
     if structured or q["rank"]:
         q["kind"] = "screen"
         if vague and not q["rank"]:
-            q["notes"].append('"best" is not a metric.')
             q["rank"] = {"field": "mcap", "dir": "desc", "by": "default"}
     return q, (left if structured or q["rank"] else [])
 
@@ -544,7 +401,9 @@ def parse(text: str) -> dict:
         q["ignored"].append(" ".join(left)[:80])
         q["kind"] = q["kind"] if q["kind"] != "name" else "theme"
     if (q["rank"] or {}).get("by") == "default" and not ai_available():
-        q["notes"].append("Ranked by market cap. Add an NVIDIA key for AI ranking.")
+        q["notes"].append(
+            '"best" is not a metric, so this is ranked by market cap. With an NVIDIA key the AI picks the ranking.'
+        )
     return q
 
 
@@ -566,10 +425,12 @@ def run(q: dict, offset: int = 0) -> dict:
     base = hit[1] if hit and time.time() - hit[0] < _TTL_S else None
     warnings = [f'Ignored "{x}": not something Convexity can search on.' for x in q["ignored"]]
     if base is None:
-        if q["kind"] == "name":
+        if q["kind"] == "name" and not q["picks"]:
             base = [_card(h) for h in sdb.lookup(q["text"], limit=25)]
-        elif q["kind"] == "theme":
+        elif q["kind"] in ("name", "theme"):
             base, dropped = _verify_picks(q["picks"])
+            if q["regions"]:  # "... in Europe": the company's home, not the AI's say-so
+                base = [c for c in base if c["region"] in q["regions"]]
             if q["filters"]:  # the AI's picks still have to pass the user's criteria
                 _fill_values(base, q)
                 base = [c for c in base if _passes(c, q["filters"], c["values"])]
@@ -605,7 +466,10 @@ def run(q: dict, offset: int = 0) -> dict:
     print(f"[search] {q['text']!r} engine={q['engine']} kind={q['kind']} query={json.dumps(_brief(q))}"
           f" results={len(base)} {time.time() - t0:.1f}s", flush=True)  # fmt: skip
     return {"query": q, "chips": _chips(q), "results": page, "total": len(base),
-            "offset": offset, "warnings": warnings, "notes": q["notes"]}  # fmt: skip
+            "offset": offset, "warnings": warnings, "notes": q["notes"], "fields": _LABELS}  # fmt: skip
+
+
+_LABELS = {k: v[:2] for k, v in FIELDS.items()}  # the page formats values with these
 
 
 def _card(h: sdb.Hit, why: str = "") -> dict:
@@ -731,9 +595,7 @@ def _chips(q: dict) -> list[dict]:
     chips = [{"kind": "sector", "label": v} for v in q["sectors"]]
     chips += [{"kind": "industry", "label": v} for v in q["industries"]]
     if q["regions"]:
-        chips.append(
-            {"kind": "regions", "label": "Region: " + ", ".join(r.upper() for r in q["regions"])}
-        )
+        chips.append({"kind": "regions", "label": "Region: " + _region_label(q["regions"])})
     chips += [
         {"kind": "type", "label": t.upper() if t == "etf" else t.title() + "s"} for t in q["types"]
     ]
@@ -746,6 +608,17 @@ def _chips(q: dict) -> list[dict]:
         chips.append({"kind": "picks", "ai": True, "label": "AI picks"})
     chips += [{"kind": "ignored", "label": x} for x in q["ignored"]]
     return chips
+
+
+def _region_label(codes: list[str]) -> str:
+    """'Europe' for the European codes, 'US, Europe' for both, else the codes."""
+    rest, names = set(codes), []
+    for group, spec in sorted(REGIONS.items(), key=lambda kv: -len(kv[0])):
+        g = set(group.split())
+        if len(g) > 1 and g <= rest:
+            names.append(spec.split("|")[0].title())
+            rest -= g
+    return ", ".join([c.upper() for c in sorted(rest)] + names)
 
 
 def search(text: str = "", query: dict | None = None, offset: int = 0) -> dict:
