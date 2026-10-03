@@ -16,13 +16,14 @@ request. Market caps arrive in the listing's currency and are converted to
 USD here, once (CLAUDE.md §0, one unit at ingestion). ETFs, funds and indices
 carry no size: the screener does not return one.
 
-Listings of one company share a group: same cleaned name and same reporting
-currency. Its home listing is, in order: on a primary venue (not a German
-regional exchange, OTC or an international board); quoted in the reporting
-currency, unless that currency is USD — many foreign companies report in USD
-(Shell, Zurich, Genmab), so there it says nothing about home; then the
-highest traded value (3-month average volume x price, in USD). So NOVO-B.CO
-over NVO, 2330.TW over TSM, LLY over LLY.DE, ZURN.SW over ZURVY.
+Listings of one company share a group: the same cleaned name (see group()).
+Its home listing is, in order: on a primary venue (not a German regional
+exchange, OTC, an international board or a depositary-receipt line); quoted
+in the reporting currency, unless that currency is USD — many foreign
+companies report in USD (Shell, Zurich, Genmab), so there it says nothing
+about home — and only if liquid; then the highest traded value (3-month
+average volume x price, in USD). So NOVO-B.CO over NVO, 2330.TW over TSM,
+LLY over LLY.DE, ZURN.SW over ZURVY, 9988.HK/BABA over 89988.HK.
 
 A degraded run is never published: a sweep that returns fewer than 95% of
 the rows Yahoo says exist, or a total more than 20% below `--previous`,
@@ -51,22 +52,8 @@ _TEST = re.compile(r"\btest\b", re.IGNORECASE)
 # Venues that mostly re-list companies whose home is elsewhere: German
 # regional exchanges, Cboe/LSE international order books, OTC, and the Latin
 # American foreign-share boards (NVDACL.SN).
-SECONDARY = {
-    "FRA",
-    "STU",
-    "BER",
-    "MUN",
-    "HAM",
-    "DUS",
-    "IOB",
-    "CXE",
-    "NEO",
-    "PNK",
-    "OQB",
-    "OQX",
-    "MEX",
-    "SGO",
-}
+SECONDARY = {"FRA", "STU", "BER", "MUN", "HAM", "HAN", "DUS", "IOB", "CXE", "CXA", "DXE", "AQS", "TLO",
+             "NEO", "PNK", "OQB", "OQX", "MEX", "SGO"}  # fmt: skip
 
 
 def _screen(query, offset: int = 0, size: int = 1, asc: bool = True) -> dict:
@@ -168,7 +155,7 @@ def _traded_usd(q: dict) -> float:
     """3-month average daily traded value in USD; 0 when unknown. Prices of
     pence/cent listings are in the minor unit, so they go through
     price_in_major first."""
-    vol = q.get("averageDailyVolume3Month")
+    vol = q.get("averageDailyVolume3Month") or q.get("regularMarketVolume")
     px = price_in_major(q.get("regularMarketPrice"), q.get("currency"))
     if not isinstance(vol, (int, float)) or not px:
         return 0.0
@@ -215,7 +202,7 @@ def collect(limit: int | None = None) -> list[dict]:
                 "mcap_usd": _usd(s.get("marketCap"), s.get("currency")) if typ == "stock" else None,
                 "ccy": s.get("currency"),
                 "fin_ccy": s.get("financialCurrency"),
-                "traded_usd": _traded_usd(s) if typ == "stock" else 0.0,
+                "traded_usd": _traded_usd(s),
             }
     data = json.loads(resources.files("convexity").joinpath("data/indices.json").read_text("utf-8"))
     for tk, name, region in data["rows"]:
@@ -223,47 +210,82 @@ def collect(limit: int | None = None) -> list[dict]:
     return list(rows.values())
 
 
-def _home_score(r: dict) -> tuple:
+# Re-listing lines whose venue code alone does not say so: the LSE's
+# international order book (0KZC.L, a London line of SPY) and Brazilian
+# depositary receipts (AAPL34.SA; local shares end in 3, 4 or 11).
+_IOB = re.compile(r"^0[A-Z0-9]{3}\.L$")
+_BDR = re.compile(r"^[A-Z0-9]{4}3[1-9]\.SA$")
+
+
+_US = {"NYQ", "NMS", "NGM", "NCM", "PCX", "ASE", "BTS"}
+
+
+def _secondary(r: dict, us: set[str]) -> bool:
+    """A re-listing: by venue, by ticker pattern, or an Argentine CEDEAR (a
+    .BA line whose base ticker trades on a US exchange: SPY.BA, AAPL.BA)."""
+    tk = r["ticker"]
+    cedear = tk.endswith(".BA") and tk[:-3] in us
+    return r.get("exchange") in SECONDARY or cedear or bool(_IOB.match(tk) or _BDR.match(tk))
+
+
+def _record(r: dict) -> bool:
+    return r["type"] == "index" or (r["type"] == "fund" and r["ticker"].startswith("0P"))
+
+
+def _home_score(r: dict, top: float) -> tuple:
+    """Among primary listings: quoted in the reporting currency (not USD, and
+    only if liquid: Alibaba's thin RMB counter 89988.HK is "local" too), then
+    the most traded."""
     fin = major_ccy(r["fin_ccy"]) if r.get("fin_ccy") else None
-    local = fin not in (None, "USD") and major_ccy(r.get("ccy") or "") == fin
-    return (r.get("exchange") not in SECONDARY, local, r.get("traded_usd") or 0.0, r["ticker"])
+    traded = r.get("traded_usd") or 0.0
+    local = (
+        fin not in (None, "USD") and major_ccy(r.get("ccy") or "") == fin and traded >= 0.1 * top
+    )
+    return (local, traded, r["ticker"])
 
 
 def group(listings: list[dict]) -> list[list]:
     """Pack rows: listings grouped into companies, one home listing each.
-    Only stocks group; every ETF, fund and index is its own home."""
-    companies: dict[tuple, list[dict]] = {}
-    orphans: dict[str, list[dict]] = {}  # stocks without a reporting currency
+
+    A company is every listing with the same cleaned name, whatever Yahoo
+    calls its type (it files Canadian depositary receipts like NOVO.TO as
+    ETFs): NOVO-B.CO, NVO, NOV.DE and NOVO.TO; SPY and SPY.BA. Its sector,
+    industry and size fill in from whichever listing has them. Dropped:
+    - stock/ETF groups with no primary listing at all (re-listings under a
+      variant name: MOH.SG for LVMH, 0KZC.L for SPY),
+    - stock groups with no size and no industry anywhere: in the data those
+      are warrants, CBBCs and re-listings with nothing to screen on (~5.5k
+      Hong Kong rows, ~1.4k Vienna re-listings) that only drown real names.
+    Funds and indices are kept as they are."""
+    us = {r["ticker"] for r in listings if r.get("exchange") in _US}
+    companies: dict[str, list[dict]] = {}
     for r in listings:
-        if r["type"] != "stock":
-            companies[("", r["ticker"])] = [r]
-        elif r.get("fin_ccy"):
-            companies.setdefault((sdb.name_key(r["name"]), r["fin_ccy"]), []).append(r)
-        else:
-            orphans.setdefault(sdb.name_key(r["name"]), []).append(r)
-    # Regional German lines often lack financialCurrency (BTL.SG for Baxter):
-    # they join the largest company of the same name instead of standing
-    # alone as a second "Baxter" with a Stuttgart home listing.
-    size = lambda g: max((m.get("mcap_usd") or 0.0) for m in g)  # noqa: E731
-    for name, members in orphans.items():
-        same = [k for k in companies if k[0] == name] if name else []
-        target = max(same, key=lambda k: size(companies[k])) if same else (name, None)
-        companies.setdefault(target, []).extend(members)
-    rows = []
-    for gid, members in enumerate(companies.values()):
-        home = max(members, key=_home_score)
+        companies.setdefault(
+            r["ticker"] if r["type"] == "index" else sdb.name_key(r["name"]), []
+        ).append(r)
+    rows, gid = [], 0
+    for members in companies.values():
+        fill = {k: next((m[k] for m in members if m.get(k)), None) for k in _FILL}
+        # Venue rules are for exchange lines. Morningstar fund records (0P…)
+        # and indices have no venue; a UCITS ETF on Stuttgart that Yahoo files
+        # as a fund (SPY5.SG) is a re-listing like any other.
+        primary = [m for m in members if _record(m) or not _secondary(m, us)]
+        if not primary:
+            continue
+        if {m["type"] for m in members} == {"stock"} and not (fill["mcap_usd"] or fill["industry"]):
+            continue
+        top = max((m.get("traded_usd") or 0.0) for m in primary)
+        home = max(primary, key=lambda m: _home_score(m, top))
         for r in sorted(members, key=lambda m: m["ticker"]):
-            rows.append(
-                [
-                    r["ticker"],
-                    r["name"],
-                    r["type"],
-                    *(r.get(k) for k in ("exchange", "region", "sector", "industry", "mcap_usd")),
-                    gid,
-                    int(r is home),
-                ]
-            )
+            v = {k: r.get(k) or fill[k] for k in _FILL}
+            rows.append([r["ticker"], r["name"], r["type"], r.get("exchange"), r.get("region"),
+                         v["sector"], v["industry"], v["mcap_usd"], r.get("traded_usd") or None,
+                         gid, int(r is home)])  # fmt: skip
+        gid += 1
     return rows
+
+
+_FILL = ("sector", "industry", "mcap_usd")
 
 
 def write(out: Path, rows: list[list]) -> dict:
@@ -294,10 +316,23 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--out", required=True, help="Output directory.")
     ap.add_argument("--limit", type=int, default=None, help="At most N rows per sweep (testing).")
     ap.add_argument("--previous", default=None, help="Directory with the previous manifest.")
+    ap.add_argument(
+        "--raw",
+        default=None,
+        help="Development: cache the swept listings in this JSON file (read it if it exists), "
+        "to work on grouping without sweeping Yahoo again.",
+    )
     args = ap.parse_args(argv)
     t0 = time.time()
     try:
-        rows = group(collect(args.limit))
+        raw = Path(args.raw) if args.raw else None
+        if raw and raw.exists():
+            listings = json.loads(raw.read_text("utf-8"))
+        else:
+            listings = collect(args.limit)
+            if raw:
+                raw.write_text(json.dumps(listings), encoding="utf-8")
+        rows = group(listings)
         if args.previous and args.limit is None:
             prev = json.loads((Path(args.previous) / sdb.MANIFEST).read_text("utf-8"))
             if len(rows) < (1 - _MAX_DROP) * int(prev["rows"]):

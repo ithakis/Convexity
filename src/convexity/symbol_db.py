@@ -76,6 +76,7 @@ COLUMNS = (
     "sector",
     "industry",
     "mcap_usd",
+    "adv_usd",  # average daily traded value: ranks ETFs and funds, which have no cap
     "group",
     "home",
 )
@@ -172,7 +173,7 @@ def iter_rows(blob: bytes) -> Iterator[list]:
         r = _json(line, f"symbols[{i}]")
         if not isinstance(r, list) or len(r) != len(COLUMNS):
             raise rp.PackError(f"symbols[{i}]: expected {len(COLUMNS)} fields")
-        tk, name, typ, *labels, mcap, grp, home = r
+        tk, name, typ, *labels, mcap, adv, grp, home = r
         if not isinstance(tk, str) or not _TICKER.match(tk):
             raise rp.PackError(f"symbols[{i}]: bad ticker")
         _text(name, f"symbols[{i}].name", 160, optional=False)
@@ -181,6 +182,7 @@ def iter_rows(blob: bytes) -> Iterator[list]:
         for k, v in zip(_LABELS, labels, strict=True):
             _text(v, f"symbols[{i}].{k}", 64)
         rp._num(mcap, f"symbols[{i}].mcap_usd")
+        rp._num(adv, f"symbols[{i}].adv_usd")
         if isinstance(grp, bool) or not isinstance(grp, int) or grp < 0 or home not in (0, 1):
             raise rp.PackError(f"symbols[{i}]: bad group or home flag")
         yield r
@@ -211,27 +213,35 @@ def write_db(rows, manifest_raw: bytes, path: Path | None = None, expect: int | 
                 CREATE TABLE symbols (
                     ticker TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL,
                     acr TEXT NOT NULL, type TEXT NOT NULL, exchange TEXT, region TEXT,
-                    sector TEXT, industry TEXT, mcap_usd REAL, grp INTEGER NOT NULL,
+                    sector TEXT, industry TEXT, mcap_usd REAL, adv_usd REAL, grp INTEGER NOT NULL,
                     home INTEGER NOT NULL);
                 CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
                 """
             )
             try:
-                con.executemany("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", values())
+                con.executemany("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", values())
             except sqlite3.IntegrityError:
                 raise rp.PackError(f"{DATA}: a ticker appears twice") from None
             if not n or (expect is not None and n != expect):
                 raise rp.PackError(f"{DATA}: {n} rows, the manifest says {expect}")
             # Name search runs in SQLite, not in memory (a Python index of
-            # ~400k names cost ~300 MB): a trigram index proposes candidates,
-            # rapidfuzz ranks them. Home listings only.
+            # ~450k names cost ~300 MB): a trigram index proposes candidates,
+            # rapidfuzz ranks them. Home listings only, funds apart: ~330k
+            # fund names would crowd companies out of the candidate list
+            # ("jp morgan" -> JPMorgan funds, not JPM). Keep detail=full (the
+            # default): with detail='none' bm25 cannot weigh how many trigrams
+            # a name shares, and "nestle" ranked Nestlé S.A. 740th of 37k.
             con.executescript(
                 """
                 CREATE INDEX symbols_grp ON symbols(grp);
                 CREATE INDEX symbols_home ON symbols(home, mcap_usd);
                 CREATE INDEX symbols_acr ON symbols(acr) WHERE home = 1;
-                CREATE VIRTUAL TABLE names USING fts5(key, tokenize='trigram', content='', detail='none');
-                INSERT INTO names(rowid, key) SELECT rowid, key FROM symbols WHERE home = 1;
+                CREATE VIRTUAL TABLE names USING fts5(key, tokenize='trigram', content='');
+                INSERT INTO names(rowid, key) SELECT rowid, key FROM symbols
+                    WHERE home = 1 AND type != 'fund';
+                CREATE VIRTUAL TABLE fund_names USING fts5(key, tokenize='trigram', content='');
+                INSERT INTO fund_names(rowid, key) SELECT rowid, key FROM symbols
+                    WHERE home = 1 AND type = 'fund';
                 """
             )
             con.executemany(
@@ -385,7 +395,8 @@ _SUFFIX = re.compile(
     r"\b(the|incorporated|inc|corporation|corp|company|co|limited|ltd|plc|holdings?|group"
     r"|n v|nv|s a|sa|ag|se|s p a|spa|asa|ab|oyj|a s|lp|llc|common stock|ordinary shares"
     r"|class [a-c]|adr|ads|depositary receipts?|aktiengesellschaft|societe anonyme"
-    r"|public limited company|kabushiki kaisha|naamloze vennootschap|societa per azioni)\b"
+    r"|public limited company|kabushiki kaisha|naamloze vennootschap|societa per azioni"
+    r"|societe europeenne)\b"
 )
 _STOP = {"and", "of", "the", "de", "la"}
 # Brand names whose company name shares no letters with them.
@@ -424,7 +435,7 @@ class Hit:
     score: float  # match quality 0..100, before the size/type tie-breaks
 
 
-_COLS = "ticker, name, type, exchange, region, sector, industry, mcap_usd, grp"
+_COLS = "ticker, name, type, exchange, region, sector, industry, mcap_usd, adv_usd, grp"
 _SELECT = f"SELECT {_COLS} FROM symbols"
 
 
@@ -450,28 +461,35 @@ def _sig():
 
 
 def _structural(q: str, key: str, base: float) -> float:
-    """Exact > prefix > whole-word substring > fuzzy, each shorter-is-better:
-    without the length penalty 'microsoft' scores Smith Micro Software as
-    high as Microsoft."""
+    """Exact > prefix > whole-word substring > fuzzy. Within a tier, fewer
+    extra words wins, then fewer extra letters: "samsung" is Samsung
+    Electronics (one word more), not Samsung C&T (two short ones), and
+    "microsoft" is not Smith Micro Software. Exact and prefix also hold with
+    the spaces removed ("jp morgan" -> "jpmorgan chase")."""
     if key == q:
         return 100.0
-    extra = len(key) - len(q)
-    if key.startswith(q):
-        return min(99.0, 96.0 - extra * 0.4)
+    more = max(0, len(key.split()) - len(q.split()))
+    for a, b in ((q, key), (q.replace(" ", ""), key.replace(" ", ""))):
+        if b == a:
+            return 98.0
+        if b.startswith(a):
+            return min(99.0, 96.0 - 1.5 * more - 0.05 * (len(b) - len(a)))
     if f" {q} " in f" {key} ":
-        return max(75.0, 92.0 - extra * 0.6)
+        return max(75.0, 92.0 - 1.5 * more - 0.05 * (len(key) - len(q)))
     return base - 6.0
 
 
-def _rank(score: float, mcap: float | None, typ: str) -> float:
+def _rank(score: float, mcap: float | None, adv: float | None, typ: str) -> float:
     """Match quality first; size (up to +6 for $10T) and type break near-ties,
-    so 'apple' is Apple Inc., not a micro-cap Apple Hospitality fund."""
-    size = min(6.0, max(0.0, math.log10(mcap) - 8.0) * 1.2) if mcap else 0.0
+    so 'apple' is Apple Inc., not a micro-cap Apple Hospitality fund. Without
+    a market cap (ETFs, funds) 100 days of traded value stands in for size."""
+    size = mcap or (adv * 100 if adv else None)
+    size = min(6.0, max(0.0, math.log10(size) - 8.0) * 1.2) if size else 0.0
     return score + size + _TYPE_ADJ.get(typ, 0.0)
 
 
 def _hit(row, score: float) -> Hit:
-    return Hit(*row[:8], group=row[8], score=round(score, 1))
+    return Hit(*row[:8], group=row[9], score=round(score, 1))
 
 
 def lookup(query: str, *, limit: int = 5, min_score: float = 72.0) -> list[Hit]:
@@ -502,14 +520,18 @@ def _lookup(q: str, min_score: float, sig) -> tuple[Hit, ...]:
             if row:
                 out[row[0]] = (1000.0, _hit(row, 100.0))
         if len(k) >= 3:  # keys are [a-z0-9 ] only, so the quoting is safe
-            match = " OR ".join(f'"{k[i : i + 3]}"' for i in range(len(k) - 2))
+            # Trigrams of the name with and without spaces: "jp morgan" must
+            # reach "jpmorgan chase".
+            tri = {w[i : i + 3] for w in (k, k.replace(" ", "")) for i in range(len(w) - 2)}
+            match = " OR ".join(f'"{t}"' for t in sorted(tri))
             cols = ", ".join("s." + c for c in _COLS.split(", "))
-            for *row, key in con.execute(
-                f"SELECT {cols}, s.key FROM names JOIN symbols s ON s.rowid = names.rowid"
-                " WHERE names MATCH ? ORDER BY rank LIMIT 300",
-                (match,),
-            ):
-                cand[row[0]] = (row, _structural(k, key, fuzz.WRatio(k, key)))
+            for table, n in (("names", 300), ("fund_names", 100)):
+                for *row, key in con.execute(
+                    f"SELECT {cols}, s.key FROM {table} JOIN symbols s ON s.rowid = {table}.rowid"
+                    f" WHERE {table} MATCH ? ORDER BY rank LIMIT {n}",
+                    (match,),
+                ):
+                    cand[row[0]] = (row, _structural(k, key, fuzz.WRatio(k, key)))
         if " " not in k and 3 <= len(k) <= 6:
             for row in con.execute(
                 _SELECT + " WHERE home = 1 AND acr >= ? AND acr < ? LIMIT 200", (k, k + "~")
@@ -517,19 +539,19 @@ def _lookup(q: str, min_score: float, sig) -> tuple[Hit, ...]:
                 cand[row[0]] = (row, max(cand.get(row[0], (None, 0.0))[1], 90.0))
     for row, s in cand.values():
         if s >= min_score and row[0] not in out:
-            out[row[0]] = (_rank(s, row[7], row[2]), _hit(row, s))
+            out[row[0]] = (_rank(s, row[7], row[8], row[2]), _hit(row, s))
     return tuple(h for _r, h in sorted(out.values(), key=lambda x: -x[0]))
 
 
 def alternates(group: int, exclude: str = "") -> list[dict]:
-    """The other listings of one company, largest first."""
+    """The other listings of one company, most traded first."""
     con = _connect()
     if con is None:
         return []
     with closing(con):
         rows = con.execute(
             "SELECT ticker, exchange, region FROM symbols WHERE grp = ? AND ticker != ?"
-            " ORDER BY home DESC, mcap_usd DESC LIMIT 12",
+            " ORDER BY home DESC, adv_usd DESC LIMIT 12",
             (group, exclude),
         ).fetchall()
     return [{"ticker": t, "exchange": x, "region": r} for t, x, r in rows]
@@ -579,7 +601,8 @@ def category(
         return []
     with closing(con):
         rows = con.execute(
-            f"{_SELECT} WHERE {' AND '.join(where)} ORDER BY mcap_usd DESC LIMIT ? OFFSET ?",
+            f"{_SELECT} WHERE {' AND '.join(where)}"
+            " ORDER BY COALESCE(mcap_usd, adv_usd * 100) DESC LIMIT ? OFFSET ?",
             (*args, limit, offset),
         ).fetchall()
     return [_hit(r, 100.0) for r in rows]

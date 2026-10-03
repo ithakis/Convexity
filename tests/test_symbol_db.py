@@ -215,6 +215,8 @@ ROWS = [
         1,
     ],
 ]
+# adv_usd (average daily traded value) sits after mcap_usd; none of these need one.
+ROWS = [r[:8] + [None] + r[8:] for r in ROWS]
 
 
 def pack(rows=None, date="2026-10-01"):
@@ -251,7 +253,7 @@ def db():
         (lambda r: r.__setitem__(1, "x" * 161), "printable"),
         (lambda r: r.__setitem__(2, "crypto"), "type"),
         (lambda r: r.__setitem__(7, "1e9"), "finite"),
-        (lambda r: r.__setitem__(9, 2), "home"),
+        (lambda r: r.__setitem__(10, 2), "home"),
         (lambda r: r.append("extra"), "fields"),
     ],
 )

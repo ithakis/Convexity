@@ -7,18 +7,10 @@ import pytest
 from convexity import cli, symbol_build as sb, symbol_db as sdb
 
 
-def L(ticker, name, exchange, ccy, fin, traded=0.0, typ="stock"):
-    return {
-        "ticker": ticker,
-        "name": name,
-        "type": typ,
-        "exchange": exchange,
-        "region": None,
-        "mcap_usd": None,
-        "ccy": ccy,
-        "fin_ccy": fin,
-        "traded_usd": traded,
-    }
+def L(ticker, name, exchange, ccy, fin, traded=0.0, typ="stock", industry="Industry"):
+    return {"ticker": ticker, "name": name, "type": typ, "exchange": exchange, "region": None,
+            "mcap_usd": None, "ccy": ccy, "fin_ccy": fin, "traded_usd": traded,
+            "industry": industry}  # fmt: skip
 
 
 LISTINGS = [
@@ -40,7 +32,48 @@ LISTINGS = [
     # No reporting currency on a regional German line: joins Baxter.
     L("BAX", "Baxter International Inc.", "NYQ", "USD", "USD", 4e8),
     L("BTL.SG", "Baxter International Inc", "STU", "EUR", None, 1e5),
-    L("XLK", "Technology Select Sector SPDR Fund", "PCX", "USD", None, None, typ="etf"),
+    L(
+        "XLK",
+        "Technology Select Sector SPDR Fund",
+        "PCX",
+        "USD",
+        None,
+        5e9,
+        typ="etf",
+        industry=None,
+    ),
+    L(
+        "XLK.MX",
+        "Technology Select Sector SPDR Fund",
+        "MEX",
+        "MXN",
+        None,
+        1e6,
+        typ="etf",
+        industry=None,
+    ),
+    # A thin RMB counter is "local" (CNY = CNY) but not liquid: not home.
+    L("9988.HK", "Alibaba Group Holding Limited", "HKG", "HKD", "CNY", 1.2e9),
+    L("89988.HK", "Alibaba Group Holding Limited", "HKG", "CNY", "CNY", 9e5),
+    L("BABA", "Alibaba Group Holding Limited", "NYQ", "USD", "CNY", 1.1e9),
+    # Yahoo files Canadian depositary receipts as ETFs: still Novo Nordisk.
+    L("NOVO.TO", "Novo Nordisk A/S", "TOR", "CAD", "DKK", 2e5, typ="etf"),
+    # An LSE international-order-book line with no primary listing: dropped.
+    L("0KZC.L", "SPDR S&P 500 ETF Trust", "LSE", "USD", "USD", 5e7, typ="etf", industry=None),
+    # A CEDEAR still named as before a rename: SPY trades in the US -> dropped.
+    L(
+        "SPY",
+        "State Street SPDR S&P 500 ETF Trust",
+        "PCX",
+        "USD",
+        "USD",
+        3e10,
+        typ="etf",
+        industry=None,
+    ),
+    L("SPY.BA", "SPDR S&P 500 ETF Trust", "BUE", "ARS", "USD", 1e6, typ="etf", industry=None),
+    # A warrant-like line: no size and no industry anywhere -> dropped.
+    L("12345.HK", "HSBC Call Warrant 2027", "HKG", "HKD", None, 0.0, industry=None),
 ]
 
 
@@ -48,9 +81,18 @@ def _homes(rows):
     return {r[0] for r in rows if r[-1] == 1}
 
 
-@pytest.mark.parametrize("ticker", ["NOVO-B.CO", "2330.TW", "LLY", "SAP.DE", "ZURN.SW", "XLK"])
+@pytest.mark.parametrize(
+    "ticker", ["NOVO-B.CO", "2330.TW", "LLY", "SAP.DE", "ZURN.SW", "XLK", "9988.HK"]
+)
 def test_home_listing_gold(ticker):
     assert ticker in _homes(sb.group(LISTINGS))
+
+
+def test_etf_listings_group_and_bare_warrants_are_dropped():
+    rows = sb.group(LISTINGS)
+    xlk = {r[0]: r[-1] for r in rows if r[1].startswith("Technology Select")}
+    assert xlk == {"XLK": 1, "XLK.MX": 0}
+    assert not {"12345.HK", "0KZC.L", "SPY.BA"} & {r[0] for r in rows}
 
 
 def test_one_home_per_company_and_alternates_share_a_group():
@@ -60,7 +102,7 @@ def test_one_home_per_company_and_alternates_share_a_group():
         groups.setdefault(r[-2], []).append(r)
     assert all(sum(r[-1] for r in g) == 1 for g in groups.values())
     novo = next(g for g in groups.values() if any(r[0] == "NVO" for r in g))
-    assert {r[0] for r in novo} == {"NOVO-B.CO", "NVO", "NOV.DE"}
+    assert {r[0] for r in novo} == {"NOVO-B.CO", "NVO", "NOV.DE", "NOVO.TO"}
     bax = next(g for g in groups.values() if any(r[0] == "BTL.SG" for r in g))
     assert {r[0]: r[-1] for r in bax} == {"BAX": 1, "BTL.SG": 0}
 
@@ -125,11 +167,13 @@ def test_cli_builds_a_pack_the_app_can_install(tmp_path, monkeypatch, capsys):
     raw = (out / sdb.MANIFEST).read_bytes()
     m = sdb.validate_manifest(json.loads(raw))
     blob = (out / sdb.DATA).read_bytes()
-    assert m["rows"] == len(list(sdb.iter_rows(blob))) == len(LISTINGS)
+    assert (
+        m["rows"] == len(list(sdb.iter_rows(blob))) == len(LISTINGS) - 3
+    )  # warrant, 0KZC.L, SPY.BA
     sdb.write_db(sdb.iter_rows(blob), raw, expect=m["rows"])
     sdb._invalidate()
     assert sdb.lookup("novo nordisk")[0].ticker == "NOVO-B.CO"
-    assert f"{len(LISTINGS)} listings" in capsys.readouterr().out
+    assert f"{len(LISTINGS) - 3} listings" in capsys.readouterr().out
 
 
 def test_a_big_drop_against_the_previous_pack_is_not_published(tmp_path, monkeypatch, capsys):

@@ -419,12 +419,25 @@ industry, mcap_usd, group, home. **Rules learned from the data:**
   exchange code (yfinance's region → exchange maps, unique per exchange).
 - `marketCap` is in the listing's currency (OTP in HUF); converted to USD once
   at build time through `fx.usd_per_unit`. ETFs/funds/indices carry no size.
-- **Home listing** per company (group = cleaned name + reporting currency):
-  primary venue first (not .F/.SG/.BE/.MU/.HM/.DU, Cboe/LSE international
-  boards, OTC, Mexico/Santiago foreign boards), then quoted in the reporting
-  currency **unless that is USD** (Shell, Zurich, Genmab report in USD but list
-  at home elsewhere), then the highest 3-month traded value in USD. Gold set:
-  NVO→NOVO-B.CO, TSM→2330.TW, LLY.F→LLY, ZURVY→ZURN.SW (`test_symbol_build.py`).
+- **A company = every listing with the same cleaned name**, whatever Yahoo
+  calls its type (it files Canadian depositary receipts like NOVO.TO as ETFs).
+  Sector, industry and size fill in from whichever listing has them.
+- **Re-listings** (`symbol_build._secondary`): German regional exchanges,
+  Cboe/Aquis/LSE international boards (incl. `0XXX.L` order-book lines), OTC,
+  Mexico/Santiago foreign boards, Brazilian BDRs (`XXXX3[1-9].SA`) and
+  Argentine CEDEARs (a `.BA` line whose base ticker trades in the US). A group
+  with **no primary listing is dropped** (MOH.SG for LVMH, SPY.BA under SPY's
+  old name); Morningstar fund records (`0P…`) and indices have no venue.
+- **Dropped too:** stock groups with no size and no industry anywhere —
+  warrants, CBBCs and re-listings (~5.5k Hong Kong rows, ~1.4k Vienna).
+- **Home listing:** among primary listings, quoted in the reporting currency
+  **unless that is USD** (Shell, Zurich, Genmab report in USD but list at home
+  elsewhere) **and only if liquid** (≥10% of the group's top traded value —
+  Alibaba's RMB counter 89988.HK is "local" but thin), then the highest
+  3-month traded value in USD. Gold set: NVO→NOVO-B.CO, TSM→2330.TW, LLY.F→LLY,
+  ZURVY→ZURN.SW, 89988.HK→9988.HK (`test_symbol_build.py`).
+- Result (2026-10): 472,558 listings → 378,606 searchable homes (43k
+  companies, 18k ETFs, 317k funds, 40 indices), 8.5 MB gzipped, ~50 min.
 - Never published: a sweep under 95% of Yahoo's own total, or a pack >20%
   smaller than the previous one.
 
@@ -447,7 +460,7 @@ listings' cleaned names (legal forms dropped: "Novo Nordisk A/S" → "novo
 nordisk"), top 300 by bm25, plus initials ("tsmc", "ibm") from a partial
 index — scored with rapidfuzz WRatio and re-ranked exact > prefix > whole
 word > fuzzy, shorter-is-better, then size (+≤6) and type (stock > index >
-ETF > fund). Memoised per file version. An in-memory index of ~400k names
+ETF > fund). Memoised per file version. An in-memory index of ~450k names
 cost ~300 MB and ~1 s per WRatio scan; this costs ~7 MB and a few hundred ms
 at worst. `category()` lists the largest
 home listings for sectors/industries/regions; `alternates(group)` and

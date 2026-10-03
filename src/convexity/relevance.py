@@ -158,7 +158,7 @@ def _find_symbol_db() -> Path | None:
 
 class _CompanyNames:
     """{ticker: company name}, read through from symbol_db.sqlite one ticker
-    at a time and memoised. The symbol pack holds every Yahoo listing (~630k):
+    at a time and memoised. The symbol pack holds every Yahoo listing (~470k):
     as a dict that was ~100 MB for lookups that need a few hundred names. Only
     `.get()` is offered — the one call every caller (app and ml/) makes — and
     the names are the same rows a full read returned."""
