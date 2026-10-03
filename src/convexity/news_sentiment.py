@@ -1057,7 +1057,15 @@ def _json_schema(lens_enum: tuple[str, ...]) -> dict:
 
 
 def _nvidia_call(
-    system_prompt: str, user_content: str, lens_enum: tuple[str, ...], cancel=None
+    system_prompt: str,
+    user_content: str,
+    lens_enum: tuple[str, ...],
+    cancel=None,
+    *,
+    schema: dict | None = None,
+    name: str = "news_read",
+    record: bool = True,
+    tag: str = "news",
 ) -> dict | None:
     """One schema-constrained NIM completion, parsed.
 
@@ -1070,16 +1078,21 @@ def _nvidia_call(
     sleep, NO limiter penalty — the penalty backfills the whole rolling minute,
     and on the gold benchmark one 503 turned a 10 s ticker into 64 s),
     timeouts and bad JSON. 404/410 mean the model is gone and 401/403 a bad
-    key: no retry, recorded in llm_status for the banner."""
+    key: no retry, recorded in llm_status for the banner.
+
+    Company search (search.py) reuses it with its own `schema`, `tag` and
+    `record=False`, so a search failure never flips the News LLM banner; the
+    client, the rate limiter and the circuit breaker stay shared."""
     global _nv_rate_limit_until
+    rec = _llm_record if record else (lambda *a, **k: None)
     if not NVIDIA_API_KEY:
-        _llm_record(False, "NVIDIA key missing — add it in Settings → API keys", permanent=True)
+        rec(False, "NVIDIA key missing — add it in Settings → API keys", permanent=True)
         return None
     _ck(cancel)
     _wait_for_circuit_breaker("NVIDIA NIM", "_nv_rate_limit_until", cancel=cancel)
     client = _get_client()
     if client is None:
-        _llm_record(False, "openai package not installed", permanent=True)
+        rec(False, "openai package not installed", permanent=True)
         return None
     messages = [
         {"role": "system", "content": "/no_think\n" + system_prompt},
@@ -1098,8 +1111,8 @@ def _nvidia_call(
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
-                        "name": "news_read",
-                        "schema": _json_schema(lens_enum),
+                        "name": name,
+                        "schema": schema or _json_schema(lens_enum),
                         "strict": True,
                     },
                 },
@@ -1109,11 +1122,11 @@ def _nvidia_call(
             if not text:
                 raise json.JSONDecodeError("empty content", "", 0)
             data = json.loads(text)
-            _llm_record(True)
+            rec(True)
             return data
         except json.JSONDecodeError:
             last_err = "malformed JSON"
-            print(f"[news] NIM returned unusable JSON (attempt {attempt + 1})", file=sys.stderr)
+            print(f"[{tag}] NIM returned unusable JSON (attempt {attempt + 1})", file=sys.stderr)
             time.sleep(1.0)
             continue
         except Cancelled:
@@ -1122,19 +1135,19 @@ def _nvidia_call(
             code = _http_status(exc)
             if code in (404, 410):
                 reason = f"{code} model retired ({_MODEL})"
-                print(f"[news] NIM {reason}", file=sys.stderr)
-                _llm_record(False, reason, permanent=True)
+                print(f"[{tag}] NIM {reason}", file=sys.stderr)
+                rec(False, reason, permanent=True)
                 return None
             if code in (401, 403):
                 reason = f"{code} NVIDIA key rejected"
-                print(f"[news] NIM {reason}", file=sys.stderr)
-                _llm_record(False, reason, permanent=True)
+                print(f"[{tag}] NIM {reason}", file=sys.stderr)
+                rec(False, reason, permanent=True)
                 return None
             if code == 503:
                 last_err = "503 service overloaded"
                 wait = 1.5 + attempt * 1.5 + random.random()
                 print(
-                    f"[news] NIM {last_err} (attempt {attempt + 1}/{_MAX_RETRIES}) — "
+                    f"[{tag}] NIM {last_err} (attempt {attempt + 1}/{_MAX_RETRIES}) — "
                     f"retrying in {wait:.1f}s",
                     file=sys.stderr,
                 )
@@ -1144,7 +1157,7 @@ def _nvidia_call(
                 _NV_LIMITER.penalize()
                 last_err = "429 rate limited"
                 print(
-                    f"[news] NIM {last_err} (attempt {attempt + 1}/{_MAX_RETRIES}) — "
+                    f"[{tag}] NIM {last_err} (attempt {attempt + 1}/{_MAX_RETRIES}) — "
                     f"sleeping {_RETRY_SLEEP_S}s",
                     file=sys.stderr,
                 )
@@ -1161,9 +1174,9 @@ def _nvidia_call(
                         _nv_rate_limit_until = time.time() + _RATE_LIMIT_BACKOFF_S
                 continue
             last_err = f"{type(exc).__name__}: {str(exc)[:160]}"
-            print(f"[news] NIM call failed: {last_err} (attempt {attempt + 1})", file=sys.stderr)
+            print(f"[{tag}] NIM call failed: {last_err} (attempt {attempt + 1})", file=sys.stderr)
             continue
-    _llm_record(False, last_err)
+    rec(False, last_err)
     return None
 
 

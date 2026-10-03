@@ -455,6 +455,16 @@ def alternates(group: int, exclude: str = "") -> list[dict]:
     return [{"ticker": t, "exchange": x, "region": r} for t, x, r in rows]
 
 
+def home(group: int) -> Hit | None:
+    """A company's home listing."""
+    con = _connect()
+    if con is None:
+        return None
+    with closing(con):
+        row = con.execute(_SELECT + " WHERE grp = ? AND home = 1", (group,)).fetchone()
+    return _hit(row, 100.0) if row else None
+
+
 def get(ticker: str) -> Hit | None:
     con = _connect()
     if con is None:
