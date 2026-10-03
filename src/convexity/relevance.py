@@ -147,9 +147,9 @@ def window_sample(articles: list[dict], cap: int, min_recent: int) -> list[dict]
 
 # ------------------------------------------------------------------ company names
 def _find_symbol_db() -> Path | None:
-    # Same resolution as the resolver (data dir, PORTFOLIO_SYMBOL_DB, legacy
-    # checkout-root fallback). Location only — the table's content, and so
-    # train/serve parity, is unaffected.
+    # The symbol pack's file in the data folder (symbol_db.py). Since 2.0 its
+    # names come from Yahoo, not NASDAQ/SEC lists; _clean_name drops the legal
+    # forms where the two differ, so a company keeps the same cleaned name.
     from convexity import symbol_db
 
     p = symbol_db.db_path()
