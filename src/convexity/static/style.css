@@ -1,13 +1,17 @@
   :root, [data-theme="light"] {
     --bg: #ffffff;
-    --bg-subtle: #f6f8fa;
+    /* "Navy & Denim" (v1.19): Morgan Stanley's published blue #187ABA as the
+       one accent, deep navy ink instead of near-black, and blue-tinted
+       neutrals instead of GitHub's cool grays. Chosen by the user from five
+       directions in the design lab. */
+    --bg-subtle: #f2f6fa;
     --bg-canvas: #ffffff;
-    --border: #d0d7de;
-    --text: #1f2328;
-    --muted: #59636e;
-    --accent: #0969da;
-    --accent-rgb: 9, 105, 218;
-    --accent-soft: #ddf4ff;
+    --border: #d6e0ea;
+    --text: #0b2239;
+    --muted: #587089;
+    --accent: #187aba;
+    --accent-rgb: 24, 122, 186;
+    --accent-soft: #e3f0f9;
     /* Corner-radius scale (F4). One knob per size tier so the whole app's
        roundness tunes from four values. Pills/circles stay literal (999px/50%).
        Current level: "Sharp" — crisp, terminal-like edges. */
@@ -15,16 +19,21 @@
     --r-md: 4px;    /* buttons, inputs, mid panels */
     --r-sm: 2px;    /* chips, badges, small controls */
     --r-xs: 1px;    /* bars, tiny fills */
-    --pos: #1f883d;
-    --pos-rgb: 31, 136, 61;
-    --neg: #cf222e;
-    --neg-rgb: 207, 34, 46;
+    /* Softer tier for the Claude-Code-style Settings (v1.19): its modal and its
+       controls are deliberately rounder than the sharp dashboard. */
+    --r-xl: 12px;   /* the Settings modal */
+    --r-soft: 8px;  /* Settings buttons, inputs, search, close */
+    --pos: #12805c;
+    --pos-rgb: 18, 128, 92;
+    --neg: #c8312b;
+    --neg-rgb: 200, 49, 43;
     --warn: #9a6700;
     --warn-rgb: 191, 135, 0;
     --bg-rgb: 255, 255, 255;
-    --row-alt: #f6f8fa;
-    --header-bg: #f6f8fa;
-    --hover: #fff8c5;
+    --row-alt: #f6f9fc;
+    --header-bg: #f2f6fa;
+    --hover: #e8f2fa;       /* was a yellow #fff8c5 — the most "default" thing on the page */
+    --hlc-hi: #00a8e0;      /* HLC area: the high line + its band (Morgan Stanley cyan) */
     --on-accent: #ffffff;   /* text/thumb color placed on an --accent fill */
     --ai: #8250df;          /* company search: anything the AI chose or wrote */
     --ai-soft: #fbefff;
@@ -36,26 +45,27 @@
     --ns-vbear: #c62828;
   }
   [data-theme="dark"] {
-    --bg: #0d1117;
-    --bg-subtle: #161b22;
-    --bg-canvas: #0d1117;
-    --border: #30363d;
-    --text: #e6edf3;
-    --muted: #7d8590;
-    --accent: #2f81f7;
-    --accent-rgb: 47, 129, 247;
-    --accent-soft: #163b66;
-    --pos: #3fb950;
-    --pos-rgb: 63, 185, 80;
-    --neg: #f85149;
-    --neg-rgb: 248, 81, 73;
+    --bg: #08182a;
+    --bg-subtle: #0e2238;
+    --bg-canvas: #08182a;
+    --border: #1f3a57;
+    --text: #e6eef6;
+    --muted: #8da3b9;
+    --accent: #4ba3e3;
+    --accent-rgb: 75, 163, 227;
+    --accent-soft: #12385a;
+    --pos: #3cc590;
+    --pos-rgb: 60, 197, 144;
+    --neg: #f0675f;
+    --neg-rgb: 240, 103, 95;
     --warn: #d29922;
     --warn-rgb: 210, 153, 34;
-    --bg-rgb: 13, 17, 23;
-    --row-alt: #161b22;
-    --header-bg: #161b22;
-    --hover: #1f2937;
-    --on-accent: #ffffff;
+    --bg-rgb: 8, 24, 42;
+    --row-alt: #0b1d31;
+    --header-bg: #0e2238;
+    --hover: #13304d;
+    --on-accent: #04121f;   /* white on the lighter dark-mode blue is only ~2.8:1 */
+    --hlc-hi: #38c0ee;
     --ai: #a371f7;
     --ai-soft: #2c2042;
     --ns-vbull: #2ea043;
@@ -97,6 +107,7 @@
     --header-bg: #141414;
     --hover: #14273f;           /* dark blue — Bloomberg's selection-bar blue */
     --on-accent: #050505;       /* near-black text on the bright orange accent */
+    --hlc-hi: #4dc7f9;          /* Bloomberg cyan */
     --ns-vbull: #33d17a;
     --ns-bull: #1f7a4b;
     --ns-flat: #5f5f5f;
@@ -206,9 +217,12 @@
   .refresh-btn .rf-label { position: relative; z-index: 2; }
   .rf-bar {
     position: absolute; left: 0; top: 0; bottom: 0; width: 0;
-    background: var(--accent-soft); border-right: 1px solid var(--accent);
+    background: var(--accent-soft);
     transition: width 0.25s ease-out; z-index: 1; pointer-events: none;
   }
+  /* The leading edge only exists while a refresh runs: a 0-width box still
+     paints its 1px border, which showed as a permanent blue bar when idle. */
+  .refresh-btn.running .rf-bar { border-right: 1px solid var(--accent); }
   .refresh-btn.running { border-color: var(--accent); }
   /* The open portfolio's constituents changed since its rows were built
      (app.js syncRefreshNeeded). `.topbar` prefix: see the .rf-chip-x note. */
@@ -265,9 +279,9 @@
   .ns-cov-hint[hidden] { display: none; }
   /* Danger style for delete buttons */
   .topbar button.danger, button.danger {
-    color: var(--neg); border-color: rgba(248, 81, 73, 0.4);
+    color: var(--neg); border-color: rgba(var(--neg-rgb), 0.4);
   }
-  button.danger:hover { background: rgba(248, 81, 73, 0.12); border-color: var(--neg); }
+  button.danger:hover { background: rgba(var(--neg-rgb), 0.12); border-color: var(--neg); }
   button.danger:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* FX (denomination) selector */
@@ -298,7 +312,7 @@
     font-size: 12.5px; color: var(--text);
   }
   .fx-opt:hover, .fx-opt.focused { background: var(--bg-subtle); }
-  .fx-opt.selected { background: rgba(47, 129, 247, 0.12); color: var(--accent); font-weight: 600; }
+  .fx-opt.selected { background: rgba(var(--accent-rgb), 0.12); color: var(--accent); font-weight: 600; }
   .fx-opt .fx-opt-code { font-weight: 600; letter-spacing: 0.02em; }
   .fx-opt .fx-opt-name { color: var(--muted); font-size: 11.5px; }
   .fx-hover {
@@ -531,14 +545,17 @@
     .topbar button.flash { animation: none; }
   }
 
-  /* Input panel: the tab strip sits on the page; the open portfolio is the
-     gray panel below it (.pf-body). */
+  /* Input panel: the tab strip sits on the page, and so does the open
+     portfolio (.pf-body). It used to be a gray box holding the Analytics box
+     holding the chart card — four levels. The user's rule is at most two, so
+     .pf-body is now just spacing and the analytics sheet is the one box. */
   #input-panel { margin: 12px 16px 0; }
   #input-panel.hidden { display: none; }
-  .pf-body {
-    background: var(--bg-subtle); border: 1px solid var(--border);
-    border-radius: var(--r-lg); padding: 14px;
-  }
+  .pf-body { padding: 4px 0 0; }
+  /* The HOLDINGS-style kicker rule, reused inside the portfolio. #input-panel
+     already supplies the 16px side inset, so the anchor's own margin drops. */
+  .pf-body .section-anchor.pf-anchor { margin: 18px 0 10px; }
+  .pf-body .co-search + .pf-editor .section-anchor.pf-anchor { margin-top: 6px; }
 
   /* Confirmation modal (delete portfolio) */
   .confirm-bg {
@@ -573,7 +590,7 @@
   }
   .confirm-foot button:hover { background: var(--bg-subtle); }
   .confirm-foot button.danger {
-    background: var(--neg); color: #fff; border-color: var(--neg);
+    background: var(--neg); color: var(--on-accent); border-color: var(--neg);
   }
   .confirm-foot button.danger:hover { filter: brightness(1.08); }
 
@@ -631,9 +648,9 @@
     border-color: var(--accent);
     color: var(--accent);
     font-weight: 600;
-    box-shadow: 0 1px 3px rgba(9, 105, 218, 0.18);
+    box-shadow: 0 1px 3px rgba(var(--accent-rgb), 0.18);
   }
-  [data-theme="dark"] .pf-tab.active { color: #fff; background: rgba(47, 129, 247, 0.22); }
+  [data-theme="dark"] .pf-tab.active { color: #fff; background: rgba(var(--accent-rgb), 0.22); }
   .pf-tab .pf-tab-label {
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;
   }
@@ -654,7 +671,7 @@
     cursor: pointer; flex-shrink: 0;
     transition: background 0.12s, color 0.12s;
   }
-  .pf-tab .pf-tab-close:hover { background: rgba(207, 34, 46, 0.16); color: var(--neg); }
+  .pf-tab .pf-tab-close:hover { background: rgba(var(--neg-rgb), 0.16); color: var(--neg); }
   .pf-tab-newadhoc {
     background: transparent !important; border-style: dashed !important;
   }
@@ -667,8 +684,7 @@
   .pf-tab-add:hover { color: var(--accent); border-color: var(--accent); }
 
   /* Constituents: one pill per entry (app.js renderConstituents) */
-  .pf-editor-head { font-weight: 600; font-size: 13px; color: var(--text); margin-bottom: 8px; }
-  #pf-count { font-weight: 400; color: var(--muted); margin-left: 4px; }
+  #pf-count { font-weight: 600; color: var(--muted); margin-left: 6px; letter-spacing: 0.04em; }
   .pf-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .pf-chips:empty::before { content: "Add companies with the search box above."; color: var(--muted); font-size: 12px; }
   .pf-chip {
@@ -693,6 +709,8 @@
   }
   .co-bar:focus-within { border-color: var(--accent); }
   .co-icon { color: var(--muted); font-size: 15px; }
+  /* The native clear (x) of type=search is redundant: Enter on an empty box clears. */
+  #co-q::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; display: none; }
   #co-q { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13px; }
   .co-go, .co-add {
     height: 34px; padding: 0 18px; border-radius: 999px; font-size: 13px; font-weight: 600;
@@ -742,7 +760,6 @@
   .co-kv .ok { color: var(--pos); }
   .co-why { margin-top: 6px; color: var(--ai); line-height: 1.35; }
   .co-alts { margin-top: 6px; color: var(--muted); }
-  .co-alts-head { color: var(--muted); margin-bottom: 2px; }
   .co-alts button { font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
   .co-alts ul { list-style: none; margin: 4px 0 0; padding: 4px 0 0; border-top: 1px solid var(--border); }
   .co-alts li { display: flex; justify-content: space-between; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
@@ -784,22 +801,21 @@
   .co-full-more { padding: 14px; text-align: center; color: var(--muted); font-size: 12px; }
   .co-full-foot { display: flex; align-items: center; gap: 10px; padding: 10px 18px; border-top: 1px solid var(--border); }
 
-  /* Analytics sub-window */
+  /* The analytics sheet — the ONE box of the portfolio view. A whisper of
+     shadow, no gradient header: the toolbar is separated by a hairline. */
   .pf-analytics {
-    margin-top: 14px;
     background: var(--bg-canvas);
     border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    box-shadow: 0 1px 0 rgba(0,0,0,0.04), 0 6px 14px rgba(0,0,0,0.06);
+    border-radius: var(--r-lg);
+    box-shadow: 0 1px 2px rgba(11, 34, 57, 0.05);
     overflow: hidden;
   }
   .pf-analytics-head {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 9px 12px;
-    background: linear-gradient(180deg, var(--bg-subtle), var(--bg-canvas));
+    padding: 10px 16px;
+    background: var(--bg-canvas);
     border-bottom: 1px solid var(--border);
   }
-  .pf-analytics-title { font-weight: 700; font-size: 12.5px; margin-right: 6px; }
   .pf-mode-toggle, .pf-period-tabs {
     display: inline-flex; background: var(--bg-canvas); border: 1px solid var(--border);
     border-radius: var(--r-md); overflow: hidden;
@@ -872,7 +888,8 @@
   .pf-overlay-pill[data-on="1"] .swatch.spy { background: #8b5cf6; }
   .pf-overlay-pill[data-on="1"] .swatch.ndx { background: #06b6d4; }
   .pf-overlay-pill[data-on="1"] .swatch.sec { background: #f59e0b; }
-  .pf-overlay-pill[data-on="1"] .swatch.dd  { background: #f85149; }
+  .pf-overlay-pill[data-on="1"] .swatch.dd  { background: var(--neg); }
+  .pf-overlay-pill[data-on="1"] .swatch.vol { background: linear-gradient(90deg, var(--pos) 50%, var(--neg) 50%); }
   /* Must match SMA_COLORS in app.js. */
   .pf-overlay-pill[data-on="1"] .swatch.sma20  { background: #38bdf8; }
   .pf-overlay-pill[data-on="1"] .swatch.sma50  { background: #a78bfa; }
@@ -1018,21 +1035,31 @@
   .pf-bench-extra { margin-top: 10px; }
   .bench-swatch { display: inline-block; width: 10px; height: 10px; border-radius: var(--r-xs); margin-right: 6px; vertical-align: middle; }
 
-  .pf-analytics-body { padding: 12px; }
+  .pf-analytics-body { padding: 0; }
   .pf-empty {
     color: var(--muted); font-size: 12.5px; text-align: center; padding: 32px 8px;
   }
   .pf-loading { display: inline-block; color: var(--muted); font-size: 11.5px; margin-left: 6px; }
 
+  /* Inside the sheet the sections are CELLS, not cards (v1.19): no fill, no
+     border of their own, no gap — a hairline grid instead. Each cell draws its
+     top rule; the left column also draws the vertical rule. The first row has
+     no top rule because the toolbar's border-bottom is already there. */
   .pf-grid {
     display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
-    gap: 12px; align-items: stretch;
+    gap: 0; align-items: stretch;
   }
-  @media (max-width: 900px) { .pf-grid { grid-template-columns: 1fr; } }
-
   .pf-card {
-    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-md);
-    padding: 10px 12px;
+    background: transparent; border: 0; border-radius: 0;
+    border-top: 1px solid var(--border);
+    padding: 14px 18px 16px;
+  }
+  .pf-grid > .pf-card:nth-child(-n+2) { border-top: 0; }
+  .pf-grid > .pf-card:nth-child(odd):not(:last-child) { border-right: 1px solid var(--border); }
+  @media (max-width: 900px) {
+    .pf-grid { grid-template-columns: 1fr; }
+    .pf-grid > .pf-card:nth-child(2) { border-top: 1px solid var(--border); }
+    .pf-grid > .pf-card:nth-child(odd):not(:last-child) { border-right: 0; }
   }
   .pf-card h4 {
     margin: 0 0 8px; font-size: 12px; font-weight: 700;
@@ -1044,6 +1071,17 @@
   .pf-chart-wrap { position: relative; }
   .pf-chart-wrap svg { display: block; width: 100%; height: 220px; }
   .pf-chart-wrap .pf-dd-svg { height: 80px; margin-top: 4px; }
+  .pf-chart-wrap .pf-vol-svg { display: block; width: 100%; height: 56px; margin-top: 2px; }
+  /* Chart-type picker (HLC area, candles, …), shared by the portfolio chart
+     and the stock modal. A native <select>: keyboard and Esc for free. */
+  .chart-type-sel {
+    margin-left: auto; height: 24px; padding: 0 22px 0 8px; font: inherit;
+    font-size: 11.5px; font-weight: 500; text-transform: none; letter-spacing: 0;
+    color: var(--text); background-color: var(--bg-canvas);
+    border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer;
+  }
+  .chart-type-sel:hover, .chart-type-sel:focus { border-color: var(--accent); outline: none; }
+  .m-chart-toolbar .chart-type-sel { margin-left: 4px; height: 28px; font-size: 12px; }
   .pf-chart-legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
   .pf-chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: var(--r-xs); vertical-align: middle; margin-right: 4px; }
 
@@ -1191,7 +1229,7 @@
   .pf-weights-foot button.danger {
     background: transparent; color: var(--neg); border-color: var(--neg);
   }
-  .pf-weights-foot button.danger:hover { background: rgba(248, 81, 73, 0.10); }
+  .pf-weights-foot button.danger:hover { background: rgba(var(--neg-rgb), 0.10); }
   .pf-name-row {
     display: flex; align-items: center; gap: 6px;
     padding: 6px 14px 0; flex-wrap: wrap;
@@ -1643,7 +1681,7 @@
   }
   .mpt-progress-fill {
     position: absolute; top: 0; bottom: 0; left: 0; width: 0%;
-    background: linear-gradient(90deg, var(--accent), rgba(9,105,218,0.45));
+    background: linear-gradient(90deg, var(--accent), rgba(var(--accent-rgb),0.45));
     transition: width 0.35s ease-out;  /* eases between streamed pct updates */
   }
   .mpt-progress.done .mpt-progress-fill { transition: width 0.15s ease-out !important; }
@@ -1654,22 +1692,11 @@
   }
   .mpt-progress-text { color: var(--text); font-weight: 600; }
   .mpt-progress-timer { color: var(--muted); }
-  .pf-mpt-chart .pf-mpt-tt {
-    position: absolute; pointer-events: none; z-index: 5;
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-md);
-    padding: 7px 10px; font-size: 11.5px; line-height: 1.5;
-    box-shadow: 0 6px 16px rgba(0,0,0,0.22);
-    opacity: 0; transition: opacity 0.08s;
-  }
-  .pf-mpt-chart .pf-mpt-tt.show { opacity: 1; }
   .pf-mpt-slider-row {
     display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--muted);
   }
   .pf-mpt-slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
   .pf-mpt-slider-row.cvar input[type="range"] { accent-color: #ea580c; }
-  /* The row whose curve is currently being dragged gets a subtle highlight. */
-  .pf-mpt-slider-row.active-line .pf-mpt-slider-label { text-shadow: 0 0 6px var(--accent); }
-  .pf-mpt-slider-row.cvar.active-line .pf-mpt-slider-label { text-shadow: 0 0 6px #ea580c; }
   .pf-mpt-slider-row .pf-mpt-slider-label {
     min-width: 88px; font-weight: 600; color: var(--text);
   }
@@ -1832,7 +1859,7 @@
   .cv-fit-toggle:hover { color: var(--text); border-color: var(--text); }
   .cv-fit-toggle.active {
     color: var(--accent); border-color: var(--accent);
-    background: rgba(47, 129, 247, 0.08);
+    background: rgba(var(--accent-rgb), 0.08);
   }
   .cv-dirty {
     display: inline-flex; align-items: center; gap: 6px;
@@ -1936,7 +1963,6 @@
     border: 1px solid var(--border); border-radius: var(--r-sm);
     background: var(--bg-canvas); color: var(--text);
   }
-  .cv-modal-foot .cv-spacer { flex: 1; }
   .cv-modal-foot button {
     background: var(--bg-canvas); border: 1px solid var(--border);
     color: var(--text); font-size: 12px; padding: 6px 12px;
@@ -2094,7 +2120,6 @@
     display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
     margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
   }
-  .an-head .an-title { font-size: 15px; font-weight: 700; color: var(--text); }
   .an-head .an-sub { font-size: 11.5px; color: var(--muted); }
   /* Aggregation control — now lives on the Per-holding consensus card header,
      right-aligned on the same line to save vertical space (F2). */
@@ -2269,21 +2294,6 @@
   .an-mini-dist .s  { background: #f97316; }
   .an-mini-dist .ss { background: #dc2626; }
 
-  /* Target waterfall (mini) — used in the per-row visualization */
-  .an-target-bar {
-    position: relative; height: 18px; width: 160px;
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-sm);
-    display: inline-block; vertical-align: middle;
-  }
-  .an-target-bar .range {
-    position: absolute; top: 6px; height: 6px; background: var(--accent-soft, rgba(47,129,247,0.15));
-    border-radius: var(--r-xs);
-  }
-  .an-target-bar .mark { position: absolute; top: 2px; width: 2px; height: 14px; transform: translateX(-1px); }
-  .an-target-bar .mark.current { background: var(--text); }
-  .an-target-bar .mark.target  { background: var(--accent); }
-  .an-target-bar .mark.low, .an-target-bar .mark.high { background: var(--muted); opacity: 0.6; width: 1.5px; }
-
   /* Coverage footer chip */
   .an-coverage-foot {
     margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border);
@@ -2291,7 +2301,6 @@
     flex-wrap: wrap; font-size: 11.5px; color: var(--muted);
   }
   .an-coverage-foot b { color: var(--text); font-weight: 600; }
-  .an-coverage-foot .credit { color: var(--muted); font-size: 11px; }
   .an-version { color: var(--muted); font-size: 10.5px; letter-spacing: 0.2px; opacity: 0.75; flex: none; }
   .an-not-covered {
     color: var(--muted); font-size: 11px;
@@ -3022,20 +3031,12 @@
   .mth-sec > p { font-size: 13.5px; line-height: 1.6; color: var(--text); margin: 0 0 8px; }
   .mth-sec ul { margin: 0 0 10px; padding-left: 20px; }
   .mth-sec li { font-size: 13px; line-height: 1.55; color: var(--text); margin: 3px 0; }
-  .mth-mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
-  .mth-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 24px; margin: 10px 0; }
-  @media (max-width: 820px) { .mth-charts { grid-template-columns: 1fr; } }
   .mth-chart {
     background: var(--bg-subtle); border: 1px solid var(--border);
     border-radius: var(--r-md); padding: 12px 14px;
   }
   .mth-chart h4 { margin: 0 0 6px; font-size: 12.5px; font-weight: 700; color: var(--text); }
   .mth-cap { font-size: 11.5px; line-height: 1.5; color: var(--muted); margin: 6px 0 0; }
-  .mth-note {
-    font-size: 12px; line-height: 1.55; color: var(--muted);
-    background: color-mix(in srgb, var(--border) 14%, transparent);
-    border-radius: var(--r-md); padding: 9px 12px; margin-top: 10px;
-  }
   .mth-foot { font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 12px; margin-top: 6px; }
   .mth-body code {
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
@@ -3056,96 +3057,91 @@
   .settings-modal {
     width: 78vw; height: 76vh; min-width: 620px;
     background: var(--bg-canvas); border: 1px solid var(--border);
-    border-radius: var(--r-lg); box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+    border-radius: var(--r-xl); box-shadow: 0 24px 60px rgba(0,0,0,0.45);
     display: flex; flex-direction: column; overflow: hidden;
   }
+  /* S3 · top tabs (v1.19, modelled on the Claude Code settings the user
+     picked): one header row — title, section pills, search, close — and no
+     sidebar. Bigger type than the rest of the app (14px), no lines between
+     tabs, and the ONLY shape is the filled pill on the selected tab. */
   .settings-head {
-    display: flex; align-items: center; gap: 12px;
-    padding: 12px 18px; border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, var(--bg-subtle), var(--bg-canvas));
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 16px 12px 22px; border-bottom: 1px solid var(--border);
+    background: var(--bg-canvas);
   }
-  .settings-title { font-weight: 700; font-size: 14.5px; }
-  .settings-head .spacer { flex: 1; }
+  .settings-title { font-weight: 650; font-size: 16px; flex: none; margin-right: 6px; }
   .settings-close {
-    width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border);
-    background: var(--bg-canvas); cursor: pointer; color: var(--muted); font-size: 15px;
+    width: 30px; height: 30px; border-radius: var(--r-soft); border: 0; flex: none;
+    background: transparent; cursor: pointer; color: var(--muted); font-size: 20px;
     line-height: 1; padding: 0;
   }
-  .settings-close:hover { color: var(--text); border-color: var(--accent); }
+  .settings-close:hover { color: var(--text); background: var(--hover); }
   .settings-body { flex: 1; display: flex; min-height: 0; }
-  .settings-nav {
-    width: 210px; flex: none; border-right: 1px solid var(--border);
-    display: flex; flex-direction: column; overflow: hidden;
-    background: var(--bg-subtle);
-  }
-  /* Search sits in its own fixed band above the scrolling list, so a long list
-     never pushes it out of reach. */
-  .settings-search-wrap {
-    position: relative; padding: 10px 8px; border-bottom: 1px solid var(--border);
-    flex: none;
-  }
+  /* The tab strip takes the space between the title and the search and
+     scrolls sideways (without a visible bar) if the window gets narrow. */
+  /* The tabs WRAP onto a second line when the modal is narrow. A hidden
+     sideways scroller (the first cut) left "Logs"/"About" unreachable below
+     ~1200px of window width; the search box gives up width first. */
+  .settings-nav { flex: 1; min-width: 0; }
+  .settings-nav-list { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .settings-search-wrap { position: relative; flex: 0 1 200px; min-width: 120px; }
   .settings-search-icon {
-    position: absolute; left: 17px; top: 50%; transform: translateY(-50%);
-    color: var(--muted); font-size: 12px; pointer-events: none;
+    position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+    color: var(--muted); font-size: 13px; pointer-events: none;
   }
   .settings-search {
-    width: 100%; background: var(--bg-canvas); border: 1px solid var(--border);
-    color: var(--text); border-radius: var(--r-sm); font-size: 12px;
-    padding: 6px 8px 6px 26px; font-family: inherit;
+    width: 100%; background: var(--bg-subtle); border: 1px solid transparent;
+    color: var(--text); border-radius: var(--r-soft); font-size: 13.5px;
+    padding: 7px 10px 7px 30px; font-family: inherit;
   }
   .settings-search::placeholder { color: var(--muted); }
-  .settings-search:focus { outline: none; border-color: var(--accent); }
-  .settings-nav-list { flex: 1; min-height: 0; overflow: auto; padding: 8px; }
-  .settings-nav-group:not(:first-child) { margin-top: 12px; }
-  .settings-nav-group-label {
-    font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
-    color: var(--muted); padding: 4px 10px; opacity: 0.85;
-  }
+  .settings-search:focus { outline: none; border-color: var(--accent); background: var(--bg-canvas); }
   .settings-nav-item {
-    text-align: left; background: transparent; border: 1px solid transparent;
-    color: var(--muted); font-size: 12.5px; padding: 7px 10px; cursor: pointer;
-    border-radius: var(--r-sm);
-    display: flex; align-items: center; gap: 8px; width: 100%;
+    flex: none; background: transparent; border: 0; white-space: nowrap;
+    color: var(--muted); font-size: 14px; font-weight: 500; padding: 6px 14px;
+    cursor: pointer; border-radius: 999px; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 7px;
   }
-  .settings-nav-icon { width: 14px; text-align: center; opacity: 0.8; flex: none; }
   .settings-nav-item:hover { color: var(--text); background: var(--hover); }
-  .settings-nav-item.active {
-    color: var(--accent); font-weight: 700;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  .settings-nav-item.active,
+  .settings-nav-item.active:hover {
+    color: var(--on-accent); background: var(--accent); font-weight: 600;
   }
-  .settings-nav-sub {
-    font-size: 10.5px; color: var(--muted); padding: 1px 10px 2px 32px;
+  /* How many settings inside this section matched the search. */
+  .settings-nav-count {
+    font-size: 11px; font-weight: 700; min-width: 18px; padding: 0 5px;
+    border-radius: 999px; text-align: center;
+    background: rgba(var(--accent-rgb), 0.14); color: var(--text);
   }
-  .settings-nav-empty {
-    font-size: 11.5px; color: var(--muted); padding: 12px 10px; line-height: 1.5;
+  .settings-nav-item.active .settings-nav-count { background: rgba(255, 255, 255, 0.22); color: inherit; }
+  .settings-nav-empty { font-size: 13px; color: var(--muted); padding: 6px 4px; white-space: nowrap; }
+  .settings-pane {
+    flex: 1; min-width: 0; display: flex; flex-direction: column;
+    padding: 22px 32px 18px;
   }
-  .settings-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 14px 18px; }
-  .settings-pane-head {
-    flex: none; padding-bottom: 10px; margin-bottom: 10px;
-    border-bottom: 1px solid var(--border);
-  }
+  .settings-pane-head { flex: none; margin-bottom: 14px; }
   /* The scroll modifier is applied to every section EXCEPT Logs: .settings-log-body
      is itself flex:1/overflow:auto, and wrapping it in a second scroll container
      breaks the tail-to-bottom behaviour. */
   .settings-pane-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .settings-pane-body.scroll { overflow: auto; display: block; }
-  .settings-section-title { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .settings-section-title { font-size: 20px; font-weight: 650; margin-bottom: 4px; letter-spacing: -0.01em; }
   .settings-section-sub {
-    font-size: 11.5px; color: var(--muted); line-height: 1.5; max-width: 62ch;
+    font-size: 13px; color: var(--muted); line-height: 1.55; max-width: 68ch;
   }
   .settings-pane-body .settings-section-sub { margin-bottom: 10px; }
   .settings-row {
-    display: flex; gap: 16px; align-items: flex-start; padding: 12px 2px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+    display: flex; gap: 16px; align-items: center; padding: 14px 2px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
+  .settings-row:last-child { border-bottom: 0; }
   .settings-row-main { flex: 1; min-width: 0; }
   .settings-row-label {
-    font-size: 12.5px; font-weight: 600;
+    font-size: 14px; font-weight: 600;
     display: flex; align-items: center; gap: 8px;
   }
   .settings-row-help {
-    font-size: 11px; color: var(--muted); line-height: 1.55; margin-top: 5px;
+    font-size: 12.5px; color: var(--muted); line-height: 1.55; margin-top: 4px;
   }
   .settings-row-help code {
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px;
@@ -3165,40 +3161,40 @@
   .settings-seg { display: inline-flex; gap: 4px; }
   .settings-seg-opt {
     background: transparent; border: 1px solid var(--border); color: var(--muted);
-    font-size: 11.5px; padding: 5px 10px; cursor: pointer;
-    border-radius: var(--r-sm); font-family: inherit;
+    font-size: 13px; padding: 6px 12px; cursor: pointer;
+    border-radius: var(--r-soft); font-family: inherit;
   }
   .settings-seg-opt:hover { color: var(--text); background: var(--hover); }
   .settings-seg-opt.active {
-    color: var(--accent); font-weight: 700;
+    color: var(--accent); font-weight: 600;
     background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .settings-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
   .settings-btn-row { display: flex; gap: 8px; margin-top: 10px; }
   .settings-btn {
-    background: var(--bg-canvas); border: 1px solid var(--border); color: var(--muted);
-    font-size: 11.5px; padding: 5px 10px; cursor: pointer;
-    border-radius: var(--r-sm); font-family: inherit;
+    background: var(--bg-canvas); border: 1px solid var(--border); color: var(--text);
+    font-size: 13px; padding: 6px 13px; cursor: pointer;
+    border-radius: var(--r-soft); font-family: inherit;
   }
   .settings-btn:hover { color: var(--text); border-color: var(--accent); }
   .settings-btn:disabled { opacity: 0.45; cursor: default; }
   .settings-btn:disabled:hover { color: var(--muted); border-color: var(--border); }
   /* .danger is defined for topbar/generic buttons; restate colour here so the
      .settings-btn base (which sets `color`) can't win on source order. */
-  .settings-btn.danger { color: var(--neg); border-color: rgba(248, 81, 73, 0.4); }
-  .settings-btn.danger:hover { color: var(--neg); background: rgba(248, 81, 73, 0.12); border-color: var(--neg); }
+  .settings-btn.danger { color: var(--neg); border-color: rgba(var(--neg-rgb), 0.4); }
+  .settings-btn.danger:hover { color: var(--neg); background: rgba(var(--neg-rgb), 0.10); border-color: var(--neg); }
   /* Sub-heading inside a settings pane, for sections that list two kinds of
      thing (Column Presets: built-ins vs your own). */
   .settings-subhead {
-    font-size: 10.5px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.06em; color: var(--muted);
-    margin: 14px 0 2px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted);
+    margin: 22px 0 2px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
   }
   .settings-pane-body > .settings-subhead:first-child { margin-top: 2px; }
   .settings-kv {
     display: grid; grid-template-columns: auto 1fr; gap: 3px 14px;
-    margin-top: 6px; font-size: 11px; align-items: baseline;
+    margin-top: 6px; font-size: 12.5px; align-items: baseline;
   }
   .settings-kv-k { color: var(--muted); white-space: nowrap; }
   .settings-kv-v {
@@ -3219,8 +3215,8 @@
   .settings-key-input {
     flex: 1; min-width: 0; max-width: 420px;
     background: var(--bg-canvas); border: 1px solid var(--border); color: var(--text);
-    font: 12px ui-monospace, "SF Mono", Menlo, monospace; padding: 5px 8px;
-    border-radius: var(--r-sm);
+    font: 13px ui-monospace, "SF Mono", Menlo, monospace; padding: 7px 10px;
+    border-radius: var(--r-soft);
   }
   .settings-key-input::placeholder {
     color: var(--muted); font-family: -apple-system, "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
@@ -3229,7 +3225,7 @@
   .settings-key-src code {
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px;
   }
-  .settings-key-src { font-size: 11px; color: var(--muted); }
+  .settings-key-src { font-size: 12.5px; color: var(--muted); }
   .settings-row-help a { color: var(--accent); }
   /* Settings -> About: old files the data-folder migration left in place. */
   .settings-migrate-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }

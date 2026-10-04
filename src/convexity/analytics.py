@@ -1,5 +1,6 @@
 """Portfolio analytics — bulk close, analyst blocks, multi-weight analysis."""
 
+import contextlib
 import math
 import random
 import time
@@ -12,6 +13,8 @@ import yfinance as yf
 from convexity.cache import (
     _BULK_CLOSE_MISS,
     _CACHE_TTL_ANALYTICS,
+    _bulk_bars_get,
+    _bulk_bars_put,
     _bulk_close_get_cached,
     _bulk_close_put,
     _cache_get,
@@ -335,6 +338,7 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
                     if not col.empty:
                         out[s] = col
                         _bulk_close_put(s, period_yf, col)
+                        _put_bars(s, period_yf, df[s].loc[col.index])
                         got.add(s)
             else:
                 try:
@@ -342,6 +346,7 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
                     if not col.empty:
                         out[to_fetch[0]] = col
                         _bulk_close_put(to_fetch[0], period_yf, col)
+                        _put_bars(to_fetch[0], period_yf, df.loc[col.index])
                         got.add(to_fetch[0])
                 except (KeyError, ValueError):
                     pass
@@ -362,6 +367,7 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
                             # old tz_convert(None) moved bars to UTC, off by a
                             # day for London and off-midnight for New York.
                             ser = by_trading_date(col)
+                            _put_bars(s, period_yf, by_trading_date(h.loc[col.index]))
                             break
                 except Exception:
                     pass
@@ -375,6 +381,100 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
     if not out:
         return pd.DataFrame()
     return pd.concat(out, axis=1).sort_index()
+
+
+def _put_bars(sym: str, period_yf: str, frame: pd.DataFrame) -> None:
+    """Keep the OHLCV that came with a bulk close (see cache._BULK_BARS_CACHE).
+    Best effort: a frame without the columns is simply not stored. Duplicate
+    dates are dropped here because _portfolio_bars reindexes on the date."""
+    cols = ["Open", "High", "Low", "Close", "Volume"]
+    with contextlib.suppress(KeyError, ValueError, TypeError):
+        f = frame[cols].astype(float)
+        _bulk_bars_put(sym, period_yf, f[~f.index.duplicated(keep="last")])
+
+
+def _sig(v: float, digits: int = 6) -> float:
+    return float(f"{v:.{digits}g}")
+
+
+def _wick_cap(b: pd.DataFrame) -> float:
+    """Largest believable wick, as a fraction of the bar body: 5x the median
+    daily range, at least 3%. Yahoo has bad prints (VOD.L 2007-10-09: high 357
+    on a 176 close) that would otherwise set the width of the portfolio band.
+    The frontend's clipBadWicks applies the same rule to single stocks."""
+    rel = ((b["High"] - b["Low"]) / b["Close"]).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(rel) < 20:
+        return np.inf  # too little history to call anything a bad print
+    return max(5.0 * float(rel.median()), 0.03)
+
+
+def _portfolio_bars(
+    port_val: pd.Series, w_vec: pd.Series, period_yf: str, conv_closes: pd.DataFrame
+) -> dict | None:
+    """Approximate daily open/high/low and traded value for the portfolio index.
+
+    A portfolio has no traded high or low of its own. The index is rebalanced
+    daily, so day t's value is P(t-1) * sum_i w_i * (1 + r_i,t). Replacing each
+    holding's close by its open/high/low on that day gives the bar:
+
+        X_t = P(t-1) * sum_i w_i * (1 + r_i,t) * X_i,t / C_i,t,   X in {O, H, L}
+
+    with P(t-1) = P(t) / sum_i w_i (1 + r_i,t). X/C is taken in the listing's
+    own currency and r in the display currency, so FX is applied at the close
+    rate. This is exact for a basket whose holdings all peak (or trough) at the
+    same moment and otherwise an upper (lower) bound on the true basket high
+    (low); since every holding's high is at or above its close, the band
+    always contains the close line. Explained in Settings → About, not on the
+    chart (the user's call).
+
+    Volume is the weighted traded value, sum(w * shares * close) in the display
+    currency. If any weighted holding has no cached bars, the result is empty
+    and the client draws a line: a band built from part of the book would be
+    wrong in a way nobody could see.
+    """
+    empty = {"ohlc": [], "volume": []}
+    idx = port_val.index
+    num = {k: pd.Series(0.0, index=idx) for k in ("Open", "High", "Low")}
+    growth = pd.Series(0.0, index=idx)
+    traded = pd.Series(0.0, index=idx)
+    try:
+        for s, w in w_vec.items():
+            if w <= 0:
+                continue
+            bars = _bulk_bars_get(s, period_yf)
+            if bars is None or getattr(bars, "empty", True) or s not in conv_closes:
+                return empty
+            cap = _wick_cap(bars)
+            b = bars.reindex(idx)
+            close = b["Close"].where(b["Close"] > 0)
+            body_hi = np.maximum(b["Open"], close)
+            body_lo = np.minimum(b["Open"], close)
+            ratio = {
+                "Open": b["Open"] / close,
+                "High": np.minimum(b["High"], body_hi * (1 + cap)) / close,
+                "Low": np.maximum(b["Low"], body_lo * (1 - cap)) / close,
+            }
+            conv = conv_closes[s]
+            g = (1.0 + conv.pct_change()).reindex(idx).fillna(1.0)
+            growth += w * g
+            for k in num:
+                # A day this listing did not trade (its own holiday, close
+                # forward-filled in the index) adds no range: ratio 1.
+                num[k] += w * g * ratio[k].fillna(1.0)
+            traded += w * b["Volume"].fillna(0.0) * conv.reindex(idx).fillna(0.0)
+    except (KeyError, ValueError, TypeError):
+        return empty  # a malformed cached frame must never 500 the analytics
+    prev = port_val / growth.where(growth > 0)
+    hi = np.maximum(prev * num["High"], port_val)
+    lo = np.minimum(prev * num["Low"], port_val)
+    op = (prev * num["Open"]).clip(lower=lo, upper=hi)
+    ohlc = [
+        [int(ts.timestamp() * 1000), _sig(o), _sig(h), _sig(low)]
+        for ts, o, h, low in zip(idx, op, hi, lo, strict=True)
+        if np.isfinite(o) and np.isfinite(h) and np.isfinite(low)
+    ]
+    volume = [[ms, _sig(v, 4)] for ms, v in _series_to_points(traded)]
+    return {"ohlc": ohlc, "volume": volume}
 
 
 def _fetch_target_trio(symbol: str) -> dict:
@@ -783,6 +883,7 @@ def analyze_portfolios_multi(
             )
         contribution.sort(key=lambda x: x["contribution"], reverse=True)
 
+        approx = _portfolio_bars(port_val, w_vec, warmup_yf, wide_sym)
         out_one = {
             "period": period_u,
             "display_ccy": display_ccy,
@@ -793,6 +894,10 @@ def analyze_portfolios_multi(
                 "portfolio": _series_to_points(port_val),
                 "drawdown": _series_to_points(drawdown),
                 "sma": sma,
+                # Approximate, from the holdings (see _portfolio_bars); empty
+                # lists when any holding's bars are missing (the key is always
+                # there, so the client knows the payload is current).
+                **approx,
             },
             "stats": pf_stats,
             "benchmarks": benchmarks,

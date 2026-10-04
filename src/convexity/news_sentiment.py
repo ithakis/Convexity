@@ -1569,22 +1569,6 @@ def _assess_symbol(symbol: str, ctx: dict, stage_cb=None, cancel=None) -> tuple[
     return result, outcome
 
 
-def get_news_sentiment(
-    symbol: str, context: dict | None = None, stage_cb=None, cancel=None
-) -> dict | None:
-    """Per-ticker two-engine read. Cache-first, then fetch + assess.
-
-    `context` (optional): {row: {...}, beta, lookback_days, closes} — the row
-    payload feeds quant context into the brief; closes (a shared price frame)
-    spare the Market read a per-symbol download during a refresh."""
-    ctx = context or {}
-    days = _clamp_lookback(ctx.get("lookback_days") or _DEFAULT_LOOKBACK_DAYS)
-    cached = _cache_get(_SENTIMENT_CACHE, f"sentiment|{symbol}|{days}")
-    if isinstance(cached, dict):
-        return cached
-    return _assess_symbol(symbol, ctx, stage_cb=stage_cb, cancel=cancel)[0]
-
-
 def get_cached_sentiment(symbol: str, days: int | None = None) -> dict | None:
     """Cache-only read — safe to call from fetch_one's hot path.
 

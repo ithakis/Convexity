@@ -433,6 +433,13 @@ function setTheme(name) {
   if (STATE.analytics && typeof renderAnalystDashboard === "function") {
     renderAnalystDashboard(STATE.analytics);
   }
+  // The charts write literal theme colours into their SVG (chartColors), so a
+  // theme switch must repaint them or dark mode keeps white candle bodies.
+  const pfHost = document.getElementById("pf-chart-host");
+  if (pfHost && STATE.analytics && !STATE.analytics.error && typeof drawPortfolioChart === "function") {
+    drawPortfolioChart(STATE.analytics, pfHost, document.getElementById("pf-chart-legend"));
+  }
+  if (typeof DETAIL !== "undefined" && DETAIL.data && document.getElementById("m-svg")) renderChart();
 }
 
 /* Paint every control that DISPLAYS the current theme, from the one place that
@@ -539,19 +546,19 @@ function setHeatMode(key, mode) {
 const THEME_COLORS = {
   light: {
     bg:   [255, 255, 255],
-    text: [31, 35, 40],      /* --text #1f2328 */
-    pos:  [31, 136, 61],     /* #1f883d  github success.emphasis */
-    neg:  [207, 34, 46],     /* #cf222e  github danger.emphasis  */
+    text: [11, 34, 57],      /* --text #0b2239 */
+    pos:  [18, 128, 92],     /* --pos  #12805c */
+    neg:  [200, 49, 43],     /* --neg  #c8312b */
     warn: [249, 115, 22],    /* #f97316  vivid orange (Tailwind orange-500) */
-    blue: [37, 99, 235],     /* #2563eb  Tailwind blue-600 */
+    blue: [24, 122, 186],    /* --accent #187aba */
   },
   dark: {
-    bg:   [13, 17, 23],      /* #0d1117 */
-    text: [230, 237, 243],   /* --text #e6edf3 */
-    pos:  [63, 185, 80],     /* #3fb950 */
-    neg:  [248, 81, 73],     /* #f85149 */
+    bg:   [8, 24, 42],       /* --bg #08182a */
+    text: [230, 238, 246],   /* --text #e6eef6 */
+    pos:  [60, 197, 144],    /* --pos #3cc590 */
+    neg:  [240, 103, 95],    /* --neg #f0675f */
     warn: [251, 146, 60],    /* #fb923c  orange-400, lighter on dark bg */
-    blue: [96, 165, 250],    /* #60a5fa  Tailwind blue-400, lighter on dark bg */
+    blue: [75, 163, 227],    /* --accent #4ba3e3 */
   },
   bloomberg: {
     bg:   [0, 0, 0],         /* #000000  pure-black terminal canvas */
@@ -1977,28 +1984,6 @@ async function deleteCustomView(name) {
   } catch (e) { return false; }
 }
 
-async function promptAndSaveCurrentAsNew() {
-  const suggested = isBuiltinView(STATE.activeViewName)
-    ? `${STATE.activeViewName} (custom)` : `${STATE.activeViewName} copy`;
-  const name = (prompt("Save current column layout as:", suggested) || "").trim();
-  if (!name) return;
-  if (isBuiltinView(name)) { alert(`"${name}" is a built-in name; pick another.`); return; }
-  const columns = currentActiveKeys();
-  const heat = getViewHeat(STATE.activeViewName);  // snapshot the live color config
-  try {
-    const r = await fetch("/api/column-views", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({name, columns, heat}),
-    });
-    if (!r.ok) { const j = await r.json().catch(()=>({})); alert(j.error || "Save failed."); return; }
-    const j = await r.json();
-    STATE.customViews = j.custom || STATE.customViews;
-    STATE.builtinOverrides = j.builtin_overrides || STATE.builtinOverrides;
-    setActiveView(name);
-  } catch (e) { alert("Save failed."); }
-}
-
 /* ----- Customize modal ----- */
 let CV_MODAL_STATE = null;  // {selected: Set<key>, order: string[]}
 
@@ -2556,6 +2541,7 @@ function renderModalSkeleton() {
         <div class="m-range-tabs" id="m-range-tabs">
           ${RANGES.map(rg => `<button data-range="${rg}" class="${rg === DETAIL.range ? "active" : ""}">${rg}</button>`).join("")}
         </div>
+        ${chartTypeSelectHtml("m-chart-type")}
         <span class="m-toolbar-spacer"></span>
         ${SMA_PERIODS.map(n => `<button class="m-toolbar-btn m-sma-btn" id="m-toggle-sma${n}" data-sma="${n}" title="${n}-period simple moving average, computed on the chart's bar frequency"><span class="dot" style="background:${SMA_COLORS[n]}"></span>${n}</button>`).join("")}
         <span class="m-toolbar-sep"></span>
@@ -2580,6 +2566,17 @@ function renderModalSkeleton() {
   $("#m-toggle-sp").onclick = () => { DETAIL.showSP = !DETAIL.showSP; renderModalFull(); ensureIntraday(DETAIL.range); };
   $("#m-toggle-sec").onclick = () => { DETAIL.showSector = !DETAIL.showSector; renderModalFull(); ensureIntraday(DETAIL.range); };
   $("#m-toggle-vol").onclick = () => { DETAIL.showVol = !DETAIL.showVol; renderModalFull(); };
+  $("#m-chart-type").onchange = (e) => {
+    setChartType(e.target.value);
+    renderModalFull();
+    // The portfolio chart shares the setting; repaint just that chart.
+    const host = $("#pf-chart-host");
+    if (host && STATE.analytics && !STATE.analytics.error) {
+      drawPortfolioChart(STATE.analytics, host, $("#pf-chart-legend"));
+      const pick = $("#pf-chart-type");
+      if (pick) pick.value = CHART_TYPE;
+    }
+  };
   for (const btn of document.querySelectorAll("#modal .m-sma-btn")) {
     btn.onclick = () => {
       const n = +btn.dataset.sma;
@@ -2741,6 +2738,195 @@ const MAX_CHART_POINTS = 1500;
 /* Edge x-axis labels anchor inward so the first and last dates aren't clipped. */
 const tickAnchor = (i, n) => i === 0 ? "start" : i === n - 1 ? "end" : "middle";
 
+/* ───────────── Chart types, TradingView-style (v1.19) ────────────────────
+ * One app-wide choice (localStorage.chart_type) shared by the stock modal and
+ * the portfolio chart, default "HLC area" — the user's pick. Every type draws
+ * from BARS ({t,o,h,l,c,v}); the hover, the drag-measure and every return the
+ * app reports still run on the exact close series (`stock` / `port`), so a
+ * type change can never change a number. */
+const CHART_TYPES = [["hlc", "HLC area"], ["candles", "Candles"], ["hollow", "Hollow candles"],
+                     ["bars", "OHLC bars"], ["area", "Area"], ["line", "Line"]];
+let CHART_TYPE = (() => {
+  try {
+    const v = localStorage.getItem("chart_type");
+    return CHART_TYPES.some(t => t[0] === v) ? v : "hlc";
+  } catch { return "hlc"; }
+})();
+function setChartType(t) {
+  if (!CHART_TYPES.some(x => x[0] === t)) return;
+  CHART_TYPE = t;
+  try { localStorage.setItem("chart_type", t); } catch { /* private mode */ }
+}
+/* Types that draw a high-low range, so the y-axis must fit the highs/lows. */
+const chartTypeUsesRange = (t) => t === "hlc" || t === "candles" || t === "hollow" || t === "bars";
+function chartTypeSelectHtml(id) {
+  return `<select class="chart-type-sel" id="${id}" aria-label="Chart type" title="Chart type">${
+    CHART_TYPES.map(([k, l]) => `<option value="${k}"${k === CHART_TYPE ? " selected" : ""}>${l}</option>`).join("")
+  }</select>`;
+}
+
+/* Join a close series with its [t,o,h,l] and [t,v] arrays on timestamp. A bar
+   with no OHLC (old cached payload, a gap in Yahoo's data) opens at the
+   previous close, so its candle and volume colour still show the day's move. */
+function buildBars(closes, ohlc, vol) {
+  const O = new Map((ohlc || []).map(p => [p[0], p]));
+  const V = new Map((vol || []).map(p => [p[0], p[1]]));
+  const out = [];
+  let prev = null;
+  for (const [t, c] of closes || []) {
+    const r = O.get(t);
+    const o = r ? r[1] : (prev ?? c);
+    // max/min with o and c: a bad print must never put the close outside its bar.
+    const h = Math.max(r ? r[2] : c, o, c), l = Math.min(r ? r[3] : c, o, c);
+    out.push({ t, t0: t, n: 1, o, h, l, c, v: V.has(t) ? V.get(t) : null });
+    prev = c;
+  }
+  clipBadWicks(out);
+  return out;
+}
+
+/* Yahoo has bad high/low prints (VOD.L 2007-10-09: high 357 on a 176 close),
+   and the range types fit the y-axis to every high and low, so one bad bar
+   flattens the whole chart. Wicks are capped at max(5x the series' median
+   daily range, 3%) beyond the bar's body; the body (open→close) is never
+   touched, so a real gap day still shows in full. */
+function clipBadWicks(bars) {
+  const rel = bars.filter(b => b.c > 0 && b.h > b.l).map(b => (b.h - b.l) / b.c).sort((a, b) => a - b);
+  if (rel.length < 20) return;
+  const k = Math.max(5 * rel[rel.length >> 1], 0.03);
+  for (const b of bars) {
+    const top = Math.max(b.o, b.c), bot = Math.min(b.o, b.c);
+    if (b.h > top * (1 + k)) b.h = top * (1 + k);
+    if (b.l < bot * (1 - k)) b.l = bot * (1 - k);
+  }
+}
+
+/* The (bucketed) bar that contains time t: the first bar whose LAST time is at
+   or after t. A nearest-end search hands the first half of a weekly bucket to
+   the previous week. */
+function barAtTime(bars, t) {
+  let lo = 0, hi = bars.length - 1;
+  if (hi < 0) return null;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (bars[mid].t < t) lo = mid + 1; else hi = mid;
+  }
+  return bars[lo];
+}
+
+/* Put an overlay on the stock's own bar times: the last value at or before
+   each bar. Needed on the ordinal axis, where x is a bar slot — SPY's bars
+   after a London close would otherwise all stack on VOD.L's last slot. */
+function alignOnto(base, pts) {
+  const out = [];
+  let j = 0;
+  for (const [t] of base) {
+    while (j + 1 < pts.length && pts[j + 1][0] <= t) j++;
+    out.push([t, pts[j][1]]);
+  }
+  return out;
+}
+
+/* Merge consecutive bars into at most maxN buckets: first open, max high, min
+   low, last close, summed volume — what TradingView does when it goes from
+   daily to weekly bars. Bucket ends match thinPoints, so the closes agree with
+   the thinned close line drawn over them. */
+function aggregateBars(bars, maxN) {
+  if (!bars || bars.length <= maxN) return bars || [];
+  const step = bars.length / maxN, out = [];
+  let start = 0;
+  for (let i = 0; i < maxN; i++) {
+    const end = Math.min(bars.length - 1, Math.ceil((i + 1) * step) - 1);
+    if (end < start) continue;
+    let h = -Infinity, l = Infinity, v = null;
+    for (let j = start; j <= end; j++) {
+      const b = bars[j];
+      if (b.h > h) h = b.h;
+      if (b.l < l) l = b.l;
+      if (b.v != null) v = (v || 0) + b.v;
+    }
+    out.push({ t: bars[end].t, t0: bars[start].t, n: end - start + 1, o: bars[start].o, h, l, c: bars[end].c, v });
+    start = end + 1;
+  }
+  return out;
+}
+
+/* Theme colours the chart types use: up/down from --pos/--neg, the HLC high
+   line from --hlc-hi (cyan, as on TradingView), the close line from --accent. */
+function chartColors() {
+  const css = getComputedStyle(document.documentElement);
+  const v = (k) => css.getPropertyValue(k).trim();
+  return { up: v("--pos"), down: v("--neg"), upRgb: v("--pos-rgb"), downRgb: v("--neg-rgb"),
+           hi: v("--hlc-hi") || v("--accent"), close: v("--accent"), bg: v("--bg-canvas") };
+}
+
+/* The price layer for every type except Area, whose fill depends on the
+   caller (the modal colours it by direction, the portfolio by accent).
+   `closes` is the exact close series, drawn as the HLC close line and the
+   Line type; `bars` are the (possibly bucketed) bars. */
+function priceLayerSvg(type, bars, closes, x, y, plotW, col) {
+  const path = (pts, k) => pts.map((p, i) => (i ? "L" : "M") + x(p.t ?? p[0]).toFixed(1) + "," + y(k ? p[k] : p[1]).toFixed(1)).join(" ");
+  if (type === "line") return `<path d="${path(closes)}" fill="none" stroke="${col.close}" stroke-width="1.8"/>`;
+  if (type === "hlc") {
+    // Two bands meeting at the close: high→close tinted with the high colour,
+    // close→low with the down colour, then the three lines on top.
+    const hiPts = bars.map(b => `${x(b.t).toFixed(1)},${y(b.h).toFixed(1)}`);
+    const loPts = bars.map(b => `${x(b.t).toFixed(1)},${y(b.l).toFixed(1)}`);
+    const cPts = bars.map(b => `${x(b.t).toFixed(1)},${y(b.c).toFixed(1)}`);
+    const rev = (a) => a.slice().reverse().join(" ");
+    return `<polygon points="${hiPts.join(" ")} ${rev(cPts)}" fill="${col.hi}" opacity="0.20"/>
+      <polygon points="${cPts.join(" ")} ${rev(loPts)}" fill="${col.down}" opacity="0.16"/>
+      <path d="${path(bars, "h")}" fill="none" stroke="${col.hi}" stroke-width="1.2"/>
+      <path d="${path(bars, "l")}" fill="none" stroke="${col.down}" stroke-width="1.2"/>
+      <path d="${path(closes)}" fill="none" stroke="${col.close}" stroke-width="1.8"/>`;
+  }
+  const bw = Math.max(1, Math.min(14, plotW / Math.max(1, bars.length) * 0.66));
+  let s = "";
+  for (const b of bars) {
+    const up = b.c >= b.o, c = up ? col.up : col.down, cx = x(b.t);
+    const yo = y(b.o), yc = y(b.c), yh = y(b.h), yl = y(b.l);
+    if (type === "bars") {
+      s += `<path d="M${cx.toFixed(1)},${yh.toFixed(1)}V${yl.toFixed(1)}M${(cx - bw / 2).toFixed(1)},${yo.toFixed(1)}H${cx.toFixed(1)}M${cx.toFixed(1)},${yc.toFixed(1)}H${(cx + bw / 2).toFixed(1)}" stroke="${c}" stroke-width="1.2" fill="none"/>`;
+      continue;
+    }
+    const top = Math.min(yo, yc), bh = Math.max(1, Math.abs(yo - yc));
+    const hollow = type === "hollow" && up;
+    s += `<line x1="${cx.toFixed(1)}" x2="${cx.toFixed(1)}" y1="${yh.toFixed(1)}" y2="${yl.toFixed(1)}" stroke="${c}" stroke-width="1"/>` +
+         `<rect x="${(cx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${hollow ? col.bg : c}" stroke="${c}" stroke-width="${hollow ? 1 : 0}"/>`;
+  }
+  return s;
+}
+
+/* Volume pane: one bar per (bucketed) bar, green when that interval closed at
+   or above its open and red when below — TradingView's default colouring. */
+function volumePaneSvg(bars, x, top, h, plotW, col) {
+  const vmax = Math.max(0, ...bars.map(b => b.v || 0));
+  if (!(vmax > 0)) return "";
+  const bw = Math.max(1, plotW / Math.max(1, bars.length) * 0.7);
+  return bars.map(b => {
+    if (!b.v) return "";
+    const bh = Math.max(0.5, b.v / vmax * h);
+    return `<rect x="${(x(b.t) - bw / 2).toFixed(1)}" y="${(top + h - bh).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="rgba(${b.c >= b.o ? col.upRgb : col.downRgb},0.5)"/>`;
+  }).join("");
+}
+
+/* Tooltip rows for the bar under the crosshair: O/H/L/C for the range types,
+   then volume. `fmt` formats a price, `fmtV` a volume. */
+function barTipRows(bar, type, fmt, fmtV) {
+  if (!bar) return "";
+  // A bucketed bar (weekly candles on 5Y, volume on long ranges) says which
+  // days it covers, since the date above it is just the hovered close.
+  let s = bar.n > 1
+    ? `<div class="tt-row"><span>Bar</span><b>${fmtDateMDY(bar.t0)} – ${fmtDateMDY(bar.t)}</b></div>` : "";
+  if (chartTypeUsesRange(type)) {
+    for (const [k, l] of [["o", "Open"], ["h", "High"], ["l", "Low"], ["c", "Close"]]) {
+      s += `<div class="tt-row"><span>${l}</span><b>${fmt(bar[k])}</b></div>`;
+    }
+  }
+  if (bar.v != null) s += `<div class="tt-row"><span>Volume</span><b>${fmtV(bar.v)}</b></div>`;
+  return s;
+}
+
 /* Drag-to-measure, shared by both charts — TradingView-style: while the
  * button is held, a shaded band and a floating badge show the return of every
  * plotted line over the dragged span; both vanish on release.
@@ -2758,7 +2944,7 @@ function attachRangeBrush({ svg, overlay, selRect, badge, geom: g, lines, onUpda
   const toTime = (clientX) => {
     const r = svg.getBoundingClientRect();
     const px = Math.max(g.padL, Math.min(g.W - g.padR, (clientX - r.left) * (g.W / r.width)));
-    const t = g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
+    const t = g.xInv ? g.xInv(px) : g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0);
     return main[nearestPointIdx(main, t)][0];    // snap to a real bar
   };
   let anchor = null;
@@ -2826,13 +3012,13 @@ function activeChartSeries() {
   if (intra && intra.history && intra.history.length >= 2) {
     const b = intra.benchmarks || {};
     return {
-      full: intra.history, vol: intra.volume || [], interval: intra.interval,
+      full: intra.history, ohlc: intra.ohlc || [], vol: intra.volume || [], interval: intra.interval,
       spy: b.SPY || null, sec: (d.sector_etf && b[d.sector_etf]) || null,
       intraday: true,
     };
   }
   return {
-    full: d.history, vol: d.volume || [], interval: "1d",
+    full: d.history, ohlc: d.ohlc || [], vol: d.volume || [], interval: "1d",
     spy: d.benchmark_spy || null, sec: d.benchmark_sector || null,
     intraday: false,
   };
@@ -2860,7 +3046,18 @@ function renderChart() {
 
   // Slice volume + benchmarks aligned to stock's window
   const t0 = stock[0][0], t1 = stock[stock.length - 1][0];
-  const vol = thinPoints((src.vol || []).filter(p => p[0] >= t0 && p[0] <= t1), MAX_CHART_POINTS);
+  const type = CHART_TYPE, usesRange = chartTypeUsesRange(type);
+  const W = wrap.clientWidth || 800;
+  const padL = 48, padR = 10, padT = 12;
+  const plotW = W - padL - padR;
+  // Bars for the window. Candles need room to read, so they are bucketed to
+  // ~5px each (daily → weekly on 5Y, like TradingView); the HLC band keeps
+  // the close line's resolution; volume gets ~4px bars on every type.
+  const allBars = buildBars(sliceHistory(src.full, range), src.ohlc, src.vol);
+  const candleLike = usesRange && type !== "hlc";
+  const drawBars = aggregateBars(allBars, candleLike ? Math.max(20, Math.floor(plotW / 5)) : MAX_CHART_POINTS);
+  const volBars = candleLike ? drawBars : aggregateBars(allBars, Math.max(20, Math.floor(plotW / 4)));
+  const volOn = DETAIL.showVol && volBars.some(b => b.v);
   let spy = null, sec = null;
   if (DETAIL.showSP && src.spy) {
     const s = src.spy.filter(p => p[0] >= t0 && p[0] <= t1);
@@ -2881,12 +3078,28 @@ function renderChart() {
     if (s.length >= 2) smas.push({ n, pts: thinPoints(s, MAX_CHART_POINTS) });
   }
 
-  // Geometry
-  const W = wrap.clientWidth || 800;
-  const H = 320;
-  const padL = 48, padR = 10, padT = 12, padB = DETAIL.showVol && vol.length ? 60 : 22;
-  const chartH = H - padT - padB;
-  const xScale = (t) => padL + ((t - t0) / Math.max(1, t1 - t0)) * (W - padL - padR);
+  // Geometry: price pane, then (if on) a separate volume pane, then the dates.
+  const chartH = 280, volGap = volOn ? 10 : 0, volH = volOn ? 64 : 0, xLabH = 22;
+  const H = padT + chartH + volGap + volH + xLabH;
+  const padB = H - padT - chartH;
+  wrap.style.height = H + "px";
+  // Intraday bars exist only during sessions; on a time axis every night and
+  // weekend is a blank gap and the candles clump into islands. Like
+  // TradingView, intraday ranges use an ORDINAL axis — one slot per bar of the
+  // close series — and hand hover/measure the inverse (xInv). Daily ranges keep
+  // the time axis, where a weekend is a sliver.
+  const ordinal = !!src.intraday;
+  const lastI = Math.max(1, stock.length - 1);
+  const xScale = ordinal
+    ? (t) => padL + (nearestPointIdx(stock, t) / lastI) * plotW
+    : (t) => padL + ((t - t0) / Math.max(1, t1 - t0)) * plotW;
+  const xInv = ordinal
+    ? (px) => stock[clamp(Math.round((px - padL) / plotW * lastI), 0, lastI)][0]
+    : null;
+  if (ordinal) {
+    if (spy) spy = alignOnto(stock, spy);
+    if (sec) sec = alignOnto(stock, sec);
+  }
 
   // y range from stock + visible benchmarks
   let lo = Infinity, hi = -Infinity;
@@ -2894,17 +3107,11 @@ function renderChart() {
   if (spy) for (const p of spy) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   if (sec) for (const p of sec) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   for (const s of smas) for (const p of s.pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  if (usesRange) for (const b of drawBars) { if (b.l < lo) lo = b.l; if (b.h > hi) hi = b.h; }
   const rng = (hi - lo) || 1;
   const padPct = 0.05;
   lo -= rng * padPct; hi += rng * padPct;
   const yScale = (v) => padT + (1 - (v - lo) / (hi - lo)) * chartH;
-
-  // Volume scale
-  let volMax = 1;
-  if (vol.length) for (const p of vol) if (p[1] > volMax) volMax = p[1];
-  const volH = 32;
-  const volTop = H - padB + 18;
-  const volScale = (v) => (v / volMax) * volH;
 
   // Main path
   const buildPath = (pts) => {
@@ -2918,15 +3125,15 @@ function renderChart() {
   };
   const stockPath = buildPath(stock);
   const stockUp = stock[stock.length - 1][1] >= stock[0][1];
-  const css = getComputedStyle(document.documentElement);
-  const posCol = css.getPropertyValue("--pos").trim();
-  const negCol = css.getPropertyValue("--neg").trim();
-  const posRgb = css.getPropertyValue("--pos-rgb").trim();
-  const negRgb = css.getPropertyValue("--neg-rgb").trim();
-  const stroke = stockUp ? posCol : negCol;
-  const fillRgb = stockUp ? posRgb : negRgb;
+  const col = chartColors();
+  const stroke = stockUp ? col.up : col.down;
+  const fillRgb = stockUp ? col.upRgb : col.downRgb;
   const baseY = yScale(lo);
   const area = stockPath + ` L ${xScale(t1).toFixed(1)},${baseY.toFixed(1)} L ${xScale(t0).toFixed(1)},${baseY.toFixed(1)} Z`;
+  const priceSvg = type === "area"
+    ? `<path d="${area}" fill="url(#g-area)"/><path d="${stockPath}" fill="none" stroke="${stroke}" stroke-width="1.8"/>`
+    : priceLayerSvg(type, drawBars, stock, xScale, yScale, plotW, col);
+  const volTop = padT + chartH + volGap;
 
   // Y-axis ticks (4)
   const ticks = [];
@@ -2938,7 +3145,7 @@ function renderChart() {
   const xTicks = [];
   const N_XT = 5;
   for (let i = 0; i <= N_XT; i++) {
-    const t = t0 + (t1 - t0) * (i / N_XT);
+    const t = ordinal ? stock[Math.round(lastI * i / N_XT)][0] : t0 + (t1 - t0) * (i / N_XT);
     xTicks.push({ t, x: xScale(t) });
   }
   const fmtTickDate = (ts) => {
@@ -2955,16 +3162,12 @@ function renderChart() {
     return v.toFixed(2);
   };
 
-  // Volume bars
-  let volSvg = "";
-  if (DETAIL.showVol && vol.length) {
-    const bw = Math.max(1, (W - padL - padR) / Math.max(vol.length, 1) - 0.5);
-    volSvg = vol.map(p => {
-      const x = xScale(p[0]) - bw/2;
-      const h = volScale(p[1]);
-      return `<rect x="${x.toFixed(1)}" y="${(volTop + volH - h).toFixed(1)}" width="${bw.toFixed(2)}" height="${h.toFixed(1)}" fill="rgba(${fillRgb},0.35)"/>`;
-    }).join("");
-  }
+  // Volume pane — its own band under the price pane, a hairline above it.
+  const volSvg = volOn
+    ? `<line x1="${padL}" x2="${W - padR}" y1="${(volTop - volGap / 2).toFixed(1)}" y2="${(volTop - volGap / 2).toFixed(1)}" stroke="var(--border)" stroke-width="0.6"/>
+       <text x="${padL - 6}" y="${volTop + 9}" font-size="9.5" fill="var(--muted)" text-anchor="end">Vol</text>
+       ${volumePaneSvg(volBars, xScale, volTop, volH, plotW, col)}`
+    : "";
 
   const spyPath = spy ? buildPath(spy) : null;
   const secPath = sec ? buildPath(sec) : null;
@@ -2982,15 +3185,14 @@ function renderChart() {
       </defs>
       ${ticks.map(t => `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>`).join("")}
       ${ticks.map(t => `<text x="${padL-6}" y="${t.y+3}" font-size="10" fill="var(--muted)" text-anchor="end">${fmtTickVal(t.v)}</text>`).join("")}
-      ${xTicks.map((t, i) => `<text x="${t.x}" y="${H-padB+12}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtTickDate(t.t)}</text>`).join("")}
-      <path d="${area}" fill="url(#g-area)"/>
+      ${xTicks.map((t, i) => `<text x="${t.x}" y="${H - 7}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtTickDate(t.t)}</text>`).join("")}
+      ${volSvg}
+      ${priceSvg}
       ${spyPath ? `<path d="${spyPath}" fill="none" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
       ${secPath ? `<path d="${secPath}" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
       ${smaSvg}
-      <path d="${stockPath}" fill="none" stroke="${stroke}" stroke-width="1.8"/>
-      ${volSvg}
       <rect class="sel-rect" id="m-sel" x="0" y="${padT}" width="0" height="${chartH}" style="display:none"/>
-      <line class="crosshair-line" id="m-cross-v" x1="0" y1="${padT}" x2="0" y2="${padT+chartH}"/>
+      <line class="crosshair-line" id="m-cross-v" x1="0" y1="${padT}" x2="0" y2="${padT + chartH + volGap + volH}"/>
       <line class="crosshair-line" id="m-cross-h" x1="${padL}" y1="0" x2="${W-padR}" y2="0"/>
       <circle class="crosshair-dot" id="m-dot" r="4" cx="0" cy="0"/>
       ${spyPath ? `<circle class="crosshair-dot sp" id="m-dot-sp" r="3.5" cx="0" cy="0"/>` : ""}
@@ -3002,8 +3204,8 @@ function renderChart() {
   `;
 
   // Save geometry + data for interaction
-  DETAIL.geom = { W, H, padL, padR, padT, padB, chartH, xScale, yScale, stock, spy, sec,
-                  t0, t1, fillRgb, interval: src.interval };
+  DETAIL.geom = { W, H, padL, padR, padT, padB, chartH, xScale, xInv, yScale, stock, spy, sec,
+                  t0, t1, fillRgb, interval: src.interval, bars: drawBars, volBars, type };
 
   renderChartInfoDefault();
   attachChartInteraction();
@@ -3045,9 +3247,17 @@ function attachChartInteraction() {
     g.sec && { label: DETAIL.data.sector_etf || "Sector", pts: g.sec, dot: $("#m-dot-sec") },
   ].filter(Boolean);
   const common = { svg: $("#m-svg"), overlay: $("#m-overlay"), geom: g, lines };
+  const tipBars = chartTypeUsesRange(g.type) ? g.bars : g.volBars;
   attachChartHover({
     ...common, tt: $("#m-tt"), cv: $("#m-cross-v"), ch: $("#m-cross-h"),
-    head: (p) => `<div class="tt-row"><span>Price</span><b>${fmtMoney(p[1], DETAIL.data.currency)}</b></div>`,
+    head: (p) => {
+      // The bar under the crosshair (bucketed on long ranges): O/H/L/C for the
+      // range types and its volume; the Line/Area types show the close.
+      const bar = barAtTime(tipBars, p[0]);
+      const money = (v) => fmtMoney(v, DETAIL.data.currency);
+      const price = chartTypeUsesRange(g.type) ? "" : `<div class="tt-row"><span>Price</span><b>${money(p[1])}</b></div>`;
+      return price + barTipRows(bar, g.type, money, fmtCompactNum);
+    },
   });
   attachRangeBrush({ ...common, selRect: $("#m-sel"), badge: $("#m-measure"), onUpdate: renderModalPriceBlock });
 }
@@ -3061,7 +3271,7 @@ function attachChartHover({ svg, overlay, tt, cv, ch, geom: g, lines, head }) {
   overlay.addEventListener("mousemove", (e) => {
     const r = svg.getBoundingClientRect();
     const px = Math.max(g.padL, Math.min(g.W - g.padR, (e.clientX - r.left) * (g.W / r.width)));
-    const i = nearestPointIdx(main, g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0));
+    const i = nearestPointIdx(main, g.xInv ? g.xInv(px) : g.t0 + (px - g.padL) / (g.W - g.padL - g.padR) * (g.t1 - g.t0));
     if (i < 0) return;
     const t = main[i][0], x = g.xScale(t), y = g.yScale(main[i][1]);
     cv.setAttribute("x1", x); cv.setAttribute("x2", x);
@@ -3090,11 +3300,6 @@ function attachChartHover({ svg, overlay, tt, cv, ch, geom: g, lines, head }) {
 }
 
 /* ---- Information sections ---- */
-function fmtPctRaw(v, digits) {
-  if (v == null || !isFinite(v)) return "—";
-  const s = v >= 0 ? "+" : "";
-  return s + Number(v).toFixed(digits == null ? 2 : digits) + "%";
-}
 function pctCell(v) {
   if (v == null || !isFinite(v)) return `<td class="na">—</td>`;
   const cls = v >= 0 ? "pos" : "neg";
@@ -3555,6 +3760,7 @@ let STATE = {
   showNdx: false,
   showSec: false,
   showDd: true,
+  showVol: true,          // the portfolio chart's volume strip (traded value of the holdings)
   pfSma: CHART_SMA,     // same object as DETAIL.sma — see CHART_SMA
   analytics: null,
   analyticsLoading: false,
@@ -3902,7 +4108,7 @@ async function loadAllAtStartup() {
   wireColumnViewBar();
   renderTabs();
   // Restore the last open view if any.
-  if (LAST_VIEW && VIEWS[LAST_VIEW]) {
+  if (LAST_VIEW && (VIEWS[LAST_VIEW] || WATCHLISTS[LAST_VIEW])) {
     await activateTab(LAST_VIEW, {silent: true});
   } else {
     // No prior view — show the editor in ad-hoc mode but keep the panel closed.
@@ -4234,6 +4440,10 @@ async function commitEntries(next) {
         delete VIEWS[AD_HOC_KEY];
       }
       STATE.activeView = name;
+      // The first edit names the tab: make it the one a reload reopens.
+      LAST_VIEW = name;
+      fetch("/api/last-view", {method: "POST", headers: {"Content-Type": "application/json"},
+                               body: JSON.stringify({name})}).catch(() => {});
     }
     if (VIEWS[name]) VIEWS[name].stale = true;
     setEntries(next);
@@ -4423,39 +4633,7 @@ function openExportPopup(fname, url) {
 /* ===========================================================================
  * Portfolio analytics — weights, request, render, chart
  * --------------------------------------------------------------------------- */
-function computeWeights() {
-  const rows = DATA.filter(r => r && r.symbol);
-  if (!rows.length) return {};
-  if (STATE.mode === "equal") {
-    const w = 1 / rows.length;
-    return Object.fromEntries(rows.map(r => [r.symbol, w]));
-  }
-  if (STATE.mode === "custom" && STATE.customWeights) {
-    // Validate and renormalize over the current row set.
-    const raw = {};
-    let total = 0;
-    for (const r of rows) {
-      const v = Number(STATE.customWeights[r.symbol] || 0);
-      raw[r.symbol] = isFinite(v) && v >= 0 ? v : 0;
-      total += raw[r.symbol];
-    }
-    if (total <= 0) {
-      const w = 1 / rows.length;
-      return Object.fromEntries(rows.map(r => [r.symbol, w]));
-    }
-    return Object.fromEntries(rows.map(r => [r.symbol, raw[r.symbol] / total]));
-  }
-  // Cap-weighted (default).
-  const caps = rows.map(r => Math.max(0, Number(r.market_cap) || 0));
-  const total = caps.reduce((a, b) => a + b, 0);
-  if (total > 0) return Object.fromEntries(rows.map((r, i) => [r.symbol, caps[i] / total]));
-  // Fallback to equal if no caps.
-  const w = 1 / rows.length;
-  return Object.fromEntries(rows.map(r => [r.symbol, w]));
-}
 
-function capWeightsFromData() { return capWeightsOf(DATA.filter(r => r && r.symbol)); }
-function equalWeightsFromData() { return equalWeightsOf(DATA.filter(r => r && r.symbol)); }
 function analyticsCacheKey(mode, period) { return mode + "|" + period + "|" + FX_QUOTE; }
 
 let _analyticsReqId = 0;
@@ -4476,7 +4654,10 @@ async function requestAnalytics(opts) {
   // backfills it — no spinner. Once the new shape is stored the short-circuit
   // below takes over, so a tab never refetches in a loop.
   const cached = tabMap[key];
-  const backfill = !!(cached && !opts.force && !cached.benchmarks);
+  // Payloads saved before v1.19 also lack `series.ohlc` (the chart bars); the
+  // server always sends the key now (empty when no bars), so this runs once.
+  const backfill = !!(cached && !opts.force &&
+                      (!cached.benchmarks || !(cached.series && "ohlc" in cached.series)));
   if (cached && !opts.force && !backfill) {
     STATE.analytics = cached;
     STATE.analyticsLoading = false;
@@ -4553,7 +4734,7 @@ function renderAnalyticsBody() {
   body.innerHTML = `
     <div class="pf-grid">
       <div class="pf-card">
-        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${labelForMode(STATE.mode)} · ${escapeHtml(a.display_ccy || FX_QUOTE)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span></h4>
+        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${labelForMode(STATE.mode)} · ${escapeHtml(a.display_ccy || FX_QUOTE)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span>${chartTypeSelectHtml("pf-chart-type")}</h4>
         <div class="pf-chart-wrap" id="pf-chart-host"></div>
         <div class="pf-chart-legend" id="pf-chart-legend"></div>
       </div>
@@ -4584,6 +4765,10 @@ function renderAnalyticsBody() {
     </div>
   `;
   drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
+  $("#pf-chart-type").onchange = (e) => {
+    setChartType(e.target.value);
+    drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
+  };
   wireBenchSelect($("#pf-bench"), (k) => {
     if (k === STATE.bench) return;
     STATE.bench = k;
@@ -5542,12 +5727,23 @@ function drawPortfolioChart(a, hostEl, legendEl) {
   const dd = STATE.showDd ? (series.drawdown || []) : [];
 
   const W = 720, H = 220, padL = 36, padR = 12, padT = 8, padB = 22;
+  const plotW = W - padL - padR;
   const t0 = port[0][0], t1 = port[port.length - 1][0];
-  const xScale = (t) => padL + ((t - t0) / Math.max(1, t1 - t0)) * (W - padL - padR);
+  const xScale = (t) => padL + ((t - t0) / Math.max(1, t1 - t0)) * plotW;
+  // The portfolio's bars are approximate, built from the holdings' bars by
+  // analytics._portfolio_bars (explained in Settings → About, not here). An
+  // old cached payload has none, and the range types then fall back to Line.
+  const hasBars = (series.ohlc || []).length >= 2;
+  const type = !hasBars && chartTypeUsesRange(CHART_TYPE) ? "line" : CHART_TYPE;
+  const allBars = buildBars(port, series.ohlc, series.volume);
+  const candleLike = chartTypeUsesRange(type) && type !== "hlc";
+  const drawBars = aggregateBars(allBars, candleLike ? Math.floor(plotW / 4) : MAX_CHART_POINTS);
+  const volBars = candleLike ? drawBars : aggregateBars(allBars, Math.floor(plotW / 3));
   let lo = Infinity, hi = -Infinity;
   for (const pts of [port, ...benches.map(b => b.pts), ...smas.map(s => s.pts)]) {
     for (const p of pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
   }
+  if (chartTypeUsesRange(type)) for (const b of drawBars) { if (b.l < lo) lo = b.l; if (b.h > hi) hi = b.h; }
   const pad = (hi - lo) * 0.06 || 1;
   lo -= pad; hi += pad;
   const yScale = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
@@ -5560,13 +5756,17 @@ function drawPortfolioChart(a, hostEl, legendEl) {
     if (STATE.period === "YTD" || STATE.period === "1Y") return d.toLocaleDateString(undefined, {month: "short", year: "2-digit"});
     return d.toLocaleDateString(undefined, {year: "numeric"});
   };
+  const col = chartColors();
   const svg = `<svg id="pf-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
     ${yTicks.map(v => `<line x1="${padL}" y1="${yScale(v).toFixed(1)}" x2="${W-padR}" y2="${yScale(v).toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>
       <text x="${padL-6}" y="${(yScale(v)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${v.toFixed(0)}</text>`).join("")}
     ${xTicks.map((t, i) => `<text x="${xScale(t).toFixed(1)}" y="${H-padB+12}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtT(t)}</text>`).join("")}
     ${benches.map(b => `<path d="${path(b.pts)}" fill="none" stroke="${b.color}" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>`).join("")}
     ${smas.map(s => `<path d="${path(s.pts)}" fill="none" stroke="${SMA_COLORS[s.n]}" stroke-width="1.2" opacity="0.9"/>`).join("")}
-    <path d="${path(port)}" fill="none" stroke="var(--accent)" stroke-width="2"/>
+    ${type === "area"
+      ? `<path d="${path(port)} L${xScale(t1).toFixed(1)},${yScale(lo).toFixed(1)} L${xScale(t0).toFixed(1)},${yScale(lo).toFixed(1)} Z" fill="rgba(var(--accent-rgb),0.12)"/>
+         <path d="${path(port)}" fill="none" stroke="var(--accent)" stroke-width="2"/>`
+      : priceLayerSvg(type, drawBars, port, xScale, yScale, plotW, col)}
     <rect class="pf-sel" id="pf-sel" x="0" y="${padT}" width="0" height="${H-padT-padB}" style="display:none"/>
     <line class="pf-cross" id="pf-cv" x1="0" x2="0" y1="${padT}" y2="${H-padB}"/>
     <line class="pf-cross" id="pf-ch" y1="0" y2="0" x1="${padL}" x2="${W-padR}"/>
@@ -5582,26 +5782,41 @@ function drawPortfolioChart(a, hostEl, legendEl) {
     const area = path(dd, y2) + ` L${xScale(t1).toFixed(1)},${y2(0).toFixed(1)} L${xScale(dd[0][0]).toFixed(1)},${y2(0).toFixed(1)} Z`;
     ddSvg = `<svg class="pf-dd-svg" viewBox="0 0 ${W} ${H2}" preserveAspectRatio="none">
       <line x1="${padL}" y1="${y2(0).toFixed(1)}" x2="${W-padR}" y2="${y2(0).toFixed(1)}" stroke="var(--border)" stroke-width="0.5"/>
-      <path d="${area}" fill="rgba(248,81,73,0.18)" stroke="#f85149" stroke-width="1.3"/>
+      <path d="${area}" fill="rgba(${col.downRgb},0.18)" stroke="${col.down}" stroke-width="1.3"/>
       <text x="${padL-6}" y="${(y2(minDd)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${minDd.toFixed(0)}%</text>
       <text x="${padL-6}" y="${(y2(0)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">0</text>
     </svg>`;
   }
-  hostEl.innerHTML = svg + ddSvg + `<div class="pf-tt" id="pf-tt"></div><div class="chart-measure" id="pf-measure"></div>`;
+  // Volume strip between the price chart and the drawdown, same x-scale.
+  let volSvg = "";
+  if (STATE.showVol && volBars.some(b => b.v)) {
+    const H3 = 56;
+    volSvg = `<svg class="pf-vol-svg" viewBox="0 0 ${W} ${H3}" preserveAspectRatio="none">
+      <text x="${padL - 6}" y="10" font-size="10" fill="var(--muted)" text-anchor="end">Vol</text>
+      ${volumePaneSvg(volBars, xScale, 2, H3 - 4, plotW, col)}
+    </svg>`;
+  }
+  hostEl.innerHTML = svg + volSvg + ddSvg + `<div class="pf-tt" id="pf-tt"></div><div class="chart-measure" id="pf-measure"></div>`;
 
   // The Nasdaq / Sector-mix entries are listed under Risk & Return instead.
   const bench = benches.find(b => b.key === "SPY");
   legendEl.innerHTML = [
     `<span><i style="background:var(--accent)"></i> Portfolio</span>`,
     bench && `<span><i style="background:${bench.color}"></i> ${escapeHtml(bench.label)}</span>`,
-    dd.length && `<span><i style="background:#f85149"></i> Drawdown</span>`,
+    dd.length && `<span><i style="background:var(--neg)"></i> Drawdown</span>`,
     ...smas.map(s => `<span><i style="background:${SMA_COLORS[s.n]}"></i> SMA ${s.n} · daily</span>`),
   ].filter(Boolean).join("");
 
   const lines = [{ label: "Portfolio", pts: port, dot: $("#pf-dot") },
                  ...benches.map((b, i) => ({ label: b.label, pts: b.pts, dot: $(`#pf-dot-${i}`) }))];
   const common = { svg: $("#pf-svg"), overlay: $("#pf-overlay"), geom: { W, padL, padR, t0, t1, xScale, yScale }, lines };
-  attachChartHover({ ...common, tt: $("#pf-tt"), cv: $("#pf-cv"), ch: $("#pf-ch") });
+  const tipBars = chartTypeUsesRange(type) ? drawBars : volBars;
+  const ccy = a.display_ccy || FX_QUOTE;
+  attachChartHover({
+    ...common, tt: $("#pf-tt"), cv: $("#pf-cv"), ch: $("#pf-ch"),
+    head: (p) => hasBars ? barTipRows(barAtTime(tipBars, p[0]), type,
+                                      (v) => v.toFixed(2), (v) => fmtCompactMoney(v, ccy)) : "",
+  });
   attachRangeBrush({ ...common, selRect: $("#pf-sel"), badge: $("#pf-measure") });
 }
 
@@ -5753,13 +5968,6 @@ function updateWeightsSum() {
   const pct = total * 100;
   el.textContent = pct.toFixed(2) + "%";
   el.className = "pf-weights-sum" + (Math.abs(pct - 100) < 0.5 ? " good" : " bad");
-}
-
-function normalizeDraft() {
-  const total = WEIGHTS_DRAFT.reduce((a, r) => a + r.weight, 0);
-  if (total <= 0) return;
-  for (const r of WEIGHTS_DRAFT) r.weight = r.weight / total;
-  syncWeightsInputs(); updateWeightsSum();
 }
 
 function resetDraftToEqual() {
@@ -6334,13 +6542,19 @@ async function coAdd() {
   coRender();
 }
 
+function coClear() {
+  CO.picked.clear(); CO.editing = null;
+  $("#co-out").hidden = true;
+  $("#co-ai").hidden = true;
+}
+
 $("#co-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const text = $("#co-q").value.trim();
   if (text) coSearch({q: text});
+  else coClear();   // an empty box + Enter dismisses the results (the old Close button)
 });
 $("#co-more").onclick = coFullOpen;
-$("#co-close").onclick = () => { $("#co-out").hidden = true; };
 $("#co-add").onclick = coAdd;
 $("#co-chips").addEventListener("click", (e) => {
   const btn = e.target.closest(".co-chip");
@@ -6725,16 +6939,6 @@ function updateNsProgressJob(id, patch) {
     updateNsProgCount();
   }
   job.fill.style.width = (job.frac * 100).toFixed(1) + "%";
-}
-
-function nsProgressError(message) {
-  if (!NS.prog) return;
-  NS.prog.error = true;
-  const foot = $("#ns-prog-foot");
-  if (foot) {
-    foot.textContent = `Refresh failed: ${message}`;
-    foot.classList.add("ns-prog-err");
-  }
 }
 
 function closeNsProgress() {
@@ -8402,6 +8606,7 @@ wireOverlayPill("#pf-show-bench", "showBench");
 wireOverlayPill("#pf-show-ndx", "showNdx");
 wireOverlayPill("#pf-show-sec", "showSec");
 wireOverlayPill("#pf-show-dd", "showDd");
+wireOverlayPill("#pf-show-vol", "showVol");
 
 /* SMA pills live one level down (STATE.pfSma[n]) and persist to the same
    localStorage key the detail chart's toggles use, so turning SMA 50 on in one
@@ -8923,7 +9128,6 @@ function mptRender() {
 // MPT._proj is the shared projection used by every chart draw call and the
 // hit-test. Single source of truth — both canvases agree on every coord by
 // construction, eliminating the SVG/canvas drift the old 3-layer chart had.
-function mptCurrentScale() { return MPT._proj; }
 
 // Display risk accessors. The chart x-axis + all panels show the 30-day
 // (10d→30d, FRTB liquidity-horizon) VaR/CVaR loss. `cvar30`/`var30` come from the
@@ -10577,7 +10781,6 @@ const SETTINGS_SECTIONS = [
     id: "general",
     group: "Settings",
     label: "General",
-    icon: "⚙",
     description: "Appearance and table layout. These preferences are stored in this "
                + "browser and apply to every portfolio tab.",
     keywords: ["appearance", "preferences", "display", "theme", "colours", "colors", "layout"],
@@ -10593,7 +10796,6 @@ const SETTINGS_SECTIONS = [
     id: "columns",
     group: "Settings",
     label: "Column Presets",
-    icon: "▤",
     description: "The presets on the Holdings column bar. Built-in presets are edited in place "
                + "and can be reverted to their factory layout here at any time; your own presets "
                + "can be deleted.",
@@ -10611,7 +10813,6 @@ const SETTINGS_SECTIONS = [
     id: "models",
     group: "Data & models",
     label: "Models & Data",
-    icon: "◉",
     description: "Whether the two news engines are actually running — the News read (LLM) "
                + "and the Market read (statistical model) — and which news providers are "
                + "configured. If reads are missing or stale, the reason is here.",
@@ -10640,7 +10841,6 @@ const SETTINGS_SECTIONS = [
     id: "keys",
     group: "Data & models",
     label: "API keys",
-    icon: "⚿",
     description: "The two free keys News needs: Finnhub for headlines and NVIDIA NIM for the "
                + "News read. They are stored in config.json in the data folder (readable only "
                + "by you) and take effect immediately — no restart.",
@@ -10656,7 +10856,6 @@ const SETTINGS_SECTIONS = [
     id: "logs",
     group: "Diagnostics",
     label: "Logs",
-    icon: "≡",
     description: "Live tail of the backend console (stdout + stderr). In the desktop app this "
                + "is the only place these lines are visible.",
     keywords: ["console", "stdout", "stderr", "backend", "tail", "output", "errors",
@@ -10671,10 +10870,10 @@ const SETTINGS_SECTIONS = [
     id: "about",
     group: "Diagnostics",
     label: "About",
-    icon: "ⓘ",
     description: "Version, where this app keeps its data, and how to update it.",
     keywords: ["version", "release", "update", "changelog", "paths", "state files", "data"],
-    items: [{ id: "version", label: "Version", keywords: ["build", "release date"] }],
+    items: [{ id: "version", label: "Version", keywords: ["build", "release date"] },
+            { id: "chart-bars", label: "Portfolio chart bars", keywords: ["hlc", "candles", "volume", "approximate", "high", "low"] }],
     render: renderSettingsAbout,
   },
 ];
@@ -10775,28 +10974,18 @@ function renderSettingsNav() {
       “${escapeHtml(SETTINGS.query)}”.</div>`;
     return;
   }
-  const html = [];
-  let lastGroup = null;
-  for (const { section, matchedItemIds } of hits) {
-    if (section.group !== lastGroup) {
-      if (lastGroup !== null) html.push(`</div>`);
-      html.push(`<div class="settings-nav-group">
-        <div class="settings-nav-group-label">${escapeHtml(section.group)}</div>`);
-      lastGroup = section.group;
-    }
-    html.push(`<button class="settings-nav-item${section.id === SETTINGS.section ? " active" : ""}"
-        data-section="${section.id}">
-        <span class="settings-nav-icon" aria-hidden="true">${section.icon}</span>
-        <span>${escapeHtml(section.label)}</span>
-      </button>`);
-    // Only surface sub-lines when a query actually matched specific settings —
-    // otherwise the nav becomes a wall of text.
-    for (const id of matchedItemIds) {
-      const item = (section.items || []).find(i => i.id === id);
-      if (item) html.push(`<div class="settings-nav-sub">${escapeHtml(item.label)}</div>`);
-    }
-  }
-  if (lastGroup !== null) html.push(`</div>`);
+  // Top tabs (v1.19): one pill per section in SETTINGS_SECTIONS order, no group
+  // labels. A search that matched specific settings inside a section shows as
+  // a count on its tab (the pane then highlights the rows); listing them as
+  // sub-lines only worked in the old vertical sidebar.
+  const html = hits.map(({ section, matchedItemIds }) => {
+    const n = matchedItemIds.length;
+    return `<button class="settings-nav-item${section.id === SETTINGS.section ? " active" : ""}"
+        data-section="${section.id}" role="tab" aria-selected="${section.id === SETTINGS.section}"
+        title="${escapeHtml(section.group)}">
+        <span>${escapeHtml(section.label)}</span>${n ? `<span class="settings-nav-count">${n}</span>` : ""}
+      </button>`;
+  });
   list.innerHTML = html.join("");
 }
 
@@ -11422,6 +11611,24 @@ function renderSettingsAbout(el) {
         <code>packaging/update.ps1</code> from a checkout): it installs the latest release, rebuilds the launcher and
         fails loudly if a required package did not install. Then quit and relaunch the app.
         In a development checkout: <code>git pull</code> and <code>uv sync</code>.`,
+    }) +
+    // The user asked for this caveat to live here, not on the chart itself.
+    settingsRow({
+      id: "chart-bars",
+      label: "How the portfolio chart's bars are built",
+      help: `A portfolio has no traded high, low or volume of its own, so the
+        HLC area, candles and volume on the portfolio chart are approximations
+        from the holdings. Each day, every holding's open, high and low are
+        taken as a ratio of its own close (in its own currency) and weighted by
+        what each holding is worth at that day's close in the rebalanced
+        portfolio. The resulting high is an upper bound and the low a lower
+        bound on the basket's true range, since the holdings rarely peak or
+        trough at the same moment. Obvious bad prints in the price data
+        (a wick more than five times the usual daily range) are capped.
+        Volume is the weighted traded value of the holdings in the display
+        currency. The close line, every return and every risk statistic use the
+        exact closes and are not approximate. Single-stock charts show the real
+        bars.`,
     });
   highlightSettingsMatches(el);
 }
@@ -11494,6 +11701,15 @@ function setupSettings() {
   if (list) list.addEventListener("click", (e) => {
     const item = e.target.closest(".settings-nav-item");
     if (item) selectSettingsSection(item.dataset.section);
+  });
+  // The tabs run horizontally since v1.19, so Left/Right walk them.
+  if (list) list.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const items = [...list.querySelectorAll(".settings-nav-item")];
+    const i = items.indexOf(document.activeElement);
+    if (i < 0) return;
+    e.preventDefault();
+    items[(i + (e.key === "ArrowRight" ? 1 : -1) + items.length) % items.length].focus();
   });
 
   const search = $("#settings-search");

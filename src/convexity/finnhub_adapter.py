@@ -140,54 +140,6 @@ def _fh_call(path: str, params: dict[str, Any], symbol: str) -> Any | None:
     return None
 
 
-def get_earnings_surprise(symbol: str) -> list[dict] | None:
-    """Up to 8 quarters of EPS surprise, most-recent first.
-
-    Each entry normalised to
-    ``{period, actual, estimate, surprise_pct}`` where
-    ``surprise_pct = (actual - estimate) / abs(estimate) * 100`` (None
-    when estimate is 0 or missing). TTL 3600s — only moves on earnings day.
-    """
-    if not FINNHUB_API_KEY:
-        return None
-    cache_key = f"earnings|{symbol}"
-    cached = _fh_get(cache_key)
-    if cached is _MISS:
-        return None
-    if cached is not None:
-        return cached
-    try:
-        raw = _fh_call("stock/earnings", {"symbol": symbol, "limit": 8}, symbol)
-        if raw is None:
-            return None  # transient failure — don't cache, retry next build
-        if not isinstance(raw, list):
-            _fh_put(cache_key, _MISS, _NEG_TTL)
-            return None
-        out: list[dict] = []
-        for e in raw[:8]:
-            actual = _safe_num(e.get("actual"))
-            estimate = _safe_num(e.get("estimate"))
-            if estimate in (None, 0) or actual is None:
-                surprise_pct = None
-            else:
-                surprise_pct = (actual - estimate) / abs(estimate) * 100
-            out.append(
-                {
-                    "period": e.get("period"),
-                    "actual": actual,
-                    "estimate": estimate,
-                    "surprise_pct": surprise_pct,
-                }
-            )
-        if not out:
-            _fh_put(cache_key, _MISS, _NEG_TTL)  # genuine no-coverage
-            return None
-        _fh_put(cache_key, out, 3600.0)
-        return out
-    except Exception:
-        return None
-
-
 def get_insider_sentiment(symbol: str) -> dict | None:
     """Most-recent monthly insider sentiment (MSPR). TTL 1800s.
 

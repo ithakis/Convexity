@@ -191,11 +191,16 @@ def mark_view_stale(name: str, entries: str) -> bool:
 
 def set_last_view(name: str) -> None:
     clean_name = (name or "").strip()
+    # A tab exists as soon as its constituents are saved (a watchlist), before
+    # its first refresh writes a view — remember that one too, or a reload
+    # reopens an empty "Untitled N" instead of the user's tab. Read before
+    # taking _VIEWS_LOCK so the two locks are never held together.
+    watchlists = load_watchlists() if clean_name else {}
     with _VIEWS_LOCK:
         raw = _read_views_raw()
         if clean_name:
             views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
-            if clean_name not in views_map:
+            if clean_name not in views_map and clean_name not in watchlists:
                 return
         raw["last_view"] = clean_name or None
         _write_views_raw(raw)

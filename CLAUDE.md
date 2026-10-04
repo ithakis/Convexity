@@ -87,6 +87,11 @@ Each of these has cost real debugging time; the link goes to the full story.
   `hideOverlay()`.** Settings sections live in `SETTINGS_SECTIONS`; the theme
   control uses `data-theme-opt`, never `data-theme`.
   [frontend.md → Key UI behaviours](docs/architecture/frontend.md#key-ui-behaviours-added-in-passes-abc)
+- **At most two levels of box** (the user's rule, v1.19): sections are a
+  kicker rule + hairlines, never a card inside a card. **Chart bars are paint
+  only** — returns, hover and measure use the exact closes; the portfolio's
+  OHLC/volume are approximate and explained in Settings → About, not on the chart.
+  [frontend.md → Portfolio panel](docs/architecture/frontend.md#portfolio-panel-and-constituents)
 - **The MPT cloud and frontier share one feasible set**; re-run
   `pytest tests/test_metrics.py -k cvar_pdip` after any solver edit.
   [mpt.md](docs/architecture/mpt.md#the-cloud-and-the-frontier-must-share-one-feasible-set-v1113)
@@ -434,7 +439,7 @@ Phase 9 (website) remains, then the single v2.0.0 release.
 - NASDAQ blurb removal
 - Desktop app (PySide6 + QtWebEngine) — see §14
 - Pass D — column-view registry (`COLS`/`COLS_BY_KEY`/`BUILTIN_VIEWS`), custom
-  presets via `.convexity_column_views.json`, Default/Fundamentals/
+  presets via `state/column_views.json`, Default/Fundamentals/
   Momentum built-ins
 
 ---
@@ -481,6 +486,12 @@ a major (X, new feature) or minor (Y, polish/fix) bump per the scheme above
 — then ask the user to confirm before changing the file. Never bump silently,
 even for changes that look small; the user wants to make this call
 explicitly every time, not have it inferred.
+
+**Versions on `distribution` (the user's call, 2026-10-04):** work on
+`distribution` keeps bumping 1.X.Y with a dated CHANGELOG section per version
+(1.15.1 onward), but gets **no tags or GitHub Releases** — those versions ship
+together as **v2.0.0** when `distribution` becomes `main` (the app's launch).
+A Release would also become "Latest", which the installers install.
 
 **GitHub Release per version (standing policy — do not skip).** The
 `CHANGELOG.md`-derived timeline lives on GitHub too, not just in the repo:

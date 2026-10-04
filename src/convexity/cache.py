@@ -53,6 +53,24 @@ def _bulk_close_put(sym: str, period_yf: str, ser) -> None:
     _BULK_CLOSE_CACHE[(sym, period_yf)] = (time.time(), ser)
 
 
+# Open/High/Low/Close/Volume per symbol, in the listing's own currency, stored
+# beside the bulk close by the same download (analytics._bulk_close). Only the
+# approximate portfolio bars read it, so a miss just means "no bars", never a
+# fetch: the portfolio chart then falls back to a line.
+_BULK_BARS_CACHE: dict[tuple[str, str], tuple[float, object]] = {}
+
+
+def _bulk_bars_get(sym: str, period_yf: str):
+    hit = _BULK_BARS_CACHE.get((sym, period_yf))
+    if hit is None or time.time() - hit[0] > _BULK_CLOSE_TTL:
+        return None
+    return hit[1]
+
+
+def _bulk_bars_put(sym: str, period_yf: str, df) -> None:
+    _BULK_BARS_CACHE[(sym, period_yf)] = (time.time(), df)
+
+
 # ----------------------------- FX caches ------------------------------------
 
 _FX_RATES_CACHE: dict[str, tuple[float, dict]] = {}

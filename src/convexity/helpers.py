@@ -14,16 +14,7 @@ import numpy as np
 import pandas as pd
 
 
-# ----------------------------- Path helpers ---------------------------------
-
-
-def _repo_root() -> Path:
-    current = Path(__file__).resolve()
-    for parent in (current.parent, *current.parents):
-        if (parent / ".git").exists():
-            return parent
-    return current.parent
-
+# ----------------------------- Secrets --------------------------------------
 
 # config.json key for each env var. Settings -> API keys (keys.py) writes
 # this file (mode 0600); it can also be edited by hand.
@@ -66,9 +57,9 @@ def _resolve_secret(env_var: str, filename: str) -> tuple[str, str | None]:
     """(value, source) — source is "env", "config", "legacy" or None.
 
     The legacy step finds ``filename`` by walking upward from this module's
-    directory (NOT via ``_repo_root()`` — a worktree run needs the key from
-    the worktree checkout itself, which ``_repo_root()``'s ``.git``-boundary
-    search would skip past). It is kept for one release (1.14) and logged when
+    directory (NOT by searching for the ``.git`` boundary — a worktree run
+    needs the key from the worktree checkout itself, which that search would
+    skip past). It is kept for one release (1.14) and logged when
     used — by name only, never the value.
     """
     env = os.environ.get(env_var, "").strip()
@@ -496,6 +487,30 @@ def _series_to_points(s: pd.Series) -> list[list[float]]:
         except Exception:
             continue
         out.append([ms, float(v)])
+    return out
+
+
+def _ohlc_to_points(df: pd.DataFrame) -> list[list[float]]:
+    """Compact [[ts_ms, open, high, low], ...] for the TradingView-style chart
+    types (HLC area, candles, OHLC bars). The close is NOT repeated: it is the
+    `history` series on the same timestamps. Bars missing any of the three are
+    dropped rather than guessed; the client draws a missing bar as a flat one
+    at its close. Rounded to 6 significant figures to keep a 45-year MAX
+    payload small."""
+    out: list[list[float]] = []
+    if df is None or getattr(df, "empty", True):
+        return out
+    cols = [c for c in ("Open", "High", "Low") if c in df]
+    if len(cols) < 3:
+        return out
+    for ts, o, h, lo in zip(df.index, df["Open"], df["High"], df["Low"], strict=True):
+        if pd.isna(o) or pd.isna(h) or pd.isna(lo):
+            continue
+        try:
+            ms = int(ts.timestamp() * 1000)
+        except Exception:
+            continue
+        out.append([ms, float(f"{o:.6g}"), float(f"{h:.6g}"), float(f"{lo:.6g}")])
     return out
 
 
