@@ -9,6 +9,18 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.19.2 — 2026-10-04
+
+Polish from the user's review of 1.19, plus an adversarial review.
+
+- **Classic data colours are back**: the holdings table, Per-holding consensus and returns use the pre-1.19 green/red (and the old heat blue for P/E and weight). Navy & Denim is now for buttons, tabs and accents only.
+- **Dark mode is "Ink"**, a near-black (#0a0e14) with navy-tinted instead of gray surfaces; the desktop loading screen matches it (it still had the old colours).
+- **Portfolio analytics** is back on the News cards' gray, with the chart in its own white rounded card so it stands out (still at most two levels of box). Section dividers are a little bigger and thicker.
+- **Contribution to return** shows company names (with the industry) in the table and the chart, sorted by name; the Table / Chart switch is a rounded segmented control; the table header now stays visible while scrolling.
+- The status bar no longer says "News read n/m scored"; a failed News read still shows a warning.
+- **Fixed**: the "Run optimization" button had lost its blue style; the Optimize per-company tooltip was white in dark mode; the chart-type menu works with the arrow keys, closes when you Tab away, and no longer swallows Esc after a redraw.
+- Removed two functions that newer code had replaced and a few unused style rules.
+
 ## 1.19.1 — 2026-10-04
 
 Polish on the 1.19.0 redesign, and the README retaken for it.
