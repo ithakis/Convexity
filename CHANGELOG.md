@@ -5,16 +5,25 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `src/convexity/__init__.py`
 when merging a PR and add a line here.
 
-## Unreleased
+Versions 1.15.1 onward were developed on the `distribution` branch and are
+released together as **v2.0.0** when `distribution` becomes `main` (the app's
+launch); until then they have no tags or GitHub Releases of their own.
 
-Company search (#6).
+## 1.19.0 — 2026-10-04
 
-- **Find companies without knowing the ticker.** A search box above the Constituents editor takes a name (`novo nordsk` → NOVO-B.CO), a sector and region (`European banks`), or criteria (`best tech companies with D/E < 0.8 and current ratio > 1`). It shows the query it ran as chips you can edit or remove, the top five as cards with each criterion's value, and **Add** puts the companies you pick into the portfolio.
-- **The AI step is optional and checked.** With an NVIDIA key, a query the rules cannot fully read goes to the same model as the News read: it can answer themes (`GLP-1 drug makers`) and choose the ranking for "best". Every company it names must exist in the symbol list, or it is dropped and counted. Anything nobody could use (`founded before 1990`) is shown struck through with a warning, never silently dropped.
-- **Every listing Yahoo has, offline.** A weekly *symbol pack* (equities in 59 regions, ETFs, mutual funds, major indices — about 470,000 listings with sector, industry and USD market cap, grouped into ~43,000 companies, ~18,000 ETFs and ~317,000 funds) is built by a new workflow and downloaded like the reference pack, behind the same Settings switch. Each company is shown on its home exchange, with its other listings one click away. It replaces the US-only symbol database that only `convexity build-symbols` could create, so new installs now resolve typos and company names too; `build-symbols` now builds the pack (CI).
-- **Typed company names now resolve to the home listing**: `Novo Nordisk` builds NOVO-B.CO (Copenhagen, DKK) and `Toyota` 7203.T, where the old US-only list gave the US line. Type the ticker (NVO, TM) to keep the US listing.
-- **The Market read looks company names up one ticker at a time** instead of holding the whole symbol list in memory (~470,000 rows would have been ~100 MB); the names it uses are unchanged.
-- Criteria run on Yahoo's screener (about 20 metrics: valuation, leverage, liquidity, profitability, growth, dividends, beta, momentum, short interest). Units are converted in one registry: the screener stores D/E in percent and ROE as a percentage, Yahoo's quote data stores ROE as a fraction, and the screener's market cap is in local currency, so size filters and ranking run in USD here.
+UI redesign, part 1: colour, fewer boxes, Settings, TradingView-style charts.
+
+- **New colours: "Navy & Denim".** Morgan Stanley's blue (#187ABA) is the one accent, on deep-navy text instead of near-black, with blue-tinted neutrals instead of GitHub's grays; the row highlight is pale blue instead of yellow. Dark mode is navy, with dark text on blue buttons (white on that blue was hard to read). Chosen from five directions in a design lab.
+- **Fewer boxes.** A portfolio used to nest four boxes (the gray tab body, the Analytics box, each chart card, the content). Now the search and constituents sit on the page, "Constituents" and "Portfolio analytics" start with the same rule as HOLDINGS, and the analytics are one sheet whose sections are separated by hairlines.
+- **Settings in the style of the Claude Code app**: the sections are tabs across the top (the selected one is a filled pill), bigger text, fewer lines, rounder corners. A search shows how many settings matched on each tab; Left/Right move between tabs; on a narrow window the tabs wrap instead of being cut off.
+- **TradingView-style charts.** The stock chart and the portfolio chart offer HLC area (the new default), candles, hollow candles, OHLC bars, area and line, with volume in its own pane (green when the interval closed up, red when down). Hovering shows open, high, low, close and volume; on long ranges candles become weekly bars and the tooltip says which days a bar covers. 1M/3M/6M charts skip nights and weekends, so intraday candles sit side by side, and the S&P / sector overlays follow the stock's own bars there. Every return, the hover dots and the drag-measure still use the exact closes. Bad high/low prints in Yahoo's data (VOD.L once printed a high of 357 on a 176 close) are capped so they cannot squash the chart.
+- **The portfolio chart's bars are built from the holdings** (a portfolio has no traded high, low or volume): each holding's open/high/low against its own close, combined exactly as the daily-rebalanced portfolio would be, which gives an upper bound for the high and a lower bound for the low; volume is the holdings' weighted traded value. Settings → About explains it. Portfolios saved before this version pick the bars up automatically.
+- **Search box**: the Close button and the × inside the box are gone; pressing Enter on an empty box clears the results.
+- **Refresh** no longer shows a thin blue bar when idle; the progress fill appears only while a refresh runs.
+- **Fixed: a reload lost a new portfolio tab** until its first refresh, opening an empty "Untitled N" instead (since 1.18.1). The tab is remembered from its first edit.
+- Removed dead code found by an adversarial review: eight unused frontend functions, unused stylesheet rules, an unused Finnhub earnings call, an unused news entry point and an old repo-path helper.
+
+## 1.18.1 — 2026-10-04
 
 Portfolio tab polish (follow-up to #6).
 
@@ -26,6 +35,19 @@ Portfolio tab polish (follow-up to #6).
 - **A card adds the company's most traded listing** (NVO for Novo Nordisk, 7203.T for Toyota; the Nasdaq line on a Nasdaq screen), and "Also listed on" now lists only exchanges someone would buy on: German regional exchanges, order books, OTC lines and depositary receipts are left out.
 - **Smarter reading of requests**: "big tech in nasdaq with small leverage" now means Technology, the Nasdaq exchange, D/E < 0.5, ranked by market cap. Before, it ranked by lowest D/E and returned companies with no debt at all. Size words rank by size, vague amounts ("low debt", "high dividend") become moderate filters you can edit, exchanges are their own filter, and a ranking by return on equity only considers profitable companies. A live test set of 20 requests (`scripts/eval_search.py`) passes in full.
 - **Better AI rankings and themes**, found testing with a live NVIDIA key: "best" no longer copies the rule parser's market-cap placeholder, and the model is told to pick a quality, growth or value metric the user did not already filter on. A ratio ranking is among companies above $1B (USD, from the pack) unless you add a market-cap filter, because over every listing it was led by microcaps with 400% ROE. "Lowest first" excludes negative values (negative equity or a loss is not low D/E or a cheap P/E). A theme's AI picks outside its own sectors and industries are dropped and named (Philip Morris was offered as a GLP-1 maker).
+
+## 1.18.0 — 2026-10-04
+
+Company search (#6).
+
+- **Find companies without knowing the ticker.** A search box above the Constituents editor takes a name (`novo nordsk` → NOVO-B.CO), a sector and region (`European banks`), or criteria (`best tech companies with D/E < 0.8 and current ratio > 1`). It shows the query it ran as chips you can edit or remove, the top five as cards with each criterion's value, and **Add** puts the companies you pick into the portfolio.
+- **The AI step is optional and checked.** With an NVIDIA key, a query the rules cannot fully read goes to the same model as the News read: it can answer themes (`GLP-1 drug makers`) and choose the ranking for "best". Every company it names must exist in the symbol list, or it is dropped and counted. Anything nobody could use (`founded before 1990`) is shown struck through with a warning, never silently dropped.
+- **Every listing Yahoo has, offline.** A weekly *symbol pack* (equities in 59 regions, ETFs, mutual funds, major indices — about 470,000 listings with sector, industry and USD market cap, grouped into ~43,000 companies, ~18,000 ETFs and ~317,000 funds) is built by a new workflow and downloaded like the reference pack, behind the same Settings switch. Each company is shown on its home exchange, with its other listings one click away. It replaces the US-only symbol database that only `convexity build-symbols` could create, so new installs now resolve typos and company names too; `build-symbols` now builds the pack (CI).
+- **Typed company names now resolve to the home listing**: `Novo Nordisk` builds NOVO-B.CO (Copenhagen, DKK) and `Toyota` 7203.T, where the old US-only list gave the US line. Type the ticker (NVO, TM) to keep the US listing.
+- **The Market read looks company names up one ticker at a time** instead of holding the whole symbol list in memory (~470,000 rows would have been ~100 MB); the names it uses are unchanged.
+- Criteria run on Yahoo's screener (about 20 metrics: valuation, leverage, liquidity, profitability, growth, dividends, beta, momentum, short interest). Units are converted in one registry: the screener stores D/E in percent and ROE as a percentage, Yahoo's quote data stores ROE as a fraction, and the screener's market cap is in local currency, so size filters and ranking run in USD here.
+
+## 1.17.2 — 2026-09-29
 
 Python 3.14 (#17).
 
@@ -42,10 +64,14 @@ Adversarial review of 3.14 (#17).
 - Removed the unused `/api/quotes` route and the portfolio's country exposure, which was always 100% "Unknown" and shown nowhere.
 - Checked unchanged: the Market read scores are bit-identical on 3.11 and 3.14, and portfolio analytics agree to the last bit apart from Python 3.12+'s more exact `sum()`.
 
+## 1.17.1 — 2026-09-29
+
 One logo (icon.svg).
 
 - **The Dock icon now matches the loading screen**: the four candlesticks on the dark tile, instead of on the light grey plate macOS 26 added around the old transparent icon. The logo now has one master, `icon.svg`, and the app icon, splash, window icon, Windows icon and the README header are all generated from it; a test fails if they drift or a second logo appears. Re-run the installer to get the new Dock icon.
 - **README**: the logo sits beside the title, every screenshot is in dark mode, a new one shows the stock detail view, and the column table gives each Default-view column's definition in LaTeX, checked against the code (it had P/S, which is not in the Default view, and missed EPS Surp., Rec Δ6M, MSPR and NS).
+
+## 1.17.0 — 2026-09-29
 
 Metric explanations and the contribution table (#5, #7, #8).
 
@@ -53,6 +79,8 @@ Metric explanations and the contribution table (#5, #7, #8).
 - **Every metric explains itself.** Formula tips (formula, meaning, typical range) on the Optimize side panel (expected return, VaR, CVaR, the bootstrap band, max drawdown, CDaR, volatility, cash, analyst views, active assets) and on the stock detail rows that had none (earnings growth, ROA, current ratio, dividend yield / rate / payout / ex-dividend date). Tips inside the Optimize panel no longer get cut off by its scroll area.
 - **Excel export explains itself**: every header has a hover comment with the definition, and a new last sheet, **Definitions**, lists every metric with its formula, meaning and typical range. The holdings sheet drops columns that repeated the analyst block (PEG, dividend yield, analyst count and rating) and nested data that could only show as "[n keys]", and gives the remaining ones readable headers (Current Ratio, Quick Ratio, SMA 20/50/200).
 - **Contribution to return**: each holding's contribution is split into **W×R** (weight × its own return) and **Compounding** (what daily rebalancing and compounding add or take away), which add up exactly; a Total row; every column sortable; a bar in each contribution cell; and a **Table | Chart** toggle whose chart is a waterfall building up to the period return. Sort and view are remembered.
+
+## 1.16.1 — 2026-09-29
 
 Metrics audit (`distribution` branch): every formula, unit and explanation checked against corporate-finance and quant conventions and against live Yahoo data (details in `docs/METRICS_AUDIT.md`).
 
@@ -68,6 +96,8 @@ Metrics audit (`distribution` branch): every formula, unit and explanation check
 - Track record hit-rate intervals account for same-day calls not being independent.
 - Tooltips, the Guide, the optimiser Guide and the Excel headers corrected where they described a different calculation (forward P/E, growth rates, beta, 52-week range, units).
 
+## 1.16.0 — 2026-09-28
+
 Roadmap Phase 8 (`distribution` branch): the reference pack.
 
 - The S&P 500 constituent list ships with the app (`src/convexity/data/sp500.json`, source and date recorded in the file) as the fixed universe of the daily reference pack. Public index membership only.
@@ -76,6 +106,8 @@ Roadmap Phase 8 (`distribution` branch): the reference pack.
 - **A calibrated Market read from day one.** Until the app has 200 Market reads of its own, the percentile is ranked against the reference data (the same model's last 90 days over the S&P 500) instead of the 2023 backtest; the News tab names which one it is ("vs 500 S&P names, last 90 days (reference data, 1 day old)"). Your own reads take over as soon as there are enough.
 - **Track record: "Model (500 names)".** Next to "Your holdings", the Track record can show the Market read scored across the S&P 500 from the reference data — the same date-clustered statistics on a far larger sample, so there is an answer long before your own history is big enough. (The News read is not in it: it runs on your own keys.)
 - New workflow `.github/workflows/reference-pack.yml` builds the pack every weekday after the US close (and on demand) from the same commit as the app, and replaces the three files of the rolling `reference-pack` release. It never commits to the repository; only its publish job can write, and the Finnhub key is an Actions secret used by the build step alone. A `yahoo-check` run tests first that Yahoo answers from GitHub's servers. Only a missing release starts the pack's history afresh — any other failure to fetch the previous pack fails the run — and a publish that broke off half-way is repaired by the next run instead of blocking every later one.
+
+## 1.15.1 — 2026-09-28
 
 Roadmap Phase 7 (`distribution` branch): repository tidy-up, for the v2.0.0 release.
 

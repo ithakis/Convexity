@@ -22,6 +22,7 @@ from convexity.helpers import (
     _is_rate_limited_error,
     _macd_hist_pct,
     _normalize_dividend_yield,
+    _ohlc_to_points,
     _pct_change,
     _rsi,
     _safe_num,
@@ -534,6 +535,7 @@ def intraday_history(symbol: str, interval: str, period: str) -> dict | None:
         "interval": interval,
         "period": period,
         "history": _series_to_points(close),
+        "ohlc": _ohlc_to_points(hist.loc[close.index]),
         "volume": _series_to_points(vol) if not vol.empty else [],
     }
     _cache_put(cache_key, out)
@@ -574,6 +576,7 @@ def range_history(symbol: str, rng: str, benchmarks: list[str] | None = None) ->
         "period": period,
         "fallback": False,
         "history": main["history"],
+        "ohlc": main.get("ohlc") or [],
         "volume": main["volume"],
         "benchmarks": {},
     }
@@ -714,6 +717,7 @@ def fetch_detail(symbol: str) -> dict:
     close = hist["Close"].dropna()
     vol = hist["Volume"] if "Volume" in hist else pd.Series(dtype=float)
     out["history"] = _series_to_points(close)
+    out["ohlc"] = _ohlc_to_points(hist.loc[close.index])
     out["volume"] = _series_to_points(vol.dropna()) if not vol.empty else []
 
     last = float(close.iloc[-1])

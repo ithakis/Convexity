@@ -74,7 +74,8 @@
 <div id="input-panel" class="hidden">
   <!-- Browser-style tab strip of saved portfolios -->
   <div class="pf-tabs" id="pf-tabs" role="tablist"></div>
-  <!-- The open portfolio, below its tab: the gray panel starts here. -->
+  <!-- The open portfolio, below its tab. Not a box (v1.19): the page holds the
+       search and constituents, and the analytics sheet is the only box. -->
   <div class="pf-body">
 
   <!-- Company search (search.py, POST /api/search). One box: the server picks
@@ -96,7 +97,6 @@
       <div class="co-foot">
         <button type="button" class="co-link" id="co-more">Show more</button>
         <span class="spacer"></span>
-        <button type="button" class="co-link" id="co-close">Close</button>
         <button type="button" class="co-add" id="co-add" disabled>Add</button>
       </div>
     </div>
@@ -105,14 +105,15 @@
   <!-- Constituents: one chip per entry; ✕ removes it. An edit is saved at
        once and turns Refresh red until the next refresh (app.js commitEntries). -->
   <div class="pf-editor">
-    <div class="pf-editor-head">Constituents <span id="pf-count"></span></div>
+    <div class="section-anchor pf-anchor"><span class="sa-kicker">Constituents<span id="pf-count"></span></span></div>
     <div class="pf-chips" id="pf-chips"></div>
   </div>
 
-  <!-- Analytics sub-window -->
+  <!-- Analytics: ONE sheet (the user's "option B"). Inside it the sections are
+       separated by hairlines only, never by boxes of their own. -->
+  <div class="section-anchor pf-anchor"><span class="sa-kicker">Portfolio analytics</span></div>
   <div class="pf-analytics" id="pf-analytics">
     <div class="pf-analytics-head">
-      <span class="pf-analytics-title">Portfolio analytics</span>
       <!-- Mode bar: built-in pills (Equal, Cap) + any saved per-portfolio
            weight presets. Trailing "+" opens the weights editor in new-preset
            mode; the pencil on an active preset opens it for edit/delete. -->
@@ -140,6 +141,9 @@
         </span>
         <span class="pf-overlay-pill" id="pf-show-dd" data-on="1" role="switch" aria-checked="true" tabindex="0">
           <span class="swatch dd"></span>Drawdown
+        </span>
+        <span class="pf-overlay-pill" id="pf-show-vol" data-on="1" role="switch" aria-checked="true" tabindex="0">
+          <span class="swatch vol"></span>Volume
         </span>
         <!-- Simple moving averages on the portfolio index, computed server-side
              over a window wider than the period so each spans the whole chart. -->
@@ -872,33 +876,33 @@
   </div>
 </div>
 
-<!-- Settings overlay (gear button): 70% of the viewport over a blurred
-     dashboard, left nav + content pane. "Logs" is the only functional section
-     today and exists because in desktop mode every backend print() goes to a
-     file descriptor nobody can read — this is the app's only console. -->
+<!-- Settings overlay (gear button), "S3 · top tabs" (v1.19): one header row
+     holds the title, the sections as pills (filled = selected), the search and
+     the close button; the selected section fills the full width below. "Logs"
+     exists because in desktop mode every backend print() goes to a file
+     descriptor nobody can read — this is the app's only console. -->
 <div class="settings-bg" id="settings-bg">
   <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
     <div class="settings-head">
       <span class="settings-title">Settings</span>
-      <span class="spacer"></span>
-      <button class="settings-close" id="settings-close" aria-label="Close settings">&times;</button>
-    </div>
-    <div class="settings-body">
+      <!-- The section tabs come from SETTINGS_SECTIONS in app.js — add a
+           section there, not here. -->
+      <nav class="settings-nav" id="settings-nav">
+        <div class="settings-nav-list" id="settings-nav-list" role="tablist"></div>
+      </nav>
       <!-- The search input is STATIC on purpose. renderSettingsNav() rebuilds
            #settings-nav-list on every keystroke; if the input lived inside that
            subtree it would be destroyed and recreated mid-type, blurring the
-           field and dropping the caret. Only the list below it is dynamic.
-           The nav items themselves come from SETTINGS_SECTIONS in app.js — add
-           a section there, not here. -->
-      <nav class="settings-nav" id="settings-nav">
-        <div class="settings-search-wrap">
-          <span class="settings-search-icon" aria-hidden="true">&#9906;</span>
-          <input class="settings-search" id="settings-search" type="text"
-                 placeholder="Search settings" autocomplete="off" spellcheck="false"
-                 aria-label="Search settings">
-        </div>
-        <div class="settings-nav-list" id="settings-nav-list"></div>
-      </nav>
+           field and dropping the caret. -->
+      <div class="settings-search-wrap">
+        <span class="settings-search-icon" aria-hidden="true">&#9906;</span>
+        <input class="settings-search" id="settings-search" type="text"
+               placeholder="Search settings" autocomplete="off" spellcheck="false"
+               aria-label="Search settings">
+      </div>
+      <button class="settings-close" id="settings-close" aria-label="Close settings">&times;</button>
+    </div>
+    <div class="settings-body">
       <div class="settings-pane" id="settings-pane"></div>
     </div>
   </div>

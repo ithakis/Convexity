@@ -22,13 +22,13 @@ Sections: §4 (caching, data folder, persistence, symbol resolution, the streami
 
 ### Where user data lives (`paths.py`, v1.14)
 Nothing is ever written next to the code. Before 1.14 every path came from
-`helpers._repo_root()` (walk up to `.git`, else the package dir), so an
+a repo-root search (walk up to `.git`, else the package dir), so an
 installed wheel wrote the user's watchlists into `site-packages/convexity/`,
 where the next upgrade deletes them. Now `src/convexity/paths.py` is the only place
 a data path is built: `data_dir()`, `state_file(name)`, `models_dir()`,
 `logs_dir()`, `config_file()`, `symbol_db_file()`. Stdlib only, no import-time
 side effects, never creates a directory — writers `mkdir` their own parent.
-`_repo_root()` survives only as `paths.legacy_root()` for migration/fallbacks.
+That search survives only as `paths.legacy_root()` for migration/fallbacks.
 
 - **`CONVEXITY_HOME` is mandatory for every test and manual/dev run.**
   `tests/conftest.py` sets it at import time (modules bind paths at import,
@@ -200,8 +200,7 @@ the whole series from one provider — mixing Finnhub's recent 4 with
 yfinance's older 4 produced a visible discontinuity (same actual EPS,
 different estimate snapshot => different surprise %). No API key needed;
 cached for the analytics TTL (1800s), so cold build = one extra yfinance
-call/symbol, warm build = zero. `finnhub_adapter.get_earnings_surprise`
-still exists but is no longer wired into `fetch_one`.
+call/symbol, warm build = zero.
 
 **Finnhub supplemental columns (`finnhub_adapter.py`):** `fetch_one`
 adds two optional row fields — `insider_mspr` (Form-4 Monthly Share
@@ -280,6 +279,31 @@ ffilled onto it, never allowed to add their own holidays as zero-return days.
 Same-day beta vs Nikkei/KOSPI is understated (they close before the US
 opens); the Beta tooltip says so. `_stats` / `_relative` are module-level and
 tested directly in `tests/test_metrics.py` and `tests/test_finance_math.py`.
+
+**Bars for the chart types (v1.19).** The stock payloads (`/api/detail`,
+`/api/history`) carry `ohlc: [[ts, open, high, low]]` on the same timestamps as
+`history` (the close is not repeated; `helpers._ohlc_to_points`). The portfolio
+has no traded bar, so `series.ohlc` / `series.volume` are **approximate**,
+built by `analytics._portfolio_bars` from the OHLCV that `_bulk_close` already
+downloads and now keeps beside the close (`cache._BULK_BARS_CACHE`, filled by
+`_put_bars`, never fetched on its own; duplicate dates dropped there). The
+index is daily-rebalanced, so the bar is the exact rebalanced form
+`X_t = P(t-1)·Σ w_i (1+r_i,t)·X_i,t/C_i,t` with `P(t-1) = P(t)/Σ w_i(1+r_i,t)`:
+X/C in the listing's own currency, r in the display currency (FX at the close
+rate). It is an upper/lower bound on the true basket high/low (the holdings
+need not peak together) and always contains the close. Wicks beyond
+max(5× the median daily range, 3%) are capped (`_wick_cap`; Yahoo has bad
+prints such as VOD.L 2007-10-09, high 357 on a 176 close; the client's
+`clipBadWicks` applies the same rule to single stocks). Prices go out at 6
+significant figures and volume at 4: these payloads are saved in
+`views.json`'s analytics cache. Volume is Σ w·shares·close in the display
+currency. If any weighted holding has no bars the keys are **empty lists**
+(always present, so the client's backfill can tell a current payload from one
+saved before v1.19) and the client draws a line — never a band from part of
+the book. A malformed cached frame returns empty rather than 500ing the
+analytics. The caveat lives in Settings → About (the user's call: not on the
+chart). Returns and statistics never read these bars.
+`tests/test_chart_bars.py` holds the invariants.
 
 The conventions (audit of 2026-09-29, `docs/METRICS_AUDIT.md`):
 - **Portfolio** = daily-rebalanced to the weights (Σ w_i r_i,t, compounded).

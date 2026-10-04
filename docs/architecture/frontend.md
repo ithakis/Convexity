@@ -128,8 +128,16 @@ exactly. Sort (`pf_contrib_sort`) and the Table | Chart toggle
 
 ### Portfolio panel and constituents
 `#input-panel` is a transparent wrapper: the `.pf-tabs` pills sit on the page,
-and the open portfolio (search, constituents, analytics) is the gray `.pf-body`
-below them. There is no text editor: the constituents are the entries string
+and so does the open portfolio (`.pf-body`, spacing only since v1.19).
+**At most two levels of box (the user's rule, v1.19).** The page used to nest
+four: gray `.pf-body` → Analytics box → `.pf-card` → content. Now the
+"Constituents" and "Portfolio analytics" headings are the HOLDINGS-style
+`.section-anchor` kicker rule, and `.pf-analytics` is the ONE sheet; inside it
+the `.pf-card`s are borderless cells separated by hairlines (each cell draws its
+top rule, the left column the vertical one; `nth-child` rules in style.css,
+collapsed under 900px). Don't give a cell a fill or border again — add a
+hairline. A scripted audit (bordered box ≥160×60 inside another) found no
+nesting anywhere in Portfolio or News after the change. There is no text editor: the constituents are the entries string
 `ENTRIES` (what `/api/watchlists` stores), shown as `.pf-chip`s by
 `renderConstituents()` — the row's name when a `DATA` row matches the entry,
 else a name remembered from a search card (`ENTRY_NAMES`), else the entry.
@@ -197,13 +205,20 @@ picked.
   custom `data-tip` pseudo-element pattern, not native `title`, so the
   help text is consistently visible in-browser.
 - **Settings overlay** (`#settings-btn` gear, `openSettings`/`closeSettings`):
-  78vw × 76vh over a blurred backdrop; search box at the top of the sidebar,
-  grouped nav below it, right pane titled + described. Follows the
+  78vw × 76vh over a blurred backdrop. **Top tabs since v1.19** ("S3", modelled
+  on the Claude Code settings): one header row holds the title, the sections as
+  pills (`.settings-nav-item`, filled accent = selected, no lines between them,
+  no group labels — the group is the tab's tooltip), the search and the close;
+  the pane is full width at 14px+ type. A search that matches settings inside a
+  section shows a count on its tab (`.settings-nav-count`) instead of the old
+  sub-lines; Left/Right walk the tabs. The tabs **wrap** to a second line when
+  the modal is narrow (a hidden sideways scroller left Logs/About unreachable
+  below ~1200px). Its radii are the softer `--r-xl` / `--r-soft` tokens. Follows the
   `openMptOverlay` idiom (the `document.body.style.overflow` lock +
   `dataset.*PrevOverflow` restore) and registers in the global Esc handler.
   See §16 for why Logs exists. Rebuilt in v1.10.1 — five load-bearing rules:
   1. **`SETTINGS_SECTIONS` is the only place a section is declared**
-     (`{id, group, label, icon, description, keywords, items, render}`).
+     (`{id, group, label, description, keywords, items, render}`).
      `renderSettingsNav()` rebuilds the nav from it. Add a section there, never
      back in `index.html`. Sections today: General, Column Presets, Models & Data, API keys, Logs, About.
   2. **The search `<input>` stays static in `index.html`.** Only
@@ -391,6 +406,28 @@ picked.
   see §4 "One wide fetch") since the client only ever has the period slice.
   At the true start of a series `smaSeries` averages what exists so far.
   `SMA_COLORS` in `app.js` and `.swatch.sma*` in `style.css` must stay in sync.
+- **Chart types, TradingView-style (v1.19).** `CHART_TYPE` (localStorage
+  `chart_type`, default **HLC area** — the user's pick) is shared by the stock
+  modal and the portfolio chart, chosen from a native `<select>`
+  (`chartTypeSelectHtml`): HLC area, Candles, Hollow candles, OHLC bars, Area,
+  Line. Drawing goes through `buildBars` (joins `history` + `ohlc` + `volume`
+  on timestamp) → `aggregateBars` (first open / max high / min low / last close
+  / summed volume — candles are bucketed to ~5px, so 5Y goes weekly like
+  TradingView) → `priceLayerSvg` / `volumePaneSvg`. **The bars are paint only:**
+  hover dots, drag-measure, the header and every return still run on the exact
+  close series, so switching type can never change a number. Volume is its own
+  pane, each bar coloured by close ≥ open. Intraday ranges use an **ordinal**
+  x-axis (one slot per bar, nights and weekends skipped); it hands hover/brush
+  an inverse `geom.xInv`, which both helpers prefer over the linear time
+  inverse; overlays (S&P, sector ETF) are first put on the stock's own bar
+  times (`alignOnto`), or a non-US listing's SPY bars stack on its last slot of
+  each day. Hover reads the bar CONTAINING the time (`barAtTime`, a lower-bound
+  search on bucket ends), and a bucketed bar shows its date span. The chart SVG
+  carries literal theme colours, so `setTheme` repaints both charts. Saved
+  analytics without `series.ohlc` (pre-v1.19) are backfilled once by
+  `requestAnalytics`. The portfolio's bars are approximate (backend.md "Bars
+  for the chart types"); the high line's colour is `--hlc-hi`, defined in all
+  three themes.
 - **Fit to screen toggle** (`#cv-fit-toggle`): optional table compaction
   mode for dense presets. `applyTableFitMode()` computes a scale from the
   active columns' declared widths versus `.table-wrap` width and applies
@@ -532,6 +569,13 @@ picked.
 - CSS variables (`--accent`, `--bg-canvas`, `--text`, `--muted`,
   `--border`, `--pos`, `--neg`) defined in `:root` and overridden under
   `[data-theme="dark"]`.
+- **Palette "Navy & Denim" (v1.19)**, chosen by the user from five options
+  inspired by Morgan Stanley / Goldman Sachs: accent `#187aba` (MS blue) on
+  deep-navy ink `#0b2239`, blue-tinted neutrals instead of GitHub grays, hover
+  `#e8f2fa` (was a yellow). Dark mode is navy (`#08182a`) with accent
+  `#4ba3e3` and a **dark** `--on-accent` (`#04121f`) because white on that blue
+  is only ~2.8:1. `THEME_COLORS` in app.js mirrors these values — change both.
+  Use `rgba(var(--accent-rgb), a)`, never a literal blue.
 - **Corner-radius scale** (`--r-lg` / `--r-md` / `--r-sm` / `--r-xs` in the base
   `:root`, currently the "Sharp" 6/4/2/1 px tier). Every non-circular
   `border-radius` reads a token, so app-wide roundness tunes from these four
