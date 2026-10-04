@@ -2779,25 +2779,36 @@ function syncChartTypeDd(dd) {
 }
 function wireChartTypeDd(dd, onPick) {
   const btn = dd.querySelector(".ct-btn"), menu = dd.querySelector(".ct-menu");
+  const opts = [...menu.querySelectorAll(".ct-opt")];
   const close = () => {
     menu.hidden = true; btn.setAttribute("aria-expanded", "false");
     document.removeEventListener("mousedown", away, true);
     document.removeEventListener("keydown", key, true);
+    dd.removeEventListener("focusout", blur);
   };
-  const away = (e) => { if (!dd.contains(e.target)) close(); };
+  // A re-render (analytics backfill, refresh) can detach the menu while it is
+  // open; its document listeners must then drop out, not swallow the next Esc.
+  const away = (e) => { if (!dd.isConnected || !dd.contains(e.target)) close(); };
+  const blur = (e) => { if (!dd.contains(e.relatedTarget)) close(); };  // Tab out closes it
   const key = (e) => {
-    if (e.key !== "Escape") return;
-    e.stopPropagation(); e.preventDefault(); close(); btn.focus();  // Esc closes the menu, not the modal behind it
+    if (!dd.isConnected) return close();
+    const i = opts.indexOf(document.activeElement);
+    if (e.key === "Escape") {
+      e.stopPropagation(); e.preventDefault(); close(); btn.focus();  // the menu, not the modal behind it
+    } else if (e.key === "ArrowDown") { e.preventDefault(); opts[(i + 1) % opts.length].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); opts[(i - 1 + opts.length) % opts.length].focus(); }
   };
   btn.onclick = () => {
     if (!menu.hidden) return close();
     menu.hidden = false; btn.setAttribute("aria-expanded", "true");
     document.addEventListener("mousedown", away, true);
     document.addEventListener("keydown", key, true);
+    dd.addEventListener("focusout", blur);
+    (opts.find(o => o.classList.contains("on")) || opts[0]).focus();
   };
   menu.onclick = (e) => {
     const o = e.target.closest(".ct-opt"); if (!o) return;
-    close(); setChartType(o.dataset.ct); syncChartTypeDd(dd); onPick();
+    close(); btn.focus(); setChartType(o.dataset.ct); syncChartTypeDd(dd); onPick();
   };
 }
 
@@ -4770,7 +4781,7 @@ function renderAnalyticsBody() {
   body.innerHTML = `
     <div class="pf-grid">
       <div class="pf-card">
-        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${labelForMode(STATE.mode)} · ${escapeHtml(a.display_ccy || FX_QUOTE)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span>${chartTypeSelectHtml("pf-chart-type")}</h4>
+        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${escapeHtml(labelForMode(STATE.mode))} · ${escapeHtml(a.display_ccy || FX_QUOTE)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span>${chartTypeSelectHtml("pf-chart-type")}</h4>
         <div class="pf-chart-card">
           <div class="pf-chart-wrap" id="pf-chart-host"></div>
           <div class="pf-chart-legend" id="pf-chart-legend"></div>
@@ -5166,7 +5177,6 @@ function renderAnalystDashboard(a) {
   const notCovered = Array.isArray(an.not_covered) ? an.not_covered : [];
   const active = an.active_count || 0;
   const covered = an.covered_count || 0;
-  const coverageWeight = an.target_coverage_weight || 0;
   const dist = an.distribution_pct;  // {strongBuy, buy, hold, sell, strongSell} as %
   const wRating = an.mean_rating;
   const wUpside = an.weighted_target_upside_pct;
@@ -5525,7 +5535,7 @@ function renderConcentrationHtml(a) {
     ["Herfindahl (HHI)", fmtNumOr(c.herfindahl, 3)],
     ["Effective # of names", fmtNumOr(c.effective_n, 1)],
     ["Active holdings", (a.active_symbols || []).length],
-    ["Dropped (no history)", (a.missing_symbols || []).join(", ") || "—"],
+    ["Dropped (no history)", escapeHtml((a.missing_symbols || []).join(", ")) || "—"],
   ];
   return `<div class="pf-stats">${rows.map(r => statRowHtml(r[0], r[1])).join("")}</div>`;
 }
@@ -5575,7 +5585,7 @@ for (const [k, info] of Object.entries(CONTRIB_INFO)) {
 }
 
 const CONTRIB_COLS = [
-  {k: "symbol", label: "Symbol", sv: (c) => (c.symbol || "").toLowerCase()},
+  {k: "symbol", label: "Company", sv: (c) => (c.name || c.symbol || "").toLowerCase()},
   {k: "weight", label: "Weight", sv: (c) => c.weight},
   {k: "period_return", label: "Return", sv: (c) => c.period_return},
   {k: "wxr", label: "W×R", tip: "contrib:wxr", sv: (c) => c.wxr},
@@ -5642,7 +5652,7 @@ function renderContribTableHtml(rows) {
   return `<table class="pf-contrib-table">
     <thead><tr>${CONTRIB_COLS.map(th).join("")}</tr></thead>
     <tbody>${sorted.map(c => `<tr>
-      <td class="pf-contrib-co" title="${escapeHtml(c.symbol)}${c.name ? " · " + escapeHtml(c.name) : ""}"><span class="pf-contrib-name">${escapeHtml(c.name || c.symbol)}</span> <span style="color:var(--muted)">${escapeHtml(c.sector || "")}</span></td>
+      <td class="pf-contrib-co" title="${escapeHtml(c.symbol)}${c.name && c.name !== c.symbol ? " · " + escapeHtml(c.name) : ""}"><span class="pf-contrib-name">${escapeHtml(c.name || c.symbol)}</span> <span style="color:var(--muted)">${escapeHtml(c.sector || "")}</span></td>
       <td>${c.weight != null ? (c.weight*100).toFixed(2) + "%" : "—"}</td>
       <td class="${cls(c.period_return)}">${fmtPctSigned(c.period_return)}</td>
       <td class="${cls(c.wxr)}">${fmtPctSigned(c.wxr)}</td>
@@ -5686,8 +5696,8 @@ function renderContribChartHtml(rows) {
   const plain = (v) => (v == null || !isFinite(v)) ? "n/a" : (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
   return `<div class="pf-wf">
     ${steps.map(({c, from, to}) => bar(from, to, (c.contribution || 0) >= 0 ? "pos" : "neg",
-      `${c.name ? c.name + " (" + c.symbol + ")" : c.symbol}: contribution ${plain(c.contribution)} = W×R ${plain(c.wxr)} + compounding ${plain(c.comp)}. Running total ${plain(to)}.`,
-      `<span title="${escapeHtml(c.symbol)}">${escapeHtml(c.name || c.symbol)}</span>`, c.contribution)).join("")}
+      `${c.name && c.name !== c.symbol ? c.name + " (" + c.symbol + ")" : c.symbol}: contribution ${plain(c.contribution)} = W×R ${plain(c.wxr)} + compounding ${plain(c.comp)}. Running total ${plain(to)}.`,
+      escapeHtml(c.name || c.symbol), c.contribution)).join("")}
     ${bar(0, total, "total", `Portfolio ${STATE.period} return: ${plain(total)}`, "Total", total)}
   </div>`;
 }
@@ -5741,10 +5751,9 @@ const BENCH_LINES = [["SPY", "showBench", "#8b5cf6"], ["QQQ", "showNdx", "#06b6d
 function pfBenchLines(a) {
   const out = [];
   for (const [k, flag, color] of BENCH_LINES) {
-    const key = k;
-    const b = (a.benchmarks || {})[key];
-    if (STATE[flag] && b && b.series.length >= 2 && !out.some(l => l.key === key)) {
-      out.push({ key, label: b.label, pts: b.series, color, ret: b.stats.total_return });
+    const b = (a.benchmarks || {})[k];
+    if (STATE[flag] && b && (b.series || []).length >= 2 && !out.some(l => l.key === k)) {
+      out.push({ key: k, label: b.label, pts: b.series, color, ret: (b.stats || {}).total_return });
     }
   }
   return out;
@@ -7241,9 +7250,9 @@ async function rfFinish(state) {
     return;
   }
   if (state === "done") {
-    // "12/15 scored", never a plain "done" when the News read failed: the
-    // engine once died silently (a retired model) and refreshes kept serving
-    // August's reads for a month.
+    // A failed News read must never pass silently: the engine once died (a
+    // retired model) and refreshes kept serving August's reads for a month.
+    // The status bar only says "updated"; a failure raises a toast.
     const ne = REFRESH.newsEnd;
     REFRESH.newsEnd = null;
     // The "News read n/m scored" note was dropped from the status bar at the
@@ -10078,7 +10087,7 @@ function mptRenderRunHistory(runs) {
   host.innerHTML = `<div class="pf-mpt-runs-head">Recent runs</div>` + list.map((run, i) => {
     const active = (run.id && run.id === curId) ? " active" : "";
     const when = mptFmtWhen(run.saved_at);
-    return `<button type="button" class="pf-mpt-run${active}" data-run-idx="${i}">
+    return `<button type="button" class="pf-mpt-hist${active}" data-run-idx="${i}">
         <span class="pf-mpt-run-main">
           <span class="pf-mpt-run-params">${escapeHtml(mptRunParamsLabel(run.params))}</span>
           <span class="pf-mpt-run-when">${escapeHtml(when)}</span>
@@ -10086,7 +10095,7 @@ function mptRenderRunHistory(runs) {
         <span class="pf-mpt-run-head">${escapeHtml(mptRunHeadline(run))}</span>
       </button>`;
   }).join("");
-  host.querySelectorAll(".pf-mpt-run").forEach(btn => {
+  host.querySelectorAll(".pf-mpt-hist").forEach(btn => {
     btn.addEventListener("click", () => {
       const idx = Number(btn.dataset.runIdx);
       if (MPT._runs && MPT._runs[idx]) mptLoadRun(MPT._runs[idx]);

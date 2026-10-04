@@ -553,16 +553,6 @@ def get_mpt_runs(view_name: str) -> list[dict]:
     return _as_run_list((raw.get("runs") or {}).get((view_name or "").strip()))
 
 
-def get_last_mpt_run(view_name: str) -> dict | None:
-    """The most-recent saved Optimize run for a portfolio, or None.
-
-    Restored on Optimize-tab open. Tolerates both the current list format and the
-    legacy single-dict format (returns the newest entry).
-    """
-    runs = get_mpt_runs(view_name)
-    return runs[0] if runs else None
-
-
 def save_mpt_run(view_name: str, run: dict) -> dict:
     """Push ``run`` onto the portfolio's history (newest-first, capped at 3).
 

@@ -75,8 +75,8 @@ actually invokes). Single file, ~160 lines:
 
 - **Splash contract**: shown immediately via `QSplashScreen` (icon +
   "Convexity" + "Made by Alexander Tsoskounoglou 2026 · v{version_display}",
-  colors matching the dashboard's own dark theme — `#0d1117`/`#e6edf3`/`#7d8590`
-  from `style.css`). A `QElapsedTimer` starts the moment it's shown. The
+  colors matching the dashboard's own dark theme — "Ink" `#0a0e14`/`#e6edf3`/`#8a99ab`,
+  accent `#4ba3e3`, from `style.css`). A `QElapsedTimer` starts the moment it's shown. The
   main window is revealed on `max(0, 6000ms - elapsed)` after the
   `QWebEngineView`'s `loadFinished` fires, via `reveal()` (guarded by a
   `nonlocal` flag so it only runs once). A 20s **safety timer** also calls

@@ -61,7 +61,7 @@
     --warn: #d29922;
     --warn-rgb: 210, 153, 34;
     --bg-rgb: 10, 14, 20;
-    --row-alt: #0d121a;
+    --row-alt: #0f151e;
     --header-bg: #111823;
     --hover: #152132;
     --on-accent: #04121f;   /* white on the lighter dark-mode blue is only ~2.8:1 */
@@ -159,7 +159,6 @@
   .topbar .status { color: var(--muted); font-size: 12px; }
   .topbar .status .status-name { color: var(--accent); font-weight: 700; font-size: 15px; letter-spacing: 0.1px; }
   .topbar .status .status-meta { color: var(--muted); font-size: 12px; margin-left: 6px; }
-  .topbar .status .status-meta.status-warn { color: var(--warn); }
   .topbar .status .status-stale { color: var(--warn, #d97706); font-weight: 600; margin-left: 6px; }
   /* Shared tooltip used by every [data-tip] in the app. One <div> at body
      level; a small JS positioner picks above/below and clamps horizontally
@@ -311,7 +310,7 @@
     gap: 10px; padding: 6px 10px; border-radius: var(--r-sm); cursor: pointer;
     font-size: 12.5px; color: var(--text);
   }
-  .fx-opt:hover, .fx-opt.focused { background: var(--bg-subtle); }
+  .fx-opt:hover { background: var(--bg-subtle); }
   .fx-opt.selected { background: rgba(var(--accent-rgb), 0.12); color: var(--accent); font-weight: 600; }
   .fx-opt .fx-opt-code { font-weight: 600; letter-spacing: 0.02em; }
   .fx-opt .fx-opt-name { color: var(--muted); font-size: 11.5px; }
@@ -812,7 +811,7 @@
     border: 1px solid var(--border);
     border-radius: var(--r-lg);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    overflow: hidden;
+    overflow: clip;  /* clips the corners without becoming a scroll container (sticky th) */
   }
   .pf-analytics-head {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -1082,7 +1081,7 @@
      the second (and last) box level: never put a box inside it. */
   .pf-chart-card {
     background: var(--bg-canvas); border: 1px solid var(--border);
-    border-radius: var(--r-xl); padding: 8px 10px 6px;
+    border-radius: var(--r-lg); padding: 8px 10px 6px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   }
   .pf-chart-wrap { position: relative; }
@@ -1090,7 +1089,8 @@
   .pf-chart-wrap .pf-dd-svg { height: 80px; margin-top: 4px; }
   .pf-chart-wrap .pf-vol-svg { display: block; width: 100%; height: 56px; margin-top: 2px; }
   /* Chart-type picker (HLC area, candles, …), shared by the portfolio chart
-     and the stock modal. A native <select>: keyboard and Esc for free. */
+     and the stock modal: a pill + rounded menu (wireChartTypeDd), since a
+     native <select> popup can't be themed. */
   .ct-dd { position: relative; margin-left: auto; text-transform: none; letter-spacing: 0; }
   .ct-btn {
     display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 12px 0 14px;
@@ -1147,12 +1147,12 @@
     text-align: right; padding: 4px 6px; color: var(--muted); font-weight: 600;
     border-bottom: 1px solid var(--border);
     position: sticky; top: 50px; z-index: 20;
-    background: var(--bg-canvas);
+    background: var(--bg-subtle);  /* the sheet's own gray */
   }
   .pf-contrib-table th:first-child, .pf-contrib-table td:first-child { text-align: left; }
   .pf-contrib-table td { padding: 3px 6px; border-bottom: 1px dashed var(--border); text-align: right; white-space: nowrap; }
   .pf-contrib-table tr:last-child td { border-bottom: none; }
-  .pf-contrib-table td.pf-contrib-co { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+  .pf-contrib-name { display: inline-block; max-width: 300px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
   .pf-contrib-table td.pos { color: var(--pos); }
   .pf-contrib-table td.neg { color: var(--neg); }
   .pf-contrib-table th[data-contrib-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
@@ -1807,25 +1807,27 @@
     font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
     color: var(--muted); margin-top: 6px;
   }
-  .pf-mpt-run {
+  /* Run-history rows (was .pf-mpt-run, which also styled — and broke — the
+     accent "Run optimization" button). */
+  .pf-mpt-hist {
     display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
     padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-sm);
     cursor: pointer; background: transparent; text-align: left; width: 100%;
     font: inherit; color: var(--text); transition: border-color .12s, background .12s;
   }
-  .pf-mpt-run:hover { border-color: var(--accent); background: var(--hover); }
-  .pf-mpt-run.active { border-color: var(--accent); }
-  .pf-mpt-run .pf-mpt-run-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-  .pf-mpt-run .pf-mpt-run-params { font-weight: 600; font-size: 11px; }
-  .pf-mpt-run .pf-mpt-run-when { color: var(--muted); font-size: 10px; }
-  .pf-mpt-run .pf-mpt-run-head { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums;
+  .pf-mpt-hist:hover { border-color: var(--accent); background: var(--hover); }
+  .pf-mpt-hist.active { border-color: var(--accent); }
+  .pf-mpt-hist .pf-mpt-run-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .pf-mpt-hist .pf-mpt-run-params { font-weight: 600; font-size: 11px; }
+  .pf-mpt-hist .pf-mpt-run-when { color: var(--muted); font-size: 10px; }
+  .pf-mpt-hist .pf-mpt-run-head { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums;
     text-align: right; white-space: nowrap; }
 
   /* Per-company hover tooltip in the Optimize tab (weights list + bounds editor).
      Reuses the frontier-tip look; richer content (risk/return/analyst). */
   .pf-mpt-asset-tip {
     position: fixed; z-index: 130; min-width: 220px; max-width: 300px;
-    background: var(--bg-elevated, var(--bg-card, #fff)); color: var(--text);
+    background: var(--bg-canvas); color: var(--text);
     border: 1px solid var(--border); border-radius: var(--r-md);
     padding: 9px 11px; font-size: 11px; box-shadow: 0 8px 28px rgba(0,0,0,.22);
     opacity: 0; pointer-events: none; transition: opacity .1s;

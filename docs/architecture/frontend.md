@@ -382,11 +382,11 @@ picked.
   the markup. `setPointerCapture` stays in try/catch — it throws for a dead
   pointer id.
 
-- **Benchmark picker.** "vs <select>" in the Risk & Return header is a native
-  `<select>` (`benchSelectHtml`) — keyboard/Esc/outside-click for free, no
-  popover code. `STATE.bench` (localStorage `pf_bench`) drives the "/ x"
-  column, Beta/R²/TE (the portfolio's `rel` against it) and the chart's purple
-  comparison line; `activeBench(a)` falls back to SPY. The Nasdaq / Sector-mix
+- **Benchmark picker.** "vs ▾" in the Risk & Return header is a small custom
+  dropdown (`benchSelectHtml` / `wireBenchSelect`: Arrow keys, Esc, outside
+  click). `STATE.bench` (localStorage `pf_bench`) drives the "/ x" column and
+  Beta/R²/TE (the portfolio's `rel` against it); `activeBench(a)` falls back to
+  SPY. The chart's purple line stays the S&P 500 on purpose (`BENCH_LINES`). The Nasdaq / Sector-mix
   pills add extra lines (`pfBenchLines`, deduped), and their period returns
   are listed *under* Risk & Return, not in the chart legend. The first overlay
   pill (`#pf-show-bench`) is relabelled with the chosen benchmark on render.
@@ -413,8 +413,9 @@ picked.
   `SMA_COLORS` in `app.js` and `.swatch.sma*` in `style.css` must stay in sync.
 - **Chart types, TradingView-style (v1.19).** `CHART_TYPE` (localStorage
   `chart_type`, default **HLC area** — the user's pick) is shared by the stock
-  modal and the portfolio chart, chosen from a native `<select>`
-  (`chartTypeSelectHtml`): HLC area, Candles, Hollow candles, OHLC bars, Area,
+  modal and the portfolio chart, chosen from a pill + rounded menu
+  (`chartTypeSelectHtml` / `wireChartTypeDd`; Arrow keys, Esc closes the menu
+  before the modal, Tab out closes it; a native `<select>` popup can't be themed): HLC area, Candles, Hollow candles, OHLC bars, Area,
   Line. Drawing goes through `buildBars` (joins `history` + `ohlc` + `volume`
   on timestamp) → `aggregateBars` (first open / max high / min low / last close
   / summed volume — candles are bucketed to ~5px, so 5Y goes weekly like
@@ -577,7 +578,7 @@ picked.
 - **Palette "Navy & Denim" (v1.19)**, chosen by the user from five options
   inspired by Morgan Stanley / Goldman Sachs: accent `#187aba` (MS blue) on
   deep-navy ink `#0b2239`, blue-tinted neutrals instead of GitHub grays, hover
-  `#e8f2fa` (was a yellow). Dark mode is navy (`#08182a`) with accent
+  `#e8f2fa` (was a yellow). Dark mode (since v1.19.2 "Ink", below) uses accent
   `#4ba3e3` and a **dark** `--on-accent` (`#04121f`) because white on that blue
   is only ~2.8:1. `THEME_COLORS` in app.js mirrors these values — change both.
   Use `rgba(var(--accent-rgb), a)`, never a literal blue.

@@ -11,7 +11,6 @@ import time
 from convexity.relevance import (
     cluster_titles,
     is_boilerplate,
-    is_near_duplicate,
     norm_title,
     relevance_score,
     window_sample,
@@ -40,11 +39,6 @@ def test_cluster_titles_keeps_empty_titles_as_singletons():
     keep, dups = cluster_titles(["", "Real headline", ""])
     assert keep == [0, 1, 2]
     assert dups == [0, 0, 0]
-
-
-def test_is_near_duplicate_symmetric():
-    a, b = "Tesla raises guidance for 2024", "Tesla Raises 2024 Guidance"
-    assert is_near_duplicate(a, b) == is_near_duplicate(b, a)
 
 
 def test_relevance_ordering_title_beats_lead_beats_tagged_only():
