@@ -95,17 +95,7 @@ def test_model_dir_prefers_data_dir_then_logged_legacy(tmp_path, monkeypatch, ca
     assert ml_sentiment.model_dir() == tmp_path / "x"
 
 
-def test_symbol_db_prefers_data_dir_then_legacy(tmp_path, monkeypatch):
-    monkeypatch.delenv("PORTFOLIO_SYMBOL_DB", raising=False)
-    monkeypatch.setattr(symbol_db, "_DB_PATH", paths.symbol_db_file())
-    monkeypatch.setenv("CONVEXITY_LEGACY_ROOT", str(tmp_path / "repo"))
-    (tmp_path / "repo").mkdir()
-    assert symbol_db.db_path() == paths.symbol_db_file()
-    (tmp_path / "repo" / "symbol_db.sqlite").write_bytes(b"")
-    assert symbol_db.db_path() == tmp_path / "repo" / "symbol_db.sqlite"
-    # the builder never writes to the legacy place
-    assert symbol_db.write_path() == paths.symbol_db_file()
-    symbol_db.init_db(symbol_db.write_path())
+def test_symbol_db_lives_in_the_data_folder():
     assert symbol_db.db_path() == paths.symbol_db_file()
 
 

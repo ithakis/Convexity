@@ -1,0 +1,128 @@
+name: Symbol pack
+
+# Builds the weekly symbol pack (every listing Yahoo has: equities in all
+# regions, ETFs, mutual funds, major indices) for company search, and
+# publishes it to the rolling release `reference-pack` next to the daily
+# reference pack — CLAUDE.md §18 (rolling-asset exception) and
+# docs/architecture/ci.md.
+#
+# - Runs the convexity package from THIS commit (`uv sync --locked`), so the
+#   format and validators are the app's own.
+# - Needs no secret: Yahoo's screener only.
+# - Never commits: data goes only to the release asset. Only `publish` can
+#   write; it never creates the release.
+# - The previous manifest is read only for its row count: a run that comes in
+#   more than 20% smaller is not published (symbol_build.py).
+
+on:
+  schedule:
+    - cron: "0 4 * * 0" # Sundays 04:00 UTC, markets closed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symbol-pack
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (locked)
+        run: uv sync --locked
+
+      # Only a missing release or a release without a symbol pack means "no
+      # previous pack"; any other failure fails the run.
+      - name: Fetch the previous manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prev
+          if ! assets=$(gh release view reference-pack --repo "$GITHUB_REPOSITORY" \
+                          --json assets --jq '.assets[].name' 2> view.err); then
+            if grep -q "release not found" view.err; then
+              echo "::notice::No reference-pack release yet."
+              exit 0
+            fi
+            cat view.err
+            exit 1
+          fi
+          if ! grep -qx "symbols-manifest.json" <<< "$assets"; then
+            echo "::notice::The release holds no symbol pack yet."
+            exit 0
+          fi
+          gh release download reference-pack --repo "$GITHUB_REPOSITORY" --dir prev \
+            --pattern symbols-manifest.json
+
+      - name: Build
+        env:
+          CONVEXITY_HOME: ${{ runner.temp }}/convexity-home
+          CONVEXITY_REFERENCE_PACK: "0"
+        run: |
+          if [ -f prev/symbols-manifest.json ]; then
+            uv run convexity build-symbols --out pack --previous prev
+          else
+            uv run convexity build-symbols --out pack
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: symbol-pack
+          path: |
+            pack/symbols-manifest.json
+            pack/symbols.ndjson.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to the reference-pack release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: symbol-pack
+          path: pack
+
+      - name: Verify the file against its manifest
+        run: |
+          python3 - <<'EOF'
+          import hashlib, json, pathlib
+          d = pathlib.Path("pack")
+          names = sorted(p.name for p in d.iterdir())
+          assert names == ["symbols-manifest.json", "symbols.ndjson.gz"], names
+          m = json.loads((d / "symbols-manifest.json").read_text())
+          for name, meta in m["files"].items():
+              data = (d / name).read_bytes()
+              assert len(data) == meta["bytes"], name
+              assert hashlib.sha256(data).hexdigest() == meta["sha256"], name
+          print("symbol pack", m["date"], m["rows"])
+          EOF
+
+      # Data file first, manifest last (see reference-pack.yml).
+      - name: Upload (replaces the previous assets)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view reference-pack --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::The reference-pack release does not exist. The owner creates it once (docs/architecture/ci.md); this workflow never does."
+            exit 1
+          fi
+          gh release upload reference-pack pack/symbols.ndjson.gz \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload reference-pack pack/symbols-manifest.json \
+            --repo "$GITHUB_REPOSITORY" --clobber

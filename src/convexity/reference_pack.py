@@ -404,7 +404,7 @@ def _get(url: str, cap: int) -> bytes:
                 return bytes(buf)
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                raise PackError("no reference pack published yet (HTTP 404)") from None
+                raise PackError(f"{url.rsplit('/', 1)[-1]} not published yet (HTTP 404)") from None
             last = PackError(f"HTTP {e.code}")
             if e.code < 500 and e.code != 429:
                 raise last from None

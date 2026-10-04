@@ -165,7 +165,13 @@ contributors (and AI agents): [CLAUDE.md](CLAUDE.md) and
 
 1. Click **Portfolio** to open the input box.
 2. Paste tickers (or company names — `microsoft`, `BME: SAN` and typos work)
-   separated by commas or newlines.
+   separated by commas or newlines — or use **Find companies** above the box:
+   a name (`novo nordsk`), a sector and region (`European banks`), or criteria
+   (`tech with D/E < 0.8 and current ratio > 1`). It shows what it understood
+   as chips you can edit, the top five matches, and **Add** puts the ones you
+   pick into the portfolio. With an NVIDIA key it also answers themes
+   (`GLP-1 drug makers`) and picks a ranking for "best"; every company the AI
+   names is checked against the list of real listings first.
 3. Press **Build Dashboard** (or `Cmd/Ctrl + Enter`).
 4. Rows stream in as data is fetched — a thin progress bar tracks completion.
    The portfolio is saved automatically and restored on the next launch.
@@ -260,6 +266,8 @@ src/convexity/
 ├── news_sentiment.py   the News read (Finnhub + yfinance headlines, NVIDIA NIM LLM)
 ├── ml_sentiment.py     the Market read (LightGBM model, downloaded on first run)
 ├── reference_pack.py   the daily S&P 500 reference pack (download + validation)
+├── symbol_db.py        the weekly symbol pack: every Yahoo listing, fuzzy lookup
+├── search.py           company search: names, themes, criteria (rules + optional AI)
 ├── jobs.py             background refresh jobs (cancellable, survive a reload)
 ├── persistence.py      portfolios and settings as JSON in the data folder
 └── static/             index.html, app.js, style.css
@@ -267,9 +275,11 @@ src/convexity/
 
 Network access is limited to Yahoo Finance, Finnhub, NVIDIA NIM, the KaTeX CDN
 (column-guide formulas) and this repository's GitHub Releases: the one-time model
-download, and a small daily *reference pack* — the Market read of the S&P 500,
+download, a small daily *reference pack* — the Market read of the S&P 500,
 built here by a scheduled workflow — that calibrates the Market read until you
-have history of your own and adds a 500-name view to the Track record. It reveals
+have history of your own and adds a 500-name view to the Track record, and a
+weekly *symbol pack* — every listing Yahoo has, with sector, industry and size —
+that company search runs on, offline. They reveal
 only that a copy of Convexity is running, never what you hold, and can be switched
 off in Settings → Models & Data. The full design notes are in
 [docs/architecture/](docs/architecture/).

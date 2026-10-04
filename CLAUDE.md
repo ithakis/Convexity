@@ -27,7 +27,7 @@ their original numbers:
 | 4 | News & Sentiment: News read, Market read, model download/release, Track record | [docs/architecture/news.md](docs/architecture/news.md) |
 | 4 | Request-origin guard, Settings → API keys (`keys.py`) | [docs/architecture/security.md](docs/architecture/security.md) |
 | 5, 8, 11 | Frontend, CSS / theming, line landmarks | [docs/architecture/frontend.md](docs/architecture/frontend.md) |
-| 6, 7 | Symbol DB (`convexity build-symbols`), Excel export | [docs/architecture/backend.md](docs/architecture/backend.md) |
+| 6, 7 | Symbol pack + company search (`convexity build-symbols`, `/api/search`), Excel export | [docs/architecture/backend.md](docs/architecture/backend.md) |
 | 9, 10 | Conventions, open work | this file |
 | 12 | Black-Litterman + mean-CVaR optimizer | [docs/architecture/mpt.md](docs/architecture/mpt.md) |
 | 13 | CI, pre-commit, merging and making a release live | [docs/architecture/ci.md](docs/architecture/ci.md) |
@@ -55,6 +55,14 @@ Each of these has cost real debugging time; the link goes to the full story.
   percent, margins are fractions, LSE prices are pence while caps are pounds, and
   ADR multiples mix currencies. Store one unit at ingestion; compare caps in USD.
   [backend.md → Streaming row build](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
+- **Company search units live in one registry** (`search.FIELDS`): the
+  screener and `.info` disagree (D/E percent in both, ROE percent vs
+  fraction), and the screener's market cap is local currency. The LLM may only
+  emit registry keys; every AI pick is verified against the symbol pack.
+  [backend.md → §6](docs/architecture/backend.md#6-symbol-pack--company-search-symbol_dbpy-symbol_buildpy-searchpy)
+- **Yahoo's screener serves at most 10,000 results per query** — deeper
+  pages silently repeat the last one. Split big queries (`symbol_build.sweep`).
+  [backend.md → §6](docs/architecture/backend.md#6-symbol-pack--company-search-symbol_dbpy-symbol_buildpy-searchpy)
 - **Don't put heavy fetches in `fetch_one`** (the streaming hot path).
   [backend.md → Streaming row build](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
 - **Request-origin guard** — every frontend POST sends
@@ -107,7 +115,7 @@ GitHub Releases (the one-time model download and the daily reference pack),
 no build step. Almost all logic lives in the `src/convexity/` package, split
 into focused modules (server, fetcher, analytics, fx, persistence, etc. —
 see the table below). The `convexity` command is `cli.main()`: no
-arguments runs the server, `convexity build-symbols` builds the symbol DB,
+arguments runs the server, `convexity build-symbols` builds the symbol pack (CI),
 `convexity build-reference-pack` builds the reference pack (CI).
 (The root `dashboard.py` shim and `build_symbol_db.py` were removed in
 Phase 7.)
@@ -127,7 +135,7 @@ sub-decision.
 ├── src/convexity/               ← The package (src layout since Phase 7). Everything below is imported by server.py or desktop.py.
 │   ├── __init__.py
 │   ├── __main__.py              ← `python -m convexity [build-symbols]` → cli.main()
-│   ├── cli.py                   ← The `convexity` command: no args = server, `build-symbols` = symbol DB builder — §6, `build-reference-pack`
+│   ├── cli.py                   ← The `convexity` command: no args = server, `build-symbols` (symbol pack, CI) — §6, `build-reference-pack`
 │   ├── server.py                ← HTTP server, route handlers, start_server()/shutdown_server() — §4, §14
 │   ├── fetcher.py                ← fetch_one() per-symbol row builder — §4
 │   ├── analytics.py             ← analyze_portfolios_multi(), bulk close, analyst blocks — §4
@@ -142,7 +150,9 @@ sub-decision.
 │   ├── paths.py                 ← THE data-folder resolver (state/, models/, logs/, config.json, symbol DB) — §4 "Where user data lives"
 │   ├── migrate.py               ← Runs from __init__: v1.13 rename (§18) + v1.14 copy→verify→remove into the data folder — §4
 │   ├── resolver.py              ← resolve_symbol() pipeline (fuzzy input → Yahoo ticker) — §4
-│   ├── symbol_db.py             ← Local fuzzy ticker DB (provider-agnostic schema) — §6
+│   ├── symbol_db.py             ← Symbol pack: format, weekly download, fuzzy lookup, categories — §6
+│   ├── symbol_build.py          ← `convexity build-symbols` (run by CI): every Yahoo listing → the pack — §6, §13
+│   ├── search.py                ← Company search: field registry, rule + LLM parsers, executor (/api/search) — §6
 │   ├── helpers.py                ← Shared small utilities (dividend-yield normalisation, etc.)
 │   ├── xlsx_export.py           ← One-sheet-per-portfolio Excel export — §7
 │   ├── finnhub_adapter.py       ← Optional Finnhub supplemental columns (MSPR, rec trend) — §4
@@ -155,7 +165,7 @@ sub-decision.
 │   ├── model_fetch.py           ← First-run download of the Market read model (pinned URL + SHA-256) — §4
 │   ├── reference_pack.py        ← Reference pack: format + allow-list validators, daily download, anchor/Track record readers — §4
 │   ├── reference_build.py       ← `convexity build-reference-pack` (run by CI): S&P 500 Market read → the pack — §4, §13
-│   ├── data/                    ← Package data: lm_lexicon.json, sp500.json (the pack's universe, source + date inside)
+│   ├── data/                    ← Package data: lm_lexicon.json, sp500.json (the pack's universe, source + date inside), indices.json
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
@@ -195,7 +205,7 @@ overrides it):
 ```
 ~/Library/Application Support/Convexity/   (macOS; Windows %APPDATA%\Convexity\, Linux $XDG_DATA_HOME/convexity/)
 ├── config.json                 ← API keys {finnhub_api_key, nvidia_api_key}, 0600 — written by Settings → API keys (keys.py)
-├── symbol_db.sqlite            ← Built by `convexity build-symbols` — §6
+├── symbol_db.sqlite            ← The downloaded symbol pack, as SQLite (weekly) — §6
 ├── state/
 │   ├── views.json              ← Per-portfolio cached rows + metadata + weight presets
 │   ├── watchlists.json         ← Per-portfolio entries strings
@@ -530,7 +540,8 @@ GitHub's side needs a GitHub Support request by the owner.
 - No new outbound hosts, CDNs, analytics or telemetry without asking (today:
   Yahoo Finance, Finnhub, NVIDIA NIM, KaTeX CDN, and GitHub Releases for the
   one-time model download — `model_fetch.py` — and the daily reference pack —
-  `reference_pack.py`, §4; the latter can be switched off in Settings).
+  `reference_pack.py`, §4 — plus the weekly symbol pack, `symbol_db.py`, §6;
+  both packs can be switched off in Settings).
 - No `eval`/`exec`, `shell=True`, `pickle`/`joblib.load` of anything downloaded,
   or `yaml.load` without `SafeLoader`. Anything downloaded at runtime (model
   artifact — `model_fetch.MODEL_SHA256`, checked before the archive is opened)
@@ -540,7 +551,10 @@ GitHub's side needs a GitHub Support request by the owner.
   the user's OK, and an existing tag's asset is never replaced.
 - **The one exception: the rolling `reference-pack` release.** Its three
   assets (`manifest.json`, `anchor.json.gz`, `history.json.gz`) are replaced
-  by `reference-pack.yml` every weekday with `gh release upload --clobber`.
+  by `reference-pack.yml` every weekday with `gh release upload --clobber`,
+  and two more (`symbols-manifest.json`, `symbols.ndjson.gz` — every Yahoo
+  listing's ticker, name, exchange, sector, industry and USD size) by
+  `symbol-pack.yml` every Sunday, under the same rules.
   The never-replace rule protects **code** that old installs pin by hash (the
   model); the pack is **data** that changes daily and cannot be pinned. What
   protects the app instead: HTTPS to this repo's releases only, the manifest's

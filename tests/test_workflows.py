@@ -97,3 +97,29 @@ def test_only_a_missing_release_starts_a_fresh_history():
     assert "rm -rf prev" not in step
     # the download itself is not wrapped in an `if`: its failure fails the step
     assert "\n          gh release download reference-pack" in step
+
+
+SYM = WF / "symbol-pack.yml"
+
+
+def test_symbol_pack_only_publish_writes_and_needs_no_secret():
+    text = SYM.read_text()
+    jobs = _jobs(text)
+    assert set(jobs) == {"build", "publish"}
+    for name, block in jobs.items():
+        assert ("contents: write" in block) == (name == "publish"), name
+    assert "secrets." not in text
+
+
+def test_symbol_pack_never_commits_or_creates_the_release():
+    text = SYM.read_text()
+    for bad in ("git commit", "git push", "gh release create", "git tag"):
+        assert bad not in text, bad
+    assert "gh release upload reference-pack" in text and "--clobber" in text
+    assert "uv sync --locked" in text
+    on = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert set(re.findall(r"(?m)^  ([a-z_]+):", on)) == {"schedule", "workflow_dispatch"}
+    assert re.search(r'cron: "\d+ \d+ \* \* 0"', text)  # weekly
+    # manifest last, so a reader never sees a manifest without its file
+    up = _jobs(text)["publish"]
+    assert up.index("pack/symbols.ndjson.gz \\") < up.index("pack/symbols-manifest.json \\")

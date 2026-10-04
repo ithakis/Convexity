@@ -43,6 +43,7 @@ POST_PATHS = [
     "/api/refresh-job",
     "/api/refresh-job/rj_x/cancel",
     "/api/news-rescore",
+    "/api/search",
     "/api/model-download",
     "/api/reference-pack",
     "/api/keys",

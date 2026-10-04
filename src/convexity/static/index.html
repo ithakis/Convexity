@@ -75,6 +75,31 @@
   <!-- Browser-style tab strip of saved portfolios -->
   <div class="pf-tabs" id="pf-tabs" role="tablist"></div>
 
+  <!-- Company search (search.py, POST /api/search). One box: the server picks
+       the search type (name, theme, screen) and returns the query it ran as
+       chips, the audit trail, which the user can edit and re-run. -->
+  <div class="co-search" id="co-search">
+    <form class="co-bar" id="co-form" autocomplete="off">
+      <span class="co-icon" aria-hidden="true">&#8981;</span>
+      <input id="co-q" type="search" spellcheck="false" aria-label="Find companies"
+        placeholder="Find companies: a name, a theme, or criteria like &quot;tech with D/E &lt; 0.8 and current ratio &gt; 1&quot;">
+      <button class="co-go" id="co-go" type="submit">Search</button>
+    </form>
+    <div class="co-out" id="co-out" hidden>
+      <div class="co-chips" id="co-chips"></div>
+      <div class="co-edit" id="co-edit" hidden></div>
+      <div class="co-msg" id="co-msg"></div>
+      <div class="co-grid" id="co-grid"></div>
+      <div class="co-foot">
+        <button type="button" class="co-link" id="co-more">Show next 5</button>
+        <span class="co-meta" id="co-meta"></span>
+        <span class="spacer"></span>
+        <button type="button" class="co-link" id="co-close">Close</button>
+        <button type="button" class="co-add" id="co-add" disabled>Add</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Constituents editor -->
   <div class="pf-editor">
     <div class="pf-editor-head">

@@ -612,11 +612,18 @@ class Handler(BaseHTTPRequestHandler):
                 reference = reference_pack.status()
             except Exception as exc:
                 reference = {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            try:
+                from convexity import symbol_db
+
+                symbols = symbol_db.status()
+            except Exception as exc:
+                symbols = {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
             self._send_json(
                 200,
                 {
                     "ml": ml,
                     "reference": reference,
+                    "symbols": symbols,
                     "env": envcheck.status(),
                     "keys": keys,
                     "version": __version__,
@@ -814,11 +821,16 @@ class Handler(BaseHTTPRequestHandler):
             # Nothing is sent anywhere but the GET of the public pack.
             from convexity import reference_pack
 
+            from convexity import symbol_db
+
             payload = self._read_json()
             if isinstance(payload.get("enabled"), bool):
-                self._send_json(200, reference_pack.set_enabled(payload["enabled"]))
+                st = reference_pack.set_enabled(payload["enabled"])
+                symbol_db.start()  # the symbol pack shares the switch
+                self._send_json(200, st)
             elif payload.get("action") == "refresh":
                 reference_pack.start(force=True)
+                symbol_db.start(force=True)
                 self._send_json(202, reference_pack.status())
             else:
                 self._send_json(
@@ -1180,6 +1192,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": False, "state": jobs.get(job_id).state})
             return
 
+        if parsed.path == "/api/search":
+            # Company search (search.py): {q} free text, or {query} an edited
+            # chip set (validated, never sent to the LLM), plus {offset}.
+            from convexity import search
+
+            try:
+                payload = self._read_json()
+                query = payload.get("query")
+                out = search.search(
+                    str(payload.get("q") or ""),
+                    query if isinstance(query, dict) else None,
+                    int(payload.get("offset") or 0),
+                )
+            except (TypeError, ValueError) as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            except Exception as exc:
+                self._log_exception("/api/search", str(payload)[:200])
+                self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+                return
+            self._send_json(200, out)
+            return
+
         if parsed.path == "/api/news-rescore":
             # Deliberately NOT a job: cache-only, sub-50 ms, no network and no
             # LLM. Changing the News window must repaint immediately.
@@ -1370,6 +1405,14 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
             reference_pack.start()
         except Exception as exc:
             print(f"[reference_pack] start failed: {type(exc).__name__}: {exc}")
+        try:
+            # The weekly symbol pack (company search, fuzzy names): same
+            # switch, its own thread, at most once a week (symbol_db.py).
+            from convexity import symbol_db
+
+            symbol_db.start()
+        except Exception as exc:
+            print(f"[symbols] start failed: {type(exc).__name__}: {exc}")
         try:
             from convexity import ml_sentiment as _mls
 
