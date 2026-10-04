@@ -126,23 +126,42 @@ exactly. Sort (`pf_contrib_sort`) and the Table | Chart toggle
 `#pf-contrib-body`. The chart is an HTML/CSS horizontal waterfall
 (`renderContribChartHtml`) in contribution order, ending in a Total bar.
 
+### Portfolio panel and constituents
+`#input-panel` is a transparent wrapper: the `.pf-tabs` pills sit on the page,
+and the open portfolio (search, constituents, analytics) is the gray `.pf-body`
+below them. There is no text editor: the constituents are the entries string
+`ENTRIES` (what `/api/watchlists` stores), shown as `.pf-chip`s by
+`renderConstituents()` — the row's name when a `DATA` row matches the entry,
+else a name remembered from a search card (`ENTRY_NAMES`), else the entry.
+Every edit goes through `commitEntries(next)`: it saves the watchlist at once
+(the server marks the view stale), and nothing is built. `refreshNeeded()`
+— entries set and the view missing, empty, stale or saved from other entries —
+drives `#refresh.needs-refresh` (red) via `syncRefreshNeeded()`, called from
+`renderEditorMeta()`. Refresh runs the background job, which saves the view;
+`rfFinish` then re-reads the active view's rows (the live patch only upserts,
+so removed constituents would otherwise stay) and the red clears. Switching to
+a stale tab does not rebuild it; only rows saved before a new column existed
+still rebuild by themselves. The unsaved tab (`AD_HOC_KEY`) is labelled
+`untitledName()` ("Untitled N") and is saved under that name by its first
+edit, because the server keeps no empty watchlists; removing the last chip is
+refused. The Build / Update Portfolio / Save as new buttons, the textarea and
+the analytics stale banner were removed in this change.
+
 ### Company search (`#co-search`, app.js "Company search")
-One box above the Constituents editor posts to `/api/search` (backend.md §6).
+One box above the constituents posts to `/api/search` (backend.md §6).
 The response's `query` is kept verbatim in `CO.query`: the chips render it
 (purple = chosen by the AI), a chip's × or its inline editor changes it and
 posts `{query}` back, which the server validates and runs without the LLM.
 Cards (top 5, "Show next 5") are selectable; "+N listings" swaps a card to
-another listing of the same company. **Add** appends the tickers to the
-textarea, calls `build({only})` — which streams just those rows and keeps
-`DATA` — and saves a named portfolio's entries without a rebuild. Tickers
-already in the portfolio show as "In this portfolio" and cannot be picked.
+another listing of the same company. **Add** passes the picked tickers to
+`commitEntries` (Refresh turns red; their rows load on the next refresh). A
+pasted list (`kind: "list"`) comes back with every new card preselected.
+Tickers already in the portfolio show as "In this portfolio" and cannot be
+picked.
 
 ### Key UI behaviours added in Passes A/B/C
-- **Smart primary button**: `#build` swaps label between "Build
-  Dashboard" / "Update Portfolio" based on `primaryButtonMode()`.
-  `runPrimary()` routes to the right handler; Cmd/Ctrl+Enter triggers it.
-  **Cmd/Ctrl+Enter bypasses the disabled button**, so `build()` calls can
-  overlap. `BUILD_GEN` means only the newest build writes `DATA`, saves and
+- **Overlapping builds**: `build()` (now only the new-column rebuild on a
+  tab switch) can still overlap a refresh job or another tab's build. `BUILD_GEN` means only the newest build writes `DATA`, saves and
   requests analytics; a superseded one cancels its reader and leaves
   progress/disabled state alone. `BUILD_STREAMING` keeps refresh-job row
   frames out while a build repopulates `DATA`. Both write through
@@ -519,8 +538,7 @@ already in the portfolio show as "In this portfolio" and cannot be picked.
   neutral gray. The first cut made body text amber too and the user rejected
   it ("everything is the same color"). A short fidelity-override block right
   under the variable block additionally paints table `th`, ticker `.sym`
-  cells, and the `#tickers` textarea amber ("amber = editable" is the
-  terminal's own convention). `--on-accent` is
+  cells amber ("amber = editable" is the terminal's own convention). `--on-accent` is
   the text/thumb colour placed *on* an `--accent` fill (white in light/dark,
   near-black in Bloomberg so text stays legible on the bright orange); any
   new accent-filled control must use `color: var(--on-accent)`, never a

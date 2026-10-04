@@ -187,7 +187,7 @@ def validate(q) -> dict:
     out = empty(str((q or {}).get("text", ""))[:300])
     if not isinstance(q, dict):
         return out
-    out["kind"] = q.get("kind") if q.get("kind") in ("name", "screen", "theme") else "name"
+    out["kind"] = q.get("kind") if q.get("kind") in ("name", "screen", "theme", "list") else "name"
     out["engine"] = "ai" if q.get("engine") == "ai" else "rules"
     out["ignored"] = [str(x)[:80] for x in (q.get("ignored") or [])[:10] if str(x).strip()]
     out["notes"] = [str(x)[:160] for x in (q.get("notes") or [])[:10]]
@@ -331,10 +331,14 @@ Use only the enums in the schema. Values are in the user's units: D/E 0.8 means
 - kind "theme": the request names a theme no sector or industry captures
   (a drug class, a technology, a supply chain). Then list up to 12 real, listed
   companies in "picks" (ticker as on Yahoo Finance, company name, why in under
-  8 words), most relevant first, plus any filters the user gave.
+  8 words), most relevant first, plus any filters the user gave. Pick only
+  companies whose own business is the theme; fewer picks beat weak ones. Any
+  sectors/industries you set must contain every pick.
 - kind "name": the user typed a company name; put it in picks.
-- rank: when the user asks for "best"/"top" without a metric, choose the metric
-  that best fits the request and say why in rank.why (under 10 words).
+- rank: when the user asks for "best"/"top" without a metric, choose the quality,
+  growth or value metric that best fits the request, not one the user already
+  filters on (market cap only when the user asks about size), and say why in
+  rank.why (under 10 words).
 - Anything you cannot express with the schema goes, verbatim, into "ignored".
 Never invent fields. Never return prose outside the JSON."""
 
@@ -387,7 +391,10 @@ def parse_llm(text: str, hint: dict) -> dict | None:
 
     if ns._nv_rate_limit_until > time.time():
         return None
-    user = f"Request: {text}\nA rule parser already read: {json.dumps(_brief(hint))}"
+    # The rules' placeholder rank (market cap for "best") is not a reading:
+    # shown to the model, it was copied back instead of choosing a metric.
+    brief = {k: v for k, v in _brief(hint).items() if k != "rank" or v.get("by") != "default"}
+    user = f"Request: {text}\nA rule parser already read: {json.dumps(brief)}"
     try:
         raw = ns._nvidia_call(_SYSTEM, user, (), _Deadline(_AI_DEADLINE_S), schema=_llm_schema(),
                               name="company_search", record=False, tag="search", timeout=20.0)  # fmt: skip
@@ -405,6 +412,10 @@ def parse_llm(text: str, hint: dict) -> dict | None:
     return q
 
 
+def _parts(text: str) -> list[str]:
+    return [p.strip() for p in re.split(r"[,;\n]+", text) if p.strip()]
+
+
 def _brief(q: dict) -> dict:
     return {
         k: q[k] for k in ("filters", "sectors", "industries", "regions", "types", "rank") if q[k]
@@ -415,6 +426,10 @@ def parse(text: str) -> dict:
     """Rules first; the LLM only when a phrase is left over, the query reads
     as a theme, or "best" needs a metric — and only with a key."""
     q, left = parse_rules(text)
+    # A pasted list ("AAPL, microsft, Novo"): one company per part, no AI.
+    parts = _parts(text)
+    if len(parts) >= 2 and not q["filters"] and all(len(p.split()) <= 5 for p in parts):
+        return {**empty(q["text"]), "kind": "list"}
     if left and not q["filters"]:
         # "deutsche bank", "bank of america", "american express": category
         # words inside a company name. A near-exact name wins over the parse.
@@ -452,6 +467,8 @@ _TTL_S = 600.0
 def run(q: dict, offset: int = 0) -> dict:
     """Execute a validated query: the next five results + warnings."""
     t0 = time.time()
+    if q["kind"] == "list":
+        return _run_list(q, t0)
     # The text only matters to a name search; a screen is its parsed query.
     skip = ("notes",) if q["kind"] == "name" else ("notes", "text")
     key = json.dumps({k: v for k, v in q.items() if k not in skip}, sort_keys=True)
@@ -469,6 +486,14 @@ def run(q: dict, offset: int = 0) -> dict:
             base, dropped = _verify_picks(q["picks"])
             if q["regions"]:  # "... in Europe": the company's home, not the AI's say-so
                 base = [c for c in base if c["region"] in q["regions"]]
+            if q["sectors"] or q["industries"]:  # a pick outside its own theme's categories
+                off = [c["ticker"] for c in base if (c["sector"] or c["industry"])
+                       and c["sector"] not in q["sectors"] and c["industry"] not in q["industries"]]  # fmt: skip
+                base = [c for c in base if c["ticker"] not in off]
+                if off:
+                    warnings.append(
+                        f"Dropped AI picks outside the theme's sectors and industries: {', '.join(off)}."
+                    )
             if q["filters"]:  # the AI's picks still have to pass the user's criteria
                 _fill_values(base, q)
                 base = [c for c in base if _passes(c, q["filters"], c["values"])]
@@ -503,6 +528,9 @@ def run(q: dict, offset: int = 0) -> dict:
             _CACHE[key] = (time.time(), base)
     page = base[offset : offset + _TOP_N]
     _fill_values(page, q)
+    floor_note = "Ranked among companies above $1B market cap; a market-cap filter changes this."
+    if q["kind"] == "screen" and _size_floor(q) and floor_note not in q["notes"]:
+        q["notes"].append(floor_note)
     if not base:
         warnings.append("No matches." if sdb.status()["installed"] else
                         "The symbol list is still downloading; try again in a minute.")  # fmt: skip
@@ -513,6 +541,27 @@ def run(q: dict, offset: int = 0) -> dict:
 
 
 _LABELS = {k: v[:2] for k, v in FIELDS.items()}  # the page formats values with these
+_LIST_MAX = 50
+
+
+def _run_list(q: dict, t0: float) -> dict:
+    """A pasted list: each part as typed (an exact ticker stays that listing),
+    else its best name match; all on one page. Not cached: lookups are."""
+    cards, seen, missing = [], set(), []
+    for part in _parts(q["text"])[:_LIST_MAX]:
+        h = sdb.get(part) or next(iter(sdb.lookup(part, limit=1)), None)
+        if h is None:
+            missing.append(part)
+        elif h.ticker not in seen:
+            seen.add(h.ticker)
+            cards.append(_card(h))
+    warnings = [f"Not found: {', '.join(missing)}."] if missing else []
+    if not cards and not sdb.status()["installed"]:
+        warnings = ["The symbol list is still downloading; try again in a minute."]
+    print(f"[search] list of {len(_parts(q['text']))} engine=rules kind=list"
+          f" results={len(cards)} missing={len(missing)} {time.time() - t0:.1f}s", flush=True)  # fmt: skip
+    return {"query": q, "chips": [], "results": cards, "total": len(cards), "offset": 0,
+            "warnings": warnings, "notes": [], "fields": _LABELS}  # fmt: skip
 
 
 def _card(h: sdb.Hit, why: str = "") -> dict:
@@ -559,15 +608,24 @@ def _screen(q: dict) -> list[dict]:
             parts.append(Q(f["op"], [field, f["value"] * factor]))
     rank = q["rank"] or {"field": "mcap", "dir": "desc"}
     sort = FIELDS[rank["field"]][2] or "intradaymarketcap"
+    if rank["dir"] == "asc" and FIELDS[rank["field"]][2]:
+        # Lowest first: a negative D/E or P/E is negative equity or a loss, not
+        # the best of the list — Yahoo would sort those to the top.
+        parts.append(Q("gte", [sort, 0]))
     quotes: list[dict] = []
-    for page in range(2 if rank["field"] == "mcap" else 1):
-        r = yf.screen(
-            Q("and", parts),
-            size=250,
-            offset=page * 250,
-            sortField=sort,
-            sortAsc=rank["dir"] == "asc",
-        )
+    for page in range(2 if rank["field"] == "mcap" else 4 if _size_floor(q) else 1):
+        for attempt in range(3):
+            try:
+                r = yf.screen(Q("and", parts), size=250, offset=page * 250,
+                              sortField=sort, sortAsc=rank["dir"] == "asc")  # fmt: skip
+                break
+            except Exception:
+                # yfinance shares one cookie + crumb across threads, and any 4xx
+                # (a delisted ticker in a concurrent quote fetch) flips its cookie
+                # strategy: a screen sent meanwhile gets a 401. Transient — retry.
+                if attempt == 2:
+                    raise
+                time.sleep(0.6 * (attempt + 1))
         quotes += r.get("quotes") or []
         if len(quotes) >= (r.get("total") or 0):
             break
@@ -582,9 +640,27 @@ def _screen(q: dict) -> list[dict]:
         groups.add(h.group)
         cards.append(_card(h))
     cards = [c for c in cards if _passes(c, [f for f in q["filters"] if f["field"] == "mcap"], {})]
+    if _size_floor(q):
+        big = [c for c in cards if (c["mcap_usd"] or 0) >= _FLOOR_USD]
+        cards = big if len(big) >= _TOP_N else cards
     if rank["field"] == "mcap":
         cards.sort(key=lambda c: (c["mcap_usd"] or 0) * (1 if rank["dir"] == "asc" else -1))
     return cards
+
+
+_FLOOR_USD = 1e9
+
+
+def _size_floor(q: dict) -> bool:
+    """A ratio ranking over every listing is led by microcaps (a 400% ROE on a
+    tiny equity base). Without a market-cap filter of the user's own, rank
+    among companies above $1B — in USD from the pack: the screener's own cap is
+    in local currency."""
+    return (
+        bool(q["rank"])
+        and q["rank"]["field"] != "mcap"
+        and all(f["field"] != "mcap" for f in q["filters"])
+    )
 
 
 def _passes(card: dict, filters: list[dict], values: dict) -> bool:

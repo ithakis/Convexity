@@ -1,13 +1,14 @@
 ---
 name: verify
-description: Run Convexity for real (installed package, temp data folder, no keys) and drive the UI, API, CLI, desktop window and installers to verify a change.
+description: Run Convexity for real (installed package, temp data folder, the user's keys via env when the change calls Finnhub/NIM) and drive the UI, API, CLI, desktop window and installers to verify a change.
 ---
 
 # Verifying Convexity at runtime
 
-Never touch the user's real data folder or keys. The checkout holds legacy
-`.finnhub_key` / `.nvidia_key` files that any run *from the checkout* loads, so
-drive the app from a key-free install of a clean tree instead:
+Never touch the user's real data folder, and never print a key. Drive the app
+from an install of a clean tree (no legacy key files, no state). When the change
+calls Finnhub or NVIDIA NIM, validate it live with the user's keys passed as
+env vars (CLAUDE.md §3 "Use and validate the user's real API keys"):
 
 ```bash
 S=<scratchpad>/v; mkdir -p $S/tree $S/tools $S/bin $S/home $S/run
@@ -22,14 +23,15 @@ the data migration. Kill the server by its python PID (not the bash wrapper);
 never `pkill -f convexity`.
 
 Flows worth driving (browser pane on the printed URL):
-- Portfolio → paste `AAPL, MSFT, NVDA, SPY, microsoft, JPM` → Build: 5 rows
-  (dedupe), analytics chart, analyst section. The pane cannot answer native
-  `prompt()`: stub `window.prompt = () => "Demo"` before "Save as new".
+- Portfolio → + New portfolio ("Untitled 1") → paste `AAPL, MSFT, NVDA, SPY,
+  microsoft, JPM` into the search box → Add → chips, red Refresh → Refresh:
+  rows, analytics chart, analyst section, red clears. ✕ a chip → red again.
 - Reload → the saved tab is restored. Click a row → detail modal; 1M = 30m bars.
 - Optimize → Run (frontier + cloud + band); `/api/efficient-frontier` with
   `bounds` and `budget: "light"` for box/infeasible probes.
-- News tab and Refresh are safe here: no keys exist in this install, so the
-  news phase makes zero LLM/Finnhub calls ("n failed" is expected).
+- News tab and Refresh: with the keys in the env, one refresh of a few names
+  checks Finnhub + the News read live ("n/n scored"); without them the news
+  phase makes zero calls ("n failed" is expected).
 - Settings → About / Models & Data / API keys (save + Remove a fake key; never
   press Test) / Logs.
 - Symbol pack + company search: `convexity build-symbols --out <dir> --limit 250`
@@ -38,7 +40,9 @@ Flows worth driving (browser pane on the printed URL):
   (same `CONVEXITY_REFERENCE_URL`, files `symbols-manifest.json` +
   `symbols.ndjson.gz`). Then Find companies: `microsft`, `european banks`,
   `tech with D/E < 0.8 and current ratio > 1`, edit a chip, Add two cards
-  (only those rows stream in), and a build with `Microsft, DaVita, Alphabet`.
+  (Refresh turns red), a pasted list `AAPL, microsft, ZZZZ`; with the NIM key,
+  `best tech companies with D/E < .8 and current ratio > 1` (AI rank chip) and
+  `GLP-1 drug makers` (verified picks with why-lines).
 - Reference pack, app side: serve a pack directory with
   `python3 -m http.server <port> --bind 127.0.0.1` and start the app with
   `CONVEXITY_REFERENCE_URL=http://127.0.0.1:<port>/<dir>/` → Settings → Models &

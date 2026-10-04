@@ -481,14 +481,29 @@ the page shows it as chips, every search prints one `[search]` line.
 - **`parse_llm`** — only when words are left over, the query is a theme, or
   "best" needs a metric, and only with the NVIDIA key. Strict JSON schema whose
   enums are the registry and the screener vocabulary; output re-validated.
-  Every AI pick must exist in the pack and is shown as its home listing.
+  Every AI pick must exist in the pack and is shown as its home listing; a
+  theme's picks outside the sectors/industries the model itself set are
+  dropped and named in a warning (a live test offered Philip Morris as a GLP-1
+  maker). The rules' placeholder rank (market cap for "best") is left out of
+  the hint, or the model copies it back instead of choosing a metric.
   Reuses `news_sentiment._nvidia_call(..., record=False, tag="search")`, so a
   search failure never touches the News LLM banner.
+- **Pasted lists** — two or more comma/newline parts with no criteria are
+  `kind: "list"` (`_run_list`, rules only): an exact ticker keeps that listing,
+  anything else is its best name match; all on one page, misses named.
 - **`run`** — names and pure sector/region screens offline on the pack;
   criteria through `yf.screen`, deduped to home listings, regions checked on
   the home listing (LLY.DE is not a European company); `Ticker.info` for the
   five cards shown. Results cached 10 min per query for "Show next 5". A chip
   edit posts `{query}` back: validated, never sent to the LLM.
+- **Screener rules learned live**: yfinance shares one cookie + crumb across
+  threads and any 4xx (a delisted ticker in a concurrent quote fetch) flips its
+  cookie strategy, so a screen sent meanwhile gets a 401 — `_screen` retries
+  twice. A ratio ranking without a market-cap filter is among companies above
+  $1B in USD (`_size_floor`, 4 pages fetched; a note says so), because over
+  every listing it is led by microcaps with tiny equity. A lowest-first
+  ranking adds `field >= 0` at the screener: negative D/E or P/E is negative
+  equity or a loss, which Yahoo would sort to the top.
 
 ### Wiring
 `resolver._symbol_db_lookup()` uses `lookup()`. With no pack yet (first

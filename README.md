@@ -163,20 +163,21 @@ contributors (and AI agents): [CLAUDE.md](CLAUDE.md) and
 
 ## Usage
 
-1. Click **Portfolio** to open the input box.
-2. Paste tickers (or company names — `microsoft`, `BME: SAN` and typos work)
-   separated by commas or newlines — or use **Find companies** above the box:
+1. Click **Portfolio**, then **+ New portfolio** (it opens as "Untitled 1";
+   double-click the tab to rename it).
+2. Add companies with the search box: paste tickers or names separated by
+   commas (`AAPL, microsft, BME: SAN` — typos work), or search for
    a name (`novo nordsk`), a sector and region (`European banks`), or criteria
    (`tech with D/E < 0.8 and current ratio > 1`). It shows what it understood
    as chips you can edit, the top five matches, and **Add** puts the ones you
    pick into the portfolio. With an NVIDIA key it also answers themes
    (`GLP-1 drug makers`) and picks a ranking for "best"; every company the AI
    names is checked against the list of real listings first.
-3. Press **Build Dashboard** (or `Cmd/Ctrl + Enter`).
-4. Rows stream in as data is fetched — a thin progress bar tracks completion.
-   The portfolio is saved automatically and restored on the next launch.
-5. **Refresh** (or `R`) updates quotes and news in the background; long-press
-   it (or `Shift+R`) to refresh every saved portfolio.
+3. Press **Refresh** (or `R`). It turns red whenever the constituents changed
+   since the last refresh. Rows stream in as data is fetched, then news and
+   sentiment; long-press it (or `Shift+R`) to refresh every saved portfolio.
+4. The portfolio is saved as you edit and restored on the next launch. Remove a
+   company with the ✕ on its chip.
 
 ### Reading the numbers
 

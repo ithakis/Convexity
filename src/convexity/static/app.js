@@ -2322,7 +2322,7 @@ function render() {
   if (typeof renderColumnViewBar === "function") renderColumnViewBar();
   const tbody = $("#tbody"); tbody.innerHTML = "";
   if (!DATA.length) {
-    tbody.innerHTML = `<tr><td colspan="${cols.length}" style="padding:30px; text-align:center; color:var(--muted);">Press <b>Build Dashboard</b> above to load your portfolio.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${cols.length}" style="padding:30px; text-align:center; color:var(--muted);">Add companies above, then press <b>Refresh</b>.</td></tr>`;
     return;
   }
   let rows = DATA.slice();
@@ -3744,8 +3744,14 @@ let LAST_VIEW = null;
 function viewIsAdhoc(name) { return !name || name === AD_HOC_KEY; }
 function entriesArr(raw) { return String(raw || "").split(/[\n,]+/).map(s => s.trim()).filter(Boolean); }
 
+/* The open portfolio's constituents, as the entries string the server
+   stores. Shown as chips (renderConstituents); never edited as text. */
+let ENTRIES = "";
+const ENTRY_NAMES = {};     // ticker -> company name, from search cards added this session
+function setEntries(s) { ENTRIES = String(s || "").trim(); renderEditorMeta(); }
+
 /* Only the newest build() may write DATA. build() has five call sites, and
-   Cmd/Ctrl+Enter reaches it straight past the disabled #build button, so two
+   a tab switch can start one while another streams, so two
    builds can overlap — and a refresh job's row frames can land mid-build too.
    All of them wrote the same DATA array and the build appended with push(), so
    an overlap left symbols in DATA twice; persistView then saved the repeats,
@@ -3762,19 +3768,17 @@ function upsertDataRow(row) {
   if (i >= 0) DATA[i] = row; else DATA.push(row);
 }
 
-/* opts.only: stream just these entries and keep the rows already loaded —
-   the company search's Add (the textarea already holds them all). */
 async function build(opts) {
   opts = opts || {};
-  const raw = $("#tickers").value.trim();
-  if (!raw) { toast("Enter at least one ticker or company name."); return; }
-  const entries = opts.only || entriesArr(raw);
+  const raw = ENTRIES;
+  if (!raw) { toast("Add companies with the search box first."); return; }
+  const entries = entriesArr(raw);
   const gen = ++BUILD_GEN;
   BUILD_STREAMING = true;
-  $("#build").disabled = true; $("#refresh").disabled = true;
+  $("#refresh").disabled = true;
   $("#status").innerHTML = lcHtml("resolving symbols", {bar: true, meta: `0·${entries.length}`});
   showProgress(2);
-  if (!opts.only) DATA = [];
+  DATA = [];
   render();
 
   let total = entries.length;
@@ -3862,7 +3866,7 @@ async function build(opts) {
     if (gen === BUILD_GEN) {
       BUILD_STREAMING = false;
       hideProgress();
-      $("#build").disabled = false; $("#refresh").disabled = false;
+      $("#refresh").disabled = false;
     }
   }
 }
@@ -4022,10 +4026,10 @@ async function activateTab(name, opts) {
   renderModeBar();
   renderTabs();
   renderEditorMeta();
-  // Set the textarea to the watchlist entries (or stored view entries if ad-hoc).
+  // The watchlist's entries (or the stored view's, for the unsaved tab).
   const view = VIEWS[name];
   const wlEntries = WATCHLISTS[name];
-  $("#tickers").value = wlEntries != null ? wlEntries : (view ? view.entries : "");
+  setEntries(wlEntries != null ? wlEntries : (view ? view.entries : ""));
   // Try to load cached rows for the view.
   if (view && view.row_count > 0) {
     try {
@@ -4040,9 +4044,12 @@ async function activateTab(name, opts) {
         renderModeBar();
         const savedAt = view.saved_at ? relTime(view.saved_at) : "previously";
         $("#status").innerHTML = `<span class="status-name">${escapeHtml(viewLabel(name))}</span><span class="status-meta">cached ${escapeHtml(savedAt)}</span>${view.stale ? `<span class="status-stale">stale</span>` : ""}`;
-        const needsColumnRefresh = DATA.length > 0 && DATA.some(r => r && !r.error && r.rating_dist === undefined);
-        if (view.stale || needsColumnRefresh) {
-          if (!opts.silent) toast(view.stale ? `Constituents changed — refreshing ${viewLabel(name)}…` : `Refreshing ${viewLabel(name)} — new data columns available…`);
+        // Changed constituents wait for Refresh (it is red); only rows saved
+        // before a new column existed rebuild by themselves.
+        renderEditorMeta();
+        const needsColumnRefresh = DATA.some(r => r && !r.error && r.rating_dist === undefined);
+        if (needsColumnRefresh && !refreshNeeded()) {
+          if (!opts.silent) toast(`Refreshing ${viewLabel(name)} — new data columns available…`);
           await build({keepPanelOpen: true});
         } else {
           // Saved rows do not carry forward every transient news field, but the
@@ -4059,22 +4066,29 @@ async function activateTab(name, opts) {
   }
   // No cached rows yet — clear the table, prompt user.
   DATA = []; render();
-  $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Press <b>Build Dashboard</b> to load this portfolio.</div>`;
+  $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Press <b>Refresh</b> to load this portfolio.</div>`;
   $("#status").innerHTML = `<span class="status-name">${escapeHtml(viewLabel(name))}</span>`;
   await fetch("/api/last-view", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({name})});
 }
 
 function viewLabel(name) {
-  if (!name) return "Ad-hoc";
-  if (name === AD_HOC_KEY) return "Ad-hoc (unsaved)";
+  if (!name || name === AD_HOC_KEY) return untitledName();
   return name;
+}
+
+/* The unsaved tab is "Untitled N" (lowest free N); its first edit saves it
+   under that name (commitEntries) — the server keeps no empty portfolios. */
+function untitledName() {
+  let n = 1;
+  while (`Untitled ${n}` in WATCHLISTS) n++;
+  return `Untitled ${n}`;
 }
 
 function renderTabs() {
   const wrap = $("#pf-tabs"); wrap.innerHTML = "";
   // Tab order: saved watchlists alphabetically, then ad-hoc (if present), then "+ New".
   const wlNames = Object.keys(WATCHLISTS).sort((a, b) => a.localeCompare(b));
-  const hasAdhoc = !!VIEWS[AD_HOC_KEY];
+  const hasAdhoc = !!VIEWS[AD_HOC_KEY] || STATE.activeView === AD_HOC_KEY;
   const tabNames = [...wlNames];
   if (hasAdhoc) tabNames.push(AD_HOC_KEY);
 
@@ -4171,17 +4185,82 @@ async function renamePortfolio(oldName, newName) {
   }
 }
 
-function renderEditorMeta() {
-  // Meta line was removed — name lives in the topbar status now.
-  if (typeof updatePrimaryButtonLabels === "function") updatePrimaryButtonLabels();
+function renderEditorMeta() { renderConstituents(); syncRefreshNeeded(); }
+
+/* Refresh is red while the open portfolio's rows were not built from its
+   current constituents: an edit since (the server marks the view stale), or
+   never built at all. */
+function refreshNeeded() {
+  const view = VIEWS[STATE.activeView];
+  if (!ENTRIES) return false;
+  return !view || !view.row_count || view.stale || (view.entries || "").trim() !== ENTRIES;
 }
+function syncRefreshNeeded() { $("#refresh").classList.toggle("needs-refresh", refreshNeeded()); }
+
+/* "Novo Nordisk A/S" -> "Novo Nordisk": legal forms only cost chip width. */
+function shortName(n) {
+  return String(n || "").replace(/[,.]?\s+(inc|corp|corporation|co|company|ltd|limited|plc|ag|sa|s\.a|nv|n\.v|se|a\/s|asa|ab|spa|s\.p\.a|holdings?|group)\.?$/i, "").trim() || n;
+}
+
+function renderConstituents() {
+  const bySym = new Map(DATA.map(r => [String(r.symbol || "").toUpperCase(), r]));
+  const list = entriesArr(ENTRIES);
+  $("#pf-count").textContent = list.length ? String(list.length) : "";
+  $("#pf-chips").innerHTML = list.map(e => {
+    const row = bySym.get(e.toUpperCase());
+    const name = row && row.name && row.name !== row.symbol ? shortName(row.name) : ENTRY_NAMES[e.toUpperCase()];
+    const tk = name ? `<span class="pf-chip-tk">${escapeHtml(row ? row.symbol : e)}</span>` : "";
+    return `<span class="pf-chip"><span class="pf-chip-name" title="${escapeHtml(name || e)}">${escapeHtml(name || e)}</span>${tk}` +
+      `<button type="button" class="pf-chip-x" data-entry="${escapeHtml(e)}" title="Remove" aria-label="Remove ${escapeHtml(name || e)}">✕</button></span>`;
+  }).join("");
+}
+
+/* Save a new constituents list at once; the rows wait for Refresh. The
+   unsaved tab becomes a saved portfolio on its first edit. */
+async function commitEntries(next) {
+  const adhoc = viewIsAdhoc(STATE.activeView);
+  const name = adhoc ? untitledName() : STATE.activeView;
+  try {
+    const r = await fetch("/api/watchlists", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, entries: next}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Save failed.");
+    WATCHLISTS = d.watchlists || WATCHLISTS;
+    if (adhoc) {
+      if (VIEWS[AD_HOC_KEY]) {
+        try { await fetch(`/api/views/${encodeURIComponent(AD_HOC_KEY)}`, {method: "DELETE"}); } catch (e) { /* best effort */ }
+        delete VIEWS[AD_HOC_KEY];
+      }
+      STATE.activeView = name;
+    }
+    if (VIEWS[name]) VIEWS[name].stale = true;
+    setEntries(next);
+    renderTabs();
+    return true;
+  } catch (err) {
+    toast(err.message || "Save failed.");
+    return false;
+  }
+}
+
+function removeEntry(entry) {
+  const next = entriesArr(ENTRIES).filter(e => e !== entry);
+  if (!next.length) { toast("A portfolio needs at least one company. Delete the tab instead."); return; }
+  commitEntries(next.join(", "));
+}
+$("#pf-chips").addEventListener("click", (e) => {
+  const x = e.target.closest(".pf-chip-x");
+  if (x) removeEntry(x.dataset.entry);
+});
 
 async function createNewTab() {
   // Open the panel in fresh ad-hoc state.
   STATE.activeView = AD_HOC_KEY;
   STATE.customWeights = null;
-  $("#tickers").value = "";
   DATA = []; render();
+  setEntries("");
   // Keep the topbar tab state in sync with the panel being opened — the
   // accent fill on .tab-btn.active is the only "which tab is open" signal,
   // and this open-path bypasses the #edit-btn click handler that manages it.
@@ -4189,9 +4268,9 @@ async function createNewTab() {
   $("#edit-btn").classList.add("active");
   $("#news-panel").classList.add("hidden");
   $("#news-btn").classList.remove("active");
-  $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Paste tickers and press <b>Build Dashboard</b>.</div>`;
+  $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Add companies with the search box above.</div>`;
   renderTabs(); renderEditorMeta();
-  $("#tickers").focus();
+  $("#co-q").focus();
 }
 
 function showConfirm({title, body, okLabel}) {
@@ -4226,7 +4305,7 @@ async function deletePortfolio(name) {
   if (name === AD_HOC_KEY) {
     const ok = await showConfirm({
       title: "Discard unsaved portfolio?",
-      body: "Your unsaved ad-hoc portfolio will be removed.",
+      body: "This unsaved portfolio will be removed.",
       okLabel: "Discard",
     });
     if (!ok) return;
@@ -4256,64 +4335,6 @@ async function deletePortfolio(name) {
     toast(`Deleted "${name}".`);
   } catch (err) {
     toast(err.message || "Delete failed.");
-  }
-}
-
-async function saveAsNewWatchlist() {
-  const raw = $("#tickers").value.trim();
-  if (!raw) return toast("Enter tickers first.");
-  const name = prompt("Save this portfolio as…", STATE.activeView && STATE.activeView !== AD_HOC_KEY ? STATE.activeView : "");
-  if (!name || !name.trim()) return;
-  const clean = name.trim();
-  try {
-    const r = await fetch("/api/watchlists", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({name: clean, entries: raw}),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || "Save failed.");
-    WATCHLISTS = d.watchlists || {};
-    // If we were on ad-hoc and have data, move that view's rows under the new name.
-    if (STATE.activeView === AD_HOC_KEY && DATA.length) {
-      await persistView(clean, raw, DATA);
-      try { await fetch(`/api/views/${encodeURIComponent(AD_HOC_KEY)}`, {method: "DELETE"}); } catch(e) {}
-      delete VIEWS[AD_HOC_KEY];
-    }
-    STATE.activeView = clean;
-    renderTabs(); renderEditorMeta();
-    toast(`Saved "${clean}".`);
-    // If the server reported the entries changed and we have rows, auto-rebuild.
-    if (d.entries_changed && DATA.length) {
-      await build({keepPanelOpen: true});
-    }
-  } catch (err) {
-    toast(err.message || "Save failed.");
-  }
-}
-
-// "Save" toolbar button — overwrite current named tab, or prompt if ad-hoc.
-async function saveWatchlist() {
-  const name = STATE.activeView;
-  if (!name || name === AD_HOC_KEY) return saveAsNewWatchlist();
-  const raw = $("#tickers").value.trim();
-  if (!raw) return toast("Enter tickers first.");
-  try {
-    const r = await fetch("/api/watchlists", {
-      method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({name, entries: raw}),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || "Save failed.");
-    WATCHLISTS = d.watchlists || {};
-    renderTabs(); renderEditorMeta();
-    toast(`Updated "${name}".`);
-    if (d.entries_changed) {
-      // Constituents changed → auto-refresh data (user preference).
-      await build({keepPanelOpen: true});
-    }
-  } catch (err) {
-    toast(err.message || "Save failed.");
   }
 }
 
@@ -4515,7 +4536,7 @@ async function requestAnalytics(opts) {
 function renderAnalyticsBody() {
   const body = $("#pf-analytics-body");
   if (!DATA.length) {
-    body.innerHTML = `<div class="pf-empty">Build the dashboard to compute portfolio analytics.</div>`;
+    body.innerHTML = `<div class="pf-empty">Refresh to compute portfolio analytics.</div>`;
     renderAnalystDashboard({});
     return;
   }
@@ -4529,9 +4550,7 @@ function renderAnalyticsBody() {
   if (a.error) { body.innerHTML = `<div class="pf-empty" style="color:var(--neg)">Analytics error: ${escapeHtml(a.error)}</div>`; renderAnalystDashboard({}); return; }
 
   // Build cards.
-  const banner = staleBannerHtml();
   body.innerHTML = `
-    ${banner}
     <div class="pf-grid">
       <div class="pf-card">
         <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${labelForMode(STATE.mode)} · ${escapeHtml(a.display_ccy || FX_QUOTE)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span></h4>
@@ -4574,13 +4593,6 @@ function renderAnalyticsBody() {
   $("#pf-bench-pill-label").textContent = ((a.benchmarks || {}).SPY || {}).label || "S&P 500";
   renderStatTipsKatex();
   renderAnalystDashboard(a);
-}
-
-function staleBannerHtml() {
-  const name = STATE.activeView;
-  if (!name || !VIEWS[name] || !VIEWS[name].stale) return "";
-  return `<div class="pf-stale-banner">Constituents changed since last build — analytics may be stale.
-    <button onclick="build({keepPanelOpen:true})">Refresh now</button></div>`;
 }
 
 function labelForMode(m) {
@@ -6010,47 +6022,7 @@ function closeMptInfo() { hideOverlay("#pf-mpt-info-bg"); }
 /* ===========================================================================
  * Wire up
  * --------------------------------------------------------------------------- */
-// Primary button mode: "build" when no saved portfolio is loaded, "update" when one is.
-// In "update" mode, #build becomes "Update Portfolio" (saves entries + refreshes), and
-// #save-as becomes "Save as New Portfolio".
-function primaryButtonMode() {
-  const name = STATE.activeView;
-  const namedLoaded = name && name !== AD_HOC_KEY;
-  return namedLoaded ? "update" : "build";
-}
-function updatePrimaryButtonLabels() {
-  const mode = primaryButtonMode();
-  const buildBtn = $("#build");
-  const saveAsBtn = $("#save-as");
-  if (!buildBtn || !saveAsBtn) return;
-  if (mode === "update") {
-    buildBtn.textContent = "Update Portfolio";
-    saveAsBtn.textContent = "Save as New Portfolio";
-  } else {
-    buildBtn.textContent = "Build Dashboard";
-    saveAsBtn.textContent = "＋ Save as new";
-  }
-}
-function runPrimary() {
-  if (primaryButtonMode() === "update") {
-    // saveWatchlist persists current entries and auto-rebuilds if they changed.
-    // If they didn't change, fall back to a plain refresh so the button always "does something".
-    const name = STATE.activeView;
-    const savedView = name && VIEWS[name];
-    const currentEntries = $("#tickers").value.trim();
-    const savedEntries = (savedView && savedView.entries || "").trim();
-    if (currentEntries && currentEntries !== savedEntries) {
-      saveWatchlist();
-    } else {
-      build({keepPanelOpen: true});
-    }
-  } else {
-    build({keepPanelOpen: true});
-  }
-}
-$("#build").onclick = runPrimary;
 setupRefreshControl();          // #refresh is a state machine now — see REFRESH
-$("#save-as").onclick = saveAsNewWatchlist;
 $("#export").onclick = exportXlsx;
 // Action buttons (Refresh, Export) flash accent on click to confirm the
 // underlying process fired. Restart the keyframe on rapid re-clicks via a
@@ -6074,7 +6046,7 @@ for (const id of ["refresh", "export"]) {
     // Refresh refuses to run on an empty portfolio — don't flash
     // "process fired" for a rejected click. A long-press "all portfolios"
     // refresh doesn't need a loaded tab, so it's exempt.
-    if (id === "refresh" && !DATA.length && !$("#tickers").value.trim()) return;
+    if (id === "refresh" && !DATA.length && !ENTRIES) return;
     flashBtn(btn);
   });
 }
@@ -6083,8 +6055,8 @@ for (const id of ["refresh", "export"]) {
  * The server picks the search type and returns {query, chips, results,
  * warnings, notes, fields}. CO.query is kept verbatim: a chip edit changes it
  * and posts it back as {query}, which the server validates and runs without
- * the LLM. Add appends the picked tickers to the editor, streams only those
- * rows (build({only})), and saves a named portfolio like any other edit.
+ * the LLM. Add saves the picked tickers into the portfolio like any other
+ * edit (commitEntries); their rows load with the next Refresh.
  * ------------------------------------------------------------------------- */
 const CO = {query: null, chips: [], fields: {}, results: [], offset: 0, total: 0,
             picked: new Map(), choice: {}, editing: null};
@@ -6103,6 +6075,11 @@ async function coSearch(body, offset = 0) {
     if (offset === 0) CO.picked.clear();
     Object.assign(CO, {query: d.query, chips: d.chips, fields: d.fields || {}, results: d.results,
                        offset: d.offset, total: d.total, choice: {}, editing: null, last: d});
+    // A pasted list is a decision already made: every new company starts picked.
+    if (d.query.kind === "list") {
+      const held = coHeld();
+      d.results.forEach((c, i) => { if (!held.has(c.ticker)) coPick(i, c.ticker); });
+    }
     coRender();
   } catch (e) {
     toast("Search failed: " + e.message);
@@ -6111,8 +6088,13 @@ async function coSearch(body, offset = 0) {
   }
 }
 
+function coPick(i, tk) {
+  CO.picked.set(i + CO.offset, tk);
+  ENTRY_NAMES[tk.toUpperCase()] = shortName(CO.results[i].name);
+}
+
 function coHeld() {
-  return new Set(entriesArr($("#tickers").value).map(t => t.toUpperCase()).concat(DATA.map(r => r.symbol)));
+  return new Set(entriesArr(ENTRIES).map(t => t.toUpperCase()).concat(DATA.map(r => r.symbol)));
 }
 
 function coFmt(k, v) {
@@ -6124,9 +6106,9 @@ function coFmt(k, v) {
 function coRender() {
   const d = CO.last, q = CO.query;
   $("#co-out").hidden = false;
-  const kind = {name: "Name", screen: "Screen", theme: "Theme"}[q.kind] || "";
+  const kind = {name: "Name", screen: "Screen", theme: "Theme", list: "List"}[q.kind] || "";
   $("#co-chips").innerHTML = `<span class="co-kind">${kind}${q.engine === "ai" ? " (AI)" : ""} ·</span>` +
-    (CO.chips.length ? "" : `<span class="co-kind">closest matches to "${escapeHtml(q.text)}"</span>`) +
+    (CO.chips.length ? "" : `<span class="co-kind">${q.kind === "list" ? `${CO.total} found` : `closest matches to "${escapeHtml(q.text)}"`}</span>`) +
     CO.chips.map((c, i) => {
       const fixed = c.kind === "ignored" || c.kind === "picks";
       return `<button type="button" class="co-chip${c.ai ? " ai" : ""}${c.kind === "ignored" ? " ignored" : ""}` +
@@ -6218,32 +6200,11 @@ function coRemove(c) {
 }
 
 async function coAdd() {
-  if (BUILD_STREAMING) { toast("Wait for the current build to finish."); return; }
   const held = coHeld();
   const add = [...new Set(CO.picked.values())].filter(t => !held.has(t));
   CO.picked.clear();
-  if (!add.length) { coRender(); return; }
-  const ta = $("#tickers"), cur = ta.value.trim();
-  ta.value = cur ? cur.replace(/[\s,]+$/, "") + ", " + add.join(", ") : add.join(", ");
-  updatePrimaryButtonLabels();
-  coRender();
-  // Nothing built yet: build everything, or entries typed earlier stay unloaded.
-  await build(DATA.length ? {only: add, keepPanelOpen: true} : {keepPanelOpen: true});
-  const name = STATE.activeView;
-  if (name && name !== AD_HOC_KEY && name in WATCHLISTS) {
-    try {
-      const r = await fetch("/api/watchlists", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({name, entries: ta.value.trim()}),
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Save failed.");
-      WATCHLISTS = d.watchlists || WATCHLISTS;
-      renderTabs(); renderEditorMeta(); updatePrimaryButtonLabels();
-    } catch (e) { toast(e.message || "Save failed."); }
-  }
-  toast(`Added ${add.join(", ")}.`);
+  if (add.length && await commitEntries(entriesArr(ENTRIES).concat(add).join(", ")))
+    toast(`Added ${add.join(", ")}. Press Refresh to load ${add.length > 1 ? "them" : "it"}.`);
   coRender();
 }
 
@@ -6278,10 +6239,10 @@ $("#co-grid").addEventListener("click", (e) => {
   const i = Number(card.dataset.card), key = i + CO.offset;
   if (alt) {  // another listing of the same company replaces the card's ticker
     CO.choice[i] = alt.dataset.tk;
-    if (CO.picked.has(key)) CO.picked.set(key, alt.dataset.tk);
+    if (CO.picked.has(key)) coPick(i, alt.dataset.tk);
   } else if (!card.classList.contains("held")) {
     if (CO.picked.has(key)) CO.picked.delete(key);
-    else CO.picked.set(key, CO.choice[i] || CO.results[i].ticker);
+    else coPick(i, CO.choice[i] || CO.results[i].ticker);
   }
   coRender();
 });
@@ -6289,8 +6250,6 @@ $("#co-grid").addEventListener("keydown", (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-card]")) { e.preventDefault(); e.target.click(); }
 });
 
-// Keep labels in sync whenever the active view or the textarea changes.
-$("#tickers").addEventListener("input", updatePrimaryButtonLabels);
 $("#edit-btn").onclick = () => {
   const panel = $("#input-panel");
   const willOpen = panel.classList.contains("hidden");
@@ -6336,9 +6295,6 @@ $("#info-btn").onclick = openInfo;
     setTheme(getTheme() === "light" ? "dark" : "light");
   });
 })();
-$("#tickers").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runPrimary(); }
-});
 window.addEventListener("scroll", () => {
   $("#topbar").classList.toggle("scrolled", window.scrollY > 4);
 });
@@ -6916,6 +6872,7 @@ async function rfFinish(state) {
     // reloaded below like a normal finish.
     if (touched.size) await loadViews();
     REFRESH.touchedViews.clear();
+    renderEditorMeta();
     return;
   }
   if (state === "done") {
@@ -6942,9 +6899,15 @@ async function rfFinish(state) {
     // and the news tape all reflect what actually landed.
     await loadViews();
     if (STATE.activeView && touched.has(STATE.activeView)) {
+      // The live patch only upserts rows: re-read so removed constituents go.
+      try {
+        const d = await fetch(`/api/views/${encodeURIComponent(STATE.activeView)}`).then(r => r.json());
+        if (d.view && Array.isArray(d.view.rows) && !BUILD_STREAMING) { DATA = d.view.rows; render(); }
+      } catch (e) { /* keep the patched rows */ }
       invalidateAnalyticsForTab(STATE.activeView);
       requestAnalytics({force: true});
     }
+    renderEditorMeta();
     await nsReloadTape();
   }
   REFRESH.touchedViews.clear();
@@ -6995,8 +6958,7 @@ async function rfStart(scope) {
     body.on_conflict = "supersede";
   } else {
     const view = STATE.activeView || AD_HOC_KEY;
-    const entries = ($("#tickers").value.trim())
-                 || (VIEWS[view] && VIEWS[view].entries) || DATA.map(r => r.symbol).join(", ");
+    const entries = ENTRIES || (VIEWS[view] && VIEWS[view].entries) || DATA.map(r => r.symbol).join(", ");
     if (!entries) { toast("Nothing to refresh — add some tickers first."); return; }
     body.view = view;
     body.entries = entries;
@@ -7361,7 +7323,7 @@ function renderNsMovers() {
     .sort((a, b) => Math.abs(b.pct_1d) - Math.abs(a.pct_1d))
     .slice(0, 5);
   if (!movers.length) {
-    body.innerHTML = '<div class="ns-panel-empty">Build the dashboard to see movers.</div>';
+    body.innerHTML = '<div class="ns-panel-empty">Refresh the portfolio to see movers.</div>';
     return;
   }
   body.innerHTML = movers.map(r => {
@@ -7711,7 +7673,7 @@ function renderPortfolioSentiment(symbols) {
   const pBody = $("#ns-portfolio-body");
   symbols = symbols || nsSymbols();
   if (!symbols.length) {
-    pBody.innerHTML = '<div class="ns-panel-empty">Build the dashboard first to see per-stock reads.</div>';
+    pBody.innerHTML = '<div class="ns-panel-empty">Refresh the portfolio first to see per-stock reads.</div>';
     return;
   }
   const dataBySymbol = new Map(DATA.map(d => [d.symbol, d]));

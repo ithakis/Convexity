@@ -74,6 +74,8 @@
 <div id="input-panel" class="hidden">
   <!-- Browser-style tab strip of saved portfolios -->
   <div class="pf-tabs" id="pf-tabs" role="tablist"></div>
+  <!-- The open portfolio, below its tab: the gray panel starts here. -->
+  <div class="pf-body">
 
   <!-- Company search (search.py, POST /api/search). One box: the server picks
        the search type (name, theme, screen) and returns the query it ran as
@@ -82,7 +84,7 @@
     <form class="co-bar" id="co-form" autocomplete="off">
       <span class="co-icon" aria-hidden="true">&#8981;</span>
       <input id="co-q" type="search" spellcheck="false" aria-label="Find companies"
-        placeholder="Find companies: a name, a theme, or criteria like &quot;tech with D/E &lt; 0.8 and current ratio &gt; 1&quot;">
+        placeholder="Add companies: a name, a theme, criteria like &quot;tech with D/E &lt; 0.8&quot;, or paste tickers">
       <button class="co-go" id="co-go" type="submit">Search</button>
     </form>
     <div class="co-out" id="co-out" hidden>
@@ -100,22 +102,11 @@
     </div>
   </div>
 
-  <!-- Constituents editor -->
+  <!-- Constituents: one chip per entry; ✕ removes it. An edit is saved at
+       once and turns Refresh red until the next refresh (app.js commitEntries). -->
   <div class="pf-editor">
-    <div class="pf-editor-head">
-      <span id="pf-editor-title">Constituents</span>
-    </div>
-    <textarea id="tickers" rows="2" placeholder="Paste tickers or company names — comma or newline separated.
-e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA, XLK, Trane, MSTR, COST, Apple, Microsoft"></textarea>
-    <div class="panel-row">
-      <button id="build" class="primary">Build Dashboard</button>
-      <button id="save-as" class="ghost">＋ Save as new</button>
-      <span class="spacer"></span>
-      <span class="status" id="editor-status">Paste your tickers and press Build (or Cmd/Ctrl + Enter).</span>
-    </div>
-    <!-- Primary button (#build) and secondary (#save-as) swap labels/intent based on
-         whether a saved portfolio is currently open. See updatePrimaryButtonLabels(). -->
-
+    <div class="pf-editor-head">Constituents <span id="pf-count"></span></div>
+    <div class="pf-chips" id="pf-chips"></div>
   </div>
 
   <!-- Analytics sub-window -->
@@ -164,8 +155,9 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
       </div>
     </div>
     <div class="pf-analytics-body" id="pf-analytics-body">
-      <div class="pf-empty" id="pf-empty">Build the dashboard to compute portfolio analytics.</div>
+      <div class="pf-empty" id="pf-empty">Refresh to compute portfolio analytics.</div>
     </div>
+  </div>
   </div>
 </div>
 
@@ -613,7 +605,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
 <div class="table-wrap">
   <table id="tbl">
     <thead><tr id="thead"></tr></thead>
-    <tbody id="tbody"><tr><td colspan="16" style="padding:30px; text-align:center; color:var(--muted);">Press <b>Build Dashboard</b> above to load your portfolio.</td></tr></tbody>
+    <tbody id="tbody"><tr><td colspan="16" style="padding:30px; text-align:center; color:var(--muted);">Add companies above, then press <b>Refresh</b>.</td></tr></tbody>
   </table>
 </div>
 
@@ -670,7 +662,7 @@ e.g.  DELL, TXN, DaVita, JBL, KLAC, MARA, COMT, FFIV, Alphabet, ETN, AVGO, NVDA,
         <ul class="info-feature-list">
           <li>Streaming quote build and update path.</li>
           <li>Per-row error states when Yahoo has no usable data.</li>
-          <li>Smart primary action that flips between Build Dashboard and Update Portfolio.</li>
+          <li>Edits save at once; Refresh turns red until the portfolio is refreshed.</li>
         </ul>
         <div class="info-card-why"><span class="label">Useful because:</span>you get fast feedback on large portfolios and can spot broken symbols without blocking the whole run.</div>
       </div>

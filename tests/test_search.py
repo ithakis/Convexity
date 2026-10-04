@@ -176,6 +176,7 @@ def test_a_theme_goes_to_the_llm_and_its_picks_are_verified(monkeypatch, yahoo):
             {"ticker": "LLY", "name": "Eli Lilly", "why": "Tirzepatide"},
             {"ticker": "NVO", "name": "Novo Nordisk", "why": "Semaglutide"},
             {"ticker": "ZZZZ", "name": "Made Up Pharma", "why": "hallucinated"},
+            {"ticker": "MSFT", "name": "Microsoft", "why": "off theme"},  # Software
         ],
         "ignored": [],
     }
@@ -191,6 +192,7 @@ def test_a_theme_goes_to_the_llm_and_its_picks_are_verified(monkeypatch, yahoo):
         ("NOVO-B.CO", "Semaglutide"),  # shown as the home listing
     ]
     assert any("1 AI-named company not found" in w for w in out["warnings"])
+    assert any("outside the theme's sectors and industries: MSFT" in w for w in out["warnings"])
 
 
 def test_best_lets_the_llm_choose_the_ranking(monkeypatch, yahoo):
@@ -300,3 +302,66 @@ def test_an_oversized_or_non_finite_edit_is_capped():
 
 def test_name_results_drop_far_weaker_matches(yahoo):
     assert [c["ticker"] for c in s.search("microsoft")["results"]] == ["MSFT"]
+
+
+# ------------------------------------------------------------------ pasted lists
+def test_a_pasted_list_resolves_each_part_and_names_the_misses(yahoo):
+    out = s.search("NVO, microsft\nZZZZ")
+    assert out["query"]["kind"] == "list" and out["query"]["engine"] == "rules"
+    # An exact ticker keeps that listing (NVO, not the home NOVO-B.CO).
+    assert [c["ticker"] for c in out["results"]] == ["NVO", "MSFT"]
+    assert out["warnings"] == ["Not found: ZZZZ."]
+    assert yahoo["calls"] == []
+
+
+def test_criteria_with_commas_are_not_a_list(yahoo):
+    assert s.parse("tech companies with D/E < 0.8, current ratio > 1")["kind"] == "screen"
+
+
+# ------------------------------------------------------------------ screener retry
+def test_a_transient_screener_401_is_retried(yahoo, monkeypatch):
+    import yfinance as yf
+
+    from requests import HTTPError
+
+    real, fails = yf.screen, {"n": 1}
+
+    def flaky(*a, **k):
+        if fails["n"]:
+            fails["n"] -= 1
+            raise HTTPError("HTTP Error 401")
+        return real(*a, **k)
+
+    monkeypatch.setattr(yf, "screen", flaky)
+    monkeypatch.setattr(s.time, "sleep", lambda _s: None)
+    yahoo["quotes"] = [{"symbol": "MSFT"}]
+    out = s.search("tech companies with D/E < 0.8")
+    assert [c["ticker"] for c in out["results"]] == ["MSFT"] and not out["warnings"]
+
+    fails["n"] = 3  # down for good: a warning, and nothing cached
+    s._CACHE.clear()
+    out = s.search("tech companies with D/E < 0.8")
+    assert out["results"] == [] and "did not answer" in out["warnings"][0]
+    assert s._CACHE == {}
+
+
+def test_a_ratio_ranking_skips_microcaps_unless_asked(yahoo):
+    # Yahoo sorts by ROE: the microcap first. Without a cap filter of the
+    # user's own, the ranking is among companies above $1B (pack USD caps).
+    yahoo["quotes"] = [{"symbol": t} for t in ("SMSI", "MSFT", "NVDA", "AAPL", "GOOGL", "2330.TW")]
+    q = {**s.empty("x"), "kind": "screen", "sectors": ["Technology"],
+         "filters": [{"field": "de", "op": "lt", "value": 1.0}],
+         "rank": {"field": "roe", "dir": "desc", "by": "ai"}}  # fmt: skip
+    out = s.search("", query=q)
+    assert [c["ticker"] for c in out["results"]] == ["MSFT", "NVDA", "AAPL", "GOOGL", "2330.TW"]
+    assert any("above $1B" in n for n in out["notes"])
+    q["filters"].append({"field": "mcap", "op": "gt", "value": 1e6})
+    assert not any("above $1B" in n for n in s.search("", query=q)["notes"])
+
+
+def test_a_lowest_first_ranking_excludes_negative_values(yahoo):
+    q = {**s.empty("x"), "kind": "screen", "sectors": ["Technology"],
+         "rank": {"field": "de", "dir": "asc", "by": "ai"}}  # fmt: skip
+    s.search("", query=q)
+    ops = _flat(yahoo["calls"][0]["query"])
+    assert ("gte", "totaldebtequity.lasttwelvemonths", 0) in ops
