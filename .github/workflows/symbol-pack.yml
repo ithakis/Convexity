@@ -18,6 +18,9 @@ on:
   schedule:
     - cron: "0 4 * * 0" # Sundays 04:00 UTC, markets closed
   workflow_dispatch:
+  push: # TEMPORARY: registers the workflow with GitHub; removed in the next commit
+    branches: [feature/company-search]
+    paths: [.github/workflows/symbol-pack.yml]
 
 permissions:
   contents: read
