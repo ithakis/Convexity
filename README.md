@@ -14,7 +14,15 @@ Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny st
 
 ## A tour
 
-**Stock detail.** Click any row for its price history from one month to the full record, with moving averages, volume and S&P 500 or sector overlays, the snapshot and valuation numbers behind the row, and its returns against the S&P 500 and its sector ETF over every window.
+**Find companies in plain English.** The search box on the Portfolio tab reads a name, a theme or a set of criteria and shows what it understood as chips you can edit. With an NVIDIA key, a theme like *GLP-1 drug makers* is answered by an AI that proposes the companies; every name it returns is checked against the list of real listings, outside-the-theme picks are dropped and the rest are shown as cards with a one-line reason. Add the ones you want and press Refresh.
+
+![AI company search: GLP-1 drug makers](docs/screenshots/search-ai.png)
+
+Criteria work the same way, with or without a key: `tech with D/E < 0.8 and current ratio > 1` becomes a screen over every Yahoo listing, and a word like *best* adds a ranking (here by ROE). Companies already in the portfolio are greyed out.
+
+![Screening by criteria: D/E, current ratio, ranked by ROE](docs/screenshots/search-screen.png)
+
+**Stock detail.** Click any row for its price history from one month to the full record, as a TradingView-style HLC area (or candles, hollow candles, OHLC bars, area or line) with volume bars coloured by direction, moving averages and S&P 500 or sector overlays, the snapshot and valuation numbers behind the row, and its returns against the S&P 500 and its sector ETF over every window.
 
 ![Stock detail](docs/screenshots/detail.png)
 
@@ -22,7 +30,7 @@ Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny st
 
 ![Portfolio optimization](docs/screenshots/optimize.png)
 
-**Portfolio analytics.** Performance against the S&P 500 (plus Nasdaq and a sector-mix overlay), moving averages, drawdown, and a risk & return card with Sharpe and Sortino (over the T-bill rate in USD), Calmar, beta, tracking error and information ratio against any benchmark.
+**Portfolio analytics.** One sheet: performance (same chart types and volume as a single stock, with the portfolio's high, low and volume built from its holdings) against the S&P 500 (plus Nasdaq and a sector-mix overlay), moving averages, drawdown, and a risk & return card with Sharpe and Sortino (over the T-bill rate in USD), Calmar, beta, tracking error and information ratio against any benchmark.
 
 ![Portfolio analytics](docs/screenshots/analytics.png)
 
@@ -65,7 +73,8 @@ shorter-horizon returns. The ⓘ column guide in the app has every formula.
 
 - **Streaming progress bar** — rows appear as they load, one at a time
 - **Sort** — click any column header or use the ⇅ Sort menu
-- **Dark / light mode** — pill toggle, preference saved to `localStorage`
+- **Company search** — names, themes and criteria in plain English, optional AI for themes and rankings
+- **Light, dark and Bloomberg themes** — Navy & Denim palette, preference saved to `localStorage`
 - **Portfolios** — named portfolios as tabs, saved in your data folder, restored on launch
 - **Excel export** — every saved portfolio, its analytics and sentiment in one `.xlsx`
 - **Column guide** — ⓘ button opens a LaTeX-rendered column reference
