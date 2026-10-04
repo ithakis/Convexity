@@ -136,7 +136,12 @@ four: gray `.pf-body` → Analytics box → `.pf-card` → content. Now the
 the `.pf-card`s are borderless cells separated by hairlines (each cell draws its
 top rule, the left column the vertical one; `nth-child` rules in style.css,
 collapsed under 900px). Don't give a cell a fill or border again — add a
-hairline. A scripted audit (bordered box ≥160×60 inside another) found no
+hairline. Since v1.19.2 the sheet is the News cards' gray (`--bg-subtle`) and
+the dividers are inset `::before`/`::after` hairlines that stop short of the
+sheet's edge; the plot sits in `.pf-chart-card` (white `--bg-canvas`, rounded),
+which is the second and last box level — nothing goes inside it. Bar tracks on
+the sheet use `--bg-canvas` so they still show on the gray. Section kickers are
+11px/800 with 2px rounded rules. A scripted audit (bordered box ≥160×60 inside another) found no
 nesting anywhere in Portfolio or News after the change. There is no text editor: the constituents are the entries string
 `ENTRIES` (what `/api/watchlists` stores), shown as `.pf-chip`s by
 `renderConstituents()` — the row's name when a `DATA` row matches the entry,
@@ -576,6 +581,14 @@ picked.
   `#4ba3e3` and a **dark** `--on-accent` (`#04121f`) because white on that blue
   is only ~2.8:1. `THEME_COLORS` in app.js mirrors these values — change both.
   Use `rgba(var(--accent-rgb), a)`, never a literal blue.
+- **Chrome vs data colours (v1.19.2, the user's call).** Navy & Denim is for
+  the chrome only (buttons, tabs, accents, kickers). **Data colours stay
+  classic**: `--pos`/`--neg` are the pre-1.19 green/red (`#1f883d`/`#cf222e`
+  light, `#3fb950`/`#f85149` dark) and the heat `blue` in `THEME_COLORS` is
+  `#2563eb`/`#60a5fa`, not the accent — the user reads tables by colour pattern.
+  Dark mode is **"Ink"** (`#0a0e14`, surfaces `#111823`, borders `#1d2938`):
+  near-black with navy-tinted, not gray, surfaces; the 1.19 navy `#08182a` was
+  too blue. The desktop splash (`desktop.py` `_BG`/`_ACCENT`) mirrors it.
 - **Corner-radius scale** (`--r-lg` / `--r-md` / `--r-sm` / `--r-xs` in the base
   `:root`, currently the "Sharp" 6/4/2/1 px tier). Every non-circular
   `border-radius` reads a token, so app-wide roundness tunes from these four

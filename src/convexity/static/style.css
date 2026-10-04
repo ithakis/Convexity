@@ -23,10 +23,10 @@
        controls are deliberately rounder than the sharp dashboard. */
     --r-xl: 12px;   /* the Settings modal */
     --r-soft: 8px;  /* Settings buttons, inputs, search, close */
-    --pos: #12805c;
-    --pos-rgb: 18, 128, 92;
-    --neg: #c8312b;
-    --neg-rgb: 200, 49, 43;
+    --pos: #1f883d;   /* data colours are classic green/red, deliberately not the brand palette */
+    --pos-rgb: 31, 136, 61;
+    --neg: #cf222e;
+    --neg-rgb: 207, 34, 46;
     --warn: #9a6700;
     --warn-rgb: 191, 135, 0;
     --bg-rgb: 255, 255, 255;
@@ -45,25 +45,25 @@
     --ns-vbear: #c62828;
   }
   [data-theme="dark"] {
-    --bg: #08182a;
-    --bg-subtle: #0e2238;
-    --bg-canvas: #08182a;
-    --border: #1f3a57;
-    --text: #e6eef6;
-    --muted: #8da3b9;
+    --bg: #0a0e14;     /* "Ink": near-black, navy-tinted surfaces (v1.19.2) */
+    --bg-subtle: #111823;
+    --bg-canvas: #0a0e14;
+    --border: #1d2938;
+    --text: #e6edf3;
+    --muted: #8a99ab;
     --accent: #4ba3e3;
     --accent-rgb: 75, 163, 227;
-    --accent-soft: #12385a;
-    --pos: #3cc590;
-    --pos-rgb: 60, 197, 144;
-    --neg: #f0675f;
-    --neg-rgb: 240, 103, 95;
+    --accent-soft: #13304a;
+    --pos: #3fb950;
+    --pos-rgb: 63, 185, 80;
+    --neg: #f85149;
+    --neg-rgb: 248, 81, 73;
     --warn: #d29922;
     --warn-rgb: 210, 153, 34;
-    --bg-rgb: 8, 24, 42;
-    --row-alt: #0b1d31;
-    --header-bg: #0e2238;
-    --hover: #13304d;
+    --bg-rgb: 10, 14, 20;
+    --row-alt: #0d121a;
+    --header-bg: #111823;
+    --hover: #152132;
     --on-accent: #04121f;   /* white on the lighter dark-mode blue is only ~2.8:1 */
     --hlc-hi: #38c0ee;
     --ai: #a371f7;
@@ -808,10 +808,10 @@
   /* The analytics sheet — the ONE box of the portfolio view. A whisper of
      shadow, no gradient header: the toolbar is separated by a hairline. */
   .pf-analytics {
-    background: var(--bg-canvas);
+    background: var(--bg-subtle);   /* the gray of the News cards (v1.19.2) */
     border: 1px solid var(--border);
     border-radius: var(--r-lg);
-    box-shadow: 0 1px 2px rgba(11, 34, 57, 0.05);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
     overflow: hidden;
   }
   .pf-analytics-head {
@@ -886,7 +886,7 @@
     background: var(--muted); transition: background 0.12s;
   }
   .pf-overlay-pill[data-on="1"] {
-    color: var(--text); background: var(--accent-soft, rgba(47,129,247,0.10));
+    color: var(--text); background: var(--accent-soft);
     border-color: var(--accent); font-weight: 600;
   }
   .pf-overlay-pill[data-on="1"] .swatch.spy { background: #8b5cf6; }
@@ -1009,11 +1009,11 @@
     font: inherit; font-size: 12px; color: var(--accent); cursor: pointer;
     display: inline-flex; align-items: center; gap: 5px;
     padding: 2px 8px 2px 9px; border-radius: 999px;
-    background: rgba(var(--accent-rgb, 47,129,247), 0.08);
-    border: 1px solid rgba(var(--accent-rgb, 47,129,247), 0.28);
+    background: rgba(var(--accent-rgb), 0.08);
+    border: 1px solid rgba(var(--accent-rgb), 0.28);
     transition: background .12s, border-color .12s;
   }
-  .bench-trigger:hover, .bench-dd.open .bench-trigger { background: rgba(var(--accent-rgb, 47,129,247), 0.16); border-color: rgba(var(--accent-rgb, 47,129,247), 0.55); }
+  .bench-trigger:hover, .bench-dd.open .bench-trigger { background: rgba(var(--accent-rgb), 0.16); border-color: rgba(var(--accent-rgb), 0.55); }
   .bench-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .bench-caret { width: 10px; height: 10px; transition: transform .15s; }
   .bench-dd.open .bench-caret { transform: rotate(180deg); }
@@ -1078,6 +1078,13 @@
   }
   .pf-card h4 .sub { font-size: 11px; color: var(--muted); font-weight: 500; text-transform: none; letter-spacing: 0; }
 
+  /* The chart's own white card on the gray sheet, so the plot pops. This is
+     the second (and last) box level: never put a box inside it. */
+  .pf-chart-card {
+    background: var(--bg-canvas); border: 1px solid var(--border);
+    border-radius: var(--r-xl); padding: 8px 10px 6px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  }
   .pf-chart-wrap { position: relative; }
   .pf-chart-wrap svg { display: block; width: 100%; height: 220px; }
   .pf-chart-wrap .pf-dd-svg { height: 80px; margin-top: 4px; }
@@ -1088,17 +1095,17 @@
   .ct-btn {
     display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 12px 0 14px;
     font: inherit; font-size: 12px; font-weight: 600; color: var(--text);
-    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
     transition: border-color .12s, background .12s;
   }
   .ct-btn svg { color: var(--muted); transition: transform .15s; }
-  .ct-btn:hover, .ct-btn[aria-expanded="true"] { border-color: var(--accent); background: var(--bg-canvas); }
+  .ct-btn:hover, .ct-btn[aria-expanded="true"] { border-color: var(--accent); }
   .ct-btn[aria-expanded="true"] svg { transform: rotate(180deg); color: var(--accent); }
   .ct-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .ct-menu {
     position: absolute; right: 0; top: calc(100% + 6px); z-index: 60; min-width: 170px; padding: 6px;
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-xl);
-    box-shadow: 0 10px 28px rgba(8, 24, 42, 0.22), 0 2px 6px rgba(8, 24, 42, 0.10);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22), 0 2px 6px rgba(0, 0, 0, 0.10);
   }
   .ct-menu[hidden] { display: none; }
   .ct-opt {
@@ -1125,7 +1132,7 @@
   .pf-bars { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
   .pf-bars .pf-bar { display: grid; grid-template-columns: minmax(70px, 1.2fr) 4fr minmax(46px, auto); gap: 6px; align-items: center; }
   .pf-bars .pf-bar-name { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pf-bars .pf-bar-track { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 999px; height: 10px; overflow: hidden; }
+  .pf-bars .pf-bar-track { background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 999px; height: 10px; overflow: hidden; }
   .pf-bars .pf-bar-fill { height: 100%; background: var(--accent); border-radius: 999px; }
   .pf-bars .pf-bar-val { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
 
@@ -1145,6 +1152,7 @@
   .pf-contrib-table th:first-child, .pf-contrib-table td:first-child { text-align: left; }
   .pf-contrib-table td { padding: 3px 6px; border-bottom: 1px dashed var(--border); text-align: right; white-space: nowrap; }
   .pf-contrib-table tr:last-child td { border-bottom: none; }
+  .pf-contrib-table td.pf-contrib-co { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
   .pf-contrib-table td.pos { color: var(--pos); }
   .pf-contrib-table td.neg { color: var(--neg); }
   .pf-contrib-table th[data-contrib-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
@@ -1158,7 +1166,7 @@
   .pf-contrib-cwrap > span:last-child { min-width: 52px; }
   .pf-cbar {
     position: relative; display: inline-block; width: 110px; height: 8px;
-    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 999px;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 999px;
     overflow: hidden;
   }
   .pf-cbar::after {  /* the zero line */
@@ -1170,18 +1178,25 @@
   @media (max-width: 700px) { .pf-cbar { display: none; } }
 
   /* Table | Chart toggle in the Contribution card header. */
-  .pf-contrib-toggle { display: inline-flex; margin-left: auto; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
-  .pf-contrib-toggle button {
-    background: var(--bg-canvas); border: none; color: var(--muted); cursor: pointer;
-    font-size: 10.5px; padding: 3px 9px; text-transform: none; letter-spacing: 0;
+  /* Segmented control: a tinted track with a sliding white pill. */
+  .pf-contrib-toggle {
+    display: inline-flex; margin-left: auto; padding: 3px; gap: 2px;
+    background: rgba(var(--accent-rgb), 0.10); border-radius: 999px;
   }
-  .pf-contrib-toggle button + button { border-left: 1px solid var(--border); }
-  .pf-contrib-toggle button.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .pf-contrib-toggle button {
+    background: transparent; border: none; border-radius: 999px; color: var(--muted); cursor: pointer;
+    font-size: 11px; font-weight: 500; padding: 3px 12px; text-transform: none; letter-spacing: 0;
+    transition: background .12s, color .12s;
+  }
+  .pf-contrib-toggle button.active {
+    background: var(--bg-canvas); color: var(--text); font-weight: 600;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+  }
   .pf-contrib-toggle button:hover:not(.active) { color: var(--text); }
 
   /* Contribution waterfall (renderContribChartHtml). */
   .pf-wf { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; font-variant-numeric: tabular-nums; }
-  .pf-wf-row { display: grid; grid-template-columns: minmax(56px, 90px) 1fr 64px; gap: 8px; align-items: center; }
+  .pf-wf-row { display: grid; grid-template-columns: minmax(90px, 200px) 1fr 64px; gap: 8px; align-items: center; }
   .pf-wf-row:hover .pf-wf-track { background: var(--bg-canvas); }
   .pf-wf-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pf-wf-track { position: relative; height: 14px; border-radius: var(--r-xs); }
@@ -1834,7 +1849,7 @@
   }
   .pf-mpt-actions button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   .pf-mpt-actions button:hover { filter: brightness(1.05); border-color: var(--accent); }
-  @keyframes mpt-apply-flash { 0%,100%{box-shadow:none} 30%{box-shadow:0 0 0 3px rgba(var(--accent-rgb,9,105,218),0.4)} }
+  @keyframes mpt-apply-flash { 0%,100%{box-shadow:none} 30%{box-shadow:0 0 0 3px rgba(var(--accent-rgb),0.4)} }
   .pf-mpt-apply-flash { animation: mpt-apply-flash 0.6s ease; }
   .pf-mpt-status {
     padding: 18px 12px; text-align: center; color: var(--muted); font-size: 12.5px;
@@ -2117,15 +2132,15 @@
     margin: 14px 16px 0;
   }
   .section-anchor::before {
-    content: ""; flex: none; width: 18px; height: 1px;
-    background: color-mix(in srgb, var(--accent) 55%, transparent);
+    content: ""; flex: none; width: 24px; height: 2px; border-radius: 2px;
+    background: color-mix(in srgb, var(--accent) 65%, transparent);
   }
   .section-anchor::after {
-    content: ""; flex: 1; height: 1px;
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    content: ""; flex: 1; height: 2px; border-radius: 2px;
+    background: color-mix(in srgb, var(--accent) 40%, transparent);
   }
   .sa-kicker {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+    font-size: 11px; font-weight: 800; letter-spacing: 0.14em;
     text-transform: uppercase; white-space: nowrap; cursor: default;
     color: color-mix(in srgb, var(--accent) 78%, var(--muted));
   }

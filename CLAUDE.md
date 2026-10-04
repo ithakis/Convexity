@@ -88,7 +88,10 @@ Each of these has cost real debugging time; the link goes to the full story.
   control uses `data-theme-opt`, never `data-theme`.
   [frontend.md → Key UI behaviours](docs/architecture/frontend.md#key-ui-behaviours-added-in-passes-abc)
 - **At most two levels of box** (the user's rule, v1.19): sections are a
-  kicker rule + hairlines, never a card inside a card. **Chart bars are paint
+  kicker rule + hairlines, never a card inside a card (the portfolio's
+  only nested box is the white `.pf-chart-card` on the gray sheet). **Data
+  colours stay classic green/red/blue**, never brand-tinted; dark mode is the
+  near-black "Ink". **Chart bars are paint
   only** — returns, hover and measure use the exact closes; the portfolio's
   OHLC/volume are approximate and explained in Settings → About, not on the chart.
   [frontend.md → Portfolio panel](docs/architecture/frontend.md#portfolio-panel-and-constituents)

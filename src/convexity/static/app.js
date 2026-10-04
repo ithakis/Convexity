@@ -547,18 +547,18 @@ const THEME_COLORS = {
   light: {
     bg:   [255, 255, 255],
     text: [11, 34, 57],      /* --text #0b2239 */
-    pos:  [18, 128, 92],     /* --pos  #12805c */
-    neg:  [200, 49, 43],     /* --neg  #c8312b */
+    pos:  [31, 136, 61],     /* --pos  #1f883d  data colours stay classic, not brand */
+    neg:  [207, 34, 46],     /* --neg  #cf222e */
     warn: [249, 115, 22],    /* #f97316  vivid orange (Tailwind orange-500) */
-    blue: [24, 122, 186],    /* --accent #187aba */
+    blue: [37, 99, 235],     /* #2563eb  heat blue (P/E, weight), not the accent */
   },
   dark: {
-    bg:   [8, 24, 42],       /* --bg #08182a */
-    text: [230, 238, 246],   /* --text #e6eef6 */
-    pos:  [60, 197, 144],    /* --pos #3cc590 */
-    neg:  [240, 103, 95],    /* --neg #f0675f */
+    bg:   [10, 14, 20],      /* --bg #0a0e14 "Ink" */
+    text: [230, 237, 243],   /* --text #e6edf3 */
+    pos:  [63, 185, 80],     /* --pos #3fb950 */
+    neg:  [248, 81, 73],     /* --neg #f85149 */
     warn: [251, 146, 60],    /* #fb923c  orange-400, lighter on dark bg */
-    blue: [75, 163, 227],    /* --accent #4ba3e3 */
+    blue: [96, 165, 250],    /* #60a5fa  heat blue, lighter on dark */
   },
   bloomberg: {
     bg:   [0, 0, 0],         /* #000000  pure-black terminal canvas */
@@ -4771,8 +4771,10 @@ function renderAnalyticsBody() {
     <div class="pf-grid">
       <div class="pf-card">
         <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${labelForMode(STATE.mode)} · ${escapeHtml(a.display_ccy || FX_QUOTE)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span>${chartTypeSelectHtml("pf-chart-type")}</h4>
-        <div class="pf-chart-wrap" id="pf-chart-host"></div>
-        <div class="pf-chart-legend" id="pf-chart-legend"></div>
+        <div class="pf-chart-card">
+          <div class="pf-chart-wrap" id="pf-chart-host"></div>
+          <div class="pf-chart-legend" id="pf-chart-legend"></div>
+        </div>
       </div>
       <div class="pf-card">
         <h4>Risk &amp; return <span class="sub">vs ${benchSelectHtml(a)} · ${escapeHtml(a.display_ccy || FX_QUOTE)}</span></h4>
@@ -5640,7 +5642,7 @@ function renderContribTableHtml(rows) {
   return `<table class="pf-contrib-table">
     <thead><tr>${CONTRIB_COLS.map(th).join("")}</tr></thead>
     <tbody>${sorted.map(c => `<tr>
-      <td title="${escapeHtml(c.name || c.symbol)}">${escapeHtml(c.symbol)} <span style="color:var(--muted)">${escapeHtml(c.sector || "")}</span></td>
+      <td class="pf-contrib-co" title="${escapeHtml(c.symbol)}${c.name ? " · " + escapeHtml(c.name) : ""}"><span class="pf-contrib-name">${escapeHtml(c.name || c.symbol)}</span> <span style="color:var(--muted)">${escapeHtml(c.sector || "")}</span></td>
       <td>${c.weight != null ? (c.weight*100).toFixed(2) + "%" : "—"}</td>
       <td class="${cls(c.period_return)}">${fmtPctSigned(c.period_return)}</td>
       <td class="${cls(c.wxr)}">${fmtPctSigned(c.wxr)}</td>
@@ -5684,8 +5686,8 @@ function renderContribChartHtml(rows) {
   const plain = (v) => (v == null || !isFinite(v)) ? "n/a" : (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
   return `<div class="pf-wf">
     ${steps.map(({c, from, to}) => bar(from, to, (c.contribution || 0) >= 0 ? "pos" : "neg",
-      `${c.symbol}: contribution ${plain(c.contribution)} = W×R ${plain(c.wxr)} + compounding ${plain(c.comp)}. Running total ${plain(to)}.`,
-      escapeHtml(c.symbol), c.contribution)).join("")}
+      `${c.name ? c.name + " (" + c.symbol + ")" : c.symbol}: contribution ${plain(c.contribution)} = W×R ${plain(c.wxr)} + compounding ${plain(c.comp)}. Running total ${plain(to)}.`,
+      `<span title="${escapeHtml(c.symbol)}">${escapeHtml(c.name || c.symbol)}</span>`, c.contribution)).join("")}
     ${bar(0, total, "total", `Portfolio ${STATE.period} return: ${plain(total)}`, "Total", total)}
   </div>`;
 }
@@ -7244,10 +7246,10 @@ async function rfFinish(state) {
     // August's reads for a month.
     const ne = REFRESH.newsEnd;
     REFRESH.newsEnd = null;
-    let newsNote = "";
+    // The "News read n/m scored" note was dropped from the status bar at the
+    // user's request (v1.19.2); a failure still raises a toast below.
     if (ne && ne.total) {
       const failed = ne.failed || 0, scored = ne.scored || 0;
-      newsNote = `<span class="status-meta${failed ? " status-warn" : ""}">News read ${scored}/${ne.total} scored</span>`;
       if (failed && !scored) {
         toast(`News read failed for every holding${ne.llm_error ? ": " + ne.llm_error : ""}. Previous reads are kept and marked stale.`);
       } else if (failed) {
@@ -7257,7 +7259,7 @@ async function rfFinish(state) {
     }
     $("#status").innerHTML =
       `<span class="status-name">${escapeHtml(viewLabel(STATE.activeView))}</span>` +
-      `<span class="status-meta">updated ${new Date().toLocaleTimeString()}</span>` + newsNote;
+      `<span class="status-meta">updated ${new Date().toLocaleTimeString()}</span>`;
     // The job wrote rows straight to disk; re-read so tab metadata, analytics
     // and the news tape all reflect what actually landed.
     await loadViews();
@@ -9586,7 +9588,7 @@ function drawCloud(ctx, cloud, proj, retColor) {
 
 function drawFrontierAndAnchors(ctx, d, proj) {
   const {X, Y} = proj;
-  const accent = _mptCssColor("--accent", "#0969da");
+  const accent = _mptCssColor("--accent", "#187aba");
   const fr = d.frontier || [];
   // Bootstrap stability band: at each return level the CVaR ranges [cvar_lo,
   // cvar_hi] across resampled scenario sets. Shade it so the frontier's sampling
@@ -9662,7 +9664,7 @@ function drawOverlay() {
   const ctx = cv.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
-  const accent = _mptCssColor("--accent", "#0969da");
+  const accent = _mptCssColor("--accent", "#187aba");
 
   // Hover ghost (only when it isn't the same point as the selection).
   if (MPT.hoverIdx != null && MPT.hoverIdx !== MPT.selectedIdx) {
