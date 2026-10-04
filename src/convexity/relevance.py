@@ -58,13 +58,6 @@ def norm_title(title: str) -> str:
     )
 
 
-def is_near_duplicate(title_a: str, title_b: str) -> bool:
-    na, nb = norm_title(title_a), norm_title(title_b)
-    if not na or not nb:
-        return False
-    return _fuzz.token_set_ratio(na, nb) >= DEDUP_SIMILARITY
-
-
 def cluster_titles(titles: list[str]) -> tuple[list[int], list[int]]:
     """Greedy near-duplicate clustering in input order (caller pre-sorts by time).
 

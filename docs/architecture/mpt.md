@@ -197,11 +197,11 @@ and non-streaming callers are unaffected. `done` also carries `asset_stats` and
 ```
 `save_mpt_run` unshifts and truncates to `_MPT_MAX_RUNS = 3`; a run whose `params`
 equal the newest entry's **replaces** it (dedupe) rather than duplicating.
-`get_mpt_runs` returns the list, `get_last_mpt_run` its head; `_as_run_list`
+`get_mpt_runs` returns the list (newest first); `_as_run_list`
 tolerates both legacy formats (bare dict, or an older list). Rename/delete cascades
 move the whole value and are format-agnostic. The cloud **is** persisted now (it was
 previously stripped and never re-sampled, so restored runs rendered an empty
 scatter) — downsampled to ~2.5k points so 3 runs stay small on disk.
-`save_mpt_run` overwrites (single run); `get_last_mpt_run` reads it (tolerates the
-legacy list format → newest entry). Cascades on view rename/delete. The heavy `cloud`
+`save_mpt_run` overwrites (single run); the newest entry of `get_mpt_runs` is the
+last run. Cascades on view rename/delete. The heavy `cloud`
 is stripped client-side before saving and re-sampled on load.

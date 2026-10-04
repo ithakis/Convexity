@@ -136,7 +136,12 @@ four: gray `.pf-body` → Analytics box → `.pf-card` → content. Now the
 the `.pf-card`s are borderless cells separated by hairlines (each cell draws its
 top rule, the left column the vertical one; `nth-child` rules in style.css,
 collapsed under 900px). Don't give a cell a fill or border again — add a
-hairline. A scripted audit (bordered box ≥160×60 inside another) found no
+hairline. Since v1.19.2 the sheet is the News cards' gray (`--bg-subtle`) and
+the dividers are inset `::before`/`::after` hairlines that stop short of the
+sheet's edge; the plot sits in `.pf-chart-card` (white `--bg-canvas`, rounded),
+which is the second and last box level — nothing goes inside it. Bar tracks on
+the sheet use `--bg-canvas` so they still show on the gray. Section kickers are
+11px/800 with 2px rounded rules. A scripted audit (bordered box ≥160×60 inside another) found no
 nesting anywhere in Portfolio or News after the change. There is no text editor: the constituents are the entries string
 `ENTRIES` (what `/api/watchlists` stores), shown as `.pf-chip`s by
 `renderConstituents()` — the row's name when a `DATA` row matches the entry,
@@ -377,11 +382,11 @@ picked.
   the markup. `setPointerCapture` stays in try/catch — it throws for a dead
   pointer id.
 
-- **Benchmark picker.** "vs <select>" in the Risk & Return header is a native
-  `<select>` (`benchSelectHtml`) — keyboard/Esc/outside-click for free, no
-  popover code. `STATE.bench` (localStorage `pf_bench`) drives the "/ x"
-  column, Beta/R²/TE (the portfolio's `rel` against it) and the chart's purple
-  comparison line; `activeBench(a)` falls back to SPY. The Nasdaq / Sector-mix
+- **Benchmark picker.** "vs ▾" in the Risk & Return header is a small custom
+  dropdown (`benchSelectHtml` / `wireBenchSelect`: Arrow keys, Esc, outside
+  click). `STATE.bench` (localStorage `pf_bench`) drives the "/ x" column and
+  Beta/R²/TE (the portfolio's `rel` against it); `activeBench(a)` falls back to
+  SPY. The chart's purple line stays the S&P 500 on purpose (`BENCH_LINES`). The Nasdaq / Sector-mix
   pills add extra lines (`pfBenchLines`, deduped), and their period returns
   are listed *under* Risk & Return, not in the chart legend. The first overlay
   pill (`#pf-show-bench`) is relabelled with the chosen benchmark on render.
@@ -408,8 +413,9 @@ picked.
   `SMA_COLORS` in `app.js` and `.swatch.sma*` in `style.css` must stay in sync.
 - **Chart types, TradingView-style (v1.19).** `CHART_TYPE` (localStorage
   `chart_type`, default **HLC area** — the user's pick) is shared by the stock
-  modal and the portfolio chart, chosen from a native `<select>`
-  (`chartTypeSelectHtml`): HLC area, Candles, Hollow candles, OHLC bars, Area,
+  modal and the portfolio chart, chosen from a pill + rounded menu
+  (`chartTypeSelectHtml` / `wireChartTypeDd`; Arrow keys, Esc closes the menu
+  before the modal, Tab out closes it; a native `<select>` popup can't be themed): HLC area, Candles, Hollow candles, OHLC bars, Area,
   Line. Drawing goes through `buildBars` (joins `history` + `ohlc` + `volume`
   on timestamp) → `aggregateBars` (first open / max high / min low / last close
   / summed volume — candles are bucketed to ~5px, so 5Y goes weekly like
@@ -572,10 +578,18 @@ picked.
 - **Palette "Navy & Denim" (v1.19)**, chosen by the user from five options
   inspired by Morgan Stanley / Goldman Sachs: accent `#187aba` (MS blue) on
   deep-navy ink `#0b2239`, blue-tinted neutrals instead of GitHub grays, hover
-  `#e8f2fa` (was a yellow). Dark mode is navy (`#08182a`) with accent
+  `#e8f2fa` (was a yellow). Dark mode (since v1.19.2 "Ink", below) uses accent
   `#4ba3e3` and a **dark** `--on-accent` (`#04121f`) because white on that blue
   is only ~2.8:1. `THEME_COLORS` in app.js mirrors these values — change both.
   Use `rgba(var(--accent-rgb), a)`, never a literal blue.
+- **Chrome vs data colours (v1.19.2, the user's call).** Navy & Denim is for
+  the chrome only (buttons, tabs, accents, kickers). **Data colours stay
+  classic**: `--pos`/`--neg` are the pre-1.19 green/red (`#1f883d`/`#cf222e`
+  light, `#3fb950`/`#f85149` dark) and the heat `blue` in `THEME_COLORS` is
+  `#2563eb`/`#60a5fa`, not the accent — the user reads tables by colour pattern.
+  Dark mode is **"Ink"** (`#0a0e14`, surfaces `#111823`, borders `#1d2938`):
+  near-black with navy-tinted, not gray, surfaces; the 1.19 navy `#08182a` was
+  too blue. The desktop splash (`desktop.py` `_BG`/`_ACCENT`) mirrors it.
 - **Corner-radius scale** (`--r-lg` / `--r-md` / `--r-sm` / `--r-xs` in the base
   `:root`, currently the "Sharp" 6/4/2/1 px tier). Every non-circular
   `border-radius` reads a token, so app-wide roundness tunes from these four

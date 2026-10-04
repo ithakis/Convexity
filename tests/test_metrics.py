@@ -959,7 +959,7 @@ def test_frontier_stream_cloud_frontier_messages_and_payload():
 
 def test_mpt_run_history_last_three(tmp_path, monkeypatch):
     """save_mpt_run keeps the last 3 runs newest-first, dedupes identical params,
-    caps at 3; get_last_mpt_run/get_mpt_runs read them; legacy formats tolerated."""
+    caps at 3; get_mpt_runs reads them; legacy formats tolerated."""
     from convexity import persistence as P
 
     monkeypatch.setattr(P, "_MPT_FILE", tmp_path / "mpt.json")
@@ -967,17 +967,17 @@ def test_mpt_run_history_last_three(tmp_path, monkeypatch):
         P.save_mpt_run("View1", {"params": {"alpha": a}, "symbols": ["A", "B"]})
     runs = P.get_mpt_runs("View1")
     assert [r["params"]["alpha"] for r in runs] == [0.99, 0.975, 0.95]  # newest-first, cap 3
-    assert P.get_last_mpt_run("View1")["params"]["alpha"] == 0.99
+    assert P.get_mpt_runs("View1")[0]["params"]["alpha"] == 0.99
     # identical params → replace newest (dedupe), not append
     P.save_mpt_run("View1", {"params": {"alpha": 0.99}, "symbols": ["A", "B", "C"]})
     runs = P.get_mpt_runs("View1")
     assert len(runs) == 3 and runs[0]["symbols"] == ["A", "B", "C"]
     assert [r["params"]["alpha"] for r in runs] == [0.99, 0.975, 0.95]
-    assert P.get_mpt_runs("Missing") == [] and P.get_last_mpt_run("Missing") is None
+    assert P.get_mpt_runs("Missing") == [] and P.get_mpt_runs("Missing") == []
     # legacy single-dict format → tolerated as a one-element history
     P._write_mpt_raw({"runs": {"Old": {"id": "r1", "params": {"alpha": 0.95}}}})
-    assert P.get_last_mpt_run("Old")["id"] == "r1"
+    assert P.get_mpt_runs("Old")[0]["id"] == "r1"
     assert len(P.get_mpt_runs("Old")) == 1
     # legacy multi-run list format → newest entry is index 0
     P._write_mpt_raw({"runs": {"Leg": [{"id": "r2"}, {"id": "r1"}]}})
-    assert P.get_last_mpt_run("Leg")["id"] == "r2"
+    assert P.get_mpt_runs("Leg")[0]["id"] == "r2"
