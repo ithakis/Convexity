@@ -341,6 +341,10 @@ cd ~/Documents/GitHub/Convexity && git checkout distribution && git pull && CONV
    the user's installed app runs as
    `~/.local/share/uv/tools/convexity/bin/python …/bin/convexity-app`, a
    checkout run as `.venv/bin/convexity`. Never `pkill -f convexity` blindly.
+   **Address your server by the port its own PID bound** (`lsof -nP -a -iTCP
+   -sTCP:LISTEN -p <pid>`), never by assuming 8765: the user's app takes 8765
+   whenever it starts first, and a POST meant for a test server then writes
+   into their real portfolios (it happened once, 2026-10-04).
    The launcher stops its own previous run via `.dashboard.pid`.
 4. **Python module caching** — restarting the server is the ONLY way to
    pick up changes to `symbol_db.py` or `xlsx_export.py` (or any other

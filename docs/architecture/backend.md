@@ -498,8 +498,12 @@ the page shows it as chips, every search prints one `[search]` line.
   edit posts `{query}` back: validated, never sent to the LLM.
 - **Screener rules learned live**: yfinance shares one cookie + crumb across
   threads and any 4xx (a delisted ticker in a concurrent quote fetch) flips its
-  cookie strategy, so a screen sent meanwhile gets a 401 — `_screen` retries
-  twice. A ratio ranking without a market-cap filter is among companies above
+  cookie strategy and wipes the cookie, so for as long as the startup warm-up
+  lasts (~35 s) every screen through it got a 401, retries included. Screens
+  use their own session instead (`_yahoo_screen`: cookie from fc.yahoo.com,
+  crumb from getcrumb, re-minted on 401/403), falling back to `yf.screen`. Its
+  body is raw UTF-8 like yfinance's: Yahoo does not decode `\u2014`, so a
+  JSON-escaped "Banks—Regional" matched nothing. A ratio ranking without a market-cap filter is among companies above
   $1B in USD (`_size_floor`, 4 pages fetched; a note says so), because over
   every listing it is led by microcaps with tiny equity. A lowest-first
   ranking adds `field >= 0` at the screener: negative D/E or P/E is negative

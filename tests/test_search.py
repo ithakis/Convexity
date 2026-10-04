@@ -32,6 +32,9 @@ def yahoo(monkeypatch):
         return {"total": len(st["quotes"]), "quotes": st["quotes"] if offset == 0 else []}
 
     monkeypatch.setattr(yf, "screen", screen)
+    monkeypatch.setattr(
+        s, "_yahoo_screen", lambda q, off, sort, asc: yf.screen(q, 250, off, sort, asc)
+    )
     monkeypatch.setattr(s, "_info", lambda t: st["info"].get(t, {}))
     return st
 
@@ -318,31 +321,52 @@ def test_criteria_with_commas_are_not_a_list(yahoo):
     assert s.parse("tech companies with D/E < 0.8, current ratio > 1")["kind"] == "screen"
 
 
-# ------------------------------------------------------------------ screener retry
-def test_a_transient_screener_401_is_retried(yahoo, monkeypatch):
-    import yfinance as yf
+# ------------------------------------------------------------------ screener session
+def test_the_own_session_remints_a_stale_crumb(monkeypatch):
+    """A 401 on the search's own session mints a new cookie + crumb and retries."""
+    from yfinance import EquityQuery as Q, _http
 
-    from requests import HTTPError
+    class Resp:
+        def __init__(self, code, text="", data=None):
+            self.status_code, self.text, self._data = code, text, data
 
-    real, fails = yf.screen, {"n": 1}
+        def json(self):
+            return self._data
 
-    def flaky(*a, **k):
-        if fails["n"]:
-            fails["n"] -= 1
-            raise HTTPError("HTTP Error 401")
-        return real(*a, **k)
+        def raise_for_status(self):
+            assert self.status_code == 200
 
-    monkeypatch.setattr(yf, "screen", flaky)
+    log = []
+
+    class Sess:
+        def get(self, url, **kw):
+            log.append(url)
+            return Resp(200, f"crumb{len(log)}")
+
+        def post(self, url, params, data, headers, timeout):
+            log.append(params["crumb"])
+            assert "Banks—Regional".encode() in data  # raw UTF-8, never \\u2014
+            if params["crumb"] == "stale":
+                return Resp(401)
+            return Resp(200, data={"finance": {"result": [{"total": 1, "quotes": []}]}})
+
+    monkeypatch.setattr(_http, "new_session", Sess)
     monkeypatch.setattr(s.time, "sleep", lambda _s: None)
+    monkeypatch.setitem(s._SESSION, "s", Sess())
+    monkeypatch.setitem(s._SESSION, "crumb", "stale")
+    out = s._yahoo_screen(Q("eq", ["industry", "Banks—Regional"]), 0, "intradaymarketcap", False)
+    assert out["total"] == 1 and log[0] == "stale" and "getcrumb" in log[2]
+    assert s._SESSION["crumb"] not in (None, "stale")
+
+
+def test_a_refused_own_session_falls_back_to_yfinance(yahoo, monkeypatch):
+    def refused(*a):
+        raise RuntimeError("no crumb")
+
+    monkeypatch.setattr(s, "_yahoo_screen", refused)
     yahoo["quotes"] = [{"symbol": "MSFT"}]
     out = s.search("tech companies with D/E < 0.8")
     assert [c["ticker"] for c in out["results"]] == ["MSFT"] and not out["warnings"]
-
-    fails["n"] = 3  # down for good: a warning, and nothing cached
-    s._CACHE.clear()
-    out = s.search("tech companies with D/E < 0.8")
-    assert out["results"] == [] and "did not answer" in out["warnings"][0]
-    assert s._CACHE == {}
 
 
 def test_a_ratio_ranking_skips_microcaps_unless_asked(yahoo):

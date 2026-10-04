@@ -34,6 +34,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import asdict
 
 from convexity import symbol_db as sdb
@@ -527,6 +528,7 @@ def run(q: dict, offset: int = 0) -> dict:
             _evict(_CACHE, 50)
             _CACHE[key] = (time.time(), base)
     page = base[offset : offset + _TOP_N]
+    t1 = time.time()
     _fill_values(page, q)
     floor_note = "Ranked among companies above $1B market cap; a market-cap filter changes this."
     if q["kind"] == "screen" and _size_floor(q) and floor_note not in q["notes"]:
@@ -535,7 +537,7 @@ def run(q: dict, offset: int = 0) -> dict:
         warnings.append("No matches." if sdb.status()["installed"] else
                         "The symbol list is still downloading; try again in a minute.")  # fmt: skip
     print(f"[search] {q['text']!r} engine={q['engine']} kind={q['kind']} query={json.dumps(_brief(q))}"
-          f" results={len(base)} {time.time() - t0:.1f}s", flush=True)  # fmt: skip
+          f" results={len(base)} {time.time() - t0:.1f}s (values {time.time() - t1:.1f}s)", flush=True)  # fmt: skip
     return {"query": q, "chips": _chips(q), "results": page, "total": len(base),
             "offset": offset, "warnings": warnings, "notes": q["notes"], "fields": _LABELS}  # fmt: skip
 
@@ -614,18 +616,15 @@ def _screen(q: dict) -> list[dict]:
         parts.append(Q("gte", [sort, 0]))
     quotes: list[dict] = []
     for page in range(2 if rank["field"] == "mcap" else 4 if _size_floor(q) else 1):
-        for attempt in range(3):
-            try:
-                r = yf.screen(Q("and", parts), size=250, offset=page * 250,
-                              sortField=sort, sortAsc=rank["dir"] == "asc")  # fmt: skip
-                break
-            except Exception:
-                # yfinance shares one cookie + crumb across threads, and any 4xx
-                # (a delisted ticker in a concurrent quote fetch) flips its cookie
-                # strategy: a screen sent meanwhile gets a 401. Transient — retry.
-                if attempt == 2:
-                    raise
-                time.sleep(0.6 * (attempt + 1))
+        args = (Q("and", parts), page * 250, sort, rank["dir"] == "asc")
+        try:
+            r = _yahoo_screen(*args)
+        except Exception as e:  # our session refused: yfinance's shared one
+            print(
+                f"[search] own screener session failed ({type(e).__name__}: {e}); using yfinance's",
+                flush=True,
+            )
+            r = yf.screen(args[0], size=250, offset=args[1], sortField=sort, sortAsc=args[3])
         quotes += r.get("quotes") or []
         if len(quotes) >= (r.get("total") or 0):
             break
@@ -646,6 +645,59 @@ def _screen(q: dict) -> list[dict]:
     if rank["field"] == "mcap":
         cards.sort(key=lambda c: (c["mcap_usd"] or 0) * (1 if rank["dir"] == "asc" else -1))
     return cards
+
+
+_SCREENER = "https://query1.finance.yahoo.com/v1/finance/screener"
+_SESSION: dict = {"s": None, "crumb": None}
+_SESSION_LOCK = threading.Lock()
+
+
+def _yahoo_screen(query, offset: int, sort: str, asc: bool) -> dict:
+    """One screener page through the search's OWN Yahoo session.
+
+    yfinance keeps one cookie + crumb for the whole process, and every 4xx
+    anywhere (a delisted ticker's 404 during the startup warm-up, which fetches
+    hundreds of symbols) flips its cookie strategy and wipes the cookie. For as
+    long as such a burst lasts (~35 s seen) every screen sent through it gets a
+    401, retries included. This session is used by nothing else, so nothing
+    resets it: cookie from fc.yahoo.com, crumb from getcrumb (yfinance's own
+    "basic" flow, same hosts), minted once and re-minted on a 401/403.
+    Serialized: searches are rare and the session is not thread-safe."""
+    from yfinance._http import new_session
+
+    body = {"offset": offset, "size": 250, "sortField": sort, "sortType": "ASC" if asc else "DESC",
+            "quoteType": "EQUITY", "query": query.to_dict(), "userId": "", "userIdType": "guid"}  # fmt: skip
+    data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode()
+    params = {
+        "corsDomain": "finance.yahoo.com",
+        "formatted": "false",
+        "lang": "en-US",
+        "region": "US",
+    }
+    with _SESSION_LOCK:
+        for attempt in range(3):
+            if _SESSION["crumb"] is None:
+                sess = new_session()
+                with suppress(Exception):  # sets the cookie though the page is a 404
+                    sess.get("https://fc.yahoo.com", timeout=10, allow_redirects=True)
+                crumb = sess.get(
+                    "https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=10
+                ).text
+                if not crumb or "<" in crumb or "Too Many" in crumb:
+                    raise RuntimeError("no crumb")
+                _SESSION.update(s=sess, crumb=crumb)
+            # Raw UTF-8, as yfinance sends it: Yahoo does not decode \u escapes,
+            # so "Banks\u2014Regional" (json= default) matched nothing.
+            r = _SESSION["s"].post(_SCREENER, params={**params, "crumb": _SESSION["crumb"]},
+                                   data=data, headers={"Content-Type": "application/json"},
+                                   timeout=20)  # fmt: skip
+            if r.status_code in (401, 403):
+                _SESSION["crumb"] = None  # stale: mint a new one
+                time.sleep(0.5 * attempt)
+                continue
+            r.raise_for_status()
+            return r.json()["finance"]["result"][0]
+    raise RuntimeError(f"HTTP {r.status_code} after a fresh crumb")
 
 
 _FLOOR_USD = 1e9
