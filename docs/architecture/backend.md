@@ -488,13 +488,36 @@ the page shows it as chips, every search prints one `[search]` line.
   the hint, or the model copies it back instead of choosing a metric.
   Reuses `news_sentiment._nvidia_call(..., record=False, tag="search")`, so a
   search failure never touches the News LLM banner.
+- **Reading a request (learned live, 2026-10).** Size words (big, large,
+  largest, giant) rank by market cap; vague amounts are moderate, editable
+  filters (`_QUAL`: "small leverage" is D/E < 0.5, never lowest-D/E-first,
+  which returned companies with no debt at all); exchanges are their own
+  filter (`EXCHANGES`: "nasdaq" is NMS/NGM/NCM, not Region US); an exact
+  industry absorbs a generic word after it ("uranium miners" is Uranium, not
+  every mining industry). The model gets worked examples, and `_sane_rank`
+  enforces the two rules it broke: a size word ranks by market cap, and a field
+  the user only constrains is not the ranking unless they asked for an extreme
+  ("best/top" may rank highest-first). A ROE/ROA ranking requires a profit at
+  the screener (a loss over negative equity is a "high" ROE on Yahoo).
+  **After any prompt, rule or model change run `scripts/eval_search.py`** (20
+  live cases, the user's NVIDIA key via env; all must pass).
+- **Which listing a card shows.** The most traded real listing of the company
+  (`symbol_db.top`: NVO for Novo Nordisk, 7203.T for Toyota) — and on an
+  exchange screen the listing there (SKHY for SK hynix on Nasdaq); a typed
+  ticker stays as typed. Region, sector and size stay the company's own.
+  "Also listed on" (`alternates`) shows only listings someone would buy: no
+  re-listing venues (`symbol_db.relisting`: German regional, order books, OTC,
+  BDRs — the builder uses the same rule) and none trading under 5% of the top
+  listing (a CEDEAR). Every card carries the pack's USD market cap and the
+  1-year change from `.info`.
 - **Pasted lists** — two or more comma/newline parts with no criteria are
   `kind: "list"` (`_run_list`, rules only): an exact ticker keeps that listing,
   anything else is its best name match; all on one page, misses named.
 - **`run`** — names and pure sector/region screens offline on the pack;
   criteria through `yf.screen`, deduped to home listings, regions checked on
   the home listing (LLY.DE is not a European company); `Ticker.info` for the
-  five cards shown. Results cached 10 min per query for "Show next 5". A chip
+  cards shown. Results cached 10 min per query; `limit` (5 inline, 25 per page
+  in the full-screen table, at most 50) pages through them. A chip
   edit posts `{query}` back: validated, never sent to the LLM.
 - **Screener rules learned live**: yfinance shares one cookie + crumb across
   threads and any 4xx (a delisted ticker in a concurrent quote fetch) flips its

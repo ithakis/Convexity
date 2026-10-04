@@ -41,6 +41,7 @@ _OVERLAY_IDS = [
     "settings-bg",
     "ns-tape-fs-bg",
     "export-bg",
+    "co-full-bg",
 ]
 
 

@@ -1204,6 +1204,7 @@ class Handler(BaseHTTPRequestHandler):
                     str(payload.get("q") or ""),
                     query if isinstance(query, dict) else None,
                     int(payload.get("offset") or 0),
+                    int(payload.get("limit") or 5),
                 )
             except (TypeError, ValueError) as exc:
                 self._send_json(400, {"error": str(exc)})

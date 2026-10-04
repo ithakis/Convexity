@@ -83,6 +83,7 @@
   <div class="co-search" id="co-search">
     <form class="co-bar" id="co-form" autocomplete="off">
       <span class="co-icon" aria-hidden="true">&#8981;</span>
+      <span class="co-ai" id="co-ai" hidden title="The AI read this search">&#10022; AI</span>
       <input id="co-q" type="search" spellcheck="false" aria-label="Find companies"
         placeholder="Add companies: a name, a theme, criteria like &quot;tech with D/E &lt; 0.8&quot;, or paste tickers">
       <button class="co-go" id="co-go" type="submit">Search</button>
@@ -93,8 +94,7 @@
       <div class="co-msg" id="co-msg"></div>
       <div class="co-grid" id="co-grid"></div>
       <div class="co-foot">
-        <button type="button" class="co-link" id="co-more">Show next 5</button>
-        <span class="co-meta" id="co-meta"></span>
+        <button type="button" class="co-link" id="co-more">Show more</button>
         <span class="spacer"></span>
         <button type="button" class="co-link" id="co-close">Close</button>
         <button type="button" class="co-add" id="co-add" disabled>Add</button>
@@ -234,6 +234,32 @@
   <div class="ns-card ns-diag" id="ns-diag-card">
     <h4 class="ns-diag-toggle" id="ns-diag-toggle">Track record <span id="ns-diag-arrow">&#9656;</span><button type="button" class="ns-methodology-link" id="ns-methodology-btn" data-tip="How the News read and the Market read work, what each is good at, and where each is blind">Methodology</button></h4>
     <div class="ns-diag-body hidden" id="ns-diag-body"></div>
+  </div>
+</div>
+
+<!-- Company search, all results (app.js coFullOpen): one sortable row per
+     company, loaded 25 at a time as the list scrolls. -->
+<div class="modal-bg" id="co-full-bg" hidden>
+  <div class="modal co-full" role="dialog" aria-modal="true" aria-label="All search results">
+    <div class="co-full-head">
+      <span class="co-ai" id="co-full-ai" hidden>&#10022; AI</span>
+      <span class="co-full-title" id="co-full-title"></span>
+      <span class="co-full-count" id="co-full-count"></span>
+      <span class="spacer"></span>
+      <button type="button" class="co-full-x" id="co-full-close" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="co-chips co-full-chips" id="co-full-chips"></div>
+    <div class="co-full-scroll" id="co-full-scroll">
+      <table class="co-table">
+        <thead id="co-full-thead"></thead>
+        <tbody id="co-full-body"></tbody>
+      </table>
+      <div class="co-full-more" id="co-full-more"></div>
+    </div>
+    <div class="co-full-foot">
+      <span class="spacer"></span>
+      <button type="button" class="co-add" id="co-full-add" disabled>Add</button>
+    </div>
   </div>
 </div>
 

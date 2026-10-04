@@ -148,12 +148,21 @@ refused. The Build / Update Portfolio / Save as new buttons, the textarea and
 the analytics stale banner were removed in this change.
 
 ### Company search (`#co-search`, app.js "Company search")
-One box above the constituents posts to `/api/search` (backend.md §6).
+One box above the constituents posts to `/api/search` (backend.md §6). An
+"✦ AI" badge (`#co-ai`) sits left of the text when the model read the query;
+the chips row starts with the plain kind ("Screen ·"). The ranking's reason
+and the $1B floor are the rank chip's tooltip, never extra lines. Cards show
+the name, then the ticker and exchange in gray, then market cap, 1Y and each
+criterion. **Show more (N)** opens `#co-full-bg`: every result as one table
+(`FULL`, `coFullOpen/coFullLoad/coFullRender`), loaded 25 rows at a time as it
+scrolls (`{query, offset, limit}`), sortable by any column over the rows
+loaded; selection is `CO.picked`, keyed by the result's position in the
+server's order, so cards and table share it.
 The response's `query` is kept verbatim in `CO.query`: the chips render it
 (purple = chosen by the AI), a chip's × or its inline editor changes it and
 posts `{query}` back, which the server validates and runs without the LLM.
-Cards (top 5, "Show next 5") are selectable; "+N listings" swaps a card to
-another listing of the same company. **Add** passes the picked tickers to
+Cards (top 5) are selectable; "Also listed on" swaps a card to another
+listing of the same company. **Add** passes the picked tickers to
 `commitEntries` (Refresh turns red; their rows load on the next refresh). A
 pasted list (`kind: "list"`) comes back with every new card preselected.
 Tickers already in the portfolio show as "In this portfolio" and cannot be

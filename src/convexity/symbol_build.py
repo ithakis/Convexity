@@ -49,11 +49,6 @@ _ATTEMPTS = 4
 _MIN_SHARE = 0.95
 _MAX_DROP = 0.20
 _TEST = re.compile(r"\btest\b", re.IGNORECASE)
-# Venues that mostly re-list companies whose home is elsewhere: German
-# regional exchanges, Cboe/LSE international order books, OTC, and the Latin
-# American foreign-share boards (NVDACL.SN).
-SECONDARY = {"FRA", "STU", "BER", "MUN", "HAM", "HAN", "DUS", "IOB", "CXE", "CXA", "DXE", "AQS", "TLO",
-             "NEO", "PNK", "OQB", "OQX", "MEX", "SGO"}  # fmt: skip
 
 
 def _screen(query, offset: int = 0, size: int = 1, asc: bool = True) -> dict:
@@ -210,13 +205,6 @@ def collect(limit: int | None = None) -> list[dict]:
     return list(rows.values())
 
 
-# Re-listing lines whose venue code alone does not say so: the LSE's
-# international order book (0KZC.L, a London line of SPY) and Brazilian
-# depositary receipts (AAPL34.SA; local shares end in 3, 4 or 11).
-_IOB = re.compile(r"^0[A-Z0-9]{3}\.L$")
-_BDR = re.compile(r"^[A-Z0-9]{4}3[1-9]\.SA$")
-
-
 _US = {"NYQ", "NMS", "NGM", "NCM", "PCX", "ASE", "BTS"}
 
 
@@ -225,7 +213,7 @@ def _secondary(r: dict, us: set[str]) -> bool:
     .BA line whose base ticker trades on a US exchange: SPY.BA, AAPL.BA)."""
     tk = r["ticker"]
     cedear = tk.endswith(".BA") and tk[:-3] in us
-    return r.get("exchange") in SECONDARY or cedear or bool(_IOB.match(tk) or _BDR.match(tk))
+    return cedear or sdb.relisting(tk, r.get("exchange"))
 
 
 def _record(r: dict) -> bool:

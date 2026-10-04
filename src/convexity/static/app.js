@@ -2468,7 +2468,7 @@ $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg"
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeModal(); closeInfo(); closeNsProgress(); closeMethodology();
-    closeExportPopup(); closeSettings(); closeTapeFullscreen();
+    closeExportPopup(); closeSettings(); closeTapeFullscreen(); closeCoFull();
     return;
   }
   // R / Shift+R mirror a click / long-press on Refresh. Added to the EXISTING
@@ -6058,27 +6058,27 @@ for (const id of ["refresh", "export"]) {
  * the LLM. Add saves the picked tickers into the portfolio like any other
  * edit (commitEntries); their rows load with the next Refresh.
  * ------------------------------------------------------------------------- */
-const CO = {query: null, chips: [], fields: {}, results: [], offset: 0, total: 0,
+const CO = {query: null, chips: [], fields: {}, results: [], total: 0,
             picked: new Map(), choice: {}, editing: null};
 
-async function coSearch(body, offset = 0) {
+async function coSearch(body) {
   const go = $("#co-go");
   go.disabled = true; go.textContent = "Searching…";
   try {
     const r = await fetch("/api/search", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({...body, offset}),
+      body: JSON.stringify(body),
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
-    if (offset === 0) CO.picked.clear();
+    CO.picked.clear();
     Object.assign(CO, {query: d.query, chips: d.chips, fields: d.fields || {}, results: d.results,
-                       offset: d.offset, total: d.total, choice: {}, editing: null, last: d});
+                       total: d.total, choice: {}, editing: null, last: d});
     // A pasted list is a decision already made: every new company starts picked.
     if (d.query.kind === "list") {
       const held = coHeld();
-      d.results.forEach((c, i) => { if (!held.has(c.ticker)) coPick(i, c.ticker); });
+      d.results.forEach((c, i) => { if (!held.has(c.ticker)) coPick(i, c.ticker, c.name); });
     }
     coRender();
   } catch (e) {
@@ -6088,9 +6088,11 @@ async function coSearch(body, offset = 0) {
   }
 }
 
-function coPick(i, tk) {
-  CO.picked.set(i + CO.offset, tk);
-  ENTRY_NAMES[tk.toUpperCase()] = shortName(CO.results[i].name);
+/* Picks are keyed by the result's position in the server's order, so the
+   inline cards (0-4) and the full-screen table share one selection. */
+function coPick(key, tk, name) {
+  CO.picked.set(key, tk);
+  ENTRY_NAMES[tk.toUpperCase()] = shortName(name);
 }
 
 function coHeld() {
@@ -6100,58 +6102,181 @@ function coHeld() {
 function coFmt(k, v) {
   if (v == null || !isFinite(v)) return "—";
   const unit = (CO.fields[k] || [])[1];
-  return unit === "%" ? Number(v).toFixed(1) + "%" : Number(v).toFixed(2);
+  return unit === "%" ? (k === "perf_52w" && v > 0 ? "+" : "") + Number(v).toFixed(1) + "%" : Number(v).toFixed(2);
+}
+const coCap = (v) => v ? "$" + fmtCompactNum(v) : "—";
+const coRet = (v) => `<span class="${v > 0 ? "pos" : v < 0 ? "neg" : ""}">${coFmt("perf_52w", v)}</span>`;
+// The criteria and the ranking, beyond the market cap and 1Y every row shows.
+const coCrit = (q) => [...new Set(q.filters.map(f => f.field).concat(q.rank ? [q.rank.field] : []))]
+  .filter(k => k !== "mcap" && k !== "perf_52w");
+
+function coChipsHtml(editable) {
+  return CO.chips.map((c, i) => {
+    const fixed = !editable || c.kind === "ignored" || c.kind === "picks";
+    return `<button type="button" class="co-chip${c.ai ? " ai" : ""}${c.kind === "ignored" ? " ignored" : ""}` +
+      `${editable && CO.editing === i ? " open" : ""}" data-i="${i}"${fixed ? " disabled" : ""}` +
+      `${c.title ? ` title="${escapeHtml(c.title)}"` : ""}>${escapeHtml(c.label)}` +
+      `${fixed ? "" : '<span class="x" data-x="1" title="Remove">×</span>'}</button>`;
+  }).join("");
 }
 
 function coRender() {
   const d = CO.last, q = CO.query;
   $("#co-out").hidden = false;
+  $("#co-ai").hidden = q.engine !== "ai";
   const kind = {name: "Name", screen: "Screen", theme: "Theme", list: "List"}[q.kind] || "";
-  $("#co-chips").innerHTML = `<span class="co-kind">${kind}${q.engine === "ai" ? " (AI)" : ""} ·</span>` +
+  $("#co-chips").innerHTML = `<span class="co-kind">${kind} ·</span>` +
     (CO.chips.length ? "" : `<span class="co-kind">${q.kind === "list" ? `${CO.total} found` : `closest matches to "${escapeHtml(q.text)}"`}</span>`) +
-    CO.chips.map((c, i) => {
-      const fixed = c.kind === "ignored" || c.kind === "picks";
-      return `<button type="button" class="co-chip${c.ai ? " ai" : ""}${c.kind === "ignored" ? " ignored" : ""}` +
-        `${CO.editing === i ? " open" : ""}" data-i="${i}"${fixed ? " disabled" : ""}>${escapeHtml(c.label)}` +
-        `${fixed ? "" : '<span class="x" data-x="1" title="Remove">×</span>'}</button>`;
-    }).join("");
+    coChipsHtml(true);
   $("#co-msg").innerHTML = d.warnings.map(w => `<div class="warn">${escapeHtml(w)}</div>`).join("") +
     d.notes.map(n => `<div class="note">${escapeHtml(n)}</div>`).join("");
   const held = coHeld();
   $("#co-grid").innerHTML = CO.results.map((c, i) => coCard(c, i, held)).join("");
-  const n = CO.results.length;
-  $("#co-meta").textContent = n ? `${CO.offset + 1}–${CO.offset + n} of ${CO.total}` : "";
-  $("#co-more").hidden = CO.offset + n >= CO.total;
-  const add = $("#co-add"), k = CO.picked.size;
-  add.disabled = !k;
-  add.textContent = k ? `Add ${k} to ${viewLabel(STATE.activeView || AD_HOC_KEY)}` : "Add";
+  const more = $("#co-more");
+  more.hidden = CO.total <= CO.results.length;
+  more.textContent = `Show more (${CO.total})`;
+  coAddLabel($("#co-add"));
   coRenderEdit();
+}
+
+function coAddLabel(btn) {
+  const k = CO.picked.size;
+  btn.disabled = !k;
+  btn.textContent = k ? `Add ${k} to ${viewLabel(STATE.activeView || AD_HOC_KEY)}` : "Add";
 }
 
 function coCard(c, i, held) {
   const q = CO.query, tk = CO.choice[i] || c.ticker;
-  const keys = [...new Set(q.filters.map(f => f.field).concat(q.rank ? [q.rank.field] : []))].filter(k => k !== "mcap");
   const filtered = new Set(q.filters.map(f => f.field));
-  const rows = keys.map(k => {
+  const rows = [`<div class="co-kv"><span>Mkt cap</span><span>${coCap(c.mcap_usd)}</span></div>`,
+                `<div class="co-kv"><span>1Y</span>${coRet(c.values.perf_52w)}</div>`];
+  for (const k of coCrit(q)) {
     const v = c.values[k];
     // No .info figure: a criterion the screener already enforced shows a tick.
     const shown = v == null && filtered.has(k) ? '<span class="ok">✓</span>' : coFmt(k, v);
-    return `<div class="co-kv"><span>${escapeHtml((CO.fields[k] || [k])[0])}</span><span>${shown}</span></div>`;
-  });
-  if (c.mcap_usd && (!keys.length || (q.rank && q.rank.field === "mcap")))
-    rows.push(`<div class="co-kv"><span>Mkt cap</span><span>$${fmtCompactNum(c.mcap_usd)}</span></div>`);
-  const where = [c.exchange, (c.region || "").toUpperCase()].filter(Boolean).join(" · ");
-  const sub2 = !keys.length && (c.industry || c.sector || (c.type !== "stock" ? c.type.toUpperCase() : ""));
-  const alts = c.alternates.length ? `<div class="co-alts"><button type="button" data-alts="${i}">+${c.alternates.length} listing${c.alternates.length > 1 ? "s" : ""} ▾</button>` +
-    `<ul hidden>${c.alternates.map(a => `<li><button type="button" data-alt="${i}" data-tk="${escapeHtml(a.ticker)}">${escapeHtml(a.ticker)}</button><span>${escapeHtml([a.exchange, (a.region || "").toUpperCase()].filter(Boolean).join(" · "))}</span></li>`).join("")}</ul></div>` : "";
-  const isHeld = held.has(tk);
-  return `<div class="co-card${CO.picked.has(i + CO.offset) ? " sel" : ""}${isHeld ? " held" : ""}" data-card="${i}" role="button" tabindex="0" aria-pressed="${CO.picked.has(i + CO.offset)}">
-    <div class="co-tk">${escapeHtml(tk)}</div>
-    <div class="co-sub" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}${where ? " · " + escapeHtml(where) : ""}</div>
-    ${sub2 ? `<div class="co-sub">${escapeHtml(sub2)}</div>` : ""}${rows.join("")}
+    rows.push(`<div class="co-kv"><span>${escapeHtml((CO.fields[k] || [k])[0])}</span><span>${shown}</span></div>`);
+  }
+  // The listing shown (another one once the user switched), then the others.
+  const lines = [{ticker: c.ticker, exchange_name: c.exchange_name}, ...c.alternates];
+  const shown = lines.find(a => a.ticker === tk) || lines[0];
+  const others = lines.filter(a => a.ticker !== tk);
+  const alts = others.length ? `<div class="co-alts"><button type="button" data-alts="${i}" title="The same shares also trade on these exchanges; click one to use it instead">Also listed on ${others.length} ▾</button>` +
+    `<ul hidden>${others.map(a => `<li><button type="button" data-alt="${i}" data-tk="${escapeHtml(a.ticker)}">${escapeHtml(a.ticker)}</button><span>${escapeHtml(a.exchange_name || "")}</span></li>`).join("")}</ul></div>` : "";
+  const isHeld = held.has(tk), sel = CO.picked.has(i);
+  return `<div class="co-card${sel ? " sel" : ""}${isHeld ? " held" : ""}" data-card="${i}" role="button" tabindex="0" aria-pressed="${sel}">
+    <div class="co-name" title="${escapeHtml(c.name)}">${escapeHtml(shortName(c.name))}</div>
+    <div class="co-tk">${escapeHtml([tk, shown.exchange_name].filter(Boolean).join(" · "))}</div>${rows.join("")}
     ${c.why ? `<div class="co-why">${escapeHtml(c.why)}</div>` : ""}
     ${isHeld ? '<div class="co-sub">In this portfolio</div>' : ""}${alts}</div>`;
 }
+
+/* "Show more": every result as one sortable table. Rows arrive 25 at a time
+   (POST /api/search {query, offset, limit}) as the list scrolls; sorting
+   reorders the rows already loaded. */
+const FULL = {rows: [], total: 0, loading: false, sort: null, dir: -1, gen: 0};
+
+function coFullCols() {
+  const val = (k) => (r) => r.values[k];
+  return [["name", "Company", false, (r) => r.name], ["mcap", "Mkt cap", true, (r) => r.mcap_usd],
+          ["perf_52w", "1Y", true, val("perf_52w")],
+          ...coCrit(CO.query).map(k => [k, (CO.fields[k] || [k])[0], true, val(k)]),
+          ...(FULL.rows.some(r => r.why) ? [["why", "Why", false, (r) => r.why]] : [])];
+}
+
+function coFullOpen() {
+  FULL.gen++;
+  Object.assign(FULL, {rows: CO.results.map((c, i) => ({...c, idx: i})), total: CO.total, sort: null, loading: false});
+  $("#co-full-ai").hidden = CO.query.engine !== "ai";
+  $("#co-full-title").textContent = CO.query.text;
+  $("#co-full-chips").innerHTML = coChipsHtml(false);
+  showOverlay("#co-full-bg");
+  $("#co-full-scroll").scrollTop = 0;
+  coFullRender();
+  coFullLoad();
+}
+
+function closeCoFull() {
+  if (hideOverlay("#co-full-bg")) { FULL.gen++; coRender(); }
+}
+
+async function coFullLoad() {
+  if (FULL.loading || FULL.rows.length >= FULL.total) return;
+  FULL.loading = true;
+  const gen = FULL.gen;
+  $("#co-full-more").textContent = "Loading…";
+  try {
+    const r = await fetch("/api/search", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({query: CO.query, offset: FULL.rows.length, limit: 25}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+    if (gen !== FULL.gen) return;
+    for (const c of d.results) FULL.rows.push({...c, idx: FULL.rows.length});
+  } catch (e) {
+    toast("Could not load more results: " + e.message);
+  } finally {
+    if (gen === FULL.gen) {
+      FULL.loading = false;
+      coFullRender();
+      const sc = $("#co-full-scroll");  // a short list must keep filling the screen
+      if (sc.scrollHeight <= sc.clientHeight + 40) coFullLoad();
+    }
+  }
+}
+
+function coFullRender() {
+  const cols = coFullCols(), held = coHeld();
+  $("#co-full-count").textContent = `· ${FULL.total} compan${FULL.total === 1 ? "y" : "ies"}`;
+  $("#co-full-thead").innerHTML = "<tr><th></th>" + cols.map(([k, label, num]) =>
+    `<th class="${num ? "num" : ""}${FULL.sort === k ? " on" : ""}" data-sort="${k}">${escapeHtml(label)}${FULL.sort === k ? (FULL.dir < 0 ? " ▾" : " ▴") : ""}</th>`).join("") + "</tr>";
+  let rows = FULL.rows;
+  if (FULL.sort) {
+    const get = cols.find(c => c[0] === FULL.sort)[3];
+    rows = [...rows].sort((a, b) => {
+      const x = get(a), y = get(b);
+      if (x == null || x === "") return 1;
+      if (y == null || y === "") return -1;
+      return (typeof x === "string" ? x.localeCompare(y) : x - y) * FULL.dir;
+    });
+  }
+  $("#co-full-body").innerHTML = rows.map(r => {
+    const isHeld = held.has(r.ticker), sel = CO.picked.has(r.idx);
+    const cells = cols.map(([k, , num, get]) => {
+      if (k === "name") return `<td>${escapeHtml(shortName(r.name))}<span class="co-tk">${escapeHtml(r.ticker)} · ${escapeHtml(r.exchange_name || "")}</span>${isHeld ? ' <span class="co-tk">in portfolio</span>' : ""}</td>`;
+      if (k === "mcap") return `<td class="num">${coCap(r.mcap_usd)}</td>`;
+      if (k === "perf_52w") return `<td class="num">${coRet(get(r))}</td>`;
+      if (k === "why") return `<td class="why">${escapeHtml(r.why || "")}</td>`;
+      return `<td class="${num ? "num" : ""}">${coFmt(k, get(r))}</td>`;
+    }).join("");
+    return `<tr class="${sel ? "sel" : ""}${isHeld ? " held" : ""}" data-idx="${r.idx}"><td><input type="checkbox" aria-label="Pick ${escapeHtml(r.name)}"${sel ? " checked" : ""}${isHeld ? " disabled" : ""}></td>${cells}</tr>`;
+  }).join("");
+  $("#co-full-more").textContent = FULL.rows.length < FULL.total ? (FULL.loading ? "Loading…" : "Scroll for more") : "";
+  coAddLabel($("#co-full-add"));
+}
+
+$("#co-full-thead").addEventListener("click", (e) => {
+  const th = e.target.closest("[data-sort]");
+  if (!th) return;
+  const k = th.dataset.sort;
+  FULL.dir = FULL.sort === k ? -FULL.dir : (k === "name" || k === "why" ? 1 : -1);
+  FULL.sort = k;
+  coFullRender();
+});
+$("#co-full-body").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr[data-idx]");
+  if (!tr || tr.classList.contains("held")) return;
+  const idx = Number(tr.dataset.idx), r = FULL.rows[idx];
+  if (CO.picked.has(idx)) CO.picked.delete(idx); else coPick(idx, r.ticker, r.name);
+  coFullRender();
+});
+$("#co-full-scroll").addEventListener("scroll", (e) => {
+  const sc = e.currentTarget;
+  if (sc.scrollTop + sc.clientHeight > sc.scrollHeight - 300) coFullLoad();
+});
+$("#co-full-close").onclick = closeCoFull;
+$("#co-full-bg").addEventListener("click", (e) => { if (e.target.id === "co-full-bg") closeCoFull(); });
+$("#co-full-add").onclick = async () => { await coAdd(); coFullRender(); };
 
 /* The inline editor under the chips: operator + value for a criterion, the
    metric and direction for the ranking. Apply re-runs the edited query. */
@@ -6194,6 +6319,7 @@ function coRemove(c) {
   else if (c.kind === "sector") q.sectors = q.sectors.filter(v => v !== c.label);
   else if (c.kind === "industry") q.industries = q.industries.filter(v => v !== c.label);
   else if (c.kind === "regions") q.regions = [];
+  else if (c.kind === "exchange") q.exchanges = q.exchanges.filter(v => "Exchange: " + v !== c.label);
   else if (c.kind === "type") q.types = [];
   else if (c.kind === "rank") q.rank = null;
   coSearch({query: q});
@@ -6213,7 +6339,7 @@ $("#co-form").addEventListener("submit", (e) => {
   const text = $("#co-q").value.trim();
   if (text) coSearch({q: text});
 });
-$("#co-more").onclick = () => coSearch({query: CO.query}, CO.offset + 5);
+$("#co-more").onclick = coFullOpen;
 $("#co-close").onclick = () => { $("#co-out").hidden = true; };
 $("#co-add").onclick = coAdd;
 $("#co-chips").addEventListener("click", (e) => {
@@ -6236,13 +6362,13 @@ $("#co-grid").addEventListener("click", (e) => {
   const alt = e.target.closest("[data-alt]");
   const card = e.target.closest("[data-card]");
   if (!card) return;
-  const i = Number(card.dataset.card), key = i + CO.offset;
+  const i = Number(card.dataset.card), c = CO.results[i];
   if (alt) {  // another listing of the same company replaces the card's ticker
     CO.choice[i] = alt.dataset.tk;
-    if (CO.picked.has(key)) coPick(i, alt.dataset.tk);
+    if (CO.picked.has(i)) coPick(i, alt.dataset.tk, c.name);
   } else if (!card.classList.contains("held")) {
-    if (CO.picked.has(key)) CO.picked.delete(key);
-    else coPick(i, CO.choice[i] || CO.results[i].ticker);
+    if (CO.picked.has(i)) CO.picked.delete(i);
+    else coPick(i, CO.choice[i] || c.ticker, c.name);
   }
   coRender();
 });

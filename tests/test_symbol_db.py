@@ -215,8 +215,10 @@ ROWS = [
         1,
     ],
 ]
-# adv_usd (average daily traded value) sits after mcap_usd; none of these need one.
-ROWS = [r[:8] + [None] + r[8:] for r in ROWS]
+# adv_usd (average daily traded value) sits after mcap_usd: Novo's US ADR
+# trades more than its Copenhagen home (real 2026-10 ratios), Frankfurt little.
+ADV = {"NVO": 4.6e8, "NOVO-B.CO": 1.7e8, "NOV.DE": 6.5e6}
+ROWS = [r[:8] + [ADV.get(r[0])] + r[8:] for r in ROWS]
 
 
 def pack(rows=None, date="2026-10-01"):
@@ -325,8 +327,11 @@ def test_names_show_home_listings_only(db):
 
 
 def test_alternates_and_category(db):
-    alts = [a["ticker"] for a in sdb.alternates(3, exclude="NOVO-B.CO")]
-    assert sorted(alts) == ["NOV.DE", "NVO"]
+    # The card shows the most traded listing; NOV.DE trades under 5% of it.
+    assert sdb.top(3).ticker == "NVO"
+    assert [a["ticker"] for a in sdb.alternates(3, exclude="NVO")] == ["NOVO-B.CO"]
+    assert sdb.relisting("0KZC.L", "LSE") and sdb.relisting("AAPL34.SA", "SAO")
+    assert sdb.relisting("NOV.F", "FRA") and not sdb.relisting("NOV.DE", "GER")
     banks = sdb.category(
         industries=["Banks—Regional", "Banks—Diversified"], regions=["de", "fr", "gb"]
     )

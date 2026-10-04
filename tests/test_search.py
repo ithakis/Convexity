@@ -68,7 +68,7 @@ def test_the_issue_example_parses_and_sends_yahoo_its_own_units(yahoo):
     assert yahoo["calls"][0]["sort"] == "intradaymarketcap"
     # home listings once each (MSF.DE -> MSFT, TSM -> 2330.TW), ranked by USD cap
     assert [c["ticker"] for c in out["results"]] == ["NVDA", "MSFT", "2330.TW", "SMSI"]
-    assert out["results"][0]["values"] == {"de": 0.11, "current_ratio": 4.2}
+    assert out["results"][0]["values"] == {"de": 0.11, "current_ratio": 4.2, "perf_52w": None}
     assert any("NVIDIA key" in n for n in out["notes"])
 
 
@@ -98,11 +98,12 @@ def test_names_and_categories_never_call_yahoo(yahoo):
     out = s.search("european banks")
     assert [c["ticker"] for c in out["results"]] == ["HSBA.L", "BNP.PA", "DBK.DE"]
     assert {"kind": "regions", "label": "Region: Europe"} in out["chips"]
+    # A company shows its most traded listing (NVO), its home and country
+    # kept; NOV.DE trades too little to list. A typed ticker stays as typed.
     nvo = s.search("novo nordisk")["results"][0]
-    assert nvo["ticker"] == "NOVO-B.CO" and {a["ticker"] for a in nvo["alternates"]} == {
-        "NVO",
-        "NOV.DE",
-    }
+    assert (nvo["ticker"], nvo["exchange_name"], nvo["region"]) == ("NVO", "NYSE", "dk")
+    assert [a["ticker"] for a in nvo["alternates"]] == ["NOVO-B.CO"]
+    assert s.search("NOVO-B.CO")["results"][0]["ticker"] == "NOVO-B.CO"
     assert yahoo["calls"] == []
 
 
@@ -186,13 +187,13 @@ def test_a_theme_goes_to_the_llm_and_its_picks_are_verified(monkeypatch, yahoo):
     calls = _ai(monkeypatch, reply)
     out = s.search("GLP-1 drug makers")
     eu = s.search("", query={**out["query"], "regions": ["dk"]})  # a chip edit: home region
-    assert [c["ticker"] for c in eu["results"]] == ["NOVO-B.CO"]
+    assert [c["ticker"] for c in eu["results"]] == ["NVO"]  # a Danish company, its US line
     assert calls and calls[0]["record"] is False and calls[0]["tag"] == "search"
     assert "de" in str(calls[0]["schema"])  # the field enum is the registry
     assert out["query"]["engine"] == "ai" and out["query"]["kind"] == "theme"
     assert [(c["ticker"], c["why"]) for c in out["results"]] == [
         ("LLY", "Tirzepatide"),
-        ("NOVO-B.CO", "Semaglutide"),  # shown as the home listing
+        ("NVO", "Semaglutide"),  # shown as its most traded listing
     ]
     assert any("1 AI-named company not found" in w for w in out["warnings"])
     assert any("outside the theme's sectors and industries: MSFT" in w for w in out["warnings"])
@@ -208,8 +209,15 @@ def test_best_lets_the_llm_choose_the_ranking(monkeypatch, yahoo):
     }
     _ai(monkeypatch, reply)
     out = s.search(TEXT)
-    assert out["query"]["rank"] == {"field": "roe", "dir": "desc", "by": "ai"}
-    assert {"kind": "rank", "ai": True, "label": "Rank: ROE"} in out["chips"]
+    assert out["query"]["rank"] == {
+        "field": "roe",
+        "dir": "desc",
+        "by": "ai",
+        "why": "profitability",
+    }
+    rank = next(c for c in out["chips"] if c["kind"] == "rank")
+    assert rank["label"] == "Rank: ROE" and rank["ai"] and rank["title"].startswith("profitability")
+    assert not any("Ranked" in n for n in out["notes"])  # the chip says it
     assert yahoo["calls"][0]["sort"] == "returnonequity.lasttwelvemonths"
 
 
@@ -378,9 +386,10 @@ def test_a_ratio_ranking_skips_microcaps_unless_asked(yahoo):
          "rank": {"field": "roe", "dir": "desc", "by": "ai"}}  # fmt: skip
     out = s.search("", query=q)
     assert [c["ticker"] for c in out["results"]] == ["MSFT", "NVDA", "AAPL", "GOOGL", "2330.TW"]
-    assert any("above $1B" in n for n in out["notes"])
+    tip = lambda o: next(c for c in o["chips"] if c["kind"] == "rank")["title"]  # noqa: E731
+    assert "above $1B" in tip(out)
     q["filters"].append({"field": "mcap", "op": "gt", "value": 1e6})
-    assert not any("above $1B" in n for n in s.search("", query=q)["notes"])
+    assert "above $1B" not in tip(s.search("", query=q))
 
 
 def test_a_lowest_first_ranking_excludes_negative_values(yahoo):
@@ -389,3 +398,56 @@ def test_a_lowest_first_ranking_excludes_negative_values(yahoo):
     s.search("", query=q)
     ops = _flat(yahoo["calls"][0]["query"])
     assert ("gte", "totaldebtequity.lasttwelvemonths", 0) in ops
+
+
+# ------------------------------------------------------------------ smarter reading
+def test_size_exchange_and_vague_amounts_parse_without_the_ai(monkeypatch, yahoo):
+    """The query that went wrong live: "big" is a market-cap ranking, Nasdaq an
+    exchange (not Region US), and "small leverage" a moderate filter."""
+    calls = _ai(monkeypatch, None)
+    q, left = s.parse_rules("big tech in nasdaq with small relative small leverage")
+    assert left == [] and q["sectors"] == ["Technology"] and q["exchanges"] == ["Nasdaq"]
+    assert q["filters"] == [{"field": "de", "op": "lt", "value": 0.5}]
+    assert q["rank"] == {"field": "mcap", "dir": "desc", "by": "rules"} and not q["regions"]
+    out = s.search("big tech in nasdaq with small relative small leverage")
+    assert calls == [] and {"kind": "exchange", "label": "Exchange: Nasdaq"} in out["chips"]
+    ops = _flat(yahoo["calls"][0]["query"])
+    assert ("eq", "exchange", "NMS") in ops or any(o[1:] == ("exchange", "NMS") for o in ops)
+
+
+@pytest.mark.parametrize(
+    "text, rank",
+    [
+        ("tech with small leverage", None),  # a constraint, not the ranking
+        ("tech with the lowest leverage", "de"),  # an extreme was asked for
+        ("large tech with small leverage", "mcap"),  # size wins
+    ],
+)
+def test_the_ai_ranking_is_kept_sane(monkeypatch, yahoo, text, rank):
+    reply = {**s.empty(), "kind": "screen", "sectors": ["Technology"],
+             "filters": [{"field": "de", "op": "lt", "value": 0.5}],
+             "rank": {"field": "de", "dir": "asc", "why": "low leverage"}}  # fmt: skip
+    _ai(monkeypatch, reply)
+    q = s.parse_llm(text, s.empty(text))
+    assert (q["rank"] or {}).get("field") == rank
+
+
+@pytest.mark.parametrize(
+    "text, industries",
+    [
+        ("uranium miners", ["Uranium"]),
+        (
+            "european banks and semiconductors",
+            ["Banks—Diversified", "Banks—Regional", "Semiconductors"],
+        ),
+    ],
+)
+def test_an_exact_industry_is_not_widened_by_a_generic_word(text, industries):
+    assert sorted(s.parse_rules(text)[0]["industries"]) == industries
+
+
+def test_a_return_ranking_needs_a_profit(yahoo):
+    q = {**s.empty("x"), "kind": "screen", "sectors": ["Technology"],
+         "rank": {"field": "roe", "dir": "desc", "by": "ai"}}  # fmt: skip
+    s.search("", query=q)
+    assert ("gt", "netincomemargin.lasttwelvemonths", 0) in _flat(yahoo["calls"][0]["query"])
