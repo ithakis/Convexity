@@ -704,14 +704,18 @@
      chips are the query that ran; purple marks what the AI chose or wrote. */
   .co-search { margin: 0 0 14px; }
   .co-bar {
-    display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 5px 0 16px;
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 999px;
+    display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 6px 0 18px;
+    background: var(--bg-canvas); border: 2px solid rgba(var(--accent-rgb), 0.42); border-radius: 999px;
+    box-shadow: 0 1px 2px rgba(var(--accent-rgb), 0.10), inset 0 1px 0 rgba(255,255,255,0.03);
+    transition: border-color .15s, box-shadow .15s;
   }
-  .co-bar:focus-within { border-color: var(--accent); }
+  .co-bar:hover { border-color: rgba(var(--accent-rgb), 0.65); }
+  .co-bar:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.16); }
   .co-icon { color: var(--muted); font-size: 15px; }
   /* The native clear (x) of type=search is redundant: Enter on an empty box clears. */
   #co-q::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; display: none; }
-  #co-q { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13px; }
+  #co-q { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 14px; }
+  #co-q::placeholder { color: var(--muted); opacity: 0.85; }
   .co-go, .co-add {
     height: 34px; padding: 0 18px; border-radius: 999px; font-size: 13px; font-weight: 600;
     border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent); cursor: pointer;
@@ -945,7 +949,7 @@
     text-decoration: underline dotted rgba(125, 125, 125, 0.75);
     text-underline-offset: 3px;
   }
-  .pf-mpt-rf-info[data-rich-tip] { text-decoration: none; }
+  .pf-mpt-rf-info[data-rich-tip], .pf-contrib-table [data-rich-tip] { text-decoration: none; }  /* the tip stays, the underline goes */
   [data-rich-tip]:focus-visible, .pf-contrib-table th[data-contrib-sort]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .pf-metric-tip .mt-table {
     width: 100%; border-collapse: collapse; margin: 6px 0 8px;
@@ -1049,17 +1053,23 @@
     display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
     gap: 0; align-items: stretch;
   }
+  /* The dividers between cells are inset hairlines that stop short of the
+     sheet's edge, so they read as separators, not as boxes. */
   .pf-card {
-    background: transparent; border: 0; border-radius: 0;
-    border-top: 1px solid var(--border);
+    position: relative; background: transparent; border: 0; border-radius: 0;
     padding: 14px 18px 16px;
   }
-  .pf-grid > .pf-card:nth-child(-n+2) { border-top: 0; }
-  .pf-grid > .pf-card:nth-child(odd):not(:last-child) { border-right: 1px solid var(--border); }
+  .pf-card::before {  /* horizontal rule above every row but the first */
+    content: ""; position: absolute; top: 0; left: 18px; right: 18px; height: 1px; background: var(--border);
+  }
+  .pf-grid > .pf-card:nth-child(-n+2)::before { display: none; }
+  .pf-grid > .pf-card:nth-child(odd):not(:last-child)::after {  /* vertical rule between columns */
+    content: ""; position: absolute; right: 0; top: 18px; bottom: 18px; width: 1px; background: var(--border);
+  }
   @media (max-width: 900px) {
     .pf-grid { grid-template-columns: 1fr; }
-    .pf-grid > .pf-card:nth-child(2) { border-top: 1px solid var(--border); }
-    .pf-grid > .pf-card:nth-child(odd):not(:last-child) { border-right: 0; }
+    .pf-grid > .pf-card:nth-child(2)::before { display: block; }
+    .pf-grid > .pf-card:nth-child(odd):not(:last-child)::after { display: none; }
   }
   .pf-card h4 {
     margin: 0 0 8px; font-size: 12px; font-weight: 700;
@@ -1074,14 +1084,32 @@
   .pf-chart-wrap .pf-vol-svg { display: block; width: 100%; height: 56px; margin-top: 2px; }
   /* Chart-type picker (HLC area, candles, …), shared by the portfolio chart
      and the stock modal. A native <select>: keyboard and Esc for free. */
-  .chart-type-sel {
-    margin-left: auto; height: 24px; padding: 0 22px 0 8px; font: inherit;
-    font-size: 11.5px; font-weight: 500; text-transform: none; letter-spacing: 0;
-    color: var(--text); background-color: var(--bg-canvas);
-    border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer;
+  .ct-dd { position: relative; margin-left: auto; text-transform: none; letter-spacing: 0; }
+  .ct-btn {
+    display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 12px 0 14px;
+    font: inherit; font-size: 12px; font-weight: 600; color: var(--text);
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
+    transition: border-color .12s, background .12s;
   }
-  .chart-type-sel:hover, .chart-type-sel:focus { border-color: var(--accent); outline: none; }
-  .m-chart-toolbar .chart-type-sel { margin-left: 4px; height: 28px; font-size: 12px; }
+  .ct-btn svg { color: var(--muted); transition: transform .15s; }
+  .ct-btn:hover, .ct-btn[aria-expanded="true"] { border-color: var(--accent); background: var(--bg-canvas); }
+  .ct-btn[aria-expanded="true"] svg { transform: rotate(180deg); color: var(--accent); }
+  .ct-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .ct-menu {
+    position: absolute; right: 0; top: calc(100% + 6px); z-index: 60; min-width: 170px; padding: 6px;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-xl);
+    box-shadow: 0 10px 28px rgba(8, 24, 42, 0.22), 0 2px 6px rgba(8, 24, 42, 0.10);
+  }
+  .ct-menu[hidden] { display: none; }
+  .ct-opt {
+    display: flex; align-items: center; justify-content: space-between; gap: 14px; width: 100%;
+    padding: 7px 10px 7px 12px; border: 0; border-radius: var(--r-soft); background: transparent;
+    font: inherit; font-size: 12.5px; font-weight: 500; color: var(--text); text-align: left; cursor: pointer;
+  }
+  .ct-opt:hover, .ct-opt:focus-visible { background: var(--hover); outline: none; }
+  .ct-opt.on { color: var(--accent); font-weight: 600; }
+  .ct-opt.on::after { content: "✓"; font-size: 11px; }
+  .m-chart-toolbar .ct-dd { margin-left: 4px; }
   .pf-chart-legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
   .pf-chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: var(--r-xs); vertical-align: middle; margin-right: 4px; }
 
@@ -1097,8 +1125,8 @@
   .pf-bars { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
   .pf-bars .pf-bar { display: grid; grid-template-columns: minmax(70px, 1.2fr) 4fr minmax(46px, auto); gap: 6px; align-items: center; }
   .pf-bars .pf-bar-name { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pf-bars .pf-bar-track { background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-sm); height: 9px; overflow: hidden; }
-  .pf-bars .pf-bar-fill { height: 100%; background: var(--accent); }
+  .pf-bars .pf-bar-track { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 999px; height: 10px; overflow: hidden; }
+  .pf-bars .pf-bar-fill { height: 100%; background: var(--accent); border-radius: 999px; }
   .pf-bars .pf-bar-val { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
 
   .pf-contrib-table { width: 100%; border-collapse: collapse; font-size: 11.5px; font-variant-numeric: tabular-nums; }
@@ -1130,13 +1158,13 @@
   .pf-contrib-cwrap > span:last-child { min-width: 52px; }
   .pf-cbar {
     position: relative; display: inline-block; width: 110px; height: 8px;
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-xs);
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 999px;
     overflow: hidden;
   }
   .pf-cbar::after {  /* the zero line */
     content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border);
   }
-  .pf-cbar-fill { position: absolute; top: 0; bottom: 0; }
+  .pf-cbar-fill { position: absolute; top: 0; bottom: 0; border-radius: 999px; }
   .pf-cbar-fill.pos { background: var(--pos); }
   .pf-cbar-fill.neg { background: var(--neg); }
   @media (max-width: 700px) { .pf-cbar { display: none; } }
@@ -2204,7 +2232,7 @@
 
   /* Distribution bar (Strong Buy / Buy / Hold / Sell / Strong Sell) */
   .an-dist-bar {
-    display: flex; height: 22px; border-radius: var(--r-sm); overflow: hidden;
+    display: flex; height: 22px; border-radius: 999px; overflow: hidden;
     background: var(--bg-canvas); border: 1px solid var(--border);
   }
   .an-dist-bar > div {
@@ -2284,7 +2312,7 @@
   .an-table td .rk.strong-sell { background: rgba(220,38,38,0.20); color: #dc2626; }
   .an-table td .rk.none { background: var(--bg-subtle); color: var(--muted); }
   .an-mini-dist {
-    display: inline-flex; height: 8px; border-radius: var(--r-xs); overflow: hidden;
+    display: inline-flex; height: 8px; border-radius: 999px; overflow: hidden;
     background: var(--bg-canvas); border: 1px solid var(--border); width: 96px;
   }
   .an-mini-dist > div { height: 100%; }
