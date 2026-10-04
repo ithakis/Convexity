@@ -2566,17 +2566,15 @@ function renderModalSkeleton() {
   $("#m-toggle-sp").onclick = () => { DETAIL.showSP = !DETAIL.showSP; renderModalFull(); ensureIntraday(DETAIL.range); };
   $("#m-toggle-sec").onclick = () => { DETAIL.showSector = !DETAIL.showSector; renderModalFull(); ensureIntraday(DETAIL.range); };
   $("#m-toggle-vol").onclick = () => { DETAIL.showVol = !DETAIL.showVol; renderModalFull(); };
-  $("#m-chart-type").onchange = (e) => {
-    setChartType(e.target.value);
+  wireChartTypeDd($("#m-chart-type"), () => {
     renderModalFull();
     // The portfolio chart shares the setting; repaint just that chart.
     const host = $("#pf-chart-host");
     if (host && STATE.analytics && !STATE.analytics.error) {
       drawPortfolioChart(STATE.analytics, host, $("#pf-chart-legend"));
-      const pick = $("#pf-chart-type");
-      if (pick) pick.value = CHART_TYPE;
+      syncChartTypeDd($("#pf-chart-type"));
     }
-  };
+  });
   for (const btn of document.querySelectorAll("#modal .m-sma-btn")) {
     btn.onclick = () => {
       const n = +btn.dataset.sma;
@@ -2759,10 +2757,48 @@ function setChartType(t) {
 }
 /* Types that draw a high-low range, so the y-axis must fit the highs/lows. */
 const chartTypeUsesRange = (t) => t === "hlc" || t === "candles" || t === "hollow" || t === "bars";
+/* Chart-type picker: a pill button + a rounded menu, because the native
+   <select> popup can't be themed (it painted a black bar in light mode). */
 function chartTypeSelectHtml(id) {
-  return `<select class="chart-type-sel" id="${id}" aria-label="Chart type" title="Chart type">${
-    CHART_TYPES.map(([k, l]) => `<option value="${k}"${k === CHART_TYPE ? " selected" : ""}>${l}</option>`).join("")
-  }</select>`;
+  const label = (CHART_TYPES.find(t => t[0] === CHART_TYPE) || CHART_TYPES[0])[1];
+  return `<span class="ct-dd" id="${id}">
+    <button type="button" class="ct-btn" aria-haspopup="listbox" aria-expanded="false" title="Chart type">${label}<svg viewBox="0 0 10 6" width="9" height="6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <div class="ct-menu" role="listbox" hidden>${
+      CHART_TYPES.map(([k, l]) => `<button type="button" role="option" class="ct-opt${k === CHART_TYPE ? " on" : ""}" data-ct="${k}" aria-selected="${k === CHART_TYPE}">${l}</button>`).join("")
+    }</div>
+  </span>`;
+}
+function syncChartTypeDd(dd) {
+  if (!dd) return;
+  const label = (CHART_TYPES.find(t => t[0] === CHART_TYPE) || CHART_TYPES[0])[1];
+  dd.querySelector(".ct-btn").firstChild.textContent = label;
+  for (const o of dd.querySelectorAll(".ct-opt")) {
+    const on = o.dataset.ct === CHART_TYPE;
+    o.classList.toggle("on", on); o.setAttribute("aria-selected", on);
+  }
+}
+function wireChartTypeDd(dd, onPick) {
+  const btn = dd.querySelector(".ct-btn"), menu = dd.querySelector(".ct-menu");
+  const close = () => {
+    menu.hidden = true; btn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("mousedown", away, true);
+    document.removeEventListener("keydown", key, true);
+  };
+  const away = (e) => { if (!dd.contains(e.target)) close(); };
+  const key = (e) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation(); e.preventDefault(); close(); btn.focus();  // Esc closes the menu, not the modal behind it
+  };
+  btn.onclick = () => {
+    if (!menu.hidden) return close();
+    menu.hidden = false; btn.setAttribute("aria-expanded", "true");
+    document.addEventListener("mousedown", away, true);
+    document.addEventListener("keydown", key, true);
+  };
+  menu.onclick = (e) => {
+    const o = e.target.closest(".ct-opt"); if (!o) return;
+    close(); setChartType(o.dataset.ct); syncChartTypeDd(dd); onPick();
+  };
 }
 
 /* Join a close series with its [t,o,h,l] and [t,v] arrays on timestamp. A bar
@@ -4765,10 +4801,7 @@ function renderAnalyticsBody() {
     </div>
   `;
   drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
-  $("#pf-chart-type").onchange = (e) => {
-    setChartType(e.target.value);
-    drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
-  };
+  wireChartTypeDd($("#pf-chart-type"), () => drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend")));
   wireBenchSelect($("#pf-bench"), (k) => {
     if (k === STATE.bench) return;
     STATE.bench = k;

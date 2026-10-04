@@ -9,6 +9,16 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.19.1 — 2026-10-04
+
+Polish on the 1.19.0 redesign, and the README retaken for it.
+
+- **Chart-type menu** is a rounded pill with a rounded, themed menu (the native dropdown painted a black bar in light mode). Esc closes the menu, not the stock window behind it.
+- **Search box** is easier to see as the place to type: a 2px accent-tinted border, a glow when focused, a little taller.
+- "Constituents" now reads **"Portfolio Constituents"**.
+- **Portfolio analytics**: the lines between cells stop short of the sheet's edge, so they read as separators rather than boxes; the sector, market-cap, contribution and rating-distribution bars are fully rounded pills; the contribution table's headers keep their hover explanations without the dotted underline.
+- **README**: all screenshots retaken on the new design with a demo portfolio of public tickers, plus a section and two screenshots for the AI company search.
+
 ## 1.19.0 — 2026-10-04
 
 UI redesign, part 1: colour, fewer boxes, Settings, TradingView-style charts.
