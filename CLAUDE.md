@@ -43,8 +43,12 @@ Read the section for the code you are about to touch before touching it.
 Each of these has cost real debugging time; the link goes to the full story.
 
 - **Never run against the user's real data** — every run sets
-  `CONVEXITY_HOME` to a temp dir; the checkout's legacy key files load in any
-  checkout run, so no news refreshes or key Test calls. §3 below.
+  `CONVEXITY_HOME` to a temp dir. §3 below.
+- **Validate with the user's real API keys** (standing instruction,
+  2026-10-04): a feature that calls Finnhub or NVIDIA NIM is tested live,
+  keys passed as env vars from the real `config.json`, never printed. §3 below.
+- **After every change on `distribution`, give the user the sync command**
+  (`git pull` + `CONVEXITY_SOURCE=. ./install.sh`). §3 below.
 - **iCloud hides `.venv`** in `~/Documents` — the real venv is `.venv.nosync`
   behind a `.venv` symlink. §3 below.
 - **The installed app is a uv tool, not the checkout** — editing the checkout
@@ -59,6 +63,8 @@ Each of these has cost real debugging time; the link goes to the full story.
   screener and `.info` disagree (D/E percent in both, ROE percent vs
   fraction), and the screener's market cap is local currency. The LLM may only
   emit registry keys; every AI pick is verified against the symbol pack.
+  After any change to the search prompt, rules or model, run
+  `scripts/eval_search.py` live (all 20 cases must pass).
   [backend.md → §6](docs/architecture/backend.md#6-symbol-pack--company-search-symbol_dbpy-symbol_buildpy-searchpy)
 - **Yahoo's screener serves at most 10,000 results per query** — deeper
   pages silently repeat the last one. Split big queries (`symbol_build.sweep`).
@@ -294,11 +300,32 @@ and verification run sets `CONVEXITY_HOME` to a temp dir (§4 "Where user data
 lives"); without it a run reads and writes the real data folder, and the first
 launch of 1.14 code migrates the checkout's state files into it. The user's
 own app keeps running on 8765 meanwhile; `_pick_port` moves yours to 8766+.
-**Never run `convexity build-reference-pack` or a news refresh from the
-checkout** with its legacy key files in reach: use a clean `git archive`
-install (`.claude/skills/verify/SKILL.md`), a `--limit` of a few names and a
-local Finnhub stub (`CONVEXITY_FINNHUB_BASE`); for the app, point
-`CONVEXITY_REFERENCE_URL` at a locally served pack.
+**Use and validate the user's real API keys when developing (standing
+instruction from the user, 2026-10-04).** A feature that calls Finnhub or
+NVIDIA NIM (news refresh, the News read, company search's AI step, key Test)
+is checked live, not only against stubs. Data isolation still holds: a temp
+`CONVEXITY_HOME`, with the keys passed as environment variables read from the
+real `config.json` without ever printing them:
+```bash
+CFG="$HOME/Library/Application Support/Convexity/config.json"
+export NVIDIA_API_KEY="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("nvidia_api_key",""))' "$CFG")"
+export FINNHUB_API_KEY="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("finnhub_api_key",""))' "$CFG")"
+CONVEXITY_HOME=$(mktemp -d) uv run convexity
+```
+Never echo, log, screenshot or commit a key value (§18). Keep live calls small
+(a few names, one refresh: both keys have quotas the user's own app shares),
+and report what was validated live. `convexity build-reference-pack` still
+reads its key from the environment only and runs with a `--limit` of a few
+names.
+
+**Sync the installed app after every change on `distribution` (standing
+instruction from the user, 2026-10-04).** Whenever a change lands on
+`distribution` (a merged PR or a direct push, CI green), end the reply with
+the command that brings the user's installed app to that version, in its own
+`bash` block, and tell them to quit Convexity fully (⌘Q) and reopen it:
+```bash
+cd ~/Documents/GitHub/Convexity && git checkout distribution && git pull && CONVEXITY_SOURCE=. ./install.sh
+```
 
 **Critical gotchas when restarting:**
 
@@ -316,6 +343,10 @@ local Finnhub stub (`CONVEXITY_FINNHUB_BASE`); for the app, point
    the user's installed app runs as
    `~/.local/share/uv/tools/convexity/bin/python …/bin/convexity-app`, a
    checkout run as `.venv/bin/convexity`. Never `pkill -f convexity` blindly.
+   **Address your server by the port its own PID bound** (`lsof -nP -a -iTCP
+   -sTCP:LISTEN -p <pid>`), never by assuming 8765: the user's app takes 8765
+   whenever it starts first, and a POST meant for a test server then writes
+   into their real portfolios (it happened once, 2026-10-04).
    The launcher stops its own previous run via `.dashboard.pid`.
 4. **Python module caching** — restarting the server is the ONLY way to
    pick up changes to `symbol_db.py` or `xlsx_export.py` (or any other

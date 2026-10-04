@@ -543,18 +543,66 @@ def _lookup(q: str, min_score: float, sig) -> tuple[Hit, ...]:
     return tuple(h for _r, h in sorted(out.values(), key=lambda x: -x[0]))
 
 
-def alternates(group: int, exclude: str = "") -> list[dict]:
-    """The other listings of one company, most traded first."""
+# Venues that mostly re-list companies whose home is elsewhere: German
+# regional exchanges, Cboe/LSE international order books, OTC, and the Latin
+# American foreign-share boards (NVDACL.SN). Shared with symbol_build.py.
+SECONDARY = {"FRA", "STU", "BER", "MUN", "HAM", "HAN", "DUS", "IOB", "CXE", "CXA", "DXE", "AQS", "TLO",
+             "NEO", "PNK", "OQB", "OQX", "MEX", "SGO"}  # fmt: skip
+# Re-listing lines whose venue code alone does not say so: the LSE's
+# international order book (0KZC.L, a London line of SPY) and Brazilian
+# depositary receipts (AAPL34.SA; local shares end in 3, 4 or 11).
+IOB = re.compile(r"^0[A-Z0-9]{3}\.L$")
+BDR = re.compile(r"^[A-Z0-9]{4}3[1-9]\.SA$")
+
+
+def relisting(ticker: str, exchange: str | None) -> bool:
+    return exchange in SECONDARY or bool(IOB.match(ticker) or BDR.match(ticker))
+
+
+def _listings(group: int) -> list[tuple]:
+    """A company's real listings (no re-listing venues), most traded first."""
     con = _connect()
     if con is None:
         return []
     with closing(con):
         rows = con.execute(
-            "SELECT ticker, exchange, region FROM symbols WHERE grp = ? AND ticker != ?"
-            " ORDER BY home DESC, adv_usd DESC LIMIT 12",
-            (group, exclude),
+            _SELECT + " WHERE grp = ? ORDER BY COALESCE(adv_usd, 0) DESC, home DESC", (group,)
         ).fetchall()
-    return [{"ticker": t, "exchange": x, "region": r} for t, x, r in rows]
+    return [r for r in rows if not relisting(r[0], r[3])]
+
+
+def top(group: int, exchanges=()) -> Hit | None:
+    """The company's most traded listing — what a card shows and adds (NVO
+    for Novo Nordisk, 7203.T for Toyota); its home listing when none trades.
+    With `exchanges`, the most traded listing there (SKHY for SK hynix on a
+    Nasdaq screen), when it has one."""
+    rows = _listings(group)
+    rows = [r for r in rows if r[3] in exchanges] or rows if exchanges else rows
+    return _hit(rows[0], 100.0) if rows else home(group)
+
+
+def on_exchanges(group: int, codes) -> bool:
+    """Does any listing of this company trade on one of these exchanges?"""
+    con = _connect()
+    if con is None:
+        return False
+    with closing(con):
+        q = f"SELECT 1 FROM symbols WHERE grp = ? AND exchange IN ({','.join('?' * len(codes))})"
+        return con.execute(q, (group, *codes)).fetchone() is not None
+
+
+_ALT_SHARE = 0.05  # an alternative must trade >= 5% of the top listing's value
+
+
+def alternates(group: int, exclude: str = "") -> list[dict]:
+    """Other listings someone would actually buy: main exchanges and ADRs
+    trading at least 5% of the top listing's value, most traded first.
+    Re-listing venues (German regional, order books, OTC, BDRs) and thin
+    lines (an Argentine CEDEAR) are left out."""
+    rows = _listings(group)
+    floor = (rows[0][8] or 0) * _ALT_SHARE if rows else 0
+    return [{"ticker": r[0], "exchange": r[3], "region": r[4]} for r in rows
+            if r[0] != exclude and (r[8] or 0) >= floor][:6]  # fmt: skip
 
 
 def home(group: int) -> Hit | None:
@@ -582,11 +630,18 @@ def category(
     industries=(),
     regions=(),
     types=("stock",),
+    exchanges=(),
     limit: int = 5,
     offset: int = 0,
 ) -> list[Hit]:
-    """Largest home listings matching every non-empty filter."""
+    """Largest home listings matching every non-empty filter; `exchanges`
+    keeps companies with any listing there (ASML is on Nasdaq too)."""
     where, args = ["home = 1"], []
+    if exchanges:
+        where.append(
+            f"grp IN (SELECT grp FROM symbols WHERE exchange IN ({','.join('?' * len(exchanges))}))"
+        )
+        args += list(exchanges)
     for col, vals in (
         ("sector", sectors),
         ("industry", industries),
