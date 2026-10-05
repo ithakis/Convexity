@@ -79,7 +79,7 @@ _ZOOM_DEFAULT_IDX = _ZOOM_LADDER.index(1.00)
 # Dashboard theme (src/convexity/static/style.css [data-theme="dark"]) —
 # the splash mirrors the app's own look, including the accent used by the
 # in-app streaming progress bar.
-_BG = "#0a0e14"
+_BG = "#0d1117"  # = the icon tile (assets/icon.svg), so the tile edge never shows
 _TEXT = "#e6edf3"
 _MUTED = "#8a99ab"
 _ACCENT = "#4ba3e3"
