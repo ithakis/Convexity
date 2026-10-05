@@ -524,8 +524,23 @@ def _sane_rank(q: dict) -> dict:
     return q
 
 
+_TICKERISH = re.compile(r"[A-Z0-9][A-Z0-9.\-^=]{0,11}")
+
+
+def _ticker_run(text: str) -> list[str] | None:
+    """`AAPL MSFT NVDA`: tickers separated by spaces only. Every token must be
+    upper-case as typed AND an exact listing in the symbol pack, so a
+    description ("US REITS", "AI chip makers") never reads as a list."""
+    toks = text.split()
+    if len(toks) < 2 or re.search(r"[,;\n]", text):
+        return None
+    if not all(_TICKERISH.fullmatch(t) and re.search(r"[A-Z]", t) for t in toks):
+        return None
+    return toks if all(sdb.get(t) for t in toks) else None
+
+
 def _parts(text: str) -> list[str]:
-    return [p.strip() for p in re.split(r"[,;\n]+", text) if p.strip()]
+    return _ticker_run(text) or [p.strip() for p in re.split(r"[,;\n]+", text) if p.strip()]
 
 
 def _brief(q: dict) -> dict:
@@ -552,8 +567,12 @@ def parse(text: str) -> dict:
             return empty(q["text"])
     needs_ai = bool(left) or (q["rank"] or {}).get("by") == "default"
     if q["kind"] == "name":
+        # Two words are enough to be a description: "cybersecurity companies"
+        # best-matched The TJX Companies at 79.5 and was shown as a name. A
+        # real name or a typo of one scores 85+ ("tjx companies" 100, "novo
+        # nordsk" 89.7, "microsft" 88.1); single words stay name lookups.
         top = sdb.lookup(q["text"], limit=1)
-        needs_ai = len(q["text"].split()) >= 3 and (not top or top[0].score < 85)
+        needs_ai = len(q["text"].split()) >= 2 and (not top or top[0].score < 85)
         if not needs_ai:
             return q
     if needs_ai and ai_available():

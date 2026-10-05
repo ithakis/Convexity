@@ -67,6 +67,12 @@ CASES = [
     ("high dividend european telecoms",
      lambda q: set(q["regions"]) >= EU and f(q, "dividend_yield", "gt")),
     ("microsoft", lambda q: q["kind"] == "name"),
+    # Two words, no company called that: a theme, not The TJX Companies.
+    ("cybersecurity companies",
+     lambda q: q["kind"] in ("theme", "screen")
+     and ({p["ticker"] for p in q["picks"]} & {"CRWD", "PANW", "FTNT", "ZS", "S", "OKTA", "CHKP"}
+          or any("Software" in i for i in q["industries"]))),
+    ("AAPL MSFT NVDA ASML.AS", lambda q: q["kind"] == "list"),
 ]  # fmt: skip
 
 

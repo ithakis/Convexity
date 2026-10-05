@@ -329,6 +329,29 @@ def test_criteria_with_commas_are_not_a_list(yahoo):
     assert s.parse("tech companies with D/E < 0.8, current ratio > 1")["kind"] == "screen"
 
 
+def test_tickers_separated_by_spaces_are_a_list(yahoo):
+    out = s.search("NVO MSFT")
+    assert out["query"]["kind"] == "list"
+    assert [c["ticker"] for c in out["results"]] == ["NVO", "MSFT"]
+
+
+@pytest.mark.parametrize("text", ["NVO ZZZZ", "US REITS", "nvo msft", "NVO, MSFT ZZZZ"])
+def test_a_space_list_needs_every_token_to_be_an_exact_upper_case_ticker(text):
+    assert s._ticker_run(text) is None
+
+
+def test_a_two_word_description_goes_to_the_llm(monkeypatch, yahoo):
+    """'cybersecurity companies' best-matched 'The TJX Companies' (79.5) and
+    was shown as a name search: two words that match no name well are a
+    description. A real two-word name still never calls the model."""
+    calls = _ai(monkeypatch, None)
+    s.parse("microsoft corporation")
+    s.parse("novo nordsk")
+    assert calls == []
+    s.parse("cybersecurity companies")
+    assert len(calls) == 1
+
+
 # ------------------------------------------------------------------ screener session
 def test_the_own_session_remints_a_stale_crumb(monkeypatch):
     """A 401 on the search's own session mints a new cookie + crumb and retries."""

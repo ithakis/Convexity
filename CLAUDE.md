@@ -64,7 +64,7 @@ Each of these has cost real debugging time; the link goes to the full story.
   fraction), and the screener's market cap is local currency. The LLM may only
   emit registry keys; every AI pick is verified against the symbol pack.
   After any change to the search prompt, rules or model, run
-  `scripts/eval_search.py` live (all 20 cases must pass).
+  `scripts/eval_search.py` live (all 22 cases must pass).
   [backend.md → §6](docs/architecture/backend.md#6-symbol-pack--company-search-symbol_dbpy-symbol_buildpy-searchpy)
 - **Yahoo's screener serves at most 10,000 results per query** — deeper
   pages silently repeat the last one. Split big queries (`symbol_build.sweep`).
