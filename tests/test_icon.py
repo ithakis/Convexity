@@ -25,6 +25,9 @@ ALLOWED = {
     "src/convexity/assets/icon.png",
     "src/convexity/assets/icon-rounded.png",
 }
+# Compiled, not drawn: the Icon Composer build of the same master (CI job
+# closed-app-icon). Not an image file by suffix, listed here for the record.
+COMPILED = "src/convexity/assets/Assets.car"
 
 
 def test_only_one_logo_is_tracked():
@@ -179,3 +182,10 @@ def test_theme_reaches_the_desktop_icon_from_the_single_mutator():
     body = js[js.index("function setTheme(name)") :]
     body = body[: body.index("\n}\n")]
     assert "window.convexityDesktop.themeChanged(name)" in body
+
+
+def test_the_closed_app_icon_ships_and_is_wired_into_the_bundle():
+    assert (ROOT / COMPILED).stat().st_size > 10_000
+    sh = (ROOT / "install.sh").read_text()
+    assert "<key>CFBundleIconName</key>" in sh and "<string>AppIcon</string>" in sh
+    assert 'Resources/Assets.car"' in sh

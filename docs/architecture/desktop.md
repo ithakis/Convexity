@@ -138,11 +138,14 @@ actually invokes). Single file, ~160 lines:
   Objective-C runtime (no pyobjc), inset 100 px of 1024 to match Apple's
   icon grid. This was verified with zoomed Dock screenshots: the rim is gone
   and the tile swaps live. Any failure falls back to `app.setWindowIcon`.
-  **Not fixed: the closed app.** Finder, Launchpad and a pinned Dock icon still
-  show the glassed `.icns`. Removing the rim there needs an Icon Composer
-  `.icon` compiled to `Assets.car` with specular off, which needs Xcode 26's
-  `actool` (the Command Line Tools do not ship it). That would also give
-  light/dark variants following the macOS appearance.
+  **The closed app:** `install.sh` also puts `assets/Assets.car` in the
+  bundle (`CFBundleIconName` = `AppIcon`), which macOS 26 prefers over the
+  `.icns`. It is the Icon Composer build of the same master
+  (`scripts/build_icon_composer.py`: glyph layers without glass, the tile as
+  the fill, `specular: false`; white in macOS Light, black in Dark), compiled
+  by CI's `closed-app-icon` job on a macOS 26 runner because actool ships only
+  with Xcode. After changing `icon.svg`, download that job's artifact and
+  commit its `Assets.car`.
 - **Shutdown**: `app.aboutToQuit.connect(lambda: shutdown_server(server))`.
   Verified via three independent paths: `app.quit()`, `window.close()`
   (which reaches `aboutToQuit` because Qt's `quitOnLastWindowClosed`
