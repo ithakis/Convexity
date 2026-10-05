@@ -9,6 +9,10 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.19.5 — 2026-10-05
+
+- **The app icon is back to what it was before 1.19.3**: the dark tile, the same in every theme, with the system's own glass rim. The theme-following icon, the Dock-tile workaround and the compiled closed-app icon are removed to keep the app minimal.
+
 ## 1.19.4 — 2026-10-05
 
 - **No glass rim on the closed app's icon either**: the app now ships its icon in Apple's newer format with the shine switched off, so Finder, Launchpad and the Dock show the flat logo even when Convexity is closed. It is white in macOS Light mode and black in Dark mode; once the app runs, it follows the app's theme.
