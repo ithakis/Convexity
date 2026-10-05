@@ -17,7 +17,7 @@ owner says so.
 
 | # | Phase | Status | Branch / PR | Done |
 |---|---|---|---|---|
-| 1 | Page shell and look | Done (PR open) | `feature/my-investments-p1` | 2026-10-05 |
+| 1 | Page shell and look | Done (PR open) | `feature/my-investments-p1` · [ithakis/Convexity#31](https://github.com/ithakis/Convexity/pull/31) | 2026-10-05 |
 | 2 | Ledger and manual entry | Not started | | |
 | 3 | Performance | Not started | | |
 | 4 | Holdings depth | Not started | | |
