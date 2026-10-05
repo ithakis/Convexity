@@ -2464,6 +2464,7 @@ document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.target && e.target.closest("input, textarea, select, [contenteditable]")) return;
   if (SCROLL_LOCK.depth > 0) return;
+  if (document.body.dataset.page === "investments") return;  // Refresh is research-only until Phase 3
   e.preventDefault();
   rfStart(e.shiftKey ? "all" : "current");
 });
@@ -4518,13 +4519,9 @@ async function createNewTab() {
   STATE.customWeights = null;
   DATA = []; render();
   setEntries("");
-  // Keep the topbar tab state in sync with the panel being opened — the
-  // accent fill on .tab-btn.active is the only "which tab is open" signal,
-  // and this open-path bypasses the #edit-btn click handler that manages it.
-  $("#input-panel").classList.remove("hidden");
-  $("#edit-btn").classList.add("active");
-  $("#news-panel").classList.add("hidden");
-  $("#news-btn").classList.remove("active");
+  // This open-path bypasses the #edit-btn handler, so it goes through
+  // showPage() itself to keep the topbar's active tab in sync.
+  showPage("portfolio");
   $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Add companies with the search box above.</div>`;
   renderTabs(); renderEditorMeta();
   $("#co-q").focus();
@@ -6635,15 +6632,9 @@ $("#co-grid").addEventListener("keydown", (e) => {
 });
 
 $("#edit-btn").onclick = () => {
-  const panel = $("#input-panel");
-  const willOpen = panel.classList.contains("hidden");
-  if (willOpen) {
-    // Mutual exclusion with the News panel — opening Portfolio closes News.
-    $("#news-panel").classList.add("hidden");
-    $("#news-btn").classList.remove("active");
-  }
-  panel.classList.toggle("hidden");
-  $("#edit-btn").classList.toggle("active", willOpen);
+  // Portfolio toggles: open it, or close it back to the plain table.
+  const willOpen = $("#input-panel").classList.contains("hidden");
+  showPage(willOpen ? "portfolio" : "table");
   if (willOpen) {
     // If we open the panel without an active view yet, start an ad-hoc tab.
     if (!STATE.activeView) STATE.activeView = AD_HOC_KEY;
@@ -6725,14 +6716,8 @@ window.addEventListener("wheel", (e) => {
 
 /* --- News & Sentiment panel --- */
 $("#news-btn").onclick = () => {
-  const panel = $("#news-panel");
-  const willOpen = panel.classList.contains("hidden");
-  if (willOpen) {
-    $("#input-panel").classList.add("hidden");
-    $("#edit-btn").classList.remove("active");
-  }
-  panel.classList.toggle("hidden");
-  $("#news-btn").classList.toggle("active", willOpen);
+  const willOpen = $("#news-panel").classList.contains("hidden");
+  showPage(willOpen ? "news" : "table");
   if (willOpen) loadNewsSentiment();
 };
 $("#ns-diag-toggle").onclick = (e) => {
@@ -10478,6 +10463,7 @@ function fxSelect(ccy) {
   try { localStorage.setItem("fx_quote", ccy); } catch (e) {}
   fxUpdateButton();
   fxRenderDropdown();
+  invRender();
   if (DATA && DATA.length) {
     if (prev !== ccy) {
       // Invalidate every tab's analytics — returns must be recomputed in the new currency.
@@ -10598,7 +10584,7 @@ function fxInit() {
   fxLoadPref();
   fxUpdateButton();
   fxRenderDropdown();
-  fxLoadRates().then(() => { if (DATA && DATA.length) render(); });
+  fxLoadRates().then(() => { if (DATA && DATA.length) render(); invRender(); });
   const btn = $("#fx-btn");
   if (btn) btn.addEventListener("click", (e) => { e.stopPropagation(); fxToggle(); });
   const dd = $("#fx-dropdown");
@@ -11790,6 +11776,268 @@ function setupSettings() {
   }
 }
 
+/* ===========================================================================
+ * Pages. showPage() is the only thing that switches them, so the topbar's
+ * active tab and the panels can never disagree: "investments" (#inv-page),
+ * "portfolio" / "news" (a research panel over the main table) or "table".
+ * body[data-page] hides the .research-only blocks on My Investments.
+ * --------------------------------------------------------------------------- */
+function showPage(name) {
+  document.body.dataset.page = name === "investments" ? "investments" : "research";
+  $("#inv-page").classList.toggle("hidden", name !== "investments");
+  $("#input-panel").classList.toggle("hidden", name !== "portfolio");
+  $("#news-panel").classList.toggle("hidden", name !== "news");
+  for (const [id, n] of [["#inv-btn", "investments"], ["#edit-btn", "portfolio"], ["#news-btn", "news"]]) {
+    $(id).classList.toggle("active", name === n);
+  }
+  try { localStorage.setItem("page", name); } catch (e) {}
+}
+
+/* ===========================================================================
+ * My Investments (docs/plans/my-investments-roadmap.md). Renders
+ * GET /api/investments/book into INV.book; the owner's UI rules for this page
+ * are in docs/architecture/frontend.md ("Pages and My Investments").
+ * Amounts arrive in INV.book.ccy and are converted to FX_QUOTE for display.
+ * --------------------------------------------------------------------------- */
+const INV = { book: null, period: "1Y", mode: "value" };
+const INV_PERIODS = ["1M", "3M", "YTD", "1Y", "3Y", "ALL"];
+const INV_PERIOD_WORDS = { "1M": "the last month", "3M": "the last 3 months", "YTD": "this year so far",
+  "1Y": "the last year", "3Y": "the last 3 years", "ALL": "since you started" };
+const invOk = (v) => v != null && isFinite(v);
+const invSign = (v) => v > 0 ? "+" : v < 0 ? "−" : "";
+const invCls = (v) => v > 0 ? "pos" : v < 0 ? "neg" : "";
+const invSym = () => FX_SYMBOL[FX_QUOTE] || FX_QUOTE + " ";
+/* Whole units of the display currency; signed adds "+" for gains. */
+function invMoney(v, signed) {
+  if (!invOk(v)) return na();
+  const x = fxConvert(v, INV.book?.ccy || "USD");
+  return (signed ? invSign(x) : x < 0 ? "−" : "") + invSym() + Math.round(Math.abs(x)).toLocaleString();
+}
+function invPct(v, d = 1, unit = "%") { return invOk(v) ? invSign(v) + Math.abs(v).toFixed(d) + unit : na(); }
+/* A price in the share's own quote unit (pence for LSE), never converted. */
+function invQuotePrice(v, qccy) {
+  if (!invOk(v)) return na();
+  if (qccy === "GBp") return Math.round(v).toLocaleString() + "p";
+  return escapeHtml(FX_SYMBOL[qccy] || qccy + " ") + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+const invDate = (d) => escapeHtml(fmtDateMDY(d));
+
+async function invLoad() {
+  try {
+    const r = await fetch("/api/investments/book");
+    INV.book = r.ok ? await r.json() : { empty: true, error: true };
+  } catch (e) {
+    INV.book = { empty: true, error: true };
+  }
+  invRender();
+}
+
+function invRender() {
+  const b = INV.book, host = $("#inv-page");
+  if (!b || host.classList.contains("hidden")) return;
+  if (b.empty) {
+    host.innerHTML = `
+      <div class="inv-empty">
+        <div class="inv-empty-title">Track your real investments</div>
+        <div class="inv-empty-body">See what you own, what it is worth, how it has done against the market, and what needs your attention. Kept separate from the portfolios you research in the other tabs.</div>
+        <div class="inv-empty-soon">Adding holdings and importing broker statements arrive in the next updates.</div>
+        ${b.error ? `<div class="inv-empty-err">Couldn't load your investments. Try again in a moment.</div>` : ""}
+      </div>`;
+    return;
+  }
+  host.innerHTML = `
+    <div class="inv-grid">
+      <div class="inv-main">
+        ${invHeroHtml(b)}
+        <div class="section-anchor inv-anchor"><span class="sa-kicker">Holdings<span class="inv-count">${b.positions.length}</span></span></div>
+        ${invHoldingsHtml(b)}
+      </div>
+      <aside class="inv-rail" aria-label="Attention">${invRailHtml(b)}</aside>
+    </div>`;
+  drawInvChart();
+}
+
+function invHeroHtml(b) {
+  const h = b.headline, p = INV.period, twr = h.twr[p], diff = invOk(twr) && invOk(h.bench_twr[p]) ? twr - h.bench_twr[p] : null;
+  const kpi = (tip, label, v, html) => `<div class="inv-kpi" data-rich-tip="inv:${tip}" tabindex="0"><div class="inv-kpi-k">${label}</div><div class="inv-kpi-v ${invCls(v)}">${html}</div></div>`;
+  const pills = (attr, keys, cur, labels = keys) => keys.map((k, i) => `<button type="button" data-inv-${attr}="${k}" class="${k === cur ? "active" : ""}" aria-pressed="${k === cur}">${labels[i]}</button>`).join("");
+  return `
+    <div class="inv-sheet">
+      <div class="inv-hero">
+        <span class="inv-value">${invMoney(h.value)}</span>
+        <span class="inv-month ${invCls(h.month_abs)}">${invMoney(h.month_abs, true)} (${invPct(h.month_pct)}) this month</span>
+        ${b.demo ? `<span class="inv-demo" data-tip="Made-up figures from the demo book, used while the page is being designed.">Demo data</span>` : ""}
+      </div>
+      <div class="inv-kpis">
+        ${kpi("profit", "Total profit", h.profit_total, invMoney(h.profit_total, true))}
+        ${kpi("twr", `Return · ${p}`, twr, invPct(twr))}
+        ${kpi("vs", "vs S&amp;P 500", diff, invPct(diff, 1, " pp"))}
+        ${kpi("mwr", "Your money", h.mwr_ann, invOk(h.mwr_ann) ? invPct(h.mwr_ann) + " / yr" : na())}
+      </div>
+      <div class="pf-chart-card inv-chart-card">
+        <div class="inv-chart-bar">
+          <span class="pf-contrib-toggle" role="group" aria-label="Chart">${pills("mode", ["value", "return"], INV.mode, ["Value", "Return %"])}</span>
+          <div class="pf-period-tabs inv-periods" role="group" aria-label="Period">${pills("period", INV_PERIODS, p)}</div>
+        </div>
+        <svg id="inv-svg" class="inv-svg" aria-label="Value chart"></svg>
+        <div class="inv-readout" id="inv-readout"></div>
+      </div>
+    </div>`;
+}
+
+function invHoldingsHtml(b) {
+  const tipped = (key, sym, html) => `<span class="inv-tipped" data-rich-tip="inv:${key}" data-sym="${escapeHtml(sym)}" tabindex="0">${html}</span>`;
+  const rows = b.positions.map(x => `
+    <tr>
+      <td class="left">${tipped("pos", x.symbol, `${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span>`)}</td>
+      <td>${invOk(x.shares) ? Number(x.shares).toLocaleString() : na()}</td>
+      <td>${invQuotePrice(x.avg_price, x.quote_ccy)}</td>
+      <td>${invMoney(x.value)}</td>
+      <td>${invPct(x.weight, 1, "%").replace("+", "")}</td>
+      <td class="${invCls(x.month_pct)}">${invPct(x.month_pct)}</td>
+      <td class="${invCls(x.profit)}">${tipped("posprofit", x.symbol, invMoney(x.profit, true))}</td>
+      <td class="${invCls(x.return_pct)}">${invPct(x.return_pct, 0)}</td>
+    </tr>`).join("");
+  return `
+    <div class="inv-tbl-wrap"><table class="inv-tbl" id="inv-tbl">
+      <thead><tr><th class="left">Holding</th><th>Shares</th><th>Avg price</th><th>Value</th><th>Weight</th><th>Month</th><th>Profit</th><th>Return</th></tr></thead>
+      <tbody>${rows}
+        <tr class="inv-cash"><td class="left"><span class="inv-tipped"><span class="logo-fallback">${escapeHtml(invSym().trim())}</span><span>Cash</span></span></td><td></td><td></td><td>${invMoney(b.headline.cash)}</td><td>${invPct(b.headline.cash_weight).replace("+", "")}</td><td></td><td></td><td></td></tr>
+      </tbody>
+    </table></div>`;
+}
+
+function invRailHtml(b) {
+  const section = (title, items, item, calm) => `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">${title}</span></div>`
+    + (items?.length ? items.map(item).join("") : `<div class="inv-calm">${calm}</div>`);
+  return section("Attention", b.attention, a => `<div class="inv-rail-item">${escapeHtml(a.text)}</div>`, "Nothing needs you today.")
+    + section("Upcoming", b.upcoming, u => `<div class="inv-rail-item">${escapeHtml(`${u.name} ${u.what}`)}<div class="inv-rail-sub">${invDate(u.date)}</div></div>`, "No events in the next two weeks.");
+}
+
+/* Hover cards: plain words, then a breakdown, then the technical name. */
+function invTip(title, body, rows, tech) {
+  const table = rows?.length ? `<table class="mt-table inv-tip-table"><tbody>${rows.map(([k, v]) => `<tr><th>${k}</th><td class="${invCls(v)}">${invMoney(v, true)}</td></tr>`).join("")}</tbody></table>` : "";
+  return `<div class="pf-metric-tip inv-tip" role="tooltip"><div class="mt-name">${title}</div>${body ? `<div class="mt-desc">${body}</div>` : ""}${table}${tech ? `<div class="inv-tip-tech">${tech}</div>` : ""}</div>`;
+}
+const invTipFor = (fn) => (host) => INV.book?.headline ? fn(INV.book.headline, host) : "";
+const invPos = (host) => (INV.book?.positions || []).find(x => x.symbol === host.dataset.sym);
+const invWords = () => INV_PERIOD_WORDS[INV.period];
+RICH_TIPS["inv:profit"] = invTipFor(h => invTip("Total profit since you started", "What your investments have earned you, after fees.",
+  [["On what you still hold", h.profit_held], ["On what you sold", h.profit_sold], ["Dividends", h.dividends]], "= value − money you put in"));
+RICH_TIPS["inv:twr"] = invTipFor(() => invTip("How your investments performed", `The growth of your holdings over ${invWords()}, ignoring when you added or took out money. This is the fair number to compare with the S&amp;P 500, or with a friend.`, null, "time-weighted return (TWR)"));
+RICH_TIPS["inv:vs"] = invTipFor(h => {
+  const t = h.twr[INV.period], s = h.bench_twr[INV.period];
+  if (!invOk(t) || !invOk(s)) return "";
+  return invTip(t >= s ? "Ahead of the market" : "Behind the market", `Over ${invWords()} you ${t >= s ? "beat" : "trailed"} the S&amp;P 500 by ${Math.abs(t - s).toFixed(1)} percentage points: ${invPct(t)} against ${invPct(s)} (with dividends).`, null, "pp = percentage points");
+});
+RICH_TIPS["inv:mwr"] = invTipFor(h => {
+  const gap = h.mwr_ann - h.twr["1Y"];
+  const why = !invOk(gap) ? "" : Math.abs(gap) < 0.3 ? " About the same as your 1-year Return: when you added money made little difference."
+    : ` It's ${Math.abs(gap).toFixed(1)} points ${gap > 0 ? "above" : "below"} your 1-year Return because ${gap > 0 ? "you added money before prices rose. Good timing." : "more of your money went in before prices fell."}`;
+  return invTip("How your actual money grew", `The yearly growth of the money you put in, counting when you added or withdrew it.${why}`, null, "money-weighted return (MWR), per year");
+});
+RICH_TIPS["inv:pos"] = (host) => {
+  const x = invPos(host); if (!x) return "";
+  const ccy = x.quote_ccy === "GBp" ? "GBP" : x.quote_ccy;
+  return invTip(`${escapeHtml(x.name)} · ${escapeHtml(x.symbol)}`, `Now ${invQuotePrice(x.price, x.quote_ccy)}`, null,
+    [x.exchange, ccy === FX_QUOTE ? ccy : `${ccy}, shown in ${FX_QUOTE}`, x.note].filter(Boolean).map(escapeHtml).join(" · "));
+};
+RICH_TIPS["inv:posprofit"] = (host) => {
+  const x = invPos(host); if (!x) return "";
+  const rows = invOk(x.profit_price) && invOk(x.profit_fx)
+    ? [["From the price", x.profit_price], ["From the currency", x.profit_fx]] : [["Still holding", x.profit_held]];
+  if (x.profit_sold) rows.push(["Sold", x.profit_sold]);
+  if (x.dividends) rows.push(["Dividends", x.dividends]);
+  return invTip(`Profit on ${escapeHtml(x.name)}`, "", rows, "");
+};
+
+/* The chart, drawn at its real pixel width so text and the hover dot are
+ * never stretched. Value mode: your value (area), the same deposits in the
+ * S&P 500 (dotted), the money you put in (dashed). Return mode: your return
+ * against the S&P 500, both from 0% at the period start. The period's base
+ * index comes from the server (series.period_start), the same base as the
+ * headline's returns. */
+function drawInvChart() {
+  const svg = $("#inv-svg"), readout = $("#inv-readout"), b = INV.book;
+  if (!svg || !b || !svg.clientWidth) return;
+  const s = b.series, i0 = s.period_start?.[INV.period] ?? 0, n = s.dates.length - i0;
+  const W = svg.clientWidth, H = 240, L = 56, R = 12, T = 10, B = 22;
+  const rebase = (arr) => arr.slice(i0).map(v => (v / arr[i0] - 1) * 100);
+  const lines = INV.mode === "value" ? [
+    { label: "Your value", vals: s.value.slice(i0), cls: "main", area: true },
+    { label: "Same money in the S&amp;P 500", vals: s.bench_value.slice(i0), cls: "bench" },
+    { label: "Money you put in", vals: s.invested.slice(i0), cls: "invested" },
+  ] : [
+    { label: "Your return", vals: rebase(s.twr_index), cls: "main" },
+    { label: "S&amp;P 500", vals: rebase(s.bench_index), cls: "bench" },
+  ];
+  const all = lines.flatMap(l => l.vals);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
+  const X = (i) => L + i * (W - L - R) / Math.max(1, n - 1);
+  const Y = (v) => T + (hi - v) * (H - T - B) / (hi - lo);
+  const fmtV = (v) => INV.mode === "value" ? invMoney(v) : invPct(v);
+  // Axis money is compact (k / M) with enough decimals that ticks never repeat.
+  const step = fxConvert((hi - lo) / 4, b.ccy);
+  const fmtAxis = (v) => {
+    if (INV.mode !== "value") return invPct(v, 0);
+    const x = fxConvert(v, b.ccy), [div, u] = Math.abs(x) >= 1e6 ? [1e6, "M"] : [1e3, "k"];
+    return invSym() + (x / div).toFixed(step < div / 10 ? 2 : step < div ? 1 : 0) + u;
+  };
+  const pts = (vals) => vals.map((v, i) => X(i).toFixed(1) + "," + Y(v).toFixed(1)).join(" ");
+  let g = "";
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (hi - lo) * k / 4;
+    g += `<line class="inv-grid-l" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text class="inv-axis" x="${L - 6}" y="${Y(v) + 3}" text-anchor="end">${fmtAxis(v)}</text>`;
+  }
+  if (INV.mode === "return" && lo < 0 && hi > 0) g += `<line class="inv-zero" x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}"/>`;
+  for (const l of [...lines].reverse()) {
+    if (l.area) g += `<polygon class="inv-area" points="${X(0)},${Y(lo)} ${pts(l.vals)} ${X(n - 1)},${Y(lo)}"/>`;
+    g += `<polyline class="inv-l-${l.cls}" points="${pts(l.vals)}"/>`;
+  }
+  g += `<text class="inv-axis" x="${L}" y="${H - 6}">${invDate(s.dates[i0])}</text><text class="inv-axis" x="${W - R}" y="${H - 6}" text-anchor="end">${invDate(s.dates.at(-1))}</text>`
+    + `<line class="inv-cross" x1="0" x2="0" y1="${T}" y2="${H - B}"/><circle class="inv-dot" r="3.5"/><rect class="inv-hit" x="${L}" y="0" width="${W - L - R}" height="${H}"/>`;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = g;
+  // The legend lives in this fixed-height reading, not the toolbar, so the
+  // card is the same size in both modes (frontend.md).
+  const readoutAt = (i) => {
+    readout.innerHTML = lines.map(l => `<span class="inv-ro"><i class="inv-sw-${l.cls}"></i><span class="inv-ro-k">${l.label}</span><b>${fmtV(l.vals[i])}</b></span>`).join("")
+      + `<span class="inv-ro-date">${invDate(s.dates[i0 + i])}</span>`;
+  };
+  readoutAt(n - 1);
+  const cross = svg.querySelector(".inv-cross"), dot = svg.querySelector(".inv-dot"), hit = svg.querySelector(".inv-hit");
+  hit.addEventListener("mousemove", (e) => {
+    const px = (e.clientX - svg.getBoundingClientRect().left) * (W / svg.clientWidth);
+    const i = Math.max(0, Math.min(n - 1, Math.round((px - L) / ((W - L - R) / Math.max(1, n - 1)))));
+    cross.setAttribute("x1", X(i)); cross.setAttribute("x2", X(i));
+    dot.setAttribute("cx", X(i)); dot.setAttribute("cy", Y(lines[0].vals[i]));
+    svg.classList.add("hovering");
+    readoutAt(i);
+  });
+  hit.addEventListener("mouseleave", () => { svg.classList.remove("hovering"); readoutAt(n - 1); });
+}
+
+$("#inv-page").addEventListener("click", (e) => {
+  const m = e.target.closest("[data-inv-mode]"), p = e.target.closest("[data-inv-period]");
+  if (m) {
+    // Only the chart depends on the mode, so only the chart is redrawn.
+    INV.mode = m.dataset.invMode;
+    for (const btn of document.querySelectorAll("#inv-page [data-inv-mode]")) {
+      btn.classList.toggle("active", btn === m);
+      btn.setAttribute("aria-pressed", String(btn === m));
+    }
+    drawInvChart();
+  } else if (p) {
+    INV.period = p.dataset.invPeriod;
+    try { localStorage.setItem("inv_period", INV.period); } catch (e2) {}
+    invRender();
+  }
+});
+$("#inv-btn").onclick = () => { showPage("investments"); invLoad(); };
+window.addEventListener("resize", () => drawInvChart());
+try { const p = localStorage.getItem("inv_period"); if (INV_PERIODS.includes(p)) INV.period = p; } catch (e) {}
+
 setTheme(readTheme());
 fxInit();
 renderHeader();
@@ -11797,3 +12045,4 @@ setupSettings();
 setupTapeFullscreen();
 loadAllAtStartup();
 loadAppVersion();
+try { if (localStorage.getItem("page") === "investments") $("#inv-btn").click(); } catch (e) {}

@@ -9,6 +9,10 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## Unreleased
+
+- **My Investments, the page shell** (issue #1, roadmap Phase 1): a new first tab for your real book, separate from the research tabs. It shows your value and this month's change, Total profit, Return against the S&P 500, a daily value chart, holdings by company name, and a calm attention rail; details sit in hover cards. Until holdings can be entered (Phase 2) it shows its empty state.
+
 ## 1.19.5 — 2026-10-05
 
 - **The app icon is back to what it was before 1.19.3**: the dark tile, the same in every theme, with the system's own glass rim. The theme-following icon, the Dock-tile workaround and the compiled closed-app icon are removed to keep the app minimal.

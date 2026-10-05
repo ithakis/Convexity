@@ -85,7 +85,8 @@ Each of these has cost real debugging time; the link goes to the full story.
 - **Topbar single-class CSS overrides lose the cascade** — prefix with
   `.topbar`. **Overlays open/close only through `showOverlay()` /
   `hideOverlay()`.** Settings sections live in `SETTINGS_SECTIONS`; the theme
-  control uses `data-theme-opt`, never `data-theme`.
+  control uses `data-theme-opt`, never `data-theme`. **Pages switch only
+  through `showPage()`**; research-only blocks carry `.research-only`.
   [frontend.md → Key UI behaviours](docs/architecture/frontend.md#key-ui-behaviours-added-in-passes-abc)
 - **At most two levels of box** (the user's rule, v1.19): sections are a
   kicker rule + hairlines, never a card inside a card (the portfolio's
@@ -115,6 +116,9 @@ Each of these has cost real debugging time; the link goes to the full story.
   environment only; the `reference-pack` release must never become "Latest"
   (the installers install `/releases/latest`).
   [news.md](docs/architecture/news.md) · [ci.md](docs/architecture/ci.md#reference-pack-workflow-githubworkflowsreference-packyml-phase-8)
+- **My Investments never shows a real book made-up numbers**: demo figures
+  only for the seeded demo book (`investments.book_preview`).
+  [frontend.md → Pages](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -181,6 +185,7 @@ sub-decision.
 │   ├── reference_build.py       ← `convexity build-reference-pack` (run by CI): S&P 500 Market read → the pack — §4, §13
 │   ├── data/                    ← Package data: lm_lexicon.json, sp500.json (the pack's universe, source + date inside), indices.json
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
+│   ├── investments.py           ← My Investments (the real book): page payload; ledger engine from roadmap Phase 2 — docs/plans/my-investments-roadmap.md
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
 │       ├── index.html           ← Main HTML template
@@ -191,7 +196,8 @@ sub-decision.
 ├── docs/                         ← Reference/audit notes not needed to run the app day-to-day
 │   ├── architecture/             ← The deep sections of these notes (backend, news, security, frontend, mpt, ci, desktop, jobs) — §0
 │   └── plans/distribution-roadmap.md  ← Distribution/packaging roadmap (Phases 1–9)
-├── scripts/                      ← Dev scripts (check_syntax.py, smoke_test_server.py, benchmark_news_read.py, …)
+│   └── plans/my-investments-roadmap.md ← My Investments (issue #1): phases, progress, feedback log, next-session prompt
+├── scripts/                      ← Dev scripts (check_syntax.py, smoke_test_server.py, benchmark_news_read.py, seed_demo_book.py, …)
 ├── ml/                           ← FNSPID training pipeline for the Market read — docs/ml_sentiment_design.md
 ├── pyproject.toml                ← THE dependency manifest + entry points (`convexity`, `convexity-app`) — §3, §4
 ├── uv.lock                       ← uv lockfile solved from pyproject.toml (CI installs exactly this) — §13
@@ -227,7 +233,8 @@ overrides it):
 │   ├── column_views.json       ← Custom column-view definitions
 │   ├── news.json               ← News + sentiment cache, LLM status
 │   ├── sentiment_history.json  ← One record per ticker-day read: Track record + live anchor
-│   └── reference_pack.json     ← {"enabled": bool} — the Settings switch for the reference pack
+│   ├── reference_pack.json     ← {"enabled": bool} — the Settings switch for the reference pack
+│   └── investments.json        ← My Investments: the user's REAL book (ledger, from roadmap Phase 2) — never overwrite a malformed one
 ├── models/mlsent-v1.1/         ← The Market read artifact (was ~/.convexity/ml_model/)
 ├── reference/                  ← The downloaded reference pack (a cache; reference_pack.py)
 └── logs/desktop.log            ← Desktop-app boot log (was ~/Library/Logs/Convexity.log)
@@ -427,6 +434,10 @@ apply `bug` / `feature`). Distribution/packaging work follows
 (pushed; CI green; the reference-pack `yahoo-check` passed from GitHub — its
 `build` run waits for the owner to create the `reference-pack` release);
 Phase 9 (website) remains, then the single v2.0.0 release.
+**My Investments** (issue #1, the real book) follows
+`docs/plans/my-investments-roadmap.md`. That file has the progress table and
+a next-session prompt. Each phase is prototyped with the owner (chat mockups,
+then a live demo book) and signed off by them before its PR.
 
 ### Done / archived (don't redo)
 - News v2 (v1.12) — two peer engines (News read with five lenses, Market read
