@@ -30,7 +30,11 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("CONVEXITY_FINNHUB_BASE", raising=False)
     ml.reset_for_tests()
     syms = [n["symbol"] for n in rb.universe()["symbols"][:6]] + ["SPY"]
-    idx = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=300)
+    # End the prices on build()'s own "today", the UTC date. The local date
+    # differs for part of every day (00:00-02:00 in UTC+2), and a close dated
+    # after the record would give it a forward return it cannot have yet.
+    today = pd.Timestamp(datetime.now(UTC).strftime("%Y-%m-%d"))
+    idx = pd.bdate_range(end=today, periods=300)
     rng = np.random.default_rng(1)
     closes = pd.DataFrame(
         {s: 100 * np.cumprod(1 + rng.normal(0, 0.01, len(idx))) for s in syms}, index=idx

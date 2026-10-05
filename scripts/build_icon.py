@@ -11,14 +11,19 @@ Outputs (both 1024x1024, both committed, both read at runtime or by the installe
                     corners, for places that do not mask: the Windows .ico and
                     the README.
 
+The white light-theme tile is not a file: the desktop app renders it at
+runtime from the same master via convexity.icon.svg_for("light").
+
 Never edit the PNGs by hand: change icon.svg and re-run this.
 """
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QByteArray, QRectF, Qt
 from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPainterPath
 from PySide6.QtSvg import QSvgRenderer
+
+from convexity.icon import svg_for
 
 ASSETS = Path(__file__).resolve().parent.parent / "src" / "convexity" / "assets"
 SIZE = 1024
@@ -27,7 +32,7 @@ SIZE = 1024
 CORNER = SIZE * 0.224
 
 
-def render(rounded: bool) -> QImage:
+def render(rounded: bool, variant: str = "dark") -> QImage:
     img = QImage(SIZE, SIZE, QImage.Format.Format_ARGB32)
     img.fill(Qt.GlobalColor.transparent)
     p = QPainter(img)
@@ -36,7 +41,7 @@ def render(rounded: bool) -> QImage:
         path = QPainterPath()
         path.addRoundedRect(QRectF(0, 0, SIZE, SIZE), CORNER, CORNER)
         p.setClipPath(path)
-    QSvgRenderer(str(ASSETS / "icon.svg")).render(p, QRectF(0, 0, SIZE, SIZE))
+    QSvgRenderer(QByteArray(svg_for(variant))).render(p, QRectF(0, 0, SIZE, SIZE))
     p.end()
     return img
 

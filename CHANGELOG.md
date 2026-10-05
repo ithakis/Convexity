@@ -9,6 +9,13 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.19.3 — 2026-10-05
+
+- **The app icon follows the theme**: a white tile in Light, black in Dark and Bloomberg. While the app runs it no longer has the glass rim macOS 26 adds to app icons (top-left and bottom edges). The closed app's icon in Finder and Launchpad still has it: removing that needs Xcode.
+- **New README**: what the app is for, the install command up top, and five fresh screenshots of a demo portfolio.
+- **Fixed**: a two-word theme like "cybersecurity companies" was searched as a company name (it found The TJX Companies); it now goes to the AI like longer themes. Tickers separated by spaces (`AAPL MSFT NVDA`) are read as a list.
+- **Fixed**: a reference-pack test failed between local midnight and the UTC date change.
+
 ## 1.19.2 — 2026-10-04
 
 Polish from the user's review of 1.19, plus an adversarial review.

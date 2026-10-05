@@ -6,86 +6,16 @@ Convexity<br>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-all%20rights%20reserved-lightgrey" alt="License: all rights reserved"></a>
 </h1>
 
-**Convexity** — a portfolio optimization app built for long-term horizon investing. Runs locally: no cloud accounts, no data leaving your machine.
+**A portfolio terminal for long-term investors.** The analytics a fund desk
+uses (risk, attribution, optimization, news) on your own machine, with no
+account and no subscription.
 
-Built on top of [yfinance](https://github.com/ranaroussi/yfinance) and a tiny stdlib HTTP server. Open it in any browser, paste your tickers, and get a live heat-mapped table in seconds.
-
-![Holdings table](docs/screenshots/table.png)
-
-## A tour
-
-**Find companies in plain English.** The search box on the Portfolio tab reads a name, a theme or a set of criteria and shows what it understood as chips you can edit. With an NVIDIA key, a theme like *GLP-1 drug makers* is answered by an AI that proposes the companies; every name it returns is checked against the list of real listings, outside-the-theme picks are dropped and the rest are shown as cards with a one-line reason. Add the ones you want and press Refresh.
-
-![AI company search: GLP-1 drug makers](docs/screenshots/search-ai.png)
-
-Criteria work the same way, with or without a key: `tech with D/E < 0.8 and current ratio > 1` becomes a screen over every Yahoo listing, and a word like *best* adds a ranking (here by ROE). Companies already in the portfolio are greyed out.
-
-![Screening by criteria: D/E, current ratio, ranked by ROE](docs/screenshots/search-screen.png)
-
-**Stock detail.** Click any row for its price history from one month to the full record, as a TradingView-style HLC area (or candles, hollow candles, OHLC bars, area or line) with volume bars coloured by direction, moving averages and S&P 500 or sector overlays, the snapshot and valuation numbers behind the row, and its returns against the S&P 500 and its sector ETF over every window.
-
-![Stock detail](docs/screenshots/detail.png)
-
-**Portfolio optimization.** Black-Litterman expected returns (market-cap equilibrium blended with analyst price-target views) and a mean-CVaR efficient frontier solved by a custom 8-core interior-point solver. Slide along the frontier, see the tail risk, weights and bootstrap uncertainty band, and apply the result as a weight preset.
-
-![Portfolio optimization](docs/screenshots/optimize.png)
-
-**Portfolio analytics.** One sheet: performance (same chart types and volume as a single stock, with the portfolio's high, low and volume built from its holdings) against the S&P 500 (plus Nasdaq and a sector-mix overlay), moving averages, drawdown, and a risk & return card with Sharpe and Sortino (over the T-bill rate in USD), Calmar, beta, tracking error and information ratio against any benchmark.
-
-![Portfolio analytics](docs/screenshots/analytics.png)
-
-**Analyst sentiment.** Weighted consensus rating, rating distribution, price-target upside (mean and median) and the full range of analyst targets for every holding.
-
-![Analyst sentiment](docs/screenshots/analyst.png)
-
-**News & sentiment.** Two independent reads of every holding's headlines: the *News read* (an LLM scoring each headline across financials, outlook, competition, regulation and street view) and the *Market read* (a statistical model of how prices have historically reacted to news like this). Plus movers, what to watch, a market-risk line and a per-headline timeline.
-
-![News & sentiment](docs/screenshots/news.png)
-
----
-
-## Features
-
-The columns of the **Default** view. $`P_t`$ is the latest close, adjusted for
-splits and dividends, so every return below is a total return. Cells are
-heat-mapped against the other rows on screen.
-
-| Column | Definition | Read it as |
-|---|---|---|
-| **Market Cap** | $`P_t \cdot N_{\mathrm{shares}}`$ | size, in the display currency |
-| **P/E** | $`P_t / \mathrm{EPS}_{\mathrm{TTM}}`$ | price per unit of trailing earnings; blank for loss-makers |
-| **% YTD** | $`P_t / P_{\mathrm{Dec\ 31}} - 1`$ | return since last year's final close |
-| **% 1Y** | $`P_t / P_{t - 365\mathrm{d}} - 1`$ | return over one calendar year |
-| **Chart 1Y** | $`\left( P_{t-251}, \dots, P_t \right)`$ | the last 252 closes, coloured by the sign of % 1Y |
-| **Δ Highs** | $`P_t / \max_{s \in 2\mathrm{y}} P_s - 1`$ | how far below the 2-year high; $`0`$ means at the high |
-| **RS Rank 1M** | $`\dfrac{P_m - \min_{12\mathrm{m}} P}{\max_{12\mathrm{m}} P - \min_{12\mathrm{m}} P}`$ | one bar per month $`m`$: where that month's close sat in its trailing-year range, $`0`$ at the low, $`1`$ at the high |
-| **20 / 50 / 200 MA** | $`P_t \gtrless \mathrm{SMA}_n`$ | ▲ above, ▼ below the $`n`$-day average $`\mathrm{SMA}_n = \frac{1}{n} \sum_{i=0}^{n-1} P_{t-i}`$ |
-| **EPS Surp.** | $`\left( \mathrm{EPS} - \widehat{\mathrm{EPS}} \right) / \lvert \widehat{\mathrm{EPS}} \rvert`$ | last 8 quarters, newest right: green beat, red miss |
-| **Rec Δ6M** | $`s_{\mathrm{now}} - s_{\mathrm{6m\ ago}}`$ | the move in the analyst score $`s = (2 n_{SB} + n_{B} - n_{S} - 2 n_{SS}) / N \in [-2, 2]`$ over Finnhub's monthly snapshots |
-| **MSPR** | $`\in [-100, 100]`$ | Finnhub's monthly insider purchase ratio from Form 4 filings; $`+100`$ = all buying |
-| **NS** | two dots | the Market read and the News read of the holding's headlines (see News & sentiment) |
-
-The **Fundamentals** and **Momentum** views add P/S $`= \mathrm{MC} / \mathrm{Revenue}_{\mathrm{TTM}}`$,
-forward P/E, PEG, EV/EBITDA, margins, leverage, RSI, MACD, Bollinger %B, beta and
-shorter-horizon returns. The ⓘ column guide in the app has every formula.
-
-**Additional**
-
-- **Streaming progress bar** — rows appear as they load, one at a time
-- **Sort** — click any column header or use the ⇅ Sort menu
-- **Company search** — names, themes and criteria in plain English, optional AI for themes and rankings
-- **Light, dark and Bloomberg themes** — Navy & Denim palette, preference saved to `localStorage`
-- **Portfolios** — named portfolios as tabs, saved in your data folder, restored on launch
-- **Excel export** — every saved portfolio, its analytics and sentiment in one `.xlsx`
-- **Column guide** — ⓘ button opens a LaTeX-rendered column reference
-- **Click-through detail** — click any row for a full-size 1-year chart and stats
-
----
-
-## Install
-
-One command installs [uv](https://docs.astral.sh/uv/) if needed, then the
-latest release, and adds a launcher. Nothing else to set up.
+- **Private by design.** Runs locally on macOS, Windows and Linux. Your holdings
+  are stored only on your computer.
+- **AI that does the reading.** Find companies in plain English and get every
+  holding's news scored for you.
+- **Institutional math, explained.** Black-Litterman, mean-CVaR, Sharpe, Sortino
+  and information ratio, with every formula in the app.
 
 **macOS / Linux**
 
@@ -93,11 +23,72 @@ latest release, and adds a launcher. Nothing else to set up.
 curl -LsSf https://raw.githubusercontent.com/ithakis/Convexity/main/install.sh | bash
 ```
 
-**Windows** (PowerShell; creates Start Menu + Desktop shortcuts)
+**Windows** (PowerShell)
 
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/ithakis/Convexity/main/packaging/install.ps1 | iex"
 ```
+
+---
+
+### Your whole portfolio on one screen
+
+Returns, valuation, momentum, earnings surprises, analyst revisions and insider
+buying for every holding, heat-mapped so the outliers stand out. Stocks and ETFs
+on any exchange, shown in the currency you choose.
+
+![Holdings table: thirteen well-known stocks, heat-mapped](docs/screenshots/table.png)
+
+### Find your next idea in plain English
+
+Type a theme like *AI chip makers* or criteria like *tech with D/E < 0.8, best
+ROE*, and get real companies, each with a one-line reason. Every AI pick is
+checked against all 470,000 Yahoo listings, so it cannot invent a ticker.
+
+![AI company search for "AI chip makers"](docs/screenshots/search-ai.png)
+
+### Are you beating the market, and at what risk?
+
+Your portfolio against the S&P 500, with drawdown and volume, on the same chart
+types you use for a single stock. Sharpe, Sortino, beta, tracking error and
+information ratio sit beside it, along with weighted valuation, analyst upside
+and concentration.
+
+![Portfolio analytics: performance vs the S&P 500 and the risk & return card](docs/screenshots/analytics.png)
+
+### The optimizer the pros use, on your laptop
+
+Black-Litterman blends the market's equilibrium with analyst price targets. A
+custom mean-CVaR solver then maps 40,000 portfolios and the efficient frontier
+in about 15 seconds: slide to the tail risk you accept and apply the weights.
+
+![Portfolio optimization: mean-CVaR efficient frontier and selected weights](docs/screenshots/optimize.png)
+
+### An analyst that reads the news for you
+
+Each holding's headlines get two independent reads: an LLM scores financials,
+outlook, competition, regulation and street view, and a statistical model
+checks how prices have reacted to news like it. Movers, what to watch and a
+market-risk line tell you what changed before you open a single article.
+
+![News & sentiment: portfolio signal, movers, what to watch, headline timeline](docs/screenshots/news.png)
+
+### Also inside
+
+- **Stock detail:** click any row for its full price history (candles, OHLC, HLC area), moving averages, S&P 500 and sector overlays, and its valuation
+- **Analyst consensus:** weighted rating, rating distribution and the full range of price targets per holding
+- **Criteria screens:** `tech with D/E < 0.8 and current ratio > 1` runs over every Yahoo listing, with or without an AI key
+- **Track record:** how both news reads have actually predicted returns, so you know how far to trust them
+- **Excel export:** every portfolio, its analytics and sentiment in one `.xlsx`
+- **Light, dark and Bloomberg themes**, multiple portfolios as tabs, keyboard shortcuts
+
+---
+
+## Install
+
+Run the command for your system at the top of this page. It installs
+[uv](https://docs.astral.sh/uv/) if needed, then the latest release, and adds a
+launcher (on Windows, Start Menu and Desktop shortcuts).
 
 Then launch **Convexity** from Launchpad / Spotlight, the Start Menu or your
 Desktop (Linux: run `convexity-app`). It opens in its own window (PySide6 +
@@ -167,6 +158,33 @@ double-click **`packaging/Launch Dashboard.command`**, which runs
 `uv run convexity` and prints the URL to open. Engineering notes for
 contributors (and AI agents): [CLAUDE.md](CLAUDE.md) and
 [docs/architecture/](docs/architecture/).
+
+---
+
+## The columns
+
+The columns of the **Default** view. $`P_t`$ is the latest close, adjusted for
+splits and dividends, so every return below is a total return. Cells are
+heat-mapped against the other rows on screen.
+
+| Column | Definition | Read it as |
+|---|---|---|
+| **Market Cap** | $`P_t \cdot N_{\mathrm{shares}}`$ | size, in the display currency |
+| **P/E** | $`P_t / \mathrm{EPS}_{\mathrm{TTM}}`$ | price per unit of trailing earnings; blank for loss-makers |
+| **% YTD** | $`P_t / P_{\mathrm{Dec\ 31}} - 1`$ | return since last year's final close |
+| **% 1Y** | $`P_t / P_{t - 365\mathrm{d}} - 1`$ | return over one calendar year |
+| **Chart 1Y** | $`\left( P_{t-251}, \dots, P_t \right)`$ | the last 252 closes, coloured by the sign of % 1Y |
+| **Δ Highs** | $`P_t / \max_{s \in 2\mathrm{y}} P_s - 1`$ | how far below the 2-year high; $`0`$ means at the high |
+| **RS Rank 1M** | $`\dfrac{P_m - \min_{12\mathrm{m}} P}{\max_{12\mathrm{m}} P - \min_{12\mathrm{m}} P}`$ | one bar per month $`m`$: where that month's close sat in its trailing-year range, $`0`$ at the low, $`1`$ at the high |
+| **20 / 50 / 200 MA** | $`P_t \gtrless \mathrm{SMA}_n`$ | ▲ above, ▼ below the $`n`$-day average $`\mathrm{SMA}_n = \frac{1}{n} \sum_{i=0}^{n-1} P_{t-i}`$ |
+| **EPS Surp.** | $`\left( \mathrm{EPS} - \widehat{\mathrm{EPS}} \right) / \lvert \widehat{\mathrm{EPS}} \rvert`$ | last 8 quarters, newest right: green beat, red miss |
+| **Rec Δ6M** | $`s_{\mathrm{now}} - s_{\mathrm{6m\ ago}}`$ | the move in the analyst score $`s = (2 n_{SB} + n_{B} - n_{S} - 2 n_{SS}) / N \in [-2, 2]`$ over Finnhub's monthly snapshots |
+| **MSPR** | $`\in [-100, 100]`$ | Finnhub's monthly insider purchase ratio from Form 4 filings; $`+100`$ = all buying |
+| **NS** | two dots | the Market read and the News read of the holding's headlines (see News & sentiment) |
+
+The **Fundamentals** and **Momentum** views add P/S $`= \mathrm{MC} / \mathrm{Revenue}_{\mathrm{TTM}}`$,
+forward P/E, PEG, EV/EBITDA, margins, leverage, RSI, MACD, Bollinger %B, beta and
+shorter-horizon returns. The ⓘ column guide in the app has every formula.
 
 ---
 
