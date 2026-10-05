@@ -100,6 +100,8 @@ Each of these has cost real debugging time; the link goes to the full story.
   [mpt.md](docs/architecture/mpt.md#the-cloud-and-the-frontier-must-share-one-feasible-set-v1113)
 - **Desktop: `--single-process` is load-bearing** (blank window otherwise),
   and `shutdown_server()` must `os._exit(0)`.
+  The Dock icon is an `NSDockTile` content view (macOS 26 glasses every
+  other kind), and it follows the theme via QWebChannel from `setTheme()`.
   [desktop.md → Gotchas](docs/architecture/desktop.md#gotchas-discovered-during-implementation)
 - **Windows PowerShell 5.1 ≠ pwsh 7** for the installer (native stderr, TLS,
   `[Uri]`). [desktop.md → Gotchas](docs/architecture/desktop.md#gotchas-discovered-during-implementation)
@@ -182,6 +184,7 @@ sub-decision.
 │   ├── data/                    ← Package data: lm_lexicon.json, sp500.json (the pack's universe, source + date inside), indices.json
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
+│   ├── icon.py                  ← The logo's light/dark colourways from assets/icon.svg (theme-following desktop icon) — §14
 │   └── static/
 │       ├── index.html           ← Main HTML template
 │       ├── app.js                ← All frontend JS (state, columns, rendering, panels) — §5

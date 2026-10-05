@@ -43,7 +43,7 @@ def test_only_one_logo_is_tracked():
 
 def test_runtime_and_installers_read_the_shipped_icons_only():
     desktop = (ROOT / "src/convexity/desktop.py").read_text()
-    assert '_ASSETS / "icon.png"' in desktop and '_ASSETS / "icon-rounded.png"' in desktop
+    assert '_ASSETS / "icon.png"' in desktop and "svg_for(variant)" in desktop
     assert "assets/icon-rounded.png" in (ROOT / "README.md").read_text()
     assert "'icon-rounded.png'" in (ROOT / "packaging/install.ps1").read_text()
     assert 'ICON_PNG="$("$TOOL_PY"' in (ROOT / "install.sh").read_text()
@@ -145,3 +145,37 @@ def test_full_bleed_icon_is_opaque_and_rounded_has_transparent_corners():
         assert _pixel(square, x, y) == (0x0D, 0x11, 0x17, 255)  # == the splash background
         assert _pixel(rounded, x, y)[3] == 0
     assert _pixel(rounded, 512, 512)[3] == 255
+
+
+def test_light_colourway_swaps_only_the_tile_and_pale_wick():
+    """The light-theme icon is the master with two colours swapped, not a second
+    logo. Bloomberg is dark."""
+    from convexity.icon import DARK_TILE, svg_for, variant_for_theme
+
+    dark, light = svg_for("dark").decode(), svg_for("light").decode()
+    assert dark == (ASSETS / "icon.svg").read_text()
+    assert DARK_TILE not in light and 'fill="#ffffff"' in light and "#90e080" not in light
+    assert len(dark.splitlines()) == len(light.splitlines())
+    assert [variant_for_theme(t) for t in ("light", "dark", "bloomberg")] == [
+        "light",
+        "dark",
+        "dark",
+    ]
+
+
+def test_light_render_has_a_white_tile():
+    mod = _renders()
+    img = mod.render(False, "light")
+    for x, y in ((0, 0), (1023, 1023), (512, 40)):
+        c = img.pixelColor(x, y)
+        assert (c.red(), c.green(), c.blue(), c.alpha()) == (255, 255, 255, 255)
+
+
+def test_theme_reaches_the_desktop_icon_from_the_single_mutator():
+    """app.js setTheme() is the one place the theme changes; it is also the one
+    place that tells the desktop bridge (browser mode has no bridge)."""
+    js = (ROOT / "src/convexity/static/app.js").read_text()
+    assert js.count("convexityDesktop.themeChanged(") == 1
+    body = js[js.index("function setTheme(name)") :]
+    body = body[: body.index("\n}\n")]
+    assert "window.convexityDesktop.themeChanged(name)" in body
