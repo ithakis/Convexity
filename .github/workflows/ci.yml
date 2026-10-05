@@ -290,6 +290,8 @@ jobs:
           set -euo pipefail
           app="$RUNNER_TEMP/Applications/Convexity.app"
           test -s "$app/Contents/Resources/icon.icns" || { echo "icon.icns missing or empty"; exit 1; }
+          test -s "$app/Contents/Resources/Assets.car" || { echo "Assets.car missing"; exit 1; }
+          [ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIconName' "$app/Contents/Info.plist")" = AppIcon ]
           launcher="$app/Contents/MacOS/Convexity"
           test -x "$launcher"
           target=$(sed -n 's/^exec "\(.*\)" .*/\1/p' "$launcher")
