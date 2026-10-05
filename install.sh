@@ -247,15 +247,6 @@ else
     warn "icon not generated (icon.png or iconutil missing); the app will use a generic icon."
 fi
 
-# Assets.car: the same logo compiled from an Icon Composer package with the
-# specular highlight off (scripts/build_icon_composer.py, compiled by CI's
-# closed-app-icon job). macOS 26 prefers it over icon.icns (CFBundleIconName)
-# and then paints no glass rim on the closed app; older macOS uses the .icns.
-ASSETS_CAR="$(dirname "$ICON_PNG")/Assets.car"
-if [ -f "$ASSETS_CAR" ]; then
-    cp "$ASSETS_CAR" "$APP_PATH/Contents/Resources/Assets.car"
-fi
-
 # Absolute path to the tool's own entry point: LaunchServices starts bundles
 # with a minimal PATH, and this does not depend on ~/.local/bin being linked.
 cat > "$APP_PATH/Contents/MacOS/$APP_NAME" <<EOF
@@ -279,8 +270,6 @@ cat > "$APP_PATH/Contents/Info.plist" <<EOF
     <string>$APP_NAME</string>
     <key>CFBundleIconFile</key>
     <string>icon.icns</string>
-    <key>CFBundleIconName</key>
-    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

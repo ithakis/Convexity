@@ -424,10 +424,6 @@ function setTheme(name) {
   document.documentElement.dataset.theme = name;
   localStorage.setItem("theme", name);
   syncThemeControls(name);
-  // Desktop app only (QWebChannel, desktop.py _DesktopBridge): the Dock /
-  // window icon follows the theme. Absent in browser mode and until the
-  // channel connects, which then reports the theme itself.
-  if (window.convexityDesktop) window.convexityDesktop.themeChanged(name);
   if (DATA.length) render();
   // The analyst table's Weight/Upside heat is baked into inline styles at build
   // time (cellStyleHeat mixes from THEME_COLORS[theme].bg), and render() only

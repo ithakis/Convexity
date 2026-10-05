@@ -290,8 +290,6 @@ jobs:
           set -euo pipefail
           app="$RUNNER_TEMP/Applications/Convexity.app"
           test -s "$app/Contents/Resources/icon.icns" || { echo "icon.icns missing or empty"; exit 1; }
-          test -s "$app/Contents/Resources/Assets.car" || { echo "Assets.car missing"; exit 1; }
-          [ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIconName' "$app/Contents/Info.plist")" = AppIcon ]
           launcher="$app/Contents/MacOS/Convexity"
           test -x "$launcher"
           target=$(sed -n 's/^exec "\(.*\)" .*/\1/p' "$launcher")
@@ -343,49 +341,3 @@ jobs:
             if ($s.IconLocation -notlike "*icon.ico*") { throw "IconLocation mismatch in ${lnk}: $($s.IconLocation)" }
             Write-Host "OK: $lnk -> $($s.TargetPath)"
           }
-
-  closed-app-icon:
-    name: "macOS 26: compile the closed-app icon (Icon Composer .icon -> Assets.car)"
-    runs-on: macos-26
-
-    # macOS 26 paints a glass rim on every legacy .icns icon; a compiled
-    # Assets.car with the specular highlight switched off is the only way to
-    # lose it while the app is closed. actool ships with Xcode, not with the
-    # Command Line Tools, so it is built here and the result committed as
-    # package data (src/convexity/assets/Assets.car). See CLAUDE.md §14.
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          enable-cache: true
-
-      - name: Build AppIcon.icon from the master logo
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: uv run --extra desktop python scripts/build_icon_composer.py "$RUNNER_TEMP/icon"
-
-      - name: Compile with actool
-        run: |
-          set -euo pipefail
-          xcodebuild -version
-          out="$RUNNER_TEMP/compiled"
-          mkdir -p "$out"
-          xcrun actool "$RUNNER_TEMP/icon/AppIcon.icon" \
-            --compile "$out" \
-            --output-format human-readable-text --notices --warnings --errors \
-            --output-partial-info-plist "$out/partial.plist" \
-            --app-icon AppIcon --include-all-app-icons \
-            --enable-on-demand-resources NO --development-region en \
-            --target-device mac --platform macosx --minimum-deployment-target 26.0
-          ls -la "$out"
-          cat "$out/partial.plist"
-          test -s "$out/Assets.car"
-          xcrun assetutil --info "$out/Assets.car" | head -60
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: closed-app-icon
-          path: ${{ runner.temp }}/compiled/
-          retention-days: 14

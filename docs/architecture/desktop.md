@@ -117,35 +117,6 @@ actually invokes). Single file, ~160 lines:
   that plate was the Dock icon before v1.15. The splash tile is the exact splash
   background colour (`_BG`), so its edges vanish. Change either colour and the
   other must follow.
-- **The icon follows the theme, and has no glass rim while running.**
-  Light gets a white tile, Dark and Bloomberg the black one. The white
-  colourway is not a file: `convexity/icon.py` `svg_for("light")` swaps two
-  colours in the master (tile, pale wick) and `desktop.py` renders it at
-  runtime (`_render_tile`), so the one-logo rule holds. The theme reaches
-  Python over **QWebChannel**: `_bridge_script()` injects Qt's own
-  `qrc:///qtwebchannel/qwebchannel.js` plus a bootstrap that publishes
-  `window.convexityDesktop`. app.js `setTheme()` (the single mutator) calls
-  `themeChanged(name)`, and the bootstrap reports the current theme once on
-  connect, because the channel connects after app.js has already applied the
-  saved theme. The slot accepts the three theme names only. Browser mode has
-  no bridge and the call is guarded.
-  **Why a Dock tile content view:** macOS 26 paints its Liquid Glass rim (a
-  bright edge top-left and along the bottom) on every legacy icon. That covers
-  the bundle's `.icns` *and* an icon set through
-  `NSApp.applicationIconImage`, which is what `app.setWindowIcon` uses. An
-  `NSDockTile.contentView` (an `NSImageView`) is drawn as given, so
-  `_set_macos_dock_tile` sets one through plain `ctypes` into the
-  Objective-C runtime (no pyobjc), inset 100 px of 1024 to match Apple's
-  icon grid. This was verified with zoomed Dock screenshots: the rim is gone
-  and the tile swaps live. Any failure falls back to `app.setWindowIcon`.
-  **The closed app:** `install.sh` also puts `assets/Assets.car` in the
-  bundle (`CFBundleIconName` = `AppIcon`), which macOS 26 prefers over the
-  `.icns`. It is the Icon Composer build of the same master
-  (`scripts/build_icon_composer.py`: glyph layers without glass, the tile as
-  the fill, `specular: false`; white in macOS Light, black in Dark), compiled
-  by CI's `closed-app-icon` job on a macOS 26 runner because actool ships only
-  with Xcode. After changing `icon.svg`, download that job's artifact and
-  commit its `Assets.car`.
 - **Shutdown**: `app.aboutToQuit.connect(lambda: shutdown_server(server))`.
   Verified via three independent paths: `app.quit()`, `window.close()`
   (which reaches `aboutToQuit` because Qt's `quitOnLastWindowClosed`
