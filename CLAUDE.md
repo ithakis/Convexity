@@ -85,7 +85,8 @@ Each of these has cost real debugging time; the link goes to the full story.
 - **Topbar single-class CSS overrides lose the cascade** — prefix with
   `.topbar`. **Overlays open/close only through `showOverlay()` /
   `hideOverlay()`.** Settings sections live in `SETTINGS_SECTIONS`; the theme
-  control uses `data-theme-opt`, never `data-theme`.
+  control uses `data-theme-opt`, never `data-theme`. **Pages switch only
+  through `showPage()`**; research-only blocks carry `.research-only`.
   [frontend.md → Key UI behaviours](docs/architecture/frontend.md#key-ui-behaviours-added-in-passes-abc)
 - **At most two levels of box** (the user's rule, v1.19): sections are a
   kicker rule + hairlines, never a card inside a card (the portfolio's
@@ -115,6 +116,9 @@ Each of these has cost real debugging time; the link goes to the full story.
   environment only; the `reference-pack` release must never become "Latest"
   (the installers install `/releases/latest`).
   [news.md](docs/architecture/news.md) · [ci.md](docs/architecture/ci.md#reference-pack-workflow-githubworkflowsreference-packyml-phase-8)
+- **My Investments never shows a real book made-up numbers**: demo figures
+  only for the seeded demo book (`investments.book_preview`).
+  [frontend.md → Pages](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -193,7 +197,7 @@ sub-decision.
 │   ├── architecture/             ← The deep sections of these notes (backend, news, security, frontend, mpt, ci, desktop, jobs) — §0
 │   └── plans/distribution-roadmap.md  ← Distribution/packaging roadmap (Phases 1–9)
 │   └── plans/my-investments-roadmap.md ← My Investments (issue #1): phases, progress, feedback log, next-session prompt
-├── scripts/                      ← Dev scripts (check_syntax.py, smoke_test_server.py, benchmark_news_read.py, seed_demo_book.py (synthetic My Investments book for prototypes), …)
+├── scripts/                      ← Dev scripts (check_syntax.py, smoke_test_server.py, benchmark_news_read.py, seed_demo_book.py, …)
 ├── ml/                           ← FNSPID training pipeline for the Market read — docs/ml_sentiment_design.md
 ├── pyproject.toml                ← THE dependency manifest + entry points (`convexity`, `convexity-app`) — §3, §4
 ├── uv.lock                       ← uv lockfile solved from pyproject.toml (CI installs exactly this) — §13

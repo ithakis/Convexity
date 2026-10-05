@@ -953,7 +953,7 @@
     text-decoration: underline dotted rgba(125, 125, 125, 0.75);
     text-underline-offset: 3px;
   }
-  .pf-mpt-rf-info[data-rich-tip], .pf-contrib-table [data-rich-tip] { text-decoration: none; }  /* the tip stays, the underline goes */
+  .pf-mpt-rf-info[data-rich-tip], .pf-contrib-table [data-rich-tip], #inv-page [data-rich-tip] { text-decoration: none; }  /* the tip stays, the underline goes */
   [data-rich-tip]:focus-visible, .pf-contrib-table th[data-contrib-sort]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .pf-metric-tip .mt-table {
     width: 100%; border-collapse: collapse; margin: 6px 0 8px;
@@ -3400,113 +3400,85 @@
   }
   .toast.show { opacity: 1; }
 
-
-  /* ==========================================================================
-     My Investments (docs/plans/my-investments-roadmap.md). Box budget: the
-     gray sheet (level 1) and the white chart card inside it (level 2), nothing
-     else. The table and the rail are hairlines only. Hover cues are a soft
-     background, never dotted underlines or info icons (owner's call, Phase 1).
-     ========================================================================== */
+  /* My Investments (rules: docs/architecture/frontend.md). Box budget: the
+     gray sheet and the white chart card inside it; table and rail are
+     hairlines only. Hover cue = soft background, never underline or icon. */
   body[data-page="investments"] .research-only { display: none !important; }
   #inv-page { margin: 12px 16px 24px; }
   #inv-page.hidden { display: none; }
-  #inv-page [data-rich-tip] { text-decoration: none; }
-  .inv-grid {
-    display: grid; grid-template-columns: minmax(0, 7fr) minmax(240px, 2.2fr);
-    gap: 22px; align-items: start;
-  }
-  @media (max-width: 1100px) { .inv-grid { grid-template-columns: minmax(0, 1fr); } }
+  .inv-grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(240px, 2.2fr); gap: 22px; align-items: start; }
   .inv-sheet {
-    background: var(--bg-subtle); border: 1px solid var(--border);
-    border-radius: var(--r-lg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    padding: 14px 14px 12px;
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-lg);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); padding: 14px 14px 12px;
   }
   .inv-hero { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; padding: 0 8px; }
-  .inv-value { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; color: var(--text); }
-  .inv-month { font-size: 13px; font-variant-numeric: tabular-nums; }
-  .inv-demo {
-    margin-left: auto; font-size: 10.5px; color: var(--muted);
-    border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 6px;
-  }
-  .inv-kpis {
-    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px;
-    margin: 10px 0 12px; padding-top: 8px; border-top: 1px solid var(--border);
-  }
-  .inv-kpi { padding: 6px 8px; border-radius: var(--r-md); cursor: default; outline: none; }
+  .inv-value { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
+  .inv-month { font-size: 13px; }
+  .inv-demo { margin-left: auto; font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 6px; }
+  .inv-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; margin: 10px 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .inv-kpi { padding: 6px 8px; border-radius: var(--r-md); }
   .inv-kpi:hover, .inv-kpi:focus-visible { background: var(--bg-canvas); }
   .inv-kpi-k { font-size: 11px; color: var(--muted); }
-  .inv-kpi-v { font-size: 17px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; color: var(--text); }
-  .inv-kpi-v.pos, #inv-page td.pos, .inv-month.pos, .inv-tip td.pos { color: var(--pos); }
-  .inv-kpi-v.neg, #inv-page td.neg, .inv-month.neg, .inv-tip td.neg { color: var(--neg); }
-  /* The toolbar and the reading are fixed-height single lines, so switching
-     Value / Return % can never change the card's size (owner, Phase 1). */
-  .inv-chart-bar { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; height: 30px; padding: 0 2px 6px; }
-  .inv-mode { margin-left: 0; flex: none; }
-  .inv-periods { margin-left: auto; flex: none; }
-  .inv-ro { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-  .inv-ro-k { color: var(--muted); }
-  .inv-ro b { font-weight: 600; }
-  .inv-chart-wrap svg { display: block; width: 100%; height: 240px; }
-  .inv-readout {
-    display: flex; gap: 16px; align-items: center; flex-wrap: nowrap; height: 20px; overflow: hidden;
-    font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--text); padding: 2px 4px 0;
-  }
-  .inv-ro-date { margin-left: auto; color: var(--muted); }
-  /* Narrow chart card: drop the series names, keep swatch + value, so the
-     fixed-height reading never clips. */
+  .inv-kpi-v { font-size: 17px; font-weight: 700; margin-top: 2px; color: var(--text); }
+  #inv-page .pos, .inv-tip .pos { color: var(--pos); }
+  #inv-page .neg, .inv-tip .neg { color: var(--neg); }
+  #inv-page, .inv-tip { font-variant-numeric: tabular-nums; }
+  /* Fixed-height single-line toolbar and reading: the card never resizes. */
   .inv-chart-card { container-type: inline-size; }
+  .inv-chart-bar { display: flex; align-items: center; gap: 12px; height: 30px; padding: 0 2px 6px; }
+  .inv-chart-bar .pf-contrib-toggle { margin-left: 0; }
+  .inv-periods { margin-left: auto; flex: none; }
+  .inv-svg { display: block; width: 100%; height: 240px; }
+  .inv-readout { display: flex; gap: 16px; align-items: center; height: 20px; overflow: hidden; font-size: 11.5px; color: var(--text); padding: 2px 4px 0; }
+  .inv-ro { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .inv-ro-k, .inv-ro-date { color: var(--muted); }
+  .inv-ro b { font-weight: 600; }
+  .inv-ro-date { margin-left: auto; }
   @container (max-width: 680px) { .inv-ro-k { display: none; } }
-  .inv-axis { font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+  .inv-axis { font-size: 10px; fill: var(--muted); }
   .inv-grid-l { stroke: var(--border); stroke-width: 0.6; }
   .inv-zero { stroke: var(--muted); stroke-width: 0.8; }
   .inv-area { fill: var(--accent); opacity: 0.08; }
-  .inv-l-main { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-  .inv-l-bench { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
-  .inv-l-invested { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 6 4; opacity: 0.8; vector-effect: non-scaling-stroke; }
-  .inv-l-main-sw, .inv-l-bench-sw, .inv-l-invested-sw { display: inline-block; width: 16px; height: 0; border-top: 2px solid var(--accent); }
-  .inv-l-bench-sw { border-top: 2px dotted var(--muted); }
-  .inv-l-invested-sw { border-top: 2px dashed var(--muted); }
-  .inv-cross { stroke: var(--muted); stroke-width: 0.7; opacity: 0; vector-effect: non-scaling-stroke; }
-  .inv-dot { fill: var(--accent); opacity: 0; }
+  .inv-l-main, .inv-l-bench, .inv-l-invested { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-linejoin: round; }
+  .inv-l-main { stroke: var(--accent); stroke-width: 1.6; }
+  .inv-l-bench { stroke-dasharray: 2 3; }
+  .inv-l-invested { stroke-dasharray: 6 4; opacity: 0.8; }
+  .inv-sw-main, .inv-sw-bench, .inv-sw-invested { display: inline-block; width: 16px; border-top: 2px solid var(--accent); }
+  .inv-sw-bench { border-top: 2px dotted var(--muted); }
+  .inv-sw-invested { border-top: 2px dashed var(--muted); }
+  .inv-cross { stroke: var(--muted); stroke-width: 0.7; }
+  .inv-dot { fill: var(--accent); }
+  .inv-cross, .inv-dot { opacity: 0; }
+  .inv-svg.hovering .inv-cross, .inv-svg.hovering .inv-dot { opacity: 1; }
   .inv-hit { fill: transparent; cursor: crosshair; }
   .inv-anchor { margin: 18px 0 8px; }
   .inv-count { margin-left: 8px; color: var(--muted); letter-spacing: 0; font-weight: 600; }
   .inv-tbl-wrap { overflow-x: auto; }  /* a narrow window scrolls the table, never the page */
-  .inv-tbl {
-    width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums;
-  }
-  .inv-tbl th {
-    color: var(--muted); font-weight: 600; font-size: 11px; text-align: right;
-    padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap;
-  }
+  .inv-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .inv-tbl th { color: var(--muted); font-weight: 600; font-size: 11px; text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .inv-tbl td { text-align: right; padding: 4px 8px; height: 26px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .inv-tbl .left { text-align: left; }
   .inv-tbl tbody tr:hover td { background: var(--hover); }
-  .inv-tbl .inv-cash td { color: var(--muted); }
-  .inv-name { display: inline-flex; align-items: center; gap: 8px; border-radius: var(--r-sm); padding: 1px 4px 1px 0; outline: none; }
-  .inv-cell-tip { border-radius: var(--r-sm); padding: 1px 3px; outline: none; }
-  .inv-name:focus-visible, .inv-cell-tip:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
-  .inv-cash-mark { font-size: 10px; }
+  .inv-cash td { color: var(--muted); }
+  .inv-tipped { display: inline-flex; align-items: center; gap: 8px; border-radius: var(--r-sm); padding: 1px 3px; }
   .inv-rail { border-left: 1px solid var(--border); padding-left: 18px; min-height: 200px; }
-  @media (max-width: 1100px) { .inv-rail { border-left: none; padding-left: 0; border-top: 1px solid var(--border); } }
   .inv-rail-anchor { margin: 4px 0 8px; }
   .inv-rail-anchor ~ .inv-rail-anchor { margin-top: 20px; }
   .inv-calm { color: var(--muted); font-size: 12.5px; padding: 4px 0; }
   .inv-rail-item { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
   .inv-rail-sub { color: var(--muted); font-size: 11px; margin-top: 1px; }
-  .rich-tip-float .pf-metric-tip.inv-tip { width: 280px; }
-  .inv-tip .mt-desc { line-height: 1.5; }
-  .inv-tip-table th { text-align: left; font-weight: 500 !important; color: var(--text); }
-  .inv-tip-tech {
-    margin-top: 6px; color: var(--muted); font-size: 10.5px;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  @media (max-width: 1100px) {
+    .inv-grid { grid-template-columns: minmax(0, 1fr); }
+    .inv-rail { border-left: none; padding-left: 0; border-top: 1px solid var(--border); }
   }
+  .rich-tip-float .pf-metric-tip.inv-tip { width: 280px; }
+  .inv-tip-table th { text-align: left; font-weight: 500 !important; }
+  .inv-tip-tech { margin-top: 6px; color: var(--muted); font-size: 10.5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   .inv-empty {
-    max-width: 560px; margin: 48px auto; text-align: center;
-    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 28px 28px 24px;
+    max-width: 560px; margin: 48px auto; text-align: center; padding: 28px 28px 24px;
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-lg);
   }
   .inv-empty-title { font-size: 18px; font-weight: 700; color: var(--text); }
   .inv-empty-body { margin-top: 8px; color: var(--muted); line-height: 1.55; }
   .inv-empty-soon { margin-top: 14px; font-size: 11.5px; color: var(--muted); }
   .inv-empty-err { margin-top: 10px; font-size: 12px; color: var(--neg); }
-  .inv-loading { padding: 40px; color: var(--muted); }

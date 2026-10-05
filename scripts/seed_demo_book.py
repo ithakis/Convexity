@@ -33,51 +33,37 @@ INSTRUMENTS = {
     "VWCE.DE": {"name": "Vanguard FTSE All-World UCITS ETF", "quote_ccy": "EUR", "ccy": "EUR"},
 }
 
-# (date, type, symbol, qty, price, fee, amount, tax, ccy, qty_basis)
-# Prices are in the major unit (GBP, not pence). Amounts are for cash events.
+# Each row holds only its own fields; build_book() fills the rest from BLANK.
+# Prices are in the major unit (GBP, not pence); "amount" is for cash events.
 LEDGER = [
-    ("2023-01-03", "deposit", None, None, None, None, 50000.0, None, "USD", None),
-    ("2023-01-04", "buy", "AAPL", 60, 126.36, 1.0, None, None, "USD", "trade"),
-    ("2023-02-15", "buy", "MSFT", 40, 269.32, 1.0, None, None, "USD", "trade"),
-    ("2023-05-31", "buy", "NVDA", 20, 378.34, 1.0, None, None, "USD", "trade"),
-    ("2023-09-12", "buy", "SHEL.L", 300, 25.40, 3.0, None, None, "GBP", "trade"),
-    ("2024-01-02", "deposit", None, None, None, None, 20000.0, None, "USD", None),
-    ("2024-01-03", "buy", "VWCE.DE", 120, 105.12, 2.0, None, None, "EUR", "trade"),
-    ("2024-05-16", "dividend", "AAPL", None, None, None, 15.00, 2.25, "USD", None),
-    ("2024-08-15", "dividend", "MSFT", None, None, None, 30.00, 4.50, "USD", None),
-    ("2025-02-03", "sell", "NVDA", 80, 116.66, 1.0, None, None, "USD", "trade"),
-    ("2025-06-02", "buy", "MSFT", 10, 461.97, 1.0, None, None, "USD", "trade"),
-    ("2025-09-30", "fee", None, None, None, None, 25.0, None, "USD", None),
-    ("2025-11-13", "dividend", "AAPL", None, None, None, 15.60, 2.34, "USD", None),
-    ("2026-03-02", "withdrawal", None, None, None, None, 5000.0, None, "USD", None),
-]
+    {"date": "2023-01-03", "type": "deposit", "amount": 50000.0},
+    {"date": "2023-01-04", "type": "buy", "symbol": "AAPL", "qty": 60, "price": 126.36, "fee": 1.0},
+    {"date": "2023-02-15", "type": "buy", "symbol": "MSFT", "qty": 40, "price": 269.32, "fee": 1.0},
+    {"date": "2023-05-31", "type": "buy", "symbol": "NVDA", "qty": 20, "price": 378.34, "fee": 1.0},
+    {"date": "2023-09-12", "type": "buy", "symbol": "SHEL.L", "qty": 300, "price": 25.40, "fee": 3.0, "ccy": "GBP"},
+    {"date": "2024-01-02", "type": "deposit", "amount": 20000.0},
+    {"date": "2024-01-03", "type": "buy", "symbol": "VWCE.DE", "qty": 120, "price": 105.12, "fee": 2.0, "ccy": "EUR"},
+    {"date": "2024-05-16", "type": "dividend", "symbol": "AAPL", "amount": 15.00, "tax": 2.25},
+    {"date": "2024-08-15", "type": "dividend", "symbol": "MSFT", "amount": 30.00, "tax": 4.50},
+    {"date": "2025-02-03", "type": "sell", "symbol": "NVDA", "qty": 80, "price": 116.66, "fee": 1.0},
+    {"date": "2025-06-02", "type": "buy", "symbol": "MSFT", "qty": 10, "price": 461.97, "fee": 1.0},
+    {"date": "2025-09-30", "type": "fee", "amount": 25.0},
+    {"date": "2025-11-13", "type": "dividend", "symbol": "AAPL", "amount": 15.60, "tax": 2.34},
+    {"date": "2026-03-02", "type": "withdrawal", "amount": 5000.0},
+]  # fmt: skip
+BLANK = dict.fromkeys(("symbol", "qty", "price", "fee", "amount", "tax", "ratio", "fx_rate"))
+BLANK |= {"ccy": "USD", "qty_basis": None, "source": "demo", "batch": "b_demo", "note": ""}
 
 
 def build_book() -> dict:
-    entries = []
-    for i, (day, kind, sym, qty, price, fee, amount, tax, ccy, basis) in enumerate(LEDGER, 1):
-        entries.append(
-            {
-                "id": f"e_demo_{i:03d}",
-                "type": kind,
-                "date": day,
-                "symbol": sym,
-                "qty": qty,
-                "price": price,
-                "fee": fee,
-                "amount": amount,
-                "tax": tax,
-                "ratio": None,
-                "ccy": ccy,
-                "fx_rate": None,
-                "qty_basis": basis,
-                "source": "demo",
-                "batch": "b_demo",
-                "note": "",
-                "created_at": CREATED,
-                "updated_at": CREATED,
-            }
-        )
+    """The demo book in the agreed schema (roadmap Appendix B). Trades carry
+    qty_basis "trade" (contract-note shares), so the pre-split NVDA buy
+    exercises the split logic."""
+    entries = [
+        BLANK | row | {"id": f"e_demo_{i:03d}", "created_at": CREATED, "updated_at": CREATED}
+        | ({"qty_basis": "trade"} if row["type"] in ("buy", "sell") else {})
+        for i, row in enumerate(LEDGER, 1)
+    ]  # fmt: skip
     return {
         "version": SCHEMA_VERSION,
         "rev": 1,

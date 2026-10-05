@@ -5,6 +5,7 @@ synthetic demo book (scripts/seed_demo_book.py) gets demo figures; anything
 else answers ``empty`` until the ledger engine exists (roadmap Phase 2).
 """
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from convexity import investments, paths
 
-ROOT = Path(__file__).resolve().parents[1]
+SEED = Path(__file__).resolve().parents[1] / "scripts" / "seed_demo_book.py"
 
 
 def _write_book(entries):
@@ -23,11 +24,10 @@ def _write_book(entries):
 
 
 def _seed():
-    subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "seed_demo_book.py")],
-        check=True,
-        capture_output=True,
-    )
+    spec = importlib.util.spec_from_file_location("seed_demo_book", SEED)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _write_book(mod.build_book()["entries"])
 
 
 def test_no_book_is_empty():
@@ -62,14 +62,24 @@ def test_seeded_demo_book_is_coherent():
     # Daily points (the owner asked for daily, not weekly): weekdays only.
     days = [date.fromisoformat(d) for d in s["dates"]]
     assert len(days) > 700 and all(d.weekday() < 5 for d in days)
-    # The headline's return per period is read off the chart's own index.
-    assert h["twr"]["ALL"] == round((s["twr_index"][-1] / s["twr_index"][0] - 1) * 100, 2)
+    # Every headline return is read off the chart's own index at the base
+    # the page slices with, so the two can never disagree.
+    for p, i in s["period_start"].items():
+        assert h["twr"][p] == round((s["twr_index"][-1] / s["twr_index"][i] - 1) * 100, 2)
+
+
+def test_period_starts_clamp_month_ends_and_use_jan_1_for_ytd():
+    dates = ["2025-12-31", "2026-01-02", "2026-02-27", "2026-03-02", "2026-03-31"]
+    st = investments.period_starts(dates)
+    assert dates[st["1M"]] == "2026-02-27"  # 31 Mar - 1M = 28 Feb (clamped), last on/before
+    assert dates[st["YTD"]] == "2025-12-31"  # base is the last close before 1 Jan
+    assert st["ALL"] == 0
 
 
 def test_seed_refuses_without_convexity_home(monkeypatch):
     monkeypatch.delenv("CONVEXITY_HOME", raising=False)
     r = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "seed_demo_book.py")],
+        [sys.executable, str(SEED)],
         capture_output=True,
         text=True,
     )

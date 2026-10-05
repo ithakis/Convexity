@@ -19,108 +19,23 @@ from datetime import date, timedelta
 
 from convexity import paths
 
-# Demo figures, in USD. Positions + cash add up to the value, and weights to
-# 100%, so the prototype never shows a number that contradicts another one.
+# Demo figures, in USD, derived so nothing on the page can contradict
+# anything else: positions + cash = value, weights + cash = 100%, profit =
+# value - money put in. Prices and avg prices are in the share's quote unit.
+_POS_KEYS = ("symbol", "name", "exchange", "quote_ccy", "shares", "avg_price", "price",
+             "value", "month_pct", "profit_held", "profit_sold", "dividends",
+             "profit_price", "profit_fx", "return_pct", "note")  # fmt: skip
+# fmt: off
 _DEMO_POSITIONS = [
-    # symbol, name, exchange, quote_ccy, shares, avg_price (quote units),
-    # price (quote units), value_usd, month_pct, profit_held, profit_sold,
-    # dividends, profit_price, profit_fx, return_pct, note
-    (
-        "MSFT",
-        "Microsoft",
-        "NASDAQ",
-        "USD",
-        50,
-        293.79,
-        502.60,
-        25130.0,
-        3.1,
-        10440.0,
-        0.0,
-        25.5,
-        None,
-        None,
-        71.1,
-        None,
-    ),
-    (
-        "NVDA",
-        "NVIDIA",
-        "NASDAQ",
-        "USD",
-        120,
-        37.93,
-        186.75,
-        22410.0,
-        5.6,
-        17860.0,
-        6300.0,
-        0.0,
-        None,
-        None,
-        392.3,
-        "Split 10:1 on 10 Jun 2024",
-    ),
-    (
-        "VWCE.DE",
-        "Vanguard FTSE All-World",
-        "XETRA",
-        "EUR",
-        120,
-        105.14,
-        115.40,
-        15870.0,
-        1.2,
-        2310.0,
-        0.0,
-        0.0,
-        1350.0,
-        960.0,
-        17.0,
-        None,
-    ),
-    (
-        "AAPL",
-        "Apple",
-        "NASDAQ",
-        "USD",
-        60,
-        126.38,
-        258.10,
-        15486.0,
-        0.8,
-        7903.2,
-        0.0,
-        26.0,
-        None,
-        None,
-        104.5,
-        None,
-    ),
-    (
-        "SHEL.L",
-        "Shell",
-        "LSE",
-        "GBp",
-        300,
-        2541.0,
-        2690.0,
-        10320.0,
-        -2.0,
-        530.0,
-        0.0,
-        0.0,
-        410.0,
-        120.0,
-        5.4,
-        None,
-    ),
+    ("MSFT", "Microsoft", "NASDAQ", "USD", 50, 293.79, 502.60, 25130.0, 3.1, 10440.0, 0.0, 25.5, None, None, 71.1, None),
+    ("NVDA", "NVIDIA", "NASDAQ", "USD", 120, 37.93, 186.75, 22410.0, 5.6, 17860.0, 6300.0, 0.0, None, None, 392.3, "Split 10:1 on 10 Jun 2024"),
+    ("VWCE.DE", "Vanguard FTSE All-World", "XETRA", "EUR", 120, 105.14, 115.40, 15870.0, 1.2, 2310.0, 0.0, 0.0, 1350.0, 960.0, 17.0, None),
+    ("AAPL", "Apple", "NASDAQ", "USD", 60, 126.38, 258.10, 15486.0, 0.8, 7903.2, 0.0, 26.0, None, None, 104.5, None),
+    ("SHEL.L", "Shell", "LSE", "GBp", 300, 2541.0, 2690.0, 10320.0, -2.0, 530.0, 0.0, 0.0, 410.0, 120.0, 5.4, None),
 ]
+# fmt: on
 _DEMO_VALUE = 93040.0
 _DEMO_CASH = _DEMO_VALUE - sum(p[7] for p in _DEMO_POSITIONS)
-# Money put in = value - total profit, so the chart's "money you put in" line
-# and the Total profit cell can never disagree. Net of the demo's two flows
-# (+20,000 and -5,000, below), this is the opening deposit.
 _DEMO_PROFIT = sum(p[9] + p[10] + p[11] for p in _DEMO_POSITIONS)
 _DEMO_FLOWS = {date(2024, 1, 2): 20000.0, date(2026, 3, 2): -5000.0}
 _DEMO_FIRST_DEPOSIT = _DEMO_VALUE - _DEMO_PROFIT - sum(_DEMO_FLOWS.values())
@@ -176,112 +91,73 @@ def _demo_series() -> dict:
     return {
         "dates": dates,
         "value": [round(x * k, 2) for x in value],
-        "invested": invested,
+        "invested": [round(x, 2) for x in invested],
         "bench_value": [round(x * k, 2) for x in bench_value],
         "twr_index": [round(x, 6) for x in twr],
         "bench_index": [round(x, 6) for x in bench],
     }
 
 
+PERIODS = ("1M", "3M", "YTD", "1Y", "3Y", "ALL")
 _PERIOD_MONTHS = {"1M": 1, "3M": 3, "1Y": 12, "3Y": 36}
 
 
-def _period_returns(series: dict, key: str) -> dict:
-    """Return % per period pill, read off the chart's own index.
+def period_starts(dates: list[str]) -> dict:
+    """Index of each period's base point: the last date on or before its start.
 
-    Same base rule as the page's invSlice(): the last point on or before the
-    period start. The headline can then never disagree with where the chart
-    line ends.
+    The server is the only place this rule lives. The page slices the chart
+    with these indexes, so the headline return and the end of the chart line
+    can never disagree (a JS copy once differed by a day in UTC+ zones).
+    Month arithmetic clamps the day to 28, so 31 Mar - 1M is 28 Feb.
     """
-    dates = [date.fromisoformat(d) for d in series["dates"]]
-    idx, last = series[key], dates[-1]
-    out = {}
-    for p in ("1M", "3M", "YTD", "1Y", "3Y", "ALL"):
-        if p == "ALL":
-            i0 = 0
+    last, out = date.fromisoformat(dates[-1]), {"ALL": 0}
+    for p in PERIODS[:-1]:
+        if p == "YTD":
+            start = date(last.year, 1, 1)
         else:
-            if p == "YTD":
-                start = date(last.year, 1, 1)
-            else:
-                m = last.month - _PERIOD_MONTHS[p]
-                y, m = last.year + (m - 1) // 12, (m - 1) % 12 + 1
-                start = date(y, m, min(last.day, 28))
-            i0 = max((i for i, d in enumerate(dates) if d <= start), default=0)
-        out[p] = round((idx[-1] / idx[i0] - 1) * 100, 2)
+            m = last.month - _PERIOD_MONTHS[p]
+            start = date(last.year + (m - 1) // 12, (m - 1) % 12 + 1, min(last.day, 28))
+        out[p] = max((i for i, d in enumerate(dates) if d <= start.isoformat()), default=0)
     return out
 
 
+def _period_returns(idx: list[float], starts: dict) -> dict:
+    return {p: round((idx[-1] / idx[i] - 1) * 100, 2) for p, i in starts.items()}
+
+
 def _demo_book() -> dict:
+    """Fixed demo payload, in the exact shape Phase 2 must fill for real."""
     series = _demo_series()
-    positions = []
-    for (
-        sym,
-        name,
-        exch,
-        qccy,
-        shares,
-        avg,
-        px,
-        val,
-        mpct,
-        held,
-        sold,
-        div,
-        ppx,
-        pfx,
-        ret,
-        note,
-    ) in _DEMO_POSITIONS:
-        positions.append(
-            {
-                "symbol": sym,
-                "name": name,
-                "exchange": exch,
-                "quote_ccy": qccy,
-                "shares": shares,
-                "avg_price": avg,
-                "price": px,
-                "value": val,
-                "weight": val / _DEMO_VALUE * 100,
-                "month_pct": mpct,
-                "profit": held + sold + div,
-                "profit_held": held,
-                "profit_sold": sold,
-                "dividends": div,
-                "profit_price": ppx,
-                "profit_fx": pfx,
-                "return_pct": ret,
-                "note": note,
-            }
-        )
-    held = sum(p["profit_held"] for p in positions)
-    sold = sum(p["profit_sold"] for p in positions)
-    div = sum(p["dividends"] for p in positions)
+    starts = series["period_start"] = period_starts(series["dates"])
+    twr = _period_returns(series["twr_index"], starts)
+    positions = [
+        dict(zip(_POS_KEYS, row, strict=True)) | {
+            "weight": row[7] / _DEMO_VALUE * 100, "profit": row[9] + row[10] + row[11]}
+        for row in _DEMO_POSITIONS
+    ]  # fmt: skip
     return {
         "demo": True,
         "empty": False,
-        "ccy": "USD",
-        "as_of": "2026-10-02",
+        "ccy": "USD",  # the currency of every amount; the page converts for display
         "headline": {
             "value": _DEMO_VALUE,
             "cash": _DEMO_CASH,
+            "cash_weight": _DEMO_CASH / _DEMO_VALUE * 100,
             "month_abs": 2140.0,
             "month_pct": 2.4,
-            "profit_total": held + sold + div,
-            "profit_held": held,
-            "profit_sold": sold,
-            "dividends": div,
-            "twr": _period_returns(series, "twr_index"),
-            "bench_twr": _period_returns(series, "bench_index"),
-            "mwr_ann": round(
-                _period_returns(series, "twr_index")["1Y"] + 1.2, 2
-            ),  # demo: good timing
+            "profit_total": _DEMO_PROFIT,
+            "profit_held": sum(p["profit_held"] for p in positions),
+            "profit_sold": sum(p["profit_sold"] for p in positions),
+            "dividends": sum(p["dividends"] for p in positions),
+            "twr": twr,
+            "bench_twr": _period_returns(series["bench_index"], starts),
+            "mwr_ann": round(twr["1Y"] + 1.2, 2),  # demo: money added before a rise
         },
         "positions": positions,
         "series": series,
         "upcoming": [
-            {"name": "Microsoft", "what": "Earnings", "date": "2026-10-28"},
-            {"name": "Apple", "what": "Ex-dividend", "date": "2026-11-10"},
+            {"name": "Microsoft", "what": "earnings", "date": "2026-10-28"},
+            {"name": "Apple", "what": "ex-dividend", "date": "2026-11-10"},
         ],
         "attention": [],
     }

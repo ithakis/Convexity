@@ -66,7 +66,9 @@ verify → review → sign-off). Follow CLAUDE.md. Never use my real data.
      prompt current.
    - Commit on `feature/my-investments-pN`, cut from `distribution`, and open a
      PR to `distribution`.
-   - Reason through the version bump and ask first (CLAUDE.md §15).
+   - Reason through the version bump and ask first (CLAUDE.md §15). At a
+     bump, rename CHANGELOG's `## Unreleased` to the version header (the
+     release-notes slice keys on `## X.Y.Z`).
    - After the merge, give the owner the sync command (CLAUDE.md §3).
 
 ## Rules for every phase
@@ -131,8 +133,8 @@ the owner reacts to something that looks real.
 - [x] Light, dark and Bloomberg themes; around 1200 and 1440 px, and one
       column.
 - [x] Box nesting is at most two levels (sheet, then chart card).
-- [x] 988 tests pass, including `tests/test_investments_preview.py` (a real
-      book never gets demo numbers; the demo book is coherent).
+- [x] The full test suite passes, including `tests/test_investments_preview.py`
+      (a real book never gets demo numbers; the demo book is coherent).
 
 **Feedback log:**
 - 2026-10-05: Q&A settled the decisions in Appendix A. The owner asked for
@@ -180,7 +182,7 @@ the owner reacts to something that looks real.
   hover readout, the holdings table with names, a cash row, the calm rail and
   the empty state. A stub `GET /api/investments/book` (`investments.py`)
   serves either the demo book or `{empty}`. Checked: all four page states,
-  light / dark / Bloomberg, and 983 tests passing. Waiting for the owner's
+  light / dark / Bloomberg, and the full test suite passes. Waiting for the owner's
   review.
 - 2026-10-05: **Live review: "looks good, small tweaks".** All three Value-mode
   lines stay.
@@ -210,10 +212,17 @@ the owner reacts to something that looks real.
   the headline return is read off the chart's own index), or the owner reads
   the mismatch as a bug.
 - Phase 2 must replace `book_preview()` behind the same payload keys:
-  `headline{value, cash, month_abs, month_pct, profit_total, profit_held,
-  profit_sold, dividends, twr{period}, bench_twr{period}, mwr_ann}`,
-  `positions[]`, `series{dates, value, invested, bench_value, twr_index,
-  bench_index}`, `upcoming[]`, `attention[]`.
+  `ccy`, `headline{value, cash, cash_weight, month_abs, month_pct,
+  profit_total, profit_held, profit_sold, dividends, twr{period},
+  bench_twr{period}, mwr_ann}`, `positions[]`, `series{dates, value,
+  invested, bench_value, twr_index, bench_index, period_start{period}}`,
+  `upcoming[]`, `attention[]`. `period_starts()` is the one place the
+  period-base rule lives.
+- Adversarial review (2026-10-05) fixed: FX switch and startup rates not
+  re-rendering the page; JS and Python period bases disagreeing (now the
+  server sends indexes); a stretched SVG (now drawn at pixel width); the
+  wrong currency in tips and the cash mark; null crashes; unescaped dates;
+  R / Refresh acting on the hidden research tab. It also cut about 200 lines.
 - The version did not change in Phase 1 (owner's call); 1.20.0 is meant for
   Phase 2, when a real book works.
 

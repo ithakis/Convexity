@@ -9,7 +9,7 @@
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"></script>
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body data-page="research">
 
 <div class="topbar" id="topbar">
   <button id="inv-btn" class="tab-btn" data-tip="Open My Investments: your real book (what you own, what it is worth, how it has done) and what needs your attention.">My Investments</button>
@@ -22,7 +22,7 @@
        states the real cost first. Either way it runs as a background job that
        survives switching tabs or reloading the page, and is cancellable from
        the status chip. The bar and the radial fill live inside the button. -->
-  <button id="refresh" class="refresh-btn" data-tip="Refresh this portfolio: quotes, then news &amp; sentiment. Runs in the background — you can keep working, and cancel from the status chip. Press and hold (or Shift+R) to refresh every saved portfolio.">
+  <button id="refresh" class="refresh-btn research-only" data-tip="Refresh this portfolio: quotes, then news &amp; sentiment. Runs in the background — you can keep working, and cancel from the status chip. Press and hold (or Shift+R) to refresh every saved portfolio.">
     <span class="rf-hold" id="rf-hold" aria-hidden="true"></span>
     <span class="rf-bar" id="rf-bar" aria-hidden="true"></span>
     <span class="rf-label" id="rf-label">↻ Refresh</span>
@@ -72,10 +72,7 @@
 </div>
 <div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
 
-<!-- My Investments (docs/plans/my-investments-roadmap.md): the user's REAL
-     book, kept apart from the hypothetical research tabs. showPage() in app.js
-     owns which page is visible; on this page the research-only blocks (main
-     table, column views, analyst section, Optimize) are hidden by CSS. -->
+<!-- My Investments: the user's REAL book; showPage() (app.js) owns which page shows. -->
 <div id="inv-page" class="hidden" aria-label="My Investments"></div>
 
 <div id="input-panel" class="hidden">

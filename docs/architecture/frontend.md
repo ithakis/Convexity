@@ -11,25 +11,24 @@ Real static files served by `server.py` — `index.html`, `app.js`,
 dependency (loaded from CDN, used only for column-guide formulas).
 
 ### Pages and My Investments (`showPage`, `INV`)
-- `showPage(name)` is the only thing that switches pages: `"investments"`
-  (`#inv-page`), `"portfolio"` (`#input-panel`), `"news"` (`#news-panel`) or
-  `"table"` (both research panels closed). It sets the topbar's active tab and
-  `body[data-page]`. On `investments`, CSS hides every `.research-only` block
-  (main table, column-view bar, analyst section, Optimize). The last page is
-  kept in localStorage `page`; My Investments reopens if it was last.
-- My Investments (roadmap `docs/plans/my-investments-roadmap.md`) renders
-  from `GET /api/investments/book` into `INV.book`. It has its own table
-  (`#inv-tbl`), not `#tbl`/`COLS`, because positions have a different
-  identity (cash row, closed positions). `drawInvChart()` is a hand-written
-  SVG with Value / Return % modes. A mode switch redraws only the chart, and
-  the toolbar and reading line have a fixed height, so the card never changes
-  size.
-- **The owner's rules for this page:** one number per headline cell, with
-  explanations in `RICH_TIPS` hover cards (`inv:*`: plain words, technical
-  name in small print). No dotted underlines and no info icons (`#inv-page
-  [data-rich-tip]` turns the global underline off). Company names, not
-  tickers. "This month", never daily figures, in the headline; the chart
-  itself is daily.
+- `showPage(name)` is the only page switch: `"investments"` (`#inv-page`),
+  `"portfolio"`, `"news"` or `"table"`. It sets the active topbar tab and
+  `body[data-page]`; on `investments` CSS hides every `.research-only` block
+  (main table, column views, analyst section, Optimize, Refresh). The R
+  shortcut is off there too. My Investments reopens on launch if it was last.
+- The page renders `GET /api/investments/book` into `INV.book` with its own
+  table (`#inv-tbl`, not `#tbl`/`COLS`: positions have a cash row and, later,
+  closed lots). Amounts arrive in `book.ccy` and convert to `FX_QUOTE`.
+  `fxSelect` and the startup rate load re-render it.
+- The chart's period base indexes come from the server
+  (`series.period_start`), the same base as the headline returns, so the two
+  can't disagree. It is drawn at its pixel width (no stretched text). A
+  Value / Return % switch redraws only the chart; the toolbar and reading are
+  fixed-height single lines, so the card never resizes.
+- **Owner's rules for this page:** one number per headline cell, with details
+  in `RICH_TIPS` hover cards (`inv:*`: plain words, technical name small);
+  no dotted underlines or info icons; company names, not tickers; "this
+  month", not daily, in the headline (the chart itself is daily).
 
 ### State (`STATE`, `DATA`, `VIEWS`, `WATCHLISTS`)
 - `DATA` — currently-rendered rows

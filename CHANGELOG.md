@@ -11,8 +11,7 @@ launch); until then they have no tags or GitHub Releases of their own.
 
 ## Unreleased
 
-- **My Investments, the page shell** (issue #1, roadmap Phase 1): a new first tab for your real book, kept apart from the research tabs. It has a hero value with "this month", four headline numbers (Total profit, Return, vs S&P 500, Your money) whose explanations sit in hover cards, a daily value / return chart against the S&P 500, a holdings table by company name, and a calm attention rail. Until holdings can be entered (Phase 2), the tab shows its empty state; the made-up figures appear only for the demo book used in development (`scripts/seed_demo_book.py`). The plan, progress and feedback log live in `docs/plans/my-investments-roadmap.md`.
-- One `showPage()` now switches between My Investments, Portfolio, News and the plain table, replacing three hand-copied toggles.
+- **My Investments, the page shell** (issue #1, roadmap Phase 1): a new first tab for your real book, separate from the research tabs. It shows your value and this month's change, Total profit, Return against the S&P 500, a daily value chart, holdings by company name, and a calm attention rail; details sit in hover cards. Until holdings can be entered (Phase 2) it shows its empty state.
 
 ## 1.19.5 — 2026-10-05
 
