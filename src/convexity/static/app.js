@@ -4518,13 +4518,9 @@ async function createNewTab() {
   STATE.customWeights = null;
   DATA = []; render();
   setEntries("");
-  // Keep the topbar tab state in sync with the panel being opened — the
-  // accent fill on .tab-btn.active is the only "which tab is open" signal,
-  // and this open-path bypasses the #edit-btn click handler that manages it.
-  $("#input-panel").classList.remove("hidden");
-  $("#edit-btn").classList.add("active");
-  $("#news-panel").classList.add("hidden");
-  $("#news-btn").classList.remove("active");
+  // This open-path bypasses the #edit-btn handler, so it goes through
+  // showPage() itself to keep the topbar's active tab in sync.
+  showPage("portfolio");
   $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Add companies with the search box above.</div>`;
   renderTabs(); renderEditorMeta();
   $("#co-q").focus();
@@ -6635,15 +6631,9 @@ $("#co-grid").addEventListener("keydown", (e) => {
 });
 
 $("#edit-btn").onclick = () => {
-  const panel = $("#input-panel");
-  const willOpen = panel.classList.contains("hidden");
-  if (willOpen) {
-    // Mutual exclusion with the News panel — opening Portfolio closes News.
-    $("#news-panel").classList.add("hidden");
-    $("#news-btn").classList.remove("active");
-  }
-  panel.classList.toggle("hidden");
-  $("#edit-btn").classList.toggle("active", willOpen);
+  // Portfolio toggles: open it, or close it back to the plain table.
+  const willOpen = $("#input-panel").classList.contains("hidden");
+  showPage(willOpen ? "portfolio" : "table");
   if (willOpen) {
     // If we open the panel without an active view yet, start an ad-hoc tab.
     if (!STATE.activeView) STATE.activeView = AD_HOC_KEY;
@@ -6725,14 +6715,8 @@ window.addEventListener("wheel", (e) => {
 
 /* --- News & Sentiment panel --- */
 $("#news-btn").onclick = () => {
-  const panel = $("#news-panel");
-  const willOpen = panel.classList.contains("hidden");
-  if (willOpen) {
-    $("#input-panel").classList.add("hidden");
-    $("#edit-btn").classList.remove("active");
-  }
-  panel.classList.toggle("hidden");
-  $("#news-btn").classList.toggle("active", willOpen);
+  const willOpen = $("#news-panel").classList.contains("hidden");
+  showPage(willOpen ? "news" : "table");
   if (willOpen) loadNewsSentiment();
 };
 $("#ns-diag-toggle").onclick = (e) => {
@@ -11790,6 +11774,324 @@ function setupSettings() {
   }
 }
 
+/* ===========================================================================
+ * Pages. One function owns which page is showing, so the topbar's active tab
+ * and the panels can never disagree (the three hand-copied toggles it
+ * replaced each had to remember the others).
+ *   investments  My Investments: the real book (#inv-page)
+ *   portfolio    research: the Portfolio panel above the main table
+ *   news         research: the News panel above the main table
+ *   table        research: the main table alone (both panels closed)
+ * body[data-page] lets CSS hide the research-only blocks on My Investments.
+ * --------------------------------------------------------------------------- */
+function showPage(name) {
+  document.body.dataset.page = name === "investments" ? "investments" : "research";
+  $("#inv-page").classList.toggle("hidden", name !== "investments");
+  $("#input-panel").classList.toggle("hidden", name !== "portfolio");
+  $("#news-panel").classList.toggle("hidden", name !== "news");
+  for (const [id, n] of [["#inv-btn", "investments"], ["#edit-btn", "portfolio"], ["#news-btn", "news"]]) {
+    $(id).classList.toggle("active", name === n);
+  }
+  try { localStorage.setItem("page", name); } catch (e) {}
+}
+
+/* ===========================================================================
+ * My Investments (docs/plans/my-investments-roadmap.md, Phase 1: the shell).
+ * The page reads GET /api/investments/book. In Phase 1 that is either
+ * {empty:true} or the synthetic demo book (demo:true); Phases 2-3 fill the
+ * same keys from the ledger engine.
+ *
+ * Owner's rules for this page (feedback log, 2026-10-05): one number per KPI
+ * cell, every explanation in a hover card (plain words, technical name in
+ * small print); no dotted underlines or info icons; company names, not
+ * tickers; no daily figures ("this month" instead of "today").
+ * --------------------------------------------------------------------------- */
+const INV = { book: null, period: "1Y", mode: "value", loading: false };
+const INV_PERIODS = ["1M", "3M", "YTD", "1Y", "3Y", "ALL"];
+const INV_PERIOD_WORDS = { "1M": "the last month", "3M": "the last 3 months", "YTD": "this year so far",
+  "1Y": "the last year", "3Y": "the last 3 years", "ALL": "since you started" };
+
+function invMoney(v, opts = {}) {
+  if (v == null || !isFinite(v)) return na();
+  const ccy = INV.book?.ccy || "USD";
+  const s = fmtMoney(Math.abs(v), ccy);
+  const sign = opts.signed ? (v > 0 ? "+" : v < 0 ? "\u2212" : "") : (v < 0 ? "\u2212" : "");
+  return sign + (opts.whole ? s.replace(/\.\d+$/, "") : s);
+}
+function invPct(v, d = 1) {
+  if (v == null || !isFinite(v)) return na();
+  return (v > 0 ? "+" : v < 0 ? "\u2212" : "") + Math.abs(v).toFixed(d) + "%";
+}
+function invCls(v) { return v > 0 ? "pos" : v < 0 ? "neg" : ""; }
+/* A price in the share's own quote unit: pence for LSE (GBp), never converted. */
+function invQuotePrice(v, qccy) {
+  if (v == null || !isFinite(v)) return na();
+  if (qccy === "GBp") return Math.round(v).toLocaleString() + "p";
+  const sym = FX_SYMBOL[qccy] || (qccy + " ");
+  return sym + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+async function invLoad() {
+  if (INV.loading) return;
+  INV.loading = true;
+  try {
+    const r = await fetch("/api/investments/book");
+    INV.book = r.ok ? await r.json() : { empty: true, error: true };
+  } catch (e) {
+    INV.book = { empty: true, error: true };
+  } finally {
+    INV.loading = false;
+  }
+  invRender();
+}
+
+function invRender() {
+  const host = $("#inv-page");
+  const b = INV.book;
+  if (!b) { host.innerHTML = `<div class="inv-loading">${lcHtml("loading your investments", {bar: true})}</div>`; return; }
+  if (b.empty) { host.innerHTML = invEmptyHtml(b); return; }
+  host.innerHTML = `
+    <div class="inv-grid">
+      <div class="inv-main">
+        ${invHeroHtml(b)}
+        <div class="section-anchor inv-anchor"><span class="sa-kicker">Holdings<span class="inv-count">${b.positions.length}</span></span></div>
+        ${invHoldingsHtml(b)}
+      </div>
+      <aside class="inv-rail" aria-label="Attention">${invRailHtml(b)}</aside>
+    </div>`;
+  drawInvChart();
+}
+
+function invEmptyHtml(b) {
+  return `
+    <div class="inv-empty">
+      <div class="inv-empty-title">Track your real investments</div>
+      <div class="inv-empty-body">See what you own, what it is worth, how it has done against the market, and what needs your attention. Kept separate from the portfolios you research in the other tabs.</div>
+      <div class="inv-empty-soon">Adding holdings and importing broker statements arrive in the next updates.</div>
+      ${b.error ? `<div class="inv-empty-err">Couldn't load your investments. Try again in a moment.</div>` : ""}
+    </div>`;
+}
+
+function invHeroHtml(b) {
+  const h = b.headline, p = INV.period;
+  const twr = h.twr[p], bench = h.bench_twr[p], diff = (twr != null && bench != null) ? twr - bench : null;
+  return `
+    <div class="inv-sheet">
+      <div class="inv-hero">
+        <span class="inv-value">${invMoney(h.value, {whole: true})}</span>
+        <span class="inv-month ${invCls(h.month_abs)}">${invMoney(h.month_abs, {signed: true, whole: true})} (${invPct(h.month_pct)}) this month</span>
+        ${b.demo ? `<span class="inv-demo" data-tip="These are made-up figures from the demo book, used while the page is being designed.">Demo data</span>` : ""}
+      </div>
+      <div class="inv-kpis">
+        <div class="inv-kpi" data-rich-tip="inv:profit" tabindex="0"><div class="inv-kpi-k">Total profit</div><div class="inv-kpi-v ${invCls(h.profit_total)}">${invMoney(h.profit_total, {signed: true, whole: true})}</div></div>
+        <div class="inv-kpi" data-rich-tip="inv:twr" tabindex="0"><div class="inv-kpi-k">Return · ${p}</div><div class="inv-kpi-v ${invCls(twr)}">${invPct(twr)}</div></div>
+        <div class="inv-kpi" data-rich-tip="inv:vs" tabindex="0"><div class="inv-kpi-k">vs S&amp;P 500</div><div class="inv-kpi-v ${invCls(diff)}">${diff == null ? na() : (diff > 0 ? "+" : diff < 0 ? "\u2212" : "") + Math.abs(diff).toFixed(1) + " pp"}</div></div>
+        <div class="inv-kpi" data-rich-tip="inv:mwr" tabindex="0"><div class="inv-kpi-k">Your money</div><div class="inv-kpi-v ${invCls(h.mwr_ann)}">${invPct(h.mwr_ann)} / yr</div></div>
+      </div>
+      <div class="pf-chart-card inv-chart-card">
+        <div class="inv-chart-bar">
+          <span class="pf-contrib-toggle inv-mode" role="group" aria-label="Chart">
+            <button type="button" data-inv-mode="value" class="${INV.mode === "value" ? "active" : ""}" aria-pressed="${INV.mode === "value"}">Value</button>
+            <button type="button" data-inv-mode="return" class="${INV.mode === "return" ? "active" : ""}" aria-pressed="${INV.mode === "return"}">Return %</button>
+          </span>
+          <div class="pf-period-tabs inv-periods" role="tablist" aria-label="Period">
+            ${INV_PERIODS.map(k => `<button type="button" data-inv-period="${k}" class="${k === p ? "active" : ""}">${k}</button>`).join("")}
+          </div>
+        </div>
+        <div class="inv-chart-wrap">
+          <svg id="inv-svg" viewBox="0 0 720 240" preserveAspectRatio="none" aria-label="Value chart"></svg>
+          <div class="inv-readout" id="inv-readout"></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function invHoldingsHtml(b) {
+  const rows = b.positions.map(x => `
+    <tr>
+      <td class="left"><span class="inv-name" data-rich-tip="inv:pos" data-sym="${escapeHtml(x.symbol)}" tabindex="0">${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span></td>
+      <td>${Number(x.shares).toLocaleString()}</td>
+      <td>${invQuotePrice(x.avg_price, x.quote_ccy)}</td>
+      <td>${invMoney(x.value, {whole: true})}</td>
+      <td>${x.weight.toFixed(1)}%</td>
+      <td class="${invCls(x.month_pct)}">${invPct(x.month_pct)}</td>
+      <td class="${invCls(x.profit)}"><span class="inv-cell-tip" data-rich-tip="inv:posprofit" data-sym="${escapeHtml(x.symbol)}" tabindex="0">${invMoney(x.profit, {signed: true, whole: true})}</span></td>
+      <td class="${invCls(x.return_pct)}">${invPct(x.return_pct, 0)}</td>
+    </tr>`).join("");
+  const cash = b.headline.cash;
+  return `
+    <div class="inv-tbl-wrap"><table class="inv-tbl" id="inv-tbl">
+      <thead><tr><th class="left">Holding</th><th>Shares</th><th>Avg price</th><th>Value</th><th>Weight</th><th>Month</th><th>Profit</th><th>Return</th></tr></thead>
+      <tbody>${rows}
+        <tr class="inv-cash"><td class="left"><span class="inv-name"><span class="logo-fallback inv-cash-mark">$</span><span>Cash</span></span></td><td></td><td></td><td>${invMoney(cash, {whole: true})}</td><td>${(cash / b.headline.value * 100).toFixed(1)}%</td><td></td><td></td><td></td></tr>
+      </tbody>
+    </table></div>`;
+}
+
+function invRailHtml(b) {
+  const att = (b.attention || []);
+  const up = (b.upcoming || []);
+  return `
+    <div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">Attention</span></div>
+    ${att.length ? att.map(a => `<div class="inv-rail-item">${escapeHtml(a.text)}</div>`).join("") : `<div class="inv-calm">Nothing needs you today.</div>`}
+    <div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">Upcoming</span></div>
+    ${up.length ? up.map(u => `<div class="inv-rail-item"><div>${escapeHtml(u.name)} ${escapeHtml(u.what.toLowerCase())}</div><div class="inv-rail-sub">${fmtDateMDY(u.date)}</div></div>`).join("") : `<div class="inv-calm">No events in the next two weeks.</div>`}`;
+}
+
+function invPos(sym) { return (INV.book?.positions || []).find(x => x.symbol === sym); }
+function invTip(title, body, rows, tech) {
+  const table = rows && rows.length ? `<table class="mt-table inv-tip-table"><tbody>${rows.map(([k, v, c]) => `<tr><th>${k}</th><td class="${c || ""}">${v}</td></tr>`).join("")}</tbody></table>` : "";
+  return `<div class="pf-metric-tip inv-tip" role="tooltip"><div class="mt-name">${title}</div>${body ? `<div class="mt-desc">${body}</div>` : ""}${table}${tech ? `<div class="inv-tip-tech">${tech}</div>` : ""}</div>`;
+}
+RICH_TIPS["inv:profit"] = () => {
+  const h = INV.book?.headline; if (!h) return "";
+  return invTip("Total profit since you started", "What your investments have earned you, after fees.", [
+    ["On what you still hold", invMoney(h.profit_held, {signed: true, whole: true}), invCls(h.profit_held)],
+    ["On what you sold", invMoney(h.profit_sold, {signed: true, whole: true}), invCls(h.profit_sold)],
+    ["Dividends", invMoney(h.dividends, {signed: true, whole: true}), invCls(h.dividends)],
+  ], "= value \u2212 money you put in");
+};
+RICH_TIPS["inv:twr"] = () => {
+  const h = INV.book?.headline; if (!h) return "";
+  return invTip("How your investments performed", `The growth of your holdings over ${INV_PERIOD_WORDS[INV.period]}, ignoring when you added or took out money. This is the fair number to compare with the S&amp;P 500, or with a friend.`, null, "time-weighted return (TWR)");
+};
+RICH_TIPS["inv:vs"] = () => {
+  const h = INV.book?.headline; if (!h) return "";
+  const t = h.twr[INV.period], s = h.bench_twr[INV.period], d = t - s;
+  const word = d >= 0 ? "Ahead of the market" : "Behind the market";
+  return invTip(word, `Over ${INV_PERIOD_WORDS[INV.period]} you ${d >= 0 ? "beat" : "trailed"} the S&amp;P 500 by ${Math.abs(d).toFixed(1)} percentage points.`, [
+    ["You", invPct(t), invCls(t)], ["S&amp;P 500, with dividends", invPct(s), invCls(s)],
+  ], "pp = percentage points");
+};
+RICH_TIPS["inv:mwr"] = () => {
+  const h = INV.book?.headline; if (!h) return "";
+  const gap = h.mwr_ann - (h.twr["1Y"] ?? h.mwr_ann);
+  const why = Math.abs(gap) < 0.3 ? "About the same as your Return: when you added money made little difference."
+    : gap > 0 ? `It's ${gap.toFixed(1)} points above your Return because you added money before prices rose. Good timing.`
+    : `It's ${Math.abs(gap).toFixed(1)} points below your Return because more of your money went in before prices fell.`;
+  return invTip("How your actual money grew", `The yearly growth of the money you put in, counting when you added or withdrew it. ${why}`, null, "money-weighted return (MWR), per year");
+};
+RICH_TIPS["inv:pos"] = (host) => {
+  const x = invPos(host.dataset.sym); if (!x) return "";
+  return invTip(`${escapeHtml(x.name)} · ${escapeHtml(x.symbol)}`, `Now ${invQuotePrice(x.price, x.quote_ccy)}`, null,
+    [x.exchange, x.quote_ccy === "GBp" ? "GBP, shown in " + (INV.book.ccy) : x.quote_ccy !== INV.book.ccy ? x.quote_ccy + ", shown in " + INV.book.ccy : x.quote_ccy, x.note].filter(Boolean).map(escapeHtml).join(" · "));
+};
+RICH_TIPS["inv:posprofit"] = (host) => {
+  const x = invPos(host.dataset.sym); if (!x) return "";
+  const rows = [];
+  if (x.profit_price != null && x.profit_fx != null) {
+    rows.push(["From the price", invMoney(x.profit_price, {signed: true, whole: true}), invCls(x.profit_price)]);
+    rows.push(["From the currency", invMoney(x.profit_fx, {signed: true, whole: true}), invCls(x.profit_fx)]);
+  } else {
+    rows.push(["Still holding", invMoney(x.profit_held, {signed: true, whole: true}), invCls(x.profit_held)]);
+  }
+  if (x.profit_sold) rows.push(["Sold", invMoney(x.profit_sold, {signed: true, whole: true}), invCls(x.profit_sold)]);
+  if (x.dividends) rows.push(["Dividends", invMoney(x.dividends, {signed: true, whole: true}), invCls(x.dividends)]);
+  return invTip(`Profit on ${escapeHtml(x.name)}`, "", rows, "");
+};
+
+/* The value chart: one SVG, drawn by hand like the rest of the app's charts.
+ * Value mode: your value (area), the money you put in (dashed), and the same
+ * deposits put into the S&P 500 (dotted). Return mode: your return against
+ * the S&P 500, both from 0% at the start of the period. */
+function invSlice(s) {
+  const n = s.dates.length, last = new Date(s.dates[n - 1]);
+  let start;
+  if (INV.period === "ALL") return 0;
+  if (INV.period === "YTD") start = new Date(last.getFullYear(), 0, 1);
+  else {
+    const months = { "1M": 1, "3M": 3, "1Y": 12, "3Y": 36 }[INV.period];
+    start = new Date(last); start.setMonth(start.getMonth() - months);
+  }
+  let i0 = 0;
+  for (let i = 0; i < n; i++) if (new Date(s.dates[i]) <= start) i0 = i;
+  return i0;
+}
+function drawInvChart() {
+  const svg = $("#inv-svg"), readout = $("#inv-readout");
+  const b = INV.book; if (!svg || !b) return;
+  const s = b.series, i0 = invSlice(s), n = s.dates.length - i0;
+  const W = 720, H = 240, L = 56, R = 12, T = 10, B = 22;
+  let lines;
+  if (INV.mode === "value") {
+    lines = [
+      { key: "value", label: "Your value", vals: s.value.slice(i0), cls: "inv-l-main", area: true },
+      { key: "bench", label: "Same money in the S&amp;P 500", vals: s.bench_value.slice(i0), cls: "inv-l-bench" },
+      { key: "invested", label: "Money you put in", vals: s.invested.slice(i0), cls: "inv-l-invested" },
+    ];
+  } else {
+    const r = (arr) => arr.slice(i0).map(v => (v / arr[i0] - 1) * 100);
+    lines = [
+      { key: "value", label: "Your return", vals: r(s.twr_index), cls: "inv-l-main", area: false },
+      { key: "bench", label: "S&amp;P 500", vals: r(s.bench_index), cls: "inv-l-bench" },
+    ];
+  }
+  const all = lines.flatMap(l => l.vals);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
+  const X = (i) => L + i * (W - L - R) / Math.max(1, n - 1);
+  const Y = (v) => T + (hi - v) * (H - T - B) / (hi - lo);
+  const fmtAxis = (v) => INV.mode === "value" ? invMoney(v, {whole: true}).replace(/,\d{3}$/, "k") : (v > 0 ? "+" : "") + v.toFixed(0) + "%";
+  let g = "";
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (hi - lo) * k / 4;
+    g += `<line class="inv-grid-l" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text class="inv-axis" x="${L - 6}" y="${Y(v) + 3}" text-anchor="end">${fmtAxis(v)}</text>`;
+  }
+  if (INV.mode === "return" && lo < 0 && hi > 0) g += `<line class="inv-zero" x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}"/>`;
+  const pts = (vals) => vals.map((v, i) => X(i).toFixed(1) + "," + Y(v).toFixed(1)).join(" ");
+  for (const l of [...lines].reverse()) {
+    if (l.area) g += `<polygon class="inv-area" points="${X(0)},${Y(lo)} ${pts(l.vals)} ${X(n - 1)},${Y(lo)}"/>`;
+    g += `<polyline class="${l.cls}" points="${pts(l.vals)}"/>`;
+  }
+  const d0 = s.dates[i0], d1 = s.dates[s.dates.length - 1];
+  g += `<text class="inv-axis" x="${L}" y="${H - 6}">${fmtDateMDY(d0)}</text><text class="inv-axis" x="${W - R}" y="${H - 6}" text-anchor="end">${fmtDateMDY(d1)}</text>`;
+  g += `<line class="inv-cross" id="inv-cross" x1="0" x2="0" y1="${T}" y2="${H - B}"/><circle class="inv-dot" id="inv-dot" r="3.5"/>`;
+  g += `<rect class="inv-hit" x="${L}" y="0" width="${W - L - R}" height="${H}"/>`;
+  svg.innerHTML = g;
+  // The legend lives in the reading under the plot (label + value per line),
+  // not in the toolbar: a toolbar whose width depends on the mode can wrap in
+  // one mode and not the other, and the chart would jump in size.
+  const fmtV = (v) => INV.mode === "value" ? invMoney(v, {whole: true}) : invPct(v);
+  const readoutAt = (i) => lines.map(l => `<span class="inv-ro"><i class="${l.cls}-sw"></i><span class="inv-ro-k">${l.label}</span><b>${fmtV(l.vals[i])}</b></span>`).join("")
+    + `<span class="inv-ro-date">${fmtDateMDY(s.dates[i0 + i])}</span>`;
+  const idle = () => { readout.innerHTML = readoutAt(n - 1); };
+  idle();
+  const hit = svg.querySelector(".inv-hit"), cross = svg.querySelector("#inv-cross"), dot = svg.querySelector("#inv-dot");
+  hit.addEventListener("mousemove", (e) => {
+    const r = svg.getBoundingClientRect();
+    const px = (e.clientX - r.left) * (W / r.width);
+    const i = Math.max(0, Math.min(n - 1, Math.round((px - L) / ((W - L - R) / Math.max(1, n - 1)))));
+    cross.setAttribute("x1", X(i)); cross.setAttribute("x2", X(i)); cross.style.opacity = 1;
+    dot.setAttribute("cx", X(i)); dot.setAttribute("cy", Y(lines[0].vals[i])); dot.style.opacity = 1;
+    readout.innerHTML = readoutAt(i);
+  });
+  hit.addEventListener("mouseleave", () => { cross.style.opacity = 0; dot.style.opacity = 0; idle(); });
+}
+
+$("#inv-page").addEventListener("click", (e) => {
+  const m = e.target.closest("[data-inv-mode]");
+  if (m) {
+    // Only the chart changes with the mode, so only the chart is redrawn:
+    // re-rendering the page would rebuild everything around it.
+    INV.mode = m.dataset.invMode;
+    for (const btn of document.querySelectorAll("#inv-page [data-inv-mode]")) {
+      const on = btn.dataset.invMode === INV.mode;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-pressed", String(on));
+    }
+    drawInvChart();
+    return;
+  }
+  const p = e.target.closest("[data-inv-period]");
+  if (p) {
+    INV.period = p.dataset.invPeriod;
+    try { localStorage.setItem("inv_period", INV.period); } catch (e2) {}
+    invRender();
+  }
+});
+$("#inv-btn").onclick = () => { showPage("investments"); invLoad(); };
+try { INV.period = INV_PERIODS.includes(localStorage.getItem("inv_period")) ? localStorage.getItem("inv_period") : "1Y"; } catch (e) {}
+
 setTheme(readTheme());
 fxInit();
 renderHeader();
@@ -11797,3 +12099,10 @@ setupSettings();
 setupTapeFullscreen();
 loadAllAtStartup();
 loadAppVersion();
+(function restoreInvestmentsPage() {
+  // My Investments is the landing page when it was the last page open.
+  let last = null;
+  try { last = localStorage.getItem("page"); } catch (e) {}
+  if (last === "investments") { showPage("investments"); invLoad(); }
+  else document.body.dataset.page = "research";
+})();

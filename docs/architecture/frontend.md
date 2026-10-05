@@ -10,6 +10,27 @@ Real static files served by `server.py` — `index.html`, `app.js`,
 `style.css`. No frameworks, no build step. KaTeX is the only external
 dependency (loaded from CDN, used only for column-guide formulas).
 
+### Pages and My Investments (`showPage`, `INV`)
+- `showPage(name)` is the only thing that switches pages: `"investments"`
+  (`#inv-page`), `"portfolio"` (`#input-panel`), `"news"` (`#news-panel`) or
+  `"table"` (both research panels closed). It sets the topbar's active tab and
+  `body[data-page]`. On `investments`, CSS hides every `.research-only` block
+  (main table, column-view bar, analyst section, Optimize). The last page is
+  kept in localStorage `page`; My Investments reopens if it was last.
+- My Investments (roadmap `docs/plans/my-investments-roadmap.md`) renders
+  from `GET /api/investments/book` into `INV.book`. It has its own table
+  (`#inv-tbl`), not `#tbl`/`COLS`, because positions have a different
+  identity (cash row, closed positions). `drawInvChart()` is a hand-written
+  SVG with Value / Return % modes. A mode switch redraws only the chart, and
+  the toolbar and reading line have a fixed height, so the card never changes
+  size.
+- **The owner's rules for this page:** one number per headline cell, with
+  explanations in `RICH_TIPS` hover cards (`inv:*`: plain words, technical
+  name in small print). No dotted underlines and no info icons (`#inv-page
+  [data-rich-tip]` turns the global underline off). Company names, not
+  tickers. "This month", never daily figures, in the headline; the chart
+  itself is daily.
+
 ### State (`STATE`, `DATA`, `VIEWS`, `WATCHLISTS`)
 - `DATA` — currently-rendered rows
 - `VIEWS` — server-side view metadata (mirrors `/api/views` response)

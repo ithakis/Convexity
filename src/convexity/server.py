@@ -47,6 +47,7 @@ from convexity.analytics import (
     analyze_portfolios_multi,
 )
 from convexity import jobs
+from convexity import investments as _investments
 from convexity.fetcher import fetch_detail, range_history
 from convexity.fetcher import stream_quotes as fetcher_stream_quotes
 
@@ -360,6 +361,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/keys":
             # Settings -> API keys. Booleans + source names only (keys.status).
             self._send_json(200, _keys.status())
+            return
+        if parsed.path == "/api/investments/book":
+            # My Investments (roadmap Phase 1): reads the book file, never writes.
+            self._send_json(200, _investments.book_preview())
             return
         if parsed.path == "/api/watchlists":
             self._send_json(200, {"watchlists": load_watchlists()})

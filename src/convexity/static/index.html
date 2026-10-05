@@ -12,9 +12,10 @@
 <body>
 
 <div class="topbar" id="topbar">
+  <button id="inv-btn" class="tab-btn" data-tip="Open My Investments: your real book (what you own, what it is worth, how it has done) and what needs your attention.">My Investments</button>
   <button id="edit-btn" class="tab-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
   <button id="news-btn" class="tab-btn" data-tip="Open the News &amp; Sentiment dashboard: for every holding, the News read (what the news says, lens by lens) beside the Market read (how prices have reacted to news like this).">News</button>
-  <button id="optimize" data-tip="Open the Portfolio Optimization workspace: trace the mean-CVaR efficient frontier from your holdings using Black-Litterman expected returns (market-cap equilibrium + analyst-target views), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
+  <button id="optimize" class="research-only" data-tip="Open the Portfolio Optimization workspace: trace the mean-CVaR efficient frontier from your holdings using Black-Litterman expected returns (market-cap equilibrium + analyst-target views), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
   <!-- One Refresh for the whole app (v1.11.0). Click (or R) refreshes the
        current portfolio: quotes first, then news + sentiment. Long-press for
        600ms (or Shift+R) refreshes EVERY saved portfolio, behind a dialog that
@@ -70,6 +71,12 @@
   <button class="gear-btn" id="settings-btn" data-tip="Settings — app preferences and the backend console log." aria-label="Settings">&#9881;</button>
 </div>
 <div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
+
+<!-- My Investments (docs/plans/my-investments-roadmap.md): the user's REAL
+     book, kept apart from the hypothetical research tabs. showPage() in app.js
+     owns which page is visible; on this page the research-only blocks (main
+     table, column views, analyst section, Optimize) are hidden by CSS. -->
+<div id="inv-page" class="hidden" aria-label="My Investments"></div>
 
 <div id="input-panel" class="hidden">
   <!-- Browser-style tab strip of saved portfolios -->
@@ -611,9 +618,9 @@
      built-in preset). -->
 <!-- Section anchor (item 2): Bloomberg-style hairline rule + kicker marking
      where the holdings table starts, regardless of which panel is open. -->
-<div class="section-anchor" id="anchor-holdings"><span class="sa-kicker">Holdings</span></div>
+<div class="section-anchor research-only" id="anchor-holdings"><span class="sa-kicker">Holdings</span></div>
 
-<div class="cv-bar" id="cv-bar">
+<div class="cv-bar research-only" id="cv-bar">
   <!-- Every preset is a chip in this one row: the three built-ins, then your
        own presets (green) in the order you created them. Deleting a preset
        lives in Settings > Column Presets so the bar carries nothing
@@ -632,7 +639,7 @@
   </span>
 </div>
 
-<div class="table-wrap">
+<div class="table-wrap research-only">
   <table id="tbl">
     <thead><tr id="thead"></tr></thead>
     <tbody id="tbody"><tr><td colspan="16" style="padding:30px; text-align:center; color:var(--muted);">Add companies above, then press <b>Refresh</b>.</td></tr></tbody>
@@ -647,9 +654,9 @@
 
 <!-- Section anchor (item 2, second instance): marks the Analyst Sentiment
      section right after the main table. -->
-<div class="section-anchor" id="anchor-analyst"><span class="sa-kicker">Analyst Sentiment</span></div>
+<div class="section-anchor research-only" id="anchor-analyst"><span class="sa-kicker">Analyst Sentiment</span></div>
 
-<div id="analyst-dashboard" aria-label="Analyst sentiment dashboard"></div>
+<div id="analyst-dashboard" class="research-only" aria-label="Analyst sentiment dashboard"></div>
 
 <div class="info-bg" id="info-bg">
   <div class="info-modal">

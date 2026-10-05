@@ -9,6 +9,11 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## Unreleased
+
+- **My Investments, the page shell** (issue #1, roadmap Phase 1): a new first tab for your real book, kept apart from the research tabs. It has a hero value with "this month", four headline numbers (Total profit, Return, vs S&P 500, Your money) whose explanations sit in hover cards, a daily value / return chart against the S&P 500, a holdings table by company name, and a calm attention rail. Until holdings can be entered (Phase 2), the tab shows its empty state; the made-up figures appear only for the demo book used in development (`scripts/seed_demo_book.py`). The plan, progress and feedback log live in `docs/plans/my-investments-roadmap.md`.
+- One `showPage()` now switches between My Investments, Portfolio, News and the plain table, replacing three hand-copied toggles.
+
 ## 1.19.5 — 2026-10-05
 
 - **The app icon is back to what it was before 1.19.3**: the dark tile, the same in every theme, with the system's own glass rim. The theme-following icon, the Dock-tile workaround and the compiled closed-app icon are removed to keep the app minimal.

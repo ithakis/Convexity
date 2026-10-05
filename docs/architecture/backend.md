@@ -353,6 +353,7 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/views`                     — list of saved views (metadata only)
 - `/api/views/<name>`              — full view payload (rows included)
 - `/api/watchlists`                — `{name: entries_string}` map
+- `/api/investments/book`          — My Investments page payload (`investments.book_preview`). Phase 1: `{empty: true}`, or demo figures for the seeded demo book only. Reads the book file, never writes it. Roadmap: `docs/plans/my-investments-roadmap.md`
 - `/api/fx-rates?base=USD`         — spot rates
 - `/api/fx-index?ccy=…`            — one synthetic basket index
 - `/api/fx-indexes-bulk?ccys=…`    — many in one call (sequential server-side)
