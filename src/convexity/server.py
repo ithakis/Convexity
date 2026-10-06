@@ -856,6 +856,22 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[investments] GET {parsed.path} failed: {type(exc).__name__}", file=sys.stderr)
             self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
 
+    def _investments_import(self, p: dict) -> dict:
+        """Read text and files into a proposal (importer.read), with the
+        rows the ledger would refuse already flagged. Nothing is written."""
+        from convexity import importer
+
+        ctx = _investments.import_context()
+        try:
+            prop = importer.read(str(p.get("text") or ""), p.get("files"), base=ctx["base"],
+                                 aliases=ctx["aliases"], held=ctx["held"])  # fmt: skip
+        except importer.ImportError_ as exc:
+            err = _investments.BookError(exc.message)
+            err.status = exc.status
+            raise err from None
+        importer.attach_problems(prop, _investments.check_rows)
+        return prop
+
     def _handle_investments_post(self, path: str) -> None:
         """Mutations of the real book. Each answers the new page payload, or
         {error, message}: 400 bad input, 409 stale rev or a damaged file
@@ -875,6 +891,12 @@ class Handler(BaseHTTPRequestHandler):
                 out = _investments.undo(rev)
             elif path == "/api/investments/redo":
                 out = _investments.redo(rev)
+            elif path == "/api/investments/import":
+                out = self._investments_import(p)
+            elif path == "/api/investments/import/check":
+                out = {"problems": _investments.check_rows(p.get("entries"))}
+            elif path == "/api/investments/import/apply":
+                out = _investments.add_batch(p.get("entries"), rev, p.get("aliases"))
             else:
                 self._send_json(404, {"error": "not found"})
                 return

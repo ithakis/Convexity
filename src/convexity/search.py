@@ -38,6 +38,7 @@ from contextlib import suppress
 from dataclasses import asdict
 
 from convexity import symbol_db as sdb
+from convexity.helpers import Deadline
 
 # key: (label, unit, screener field, user -> screener factor, .info key,
 #       .info -> user factor, aliases). Units verified against live data
@@ -459,17 +460,6 @@ def ai_available() -> bool:
     return bool(ns.NVIDIA_API_KEY)
 
 
-class _Deadline:
-    """A `cancel` for _nvidia_call that fires after `s` seconds: a search must
-    not queue behind a news refresh's NIM calls for minutes."""
-
-    def __init__(self, s: float):
-        self.at = time.time() + s
-
-    def is_set(self) -> bool:
-        return time.time() > self.at
-
-
 _AI_DEADLINE_S = 25.0
 
 
@@ -486,7 +476,7 @@ def parse_llm(text: str, hint: dict) -> dict | None:
     brief = {k: v for k, v in _brief(hint).items() if k != "rank" or v.get("by") != "default"}
     user = f"Request: {text}\nA rule parser already read: {json.dumps(brief)}"
     try:
-        raw = ns._nvidia_call(_SYSTEM, user, (), _Deadline(_AI_DEADLINE_S), schema=_llm_schema(),
+        raw = ns._nvidia_call(_SYSTEM, user, (), Deadline(_AI_DEADLINE_S), schema=_llm_schema(),
                               name="company_search", record=False, tag="search", timeout=20.0)  # fmt: skip
     except Cancelled:
         print("[search] AI step timed out; using the rule parser's reading", flush=True)

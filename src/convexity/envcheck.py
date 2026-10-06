@@ -71,7 +71,12 @@ REQUIRED: tuple[Requirement, ...] = (
     ),
     Requirement("openai", "openai", "LLM news sentiment via the NVIDIA NIM endpoint"),
     Requirement("lxml", "lxml", "the EPS Surprise column (yfinance parses Yahoo HTML via lxml)"),
-    Requirement("openpyxl", "openpyxl", "Excel export"),
+    Requirement(
+        "openpyxl", "openpyxl", "Excel export, and reading Excel files in My Investments import"
+    ),
+    Requirement(
+        "pypdfium2", "pypdfium2", "reading PDF statements in My Investments import", critical=False
+    ),
     Requirement(
         "rapidfuzz", "rapidfuzz", "fuzzy ticker lookup and news de-duplication", critical=False
     ),

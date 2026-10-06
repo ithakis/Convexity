@@ -45,6 +45,8 @@ dependencies = [
     "lxml>=4.9.0",
     "openpyxl>=3.1.0",
     "rapidfuzz>=3.0.0",
+    # My Investments import: PDF statements (text, and scanned pages as images).
+    "pypdfium2>=4.30",
 ]
 
 [project.optional-dependencies]

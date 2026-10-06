@@ -44,6 +44,28 @@ dependency (loaded from CDN, used only for column-guide formulas).
   Undo: a toast with an Undo button (`toast(msg, {label, fn})`), Undo/Redo in
   the Activity header (the hover names the step), ⌘Z / ⇧⌘Z on the page when
   no field has focus.
+- **The front door (Phases 5–6, owner's W1).** The empty page *is* the
+  composer (`invWelcomeHtml` → `invComposerHtml`): one box for typed or
+  pasted text, pasted images, and dropped or attached files (screenshots,
+  PDF, CSV, Excel), with "add one holding by hand" under it. "+ Add" on a
+  full page opens the same composer in `#inv-pop`, "By hand" one click away.
+  State is `INV.imp` (`text, files, busy, error, prop, answers`); "Read it"
+  posts base64 files to `/api/investments/import`.
+- **The review** (`invReviewHtml`) takes the page until Apply or Cancel:
+  summary, screenshot thumbnails, at most three one-click questions, and an
+  editable table. Purple (`--ai`) marks what the AI guessed, amber what it
+  needs from the owner; "From" names the source row. Edits re-run
+  `/import/check` (debounced) so a sale the book can't cover is flagged
+  before Apply, with "Add the N shares as held before" or "Leave it out".
+  `invRowEntry` is the client twin of `importer.entry_of`. Apply sends the
+  rows and the names the owner corrected (`aliases`) in one batch.
+- **Adding by hand and editing (owner's E2).** `invFormHtml` is a card: the
+  company as a header once chosen (initial, name, ticker, today's close via
+  `invNowFill`), big number fields with the unit in the label, date chips
+  (Today, 1 year ago, the picker as the real `date` field) and a live result
+  line (`invResultText`, updated in place on input so typing never loses
+  focus). The same card edits an entry in Activity. Other types sit in the
+  quiet "Something else" menu.
 
 ### The book in the Portfolio tab (`BOOK_KEY = "__book__"`)
 - When the book holds anything, `renderTabs()` pins a red pill "My

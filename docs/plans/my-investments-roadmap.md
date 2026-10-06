@@ -19,10 +19,10 @@ owner says so.
 |---|---|---|---|---|
 | 1 | Page shell and look | Done (merged) | `feature/my-investments-p1` · [ithakis/Convexity#31](https://github.com/ithakis/Convexity/pull/31) | 2026-10-05 |
 | 2 | Ledger and manual entry | Done (merged) | `feature/my-investments-p2` · [ithakis/Convexity#33](https://github.com/ithakis/Convexity/pull/33) | 2026-10-06 |
-| 3 | Performance | Not started | | |
+| 5 | AI import I: text and spreadsheets, and the front door | Done (signed off) | `feature/my-investments-p5` (with 6) | 2026-10-06 |
+| 6 | AI import II: screenshots and PDFs | Done (signed off) | `feature/my-investments-p5` (with 5) | 2026-10-06 |
+| 3 | Performance | Not started (decisions taken) | | |
 | 4 | Holdings depth | Not started | | |
-| 5 | AI import I: text and spreadsheets | Not started | | |
-| 6 | AI import II: screenshots and PDFs | Not started | | |
 | 7 | Attention rail I: risk and events | Not started | | |
 | 8 | Attention rail II: plans and price alerts | Not started | | |
 | 9 | Notifications | Not started | | |
@@ -30,13 +30,18 @@ owner says so.
 
 Status values: Not started · In prototype · Building · In review · Done.
 
+**Rows are in run order; the numbers are names.** On 2026-10-06 the owner
+moved the AI import (Phases 5 and 6, run together) ahead of Performance:
+the composer is the way into the page. Phase 3's decisions were already
+taken, and its feedback log keeps them.
+
 ## Next-session prompt
 
 Paste this into a new Claude Code session to carry on:
 
 ```
 Read docs/plans/my-investments-roadmap.md. Continue the My Investments roadmap:
-take the first phase in the progress table that is not Done, read its section and
+take the first phase in the progress table (run order) that is not Done, read its section and
 the feedback log, and run it with the phase loop (suggest → prototype → build →
 verify → review → sign-off). Follow CLAUDE.md. Never use my real data.
 ```
@@ -392,6 +397,15 @@ the owner reacts to something that looks real.
 - [ ] The S&P line in the chart matches SPY total return over 1Y.
 
 **Feedback log:**
+- 2026-10-06: Chat mockups and questions (asked while this phase was first in line). The owner chose:
+  - **Periods: O2.** "Total profit" stays lifetime. Return, vs S&P 500 and
+    Your money follow the period pill.
+  - **The chart opens in Value mode**, and the last mode is remembered.
+  - **Refresh: the topbar Refresh button** (and R) shows on My Investments
+    and refreshes the book only.
+  - **A quick-added holding's performance starts at that day's market
+    value.** The gap from its average price stays in lifetime Total profit
+    and is never a one-day return, which keeps the Since tooltip's promise.
 
 **Findings:**
 
@@ -444,18 +458,23 @@ the owner reacts to something that looks real.
 - How snapshot-versus-transactions reconciliation is explained.
 
 **Build:**
-- [ ] Deterministic pre-parse (CSV and XLSX via pandas or openpyxl), then
+- [x] The front door (owner's W1): the composer is the empty page, and
+      "+ Add" opens it on a full page, with "By hand" one click away.
+- [x] Adding by hand and editing in Activity use the E2 card (owner's
+      choice).
+- [x] Deterministic pre-parse (CSV and XLSX via pandas or openpyxl), then
       `nemotron-3-super` maps it to a strict JSON schema of ledger operations.
-- [ ] Every ticker is verified through `resolver.resolve_symbol` and the symbol
-      pack, the same rule as `search.py`.
-- [ ] Review table:
+- [x] Every ticker is verified in the symbol pack, the same rule as
+      `search.py`. The row's currency picks the listing.
+- [x] Review table:
       - a one-line summary
       - purple for inferred cells, amber for missing ones
       - the source shown on each row
       - at most 3 inline one-click questions, each with a stated default
-- [ ] Apply as one undoable batch; alias memory (e.g. "Shell" maps to SHEL.L).
-- [ ] Snapshot detection, reconciled against the current book.
-- [ ] `scripts/eval_import.py` gold set with synthetic statements only, run
+      - a dry run that flags a sale the book can't cover, with a fix
+- [x] Apply as one undoable batch; alias memory (e.g. "Shell" maps to SHEL.L).
+- [x] Snapshot detection, reconciled against the current book.
+- [x] `scripts/eval_import.py` gold set with synthetic statements only, run
       live.
 
 **Verify:**
@@ -464,8 +483,113 @@ the owner reacts to something that looks real.
 - [ ] Undo removes a whole batch.
 
 **Feedback log:**
+- 2026-10-06: **Owner request, made while Phase 3 was next:** make the
+  empty state and the Add popover more beautiful, friendly and inviting. Today the empty card has a left-aligned button under centred
+  text and a lot of dead space, and the popover covers the page and crowds
+  seven type pills into one row.
+- 2026-10-06: Chat mockups and questions. The owner first chose:
+  - **Empty state: A, "Calm welcome".** No box. A round icon, a headline,
+    one line, a centred button, then three quiet cues under a hairline
+    (value and profit, vs S&P 500, what needs a look). (Rejected: a faded
+    ghost of the page, and the first holding typed into the welcome.)
+  - **Add popover: P1, "Holding first".** Titled "Add a holding". The other
+    six types sit in a quiet "Something else" menu, so there's no pill row.
+    (Rejected: two rows of grouped chips, and a side panel.)
+- 2026-10-06: Live prototype of A and P1 (light, dark, Bloomberg).
+  **The owner didn't like it much.** They want **AI-assisted input** as the
+  way in: add files or paste text (Revolut screenshots, for example) and the
+  AI sorts them into historical trades. They also said it is "not that
+  inviting to edit" and asked why it got worse than before. Explanation
+  given: the composer (Appendix A, "Import UX", approved 2026-10-05) was
+  scheduled for Phases 5–6, so Phase 2 built only manual entry, and A/P1
+  only polished that manual path. Next: options that make the composer the
+  front door, and a question about where the AI import goes in the order.
+- 2026-10-06: **The owner chose W1, the composer as the welcome**: one box
+  to drop, paste or type into, with "add one holding by hand" as a quiet
+  link, and "+ Add" on a full page opens the same composer. **The AI import
+  is built now, before Performance**: text, CSV/Excel, screenshots (Revolut)
+  and PDFs, so Phases 5 and 6 run together. "Not inviting to edit" means
+  **the Add form and editing in Activity**: both get redesigned in this phase.
+- 2026-10-06: Three edit feels were shown (E1 a sentence with blanks, E2 a
+  live preview card, E3 an entry sheet over the rail). **The owner chose E2
+  for both adding by hand and editing**: a company header with today's
+  price, big number fields, date chips (Today, 1 year ago, a picked date),
+  and the result (value, profit) shown as you type.
+- 2026-10-06: **Live prototype on a temp data folder**, with live NIM calls
+  on the owner's key. Shown:
+  - the composer welcome;
+  - a synthetic broker screenshot read into a review table (26 s);
+  - the NVIDIA sale flagged before Apply, with the one-click fix;
+  - Apply as one undoable batch ("Imported 7 entries · Undo");
+  - "+ Add" opening the composer, "By hand" opening the E2 card, and the
+    same card for editing in Activity;
+  - light, dark and Bloomberg themes.
+
+  Reading model chosen by probe:
+  - Screenshots go to `nemotron-3-nano-omni` with thinking off (~7 s, every
+    field right at phone resolution).
+  - Llama 3.2 90B misread dates and a currency and took 75 s.
+  - `nemotron-parse-2.0` was degraded on NVIDIA's side and Kimi K3 timed
+    out.
+  - Text goes to `nemotron-3-super` under a strict schema. Three
+    broker-style CSVs (pence, EUR and commission included) and a holdings
+    screenshot also read correctly.
+- 2026-10-06: **Owner: "Good, keep going."** The direction is approved.
+  Still to finish:
+  - PDFs;
+  - remembering name corrections (aliases);
+  - reconciling a holdings screenshot against an existing book;
+  - tests and the live eval.
+- 2026-10-06: **PDF library: pypdfium2** (owner's choice). It handles text
+  PDFs and scanned ones.
+- 2026-10-06: Built and verified, waiting for the owner's review:
+  - PDFs, name memory and snapshot reconciliation are in.
+  - Live eval: 10 synthetic cases (phone screenshots, three CSV styles, a
+    text PDF, a scanned PDF, typed text).
+  - The adversarial review found 10 issues, all fixed with tests:
+    - unread screenshots weren't shown;
+    - one failed scan sank a PDF's text pages;
+    - a stray letter in a number cleared its "needed" mark;
+    - bad dry-run input was a 500;
+    - the upload size cap was missing in the page;
+    - drops on the review added hidden files;
+    - Yahoo was asked for the same ticker twice per import, with one
+      replay per row;
+    - two row-to-entry functions had drifted apart;
+    - plus two duplications.
 
 **Findings:**
+- **The gold images were wrong first, not the model.** Chrome's
+  command-line screenshot has a minimum window width, so a fluid phone page
+  lost its right column (every amount). The model correctly left them blank.
+  The gold pages are now a fixed 393 px.
+- **The vision transcript's layout decides accuracy.**
+  - Asked loosely, the model sometimes dropped each row's sub-line (type and
+    date), and with section headers on lines of their own it sometimes
+    dropped those too, and the year with them.
+  - Now every row is one line: header | title | sub-line | amount |
+    sub-line. That was 5 of 5 complete in samples.
+- **The text model sometimes leaves a real entry out "because the ticker
+  can't be confirmed"** (about one in eight), despite the prompt. A
+  left-out line whose reason is doubt makes code read that block once
+  more, naming it.
+- **Shrunk screenshots lose digits:** 405.00 read as 405.05. Real phone
+  screenshots arrive full size; never downscale before the vision call.
+- **A NIM wait needs a deadline.** One eval call sat 46 minutes in the
+  shared limiter and circuit breaker. `helpers.Deadline` now bounds every
+  stage at 150 s (company search uses it too).
+- An imported trade keeps the statement's share count (`trade` basis), so
+  the dry run's wording divides by the split factor ("Sells 5 NVIDIA", not
+  50).
+- **Never put literal example values in a vision prompt.** Given "Buy · 12
+  Mar, 15:42" as an example, the model wrote it into a scanned table and
+  turned 12.03.2024 into a date with an invented time and no year.
+- **The prompt must name the schema's own fields.** It said "amount" where
+  the schema has `total`, so dividend cash sometimes landed nowhere.
+- Dotted dates are day.month.year. A short block is read twice and the
+  fuller reading wins: more rows first, then more cells filled.
+- Final state: the live eval passed 30 of 30 across three full runs; the
+  test suite has 1150 passing; `/verify` passed on a clean uv-tool install.
 
 ---
 
@@ -480,13 +604,16 @@ the owner reacts to something that looks real.
 - Whether a source thumbnail sits next to the review table.
 
 **Build:**
-- [ ] A drop and paste target covering the whole page.
-- [ ] PDF text extraction.
-- [ ] Images go through the NIM vision model that wins a live eval among
-      `nvidia/nemotron-parse-2.0`, `meta/llama-3.2-90b-vision-instruct` and
-      `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`.
-- [ ] A notice on first use that files are read by NVIDIA NIM.
-- [ ] Size caps, and a clear error for unreadable files.
+- [x] A drop and paste target covering the whole page (wherever a composer
+      shows).
+- [x] PDF text extraction (`pypdfium2`, owner's choice). Scanned pages are
+      rendered and read like screenshots.
+- [x] Images go through the NIM vision model that won a live probe:
+      `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`, thinking off.
+      `nemotron-parse-2.0` was degraded; Llama 3.2 90B was slower and
+      misread fields.
+- [x] A notice under every composer that files are read by NVIDIA NIM.
+- [x] Size caps, and a clear error for unreadable files.
 
 **Verify:**
 - [ ] The eval on synthetic broker screenshots and PDFs, run live.

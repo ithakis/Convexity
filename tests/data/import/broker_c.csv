@@ -1,0 +1,5 @@
+Trades,Header,DataDiscriminator,Asset Category,Currency,Symbol,Date/Time,Quantity,T. Price,Proceeds,Comm/Fee,Basis
+Trades,Data,Order,Stocks,USD,GOOGL,"2024-02-12, 10:21:33",25,148.90,-3722.5,-1.0,3723.5
+Trades,Data,Order,Stocks,USD,JNJ,"2024-02-12, 10:25:01",10,158.20,-1582,-1.0,1583
+Trades,Data,Order,Stocks,EUR,ASML,"2024-03-18, 09:05:44",3,885.40,-2656.2,-3.0,2659.2
+Trades,Data,Order,Stocks,USD,JNJ,"2024-07-22, 15:55:10",-4,149.75,599,-1.0,-633.2

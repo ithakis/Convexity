@@ -9,6 +9,11 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.21.0 — 2026-10-06
+
+- **Bring your investments in with AI** (issue #1, roadmap Phases 5 and 6). The empty My Investments page is now one box: paste what your broker app shows, type it in your own words, or drop screenshots (a phone's activity or holdings screen), PDF statements (scanned ones too), CSV or Excel files. NVIDIA NIM reads them, and you check everything in a review table before anything is added. What the AI guessed is purple and what it needs from you is amber; every company is checked against the symbol list, and a £ or € price picks the right listing. A sale your book can't cover, or a total that doesn't add up, is flagged with a one-click fix. Apply adds it all as one step with one Undo. A holdings screenshot is compared with what you already hold, and a company you correct is remembered next time. "+ Add" opens the same box, with "By hand" one click away.
+- **Adding and editing by hand is friendlier**: a card with the company, its price today, big number fields, quick dates (today, a year ago, or any day) and the result as you type. The same card edits an entry in Activity.
+
 ## 1.20.0 — 2026-10-06
 
 - **My Investments: your real book** (issue #1, roadmap Phase 2). Add holdings and transactions by hand (buy, sell, dividend, cash in and out, fees, splits) from an "+ Add" popover. The price fills itself from that day's close. Value, this month, total profit (held, sold, dividends, fees) and every holding are now computed from your entries, with average cost, cash and splits handled. The rail switches between Attention and Activity, where every entry can be edited in place. Every change can be undone (toast, buttons, ⌘Z). A change the ledger can't book, such as selling more than you hold, is explained in plain words. Performance figures arrive in the next phase and show a dash until then.

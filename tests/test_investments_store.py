@@ -26,6 +26,7 @@ FX = {"USD": 1.0, "GBP": 1.3, "EUR": 1.1}
 def offline(monkeypatch):
     """No network: quote currencies, names, splits, closes and FX are fixed."""
     inv._SPLITS.clear()
+    inv._QCCY.clear()
     monkeypatch.setattr(inv, "_fetch_quote_ccy", lambda s: QUOTE.get(s))
     monkeypatch.setattr(inv, "_pack_hit", lambda t: None)
     monkeypatch.setattr(inv, "_resolve", lambda text: text.strip().upper())
@@ -402,3 +403,102 @@ def test_a_preset_may_be_called_like_the_book_tab(srv):
     body = {"view": "Mine", "name": "__book__", "weights": {"AAPL": 1}}
     code, out = _post(srv, "/api/weight-presets", body)
     assert code == 200, out
+
+
+# ------------------------------------------------------- import (Phases 5-6)
+
+
+def _batch():
+    return [
+        {"type": "deposit", "date": "2024-03-01", "amount": 5000, "ccy": "USD"},
+        {
+            "type": "buy",
+            "date": "2024-03-12",
+            "symbol": "AAPL",
+            "qty": 10,
+            "price": 182.4,
+            "qty_basis": "trade",
+        },
+        {
+            "type": "buy",
+            "date": "2024-01-02",
+            "symbol": "MSFT",
+            "qty": 5,
+            "price": 370.0,
+            "qty_basis": "current",
+        },
+    ]
+
+
+def test_an_import_is_one_batch_and_one_undo():
+    b = inv.add_batch(_batch(), 0)
+    assert b["undo_label"] == "Imported 3 entries" and len(b["entries"]) == 3
+    raw = _raw()
+    assert {e["source"] for e in raw["entries"]} == {"import"}
+    assert len({e["batch"] for e in raw["entries"]}) == 1 and len(raw["journal"]) == 1
+    b = inv.undo(b["rev"])
+    assert b["empty"] is True
+    assert len(inv.redo(b["rev"])["entries"]) == 3
+
+
+def test_a_bad_row_names_itself_and_nothing_is_saved():
+    rows = _batch()
+    rows[1] = rows[1] | {"qty": -3}
+    with pytest.raises(inv.BookError) as ex:
+        inv.add_batch(rows, 0)
+    assert ex.value.message.startswith("Row 2:")
+    assert inv.book()["empty"] is True
+
+
+def test_the_dry_run_flags_a_sale_in_the_statements_share_count():
+    # 5 NVIDIA sold in Feb 2024 were 50 shares after the 10:1 split; the
+    # owner's statement says 5, so the words (and the shortfall) say 5.
+    probs = inv.check_rows([
+        {"type": "sell", "date": "2024-02-21", "symbol": "NVDA", "qty": 5, "price": 674.1, "qty_basis": "trade"},
+        {"type": "buy", "date": "2024-03-12", "symbol": "AAPL", "qty": 10, "price": 182.4, "qty_basis": "trade"},
+    ])  # fmt: skip
+    assert list(probs) == [0] and probs[0]["kind"] == "oversell"
+    assert probs[0]["short"] == pytest.approx(5) and "Sells 5 " in probs[0]["message"]
+    assert inv.book()["empty"] is True  # a dry run writes nothing
+
+
+def test_corrected_names_are_remembered_only_for_booked_tickers():
+    inv.add_batch(_batch(), 0, aliases={"Apple ": "AAPL", "Tesla": "TSLA"})
+    assert _raw()["settings"]["aliases"] == {"apple": "AAPL"}
+    ctx = inv.import_context()
+    assert ctx["aliases"] == {"apple": "AAPL"}
+    assert ctx["held"] == {"AAPL": pytest.approx(10), "MSFT": pytest.approx(5)}
+
+
+def test_import_routes(srv, monkeypatch):
+    from convexity import importer
+    from convexity import news_sentiment as ns
+
+    monkeypatch.setattr(ns, "NVIDIA_API_KEY", "")
+    code, b = _post(srv, "/api/investments/import", {"text": "10 Apple"})
+    assert code == 409 and "NVIDIA key" in b["message"]
+    monkeypatch.setattr(ns, "NVIDIA_API_KEY", "test-key")
+    monkeypatch.setattr(
+        importer, "_structure", lambda text, today, base: {"items": [], "skipped": []}
+    )
+    code, b = _post(srv, "/api/investments/import", {"text": "nothing here"})
+    assert code == 200 and b["items"] == []
+    code, b = _post(
+        srv, "/api/investments/import/check", {"entries": [_batch()[1] | {"type": "sell"}]}
+    )
+    assert code == 200 and b["problems"]["0"]["kind"] == "oversell"
+    code, b = _post(srv, "/api/investments/import/apply", {"base_rev": 0, "entries": _batch()})
+    assert code == 200 and b["undo_label"] == "Imported 3 entries"
+    code, _ = _post(
+        srv, "/api/investments/import/apply", {"base_rev": 0, "entries": _batch()}, "text/plain"
+    )
+    assert code == 403
+
+
+def test_the_dry_run_refuses_bad_shapes_in_plain_words():
+    # Review finding: a non-object row was a 500.
+    assert inv.check_rows(["x", _batch()[0]]) == {
+        0: {"kind": "invalid", "message": "This row couldn't be read."}
+    }
+    with pytest.raises(inv.BookError):
+        inv.check_rows({"not": "a list"})

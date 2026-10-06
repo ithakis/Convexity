@@ -123,6 +123,15 @@ Each of these has cost real debugging time; the link goes to the full story.
   mirror of the book**: the server refuses the name on portfolio write routes.
   [frontend.md → Pages](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv) ·
   [backend.md → My Investments](docs/architecture/backend.md#my-investments-the-ledger-and-the-book-file-ledgerpy-investmentspy)
+- **My Investments import: the model may suggest, never decide.** Plain code
+  verifies every ticker against the symbol pack (the row's currency picks
+  the listing), checks qty × price against the total, and marks guesses
+  (purple) and gaps (amber); nothing is written before the owner's Apply, one
+  undoable batch. Screenshots must reach the vision model at full resolution
+  (shrunk, it misreads digits). Every NIM wait has a deadline. After any
+  change to the prompts, matching rules or models, run
+  `scripts/eval_import.py` live (all 10 synthetic cases must pass).
+  [backend.md → My Investments import](docs/architecture/backend.md#my-investments-import-importerpy)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -191,6 +200,7 @@ sub-decision.
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
 │   ├── investments.py           ← My Investments (the real book): the book file, undo/redo, prices/FX, page payload — docs/plans/my-investments-roadmap.md
 │   ├── ledger.py                ← My Investments ledger engine: pure replay (average cost, implied deposits, splits), TWR/MWR
+│   ├── importer.py              ← My Investments import: text, screenshots, PDFs, CSV/Excel → rows to review (NIM vision + text, symbol-pack checks)
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
 │       ├── index.html           ← Main HTML template

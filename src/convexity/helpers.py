@@ -203,6 +203,19 @@ class Cancelled(Exception):
     """Raised inside a sleep gate when the owning job was cancelled."""
 
 
+class Deadline:
+    """A ``cancel`` token (duck-typed ``is_set``) that fires after ``s``
+    seconds. Someone waiting on a page (company search, an import's "Read
+    it") must not queue behind a news refresh's NIM calls for minutes: the
+    limiter and the circuit breaker raise Cancelled once it passes."""
+
+    def __init__(self, s: float):
+        self.at = time.time() + s
+
+    def is_set(self) -> bool:
+        return time.time() > self.at
+
+
 _FH_LIMITER = _RateLimiter(max_per_min=55, name="finnhub")
 _NV_LIMITER = _RateLimiter(max_per_min=60, name="nvidia")
 # yfinance has no official rate limit and no app-level throttle anywhere else

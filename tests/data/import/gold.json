@@ -1,0 +1,77 @@
+{
+  "_note": "Synthetic gold set for scripts/eval_import.py: made-up amounts, public tickers. Each case lists the rows a correct reading must produce (order free). Missing dates are \"\". Prices are in the major unit (GBP, not pence).",
+  "cases": [
+    {"name": "phone activity screenshot", "files": ["activity.png"],
+     "rows": [
+       {"type": "buy", "date": "2024-03-12", "symbol": "AAPL", "qty": 10, "price": 182.40, "ccy": "USD"},
+       {"type": "dividend", "date": "2024-03-14", "symbol": "MSFT", "amount": 15.00, "ccy": "USD"},
+       {"type": "deposit", "date": "2024-03-01", "amount": 5000.00, "ccy": "USD"},
+       {"type": "sell", "date": "2024-02-21", "symbol": "NVDA", "qty": 5, "price": 674.10, "ccy": "USD"},
+       {"type": "buy", "date": "2024-02-06", "symbol": "MSFT", "qty": 20, "price": 405.00, "ccy": "USD"},
+       {"type": "buy", "date": "2024-02-02", "symbol": "VUSA.L", "qty": 19.5, "price": 82.58, "ccy": "GBP"}
+     ]},
+    {"name": "phone holdings screenshot", "files": ["holdings.png"], "questions": ["since"],
+     "rows": [
+       {"type": "holding", "date": "", "symbol": "AAPL", "qty": 40, "price": 151.20, "ccy": "USD"},
+       {"type": "holding", "date": "", "symbol": "GOOGL", "qty": 25, "price": 139.80, "ccy": "USD"},
+       {"type": "holding", "date": "", "symbol": "KO", "qty": 60, "price": 61.15, "ccy": "USD"},
+       {"type": "holding", "date": "", "symbol": "SHEL.L", "qty": 150, "price": 24.10, "ccy": "GBP"},
+       {"type": "holding", "date": "", "symbol": "TSLA", "qty": 12.5, "price": 265.00, "ccy": "USD"},
+       {"type": "deposit", "date": "", "amount": 4050.00, "ccy": "USD"}
+     ]},
+    {"name": "broker CSV, pence and FX columns", "files": ["broker_a.csv"],
+     "rows": [
+       {"type": "deposit", "date": "2024-01-03", "amount": 10000.00, "ccy": "USD"},
+       {"type": "buy", "date": "2024-01-04", "symbol": "AAPL", "qty": 15, "price": 184.25, "ccy": "USD"},
+       {"type": "buy", "date": "2024-01-04", "symbol": "MSFT", "qty": 8, "price": 370.60, "ccy": "USD"},
+       {"type": "dividend", "date": "2024-02-15", "symbol": "AAPL", "amount": 3.06, "ccy": "USD"},
+       {"type": "sell", "date": "2024-04-10", "symbol": "MSFT", "qty": 3, "price": 423.10, "ccy": "USD"},
+       {"type": "buy", "date": "2024-05-02", "symbol": "SHEL.L", "qty": 40, "price": 26.10, "ccy": "GBP"}
+     ]},
+    {"name": "broker CSV, typed actions and a fee", "files": ["broker_b.csv"],
+     "rows": [
+       {"type": "deposit", "date": "2024-03-01", "amount": 3000.00, "ccy": "USD"},
+       {"type": "buy", "date": "2024-03-04", "symbol": "KO", "qty": 20, "price": 60.12, "ccy": "USD"},
+       {"type": "buy", "date": "2024-03-04", "symbol": "TSLA", "qty": 4.5, "price": 188.71, "ccy": "USD"},
+       {"type": "dividend", "date": "2024-04-01", "symbol": "KO", "amount": 9.70, "ccy": "USD"},
+       {"type": "sell", "date": "2024-06-11", "symbol": "TSLA", "qty": 2, "price": 170.66, "ccy": "USD"},
+       {"type": "fee", "date": "2024-06-30", "amount": 1.00, "ccy": "USD"}
+     ]},
+    {"name": "broker CSV, signed quantities and commissions", "files": ["broker_c.csv"],
+     "rows": [
+       {"type": "buy", "date": "2024-02-12", "symbol": "GOOGL", "qty": 25, "price": 148.90, "fee": 1.0, "ccy": "USD"},
+       {"type": "buy", "date": "2024-02-12", "symbol": "JNJ", "qty": 10, "price": 158.20, "fee": 1.0, "ccy": "USD"},
+       {"type": "buy", "date": "2024-03-18", "symbol": "ASML.AS", "qty": 3, "price": 885.40, "fee": 3.0, "ccy": "EUR"},
+       {"type": "sell", "date": "2024-07-22", "symbol": "JNJ", "qty": 4, "price": 149.75, "fee": 1.0, "ccy": "USD"}
+     ]},
+    {"name": "PDF statement with a text layer", "files": ["statement.pdf"],
+     "rows": [
+       {"type": "buy", "date": "2024-06-03", "symbol": "JPM", "qty": 15, "price": 198.40, "ccy": "USD"},
+       {"type": "sell", "date": "2024-06-10", "symbol": "KO", "qty": 10, "price": 63.55, "ccy": "USD"},
+       {"type": "dividend", "date": "2024-06-14", "symbol": "JNJ", "amount": 12.40, "ccy": "USD"},
+       {"type": "buy", "date": "2024-06-20", "symbol": "AMZN", "qty": 8, "price": 182.80, "ccy": "USD"},
+       {"type": "deposit", "date": "2024-06-28", "amount": 2000.00, "ccy": "USD"}
+     ]},
+    {"name": "scanned PDF (no text layer)", "files": ["scanned.pdf"],
+     "rows": [
+       {"type": "buy", "date": "2024-03-12", "symbol": "ASML.AS", "qty": 2, "price": 880.10, "ccy": "EUR"},
+       {"type": "buy", "date": "2024-03-25", "symbol": "SAP.DE", "qty": 6, "price": 172.34, "ccy": "EUR"},
+       {"type": "dividend", "date": "2024-05-02", "symbol": "ASML.AS", "amount": 2.92, "ccy": "EUR"}
+     ]},
+    {"name": "typed trades", "text": "Bought 10 Apple at 182.40 on 12 March 2024. Sold 5 Microsoft on 2 April 2024 at 421.90, fee 1.",
+     "rows": [
+       {"type": "buy", "date": "2024-03-12", "symbol": "AAPL", "qty": 10, "price": 182.40, "ccy": "USD"},
+       {"type": "sell", "date": "2024-04-02", "symbol": "MSFT", "qty": 5, "price": 421.90, "fee": 1.0, "ccy": "USD"}
+     ]},
+    {"name": "typed holdings", "text": "I have 300 Shell shares in London, average 25.40 pounds, and 40 Coca-Cola at 61.15 dollars.", "questions": ["since"],
+     "rows": [
+       {"type": "holding", "date": "", "symbol": "SHEL.L", "qty": 300, "price": 25.40, "ccy": "GBP"},
+       {"type": "holding", "date": "", "symbol": "KO", "qty": 40, "price": 61.15, "ccy": "USD"}
+     ]},
+    {"name": "typed cash events", "text": "Received a 9.70 dollar dividend from Coca-Cola on 1 April 2024 and paid a 1 dollar custody fee on 30 June 2024.",
+     "rows": [
+       {"type": "dividend", "date": "2024-04-01", "symbol": "KO", "amount": 9.70, "ccy": "USD"},
+       {"type": "fee", "date": "2024-06-30", "amount": 1.00, "ccy": "USD"}
+     ]}
+  ]
+}

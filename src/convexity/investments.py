@@ -41,7 +41,8 @@ _LOCK = threading.Lock()
 PERIODS = ("1M", "3M", "YTD", "1Y", "3Y", "ALL")
 _PERIOD_MONTHS = {"1M": 1, "3M": 3, "1Y": 12, "3Y": 36}
 
-SOURCES = ("manual", "quick")  # what the page may send; "demo" is the seed script's
+SOURCES = ("manual", "quick", "import")  # what the page may send; "demo" is the seed script's
+IMPORT_MAX = 500  # entries in one Apply
 _MAX_NUMBER = 1e12  # far above any real holding; keeps every sum finite (JSON has no inf)
 _FIELDS = ("date", "type", "symbol", "qty", "price", "fee", "amount", "tax", "ratio",
            "fx_rate", "ccy", "qty_basis", "note")  # fmt: skip
@@ -273,6 +274,9 @@ def _make_fx_at(base: str, warnings: list[str]):
 # -------------------------------------------------------------- instruments
 
 
+_QCCY: dict[str, str] = {}  # ticker -> Yahoo quote currency; only successes are kept
+
+
 def _fetch_quote_ccy(symbol: str) -> str | None:
     import yfinance as yf
 
@@ -312,7 +316,11 @@ def ensure_instrument(raw: dict, text: str) -> str:
     if ticker in inst:
         return ticker
     hit = hit or _pack_hit(ticker)
-    qccy = _fetch_quote_ccy(ticker)
+    # A listing's quote currency never changes: an import's dry run and its
+    # Apply would otherwise ask Yahoo for every new ticker twice, in a row.
+    qccy = _QCCY.get(ticker) or _fetch_quote_ccy(ticker)
+    if qccy:
+        _QCCY[ticker] = qccy
     if not qccy:
         raise BookError(f"Couldn't find {text} on Yahoo Finance. Check the name or ticker.")
     inst[ticker] = {
@@ -569,6 +577,145 @@ def add(fields: dict, base_rev) -> dict:
         return _record(raw, "Added", e, [{"del": e["id"]}], [{"put": e}])
 
     return _mutate(base_rev, change)
+
+
+def _clean_rows(raw: dict, items) -> list[dict]:
+    """An import's rows as entries, each cleaned like a hand-added one; the
+    first refusal names its row and nothing is kept."""
+    if not isinstance(items, list) or not items:
+        raise BookError("Nothing to add.")
+    if len(items) > IMPORT_MAX:
+        raise BookError(f"Add at most {IMPORT_MAX} entries at a time.")
+    batch, out = "b_" + secrets.token_hex(6), []
+    for n, fields in enumerate(items, 1):
+        if not isinstance(fields, dict):
+            raise BookError(f"Row {n} couldn't be read.")
+        try:
+            e = _clean(raw, fields)
+        except BookError as exc:
+            raise BookError(f"Row {n}: {exc.message}") from None
+        e |= {"id": "e_" + secrets.token_hex(6), "source": "import", "batch": batch,
+              "created_at": _now(), "updated_at": _now()}  # fmt: skip
+        out.append(e)
+    return out
+
+
+ALIASES_MAX = 300
+
+
+def import_context() -> dict:
+    """What an import reads against, without any network call: the base
+    currency, the owner's remembered names, and the shares held now (so a
+    holdings screenshot is reconciled, not added twice)."""
+    raw = _load() or _new_book()
+    entries, base = raw["entries"], raw["settings"].get("base_ccy", "USD")
+    held: dict[str, float] = {}
+    if entries:
+        syms = sorted({e["symbol"] for e in entries if e.get("symbol")})
+        try:
+            b = ledger.replay(entries, base_ccy=base, fx_at=lambda *_: 1.0,
+                              splits=ledger.merge_splits(entries, market_splits(syms, fetch=False)))  # fmt: skip
+            held = {p.symbol: p.qty for p in b.open_positions()}
+        except ledger.LedgerError:
+            held = {}
+    aliases = raw["settings"].get("aliases")
+    return {"base": base, "aliases": aliases if isinstance(aliases, dict) else {}, "held": held}
+
+
+def _remember(raw: dict, aliases, used: set[str]) -> None:
+    """Keep the owner's corrections of names ("Shell" is SHEL.L): only for
+    tickers this batch actually booked, newest first, at most ALIASES_MAX."""
+    from convexity.importer import alias_key
+
+    if not isinstance(aliases, dict):
+        return
+    keep = dict(raw["settings"].get("aliases") or {})
+    for name, sym in list(aliases.items())[:50]:
+        k = alias_key(str(name))
+        if k and isinstance(sym, str) and sym.upper() in used:
+            keep.pop(k, None)
+            keep = {k: sym.upper(), **keep}
+    raw["settings"]["aliases"] = dict(list(keep.items())[:ALIASES_MAX])
+
+
+def add_batch(items, base_rev, aliases=None) -> dict:
+    """An import's Apply: every entry in ONE journal item, so one Undo
+    removes the whole batch (roadmap Phase 5). ``aliases`` are the names the
+    owner corrected in the review, remembered for the next import."""
+
+    def change(raw):
+        new = _clean_rows(raw, items)
+        _remember(raw, aliases, {e["symbol"] for e in new if e.get("symbol")})
+        n = len(new)
+        item = {"label": f"Imported {n} entr{'y' if n == 1 else 'ies'}",
+                "undo": [{"del": e["id"]} for e in new], "redo": [{"put": e} for e in new]}  # fmt: skip
+        raw["journal"] = (raw["journal"] + [item])[-JOURNAL_MAX:]
+        raw["redo"] = []
+        print(f"[investments] import {new[0]['batch']} {n} entries")
+        return _apply(raw["entries"], item["redo"]), None
+
+    return _mutate(base_rev, change)
+
+
+def check_rows(items) -> dict[int, dict]:
+    """A dry run of an import against the book as it is: {row index: problem}
+    for rows the ledger would refuse, so the review flags them before Apply.
+    Rows go in date order and a refused row is left out of the rest, so one
+    problem doesn't hide another. Nothing is saved."""
+    raw = _load() or _new_book()
+    base = raw["settings"].get("base_ccy", "USD")
+    probe = {**raw, "instruments": dict(raw["instruments"])}
+    rows: list[dict] = []
+    problems: dict[int, dict] = {}
+    if not isinstance(items, list) or len(items) > IMPORT_MAX:
+        raise BookError(f"Send a list of at most {IMPORT_MAX} entries.")
+    for i, fields in enumerate(items):
+        if not isinstance(fields, dict):
+            problems[i] = {"kind": "invalid", "message": "This row couldn't be read."}
+            continue
+        try:
+            rows.append(_clean(probe, fields) | {"id": f"r{i}"})
+        except BookError as exc:
+            problems[i] = {"kind": "invalid", "message": exc.message}
+    kept = list(raw["entries"])
+    warnings: list[str] = []
+    # The usual case, everything books, costs one replay; only a refusal
+    # pays for the row-by-row pass that finds which rows are at fault.
+    whole = kept + rows
+    try:
+        ledger.replay(whole, base_ccy=base, fx_at=_make_fx_at(base, warnings),
+                      splits=ledger.merge_splits(whole, market_splits(_trade_basis_symbols(whole))))  # fmt: skip
+        return problems
+    except ledger.LedgerError:
+        pass
+    for e in sorted(rows, key=lambda x: x["date"]):
+        trial, i = kept + [e], int(e["id"][1:])
+        splits = ledger.merge_splits(trial, market_splits(_trade_basis_symbols(trial)))
+        try:
+            ledger.replay(trial, base_ccy=base, fx_at=_make_fx_at(base, warnings), splits=splits)
+        except ledger.OversellError as exc:
+            if exc.entry_id == e["id"]:
+                # The ledger counts today's shares; the statement the owner is
+                # looking at counts shares as of the trade (5 NVIDIA in Feb
+                # 2024 are 50 today), so the words use the statement's.
+                f = 1.0
+                if e.get("qty_basis") == "trade":
+                    f = ledger.split_factor(splits.get(e["symbol"], []), e["date"]) or 1.0
+                name, short = _name(probe, e["symbol"]), (exc.sell - exc.have) / f
+                problems[i] = {"kind": "oversell", "short": short,
+                               "message": f"Sells {ledger._qty(exc.sell / f)} {name} on {_when(e['date'])}, "
+                                          f"but the book holds {ledger._qty(exc.have / f)} then."}  # fmt: skip
+            else:
+                problems[i] = {
+                    "kind": "breaks",
+                    "message": "It would leave a later sale short of shares.",
+                }
+            continue
+        except ledger.LedgerError as exc:
+            problems[i] = {"kind": "invalid", "message": exc.message}
+            continue
+        kept = trial
+    return problems
 
 
 def _find(raw: dict, entry_id: str) -> tuple[int, dict]:
