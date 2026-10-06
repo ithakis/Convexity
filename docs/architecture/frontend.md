@@ -16,7 +16,7 @@ dependency (loaded from CDN, used only for column-guide formulas).
   `body[data-page]`; on `investments` CSS hides every `.research-only` block
   (main table, column views, analyst section, Optimize, Refresh). The R
   shortcut is off there too. My Investments reopens on launch if it was last.
-- The page renders `GET /api/investments/book` into `INV.book` with its own
+- The page renders `GET /api/investments` into `INV.book` with its own
   table (`#inv-tbl`, not `#tbl`/`COLS`: positions have a cash row and, later,
   closed lots). Amounts arrive in `book.ccy` and convert to `FX_QUOTE`.
   `fxSelect` and the startup rate load re-render it.
@@ -29,6 +29,34 @@ dependency (loaded from CDN, used only for column-guide formulas).
   in `RICH_TIPS` hover cards (`inv:*`: plain words, technical name small);
   no dotted underlines or info icons; company names, not tickers; "this
   month", not daily, in the headline (the chart itself is daily).
+- **The ledger (Phase 2).** The rail toggles **Attention | Activity** (the
+  `.pf-contrib-toggle` pill, remembered in localStorage `inv_rail`). Activity
+  lists the entries newest first, grouped by month; a row click edits it in
+  place, with Delete. "+ Add" (Holdings kicker, Activity header, empty state)
+  opens `#inv-pop`, one form for every type (`invFormHtml`): quick add
+  ("Holding": shares, avg price, Since, which is required and defaults to
+  today) is a `buy` with `qty_basis: "current"`. The company field uses
+  `/api/investments/lookup`; picking one fetches that day's close, which
+  fills a buy or sell price and keeps following the date until the user types
+  their own. Prices show in the share's quote unit (pence for LSE) and travel
+  in the major unit. Every change POSTs with `INV.book.rev` and renders the
+  payload it gets back; a refusal shows the server's message under the form.
+  Undo: a toast with an Undo button (`toast(msg, {label, fn})`), Undo/Redo in
+  the Activity header (the hover names the step), ⌘Z / ⇧⌘Z on the page when
+  no field has focus.
+
+### The book in the Portfolio tab (`BOOK_KEY = "__book__"`)
+- When the book holds anything, `renderTabs()` pins a red pill "My
+  Investments" first (`.pf-tab-book`, colour `--book`, the theme's red). It is
+  a **read-only mirror**: constituents are the open positions
+  (`/api/investments/symbols` at startup, then `bookTabSync()` after every
+  change on the page), and its default weight mode is `book` (today's market
+  values, cash excluded), with Equal and Cap still available. Analytics, News
+  and Optimize run on it; rename, delete, constituent edits, company search,
+  presets, MPT save/apply and saved MPT runs are gated (`viewIsBook`), and the
+  server refuses the name on every portfolio write route except the cached
+  rows (`Handler._writes_book_name`). A changed book rebuilds the rows on
+  activation instead of turning Refresh red. The xlsx export skips it.
 
 ### State (`STATE`, `DATA`, `VIEWS`, `WATCHLISTS`)
 - `DATA` — currently-rendered rows

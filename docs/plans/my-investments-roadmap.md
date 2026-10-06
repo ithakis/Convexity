@@ -18,7 +18,7 @@ owner says so.
 | # | Phase | Status | Branch / PR | Done |
 |---|---|---|---|---|
 | 1 | Page shell and look | Done (merged) | `feature/my-investments-p1` · [ithakis/Convexity#31](https://github.com/ithakis/Convexity/pull/31) | 2026-10-05 |
-| 2 | Ledger and manual entry | Not started | | |
+| 2 | Ledger and manual entry | Done (merged) | `feature/my-investments-p2` · [ithakis/Convexity#33](https://github.com/ithakis/Convexity/pull/33) | 2026-10-06 |
 | 3 | Performance | Not started | | |
 | 4 | Holdings depth | Not started | | |
 | 5 | AI import I: text and spreadsheets | Not started | | |
@@ -242,41 +242,117 @@ the owner reacts to something that looks real.
 - How an oversell or a broken edit is explained, in plain words.
 
 **Build:**
-- [ ] `src/convexity/ledger.py`: a pure engine with no I/O.
+- [x] `src/convexity/ledger.py`: a pure engine with no I/O.
       - Average cost, one cash pool in `base_ccy`, implied deposits.
       - Split factors with `qty_basis` set to `trade` or `current`.
       - Same-day order: deposit, dividend, sell, buy, fee, withdrawal.
       - `OversellError`. See Appendix B.
-- [ ] `src/convexity/investments.py`:
+- [x] `src/convexity/investments.py`:
       - `state/investments.json` (version, rev, settings, instruments, entries,
         journal of at most 100, redo).
       - Atomic write plus `.bak`; a malformed file is never overwritten (409).
       - `base_rev` conflicts return 409.
       - `ensure_instrument` via `resolver.resolve_symbol`.
-- [ ] Routes:
+- [x] Routes:
       - `GET /api/investments`
       - `POST /api/investments/entries`, `…/entries/update`,
         `…/entries/delete`, `…/undo`, `…/redo` (JSON only)
-- [ ] UI: quick-add holding, add transaction, editable ledger, Undo/Redo with
+- [x] UI: quick-add holding, add transaction, editable ledger, Undo/Redo with
       a label and ⌘Z.
-- [ ] Holdings table core columns: ticker, qty, avg cost, last, day %/$,
+- [x] Holdings table core columns: ticker, qty, avg cost, last, day %/$,
       value, weight, unrealised $/%, realised $, total return.
-- [ ] Lifetime P&L split in the headline: unrealised, realised, dividends.
-- [ ] `tests/test_ledger.py`: the acceptance test in Appendix B plus its
+- [x] Lifetime P&L split in the headline: unrealised, realised, dividends.
+- [x] `tests/test_ledger.py`: the acceptance test in Appendix B plus its
       companions.
-- [ ] `tests/test_investments_store.py` and route tests.
-- [ ] A test that the seeded demo book replays cleanly.
+- [x] `tests/test_investments_store.py` and route tests.
+- [x] A test that the seeded demo book replays cleanly.
+- [x] Rail toggle **Attention | Activity** (`.pf-contrib-toggle`, remembered
+      in localStorage `inv_rail`); Activity grouped by month, a row click
+      edits in place.
+- [x] Add popover, quick add first; **Since is required, prefilled with
+      today**; price auto-fills from that day's close.
+- [x] Before Phase 3: the return cells show "—" and the chart card one calm
+      line; the demo book also goes through the real engine.
+- [x] **The book in the Portfolio tab:** a pinned, read-only red pill
+      `__book__` labelled "My Investments", "Book" (value) weights by
+      default, server guards on the reserved name.
 
 **Verify:**
-- [ ] The acceptance numbers match.
-- [ ] With curl on our own port: add, edit, delete, undo, redo; a stale rev
+- [x] The acceptance numbers match.
+- [x] With curl on our own port: add, edit, delete, undo, redo; a stale rev
       returns 409; a text/plain POST returns 403.
-- [ ] In the browser: the empty state, then the first holding, then an edit,
+- [x] In the browser: the empty state, then the first holding, then an edit,
       then undo.
 
 **Feedback log:**
+- 2026-10-05: Q&A with mockups. **Add:** a popover from "+ Add", quick add
+  first ("Holding": company, shares, avg price, Since), a type row for Buy /
+  Sell / Dividend / Cash / Fee / Split, more fields behind a disclosure.
+  **Since is required and prefilled with today.** **Undo:** a toast after
+  every change, Undo/Redo in the Activity header, and ⌘Z / ⇧⌘Z.
+  **Before Phase 3:** real value, month and profit; the return cells and the
+  chart show calm gaps, never made-up numbers.
+- 2026-10-05: **Ledger placement:** three graphical options shown (toggle
+  beside Holdings, section below, drawer). The owner chose the drawer idea,
+  refined: **the rail toggles between Attention and Activity**, like Table |
+  Chart in the Portfolio tab.
+- 2026-10-05: **New feature added to this phase:** the book appears
+  automatically in the Portfolio tab as a pill coloured in the theme's red.
+  Chosen: a read-only mirror (holdings = constituents, value weights by
+  default; Equal / Cap, analytics, News and Optimize still work; no rename,
+  delete, edits, presets or "apply"), shipped inside Phase 2.
+- Holdings columns stay the Phase 1 sign-off set (Holding, Shares, Avg price,
+  Value, Weight, Month, Profit, Return), superseding Appendix A's list.
+- 2026-10-06: Built live on the seeded demo book (`ledger.py`,
+  `investments.py`, the routes, the rail, the popover, undo and the book
+  pill). Checked in light, dark and Bloomberg at 1440 px, plus the empty
+  state. The Appendix B acceptance numbers match exactly. One live News
+  refresh on the book tab with the owner's keys worked: Finnhub headlines for
+  the US names, the News read from NIM, and Book weights. Waiting for the
+  owner's review.
+- 2026-10-06: Adversarial review (owner's /verify request) fixed 9 backend
+  bugs, each with a test:
+  - a sell of a tiny fraction of an unheld share crashed;
+  - a book file with a bad shape was a 500, not left untouched;
+  - booleans, overflowing numbers and junk currency codes were accepted;
+  - `source` could mark a real book as demo;
+  - changing an entry's company kept the old currency;
+  - a pence holding without a Yahoo price showed in pounds;
+  - a non-object entry was a 500;
+  - the `__book__` guard was too broad (it blocked a preset with that name);
+  - holdings with no price dropped out of the value silently.
+
+  Frontend fixes: a faded toast kept its Undo clickable; currency hints were
+  unescaped; ⌘Z fired inside the form; book-pill edge cases. FX history
+  lookups now use bisect. Then `/verify` on a clean uv-tool install of the
+  tree:
+  - API: 409, 422, 400s, undo/redo, the origin guard and the reserved name
+    all held.
+  - UI: quick add in pence (SHEL.L, average 2,605.75p), inline edit, ⌘Z.
+  - The Portfolio regression flow (new portfolio, Refresh red then clear) and
+    the book tab following a new holding.
+  - A live News refresh on the book tab: 4 of 6 holdings read.
+  - Reload restored the tab; the logs held no amounts; the desktop window
+    reached `loadFinished ok=True`.
+- 2026-10-06: **Owner sign-off: "commit, create a PR and merge".** Version
+  1.20.0 (owner's call).
 
 **Findings:**
+- Yahoo's `auto_adjust=False` only removes the dividend adjustment; closes
+  stay split-adjusted. The price auto-fill multiplies the later splits back
+  in (NVDA on 1 May 2024 is ~830, not 83). Phase 3's unadjusted valuation
+  must do the same.
+- Same-day order (sell before buy) means a buy and a sell of the same share
+  on one day is refused when nothing was held before. That is Appendix B's
+  rule; revisit it if the owner day-trades.
+- "This month" values month-start holdings at today's FX until Phase 3
+  brings daily FX.
+- "This month" can count a dividend twice in a month with an ex-date:
+  `_bulk_close` closes are dividend-adjusted. Phase 3's as-traded closes fix
+  it.
+- The demo book now runs through the real engine. The "Demo data" badge
+  shows only while every entry is a demo entry, so it disappears after the
+  first entry of your own.
 
 ---
 

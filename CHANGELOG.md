@@ -9,8 +9,10 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
-## Unreleased
+## 1.20.0 — 2026-10-06
 
+- **My Investments: your real book** (issue #1, roadmap Phase 2). Add holdings and transactions by hand (buy, sell, dividend, cash in and out, fees, splits) from an "+ Add" popover. The price fills itself from that day's close. Value, this month, total profit (held, sold, dividends, fees) and every holding are now computed from your entries, with average cost, cash and splits handled. The rail switches between Attention and Activity, where every entry can be edited in place. Every change can be undone (toast, buttons, ⌘Z). A change the ledger can't book, such as selling more than you hold, is explained in plain words. Performance figures arrive in the next phase and show a dash until then.
+- **Your book in the Portfolio tab**: a red "My Investments" pill, pinned first, mirrors your real holdings, weighted by today's value. Analytics, News and Optimize work on it; it is read-only there.
 - **My Investments, the page shell** (issue #1, roadmap Phase 1): a new first tab for your real book, separate from the research tabs. It shows your value and this month's change, Total profit, Return against the S&P 500, a daily value chart, holdings by company name, and a calm attention rail; details sit in hover cards. Until holdings can be entered (Phase 2) it shows its empty state.
 
 ## 1.19.5 — 2026-10-05

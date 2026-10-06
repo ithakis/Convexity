@@ -48,6 +48,11 @@ POST_PATHS = [
     "/api/reference-pack",
     "/api/keys",
     "/api/keys/test",
+    "/api/investments/entries",
+    "/api/investments/entries/update",
+    "/api/investments/entries/delete",
+    "/api/investments/undo",
+    "/api/investments/redo",
     "/api/no-such-route",
 ]
 DELETE_PATHS = [

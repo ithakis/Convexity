@@ -1,105 +1,75 @@
 """My Investments: the user's real book (docs/plans/my-investments-roadmap.md).
 
-Phase 1 is the page shell only. ``book_preview()`` serves the payload shape the
-page is built against, so the visual language can be signed off before any
-maths exists. It answers in exactly two ways:
+This module owns ``state/investments.json`` and turns it into the page
+payload. The maths lives in ``ledger.py`` (pure, no I/O); this file does the
+I/O around it: the store, undo/redo, instruments, prices and FX.
 
-- no book file yet -> ``{"empty": True}`` (the page shows its empty state);
-- the synthetic demo book from ``scripts/seed_demo_book.py`` -> fixed demo
-  figures flagged ``"demo": True`` (the page labels them as demo data).
+The book file holds the user's real money, so the store is defensive:
 
-A real, user-entered book is never shown fake numbers: anything other than
-the demo book also answers ``empty`` until Phase 2 computes it for real.
-Phases 2-3 replace the demo figures with the ledger engine behind the same
-keys, so the frontend does not change shape.
+- every read-modify-write runs under one lock, and every write is atomic
+  (``persistence._atomic_write``) after copying the old file to ``.bak``;
+- **a malformed file is never overwritten** (``BookUnreadable`` -> 409): the
+  user may be able to repair it, and a silent "start again" would lose it;
+- every mutation carries the ``rev`` the page last saw; a stale one is a 409,
+  so two windows can never overwrite each other's edits;
+- every mutation replays the whole candidate ledger before it is saved, so
+  the file never holds a book the engine refuses (an oversell, say);
+- logs name the operation, the entry id and the symbol, never amounts:
+  users paste logs into public issues.
+
+Performance (TWR, MWR, the chart) arrives in Phase 3. Until then the payload
+leaves those keys empty (``None`` / no ``series``) and the page shows calm
+gaps: a real book is never shown made-up numbers.
 """
 
 import json
-from datetime import date, timedelta
+import math
+import re
+import secrets
+import threading
+import time
+from bisect import bisect_right
+from datetime import UTC, date, datetime, timedelta
 
-from convexity import paths
+from convexity import ledger, paths
+from convexity.helpers import major_ccy, price_in_major
 
-# Demo figures, in USD, derived so nothing on the page can contradict
-# anything else: positions + cash = value, weights + cash = 100%, profit =
-# value - money put in. Prices and avg prices are in the share's quote unit.
-_POS_KEYS = ("symbol", "name", "exchange", "quote_ccy", "shares", "avg_price", "price",
-             "value", "month_pct", "profit_held", "profit_sold", "dividends",
-             "profit_price", "profit_fx", "return_pct", "note")  # fmt: skip
-# fmt: off
-_DEMO_POSITIONS = [
-    ("MSFT", "Microsoft", "NASDAQ", "USD", 50, 293.79, 502.60, 25130.0, 3.1, 10440.0, 0.0, 25.5, None, None, 71.1, None),
-    ("NVDA", "NVIDIA", "NASDAQ", "USD", 120, 37.93, 186.75, 22410.0, 5.6, 17860.0, 6300.0, 0.0, None, None, 392.3, "Split 10:1 on 10 Jun 2024"),
-    ("VWCE.DE", "Vanguard FTSE All-World", "XETRA", "EUR", 120, 105.14, 115.40, 15870.0, 1.2, 2310.0, 0.0, 0.0, 1350.0, 960.0, 17.0, None),
-    ("AAPL", "Apple", "NASDAQ", "USD", 60, 126.38, 258.10, 15486.0, 0.8, 7903.2, 0.0, 26.0, None, None, 104.5, None),
-    ("SHEL.L", "Shell", "LSE", "GBp", 300, 2541.0, 2690.0, 10320.0, -2.0, 530.0, 0.0, 0.0, 410.0, 120.0, 5.4, None),
-]
-# fmt: on
-_DEMO_VALUE = 93040.0
-_DEMO_CASH = _DEMO_VALUE - sum(p[7] for p in _DEMO_POSITIONS)
-_DEMO_PROFIT = sum(p[9] + p[10] + p[11] for p in _DEMO_POSITIONS)
-_DEMO_FLOWS = {date(2024, 1, 2): 20000.0, date(2026, 3, 2): -5000.0}
-_DEMO_FIRST_DEPOSIT = _DEMO_VALUE - _DEMO_PROFIT - sum(_DEMO_FLOWS.values())
-
-
-def _demo_noise(n: int, seed: int) -> list[float]:
-    """Deterministic standard-normal-ish draws (Irwin-Hall over a fixed LCG).
-
-    No ``random`` module, so the demo chart is identical on every run and
-    every machine, which is what makes screenshots comparable.
-    """
-    out, x = [], seed
-    for _ in range(n):
-        acc = 0.0
-        for _ in range(12):
-            x = (x * 1103515245 + 12345) % 2**31
-            acc += x / 2**31
-        out.append(acc - 6.0)
-    return out
-
-
-def _demo_series() -> dict:
-    """Three years of daily points (weekdays), deterministic, ending on the
-    demo value. The book and the S&P 500 share a common factor, so they move
-    together the way a stock portfolio and the index do."""
-    end = date(2026, 10, 2)
-    days, d = [], end - timedelta(days=3 * 365)
-    while d <= end:
-        if d.weekday() < 5:
-            days.append(d)
-        d += timedelta(days=1)
-    mkt, own = _demo_noise(len(days), 41), _demo_noise(len(days), 120)
-    dates, value, invested, bench_value, twr, bench = [], [], [], [], [], []
-    cap = v = b = _DEMO_FIRST_DEPOSIT
-    t = s = 1.0
-    for i, day in enumerate(days):
-        if i:
-            rb = 0.00055 + 0.0095 * mkt[i]
-            r = 0.0007 + 1.1 * 0.0095 * mkt[i] + 0.0055 * own[i]
-            v *= 1 + r
-            b *= 1 + rb
-            t *= 1 + r
-            s *= 1 + rb
-        flow = _DEMO_FLOWS.get(day, 0.0)
-        v, b, cap = v + flow, b + flow, cap + flow
-        dates.append(day.isoformat())
-        value.append(v)
-        invested.append(cap)
-        bench_value.append(b)
-        twr.append(t)
-        bench.append(s)
-    k = _DEMO_VALUE / value[-1]  # pin the last point to the headline value
-    return {
-        "dates": dates,
-        "value": [round(x * k, 2) for x in value],
-        "invested": [round(x, 2) for x in invested],
-        "bench_value": [round(x * k, 2) for x in bench_value],
-        "twr_index": [round(x, 6) for x in twr],
-        "bench_index": [round(x, 6) for x in bench],
-    }
-
+SCHEMA_VERSION = 1
+JOURNAL_MAX = 100
+_LOCK = threading.Lock()
 
 PERIODS = ("1M", "3M", "YTD", "1Y", "3Y", "ALL")
 _PERIOD_MONTHS = {"1M": 1, "3M": 3, "1Y": 12, "3Y": 36}
+
+SOURCES = ("manual", "quick")  # what the page may send; "demo" is the seed script's
+_MAX_NUMBER = 1e12  # far above any real holding; keeps every sum finite (JSON has no inf)
+_FIELDS = ("date", "type", "symbol", "qty", "price", "fee", "amount", "tax", "ratio",
+           "fx_rate", "ccy", "qty_basis", "note")  # fmt: skip
+
+
+class BookError(Exception):
+    """A refused request. ``status`` is the HTTP status; ``message`` is plain
+    words the page shows as is."""
+
+    status = 400
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+class BookUnreadable(BookError):
+    status = 409
+
+
+class StaleRev(BookError):
+    status = 409
+
+
+class Refused(BookError):
+    """The ledger engine refused the change (an oversell, a missing FX rate)."""
+
+    status = 422
 
 
 def period_starts(dates: list[str]) -> dict:
@@ -121,59 +91,706 @@ def period_starts(dates: list[str]) -> dict:
     return out
 
 
-def _period_returns(idx: list[float], starts: dict) -> dict:
-    return {p: round((idx[-1] / idx[i] - 1) * 100, 2) for p, i in starts.items()}
+# ------------------------------------------------------------------- store
 
 
-def _demo_book() -> dict:
-    """Fixed demo payload, in the exact shape Phase 2 must fill for real."""
-    series = _demo_series()
-    starts = series["period_start"] = period_starts(series["dates"])
-    twr = _period_returns(series["twr_index"], starts)
-    positions = [
-        dict(zip(_POS_KEYS, row, strict=True)) | {
-            "weight": row[7] / _DEMO_VALUE * 100, "profit": row[9] + row[10] + row[11]}
-        for row in _DEMO_POSITIONS
-    ]  # fmt: skip
+def _path():
+    return paths.state_file("investments")
+
+
+def _new_book() -> dict:
+    return {"version": SCHEMA_VERSION, "rev": 0, "settings": {"base_ccy": "USD", "benchmark": "SPY"},
+            "instruments": {}, "entries": [], "journal": [], "redo": []}  # fmt: skip
+
+
+def _load() -> dict | None:
+    """The book file, ``None`` when there is none yet. Raises BookUnreadable
+    for anything malformed, and never touches the file."""
+    path = _path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise BookUnreadable(
+            "Your investments file couldn't be read. Nothing was changed."
+        ) from exc
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        raw = None
+    if not isinstance(raw, dict) or not isinstance(raw.get("entries"), list):
+        raise BookUnreadable(
+            f"Your investments file ({path.name}) is damaged, so it was left untouched. "
+            f"A copy of the previous version is next to it as {path.name}.bak."
+        )
+    version, rev = raw.get("version", 0), raw.setdefault("rev", 0)
+    if (
+        not isinstance(version, int)
+        or not isinstance(rev, int)
+        or not all(
+            isinstance(e, dict)
+            and isinstance(e.get("date"), str)
+            and e.get("type") in ledger.TYPES
+            and (e["type"] not in ledger.NEEDS_SYMBOL or isinstance(e.get("symbol"), str))
+            for e in raw["entries"]
+        )
+    ):
+        raise BookUnreadable(
+            f"Your investments file ({path.name}) has entries Convexity can't read, so it was "
+            "left untouched."
+        )
+    if version > SCHEMA_VERSION:
+        raise BookUnreadable(
+            "Your investments file was saved by a newer Convexity. Update the app to open it."
+        )
+    base = _new_book()
+    for k in ("settings", "instruments", "journal", "redo"):
+        if not isinstance(raw.get(k), type(base[k])):
+            raw[k] = base[k]
+    return raw
+
+
+def _save(raw: dict) -> None:
+    from convexity.persistence import _atomic_write
+
+    path = _path()
+    if path.exists():
+        _atomic_write(path.with_name(path.name + ".bak"), path.read_text(encoding="utf-8"))
+    _atomic_write(path, json.dumps(raw, indent=1, ensure_ascii=False) + "\n")
+
+
+def _now() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# -------------------------------------------------------------- market data
+# Each fetch is a small function so the tests can stub the network. Every
+# cache stores failures only briefly (CLAUDE.md §9: never cache empty forever).
+
+_SPLITS: dict[str, tuple[float, list]] = {}
+_SPLITS_TTL, _MISS_TTL = 12 * 3600.0, 600.0
+
+
+def _fetch_splits(symbol: str) -> list[tuple[str, float]] | None:
+    import yfinance as yf
+
+    try:
+        s = yf.Ticker(symbol).splits
+    except Exception:
+        return None
+    if s is None:
+        return None
+    return [(ts.date().isoformat(), float(r)) for ts, r in s.items() if r and float(r) > 0]
+
+
+def market_splits(symbols, *, fetch: bool = True) -> dict[str, list[tuple[str, float]]]:
+    """Yahoo's split history per symbol, cached. ``fetch=False`` answers from
+    the cache only (the cheap symbol list at startup)."""
+    out, now = {}, time.time()
+    for sym in symbols:
+        hit = _SPLITS.get(sym)
+        if hit and now - hit[0] < (_SPLITS_TTL if hit[1] is not None else _MISS_TTL):
+            got = hit[1]
+        elif fetch:
+            got = _fetch_splits(sym)
+            _SPLITS[sym] = (now, got)
+        else:
+            got = None
+        if got:
+            out[sym] = got
+    return out
+
+
+def _closes(symbols: list[str]):
+    """Daily closes for the last few months (split-adjusted, quote unit)."""
+    from convexity.analytics import _bulk_close
+
+    return _bulk_close(symbols, "3mo")
+
+
+def _fx_series(ccy: str):
+    from convexity.fx import _fx_usd_series
+
+    return _fx_usd_series(ccy, "max")
+
+
+def _fx_now(ccy: str, base: str) -> float | None:
+    from convexity.fx import convert_amount
+
+    return convert_amount(1.0, ccy, base)
+
+
+def _dated(series) -> tuple[list[str], list[float]]:
+    """A date-indexed series as sorted (ISO dates, values), NaNs dropped, so
+    a lookup is a bisect: the FX history runs to decades of days and is
+    looked up twice per foreign entry."""
+    if series is None or len(series) == 0:
+        return [], []
+    s = series.dropna()
+    return [d.date().isoformat() if hasattr(d, "date") else str(d)[:10] for d in s.index], [
+        float(v) for v in s.values
+    ]
+
+
+def _on_or_before(dated: tuple[list[str], list[float]], iso: str) -> float | None:
+    """The last value on or before ``iso`` of a ``_dated`` series."""
+    i = bisect_right(dated[0], iso)
+    return dated[1][i - 1] if i else None
+
+
+def _make_fx_at(base: str, warnings: list[str]):
+    """``fx_at(ccy, date)``: base units per one ``ccy`` on that date, from
+    Yahoo's history; today's rate (with a warning) when history is missing."""
+    memo: dict = {}
+
+    def usd_per(ccy: str, iso: str) -> float | None:
+        if ccy == "USD":
+            return 1.0
+        if ccy not in memo:
+            memo[ccy] = _dated(_fx_series(ccy))
+        dates, vals = memo[ccy]
+        # Before the history starts, its first rate is the best there is.
+        return vals[max(bisect_right(dates, iso), 1) - 1] if vals else None
+
+    def fx_at(ccy: str, iso: str) -> float | None:
+        ccy = major_ccy(ccy)
+        if ccy == base:
+            return 1.0
+        a, b = usd_per(ccy, iso), usd_per(base, iso)
+        if a and b:
+            return a / b
+        spot = _fx_now(ccy, base)
+        if spot:
+            note = f"No {ccy} history from Yahoo: trades in {ccy} use today's rate."
+            if note not in warnings:
+                warnings.append(note)
+        return spot
+
+    return fx_at
+
+
+# -------------------------------------------------------------- instruments
+
+
+def _fetch_quote_ccy(symbol: str) -> str | None:
+    import yfinance as yf
+
+    try:
+        c = yf.Ticker(symbol).fast_info.get("currency")
+        return str(c) if c else None
+    except Exception:
+        return None
+
+
+def _resolve(text: str) -> str:
+    from convexity.resolver import resolve_symbol
+
+    return resolve_symbol(text) or text.strip().upper()
+
+
+def _pack_hit(ticker: str):
+    try:
+        from convexity import symbol_db
+
+        return symbol_db.get(ticker)
+    except Exception:
+        return None
+
+
+def ensure_instrument(raw: dict, text: str) -> str:
+    """The ticker for ``text`` (a ticker or a name), recorded in
+    ``raw["instruments"]`` with its name, exchange and quote currency."""
+    text = (text or "").strip()
+    if not text or len(text) > 60:
+        raise BookError("Choose a company.")
+    inst = raw["instruments"]
+    if text.upper() in inst:
+        return text.upper()
+    hit = _pack_hit(text.upper())
+    ticker = hit.ticker if hit else _resolve(text)
+    if ticker in inst:
+        return ticker
+    hit = hit or _pack_hit(ticker)
+    qccy = _fetch_quote_ccy(ticker)
+    if not qccy:
+        raise BookError(f"Couldn't find {text} on Yahoo Finance. Check the name or ticker.")
+    inst[ticker] = {
+        "name": (hit.name if hit else None) or ticker,
+        "exchange": _exchange_name(hit.exchange) if hit else None,
+        "quote_ccy": qccy,
+        "ccy": major_ccy(qccy),
+    }
+    return ticker
+
+
+def lookup(query: str, limit: int = 6) -> list[dict]:
+    """Company typeahead for the Add popover, from the symbol pack."""
+    try:
+        from convexity import symbol_db
+
+        hits = symbol_db.lookup(query, limit=limit, min_score=60.0)
+    except Exception:
+        hits = []
+    return [
+        {"ticker": h.ticker, "name": h.name, "exchange": _exchange_name(h.exchange)} for h in hits
+    ]
+
+
+def _exchange_name(code: str | None) -> str | None:
+    """Yahoo's exchange code as people say it ("NMS" -> "NASDAQ")."""
+    from convexity.search import EXCHANGE_NAMES
+
+    return EXCHANGE_NAMES.get(code or "", code)
+
+
+def price_on(symbol: str, iso: str) -> dict:
+    """The close on or before ``iso`` as traded that day, so it matches a
+    contract note: the Add popover's price auto-fill. Major unit, with the
+    quote currency.
+
+    ``auto_adjust=False`` drops the dividend adjustment only: Yahoo's closes
+    are always split-adjusted, so every split after the day is multiplied
+    back in (NVDA on 1 May 2024 traded near 830, not 83)."""
+    import yfinance as yf
+
+    d = date.fromisoformat(iso)
+    try:
+        h = yf.Ticker(symbol).history(start=(d - timedelta(days=10)).isoformat(),
+                                      end=(d + timedelta(days=1)).isoformat(), auto_adjust=False)  # fmt: skip
+        col = h["Close"].dropna() if h is not None and not h.empty else None
+        raw = float(col.iloc[-1]) if col is not None and len(col) else None
+        on = col.index[-1].date().isoformat() if raw is not None else None
+        if raw is not None:
+            raw *= ledger.split_factor(market_splits([symbol]).get(symbol, []), on)
+        qccy = _fetch_quote_ccy(symbol)
+    except Exception:
+        raw, on, qccy = None, None, None
+    return {"symbol": symbol, "date": on, "price": price_in_major(raw, qccy), "quote_ccy": qccy}
+
+
+# ---------------------------------------------------------------- entries
+
+
+def _f(v, name: str, *, positive=False, nonneg=False):
+    if v is None or v == "":
+        return None
+    try:
+        x = None if isinstance(v, bool) else float(v)
+    except (TypeError, ValueError):
+        x = None
+    if x is None or not math.isfinite(x):
+        raise BookError(f"{name} must be a number.")
+    if abs(x) > _MAX_NUMBER:
+        raise BookError(f"{name} is too large.")
+    if positive and x <= 0:
+        raise BookError(f"{name} must be more than zero.")
+    if nonneg and x < 0:
+        raise BookError(f"{name} can't be negative.")
+    return x
+
+
+def _clean(raw: dict, fields: dict, old: dict | None = None) -> dict:
+    """A validated entry from the page's fields (merged over ``old`` for an
+    edit). Prices and amounts are in the major unit of ``ccy``."""
+    e = dict(old or {})
+    for k in _FIELDS:
+        if k in fields:
+            e[k] = fields[k]
+    t = e.get("type")
+    if t not in ledger.TYPES:
+        raise BookError("Choose what kind of entry this is.")
+    try:
+        d = date.fromisoformat(str(e.get("date") or ""))
+    except ValueError:
+        raise BookError("Enter a date.") from None
+    if d > date.today():
+        raise BookError("The date can't be in the future.")
+    if d.year < 1970:
+        raise BookError("The date is too far back.")
+    out = dict.fromkeys(_FIELDS)
+    out |= {"date": d.isoformat(), "type": t, "note": str(e.get("note") or "")[:200]}
+    base = raw["settings"].get("base_ccy", "USD")
+    if t in ledger.NEEDS_SYMBOL:
+        sym = out["symbol"] = ensure_instrument(raw, str(e.get("symbol") or ""))
+        if old and sym != old.get("symbol"):
+            # Another company brings its own currency, unless one was sent.
+            for k in ("ccy", "fx_rate"):
+                e[k] = fields.get(k)
+        out["ccy"] = major_ccy(str(e.get("ccy") or raw["instruments"][sym]["ccy"]))
+    else:
+        out["ccy"] = major_ccy(str(e.get("ccy") or base))
+    if not re.fullmatch(r"[A-Z]{3}", out["ccy"]):
+        raise BookError("Choose a currency, like USD or EUR.")
+    if t in ledger.TRADES:
+        out["qty"] = _f(e.get("qty"), "Shares", positive=True)
+        out["price"] = _f(e.get("price"), "Price", nonneg=True)
+        out["fee"] = _f(e.get("fee"), "Fee", nonneg=True) or 0.0
+        if out["qty"] is None or out["price"] is None:
+            raise BookError("Enter the shares and the price.")
+        out["qty_basis"] = "current" if e.get("qty_basis") == "current" else "trade"
+    elif t == "split":
+        out["ratio"] = _f(e.get("ratio"), "Ratio", positive=True)
+        if not out["ratio"] or out["ratio"] == 1:
+            raise BookError("Enter the split ratio, e.g. 10 for a 10-for-1 split.")
+    else:
+        out["amount"] = _f(e.get("amount"), "Amount", positive=True)
+        if out["amount"] is None:
+            raise BookError("Enter the amount.")
+        if t == "dividend":
+            out["tax"] = _f(e.get("tax"), "Tax", nonneg=True) or 0.0
+            if out["tax"] >= out["amount"]:
+                raise BookError("The tax must be less than the dividend.")
+    if out["ccy"] != base:
+        out["fx_rate"] = _f(e.get("fx_rate"), "FX rate", positive=True)
+    return out
+
+
+def _label(op: str, e: dict, raw: dict) -> str:
+    """Plain words for the journal, the toast and the Undo hover."""
+    name = _name(raw, e.get("symbol"))
+    if e["type"] in ledger.TRADES:
+        name = f"{ledger._qty(e['qty'])} {name}"
+    return f"{op} {e['type']}" + (f" · {name}" if name else "")
+
+
+_TAILS = (" Corporation", " Inc.", " Inc", " plc", " PLC", " Ltd", " N.V.", " SE", " AG", " S.A.")
+
+
+def _short(name: str) -> str:
+    for tail in _TAILS:
+        if name.endswith(tail):
+            return name[: -len(tail)]
+    return name
+
+
+def _apply(entries: list[dict], ops: list[dict]) -> list[dict]:
+    """Apply journal ops: {"put": entry, "at": i} replaces by id or inserts
+    at ``at``; {"del": id} removes."""
+    out = list(entries)
+    for op in ops:
+        if "del" in op:
+            out = [e for e in out if e.get("id") != op["del"]]
+        else:
+            ent = op["put"]
+            i = next((k for k, e in enumerate(out) if e.get("id") == ent["id"]), None)
+            if i is not None:
+                out[i] = ent
+            else:
+                out.insert(min(op.get("at", len(out)), len(out)), ent)
+    return out
+
+
+def _trade_basis_symbols(entries: list[dict]) -> list[str]:
+    """Only trades on the contract-note basis need Yahoo's split history."""
+    return sorted(
+        {e["symbol"] for e in entries if e.get("qty_basis") == "trade" and e.get("symbol")}
+    )
+
+
+def _check(raw: dict, entries: list[dict], changed: str | None = None) -> None:
+    """Replay the candidate ledger. A refusal is explained in plain words:
+    about the entry just changed, or about the later entry it breaks (an
+    edit that leaves a later sell short of shares)."""
+    warnings: list[str] = []
+    base = raw["settings"].get("base_ccy", "USD")
+    splits = ledger.merge_splits(entries, market_splits(_trade_basis_symbols(entries)))
+    try:
+        ledger.replay(entries, base_ccy=base, fx_at=_make_fx_at(base, warnings), splits=splits)
+    except ledger.OversellError as exc:
+        name, when = _name(raw, exc.symbol), _when(exc.day)
+        sell, have = ledger._qty(exc.sell), ledger._qty(exc.have)
+        if changed is not None and exc.entry_id == changed:
+            raise Refused(
+                f"That sells {sell} {name} on {when}, but you hold {have} then."
+            ) from None
+        raise Refused(
+            f"That would leave your sale of {sell} {name} on {when} selling more than you hold then "
+            f"({have}). Change that sale first."
+        ) from None
+    except ledger.LedgerError as exc:
+        bad = next((e for e in entries if e.get("id") == exc.entry_id), None)
+        who = _describe(bad, raw) if bad else "An entry"
+        raise Refused(f"{who} {exc.message}.") from None
+
+
+def _name(raw: dict, symbol: str | None) -> str:
+    return _short(raw["instruments"].get(symbol or "", {}).get("name") or symbol or "")
+
+
+def _when(iso: str) -> str:
+    d = date.fromisoformat(iso)
+    return f"{d.day} {d:%b %Y}"  # no %-d: Windows strftime lacks it
+
+
+def _describe(e: dict, raw: dict) -> str:
+    name = _name(raw, e.get("symbol"))
+    return f"The {e['type']}{' of ' + name if name else ''} on {_when(e['date'])}"
+
+
+def _check_rev(raw: dict, base_rev) -> None:
+    """Every change names the rev the page last saw, so two windows can never
+    silently overwrite each other's edits."""
+    if type(base_rev) is not int or base_rev != raw["rev"]:
+        raise StaleRev("Your investments changed in another window. Reload to see the latest.")
+
+
+def _mutate(base_rev, change) -> dict:
+    """The one read-check-write path, for edits and undo/redo alike.
+    ``change(raw)`` updates the journal and returns (new_entries, the id of
+    the entry it put, for the refusal wording) or raises BookError; nothing
+    is saved unless the candidate ledger replays."""
+    with _LOCK:
+        raw = _load() or _new_book()
+        _check_rev(raw, base_rev)
+        entries, changed = change(raw)
+        _check(raw, entries, changed)
+        raw["entries"] = entries
+        raw["rev"] += 1
+        _save(raw)
+    return book()
+
+
+def _record(raw: dict, verb: str, e: dict, undo: list, redo: list):
+    """Journal one change (a new change clears redo) and apply it."""
+    item = {"label": _label(verb, e, raw), "undo": undo, "redo": redo}
+    raw["journal"] = (raw["journal"] + [item])[-JOURNAL_MAX:]
+    raw["redo"] = []
+    print(f"[investments] {verb.lower()} {e['id']} {e.get('symbol') or e['type']}")
+    return _apply(raw["entries"], redo), redo[0].get("put", {}).get("id")
+
+
+def add(fields: dict, base_rev) -> dict:
+    def change(raw):
+        e = _clean(raw, fields)
+        src = fields.get("source")
+        e |= {"id": "e_" + secrets.token_hex(6), "source": src if src in SOURCES else "manual",
+              "batch": None, "created_at": _now(), "updated_at": _now()}  # fmt: skip
+        return _record(raw, "Added", e, [{"del": e["id"]}], [{"put": e}])
+
+    return _mutate(base_rev, change)
+
+
+def _find(raw: dict, entry_id: str) -> tuple[int, dict]:
+    for i, e in enumerate(raw["entries"]):
+        if e.get("id") == entry_id:
+            return i, e
+    raise BookError("That entry no longer exists. Reload to see the latest.")
+
+
+def update(entry_id: str, fields: dict, base_rev) -> dict:
+    def change(raw):
+        i, old = _find(raw, entry_id)
+        new = old | _clean(raw, fields, old) | {"updated_at": _now()}
+        return _record(raw, "Edited", new, [{"put": old, "at": i}], [{"put": new}])
+
+    return _mutate(base_rev, change)
+
+
+def delete(entry_id: str, base_rev) -> dict:
+    def change(raw):
+        i, old = _find(raw, entry_id)
+        return _record(raw, "Deleted", old, [{"put": old, "at": i}], [{"del": entry_id}])
+
+    return _mutate(base_rev, change)
+
+
+def _step(base_rev, frm: str, to: str) -> dict:
+    """Undo (journal -> redo) or redo (redo -> journal)."""
+
+    def change(raw):
+        if not raw[frm]:
+            raise BookError("Nothing to undo." if frm == "journal" else "Nothing to redo.")
+        item = raw[frm].pop()
+        raw[to] = (raw[to] + [item])[-JOURNAL_MAX:]
+        print(f"[investments] {'undo' if frm == 'journal' else 'redo'}")
+        return _apply(raw["entries"], item["undo" if frm == "journal" else "redo"]), None
+
+    return _mutate(base_rev, change)
+
+
+def undo(base_rev) -> dict:
+    return _step(base_rev, "journal", "redo")
+
+
+def redo(base_rev) -> dict:
+    return _step(base_rev, "redo", "journal")
+
+
+# ---------------------------------------------------------------- payload
+
+
+def _cash_effect(e: dict) -> float | None:
+    """The entry's own cash movement in its own currency (for Activity)."""
+    t, n = e["type"], (lambda k: float(e.get(k) or 0.0))
+    if t == "buy":
+        return -(n("qty") * n("price") + n("fee"))
+    if t == "sell":
+        return n("qty") * n("price") - n("fee")
+    if t == "dividend":
+        return n("amount") - n("tax")
+    if t == "deposit":
+        return n("amount")
+    if t in ("withdrawal", "fee"):
+        return -n("amount")
+    return None
+
+
+def book_symbols() -> list[str]:
+    """Open positions, without any network call: the Portfolio tab's pinned
+    book pill needs only this at startup. Splits come from the cache; if the
+    replay can't run without fresh ones, every bought symbol stands in."""
+    try:
+        raw = _load()
+    except BookUnreadable:
+        return []
+    if not raw or not raw["entries"]:
+        return []
+    entries = raw["entries"]
+    syms = sorted({e["symbol"] for e in entries if e.get("symbol")})
+    try:
+        b = ledger.replay(entries, base_ccy=raw["settings"].get("base_ccy", "USD"), fx_at=lambda *_: 1.0,
+                          splits=ledger.merge_splits(entries, market_splits(syms, fetch=False)))  # fmt: skip
+        return sorted(p.symbol for p in b.open_positions())
+    except ledger.LedgerError:
+        return sorted({e["symbol"] for e in entries if e.get("type") == "buy"})
+
+
+def book() -> dict:
+    """The page payload. The keys are the ones Phase 1 built the page
+    against (roadmap, Phase 1 Findings); performance keys stay empty until
+    Phase 3."""
+    try:
+        raw = _load()
+    except BookUnreadable as exc:
+        return {"empty": True, "error": exc.message}
+    if not raw or not raw["entries"]:
+        return {"empty": True, "rev": raw["rev"] if raw else 0,
+                "undo_label": _top(raw, "journal"), "redo_label": _top(raw, "redo")}  # fmt: skip
+    base = raw["settings"].get("base_ccy", "USD")
+    inst, entries, warnings = raw["instruments"], raw["entries"], []
+    splits = ledger.merge_splits(entries, market_splits(_trade_basis_symbols(entries)))
+    fx_at = _make_fx_at(base, warnings)
+    try:
+        b = ledger.replay(entries, base_ccy=base, fx_at=fx_at, splits=splits)
+    except ledger.LedgerError as exc:
+        # The stored book no longer replays (new split data, say): show the
+        # ledger so it can be fixed, never a half-computed book.
+        return {"empty": False, "broken": f"{exc.message}.", "rev": raw["rev"], "ccy": base,
+                "entries": _entries_out(raw), "undo_label": _top(raw, "journal"),
+                "redo_label": _top(raw, "redo"), "positions": [], "headline": None}  # fmt: skip
+
+    ms_iso = (date.today().replace(day=1) - timedelta(days=1)).isoformat()  # last month's close
+    ms_qty, ms_cash = ledger.qty_at(b, ms_iso)
+    syms = sorted({p.symbol for p in b.open_positions()} | set(ms_qty))
+    closes = _closes(syms) if syms else None
+    dated = {s: _dated(closes.get(s) if closes is not None else None) for s in syms}
+    fx_memo: dict[str, float | None] = {}
+
+    def fxn(ccy: str) -> float | None:
+        if ccy not in fx_memo:
+            fx_memo[ccy] = 1.0 if ccy == base else _fx_now(ccy, base)
+        return fx_memo[ccy]
+
+    positions, value_pos = [], 0.0
+    for p in b.open_positions():
+        meta = inst.get(p.symbol, {})
+        name, qccy = meta.get("name") or p.symbol, meta.get("quote_ccy") or p.ccy or base
+        last_q = (dated[p.symbol][1] or [None])[-1]
+        price, pccy, note = price_in_major(last_q, qccy), major_ccy(qccy), None
+        if price is None:
+            price, pccy = p.last_price, p.ccy or base
+            note = "No price from Yahoo: valued at your last trade price."
+            warnings.append(f"{name}: no price from Yahoo, valued at the last trade price.")
+        rate = fxn(pccy)
+        if price is None or not rate:
+            warnings.append(f"{name}: no price or {pccy} rate, so it is left out of the value.")
+            continue
+        m = ledger.mark(p, price, pccy, rate)
+        ms_q = _on_or_before(dated[p.symbol], ms_iso)
+        # Prices show in the share's quote unit (pence for LSE), like Yahoo.
+        to_quote = 100.0 if qccy != pccy and pccy == major_ccy(qccy) else 1.0
+        avg = p.avg_cost_loc if p.ccy == pccy else None
+        positions.append({
+            "symbol": p.symbol, "name": _short(name), "exchange": meta.get("exchange"),
+            "quote_ccy": qccy, "shares": round(p.qty, 6),
+            "avg_price": avg * to_quote if avg is not None else None,
+            "price": price * to_quote, "value": m.value,
+            "month_pct": ((last_q / ms_q - 1) * 100 if last_q and ms_q else None),
+            "profit_held": m.unrealised, "profit_sold": p.realised, "dividends": p.dividends,
+            "profit_price": m.profit_price if pccy != base else None,
+            "profit_fx": m.profit_fx if pccy != base else None,
+            "return_pct": m.unrealised / m.cost * 100 if m.cost > 0 else None,
+            "note": note, "profit": m.unrealised + p.realised + p.dividends,
+        })  # fmt: skip
+        value_pos += m.value
+    value = value_pos + b.cash
+    for x in positions:
+        x["weight"] = x["value"] / value * 100 if value else None
+    positions.sort(key=lambda x: -x["value"])
+
+    # This month: the change in value since last month's close, less the
+    # money put in or taken out this month. Month-start holdings are valued
+    # at that day's close and today's FX (Phase 3 brings daily FX).
+    ms_value = ms_cash
+    for sym, q in ms_qty.items():
+        qccy = inst.get(sym, {}).get("quote_ccy") or base
+        px = price_in_major(_on_or_before(dated[sym], ms_iso), qccy)
+        rate = fxn(major_ccy(qccy))
+        if px is None or not rate:
+            ms_value = None
+            break
+        ms_value += q * px * rate
+    flows_in = sum(d.inflow for d in b.days if d.date > ms_iso)
+    flows_out = sum(d.outflow for d in b.days if d.date > ms_iso)
+    month_abs = value - ms_value - flows_in + flows_out if ms_value is not None else None
+    denom = (ms_value or 0.0) + flows_in
+    sold = sum(p.realised for p in b.positions.values())
+    divs = sum(p.dividends for p in b.positions.values())
+    held_profit = sum(x["profit_held"] for x in positions)
     return {
-        "demo": True,
+        "demo": all(e.get("source") == "demo" for e in entries),
         "empty": False,
-        "ccy": "USD",  # the currency of every amount; the page converts for display
+        "rev": raw["rev"],
+        "ccy": base,
         "headline": {
-            "value": _DEMO_VALUE,
-            "cash": _DEMO_CASH,
-            "cash_weight": _DEMO_CASH / _DEMO_VALUE * 100,
-            "month_abs": 2140.0,
-            "month_pct": 2.4,
-            "profit_total": _DEMO_PROFIT,
-            "profit_held": sum(p["profit_held"] for p in positions),
-            "profit_sold": sum(p["profit_sold"] for p in positions),
-            "dividends": sum(p["dividends"] for p in positions),
-            "twr": twr,
-            "bench_twr": _period_returns(series["bench_index"], starts),
-            "mwr_ann": round(twr["1Y"] + 1.2, 2),  # demo: money added before a rise
+            "value": value,
+            "cash": b.cash,
+            "cash_weight": b.cash / value * 100 if value else None,
+            "month_abs": month_abs,
+            "month_pct": month_abs / denom * 100 if month_abs is not None and denom > 0 else None,
+            "profit_total": value - b.net_deposits,
+            "profit_held": held_profit,
+            "profit_sold": sold,
+            "dividends": divs,
+            "fees": b.fees,
+            "net_deposits": b.net_deposits,
+            "implied_deposits": b.implied,
+            "twr": dict.fromkeys(PERIODS),
+            "bench_twr": dict.fromkeys(PERIODS),
+            "mwr_ann": None,
         },
         "positions": positions,
-        "series": series,
-        "upcoming": [
-            {"name": "Microsoft", "what": "earnings", "date": "2026-10-28"},
-            {"name": "Apple", "what": "ex-dividend", "date": "2026-11-10"},
-        ],
+        "entries": _entries_out(raw),
+        "undo_label": _top(raw, "journal"),
+        "redo_label": _top(raw, "redo"),
+        "warnings": warnings,
+        "upcoming": [],
         "attention": [],
     }
 
 
-def book_preview() -> dict:
-    """The page payload for Phase 1. Reads the book file, never writes it."""
-    path = paths.state_file("investments")
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {"empty": True}
-    except (OSError, ValueError):
-        print("[investments] book file unreadable; showing the empty state")
-        return {"empty": True}
-    entries = raw.get("entries") if isinstance(raw, dict) else None
-    if entries and all(isinstance(e, dict) and e.get("source") == "demo" for e in entries):
-        return _demo_book()
-    return {"empty": True}
+def _top(raw: dict | None, key: str) -> str | None:
+    return raw[key][-1].get("label") if raw and raw.get(key) else None
+
+
+def _entries_out(raw: dict) -> list[dict]:
+    """The ledger for Activity, newest first, with names and cash effects."""
+    inst = raw["instruments"]
+    out = []
+    for e in reversed(ledger.sort_entries(raw["entries"])):
+        meta = inst.get(e.get("symbol") or "", {})
+        out.append({k: e.get(k) for k in ("id", *_FIELDS, "source")}
+                   | {"name": _short(meta.get("name") or e.get("symbol") or "") or None,
+                      "quote_ccy": meta.get("quote_ccy"), "cash": _cash_effect(e)})  # fmt: skip
+    return out

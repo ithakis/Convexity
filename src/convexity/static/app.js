@@ -3793,6 +3793,14 @@ function hideProgress() {
  * Portfolio state — per-portfolio views, tabs, and analytics
  * --------------------------------------------------------------------------- */
 const AD_HOC_KEY = "__current__";
+/* The real book (My Investments) as a pinned, read-only portfolio: its
+   constituents and value weights come from the book, and trades are entered
+   only on the My Investments page. The server refuses the name for every
+   portfolio write except the cached rows (docs/architecture/frontend.md). */
+const BOOK_KEY = "__book__";
+const BOOK = { symbols: [], weights: null };
+const viewIsBook = (name) => name === BOOK_KEY;
+const bookEntries = () => BOOK.symbols.join(", ");
 function readBench() {
   try { return localStorage.getItem("pf_bench") || "SPY"; } catch { return "SPY"; }
 }
@@ -3851,6 +3859,14 @@ function weightsForMode(mode) {
   if (mode === "equal") return equalWeightsOf(rows);
   if (mode === "cap")   return capWeightsOf(rows);
   if (mode === "custom") return STATE.customWeights || capWeightsOf(rows);
+  if (mode === "book") {
+    // Today's market values from the book, renormalised over the loaded rows.
+    const out = {}; let total = 0;
+    for (const r of rows) { const w = Math.max(0, Number(BOOK.weights?.[r.symbol] || 0)); out[r.symbol] = w; total += w; }
+    if (total <= 0) return capWeightsOf(rows);
+    for (const k of Object.keys(out)) out[k] /= total;
+    return out;
+  }
   if (typeof mode === "string" && mode.startsWith("preset:")) {
     const p = presetByName(mode.slice(7));
     if (!p) return capWeightsOf(rows);
@@ -3870,6 +3886,11 @@ async function loadPresetsForView(name, opts) {
   // the previously-active tab. The build() caller omits it so a rebuild keeps
   // the mode the user currently has selected.
   opts = opts || {};
+  if (viewIsBook(name)) {  // the book's weights are its values; no presets
+    STATE.weightPresets = [];
+    if (opts.restoreMode) STATE.mode = "book";
+    return;
+  }
   // Anonymous / unsaved tabs don't have presets — keep the list empty.
   if (!name || name === AD_HOC_KEY) {
     STATE.weightPresets = [];
@@ -3897,7 +3918,7 @@ async function persistActivePreset() {
   // Tell the server which preset (or none) is currently active for the
   // active view so it can be restored next launch.
   const view = STATE.activeView;
-  if (!view || view === AD_HOC_KEY) return;
+  if (!view || view === AD_HOC_KEY || viewIsBook(view)) return;
   const name = activePresetName();
   try {
     await fetch("/api/weight-presets/active", {
@@ -3911,6 +3932,7 @@ async function savePresetServer(name, weights, opts) {
   opts = opts || {};
   const view = STATE.activeView;
   if (!view || view === AD_HOC_KEY) throw new Error("Save the portfolio first.");
+  if (viewIsBook(view)) throw new Error("My Investments is weighted by what you hold.");
   const body = {view, name, weights, set_active: opts.setActive !== false};
   if (opts.renameFrom) body.rename_from = opts.renameFrom;
   const r = await fetch("/api/weight-presets", {
@@ -4151,12 +4173,12 @@ async function persistView(name, entries, rows) {
 
 async function loadAllAtStartup() {
   $("#status").innerHTML = lcHtml("indexing portfolios", {bar: true});
-  await Promise.all([loadWatchlists(), loadViews(), loadColumnViews()]);
+  await Promise.all([loadWatchlists(), loadViews(), loadColumnViews(), loadBookSymbols()]);
   $("#status").textContent = "Idle";
   wireColumnViewBar();
   renderTabs();
   // Restore the last open view if any.
-  if (LAST_VIEW && (VIEWS[LAST_VIEW] || WATCHLISTS[LAST_VIEW])) {
+  if (LAST_VIEW && (viewIsBook(LAST_VIEW) ? BOOK.symbols.length : (VIEWS[LAST_VIEW] || WATCHLISTS[LAST_VIEW]))) {
     await activateTab(LAST_VIEW, {silent: true});
   } else {
     // No prior view — show the editor in ad-hoc mode but keep the panel closed.
@@ -4246,6 +4268,35 @@ async function warmRecentTabs(maxN) {
   }
 }
 
+async function loadBookSymbols() {
+  try { BOOK.symbols = (await (await fetch("/api/investments/symbols")).json()).symbols || []; }
+  catch (e) { BOOK.symbols = []; }
+}
+async function bookLoadWeights() {
+  if (!INV.book || INV.book.empty == null) {
+    try { INV.book = await (await fetch("/api/investments")).json(); } catch (e) { return; }
+  }
+  bookTabSync({quiet: true});
+}
+/* Keep the book pill in step with My Investments after any change there. */
+function bookTabSync(opts) {
+  if (INV.book?.broken) return;  // a book that can't be totalled keeps its pill as it was
+  const pos = INV.book?.positions || [];
+  const before = bookEntries();
+  BOOK.symbols = pos.map(p => p.symbol).sort();
+  const total = pos.reduce((a, p) => a + (p.value > 0 ? p.value : 0), 0);
+  BOOK.weights = total > 0 ? Object.fromEntries(pos.map(p => [p.symbol, Math.max(0, p.value) / total])) : null;
+  if (opts?.quiet) return;
+  if (viewIsBook(STATE.activeView)) {
+    if (!BOOK.symbols.length) { STATE.activeView = null; DATA = []; render(); renderEditorMeta(); }
+    else {
+      setEntries(bookEntries());
+      if (STATE.mode === "book") { invalidateAnalyticsForTab(BOOK_KEY); }
+    }
+  }
+  if (before !== bookEntries() || opts?.render) renderTabs();
+}
+
 async function loadViews() {
   try {
     const r = await fetch("/api/views");
@@ -4268,6 +4319,7 @@ async function activateTab(name, opts) {
   // saved active preset, or "cap"). Without this reset a leaked equal/preset
   // mode could survive into a tab that has no such preset.
   STATE.mode = "cap";
+  if (viewIsBook(name)) await bookLoadWeights();
   // Switching tabs swaps the per-portfolio preset list, and loadPresetsForView
   // (restoreMode) restores this tab's own active preset so the user's last
   // selection persists across sessions.
@@ -4282,7 +4334,7 @@ async function activateTab(name, opts) {
   renderEditorMeta();
   // The watchlist's entries (or the stored view's, for the unsaved tab).
   const view = VIEWS[name];
-  const wlEntries = WATCHLISTS[name];
+  const wlEntries = viewIsBook(name) ? bookEntries() : WATCHLISTS[name];
   setEntries(wlEntries != null ? wlEntries : (view ? view.entries : ""));
   // Try to load cached rows for the view.
   if (view && view.row_count > 0) {
@@ -4302,7 +4354,9 @@ async function activateTab(name, opts) {
         // before a new column existed rebuild by themselves.
         renderEditorMeta();
         const needsColumnRefresh = DATA.some(r => r && !r.error && r.rating_dist === undefined);
-        if (needsColumnRefresh && !refreshNeeded()) {
+        if (viewIsBook(name) && refreshNeeded()) {
+          await build({keepPanelOpen: true});  // the book changed: follow it, no red Refresh
+        } else if (needsColumnRefresh && !refreshNeeded()) {
           if (!opts.silent) toast(`Refreshing ${viewLabel(name)} — new data columns available…`);
           await build({keepPanelOpen: true});
         } else {
@@ -4318,6 +4372,7 @@ async function activateTab(name, opts) {
       }
     } catch (e) { /* fall through */ }
   }
+  if (viewIsBook(name) && ENTRIES) { await build({keepPanelOpen: true}); return; }
   // No cached rows yet — clear the table, prompt user.
   DATA = []; render();
   $("#pf-analytics-body").innerHTML = `<div class="pf-empty">Press <b>Refresh</b> to load this portfolio.</div>`;
@@ -4327,6 +4382,7 @@ async function activateTab(name, opts) {
 
 function viewLabel(name) {
   if (!name || name === AD_HOC_KEY) return untitledName();
+  if (viewIsBook(name)) return "My Investments";
   return name;
 }
 
@@ -4345,6 +4401,17 @@ function renderTabs() {
   const hasAdhoc = !!VIEWS[AD_HOC_KEY] || STATE.activeView === AD_HOC_KEY;
   const tabNames = [...wlNames];
   if (hasAdhoc) tabNames.push(AD_HOC_KEY);
+
+  if (BOOK.symbols.length) {
+    const tab = document.createElement("div");
+    tab.className = "pf-tab pf-tab-book" + (viewIsBook(STATE.activeView) ? " active" : "");
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("data-name", BOOK_KEY);
+    tab.setAttribute("data-tip", "Your real investments, kept in step with My Investments. Read-only here: add or change trades on the My Investments page.");
+    tab.innerHTML = `<span class="pf-tab-label">My Investments</span>`;
+    tab.addEventListener("click", () => activateTab(BOOK_KEY));
+    wrap.appendChild(tab);
+  }
 
   for (const name of tabNames) {
     const tab = document.createElement("div");
@@ -4439,7 +4506,10 @@ async function renamePortfolio(oldName, newName) {
   }
 }
 
-function renderEditorMeta() { renderConstituents(); syncRefreshNeeded(); }
+function renderEditorMeta() {
+  $("#input-panel").classList.toggle("pf-book-ro", viewIsBook(STATE.activeView));
+  renderConstituents(); syncRefreshNeeded();
+}
 
 /* Refresh is red while the open portfolio's rows were not built from its
    current constituents: an edit since (the server marks the view stale), or
@@ -4472,6 +4542,7 @@ function renderConstituents() {
 /* Save a new constituents list at once; the rows wait for Refresh. The
    unsaved tab becomes a saved portfolio on its first edit. */
 async function commitEntries(next) {
+  if (viewIsBook(STATE.activeView)) { toast("Add or sell holdings on the My Investments page."); return false; }
   const adhoc = viewIsAdhoc(STATE.activeView);
   const name = adhoc ? untitledName() : STATE.activeView;
   try {
@@ -4827,6 +4898,7 @@ function labelForMode(m) {
   if (m === "equal") return "Equal-weight";
   if (m === "custom") return "Custom";
   if (m === "cap") return "Cap-weighted";
+  if (m === "book") return "Weighted by value";
   if (typeof m === "string" && m.startsWith("preset:")) return m.slice(7);
   return "Cap-weighted";
 }
@@ -5389,6 +5461,7 @@ function renderAnalystDashboard(a) {
         <span class="an-caret">▾</span>
       </button>
       <div class="an-mode-menu" id="an-mode-menu" role="listbox" aria-label="Aggregation method">
+        ${viewIsBook(STATE.activeView) ? `<div class="an-mode-opt" data-mode="book" role="option" data-selected="${STATE.mode === 'book' ? '1' : '0'}">Weighted by value</div>` : ""}
         <div class="an-mode-opt" data-mode="equal"  role="option" data-selected="${STATE.mode === 'equal' ? '1' : '0'}">Equal-weight</div>
         <div class="an-mode-opt" data-mode="cap"    role="option" data-selected="${STATE.mode === 'cap' ? '1' : '0'}">Cap-weighted</div>
         ${(STATE.weightPresets || []).map(p => `<div class="an-mode-opt" data-mode="${escapeHtml(modeId(p.name))}" role="option" data-selected="${STATE.mode === modeId(p.name) ? '1' : '0'}">${escapeHtml(p.name)}</div>`).join("")}
@@ -6190,6 +6263,7 @@ function renderModeBar() {
     const cls = "pf-mode-pill" + (active === mode ? " active" : "") + (extra ? " " + extra : "");
     return `<span class="${cls}" role="tab" data-mode="${escapeHtml(mode)}" tabindex="0">${escapeHtml(label)}</span>`;
   }
+  if (viewIsBook(STATE.activeView)) pills.push(pill("book", "Book"));
   pills.push(pill("equal", "Equal"));
   pills.push(pill("cap", "Cap"));
   for (const p of (STATE.weightPresets || [])) {
@@ -6197,7 +6271,7 @@ function renderModeBar() {
     pills.push(pill(modeId(p.name), p.name, "preset"));
   }
   // Trailing controls (only meaningful for saved portfolios)
-  const canAdd = !!STATE.activeView && STATE.activeView !== AD_HOC_KEY && DATA.length > 0;
+  const canAdd = !!STATE.activeView && STATE.activeView !== AD_HOC_KEY && !viewIsBook(STATE.activeView) && DATA.length > 0;
   if (canAdd) {
     pills.push(`<span class="pf-mode-pill icon" id="pf-mode-add" title="New preset from current weights">＋</span>`);
   }
@@ -6230,9 +6304,18 @@ function updatePeriodButtons() {
   $$("#pf-period-tabs button").forEach(b => b.classList.toggle("active", b.dataset.p === STATE.period));
 }
 
-function toast(msg) {
-  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
-  clearTimeout(window._toastT); window._toastT = setTimeout(() => t.classList.remove("show"), 2400);
+/* action = {label, fn}: a button in the toast (My Investments' Undo); the
+ * toast then stays a little longer so there is time to reach it. */
+function toast(msg, action) {
+  const t = $("#toast"); t.textContent = msg;
+  if (action) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "toast-act"; b.textContent = action.label;
+    b.onclick = () => { t.classList.remove("show"); action.fn(); };
+    t.append(b);
+  }
+  t.classList.add("show");
+  clearTimeout(window._toastT); window._toastT = setTimeout(() => t.classList.remove("show"), action ? 6000 : 2400);
 }
 
 /* ===========================================================================
@@ -9940,6 +10023,7 @@ function mptWireAssetTips(root) {
 
 function mptApplyToPortfolio() {
   const d = MPT.result; if (!d) return;
+  if (viewIsBook(STATE.activeView)) return toast("Your real book's weights come from what you hold.");
   const sel = mptActiveSel(); if (!sel) return;
   const w = sel.weights || {};
   if (!Object.keys(w).length) { toast("No weights at this point."); return; }
@@ -9961,6 +10045,7 @@ function mptApplyToPortfolio() {
 
 function mptSaveAsPreset() {
   const d = MPT.result; if (!d) return;
+  if (viewIsBook(STATE.activeView)) return toast("Your real book's weights come from what you hold.");
   const sel = mptActiveSel(); if (!sel) return;
   if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
     return toast("Save the portfolio first to keep custom weights.");
@@ -9997,6 +10082,7 @@ function mptSaveAsPreset() {
 
 async function mptSaveRun({silent} = {silent: false}) {
   const d = MPT.result; if (!d) return;
+  if (viewIsBook(STATE.activeView)) return;  // runs on the book are not kept
   if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
     if (!silent) toast("Save the portfolio first.");
     return;
@@ -11795,11 +11881,11 @@ function showPage(name) {
 
 /* ===========================================================================
  * My Investments (docs/plans/my-investments-roadmap.md). Renders
- * GET /api/investments/book into INV.book; the owner's UI rules for this page
+ * GET /api/investments into INV.book; the owner's UI rules for this page
  * are in docs/architecture/frontend.md ("Pages and My Investments").
  * Amounts arrive in INV.book.ccy and are converted to FX_QUOTE for display.
  * --------------------------------------------------------------------------- */
-const INV = { book: null, period: "1Y", mode: "value" };
+const INV = { book: null, period: "1Y", mode: "value", rail: "attention", editing: null };
 const INV_PERIODS = ["1M", "3M", "YTD", "1Y", "3Y", "ALL"];
 const INV_PERIOD_WORDS = { "1M": "the last month", "3M": "the last 3 months", "YTD": "this year so far",
   "1Y": "the last year", "3Y": "the last 3 years", "ALL": "since you started" };
@@ -11813,7 +11899,11 @@ function invMoney(v, signed) {
   const x = fxConvert(v, INV.book?.ccy || "USD");
   return (signed ? invSign(x) : x < 0 ? "−" : "") + invSym() + Math.round(Math.abs(x)).toLocaleString();
 }
-function invPct(v, d = 1, unit = "%") { return invOk(v) ? invSign(v) + Math.abs(v).toFixed(d) + unit : na(); }
+function invPct(v, d = 1, unit = "%") {
+  if (!invOk(v)) return na();
+  const r = Number(v.toFixed(d));  // a tiny move rounds to 0.0, never "−0.0"
+  return invSign(r) + Math.abs(r).toFixed(d) + unit;
+}
 /* A price in the share's own quote unit (pence for LSE), never converted. */
 function invQuotePrice(v, qccy) {
   if (!invOk(v)) return na();
@@ -11824,33 +11914,35 @@ const invDate = (d) => escapeHtml(fmtDateMDY(d));
 
 async function invLoad() {
   try {
-    const r = await fetch("/api/investments/book");
+    const r = await fetch("/api/investments");
     INV.book = r.ok ? await r.json() : { empty: true, error: true };
   } catch (e) {
     INV.book = { empty: true, error: true };
   }
   invRender();
+  if (!INV.book.error) bookTabSync();
 }
 
 function invRender() {
   const b = INV.book, host = $("#inv-page");
   if (!b || host.classList.contains("hidden")) return;
   if (b.empty) {
+    const err = typeof b.error === "string" ? b.error : b.error ? "Couldn't load your investments. Try again in a moment." : "";
     host.innerHTML = `
       <div class="inv-empty">
         <div class="inv-empty-title">Track your real investments</div>
         <div class="inv-empty-body">See what you own, what it is worth, how it has done against the market, and what needs your attention. Kept separate from the portfolios you research in the other tabs.</div>
-        <div class="inv-empty-soon">Adding holdings and importing broker statements arrive in the next updates.</div>
-        ${b.error ? `<div class="inv-empty-err">Couldn't load your investments. Try again in a moment.</div>` : ""}
+        ${err ? `<div class="inv-empty-err">${escapeHtml(err)}</div>` : `<div class="inv-empty-actions"><button type="button" class="primary" data-inv-add>Add your first holding</button>${b.undo_label ? `<button type="button" data-inv-undo data-tip="Undo: ${escapeHtml(b.undo_label)}">Undo</button>` : ""}</div>`}
+        <div class="inv-empty-soon">Importing broker statements arrives in a later update.</div>
       </div>`;
     return;
   }
   host.innerHTML = `
     <div class="inv-grid">
       <div class="inv-main">
-        ${invHeroHtml(b)}
-        <div class="section-anchor inv-anchor"><span class="sa-kicker">Holdings<span class="inv-count">${b.positions.length}</span></span></div>
-        ${invHoldingsHtml(b)}
+        ${b.broken ? `<div class="inv-broken">Your investments can't be totalled: ${escapeHtml(b.broken)} Fix or delete that entry in Activity.</div>` : invHeroHtml(b)}
+        <div class="section-anchor inv-anchor"><span class="sa-kicker">Holdings<span class="inv-count">${b.positions.length}</span></span><button type="button" class="inv-add" data-inv-add>+ Add</button></div>
+        ${b.broken ? "" : invHoldingsHtml(b)}
       </div>
       <aside class="inv-rail" aria-label="Attention">${invRailHtml(b)}</aside>
     </div>`;
@@ -11859,13 +11951,14 @@ function invRender() {
 
 function invHeroHtml(b) {
   const h = b.headline, p = INV.period, twr = h.twr[p], diff = invOk(twr) && invOk(h.bench_twr[p]) ? twr - h.bench_twr[p] : null;
-  const kpi = (tip, label, v, html) => `<div class="inv-kpi" data-rich-tip="inv:${tip}" tabindex="0"><div class="inv-kpi-k">${label}</div><div class="inv-kpi-v ${invCls(v)}">${html}</div></div>`;
+  // A figure Phase 3 hasn't computed yet is a quiet dash, never a made-up number.
+  const kpi = (tip, label, v, html) => `<div class="inv-kpi" data-rich-tip="inv:${tip}" tabindex="0"><div class="inv-kpi-k">${label}</div><div class="inv-kpi-v ${invCls(v)}">${invOk(v) ? html : '<span class="inv-gap">—</span>'}</div></div>`;
   const pills = (attr, keys, cur, labels = keys) => keys.map((k, i) => `<button type="button" data-inv-${attr}="${k}" class="${k === cur ? "active" : ""}" aria-pressed="${k === cur}">${labels[i]}</button>`).join("");
   return `
     <div class="inv-sheet">
       <div class="inv-hero">
         <span class="inv-value">${invMoney(h.value)}</span>
-        <span class="inv-month ${invCls(h.month_abs)}">${invMoney(h.month_abs, true)} (${invPct(h.month_pct)}) this month</span>
+        ${invOk(h.month_abs) ? `<span class="inv-month ${invCls(h.month_abs)}">${invMoney(h.month_abs, true)}${invOk(h.month_pct) ? ` (${invPct(h.month_pct)})` : ""} this month</span>` : ""}
         ${b.demo ? `<span class="inv-demo" data-tip="Made-up figures from the demo book, used while the page is being designed.">Demo data</span>` : ""}
       </div>
       <div class="inv-kpis">
@@ -11875,12 +11968,12 @@ function invHeroHtml(b) {
         ${kpi("mwr", "Your money", h.mwr_ann, invOk(h.mwr_ann) ? invPct(h.mwr_ann) + " / yr" : na())}
       </div>
       <div class="pf-chart-card inv-chart-card">
-        <div class="inv-chart-bar">
+        ${b.series ? `<div class="inv-chart-bar">
           <span class="pf-contrib-toggle" role="group" aria-label="Chart">${pills("mode", ["value", "return"], INV.mode, ["Value", "Return %"])}</span>
           <div class="pf-period-tabs inv-periods" role="group" aria-label="Period">${pills("period", INV_PERIODS, p)}</div>
-        </div>
-        <svg id="inv-svg" class="inv-svg" aria-label="Value chart"></svg>
-        <div class="inv-readout" id="inv-readout"></div>
+        </div>` : ""}
+        ${b.series ? `<svg id="inv-svg" class="inv-svg" aria-label="Value chart"></svg>
+        <div class="inv-readout" id="inv-readout"></div>` : `<div class="inv-chart-soon">Performance arrives in the next update.</div>`}
       </div>
     </div>`;
 }
@@ -11894,7 +11987,7 @@ function invHoldingsHtml(b) {
       <td>${invQuotePrice(x.avg_price, x.quote_ccy)}</td>
       <td>${invMoney(x.value)}</td>
       <td>${invPct(x.weight, 1, "%").replace("+", "")}</td>
-      <td class="${invCls(x.month_pct)}">${invPct(x.month_pct)}</td>
+      <td class="${invOk(x.month_pct) ? invCls(Number(x.month_pct.toFixed(1))) : ""}">${invPct(x.month_pct)}</td>
       <td class="${invCls(x.profit)}">${tipped("posprofit", x.symbol, invMoney(x.profit, true))}</td>
       <td class="${invCls(x.return_pct)}">${invPct(x.return_pct, 0)}</td>
     </tr>`).join("");
@@ -11907,10 +12000,17 @@ function invHoldingsHtml(b) {
     </table></div>`;
 }
 
+/* The rail toggles between Attention and Activity (the ledger), the same
+ * pill as the Portfolio tab's Table | Chart. */
 function invRailHtml(b) {
+  const tabs = [["attention", "Attention"], ["activity", "Activity"]].map(([k, l]) =>
+    `<button type="button" data-inv-rail="${k}" class="${INV.rail === k ? "active" : ""}" aria-pressed="${INV.rail === k}">${l}</button>`).join("");
+  const head = `<div class="inv-rail-head"><span class="pf-contrib-toggle" role="group" aria-label="Rail">${tabs}</span></div>`;
+  if (INV.rail === "activity") return head + invActivityHtml(b);
   const section = (title, items, item, calm) => `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">${title}</span></div>`
     + (items?.length ? items.map(item).join("") : `<div class="inv-calm">${calm}</div>`);
-  return section("Attention", b.attention, a => `<div class="inv-rail-item">${escapeHtml(a.text)}</div>`, "Nothing needs you today.")
+  const att = [...(b.attention || []).map(a => a.text), ...(b.warnings || [])];
+  return head + section("Attention", att, t => `<div class="inv-rail-item">${escapeHtml(t)}</div>`, "Nothing needs you today.")
     + section("Upcoming", b.upcoming, u => `<div class="inv-rail-item">${escapeHtml(`${u.name} ${u.what}`)}<div class="inv-rail-sub">${invDate(u.date)}</div></div>`, "No events in the next two weeks.");
 }
 
@@ -11923,14 +12023,16 @@ const invTipFor = (fn) => (host) => INV.book?.headline ? fn(INV.book.headline, h
 const invPos = (host) => (INV.book?.positions || []).find(x => x.symbol === host.dataset.sym);
 const invWords = () => INV_PERIOD_WORDS[INV.period];
 RICH_TIPS["inv:profit"] = invTipFor(h => invTip("Total profit since you started", "What your investments have earned you, after fees.",
-  [["On what you still hold", h.profit_held], ["On what you sold", h.profit_sold], ["Dividends", h.dividends]], "= value − money you put in"));
-RICH_TIPS["inv:twr"] = invTipFor(() => invTip("How your investments performed", `The growth of your holdings over ${invWords()}, ignoring when you added or took out money. This is the fair number to compare with the S&amp;P 500, or with a friend.`, null, "time-weighted return (TWR)"));
+  [["On what you still hold", h.profit_held], ["On what you sold", h.profit_sold], ["Dividends", h.dividends], ...(h.fees ? [["Fees", -h.fees]] : [])], "= value − money you put in"));
+const INV_SOON = "Arrives with the Performance update, which reads your daily prices.";
+RICH_TIPS["inv:twr"] = invTipFor((h) => invTip("How your investments performed", `The growth of your holdings over ${invWords()}, ignoring when you added or took out money. This is the fair number to compare with the S&amp;P 500, or with a friend.${invOk(h.twr[INV.period]) ? "" : " " + INV_SOON}`, null, "time-weighted return (TWR)"));
 RICH_TIPS["inv:vs"] = invTipFor(h => {
   const t = h.twr[INV.period], s = h.bench_twr[INV.period];
-  if (!invOk(t) || !invOk(s)) return "";
+  if (!invOk(t) || !invOk(s)) return invTip("Against the market", `How your return compares with the S&amp;P 500's. ${INV_SOON}`, null, "");
   return invTip(t >= s ? "Ahead of the market" : "Behind the market", `Over ${invWords()} you ${t >= s ? "beat" : "trailed"} the S&amp;P 500 by ${Math.abs(t - s).toFixed(1)} percentage points: ${invPct(t)} against ${invPct(s)} (with dividends).`, null, "pp = percentage points");
 });
 RICH_TIPS["inv:mwr"] = invTipFor(h => {
+  if (!invOk(h.mwr_ann)) return invTip("How your actual money grew", `The yearly growth of the money you put in, counting when you added or withdrew it. ${INV_SOON}`, null, "money-weighted return (MWR), per year");
   const gap = h.mwr_ann - h.twr["1Y"];
   const why = !invOk(gap) ? "" : Math.abs(gap) < 0.3 ? " About the same as your 1-year Return: when you added money made little difference."
     : ` It's ${Math.abs(gap).toFixed(1)} points ${gap > 0 ? "above" : "below"} your 1-year Return because ${gap > 0 ? "you added money before prices rose. Good timing." : "more of your money went in before prices fell."}`;
@@ -11959,7 +12061,7 @@ RICH_TIPS["inv:posprofit"] = (host) => {
  * headline's returns. */
 function drawInvChart() {
   const svg = $("#inv-svg"), readout = $("#inv-readout"), b = INV.book;
-  if (!svg || !b || !svg.clientWidth) return;
+  if (!svg || !b?.series || !svg.clientWidth) return;
   const s = b.series, i0 = s.period_start?.[INV.period] ?? 0, n = s.dates.length - i0;
   const W = svg.clientWidth, H = 240, L = 56, R = 12, T = 10, B = 22;
   const rebase = (arr) => arr.slice(i0).map(v => (v / arr[i0] - 1) * 100);
@@ -12018,9 +12120,301 @@ function drawInvChart() {
   hit.addEventListener("mouseleave", () => { svg.classList.remove("hovering"); readoutAt(n - 1); });
 }
 
+/* ---------------------------------------------------------------------------
+ * The ledger: Activity in the rail, the Add popover, edit in place, undo.
+ * Every change POSTs to /api/investments/* with the rev the page last saw and
+ * gets the whole new page payload back, so nothing is ever recomputed here.
+ * Prices and amounts travel in the major unit (GBP, not pence); the forms
+ * show a share's price in its own quote unit, like the holdings table.
+ * ------------------------------------------------------------------------ */
+const INV_MINOR = { GBp: "GBP", GBX: "GBP", ZAc: "ZAR", ILA: "ILS" };
+const INV_FORM_TYPES = [["holding", "Holding"], ["buy", "Buy"], ["sell", "Sell"], ["dividend", "Dividend"],
+  ["cash", "Cash"], ["fee", "Fee"], ["split", "Split"]];
+const INV_TYPE_WORDS = { buy: "Buy", sell: "Sell", dividend: "Dividend", deposit: "Deposit",
+  withdrawal: "Withdrawal", fee: "Fee", split: "Split" };
+const invToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+/* How many quote units per major unit when the entry is in the share's own currency. */
+const invUnit = (qccy, ccy) => INV_MINOR[qccy] && (!ccy || ccy === INV_MINOR[qccy]) ? 100 : 1;
+function invNative(v, ccy, signed = true) {
+  if (!invOk(v)) return "";
+  const s = (signed ? invSign(v) : v < 0 ? "−" : "") + escapeHtml(FX_SYMBOL[ccy] || ccy + " ");
+  return s + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+const invQty = (q) => Number(q).toLocaleString(undefined, { maximumFractionDigits: 6 });
+
+function invActivityHtml(b) {
+  const undo = b.undo_label, redo = b.redo_label;
+  const head = `<div class="inv-act-bar">
+      <button type="button" class="inv-icon-btn" data-inv-undo ${undo ? "" : "disabled"} data-tip="${undo ? "Undo: " + escapeHtml(undo) + " (⌘Z)" : "Nothing to undo"}" aria-label="Undo">Undo</button>
+      <button type="button" class="inv-icon-btn" data-inv-redo ${redo ? "" : "disabled"} data-tip="${redo ? "Redo: " + escapeHtml(redo) + " (⇧⌘Z)" : "Nothing to redo"}" aria-label="Redo">Redo</button>
+      <button type="button" class="inv-add" data-inv-add>+ Add</button>
+    </div>`;
+  const entries = b.entries || [];
+  if (!entries.length) return head + `<div class="inv-calm">No entries yet.</div>`;
+  let month = "", html = "";
+  for (const e of entries) {
+    const m = e.date.slice(0, 7);
+    if (m !== month) {
+      month = m;
+      const [y, mm] = m.split("-").map(Number);
+      html += `<div class="inv-act-month">${new Date(y, mm - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" })}</div>`;
+    }
+    html += INV.editing === e.id && INV.editForm ? `<div class="inv-act-edit">${invFormHtml(INV.editForm)}</div>` : invActRow(e);
+  }
+  return head + `<div class="inv-act-list">${html}</div>`;
+}
+
+function invActRow(e) {
+  const d = Number(e.date.slice(8, 10));
+  let what = INV_TYPE_WORDS[e.type] || e.type, sub = "";
+  if (e.name) what += " " + escapeHtml(e.name);
+  if (e.type === "buy" || e.type === "sell") {
+    const u = invUnit(e.quote_ccy, e.ccy);
+    sub = `${invQty(e.qty)} @ ${u === 100 ? Math.round(e.price * 100).toLocaleString() + "p" : invNative(e.price, e.ccy, false)}${e.fee ? ` · fee ${invNative(e.fee, e.ccy, false)}` : ""}${e.qty_basis === "current" ? " · as held today" : ""}`;
+  } else if (e.type === "dividend" && e.tax) sub = `${invNative(e.amount, e.ccy, false)} less ${invNative(e.tax, e.ccy, false)} tax`;
+  else if (e.type === "split") sub = `${invQty(e.ratio)} for 1`;
+  if (e.note) sub += (sub ? " · " : "") + escapeHtml(e.note);
+  return `<button type="button" class="inv-act-row" data-inv-edit="${escapeHtml(e.id)}" data-tip="Click to edit">
+      <span class="inv-act-day">${d}</span>
+      <span class="inv-act-what"><span>${what}</span>${sub ? `<span class="inv-act-sub">${sub}</span>` : ""}</span>
+      <span class="inv-act-amt">${invNative(e.cash, e.ccy)}</span>
+    </button>`;
+}
+
+/* One form for adding (in the popover) and editing (in place in Activity). */
+function invFormFromEntry(e) {
+  const t = e.type === "deposit" || e.type === "withdrawal" ? "cash" : e.type === "buy" && e.qty_basis === "current" ? "holding" : e.type;
+  const u = invUnit(e.quote_ccy, e.ccy);
+  return { id: e.id, type: t, dir: e.type === "withdrawal" ? "withdrawal" : "deposit", symbol: e.symbol, name: e.name,
+    quote_ccy: e.quote_ccy, ccy: e.ccy, date: e.date, qty: e.qty, price: invOk(e.price) ? +(e.price * u).toFixed(4) : "",
+    qty_basis: e.qty_basis, fee: e.fee || "", amount: e.amount ?? "", tax: e.tax || "", ratio: e.ratio ?? "", fx_rate: e.fx_rate || "", note: e.note || "" };
+}
+
+function invFormHtml(f) {
+  const v = (k) => escapeHtml(f[k] ?? "");
+  const field = (k, label, attrs = "", hint = "") => `<label class="inv-f"><span>${label}</span><input name="${k}" value="${v(k)}" ${attrs}>${hint ? `<em>${escapeHtml(hint)}</em>` : ""}</label>`;
+  const num = (k, label, hint) => field(k, label, 'inputmode="decimal" autocomplete="off"', hint);
+  const unit = f.quote_ccy ? (INV_MINOR[f.quote_ccy] ? "pence" : f.quote_ccy) : "";
+  const company = `<label class="inv-f inv-f-co"><span>Company</span><input name="company" value="${escapeHtml(f.name ? `${f.name} (${f.symbol})` : f.symbol || "")}" placeholder="Name or ticker" autocomplete="off" spellcheck="false"><div class="inv-co-list" hidden></div></label>`;
+  const date = (label) => field("date", label, `type="date" max="${invToday()}"`);
+  const t = f.type;
+  let body = "";
+  if (t === "holding") body = company + `<div class="inv-f-row">${num("qty", "Shares")}${num("price", "Avg price", unit)}</div>`
+    + `<label class="inv-f" data-tip="The day your holding counts from. Performance (next update) measures from this date, so pick roughly when you bought; today is fine if you don't know."><span>Since</span><input name="date" type="date" value="${v("date")}" max="${invToday()}"></label>`;
+  else if (t === "buy" || t === "sell") body = company + `<div class="inv-f-row">${date("Date")}${num("qty", "Shares")}</div><div class="inv-f-row">${num("price", "Price", unit + (f.priceNote ? " · " + f.priceNote : ""))}${num("fee", "Fee")}</div>`;
+  else if (t === "dividend") body = company + `<div class="inv-f-row">${date("Date")}${num("amount", "Amount received", f.ccy || "")}</div>`;
+  else if (t === "cash") body = `<div class="inv-f-row"><label class="inv-f"><span>Money</span><select name="dir"><option value="deposit" ${f.dir !== "withdrawal" ? "selected" : ""}>Put in</option><option value="withdrawal" ${f.dir === "withdrawal" ? "selected" : ""}>Taken out</option></select></label>${date("Date")}</div>${num("amount", "Amount", f.ccy || INV.book?.ccy || "USD")}`;
+  else if (t === "fee") body = `<div class="inv-f-row">${date("Date")}${num("amount", "Amount", f.ccy || INV.book?.ccy || "USD")}</div>`;
+  else if (t === "split") body = company + `<div class="inv-f-row">${date("Date")}${num("ratio", "New shares per old", "10 for a 10-for-1")}</div>`;
+  const more = [];
+  if (t === "dividend") more.push(num("tax", "Tax withheld"));
+  if (t !== "split" && t !== "holding") more.push(num("fx_rate", `FX rate`, `${INV.book?.ccy || "USD"} per 1 ${f.ccy || "unit"}, blank = that day's`));
+  more.push(field("note", "Note", 'maxlength="200"'));
+  const types = f.id ? "" : `<div class="inv-types" role="group" aria-label="Entry type">${INV_FORM_TYPES.map(([k, l]) =>
+    `<button type="button" data-inv-type="${k}" class="${k === t ? "active" : ""}">${l}</button>`).join("")}</div>`;
+  return `<form class="inv-form" data-inv-form="${escapeHtml(f.id || "")}" novalidate>${types}${body}
+    <details class="inv-more"${f.moreOpen ? " open" : ""}><summary>${t === "dividend" ? "Tax, FX rate, note" : t === "holding" || t === "split" ? "Note" : "FX rate, note"}</summary>${more.join("")}</details>
+    <div class="inv-form-err" role="alert">${escapeHtml(f.error || "")}</div>
+    <div class="inv-form-btns">${f.id ? `<button type="button" class="danger" data-inv-del>Delete</button>` : ""}<span></span><button type="button" data-inv-cancel>Cancel</button><button type="submit" class="primary">${f.id ? "Save" : "Add"}</button></div>
+  </form>`;
+}
+
+/* The form's fields as an entry for the API, in major units. */
+function invEntryFromForm(form, f) {
+  const val = (k) => form.elements[k]?.value?.trim() ?? "";
+  const n = (k) => val(k) === "" ? null : Number(val(k).replace(/,/g, ""));
+  const u = invUnit(f.quote_ccy, f.ccy);
+  let type = f.type, basis = null;
+  if (type === "holding") { type = "buy"; basis = "current"; }
+  if (type === "cash") type = val("dir") === "withdrawal" ? "withdrawal" : "deposit";
+  const e = { type, date: val("date"), note: val("note") };
+  if (f.type !== "cash" && f.type !== "fee") e.symbol = f.symbol || val("company");
+  if (type === "buy" || type === "sell") {
+    Object.assign(e, { qty: n("qty"), price: n("price") == null ? null : n("price") / u, fee: n("fee") || 0 });
+    e.qty_basis = basis || (f.id ? (f.qty_basis || "trade") : "trade");
+  } else if (type === "split") e.ratio = n("ratio");
+  else e.amount = n("amount");
+  if (type === "dividend") e.tax = n("tax") || 0;
+  if (form.elements.fx_rate) e.fx_rate = n("fx_rate");
+  if (f.ccy && f.type !== "holding") e.ccy = f.ccy;
+  if (f.type === "holding") e.source = "quick";
+  return e;
+}
+
+/* --- the popover ------------------------------------------------------- */
+function invPop() {
+  let p = $("#inv-pop");
+  if (!p) { p = document.createElement("div"); p.id = "inv-pop"; p.className = "inv-pop"; p.hidden = true; document.body.appendChild(p); }
+  return p;
+}
+function invOpenAdd(anchor) {
+  const r = anchor.getBoundingClientRect(), w = Math.min(360, window.innerWidth - 24);
+  if (INV.editing) { INV.editing = null; invRender(); }  // one form at a time
+  INV.form = { type: "holding", date: invToday(), ccy: null };
+  const p = invPop();
+  p.innerHTML = invFormHtml(INV.form);
+  p.hidden = false;
+  p.style.width = w + "px";
+  p.style.left = Math.max(12, Math.min(r.right - w, window.innerWidth - w - 12)) + "px";
+  p.style.top = Math.min(r.bottom + 6, window.innerHeight - 60) + "px";
+  p.querySelector("input[name=company]")?.focus();
+}
+function invClosePop() { const p = $("#inv-pop"); if (p && !p.hidden) { p.hidden = true; p.innerHTML = ""; } }
+const invFormState = (form) => form.dataset.invForm ? INV.editForm : INV.form;
+function invFormRerender(form, patch) {
+  // Keep what was typed, apply the patch, redraw in place; returns the new form.
+  const f = invFormState(form), host = form.parentElement;
+  for (const el of form.elements) if (el.name && el.name !== "company") f[el.name] = el.value;
+  f.moreOpen = form.querySelector("details")?.open;
+  Object.assign(f, patch);
+  form.outerHTML = invFormHtml(f);
+  return host.querySelector(".inv-form");
+}
+
+/* --- company typeahead (symbol pack) and price auto-fill ---------------- */
+let _invCoT = 0, _invCoSeq = 0;
+function invCoInput(input) {
+  const list = input.parentElement.querySelector(".inv-co-list"), q = input.value.trim();
+  // A retyped company forgets the old one's currency too, or an unpicked
+  // ticker would be booked in the previous company's currency.
+  Object.assign(invFormState(input.form), { symbol: null, name: null, quote_ccy: null, ccy: null, autoPrice: null });
+  clearTimeout(_invCoT);
+  if (q.length < 1) { list.hidden = true; return; }
+  _invCoT = setTimeout(async () => {
+    const seq = ++_invCoSeq;
+    try {
+      const d = await (await fetch("/api/investments/lookup?q=" + encodeURIComponent(q))).json();
+      if (seq !== _invCoSeq) return;
+      list.innerHTML = (d.hits || []).map(h => `<button type="button" data-inv-co="${escapeHtml(h.ticker)}" data-name="${escapeHtml(shortName(h.name))}"><b>${escapeHtml(shortName(h.name))}</b><span>${escapeHtml([h.ticker, h.exchange].filter(Boolean).join(" · "))}</span></button>`).join("");
+      list.hidden = !(d.hits || []).length;
+    } catch (e) { list.hidden = true; }
+  }, 180);
+}
+async function invPickCompany(form, ticker, name) {
+  Object.assign(invFormState(form), { symbol: ticker, name });
+  const input = form.elements.company;
+  input.value = `${name} (${ticker})`;
+  input.parentElement.querySelector(".inv-co-list").hidden = true;
+  await invPriceFill(form);
+}
+/* Learn the quote currency (for the price unit) and, for a buy or sell,
+ * fill the price with that day's close as traded, never overwriting one
+ * the user typed. */
+async function invPriceFill(form) {
+  const f = invFormState(form);
+  if (!f.symbol) return;
+  const day = form.elements.date?.value || invToday();
+  try {
+    const d = await (await fetch(`/api/investments/price?symbol=${encodeURIComponent(f.symbol)}&date=${encodeURIComponent(day)}`)).json();
+    if (invFormState(form) !== f || !form.isConnected || !d.quote_ccy) return;
+    const ccy = INV_MINOR[d.quote_ccy] || d.quote_ccy;
+    const patch = { quote_ccy: d.quote_ccy, ccy };
+    // A price we filled follows the date; one the user typed is theirs.
+    const typed = form.elements.price?.value?.trim();
+    const ours = !typed || (f.autoPrice != null && Number(typed) === f.autoPrice);
+    if ((f.type === "buy" || f.type === "sell") && ours && invOk(d.price)) {
+      patch.price = patch.autoPrice = +(d.price * invUnit(d.quote_ccy, ccy)).toFixed(4);
+      patch.priceNote = `close on ${fmtDateMDY(d.date)}`;
+    } else if (!ours) patch.priceNote = "";
+    invFormRerender(form, patch);
+  } catch (e) { /* the price stays blank; the user types it */ }
+}
+
+/* --- mutations ---------------------------------------------------------- */
+async function invPost(path, body) {
+  const r = await fetch("/api/investments/" + path, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_rev: INV.book?.rev ?? 0, ...body }) });
+  let d = {};
+  try { d = await r.json(); } catch (e) { /* non-JSON error */ }
+  if (!r.ok) throw new Error(d.message || "Couldn't save that. Try again in a moment.");
+  return d;
+}
+async function invCommit(path, body, toastMsg, form) {
+  try {
+    const d = await invPost(path, body);
+    INV.book = d; INV.editing = null; invClosePop();
+    invRender();
+    bookTabSync();
+    if (toastMsg !== false) toast(toastMsg || d.undo_label || "Saved", d.undo_label ? { label: "Undo", fn: () => invUndo(false) } : null);
+  } catch (err) {
+    if (form) { const box = form.querySelector(".inv-form-err"); if (box) box.textContent = err.message; }
+    else toast(err.message);
+  }
+}
+async function invSubmit(form) {
+  const f = invFormState(form);
+  const entry = invEntryFromForm(form, f);
+  if (f.id) await invCommit("entries/update", { id: f.id, entry }, null, form);
+  else await invCommit("entries", { entry }, null, form);
+}
+async function invUndo(redo) {
+  const lab = redo ? INV.book?.redo_label : INV.book?.undo_label;
+  if (!lab) return;
+  await invCommit(redo ? "redo" : "undo", {}, `${redo ? "Redone" : "Undone"}: ${lab}`);
+}
+
+function invStartEdit(id) {
+  const e = (INV.book?.entries || []).find(x => x.id === id);
+  if (!e) return;
+  invClosePop();
+  INV.editing = id; INV.editForm = invFormFromEntry(e);
+  invRender();
+  $(`#inv-page form[data-inv-form="${CSS.escape(id)}"] input:not([type=date])`)?.focus();
+}
+
+document.addEventListener("click", (e) => {
+  const p = $("#inv-pop");
+  if (p && !p.hidden && !p.contains(e.target) && !e.target.closest("[data-inv-add]") && !e.target.closest(".toast")) invClosePop();
+});
+function invFormClick(e) {
+  const form = e.target.closest(".inv-form");
+  if (!form) return false;
+  const f = invFormState(form);
+  const ty = e.target.closest("[data-inv-type]"), co = e.target.closest("[data-inv-co]");
+  if (ty) { const next = invFormRerender(form, { type: ty.dataset.invType, error: "", priceNote: "" }); if (f.symbol) invPriceFill(next); }
+  else if (co) invPickCompany(form, co.dataset.invCo, co.dataset.name);
+  else if (e.target.closest("[data-inv-cancel]")) { if (f.id) { INV.editing = null; invRender(); } else invClosePop(); }
+  else if (e.target.closest("[data-inv-del]")) invCommit("entries/delete", { id: f.id }, null, form);
+  else return false;
+  return true;
+}
+document.addEventListener("click", (e) => { if (e.target.closest("#inv-pop")) invFormClick(e); });
+document.addEventListener("submit", (e) => {
+  const form = e.target.closest(".inv-form");
+  if (!form) return;
+  e.preventDefault();
+  invSubmit(form);
+});
+document.addEventListener("input", (e) => {
+  if (e.target.matches?.(".inv-form input[name=company]")) invCoInput(e.target);
+});
+document.addEventListener("change", (e) => {
+  const form = e.target.closest?.(".inv-form");
+  if (form && e.target.name === "date" && invFormState(form)?.symbol) invPriceFill(form);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#inv-pop")?.hidden === false) { invClosePop(); return; }
+  if (document.body.dataset.page !== "investments" || !(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "z") return;
+  // A field keeps its own undo; an open form is not the ledger's to undo under.
+  if (e.target.closest?.("input, textarea, select, [contenteditable], .inv-form")) return;
+  e.preventDefault();
+  invUndo(e.shiftKey);
+});
+
 $("#inv-page").addEventListener("click", (e) => {
+  if (invFormClick(e)) return;
   const m = e.target.closest("[data-inv-mode]"), p = e.target.closest("[data-inv-period]");
-  if (m) {
+  const rail = e.target.closest("[data-inv-rail]"), edit = e.target.closest("[data-inv-edit]"), add = e.target.closest("[data-inv-add]");
+  if (add) $("#inv-pop")?.hidden === false ? invClosePop() : invOpenAdd(add);
+  else if (e.target.closest("[data-inv-undo]")) invUndo(false);
+  else if (e.target.closest("[data-inv-redo]")) invUndo(true);
+  else if (edit) invStartEdit(edit.dataset.invEdit);
+  else if (rail) {
+    INV.rail = rail.dataset.invRail; INV.editing = null;
+    try { localStorage.setItem("inv_rail", INV.rail); } catch (e2) {}
+    const aside = $("#inv-page .inv-rail");
+    if (aside) aside.innerHTML = invRailHtml(INV.book);
+  } else if (m) {
     // Only the chart depends on the mode, so only the chart is redrawn.
     INV.mode = m.dataset.invMode;
     for (const btn of document.querySelectorAll("#inv-page [data-inv-mode]")) {
@@ -12037,6 +12431,7 @@ $("#inv-page").addEventListener("click", (e) => {
 $("#inv-btn").onclick = () => { showPage("investments"); invLoad(); };
 window.addEventListener("resize", () => drawInvChart());
 try { const p = localStorage.getItem("inv_period"); if (INV_PERIODS.includes(p)) INV.period = p; } catch (e) {}
+try { if (localStorage.getItem("inv_rail") === "activity") INV.rail = "activity"; } catch (e) {}
 
 setTheme(readTheme());
 fxInit();
