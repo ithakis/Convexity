@@ -11,7 +11,7 @@ import threading
 import time
 import traceback
 import warnings
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -101,6 +101,16 @@ def _rows_summary(rows, period=None) -> str:
     syms = [r.get("symbol") for r in rows if isinstance(r, dict) and r.get("symbol")]
     out = f"{len(rows)} rows, {len(set(syms))} distinct symbols"
     return out + (f", period={period}" if period else "")
+
+
+# The Portfolio tab's read-only mirror of the real book (app.js BOOK_KEY), and
+# the write routes that may never name it, with the body/query keys that name
+# a portfolio there (Handler._writes_book_name). A preset's own "name" is not
+# one: a preset may be called anything.
+BOOK_VIEW = "__book__"
+_BOOK_GUARDED = {"/api/watchlists": ("name",), "/api/portfolio/rename": ("old", "new"),
+                 "/api/mpt-runs": ("view",), "/api/weight-presets": ("view",),
+                 "/api/weight-presets/active": ("view",)}  # fmt: skip
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -362,9 +372,8 @@ class Handler(BaseHTTPRequestHandler):
             # Settings -> API keys. Booleans + source names only (keys.status).
             self._send_json(200, _keys.status())
             return
-        if parsed.path == "/api/investments/book":
-            # My Investments (roadmap Phase 1): reads the book file, never writes.
-            self._send_json(200, _investments.book_preview())
+        if parsed.path.startswith("/api/investments"):
+            self._handle_investments_get(parsed)
             return
         if parsed.path == "/api/watchlists":
             self._send_json(200, {"watchlists": load_watchlists()})
@@ -669,7 +678,7 @@ class Handler(BaseHTTPRequestHandler):
                 meta = list_views().get("views") or {}
                 full: dict[str, dict] = {}
                 for name in meta:
-                    if not name or name == _CURRENT_KEY:
+                    if not name or name in (_CURRENT_KEY, BOOK_VIEW):
                         continue
                     full[name] = load_view(name)
                 if not full:
@@ -798,6 +807,87 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[keys] {path} failed: {type(exc).__name__}", file=sys.stderr)
             self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
 
+    # ----------------------------- My Investments ----------------------------
+
+    def _writes_book_name(self, parsed, payload: dict) -> bool:
+        """Refuse a portfolio write that names the real book's pinned tab.
+
+        ``__book__`` is the Portfolio tab's read-only mirror of My Investments
+        (app.js BOOK_KEY): its constituents and weights come from the ledger,
+        so no watchlist, preset, rename, MPT run or delete may use the name.
+        Only its cached rows (POST /api/views/__book__) are written, like any
+        tab's. Answers 400 and returns True when it refused."""
+        if parsed.path.startswith("/api/views/"):
+            names = [unquote(parsed.path[len("/api/views/") :])] if self.command == "DELETE" else []
+        else:
+            q, keys = parse_qs(parsed.query), _BOOK_GUARDED.get(parsed.path, ())
+            names = [payload.get(k) for k in keys] + [(q.get(k) or [""])[0] for k in keys]
+        if any(str(n or "").strip() == BOOK_VIEW for n in names):
+            self._send_json(
+                400, {"error": "My Investments is read-only here; change it on its own page"}
+            )
+            return True
+        return False
+
+    def _handle_investments_get(self, parsed) -> None:
+        """The real book (investments.py). GETs never write the book file."""
+        q = parse_qs(parsed.query)
+        try:
+            if parsed.path == "/api/investments":
+                self._send_json(200, _investments.book())
+            elif parsed.path == "/api/investments/symbols":
+                self._send_json(200, {"symbols": _investments.book_symbols()})
+            elif parsed.path == "/api/investments/lookup":
+                self._send_json(200, {"hits": _investments.lookup((q.get("q") or [""])[0][:80])})
+            elif parsed.path == "/api/investments/price":
+                sym = (q.get("symbol") or [""])[0].strip()[:32]
+                day = (q.get("date") or [""])[0].strip()
+                try:
+                    date.fromisoformat(day)
+                    if not sym:
+                        raise ValueError
+                except ValueError:
+                    self._send_json(400, {"error": "symbol and date required"})
+                    return
+                self._send_json(200, _investments.price_on(sym, day))
+            else:
+                self._send_json(404, {"error": "not found"})
+        except Exception as exc:
+            print(f"[investments] GET {parsed.path} failed: {type(exc).__name__}", file=sys.stderr)
+            self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
+
+    def _handle_investments_post(self, path: str) -> None:
+        """Mutations of the real book. Each answers the new page payload, or
+        {error, message}: 400 bad input, 409 stale rev or a damaged file
+        (never overwritten), 422 a change the ledger refuses (an oversell)."""
+        p = self._read_json()
+        rev, entry = p.get("base_rev"), p.get("entry") or {}
+        try:
+            if not isinstance(entry, dict):
+                raise _investments.BookError("entry must be an object")
+            if path == "/api/investments/entries":
+                out = _investments.add(entry, rev)
+            elif path == "/api/investments/entries/update":
+                out = _investments.update(str(p.get("id") or ""), entry, rev)
+            elif path == "/api/investments/entries/delete":
+                out = _investments.delete(str(p.get("id") or ""), rev)
+            elif path == "/api/investments/undo":
+                out = _investments.undo(rev)
+            elif path == "/api/investments/redo":
+                out = _investments.redo(rev)
+            else:
+                self._send_json(404, {"error": "not found"})
+                return
+        except _investments.BookError as exc:
+            self._send_json(exc.status, {"error": type(exc).__name__, "message": exc.message})
+            return
+        except Exception as exc:
+            print(f"[investments] POST {path} failed: {type(exc).__name__}", file=sys.stderr)
+            traceback.print_exc()
+            self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
+            return
+        self._send_json(200, out)
+
     def do_POST(self):
         # Every POST, not just the key routes: watchlists, views, rename,
         # presets, jobs … all change saved state or spend API quota.
@@ -810,6 +900,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
             return
         parsed = urlparse(self.path)
+        if self._writes_book_name(parsed, self._body):
+            return
         if parsed.path in ("/api/keys", "/api/keys/test"):
             self._handle_keys_post(parsed.path)
             return
@@ -841,6 +933,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(
                     400, {"error": 'expected {"enabled": bool} or {"action": "refresh"}'}
                 )
+            return
+        if parsed.path.startswith("/api/investments/"):
+            self._handle_investments_post(parsed.path)
             return
         if parsed.path == "/api/watchlists":
             try:
@@ -1245,6 +1340,8 @@ class Handler(BaseHTTPRequestHandler):
             self._refuse_cross_origin()
             return
         parsed = urlparse(self.path)
+        if self._writes_book_name(parsed, {}):
+            return
         if parsed.path.startswith("/api/views/"):
             name = unquote(parsed.path[len("/api/views/") :])
             try:

@@ -116,9 +116,13 @@ Each of these has cost real debugging time; the link goes to the full story.
   environment only; the `reference-pack` release must never become "Latest"
   (the installers install `/releases/latest`).
   [news.md](docs/architecture/news.md) · [ci.md](docs/architecture/ci.md#reference-pack-workflow-githubworkflowsreference-packyml-phase-8)
-- **My Investments never shows a real book made-up numbers**: demo figures
-  only for the seeded demo book (`investments.book_preview`).
-  [frontend.md → Pages](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv)
+- **My Investments never shows a real book made-up numbers**: every figure
+  comes from replaying the ledger (`ledger.py`); what isn't computed yet is a
+  dash. **The book file is never overwritten when malformed**, and every
+  change carries `base_rev`. **`__book__` is the Portfolio tab's read-only
+  mirror of the book**: the server refuses the name on portfolio write routes.
+  [frontend.md → Pages](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv) ·
+  [backend.md → My Investments](docs/architecture/backend.md#my-investments-the-ledger-and-the-book-file-ledgerpy-investmentspy)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -185,7 +189,8 @@ sub-decision.
 │   ├── reference_build.py       ← `convexity build-reference-pack` (run by CI): S&P 500 Market read → the pack — §4, §13
 │   ├── data/                    ← Package data: lm_lexicon.json, sp500.json (the pack's universe, source + date inside), indices.json
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
-│   ├── investments.py           ← My Investments (the real book): page payload; ledger engine from roadmap Phase 2 — docs/plans/my-investments-roadmap.md
+│   ├── investments.py           ← My Investments (the real book): the book file, undo/redo, prices/FX, page payload — docs/plans/my-investments-roadmap.md
+│   ├── ledger.py                ← My Investments ledger engine: pure replay (average cost, implied deposits, splits), TWR/MWR
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
 │       ├── index.html           ← Main HTML template

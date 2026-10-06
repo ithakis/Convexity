@@ -353,7 +353,10 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/views`                     — list of saved views (metadata only)
 - `/api/views/<name>`              — full view payload (rows included)
 - `/api/watchlists`                — `{name: entries_string}` map
-- `/api/investments/book`          — My Investments page payload (`investments.book_preview`). Phase 1: `{empty: true}`, or demo figures for the seeded demo book only. Reads the book file, never writes it. Roadmap: `docs/plans/my-investments-roadmap.md`
+- `/api/investments`               — My Investments page payload (`investments.book()`), computed by replaying the ledger. Never writes the book file. See "My Investments" below
+- `/api/investments/symbols`       — open positions only, no network (the Portfolio tab's pinned book pill)
+- `/api/investments/lookup?q=…`    — company typeahead for the Add popover (symbol pack)
+- `/api/investments/price?symbol=…&date=…` — that day's close as traded (Yahoo's split adjustment undone), for the price auto-fill
 - `/api/fx-rates?base=USD`         — spot rates
 - `/api/fx-index?ccy=…`            — one synthetic basket index
 - `/api/fx-indexes-bulk?ccys=…`    — many in one call (sequential server-side)
@@ -364,6 +367,7 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/quotes-stream` (preferred) — NDJSON streaming, the fast path
 - `/api/search`                    — company search `{q}` or `{query}` (an edited chip set), `{offset}` — §6
 - `/api/watchlists`                — upsert `{name, entries}`
+- `/api/investments/entries`, `…/entries/update`, `…/entries/delete`, `…/undo`, `…/redo` — change the real book; body carries `base_rev`. Answer the new page payload, or `{error, message}`: 400 bad input, 409 stale rev or a damaged file, 422 a change the ledger refuses
 - `/api/views/<name>`              — save view body `{entries, rows, set_last?}`
 - `/api/last-view`                 — set the restore-on-launch target
 - `/api/portfolio/rename`          — `{old, new}` — atomic rename of both files
@@ -412,6 +416,45 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/history?symbol=…&range=…&bench=SPY,XLK` — intraday half of the chart granularity ladder (§5)
 - `/api/refresh-job/current`       — `{job: snapshot|null}`; one cheap call on page load is what lets a job survive a full reload
 - `/api/refresh-job/<id>/stream?since=<seq>` — replayable NDJSON progress (§17)
+
+### My Investments: the ledger and the book file (`ledger.py`, `investments.py`)
+Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
+- **`ledger.py` is pure** (no I/O): `replay(entries, base_ccy, fx_at, splits)`
+  returns the whole book from the first entry, every time. Nothing derived is
+  stored, so editing a 2023 trade can never leave a stale number. Average
+  cost (trade fees in the cost), one cash pool in the base currency, and cash
+  never below zero: a shortfall is an *implied deposit*. Quantities are in
+  today's shares (`qty_basis` `trade` entries are scaled by the splits after
+  their date; Yahoo dates a split on its ex-date, so "after" is strict).
+  Same-day order: deposit, dividend, sell, buy, fee, withdrawal, so a buy
+  and a sell of the same share on one day books the sell first and is refused
+  if nothing was held. `twr`/`mwr` are there for the acceptance test; Phase 3
+  feeds them daily closes.
+- **`investments.py` owns `state/investments.json`.** One lock around every
+  read-modify-write; an atomic write after copying the old file to `.bak`; a
+  malformed or newer-schema file is **never overwritten** (409, the page
+  shows the message); every change carries `base_rev` (409 when stale) and
+  replays the candidate ledger before saving, so the file never holds a book
+  the engine refuses. Undo/redo are journal items of inverse ops
+  (`{"put": entry, "at": i}` / `{"del": id}`, last 100). Logs carry the
+  operation, entry id and symbol only, never amounts.
+- **Units:** entry prices and amounts are in the major unit of the entry's
+  `ccy` (GBP, not pence); the page converts to the quote unit for display.
+  `price_on` undoes Yahoo's split adjustment (`auto_adjust=False` only drops
+  the dividend one): NVDA on 1 May 2024 fills ~830, not 83.
+- **Validation** (`_clean`, `_load`): numbers must be finite, not booleans,
+  and at most 1e12 (JSON has no infinity); `ccy` is three letters; editing an
+  entry to another company drops the old currency and FX rate. A book file
+  whose entries lack a date, a known type or a symbol is unreadable (409),
+  never a 500.
+- **Known gap until Phase 3:** "This month" values month-start holdings at
+  `_bulk_close`'s dividend-adjusted close, so in a month with an ex-dividend
+  date a recorded dividend is counted twice (small). Phase 3's as-traded
+  daily closes remove it.
+- Network calls sit in small functions (`_closes`, `_fx_series`, `_fx_now`,
+  `_fetch_splits`, `_fetch_quote_ccy`) that the tests stub.
+- Until Phase 3 the payload leaves `twr`, `bench_twr`, `mwr_ann` as null and
+  sends no `series`; the page shows calm gaps.
 
 ## 6. Symbol pack + company search (`symbol_db.py`, `symbol_build.py`, `search.py`)
 

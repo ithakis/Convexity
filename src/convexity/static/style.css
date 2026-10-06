@@ -27,6 +27,8 @@
     --pos-rgb: 31, 136, 61;
     --neg: #cf222e;
     --neg-rgb: 207, 34, 46;
+    --book: #cf222e;          /* the real book's pill (Portfolio tab): the theme's red */
+    --book-rgb: 207, 34, 46;
     --warn: #9a6700;
     --warn-rgb: 191, 135, 0;
     --bg-rgb: 255, 255, 255;
@@ -58,6 +60,8 @@
     --pos-rgb: 63, 185, 80;
     --neg: #f85149;
     --neg-rgb: 248, 81, 73;
+    --book: #f85149;          /* the real book's pill (Portfolio tab): the theme's red */
+    --book-rgb: 248, 81, 73;
     --warn: #d29922;
     --warn-rgb: 210, 153, 34;
     --bg-rgb: 10, 14, 20;
@@ -100,6 +104,8 @@
     --pos-rgb: 51, 209, 122;
     --neg: #ff433d;
     --neg-rgb: 255, 67, 61;
+    --book: #ff433d;          /* the real book's pill (Portfolio tab): the theme's red */
+    --book-rgb: 255, 67, 61;
     --warn: #f5b301;
     --warn-rgb: 245, 179, 1;
     --bg-rgb: 0, 0, 0;
@@ -3399,6 +3405,7 @@
     z-index: 100; box-shadow: 0 4px 14px rgba(0,0,0,0.10); color: var(--text);
   }
   .toast.show { opacity: 1; }
+  .toast:not(.show) { pointer-events: none; }  /* a faded toast's Undo must not take clicks */
 
   /* My Investments (rules: docs/architecture/frontend.md). Box budget: the
      gray sheet and the white chart card inside it; table and rail are
@@ -3482,3 +3489,80 @@
   .inv-empty-body { margin-top: 8px; color: var(--muted); line-height: 1.55; }
   .inv-empty-soon { margin-top: 14px; font-size: 11.5px; color: var(--muted); }
   .inv-empty-err { margin-top: 10px; font-size: 12px; color: var(--neg); }
+
+  /* My Investments, Phase 2: the ledger (Activity), the Add popover, undo. */
+  .inv-gap { color: var(--muted); font-weight: 400; }
+  .inv-chart-soon { height: 64px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12.5px; }
+  .inv-broken { padding: 14px 8px; color: var(--neg); font-size: 13px; }
+  .inv-anchor .inv-add { order: 3; }
+  .inv-anchor::after { order: 2; }
+  .inv-add {
+    flex: none; font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: var(--r-md); cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text);
+  }
+  .inv-add:hover { border-color: var(--accent); }
+  .inv-empty-actions { margin-top: 16px; display: flex; gap: 8px; }
+  .inv-empty-actions button { font-size: 13px; padding: 6px 14px; border-radius: var(--r-md); cursor: pointer; border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text); }
+  .inv-empty-actions button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .inv-rail-head { display: flex; margin: 0 0 10px; }
+  .inv-rail-head .pf-contrib-toggle { margin-left: 0; }
+  .inv-act-bar { display: flex; align-items: center; gap: 4px; margin: 0 0 6px; }
+  .inv-act-bar .inv-add { margin-left: auto; }
+  .inv-icon-btn { height: 24px; padding: 0 8px; border: 1px solid transparent; background: none; border-radius: var(--r-sm); color: var(--text); cursor: pointer; font-size: 11.5px; line-height: 1; }
+  .inv-icon-btn:hover:not(:disabled) { background: var(--bg-subtle); border-color: var(--border); }
+  .inv-icon-btn:disabled { color: var(--muted); opacity: 0.45; cursor: default; }
+  .inv-act-month { font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); padding: 12px 0 4px; }
+  .inv-act-row {
+    display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; width: 100%;
+    padding: 6px 4px; border: none; border-bottom: 1px solid var(--border); background: none; text-align: left;
+    color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; border-radius: 0;
+  }
+  .inv-act-row:hover { background: var(--hover); }
+  .inv-act-day { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .inv-act-what { display: flex; flex-direction: column; min-width: 0; }
+  .inv-act-what > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inv-act-sub { color: var(--muted); font-size: 11px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inv-act-amt { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .inv-act-edit { padding: 8px 0 10px; border-bottom: 1px solid var(--border); }
+  .inv-pop {
+    position: fixed; z-index: 90; background: var(--bg-canvas); border: 1px solid var(--border);
+    border-radius: var(--r-md); box-shadow: 0 8px 28px rgba(0,0,0,0.18); padding: 12px;
+  }
+  .inv-form { display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
+  .inv-types { display: flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: 999px; background: rgba(var(--accent-rgb), 0.10); align-self: flex-start; }
+  .inv-types button { border: none; background: none; border-radius: 999px; padding: 3px 9px; font-size: 11px; color: var(--muted); cursor: pointer; }
+  .inv-types button.active { background: var(--bg-canvas); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.16); }
+  .inv-f { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; position: relative; }
+  .inv-f > span { font-size: 11px; color: var(--muted); }
+  .inv-f em { font-style: normal; font-size: 10.5px; color: var(--muted); }
+  .inv-f input, .inv-f select {
+    height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--r-sm);
+    background: var(--bg-canvas); color: var(--text); font: inherit; font-variant-numeric: tabular-nums; min-width: 0;
+  }
+  .inv-f input:focus, .inv-f select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18); }
+  .inv-f-row { display: flex; gap: 8px; }
+  .inv-co-list {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 2; margin-top: 2px; padding: 4px;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-sm); box-shadow: 0 6px 18px rgba(0,0,0,0.14);
+  }
+  .inv-co-list button { display: flex; justify-content: space-between; gap: 8px; width: 100%; padding: 5px 8px; border: none; background: none; border-radius: var(--r-sm); cursor: pointer; color: var(--text); font: inherit; text-align: left; }
+  .inv-co-list button:hover { background: var(--bg-subtle); }
+  .inv-co-list b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inv-co-list span { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .inv-more summary { cursor: pointer; color: var(--muted); font-size: 11.5px; }
+  .inv-more[open] summary { margin-bottom: 6px; }
+  .inv-more .inv-f { margin-bottom: 6px; }
+  .inv-form-err { color: var(--neg); font-size: 12px; min-height: 0; }
+  .inv-form-err:empty { display: none; }
+  .inv-form-btns { display: flex; gap: 6px; align-items: center; }
+  .inv-form-btns span { flex: 1; }
+  .inv-form-btns button { font-size: 12px; padding: 4px 12px; border-radius: var(--r-md); border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text); cursor: pointer; }
+  .inv-form-btns button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .toast .toast-act { margin-left: 12px; border: none; background: none; color: var(--accent); font: inherit; font-weight: 700; cursor: pointer; padding: 0; }
+
+  /* The real book as a pinned pill in the Portfolio tab, in the theme's red. */
+  .pf-tab.pf-tab-book { color: var(--book); border-color: rgba(var(--book-rgb), 0.55); font-weight: 600; }
+  .pf-tab.pf-tab-book:hover { border-color: var(--book); background: rgba(var(--book-rgb), 0.06); }
+  .pf-tab.pf-tab-book.active { background: rgba(var(--book-rgb), 0.12); border-color: var(--book); color: var(--book); box-shadow: 0 0 0 1px rgba(var(--book-rgb), 0.25); }
+  [data-theme="dark"] .pf-tab.pf-tab-book.active { color: #fff; background: rgba(var(--book-rgb), 0.28); }
+  #input-panel.pf-book-ro .co-search, #input-panel.pf-book-ro .pf-chip-x { display: none; }
