@@ -19,8 +19,8 @@ owner says so.
 |---|---|---|---|---|
 | 1 | Page shell and look | Done (merged) | `feature/my-investments-p1` · [ithakis/Convexity#31](https://github.com/ithakis/Convexity/pull/31) | 2026-10-05 |
 | 2 | Ledger and manual entry | Done (merged) | `feature/my-investments-p2` · [ithakis/Convexity#33](https://github.com/ithakis/Convexity/pull/33) | 2026-10-06 |
-| 5 | AI import I: text and spreadsheets, and the front door | Done (signed off) | `feature/my-investments-p5` (with 6) | 2026-10-06 |
-| 6 | AI import II: screenshots and PDFs | Done (signed off) | `feature/my-investments-p5` (with 5) | 2026-10-06 |
+| 5 | AI import I: text and spreadsheets, and the front door | Done (merged) | `feature/my-investments-p5` (with 6) · [ithakis/Convexity#34](https://github.com/ithakis/Convexity/pull/34) | 2026-10-06 |
+| 6 | AI import II: screenshots and PDFs | Done (merged) | `feature/my-investments-p5` (with 5) · [ithakis/Convexity#34](https://github.com/ithakis/Convexity/pull/34) | 2026-10-06 |
 | 3 | Performance | Not started (decisions taken) | | |
 | 4 | Holdings depth | Not started | | |
 | 7 | Attention rail I: risk and events | Not started | | |
@@ -41,9 +41,13 @@ Paste this into a new Claude Code session to carry on:
 
 ```
 Read docs/plans/my-investments-roadmap.md. Continue the My Investments roadmap:
-take the first phase in the progress table (run order) that is not Done, read its section and
-the feedback log, and run it with the phase loop (suggest → prototype → build →
-verify → review → sign-off). Follow CLAUDE.md. Never use my real data.
+take the first phase in the progress table (run order) that is not Done. That is Phase 3,
+Performance: read its section, the feedback log and Part 2 of the engine design in the plan
+file, and run it with the phase loop (suggest → prototype → build → verify → review →
+sign-off). Locked decisions: Total profit is lifetime; Return, vs S&P and Your money follow
+the period pill; the chart defaults to Value; the topbar Refresh refreshes the book only;
+quick-add performance starts at the Since-day market value. Follow CLAUDE.md. Never use my
+real data; run live checks with my API keys as env vars. Ask before any version bump.
 ```
 
 ## The phase loop (every phase)
