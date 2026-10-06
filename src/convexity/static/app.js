@@ -11926,15 +11926,11 @@ async function invLoad() {
 function invRender() {
   const b = INV.book, host = $("#inv-page");
   if (!b || host.classList.contains("hidden")) return;
+  // The review of an import takes the page until it is applied or cancelled.
+  if (INV.imp?.prop) { host.innerHTML = invReviewHtml(); return; }
   if (b.empty) {
     const err = typeof b.error === "string" ? b.error : b.error ? "Couldn't load your investments. Try again in a moment." : "";
-    host.innerHTML = `
-      <div class="inv-empty">
-        <div class="inv-empty-title">Track your real investments</div>
-        <div class="inv-empty-body">See what you own, what it is worth, how it has done against the market, and what needs your attention. Kept separate from the portfolios you research in the other tabs.</div>
-        ${err ? `<div class="inv-empty-err">${escapeHtml(err)}</div>` : `<div class="inv-empty-actions"><button type="button" class="primary" data-inv-add>Add your first holding</button>${b.undo_label ? `<button type="button" data-inv-undo data-tip="Undo: ${escapeHtml(b.undo_label)}">Undo</button>` : ""}</div>`}
-        <div class="inv-empty-soon">Importing broker statements arrives in a later update.</div>
-      </div>`;
+    host.innerHTML = invWelcomeHtml(b, err);
     return;
   }
   host.innerHTML = `
@@ -12128,11 +12124,18 @@ function drawInvChart() {
  * show a share's price in its own quote unit, like the holdings table.
  * ------------------------------------------------------------------------ */
 const INV_MINOR = { GBp: "GBP", GBX: "GBP", ZAc: "ZAR", ILA: "ILS" };
-const INV_FORM_TYPES = [["holding", "Holding"], ["buy", "Buy"], ["sell", "Sell"], ["dividend", "Dividend"],
-  ["cash", "Cash"], ["fee", "Fee"], ["split", "Split"]];
+/* The Add popover leads with the quick-add holding; every other type sits in
+   its quiet "Something else" menu (owner's choice, Phase 3: no pill row).
+   null marks the divider before the rare ones. */
+const INV_FORM_TITLES = { holding: "Add a holding", buy: "Add a purchase", sell: "Add a sale",
+  dividend: "Add a dividend", cash: "Add cash in or out", fee: "Add a fee", split: "Add a stock split" };
+const INV_TYPE_MENU = [["holding", "A holding you own"], ["buy", "Bought shares"], ["sell", "Sold shares"],
+  ["dividend", "Dividend"], ["cash", "Cash in or out"], null, ["fee", "Fee"], ["split", "Stock split"]];
 const INV_TYPE_WORDS = { buy: "Buy", sell: "Sell", dividend: "Dividend", deposit: "Deposit",
   withdrawal: "Withdrawal", fee: "Fee", split: "Split" };
-const invToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+/* A local calendar date as YYYY-MM-DD (toISOString would give UTC's day). */
+const invIso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const invToday = () => invIso(new Date());
 /* How many quote units per major unit when the entry is in the share's own currency. */
 const invUnit = (qccy, ccy) => INV_MINOR[qccy] && (!ccy || ccy === INV_MINOR[qccy]) ? 100 : 1;
 function invNative(v, ccy, signed = true) {
@@ -12190,28 +12193,74 @@ function invFormFromEntry(e) {
     qty_basis: e.qty_basis, fee: e.fee || "", amount: e.amount ?? "", tax: e.tax || "", ratio: e.ratio ?? "", fx_rate: e.fx_rate || "", note: e.note || "" };
 }
 
+/* "1 year ago" for the date chips, as a local ISO date. */
+const invYearAgo = () => { const d = new Date(); d.setFullYear(d.getFullYear() - 1); return invIso(d); };
+
+/* The live line under the fields (owner's choice E2, Phase 5): what the entry
+ * comes to as it is typed. Prices are typed in the quote unit (pence for LSE);
+ * `f.now` is today's close in the major unit. */
+function invResultText(form, f) {
+  const val = (k) => form?.elements[k]?.value?.trim() ?? String(f[k] ?? "");
+  const n = (k) => { const x = Number(val(k).replace(/,/g, "")); return val(k) !== "" && Number.isFinite(x) ? x : null; };
+  const u = invUnit(f.quote_ccy, f.ccy), ccy = f.ccy || INV.book?.ccy || "USD";
+  const qty = n("qty"), px = n("price") == null ? null : n("price") / u, fee = n("fee") || 0, amt = n("amount");
+  const money = (v) => invNative(v, ccy, false);
+  if (f.type === "holding" && qty && invOk(f.now)) {
+    const value = qty * f.now, line = `${invQty(qty)} × ${invQuotePrice(f.now, f.quote_ccy || ccy)} = <b>${money(value)}</b>`;
+    if (px == null) return line;
+    const gain = value - qty * px;
+    return `${line} · <span class="${gain >= 0 ? "pos" : "neg"}">${invNative(gain, ccy)} since you bought</span>`;
+  }
+  if ((f.type === "buy" || f.type === "holding") && qty && px != null) return `${f.type === "buy" ? "Costs" : "Cost"} <b>${money(qty * px + fee)}</b>${fee ? " with the fee" : ""}`;
+  if (f.type === "sell" && qty && px != null) return `You get <b>${money(qty * px - fee)}</b>${fee ? " after the fee" : ""}`;
+  if (f.type === "dividend" && amt) return `<b>${money(amt - (n("tax") || 0))}</b> into your cash`;
+  if (f.type === "cash" && amt) return `<b>${money(amt)}</b> ${val("dir") === "withdrawal" ? "out of" : "into"} your cash`;
+  if (f.type === "fee" && amt) return `<b>${money(amt)}</b> out of your cash`;
+  if (f.type === "split" && n("ratio")) return `Each share becomes <b>${invQty(n("ratio"))}</b>`;
+  return f.symbol || !["holding", "buy", "sell", "dividend", "split"].includes(f.type) ? "" : "Pick a company to see what it comes to.";
+}
+
 function invFormHtml(f) {
   const v = (k) => escapeHtml(f[k] ?? "");
   const field = (k, label, attrs = "", hint = "") => `<label class="inv-f"><span>${label}</span><input name="${k}" value="${v(k)}" ${attrs}>${hint ? `<em>${escapeHtml(hint)}</em>` : ""}</label>`;
   const num = (k, label, hint) => field(k, label, 'inputmode="decimal" autocomplete="off"', hint);
-  const unit = f.quote_ccy ? (INV_MINOR[f.quote_ccy] ? "pence" : f.quote_ccy) : "";
-  const company = `<label class="inv-f inv-f-co"><span>Company</span><input name="company" value="${escapeHtml(f.name ? `${f.name} (${f.symbol})` : f.symbol || "")}" placeholder="Name or ticker" autocomplete="off" spellcheck="false"><div class="inv-co-list" hidden></div></label>`;
-  const date = (label) => field("date", label, `type="date" max="${invToday()}"`);
+  // The unit rides in the label, so the two big fields of a row line up.
+  const big = (k, label, hint) => `<label class="inv-f inv-f-big"><span>${label}${hint ? ` <em>· ${escapeHtml(hint)}</em>` : ""}</span><input name="${k}" value="${v(k)}" inputmode="decimal" autocomplete="off" placeholder="0"></label>`;
+  const unit = f.quote_ccy ? (INV_MINOR[f.quote_ccy] ? "in pence" : f.quote_ccy) : "";
+  // The company is a header once chosen (name, ticker, today's price), the
+  // search field until then; "Change" goes back to the field.
+  const company = f.symbol && !f.coEdit
+    ? `<div class="inv-co-head"><span class="inv-co-dot" aria-hidden="true">${escapeHtml((f.name || f.symbol).trim().charAt(0).toUpperCase())}</span>
+        <span class="inv-co-id"><b>${escapeHtml(f.name || f.symbol)}</b><span>${escapeHtml([f.symbol, f.exchange].filter(Boolean).join(" · "))}${invOk(f.now) ? ` · ${invQuotePrice(f.now, f.quote_ccy || f.ccy)} now` : ""}</span></span>
+        <button type="button" class="inv-link" data-inv-cochange>Change</button></div>`
+    : `<label class="inv-f inv-f-co"><span>Company</span><input name="company" value="${escapeHtml(f.coEdit ? "" : f.name ? `${f.name} (${f.symbol})` : f.symbol || "")}" placeholder="Name or ticker, like Apple or AAPL" autocomplete="off" spellcheck="false"><div class="inv-co-list" hidden></div></label>`;
+  // Date chips: Today, 1 year ago, or the picker (which is the real field).
+  const date = (label, tip = "") => {
+    const d = f.date || invToday(), chips = [[invToday(), "Today"], [invYearAgo(), "1 year ago"]];
+    const custom = !chips.some(([iso]) => iso === d);
+    return `<div class="inv-f"${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}><span>${label}</span><div class="inv-dates">${chips.map(([iso, l]) =>
+      `<button type="button" class="inv-chip${iso === d ? " on" : ""}" data-inv-day="${iso}">${l}</button>`).join("")}
+      <input class="inv-chip inv-chip-date${custom ? " on" : ""}" name="date" type="date" value="${escapeHtml(d)}" max="${invToday()}" aria-label="${label}: pick a date"></div></div>`;
+  };
   const t = f.type;
   let body = "";
-  if (t === "holding") body = company + `<div class="inv-f-row">${num("qty", "Shares")}${num("price", "Avg price", unit)}</div>`
-    + `<label class="inv-f" data-tip="The day your holding counts from. Performance (next update) measures from this date, so pick roughly when you bought; today is fine if you don't know."><span>Since</span><input name="date" type="date" value="${v("date")}" max="${invToday()}"></label>`;
-  else if (t === "buy" || t === "sell") body = company + `<div class="inv-f-row">${date("Date")}${num("qty", "Shares")}</div><div class="inv-f-row">${num("price", "Price", unit + (f.priceNote ? " · " + f.priceNote : ""))}${num("fee", "Fee")}</div>`;
-  else if (t === "dividend") body = company + `<div class="inv-f-row">${date("Date")}${num("amount", "Amount received", f.ccy || "")}</div>`;
-  else if (t === "cash") body = `<div class="inv-f-row"><label class="inv-f"><span>Money</span><select name="dir"><option value="deposit" ${f.dir !== "withdrawal" ? "selected" : ""}>Put in</option><option value="withdrawal" ${f.dir === "withdrawal" ? "selected" : ""}>Taken out</option></select></label>${date("Date")}</div>${num("amount", "Amount", f.ccy || INV.book?.ccy || "USD")}`;
-  else if (t === "fee") body = `<div class="inv-f-row">${date("Date")}${num("amount", "Amount", f.ccy || INV.book?.ccy || "USD")}</div>`;
-  else if (t === "split") body = company + `<div class="inv-f-row">${date("Date")}${num("ratio", "New shares per old", "10 for a 10-for-1")}</div>`;
+  if (t === "holding") body = company + `<div class="inv-f-row">${big("qty", "Shares")}${big("price", "Average price", unit)}</div>`
+    + date("Since", "The day your holding counts from: performance measures from here. Today is fine if you don't know.");
+  else if (t === "buy" || t === "sell") body = company + `<div class="inv-f-row">${big("qty", "Shares")}${big("price", "Price", [unit, f.priceNote].filter(Boolean).join(" · "))}</div>` + date("Date") + `<div class="inv-f-row inv-f-narrow">${num("fee", "Fee")}</div>`;
+  else if (t === "dividend") body = company + `<div class="inv-f-row">${big("amount", "Amount received", f.ccy || "")}</div>` + date("Date");
+  else if (t === "cash") body = `<div class="inv-f-row"><label class="inv-f"><span>Money</span><select name="dir"><option value="deposit" ${f.dir !== "withdrawal" ? "selected" : ""}>Put in</option><option value="withdrawal" ${f.dir === "withdrawal" ? "selected" : ""}>Taken out</option></select></label>${big("amount", "Amount", f.ccy || INV.book?.ccy || "USD")}</div>` + date("Date");
+  else if (t === "fee") body = `<div class="inv-f-row">${big("amount", "Amount", f.ccy || INV.book?.ccy || "USD")}</div>` + date("Date");
+  else if (t === "split") body = company + `<div class="inv-f-row">${big("ratio", "New shares per old", "10 for a 10-for-1")}</div>` + date("Date");
+  body += `<div class="inv-result" data-inv-result>${invResultText(null, f)}</div>`;
   const more = [];
   if (t === "dividend") more.push(num("tax", "Tax withheld"));
   if (t !== "split" && t !== "holding") more.push(num("fx_rate", `FX rate`, `${INV.book?.ccy || "USD"} per 1 ${f.ccy || "unit"}, blank = that day's`));
   more.push(field("note", "Note", 'maxlength="200"'));
-  const types = f.id ? "" : `<div class="inv-types" role="group" aria-label="Entry type">${INV_FORM_TYPES.map(([k, l]) =>
-    `<button type="button" data-inv-type="${k}" class="${k === t ? "active" : ""}">${l}</button>`).join("")}</div>`;
+  // Editing in place keeps its row's type; only a new entry gets the menu.
+  const types = f.id ? "" : `<div class="inv-form-head"><span class="inv-form-title">${INV_FORM_TITLES[t]}</span>
+    <button type="button" class="inv-type-btn" data-inv-typemenu aria-haspopup="menu" aria-expanded="false">Something else<svg viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <div class="inv-type-menu" role="menu" hidden>${INV_TYPE_MENU.filter(x => !x || x[0] !== t).map(x => x
+      ? `<button type="button" role="menuitem" data-inv-type="${x[0]}">${x[1]}</button>` : '<hr>').join("")}</div></div>`;
   return `<form class="inv-form" data-inv-form="${escapeHtml(f.id || "")}" novalidate>${types}${body}
     <details class="inv-more"${f.moreOpen ? " open" : ""}><summary>${t === "dividend" ? "Tax, FX rate, note" : t === "holding" || t === "split" ? "Note" : "FX rate, note"}</summary>${more.join("")}</details>
     <div class="inv-form-err" role="alert">${escapeHtml(f.error || "")}</div>
@@ -12247,17 +12296,34 @@ function invPop() {
   if (!p) { p = document.createElement("div"); p.id = "inv-pop"; p.className = "inv-pop"; p.hidden = true; document.body.appendChild(p); }
   return p;
 }
-function invOpenAdd(anchor) {
-  const r = anchor.getBoundingClientRect(), w = Math.min(360, window.innerWidth - 24);
+/* "+ Add" opens the composer (with "by hand" one click away); the welcome's
+ * "add one holding by hand" opens the card directly. */
+function invOpenAdd(anchor, hand = anchor.hasAttribute("data-inv-hand")) {
+  const r = anchor.getBoundingClientRect(), w = Math.min(hand ? 380 : 440, window.innerWidth - 24);
   if (INV.editing) { INV.editing = null; invRender(); }  // one form at a time
   INV.form = { type: "holding", date: invToday(), ccy: null };
   const p = invPop();
-  p.innerHTML = invFormHtml(INV.form);
+  p.innerHTML = hand ? invFormHtml(INV.form)
+    : `<div class="inv-pop-compose"><div class="inv-form-head"><span class="inv-form-title">Add or update</span>
+        <button type="button" class="inv-type-btn" data-inv-hand-swap>By hand</button></div>${invComposerHtml(true)}
+        <div class="inv-pop-note">Read by NVIDIA NIM. Nothing is added until you apply it.</div></div>`;
   p.hidden = false;
   p.style.width = w + "px";
-  p.style.left = Math.max(12, Math.min(r.right - w, window.innerWidth - w - 12)) + "px";
-  p.style.top = Math.min(r.bottom + 6, window.innerHeight - 60) + "px";
-  p.querySelector("input[name=company]")?.focus();
+  // Under the welcome's centred button the popover centres too, so it drops
+  // below the invitation instead of covering it; "+ Add" keeps its right edge.
+  const centred = !!anchor.closest(".inv-welcome");
+  const left = centred ? r.left + r.width / 2 - w / 2 : r.right - w;
+  p.style.left = Math.max(12, Math.min(left, window.innerWidth - w - 12)) + "px";
+  const h = p.offsetHeight, below = r.bottom + 8;
+  p.style.top = (below + h <= window.innerHeight - 12 || r.top - 8 - h < 12 ? below : r.top - 8 - h) + "px";
+  (p.querySelector("input[name=company]") || p.querySelector("[data-inv-comp-text]"))?.focus();
+}
+/* A type with more fields can grow the popover past the window: lift it. */
+function invPopFit() {
+  const p = $("#inv-pop");
+  if (!p || p.hidden) return;
+  const over = p.getBoundingClientRect().bottom - (window.innerHeight - 12);
+  if (over > 0) p.style.top = Math.max(12, parseFloat(p.style.top) - over) + "px";
 }
 function invClosePop() { const p = $("#inv-pop"); if (p && !p.hidden) { p.hidden = true; p.innerHTML = ""; } }
 const invFormState = (form) => form.dataset.invForm ? INV.editForm : INV.form;
@@ -12269,6 +12335,358 @@ function invFormRerender(form, patch) {
   Object.assign(f, patch);
   form.outerHTML = invFormHtml(f);
   return host.querySelector(".inv-form");
+}
+
+/* --- the composer and the review (roadmap Phases 5-6) -------------------
+ * The way in (owner's choice W1): one box that takes typed or pasted text,
+ * screenshots (dropped, attached or pasted), PDFs and CSV/Excel files. "Read it"
+ * sends them to /api/investments/import, which returns rows to review;
+ * nothing touches the book until Apply, which adds them as one undoable
+ * batch. Purple marks what the AI guessed, amber what it couldn't find. */
+const INV_IMP_ACCEPT = "image/png,image/jpeg,image/webp,application/pdf,.pdf,.csv,.tsv,.txt,.xlsx";
+const INV_IMP_MAX_FILE = 8 * 1024 * 1024, INV_IMP_MAX_TOTAL = 20 * 1024 * 1024;
+const invImp = () => (INV.imp ||= { text: "", files: [], busy: false, error: "", prop: null, answers: {}, sinceDate: "" });
+const INV_CLIP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></svg>';
+
+function invComposerHtml(compact = false) {
+  const m = invImp(), n = m.files.length, shots = m.files.filter(f => f.image).length, docs = n - shots;
+  const what = [shots && `${shots} screenshot${shots > 1 ? "s" : ""}`, docs && `${docs} file${docs > 1 ? "s" : ""}`,
+    m.text.trim() && "your text"].filter(Boolean).join(" and ");
+  return `<div class="inv-composer${compact ? " compact" : ""}${m.busy ? " busy" : ""}" data-inv-drop>
+    <textarea class="inv-comp-text" data-inv-comp-text rows="${compact ? 3 : 4}" ${m.busy ? "disabled" : ""}
+      placeholder="Paste from your broker, or describe it: &quot;Bought 10 Apple at 182 in March 2024, 300 Shell since 2023&quot;">${escapeHtml(m.text)}</textarea>
+    ${n ? `<div class="inv-comp-files">${m.files.map((f, i) => `<span class="inv-comp-file">${f.image ? `<img src="${f.url}" alt="">` : `<span class="inv-comp-ext">${escapeHtml((f.name.split(".").pop() || "").toUpperCase())}</span>`}<span>${escapeHtml(f.name)}</span>${m.busy ? "" : `<button type="button" data-inv-unfile="${i}" aria-label="Remove ${escapeHtml(f.name)}">×</button>`}</span>`).join("")}</div>` : ""}
+    <div class="inv-comp-bar">
+      <button type="button" class="inv-comp-attach" data-inv-attach ${m.busy ? "disabled" : ""}>${INV_CLIP}Attach</button>
+      <span class="inv-comp-hint">${m.busy ? `Reading ${what}…` : compact ? "Screenshots, PDF, CSV or Excel" : "Screenshots, PDF statements, CSV or Excel. You can paste an image too."}</span>
+      <button type="button" class="primary" data-inv-read ${m.busy ? "disabled" : ""}>${m.busy ? "Reading…" : "Read it"}</button>
+    </div>
+    ${m.busy ? '<div class="inv-comp-progress"><span></span></div>' : ""}
+    ${m.error ? `<div class="inv-comp-err" role="alert">${escapeHtml(m.error)}</div>` : ""}
+  </div>`;
+}
+
+function invWelcomeHtml(b, err) {
+  return `<div class="inv-welcome">
+    <h2 class="inv-welcome-title">Bring in your investments</h2>
+    <p class="inv-welcome-body">Drop broker screenshots or statements, paste what your app shows, or just describe it. You check everything before it's added.</p>
+    ${err ? `<div class="inv-welcome-err" role="alert">${escapeHtml(err)}</div>` : invComposerHtml()}
+    <div class="inv-welcome-alt">or <button type="button" class="inv-link" data-inv-add data-inv-hand>add one holding by hand</button>${b.undo_label ? ` · <button type="button" class="inv-link" data-inv-undo>Undo: ${escapeHtml(b.undo_label)}</button>` : ""}</div>
+    <div class="inv-welcome-soon">Screenshots and text are read by NVIDIA NIM. Nothing is added until you press Apply.</div>
+  </div>`;
+}
+
+/* Re-render just the composer wherever it is (welcome or popover). */
+function invComposerRefresh() {
+  for (const box of document.querySelectorAll(".inv-composer")) box.outerHTML = invComposerHtml(box.classList.contains("compact"));
+}
+
+function invAddFiles(list) {
+  // Cleared once per batch, so a refused file's message survives the good
+  // files added with it.
+  const m = invImp();
+  m.error = "";
+  for (const file of list) {
+    const low = file.name.toLowerCase(), image = /^image\/(png|jpeg|webp)$/.test(file.type);
+    if (!image && !/\.(csv|tsv|txt|xlsx|pdf)$/.test(low)) { m.error = `${file.name}: use screenshots (PNG, JPEG), PDF, CSV, Excel or text.`; continue; }
+    if (file.size > INV_IMP_MAX_FILE) { m.error = `${file.name} is larger than 8 MB.`; continue; }
+    if (m.files.length >= 8) { m.error = "Add at most 8 files at a time."; break; }
+    // The server reads at most 20 MB in one go (and its request cap is 32 MB
+    // of base64): say so here instead of sending a request it must refuse.
+    if (m.files.reduce((s, f) => s + f.file.size, 0) + file.size > INV_IMP_MAX_TOTAL) { m.error = "These files add up to more than 20 MB. Read some now and the rest after."; break; }
+    m.files.push({ name: file.name || "pasted image.png", type: file.type, file, image, url: image ? URL.createObjectURL(file) : "" });
+  }
+  invComposerRefresh();
+}
+
+function invB64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(",")[1] || "");
+    r.onerror = () => rej(new Error(`${file.name} couldn't be read.`));
+    r.readAsDataURL(file);
+  });
+}
+
+async function invRead() {
+  const m = invImp();
+  if (m.busy) return;
+  if (!m.text.trim() && !m.files.length) { m.error = "Add a screenshot or a file, or type what you hold."; invComposerRefresh(); return; }
+  m.busy = true; m.error = ""; invComposerRefresh();
+  try {
+    const files = await Promise.all(m.files.map(async f => ({ name: f.name, type: f.type, data: await invB64(f.file) })));
+    const r = await fetch("/api/investments/import", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: m.text, files }) });
+    let d = {};
+    try { d = await r.json(); } catch (e) { /* non-JSON error */ }
+    if (!r.ok) throw new Error(d.message || (r.status === 400 && d.error ? "That was too much to send at once. Add fewer or smaller files." : "Couldn't read that. Try again in a moment."));
+    m.prop = d; m.answers = Object.fromEntries((d.questions || []).map(q => [q.id, q.default]));
+    m.sinceDate = invToday();
+    invClosePop();
+  } catch (err) {
+    m.error = err.message;
+  } finally {
+    m.busy = false;
+  }
+  // The dry run uses the rows exactly as Apply will send them (invRowEntry),
+  // so the flags shown and the batch applied can't disagree.
+  if (m.prop) { invRecheck(); invRender(); } else invComposerRefresh();
+}
+
+/* --- review ------------------------------------------------------------- */
+const INV_REV_TYPES = [["holding", "Holding"], ["buy", "Buy"], ["sell", "Sell"], ["dividend", "Dividend"],
+  ["deposit", "Deposit"], ["withdrawal", "Withdrawal"], ["fee", "Fee"], ["split", "Split"]];
+
+/* A review row as the entry Apply sends, or null while it needs the owner,
+ * with the questions' answers applied. The only place rows become entries:
+ * the dry run (/import/check) and Apply both get what this builds. */
+function invRowEntry(r) {
+  const m = invImp(), since = m.answers.since === "pick" ? m.sinceDate : invToday();
+  const d = r.date || ((r.type === "holding" || r.type === "deposit") && m.prop.questions.some(q => q.id === "since" && q.rows.includes(r.i)) ? since : "");
+  const need = (k) => r[k] == null || r[k] === "";
+  if (!r.type || !d) return null;
+  const e = { type: r.type === "holding" ? "buy" : r.type, date: d, note: "" };
+  if (["holding", "buy", "sell", "dividend", "split"].includes(r.type)) { if (!r.symbol) return null; e.symbol = r.symbol; }
+  if (r.ccy) e.ccy = r.ccy;
+  if (["holding", "buy", "sell"].includes(r.type)) {
+    if (need("qty") || need("price")) return null;
+    // A holding counts today's shares, unless it was added for a statement's
+    // sale (basis "trade": shares as on that day, before later splits).
+    Object.assign(e, { qty: +r.qty, price: +r.price, fee: +(r.fee || 0), qty_basis: r.basis || (r.type === "holding" ? "current" : "trade") });
+  } else if (r.type === "split") { if (need("ratio")) return null; e.ratio = +r.ratio; }
+  else { if (need("amount")) return null; e.amount = +r.amount; if (r.type === "dividend" && r.tax) e.tax = +r.tax; }
+  return e;
+}
+
+function invReviewHtml() {
+  const m = invImp(), p = m.prop, rows = p.items;
+  const sym = (r) => escapeHtml(FX_SYMBOL[r.ccy] || (r.ccy ? r.ccy + " " : ""));
+  const cls = (r, k) => (r.missing.includes(k) ? " m" : "") + (r.guessed.includes(k) ? " g" : "");
+  const shown = (v) => typeof v === "number" ? v.toLocaleString(undefined, { maximumFractionDigits: 6 }) : v ?? "";
+  const inp = (r, k, attrs = "") => `<input class="inv-rev-in${cls(r, k)}" data-inv-rk="${k}" value="${escapeHtml(shown(r[k]))}" ${attrs}>`;
+  const numIn = (r, k) => inp(r, k, `inputmode="decimal" autocomplete="off" placeholder="${r.missing.includes(k) ? "needed" : "—"}"`);
+  const trade = (r) => ["holding", "buy", "sell"].includes(r.type);
+  const company = (r) => {
+    if (!["holding", "buy", "sell", "dividend", "split"].includes(r.type)) return `<span class="inv-rev-muted">${escapeHtml(r.name || "Cash")}</span>`;
+    if (!r.symbol) return `<input class="inv-rev-in m inv-rev-find" data-inv-rk="find" placeholder="Find ${escapeHtml(r.name || "the company")}" title="Type a name or ticker, then press Enter" spellcheck="false">`;
+    const opts = [{ symbol: r.symbol, name: r.name, exchange: r.exchange }, ...(r.alts || [])];
+    return `<span class="inv-rev-co${cls(r, "symbol")}"><b>${escapeHtml(shortName(r.name || r.symbol))}</b>
+      ${opts.length > 1 ? `<select data-inv-rk="symbol" aria-label="Listing">${opts.map(o => `<option value="${escapeHtml(o.symbol)}" ${o.symbol === r.symbol ? "selected" : ""}>${escapeHtml([o.symbol, o.exchange].filter(Boolean).join(" · "))}</option>`).join("")}</select>`
+        : `<span>${escapeHtml([r.symbol, r.exchange].filter(Boolean).join(" · "))}</span>`}</span>`;
+  };
+  const since = (p.questions || []).find(q => q.id === "since");
+  const body = rows.map(r => {
+    const off = !r.include;
+    const note = r.problem ? `<div class="inv-rev-note warn">${escapeHtml(r.problem.message)}
+        ${r.problem.kind === "oversell" ? `<button type="button" class="inv-link" data-inv-rev-fix="hold">Add the ${invQty(r.problem.short)} shares as held before</button> ·` : ""}
+        <button type="button" class="inv-link" data-inv-rev-fix="skip">Leave it out</button></div>`
+      : r.checks.length ? `<div class="inv-rev-note">${escapeHtml(r.checks[0])}.
+        ${r.fix?.price != null ? `<button type="button" class="inv-link" data-inv-rev-fix="price">Use ${escapeHtml(String(r.fix.price))} (from the total)</button> ·` : ""}
+        ${r.fix?.qty != null ? `<button type="button" class="inv-link" data-inv-rev-fix="qty">Add only the ${invQty(r.fix.qty)} more</button> ·` : ""}
+        ${!r.include && r.book_qty != null ? `<button type="button" class="inv-link" data-inv-rev-fix="anyway">Add it anyway</button>`
+          : `<button type="button" class="inv-link" data-inv-rev-fix="keep">Keep it as shown</button>`}</div>` : "";
+    const dateCell = r.date || !(since && since.rows.includes(r.i))
+      ? `<input type="date" class="inv-rev-in${cls(r, "date")}" data-inv-rk="date" value="${escapeHtml(r.date || "")}" max="${invToday()}">`
+      : `<span class="inv-rev-muted">${m.answers.since === "pick" ? escapeHtml(fmtDateMDY(m.sinceDate)) : "Today"}</span>`;
+    return `<tr class="${off ? "off" : ""}" data-inv-ri="${r.i}">
+      <td><input type="checkbox" data-inv-rk="include" ${r.include ? "checked" : ""} aria-label="Include this row"></td>
+      <td>${dateCell}</td>
+      <td><select class="inv-rev-in${cls(r, "type")}" data-inv-rk="type">${INV_REV_TYPES.map(([k, l]) => `<option value="${k}" ${k === r.type ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+      <td>${company(r)}</td>
+      <td class="num">${trade(r) ? numIn(r, "qty") : r.type === "split" ? numIn(r, "ratio") : ""}</td>
+      <td class="num">${trade(r) ? `<span class="inv-rev-ccy">${sym(r)}</span>${numIn(r, "price")}` : ""}</td>
+      <td class="num">${trade(r) ? (invOk(+r.qty) && invOk(+r.price) && r.qty !== "" && r.price !== "" ? invNative(r.qty * r.price, r.ccy || "USD", false) : "") : ["dividend", "deposit", "withdrawal", "fee"].includes(r.type) ? `<span class="inv-rev-ccy">${sym(r)}</span>${numIn(r, "amount")}` : ""}</td>
+      <td class="inv-rev-src">${escapeHtml(r.source || "")}</td>
+    </tr>${note ? `<tr class="inv-rev-sub" data-inv-ri="${r.i}"><td></td><td colspan="7">${note}</td></tr>` : ""}`;
+  }).join("");
+  const ready = rows.filter(r => r.include && invRowEntry(r) && !r.problem).length;
+  const waiting = rows.filter(r => r.include && (!invRowEntry(r) || r.problem)).length;
+  const qs = (p.questions || []).map(q => `<div class="inv-rev-q"><span>${escapeHtml(q.text)}</span>
+      ${q.options.map(o => `<button type="button" class="inv-chip${m.answers[q.id] === o.value ? " on" : ""}" data-inv-q="${escapeHtml(q.id)}" data-v="${escapeHtml(o.value)}">${escapeHtml(o.label)}</button>`).join("")}
+      ${q.id === "since" && m.answers.since === "pick" ? `<input type="date" class="inv-chip inv-chip-date on" data-inv-since value="${escapeHtml(m.sinceDate)}" max="${invToday()}">` : ""}
+      ${q.hint ? `<em>${escapeHtml(q.hint)}</em>` : ""}</div>`).join("");
+  const thumbs = m.files.filter(f => f.image).map((f, i) => `<a class="inv-rev-thumb" href="${f.url}" target="_blank" rel="noopener" title="${escapeHtml(f.name)}"><img src="${f.url}" alt="Image ${i + 1}"><span>Image ${i + 1}</span></a>`).join("");
+  return `<div class="inv-review">
+    <div class="inv-rev-head">
+      <div><div class="inv-rev-kicker">Check before adding</div><h2 class="inv-rev-title">${escapeHtml(p.summary)}</h2></div>
+      <div class="inv-rev-legend"><span class="g">The AI's guess</span><span class="m">Needs you</span></div>
+    </div>
+    ${thumbs ? `<div class="inv-rev-thumbs">${thumbs}</div>` : ""}
+    ${p.unread?.length ? `<div class="inv-rev-unread" role="alert">Couldn't read ${p.unread.map(escapeHtml).join(", ")}, so ${p.unread.length > 1 ? "their" : "its"} entries aren't below. Try ${p.unread.length > 1 ? "them" : "it"} again on ${p.unread.length > 1 ? "their" : "its"} own.</div>` : ""}
+    ${qs ? `<div class="inv-rev-qs">${qs}</div>` : ""}
+    <div class="inv-tbl-wrap"><table class="inv-rev-tbl">
+      <thead><tr><th></th><th>Date</th><th>What</th><th>Company</th><th class="num">Shares</th><th class="num">Price</th><th class="num">Amount</th><th>From</th></tr></thead>
+      <tbody>${body}</tbody></table></div>
+    ${p.skipped?.length ? `<details class="inv-rev-skipped"><summary>Left out ${p.skipped.length} thing${p.skipped.length > 1 ? "s" : ""} that aren't entries</summary><ul>${p.skipped.map(s => `<li>${escapeHtml(s.replace(/^[:\s]+/, ""))}</li>`).join("")}</ul></details>` : ""}
+    <div class="inv-rev-foot">
+      <button type="button" data-inv-rev-cancel>Cancel</button>
+      <span class="inv-rev-count">${waiting ? `${waiting} row${waiting > 1 ? "s" : ""} need${waiting > 1 ? "" : "s"} you` : ""}</span>
+      <button type="button" class="primary" data-inv-apply ${ready && !m.checking ? "" : "disabled"}>${m.checking ? "Checking…" : `Add ${ready} entr${ready === 1 ? "y" : "ies"}`}</button>
+    </div>
+    <div class="inv-form-err" role="alert">${escapeHtml(m.applyError || "")}</div>
+  </div>`;
+}
+
+let _invChkT = 0, _invChkSeq = 0;
+/* After a read or an edit, ask the server which rows the ledger would
+ * refuse. Apply waits while a check is pending (`checking`): otherwise a
+ * flagged row could slip into the batch and the server refuse all of it.
+ * Only the newest answer counts. */
+function invRecheck() {
+  const m = invImp();
+  m.checking = true;
+  clearTimeout(_invChkT);
+  _invChkT = setTimeout(async () => {
+    if (!m.prop) return;
+    const seq = ++_invChkSeq;
+    const live = m.prop.items.filter(r => r.include).map(r => [r, invRowEntry(r)]).filter(([, e]) => e);
+    try {
+      const r = await fetch("/api/investments/import/check", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries: live.map(([, e]) => e) }) });
+      const d = await r.json();
+      if (seq !== _invChkSeq || INV.imp !== m) return;
+      for (const row of m.prop.items) delete row.problem;
+      for (const [k, pr] of Object.entries(d.problems || {})) live[+k][0].problem = pr;
+    } catch (e) { /* keep the last flags; Apply's own check still guards the book */ }
+    if (seq === _invChkSeq && INV.imp === m) { m.checking = false; invRender(); }
+  }, 350);
+}
+
+async function invApply() {
+  const m = invImp();
+  if (m.checking) return;
+  const rows = m.prop.items.filter(r => r.include && !r.problem && invRowEntry(r));
+  if (!rows.length) return;
+  const aliases = Object.fromEntries(rows.filter(r => r.corrected && r.as_read && r.symbol).map(r => [r.as_read, r.symbol]));
+  try {
+    const d = await invPost("import/apply", { entries: rows.map(invRowEntry), aliases });
+    for (const f of m.files) if (f.url) URL.revokeObjectURL(f.url);
+    INV.imp = null; INV.book = d;
+    invRender(); bookTabSync();
+    toast(d.undo_label || "Added", d.undo_label ? { label: "Undo", fn: () => invUndo(false) } : null);
+  } catch (err) { m.applyError = err.message; invRender(); }
+}
+
+function invReviewClick(e) {
+  const m = invImp(), tr = e.target.closest("[data-inv-ri]");
+  const row = tr ? m.prop.items.find(r => r.i === +tr.dataset.invRi) : null;
+  const q = e.target.closest("[data-inv-q]"), fix = e.target.closest("[data-inv-rev-fix]");
+  if (e.target.closest("[data-inv-rev-cancel]")) { for (const f of m.files) if (f.url) URL.revokeObjectURL(f.url); INV.imp = null; invRender(); return true; }
+  if (e.target.closest("[data-inv-apply]")) { invApply(); return true; }
+  if (q) {
+    m.answers[q.dataset.invQ] = q.dataset.v;
+    if (q.dataset.invQ.startsWith("listing-")) {
+      const r = m.prop.items.find(x => `listing-${x.i}` === q.dataset.invQ);
+      const alt = r && [{ symbol: r.symbol, name: r.name, exchange: r.exchange }, ...r.alts].find(a => a.symbol === q.dataset.v);
+      if (alt) Object.assign(r, alt, { guessed: r.guessed.filter(g => g !== "symbol"), corrected: true });
+    }
+    invRecheck(); invRender(); return true;
+  }
+  if (fix && row) {
+    const k = fix.dataset.invRevFix;
+    if (k === "skip") row.include = false;
+    else if (k === "keep") { row.checks = []; row.fix = null; }
+    else if (k === "anyway") { row.include = true; row.checks = []; }
+    else if (k === "price") { row.price = row.fix.price; row.checks = []; row.fix = null; }
+    else if (k === "qty") { row.qty = row.fix.qty; row.checks = []; row.fix = null; }
+    else if (k === "hold") {
+      // The shares the book lacks, as a holding from the day before the sale;
+      // its average price is the owner's to give (amber until then).
+      const d = new Date(row.date + "T12:00:00"); d.setDate(d.getDate() - 1);
+      const iso = invIso(d);
+      const i = Math.max(...m.prop.items.map(r => r.i)) + 1;
+      m.prop.items.splice(m.prop.items.indexOf(row), 0, { ...row, i, type: "holding", basis: "trade", date: iso, qty: +row.problem.short.toFixed(6), price: null,
+        fee: null, source: "added for this sale", guessed: [], missing: ["price"], checks: [], fix: null, problem: null, include: true });
+    }
+    invRecheck(); invRender(); return true;
+  }
+  return false;
+}
+
+function invReviewInput(t) {
+  const m = invImp(), tr = t.closest("[data-inv-ri]"), k = t.dataset.invRk;
+  const row = tr && m.prop?.items.find(r => r.i === +tr.dataset.invRi);
+  if (!row || !k) return;
+  if (k === "find") {
+    // A company the AI couldn't place: the symbol pack's best match, which
+    // the owner then sees (and can change) like any other row.
+    fetch("/api/investments/lookup?q=" + encodeURIComponent(t.value.trim())).then(r => r.json()).then(d => {
+      const h = (d.hits || [])[0];
+      if (!h) { t.value = ""; t.placeholder = "No match. Try the ticker"; return; }
+      Object.assign(row, { symbol: h.ticker, name: h.name, exchange: h.exchange, alts: (d.hits || []).slice(1, 4).map(x => ({ symbol: x.ticker, name: x.name, exchange: x.exchange })), corrected: true });
+      row.missing = row.missing.filter(x => x !== "symbol");
+      invRecheck(); invRender();
+    }).catch(() => {});
+    return;
+  }
+  if (k === "include") row.include = t.checked;
+  else if (k === "symbol") {
+    const alt = [{ symbol: row.symbol, name: row.name, exchange: row.exchange }, ...row.alts].find(a => a.symbol === t.value);
+    if (alt) {
+      const old = { symbol: row.symbol, name: row.name, exchange: row.exchange };
+      // A listing the owner picked is remembered for this name on Apply.
+      Object.assign(row, alt, { corrected: true });
+      row.alts = [old, ...row.alts.filter(a => a.symbol !== alt.symbol)];
+    }
+  } else if (["qty", "price", "amount", "ratio"].includes(k)) {
+    // Not a number (a stray letter) stays "needed", never a silent NaN.
+    const x = Number(t.value.replace(/,/g, "").trim());
+    row[k] = t.value.trim() !== "" && Number.isFinite(x) ? x : null;
+  } else row[k] = t.value;
+  // What the owner typed is theirs: no longer a guess; an emptied cell is
+  // needed again (amber), a filled one no longer is.
+  row.guessed = row.guessed.filter(g => g !== k);
+  if (k !== "include") {
+    if (row[k] != null && row[k] !== "") row.missing = row.missing.filter(x => x !== k);
+    else if (!row.missing.includes(k)) row.missing.push(k);
+  }
+  if (k === "price") { row.checks = []; row.fix = null; }
+  invRecheck();
+  // A plain number edit doesn't redraw the table (tabbing on would lose its
+  // focus), so only the Apply button shows the pending check.
+  if (["type", "symbol", "include"].includes(k) || t.type === "date" || row[k] == null) invRender();
+  else {
+    const btn = document.querySelector("[data-inv-apply]");
+    if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+  }
+}
+
+document.addEventListener("change", (e) => {
+  if (e.target.closest?.(".inv-review") && e.target.dataset.invRk) invReviewInput(e.target);
+  else if (e.target.matches?.("[data-inv-since]")) { invImp().sinceDate = e.target.value; invRecheck(); invRender(); }
+  else if (e.target.id === "inv-file") { invAddFiles([...e.target.files]); e.target.value = ""; }
+});
+document.addEventListener("input", (e) => {
+  if (e.target.matches?.("[data-inv-comp-text]")) invImp().text = e.target.value;
+});
+document.addEventListener("paste", (e) => {
+  if (!e.target.closest?.(".inv-composer")) return;
+  const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
+  if (files.length) { e.preventDefault(); invAddFiles(files); }
+});
+for (const ev of ["dragover", "drop"]) document.addEventListener(ev, (e) => {
+  const zone = e.target.closest?.("[data-inv-drop], #inv-page");
+  // Only where a composer is showing: a drop on the review would add files
+  // that are never read but show up as thumbnails.
+  if (!zone || !document.querySelector(".inv-composer") || document.body.dataset.page !== "investments" || !e.dataTransfer?.types?.includes("Files")) return;
+  e.preventDefault();
+  document.querySelector(".inv-composer")?.classList.toggle("over", ev === "dragover");
+  if (ev === "drop") invAddFiles([...e.dataTransfer.files]);
+});
+document.addEventListener("dragleave", (e) => { if (!e.relatedTarget) document.querySelector(".inv-composer")?.classList.remove("over"); });
+function invAttach() {
+  let input = $("#inv-file");
+  if (!input) { input = document.createElement("input"); input.type = "file"; input.id = "inv-file"; input.multiple = true; input.accept = INV_IMP_ACCEPT; input.hidden = true; document.body.appendChild(input); }
+  input.click();
+}
+function invComposerClick(e) {
+  if (!e.target.closest(".inv-composer")) return false;
+  const rm = e.target.closest("[data-inv-unfile]");
+  if (e.target.closest("[data-inv-attach]")) invAttach();
+  else if (e.target.closest("[data-inv-read]")) invRead();
+  else if (rm) { const m = invImp(), [f] = m.files.splice(+rm.dataset.invUnfile, 1); if (f?.url) URL.revokeObjectURL(f.url); invComposerRefresh(); }
+  else return false;
+  return true;
 }
 
 /* --- company typeahead (symbol pack) and price auto-fill ---------------- */
@@ -12285,17 +12703,31 @@ function invCoInput(input) {
     try {
       const d = await (await fetch("/api/investments/lookup?q=" + encodeURIComponent(q))).json();
       if (seq !== _invCoSeq) return;
-      list.innerHTML = (d.hits || []).map(h => `<button type="button" data-inv-co="${escapeHtml(h.ticker)}" data-name="${escapeHtml(shortName(h.name))}"><b>${escapeHtml(shortName(h.name))}</b><span>${escapeHtml([h.ticker, h.exchange].filter(Boolean).join(" · "))}</span></button>`).join("");
+      list.innerHTML = (d.hits || []).map(h => `<button type="button" data-inv-co="${escapeHtml(h.ticker)}" data-name="${escapeHtml(shortName(h.name))}" data-exchange="${escapeHtml(h.exchange || "")}"><b>${escapeHtml(shortName(h.name))}</b><span>${escapeHtml([h.ticker, h.exchange].filter(Boolean).join(" · "))}</span></button>`).join("");
       list.hidden = !(d.hits || []).length;
     } catch (e) { list.hidden = true; }
   }, 180);
 }
-async function invPickCompany(form, ticker, name) {
-  Object.assign(invFormState(form), { symbol: ticker, name });
-  const input = form.elements.company;
-  input.value = `${name} (${ticker})`;
-  input.parentElement.querySelector(".inv-co-list").hidden = true;
-  await invPriceFill(form);
+async function invPickCompany(form, ticker, name, exchange) {
+  const f = invFormState(form);
+  Object.assign(f, { symbol: ticker, name, exchange: exchange || null, coEdit: false, now: null });
+  invNowFill(f);
+  await invPriceFill(invFormRerender(form, {}));
+}
+/* Today's close for the card's header and the live result line. */
+function invNowFill(f) {
+  const ticker = f.symbol;
+  if (!ticker) return;
+  fetch(`/api/investments/price?symbol=${encodeURIComponent(ticker)}&date=${invToday()}`).then(r => r.json()).then(d => {
+    if (f.symbol !== ticker || !invOk(d.price)) return;
+    const live = document.querySelector(`.inv-form[data-inv-form="${CSS.escape(f.id || "")}"]`);
+    if (live && invFormState(live) === f) invFormRerender(live, { now: d.price, quote_ccy: d.quote_ccy || f.quote_ccy, ccy: f.ccy || INV_MINOR[d.quote_ccy] || d.quote_ccy });
+  }).catch(() => {});
+}
+/* The live result line: rewritten in place, so typing never loses focus. */
+function invResultUpdate(form) {
+  const box = form?.querySelector("[data-inv-result]");
+  if (box) box.innerHTML = invResultText(form, invFormState(form));
 }
 /* Learn the quote currency (for the price unit) and, for a buy or sell,
  * fill the price with that day's close as traded, never overwriting one
@@ -12359,26 +12791,48 @@ function invStartEdit(id) {
   invClosePop();
   INV.editing = id; INV.editForm = invFormFromEntry(e);
   invRender();
+  invNowFill(INV.editForm);
   $(`#inv-page form[data-inv-form="${CSS.escape(id)}"] input:not([type=date])`)?.focus();
 }
 
 document.addEventListener("click", (e) => {
   const p = $("#inv-pop");
-  if (p && !p.hidden && !p.contains(e.target) && !e.target.closest("[data-inv-add]") && !e.target.closest(".toast")) invClosePop();
+  // The hidden file input's programmatic click must not close the composer.
+  if (p && !p.hidden && !p.contains(e.target) && !e.target.closest("[data-inv-add]") && !e.target.closest(".toast") && e.target.id !== "inv-file") invClosePop();
 });
 function invFormClick(e) {
   const form = e.target.closest(".inv-form");
   if (!form) return false;
   const f = invFormState(form);
   const ty = e.target.closest("[data-inv-type]"), co = e.target.closest("[data-inv-co]");
-  if (ty) { const next = invFormRerender(form, { type: ty.dataset.invType, error: "", priceNote: "" }); if (f.symbol) invPriceFill(next); }
-  else if (co) invPickCompany(form, co.dataset.invCo, co.dataset.name);
+  const menu = form.querySelector(".inv-type-menu"), menuBtn = e.target.closest("[data-inv-typemenu]");
+  if (menu && !menu.hidden && !menuBtn) { menu.hidden = true; form.querySelector("[data-inv-typemenu]").setAttribute("aria-expanded", "false"); }
+  if (menuBtn) { menu.hidden = !menu.hidden; menuBtn.setAttribute("aria-expanded", String(!menu.hidden)); }
+  else if (ty) { const next = invFormRerender(form, { type: ty.dataset.invType, error: "", priceNote: "" }); invPopFit(); if (f.symbol) invPriceFill(next); }
+  else if (co) invPickCompany(form, co.dataset.invCo, co.dataset.name, co.dataset.exchange);
+  else if (e.target.closest("[data-inv-cochange]")) invFormRerender(form, { symbol: null, name: null, exchange: null, now: null, coEdit: true }).elements.company?.focus();
+  else if (e.target.closest("[data-inv-day]")) {
+    const next = invFormRerender(form, { date: e.target.closest("[data-inv-day]").dataset.invDay });
+    if (f.symbol) invPriceFill(next);
+  }
   else if (e.target.closest("[data-inv-cancel]")) { if (f.id) { INV.editing = null; invRender(); } else invClosePop(); }
   else if (e.target.closest("[data-inv-del]")) invCommit("entries/delete", { id: f.id }, null, form);
   else return false;
   return true;
 }
-document.addEventListener("click", (e) => { if (e.target.closest("#inv-pop")) invFormClick(e); });
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#inv-pop")) return;
+  if (e.target.closest("[data-inv-hand-swap]")) {
+    // From the composer to the card, in the same popover.
+    const p = $("#inv-pop");
+    INV.form = { type: "holding", date: invToday(), ccy: null };
+    p.innerHTML = invFormHtml(INV.form);
+    p.style.width = Math.min(380, window.innerWidth - 24) + "px";
+    p.style.left = Math.max(12, Math.min(parseFloat(p.style.left), window.innerWidth - 392)) + "px";
+    invPopFit();
+    p.querySelector("input[name=company]")?.focus();
+  } else if (!invComposerClick(e)) invFormClick(e);
+});
 document.addEventListener("submit", (e) => {
   const form = e.target.closest(".inv-form");
   if (!form) return;
@@ -12387,10 +12841,16 @@ document.addEventListener("submit", (e) => {
 });
 document.addEventListener("input", (e) => {
   if (e.target.matches?.(".inv-form input[name=company]")) invCoInput(e.target);
+  else if (e.target.closest?.(".inv-form")) invResultUpdate(e.target.closest(".inv-form"));
 });
 document.addEventListener("change", (e) => {
   const form = e.target.closest?.(".inv-form");
-  if (form && e.target.name === "date" && invFormState(form)?.symbol) invPriceFill(form);
+  if (!form) return;
+  if (e.target.name === "date") {
+    // A picked date lights the picker chip instead of Today / 1 year ago.
+    const next = invFormRerender(form, { date: e.target.value });
+    if (invFormState(next)?.symbol) invPriceFill(next);
+  } else if (e.target.name === "dir") invResultUpdate(form);
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && $("#inv-pop")?.hidden === false) { invClosePop(); return; }
@@ -12402,7 +12862,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 $("#inv-page").addEventListener("click", (e) => {
-  if (invFormClick(e)) return;
+  if (invComposerClick(e) || (INV.imp?.prop && invReviewClick(e)) || invFormClick(e)) return;
   const m = e.target.closest("[data-inv-mode]"), p = e.target.closest("[data-inv-period]");
   const rail = e.target.closest("[data-inv-rail]"), edit = e.target.closest("[data-inv-edit]"), add = e.target.closest("[data-inv-add]");
   if (add) $("#inv-pop")?.hidden === false ? invClosePop() : invOpenAdd(add);

@@ -1067,6 +1067,7 @@ def _nvidia_call(
     record: bool = True,
     tag: str = "news",
     timeout: float | None = None,
+    max_tokens: int | None = None,
 ) -> dict | None:
     """One schema-constrained NIM completion, parsed.
 
@@ -1084,7 +1085,9 @@ def _nvidia_call(
     Company search (search.py) reuses it with its own `schema`, `tag`,
     `record=False` (a search failure never flips the News LLM banner), a
     per-request `timeout` and a deadline as `cancel`; the client, the rate
-    limiter and the circuit breaker stay shared."""
+    limiter and the circuit breaker stay shared. The My Investments import
+    (importer.py) does the same with a larger `max_tokens`: a statement can
+    hold dozens of entries."""
     global _nv_rate_limit_until
     rec = _llm_record if record else (lambda *a, **k: None)
     if not NVIDIA_API_KEY:
@@ -1109,7 +1112,7 @@ def _nvidia_call(
                 model=_MODEL,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=_MAX_TOKENS,
+                max_tokens=max_tokens or _MAX_TOKENS,
                 response_format={
                     "type": "json_schema",
                     "json_schema": {

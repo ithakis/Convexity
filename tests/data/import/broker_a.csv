@@ -1,0 +1,7 @@
+Action,Time,ISIN,Ticker,Name,No. of shares,Price / share,Currency (Price / share),Exchange rate,Total,Currency (Total)
+Deposit,2024-01-03 09:00:00,,,,,,,,10000.00,USD
+Market buy,2024-01-04 15:31:02,US0378331005,AAPL,Apple,15,184.25,USD,1.00,2763.75,USD
+Market buy,2024-01-04 15:33:40,US5949181045,MSFT,Microsoft,8,370.60,USD,1.00,2964.80,USD
+Dividend (Dividend),2024-02-15 12:00:00,US0378331005,AAPL,Apple,15,0.24,USD,1.00,3.06,USD
+Market sell,2024-04-10 16:02:11,US5949181045,MSFT,Microsoft,3,423.10,USD,1.00,1269.30,USD
+Limit buy,2024-05-02 14:00:00,GB00BP6MXD84,SHEL,Shell,40,2610.0,GBX,0.7962,1311.37,USD

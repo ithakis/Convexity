@@ -368,6 +368,9 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/search`                    — company search `{q}` or `{query}` (an edited chip set), `{offset}` — §6
 - `/api/watchlists`                — upsert `{name, entries}`
 - `/api/investments/entries`, `…/entries/update`, `…/entries/delete`, `…/undo`, `…/redo` — change the real book; body carries `base_rev`. Answer the new page payload, or `{error, message}`: 400 bad input, 409 stale rev or a damaged file, 422 a change the ledger refuses
+- `/api/investments/import`         — read `{text, files: [{name, type, data(base64)}]}` into rows to review (`importer.read`); writes nothing. 409 when there is no NVIDIA key, 503 when NIM didn't answer
+- `/api/investments/import/check`   — dry run `{entries}` against the book: `{problems: {row: {kind, message, short?}}}`; writes nothing
+- `/api/investments/import/apply`   — `{base_rev, entries, aliases}`: one journal item (one Undo), names the owner corrected remembered
 - `/api/views/<name>`              — save view body `{entries, rows, set_last?}`
 - `/api/last-view`                 — set the restore-on-launch target
 - `/api/portfolio/rename`          — `{old, new}` — atomic rename of both files
@@ -455,6 +458,63 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
   `_fetch_splits`, `_fetch_quote_ccy`) that the tests stub.
 - Until Phase 3 the payload leaves `twr`, `bench_twr`, `mwr_ann` as null and
   sends no `series`; the page shows calm gaps.
+
+### My Investments import (`importer.py`)
+Roadmap Phases 5–6 (run together, ahead of Performance, at the owner's
+request): the composer is the way into the page.
+- **Two NIM stages**, both on `news_sentiment`'s client, limiter and circuit
+  breaker. Screenshots and scanned PDF pages are *transcribed to plain text*
+  by `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` with thinking off (~7 s;
+  every field right on the gold set; Llama 3.2 90B misread dates and a
+  currency and took 75 s; probed 2026-10-06). All text (pasted, transcripts,
+  CSV/Excel rendered as CSV, a PDF's text layer) then goes to the text model
+  under a strict schema of ledger rows (`_nvidia_call(..., max_tokens=8000)`,
+  `record=False` so an import failure never flips the News banner).
+- **Full resolution matters.** A phone screenshot shrunk to a third read
+  405.00 as 405.05. The gold images are rendered at an iPhone's 1179 px.
+- **The model may suggest, never decide** (the `search.py` rule). Code then:
+  verifies each ticker in the symbol pack and picks the listing by the row's
+  currency (a £ price makes "Shell" SHEL.L; the pack's home listing for the
+  name is the NYSE line); counts a ticker as *read* only if it literally
+  appears in the source, else marks it guessed; turns GBX/GBp into pounds;
+  checks qty × price against the row's total (tolerance: half a cent a share
+  plus a cent) and offers the price the total implies; drops a "holding"
+  with no share count (a model over-reading a portfolio total); and asks at
+  most three questions (since when undated holdings were held; which listing
+  when the currency can't tell).
+- **Share counts:** an imported trade keeps the statement's count
+  (`qty_basis: "trade"`: a Feb 2024 NVIDIA sale at $674 is pre-split); a
+  holding from a holdings list is today's count (`current`). A dry run
+  (`investments.check_rows`) flags a sale the book can't cover before Apply,
+  in the statement's shares, with the shortfall the page offers to add.
+- **Reconciling a holdings list** against the book (`import_context().held`):
+  the same count is left out by default ("Already in your book"); a larger
+  count offers to add only the difference. Never applied silently.
+- **Name memory:** a listing the owner picks in the review is saved on Apply
+  in `settings.aliases` (`alias_key`: lower-case words → ticker, only for
+  tickers that batch booked, at most 300) and wins outright next time.
+- **Inputs:** PNG/JPEG/WebP, PDF (`pypdfium2`: text pages as text, pages
+  with < 40 characters rendered and sent as images; PNG encoded with the
+  standard library, no imaging dependency), CSV/TSV/TXT, XLSX (old `.xls`
+  and HEIC are refused with a plain fix). At most 8 files, 8 MB each, 20 MB
+  together, 20 PDF pages, 60,000 characters of text.
+- **Deadlines:** every NIM wait (limiter, circuit breaker, call) is bounded
+  at 150 s per stage; an eval call once sat 46 minutes in the shared queue.
+- **Chunks:** text goes to the model 30 rows at a time (each with its
+  header row), three chunks at once. Each row comes back as about 16 JSON
+  fields, and 90-row chunks overran the 8,000-token reply cap, so every
+  reply was cut-off JSON. Blocks of 20 lines or fewer are read twice and the
+  fuller reading wins. A block whose left-out list shows doubt is read once
+  more.
+- **Problems are checked by the page**, not at read time: the review sends
+  the rows exactly as Apply will (`invRowEntry`) to `/import/check`, and
+  Apply waits while a check is pending.
+- **Logs** carry counts and timings only, never amounts, text or files.
+- **Eval:** `scripts/eval_import.py` against `tests/data/import/gold.json`
+  (synthetic: phone screenshots, three broker CSV styles, a text PDF, a
+  scanned PDF, typed text). Rebuild its images with
+  `scripts/build_import_gold.py`. Run it live after any prompt, rule or
+  model change; all cases must pass.
 
 ## 6. Symbol pack + company search (`symbol_db.py`, `symbol_build.py`, `search.py`)
 
