@@ -590,6 +590,31 @@ the owner reacts to something that looks real.
   fuller reading wins: more rows first, then more cells filled.
 - Final state: the live eval passed 30 of 30 across three full runs; the
   test suite has 1150 passing; `/verify` passed on a clean uv-tool install.
+- **Second adversarial review (owner's request, after sign-off, before the
+  PR): bugs fixed and code removed.**
+  - **A long file failed outright.** 90-row chunks overran the 8,000-token
+    reply cap (cut-off JSON, 3.5 minutes, then a refusal). Chunks are now
+    30 rows and read three at a time: a 100-row sheet reads exactly in 47 s.
+  - Excel chunks after the first lost their column names (a "# sheet" line
+    headed the block).
+  - Vision retries could outlast their deadline.
+  - Apply could fire while the dry run was still pending.
+  - A refused file's message was cleared by the good file added with it.
+  - Clearing a date dropped its amber mark.
+  - The one-logo test rejected the gold screenshots (`tests/data/` is now
+    exempt).
+  - **Removed:**
+    - the server's row-to-entry twin (`entry_of`, `attach_problems`): the
+      page builds the entries and asks `/import/check` itself;
+    - the unused `kind` field;
+    - the manual error conversion in the route (`ImportRefused` is a
+      `BookError` now);
+    - a duplicated no-network replay (`_held_now`);
+    - a dead CSS rule and a dead row class.
+  - Net: about 30 fewer lines.
+  - A rare wobble remains: about 1 read in 20 of short typed text drops an
+    entry even with two parallel reads. The review's "Left out" list shows
+    it.
 
 ---
 

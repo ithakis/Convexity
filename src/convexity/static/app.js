@@ -12339,7 +12339,7 @@ function invFormRerender(form, patch) {
 
 /* --- the composer and the review (roadmap Phases 5-6) -------------------
  * The way in (owner's choice W1): one box that takes typed or pasted text,
- * screenshots (dropped, attached or pasted) and CSV/Excel files. "Read it"
+ * screenshots (dropped, attached or pasted), PDFs and CSV/Excel files. "Read it"
  * sends them to /api/investments/import, which returns rows to review;
  * nothing touches the book until Apply, which adds them as one undoable
  * batch. Purple marks what the AI guessed, amber what it couldn't find. */
@@ -12349,9 +12349,8 @@ const invImp = () => (INV.imp ||= { text: "", files: [], busy: false, error: "",
 const INV_CLIP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></svg>';
 
 function invComposerHtml(compact = false) {
-  const m = invImp(), n = m.files.length;
-  const what = [m.files.filter(f => f.image).length && `${m.files.filter(f => f.image).length} screenshot${m.files.filter(f => f.image).length > 1 ? "s" : ""}`,
-    m.files.filter(f => !f.image).length && `${m.files.filter(f => !f.image).length} file${m.files.filter(f => !f.image).length > 1 ? "s" : ""}`,
+  const m = invImp(), n = m.files.length, shots = m.files.filter(f => f.image).length, docs = n - shots;
+  const what = [shots && `${shots} screenshot${shots > 1 ? "s" : ""}`, docs && `${docs} file${docs > 1 ? "s" : ""}`,
     m.text.trim() && "your text"].filter(Boolean).join(" and ");
   return `<div class="inv-composer${compact ? " compact" : ""}${m.busy ? " busy" : ""}" data-inv-drop>
     <textarea class="inv-comp-text" data-inv-comp-text rows="${compact ? 3 : 4}" ${m.busy ? "disabled" : ""}
@@ -12383,7 +12382,10 @@ function invComposerRefresh() {
 }
 
 function invAddFiles(list) {
+  // Cleared once per batch, so a refused file's message survives the good
+  // files added with it.
   const m = invImp();
+  m.error = "";
   for (const file of list) {
     const low = file.name.toLowerCase(), image = /^image\/(png|jpeg|webp)$/.test(file.type);
     if (!image && !/\.(csv|tsv|txt|xlsx|pdf)$/.test(low)) { m.error = `${file.name}: use screenshots (PNG, JPEG), PDF, CSV, Excel or text.`; continue; }
@@ -12393,7 +12395,6 @@ function invAddFiles(list) {
     // of base64): say so here instead of sending a request it must refuse.
     if (m.files.reduce((s, f) => s + f.file.size, 0) + file.size > INV_IMP_MAX_TOTAL) { m.error = "These files add up to more than 20 MB. Read some now and the rest after."; break; }
     m.files.push({ name: file.name || "pasted image.png", type: file.type, file, image, url: image ? URL.createObjectURL(file) : "" });
-    m.error = "";
   }
   invComposerRefresh();
 }
@@ -12427,16 +12428,18 @@ async function invRead() {
   } finally {
     m.busy = false;
   }
-  if (m.prop) invRender(); else invComposerRefresh();
+  // The dry run uses the rows exactly as Apply will send them (invRowEntry),
+  // so the flags shown and the batch applied can't disagree.
+  if (m.prop) { invRecheck(); invRender(); } else invComposerRefresh();
 }
 
 /* --- review ------------------------------------------------------------- */
 const INV_REV_TYPES = [["holding", "Holding"], ["buy", "Buy"], ["sell", "Sell"], ["dividend", "Dividend"],
   ["deposit", "Deposit"], ["withdrawal", "Withdrawal"], ["fee", "Fee"], ["split", "Split"]];
 
-/* A review row as the entry Apply sends, or null while it needs the owner.
- * Twin of importer.entry_of (which flags problems at read time), with the
- * questions' answers applied: change both together. */
+/* A review row as the entry Apply sends, or null while it needs the owner,
+ * with the questions' answers applied. The only place rows become entries:
+ * the dry run (/import/check) and Apply both get what this builds. */
 function invRowEntry(r) {
   const m = invImp(), since = m.answers.since === "pick" ? m.sinceDate : invToday();
   const d = r.date || ((r.type === "holding" || r.type === "deposit") && m.prop.questions.some(q => q.id === "since" && q.rows.includes(r.i)) ? since : "");
@@ -12473,7 +12476,7 @@ function invReviewHtml() {
   };
   const since = (p.questions || []).find(q => q.id === "since");
   const body = rows.map(r => {
-    const e = invRowEntry(r), off = !r.include;
+    const off = !r.include;
     const note = r.problem ? `<div class="inv-rev-note warn">${escapeHtml(r.problem.message)}
         ${r.problem.kind === "oversell" ? `<button type="button" class="inv-link" data-inv-rev-fix="hold">Add the ${invQty(r.problem.short)} shares as held before</button> ·` : ""}
         <button type="button" class="inv-link" data-inv-rev-fix="skip">Leave it out</button></div>`
@@ -12485,7 +12488,7 @@ function invReviewHtml() {
     const dateCell = r.date || !(since && since.rows.includes(r.i))
       ? `<input type="date" class="inv-rev-in${cls(r, "date")}" data-inv-rk="date" value="${escapeHtml(r.date || "")}" max="${invToday()}">`
       : `<span class="inv-rev-muted">${m.answers.since === "pick" ? escapeHtml(fmtDateMDY(m.sinceDate)) : "Today"}</span>`;
-    return `<tr class="${off ? "off" : ""}${!e && !off ? " needs" : ""}" data-inv-ri="${r.i}">
+    return `<tr class="${off ? "off" : ""}" data-inv-ri="${r.i}">
       <td><input type="checkbox" data-inv-rk="include" ${r.include ? "checked" : ""} aria-label="Include this row"></td>
       <td>${dateCell}</td>
       <td><select class="inv-rev-in${cls(r, "type")}" data-inv-rk="type">${INV_REV_TYPES.map(([k, l]) => `<option value="${k}" ${k === r.type ? "selected" : ""}>${l}</option>`).join("")}</select></td>
@@ -12518,34 +12521,40 @@ function invReviewHtml() {
     <div class="inv-rev-foot">
       <button type="button" data-inv-rev-cancel>Cancel</button>
       <span class="inv-rev-count">${waiting ? `${waiting} row${waiting > 1 ? "s" : ""} need${waiting > 1 ? "" : "s"} you` : ""}</span>
-      <button type="button" class="primary" data-inv-apply ${ready ? "" : "disabled"}>Add ${ready} entr${ready === 1 ? "y" : "ies"}</button>
+      <button type="button" class="primary" data-inv-apply ${ready && !m.checking ? "" : "disabled"}>${m.checking ? "Checking…" : `Add ${ready} entr${ready === 1 ? "y" : "ies"}`}</button>
     </div>
     <div class="inv-form-err" role="alert">${escapeHtml(m.applyError || "")}</div>
   </div>`;
 }
 
-let _invChkT = 0;
-/* After an edit, ask the server again which rows the ledger would refuse. */
+let _invChkT = 0, _invChkSeq = 0;
+/* After a read or an edit, ask the server which rows the ledger would
+ * refuse. Apply waits while a check is pending (`checking`): otherwise a
+ * flagged row could slip into the batch and the server refuse all of it.
+ * Only the newest answer counts. */
 function invRecheck() {
+  const m = invImp();
+  m.checking = true;
   clearTimeout(_invChkT);
   _invChkT = setTimeout(async () => {
-    const m = invImp();
     if (!m.prop) return;
+    const seq = ++_invChkSeq;
     const live = m.prop.items.filter(r => r.include).map(r => [r, invRowEntry(r)]).filter(([, e]) => e);
     try {
       const r = await fetch("/api/investments/import/check", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ entries: live.map(([, e]) => e) }) });
       const d = await r.json();
-      if (!m.prop) return;
+      if (seq !== _invChkSeq || INV.imp !== m) return;
       for (const row of m.prop.items) delete row.problem;
       for (const [k, pr] of Object.entries(d.problems || {})) live[+k][0].problem = pr;
-      invRender();
-    } catch (e) { /* keep the last flags */ }
+    } catch (e) { /* keep the last flags; Apply's own check still guards the book */ }
+    if (seq === _invChkSeq && INV.imp === m) { m.checking = false; invRender(); }
   }, 350);
 }
 
 async function invApply() {
   const m = invImp();
+  if (m.checking) return;
   const rows = m.prop.items.filter(r => r.include && !r.problem && invRowEntry(r));
   if (!rows.length) return;
   const aliases = Object.fromEntries(rows.filter(r => r.corrected && r.as_read && r.symbol).map(r => [r.as_read, r.symbol]));
@@ -12571,7 +12580,7 @@ function invReviewClick(e) {
       const alt = r && [{ symbol: r.symbol, name: r.name, exchange: r.exchange }, ...r.alts].find(a => a.symbol === q.dataset.v);
       if (alt) Object.assign(r, alt, { guessed: r.guessed.filter(g => g !== "symbol"), corrected: true });
     }
-    invRender(); invRecheck(); return true;
+    invRecheck(); invRender(); return true;
   }
   if (fix && row) {
     const k = fix.dataset.invRevFix;
@@ -12589,7 +12598,7 @@ function invReviewClick(e) {
       m.prop.items.splice(m.prop.items.indexOf(row), 0, { ...row, i, type: "holding", basis: "trade", date: iso, qty: +row.problem.short.toFixed(6), price: null,
         fee: null, source: "added for this sale", guessed: [], missing: ["price"], checks: [], fix: null, problem: null, include: true });
     }
-    invRender(); invRecheck(); return true;
+    invRecheck(); invRender(); return true;
   }
   return false;
 }
@@ -12606,7 +12615,7 @@ function invReviewInput(t) {
       if (!h) { t.value = ""; t.placeholder = "No match. Try the ticker"; return; }
       Object.assign(row, { symbol: h.ticker, name: h.name, exchange: h.exchange, alts: (d.hits || []).slice(1, 4).map(x => ({ symbol: x.ticker, name: x.name, exchange: x.exchange })), corrected: true });
       row.missing = row.missing.filter(x => x !== "symbol");
-      invRender(); invRecheck();
+      invRecheck(); invRender();
     }).catch(() => {});
     return;
   }
@@ -12623,23 +12632,32 @@ function invReviewInput(t) {
     // Not a number (a stray letter) stays "needed", never a silent NaN.
     const x = Number(t.value.replace(/,/g, "").trim());
     row[k] = t.value.trim() !== "" && Number.isFinite(x) ? x : null;
-    if (row[k] == null && !row.missing.includes(k)) row.missing.push(k);
   } else row[k] = t.value;
-  // What the owner typed is theirs: no longer a guess, no longer missing.
+  // What the owner typed is theirs: no longer a guess; an emptied cell is
+  // needed again (amber), a filled one no longer is.
   row.guessed = row.guessed.filter(g => g !== k);
-  if (row[k] != null && row[k] !== "") row.missing = row.missing.filter(x => x !== k);
+  if (k !== "include") {
+    if (row[k] != null && row[k] !== "") row.missing = row.missing.filter(x => x !== k);
+    else if (!row.missing.includes(k)) row.missing.push(k);
+  }
   if (k === "price") { row.checks = []; row.fix = null; }
-  if (["type", "symbol", "include"].includes(k) || t.type === "date" || row[k] == null) invRender();
   invRecheck();
+  // A plain number edit doesn't redraw the table (tabbing on would lose its
+  // focus), so only the Apply button shows the pending check.
+  if (["type", "symbol", "include"].includes(k) || t.type === "date" || row[k] == null) invRender();
+  else {
+    const btn = document.querySelector("[data-inv-apply]");
+    if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+  }
 }
 
 document.addEventListener("change", (e) => {
   if (e.target.closest?.(".inv-review") && e.target.dataset.invRk) invReviewInput(e.target);
-  else if (e.target.matches?.("[data-inv-since]")) { invImp().sinceDate = e.target.value; invRender(); invRecheck(); }
+  else if (e.target.matches?.("[data-inv-since]")) { invImp().sinceDate = e.target.value; invRecheck(); invRender(); }
   else if (e.target.id === "inv-file") { invAddFiles([...e.target.files]); e.target.value = ""; }
 });
 document.addEventListener("input", (e) => {
-  if (e.target.matches?.("[data-inv-comp-text]")) { invImp().text = e.target.value; if (invImp().error) { invImp().error = ""; } }
+  if (e.target.matches?.("[data-inv-comp-text]")) invImp().text = e.target.value;
 });
 document.addEventListener("paste", (e) => {
   if (!e.target.closest?.(".inv-composer")) return;

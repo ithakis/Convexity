@@ -62,7 +62,7 @@ def run_case(case: dict) -> tuple[bool, list[str], float]:
         try:
             out = importer.read(case.get("text", ""), [_file(f) for f in case.get("files", [])])
             break
-        except importer.ImportError_ as exc:
+        except importer.ImportRefused as exc:
             if exc.status != 503 or attempt == 2:
                 return False, [f"refused: {exc.message}"], time.time() - t0
             time.sleep(8)

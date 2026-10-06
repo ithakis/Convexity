@@ -54,11 +54,13 @@ dependency (loaded from CDN, used only for column-guide formulas).
 - **The review** (`invReviewHtml`) takes the page until Apply or Cancel:
   summary, screenshot thumbnails, at most three one-click questions, and an
   editable table. Purple (`--ai`) marks what the AI guessed, amber what it
-  needs from the owner; "From" names the source row. Edits re-run
-  `/import/check` (debounced) so a sale the book can't cover is flagged
-  before Apply, with "Add the N shares as held before" or "Leave it out".
-  `invRowEntry` is the client twin of `importer.entry_of`. Apply sends the
-  rows and the names the owner corrected (`aliases`) in one batch.
+  needs from the owner; "From" names the source row. The read and every
+  edit run `/import/check` (debounced, newest answer wins) so a sale the
+  book can't cover is flagged before Apply, with "Add the N shares as held
+  before" or "Leave it out"; Apply waits ("Checking…") while a check is in
+  flight. `invRowEntry` is the only place rows become entries: the dry run
+  and Apply both send what it builds. Apply sends the rows and the names the
+  owner corrected (`aliases`) in one batch.
 - **Adding by hand and editing (owner's E2).** `invFormHtml` is a card: the
   company as a header once chosen (initial, name, ticker, today's close via
   `invNowFill`), big number fields with the unit in the label, date chips

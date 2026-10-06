@@ -3587,7 +3587,6 @@
   .inv-rev-co select { border: none; background: transparent; padding: 0; font: inherit; font-size: 11px; cursor: pointer; }
   .inv-rev-ccy { color: var(--muted); font-size: 12px; margin-right: 1px; }
   .inv-rev-muted { color: var(--muted); }
-  .inv-rev-need { color: var(--warn); }
   .inv-rev-src { color: var(--muted); font-size: 11.5px; }
   .inv-rev-note { padding: 2px 0 8px 6px; font-size: 12.5px; color: var(--muted); white-space: normal; }
   .inv-rev-note.warn { color: var(--warn); }

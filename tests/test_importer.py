@@ -155,17 +155,6 @@ def test_a_holdings_list_is_reconciled_against_the_book(monkeypatch):
     assert m["include"] is True and m["fix"] == {"qty": 5.0}
 
 
-def test_entries_keep_the_statement_share_count_for_trades():
-    row = {"type": "sell", "date": "2024-02-21", "symbol": "NVDA", "ccy": "USD", "qty": 5.0, "price": 674.1,
-           "fee": None, "missing": []}  # fmt: skip
-    assert im.entry_of(row)["qty_basis"] == "trade"
-    hold = row | {"type": "holding", "date": ""}
-    assert im.entry_of(hold) is None
-    assert im.entry_of(hold, since="2024-01-02") | {} == {
-        "type": "buy", "date": "2024-01-02", "note": "", "symbol": "NVDA", "ccy": "USD",
-        "qty": 5.0, "price": 674.1, "fee": 0, "qty_basis": "current"}  # fmt: skip
-
-
 # --------------------------------------------------------------------- input
 
 
@@ -176,21 +165,21 @@ def test_entries_keep_the_statement_share_count_for_trades():
     ("big.png", "image/png", b"x" * (im.MAX_FILE_BYTES + 1), "larger than"),
 ])  # fmt: skip
 def test_files_are_refused_in_plain_words(name, mime, data, msg):
-    with pytest.raises(im.ImportError_) as ex:
+    with pytest.raises(im.ImportRefused) as ex:
         im.read("", [_file(name, data, mime)])
     assert msg in ex.value.message
 
 
 def test_bad_base64_and_nothing_given_are_refused():
-    with pytest.raises(im.ImportError_):
+    with pytest.raises(im.ImportRefused):
         im.read("", [{"name": "a.png", "type": "image/png", "data": "%%%"}])
-    with pytest.raises(im.ImportError_):
+    with pytest.raises(im.ImportRefused):
         im.read("   ")
 
 
 def test_no_key_is_a_409_with_a_way_out(monkeypatch):
     monkeypatch.setattr(ns, "NVIDIA_API_KEY", "")
-    with pytest.raises(im.ImportError_) as ex:
+    with pytest.raises(im.ImportRefused) as ex:
         im.read("10 Apple")
     assert ex.value.status == 409 and "by hand" in ex.value.message
 
@@ -223,7 +212,7 @@ def test_pdf_text_and_scanned_pages():
 
 
 def test_a_broken_pdf_is_refused():
-    with pytest.raises(im.ImportError_):
+    with pytest.raises(im.ImportRefused):
         im.pdf_parts("x.pdf", b"%PDF-1.4 not really")
 
 
@@ -238,21 +227,37 @@ def test_png_bytes_is_a_valid_png():
     assert len(raw) == 3 * (1 + 5 * 3) and raw[1] == 200
 
 
-def test_sheet_text_reads_csv_and_xlsx():
+def test_sheet_parts_read_csv_and_each_xlsx_sheet_with_its_header():
     import io
 
     import pandas as pd
 
-    assert "AAPL" in im.sheet_text("a.csv", (GOLD / "broker_a.csv").read_bytes())
+    [(label, text)] = im.sheet_parts("a.csv", (GOLD / "broker_a.csv").read_bytes())
+    assert label == "a.csv" and "AAPL" in text
     buf = io.BytesIO()
-    pd.DataFrame({"Ticker": ["KO"], "Qty": [20]}).to_excel(buf, index=False)
-    assert "KO" in im.sheet_text("b.xlsx", buf.getvalue())
+    with pd.ExcelWriter(buf) as xw:
+        pd.DataFrame({"Ticker": ["KO"] * 200, "Qty": range(200)}).to_excel(
+            xw, sheet_name="Trades", index=False
+        )
+        pd.DataFrame({"Ticker": ["JNJ"], "Qty": [5]}).to_excel(
+            xw, sheet_name="Dividends", index=False
+        )
+    parts = im.sheet_parts("b.xlsx", buf.getvalue())
+    assert [lbl for lbl, _ in parts] == ["b.xlsx, sheet Trades", "b.xlsx, sheet Dividends"]
+    # Review finding: a "# sheet" line used to head the block, so every chunk
+    # after the first lost the column names. Now each chunk starts with them.
+    chunks = im._chunks(parts[0][1])
+    assert len(chunks) == -(-200 // (im._CHUNK_LINES - 1)) and all(
+        c.startswith("Ticker,Qty") for c in chunks
+    )
 
 
 def test_long_text_is_chunked_with_its_header():
     lines = ["Date,Ticker,Qty"] + [f"2024-01-{i % 28 + 1:02d},AAPL,{i}" for i in range(200)]
     chunks = im._chunks("\n".join(lines))
-    assert len(chunks) == 3 and all(c.startswith("Date,Ticker,Qty") for c in chunks)
+    assert len(chunks) == -(-200 // (im._CHUNK_LINES - 1)) and all(
+        c.startswith("Date,Ticker,Qty") for c in chunks
+    )
 
 
 def test_a_failed_scan_does_not_sink_a_pdfs_text_pages(monkeypatch):

@@ -41,14 +41,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
-from convexity.helpers import Deadline, major_ccy
+from convexity.helpers import Cancelled, Deadline, major_ccy
+from convexity.investments import BookError
 
 VISION_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 
 MAX_FILES = 8
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_TEXT = 60_000  # characters of pasted text
-_CHUNK_LINES = 90  # rows per structuring call; output tokens grow with rows
+# Rows per text-stage call. Each row comes back as ~16 JSON fields (~80
+# tokens): 90 rows overran the 8,000-token cap and every reply was cut-off
+# JSON (verify, 2026-10-06); 30 rows leave ample room.
+_CHUNK_LINES = 30
 _MAX_TOKENS = 8000
 _IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
 _SHEET_EXT = (".csv", ".tsv", ".txt", ".xlsx")
@@ -72,12 +76,13 @@ _CCY_SUFFIX = {
 }  # fmt: skip
 
 
-class ImportError_(Exception):
-    """A refusal the page shows as is (bad file, nothing readable, no key)."""
+class ImportRefused(BookError):
+    """A refusal the page shows as is (bad file, nothing readable, no key).
+    A BookError, so the investments routes answer it like any other."""
 
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
-        self.message, self.status = message, status
+        self.status = status
 
 
 # ------------------------------------------------------------------ inputs
@@ -88,21 +93,21 @@ def _decode_files(files) -> list[dict]:
     if files is None:
         return []
     if not isinstance(files, list) or len(files) > MAX_FILES:
-        raise ImportError_(f"Add at most {MAX_FILES} files at a time.")
+        raise ImportRefused(f"Add at most {MAX_FILES} files at a time.")
     out = []
     for f in files:
         if not isinstance(f, dict):
-            raise ImportError_("A file couldn't be read.")
+            raise ImportRefused("A file couldn't be read.")
         name = str(f.get("name") or "file")[:120]
         mime = str(f.get("type") or "").lower()
         try:
             data = base64.b64decode(str(f.get("data") or ""), validate=True)
         except (ValueError, TypeError):
-            raise ImportError_(f"{name} couldn't be read.") from None
+            raise ImportRefused(f"{name} couldn't be read.") from None
         if not data:
-            raise ImportError_(f"{name} is empty.")
+            raise ImportRefused(f"{name} is empty.")
         if len(data) > MAX_FILE_BYTES:
-            raise ImportError_(f"{name} is larger than {MAX_FILE_BYTES // 1024 // 1024} MB.")
+            raise ImportRefused(f"{name} is larger than {MAX_FILE_BYTES // 1024 // 1024} MB.")
         low = name.lower()
         if mime in _IMAGE_TYPES:
             kind = "image"
@@ -111,35 +116,36 @@ def _decode_files(files) -> list[dict]:
         elif low.endswith(".pdf") or mime == "application/pdf":
             kind = "pdf"
         elif low.endswith((".heic", ".heif")):
-            raise ImportError_(f"{name} is a HEIC photo. Save it as PNG or JPEG first.")
+            raise ImportRefused(f"{name} is a HEIC photo. Save it as PNG or JPEG first.")
         elif low.endswith(".xls"):
             # Old-format Excel needs a reader the app doesn't ship (xlrd).
-            raise ImportError_(f"{name} is an old Excel file. Save it as .xlsx or CSV first.")
+            raise ImportRefused(f"{name} is an old Excel file. Save it as .xlsx or CSV first.")
         else:
-            raise ImportError_(f"{name}: use screenshots (PNG, JPEG), CSV, Excel or text.")
+            raise ImportRefused(f"{name}: use screenshots (PNG, JPEG), CSV, Excel or text.")
         out.append({"name": name, "mime": mime, "data": data, "kind": kind})
     return out
 
 
-def sheet_text(name: str, data: bytes) -> str:
-    """A spreadsheet or text file as plain CSV text: whatever the broker's
-    layout, the model reads rows, and the header goes with every chunk."""
+def sheet_parts(name: str, data: bytes) -> list[tuple[str, str]]:
+    """A spreadsheet or text file as (label, CSV text), one per sheet, each
+    starting with its own header row: ``_chunks`` repeats a block's first
+    line on every chunk, so a long sheet keeps its column names (a label
+    line there once made every chunk after the first lose them)."""
     import pandas as pd
 
-    low = name.lower()
     try:
-        if low.endswith(".xlsx"):
+        if name.lower().endswith(".xlsx"):
             sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, dtype=str, header=None)
             parts = []
             for sheet, df in sheets.items():
                 df = df.dropna(how="all").dropna(axis=1, how="all")
                 if not df.empty:
-                    parts.append(f"# sheet {sheet}\n" + df.to_csv(index=False, header=False))
-            return "\n".join(parts)
+                    parts.append((f"{name}, sheet {sheet}", df.to_csv(index=False, header=False)))
+            return parts
         text = data.decode("utf-8-sig", errors="replace")
     except Exception:
-        raise ImportError_(f"{name} couldn't be opened as a spreadsheet.") from None
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+        raise ImportRefused(f"{name} couldn't be opened as a spreadsheet.") from None
+    return [(name, text.replace("\r\n", "\n").replace("\r", "\n"))]
 
 
 MAX_PDF_PAGES = 20
@@ -155,12 +161,12 @@ def pdf_parts(name: str, data: bytes) -> tuple[str, list[bytes]]:
     try:
         pdf = pdfium.PdfDocument(data)
     except Exception:
-        raise ImportError_(
+        raise ImportRefused(
             f"{name} couldn't be opened. If it has a password, save a copy without one."
         ) from None
     try:
         if len(pdf) > MAX_PDF_PAGES:
-            raise ImportError_(
+            raise ImportRefused(
                 f"{name} has more than {MAX_PDF_PAGES} pages. Add the pages with your trades."
             )
         texts, images = [], []
@@ -189,7 +195,8 @@ def png_bytes(pixels) -> bytes:
     arr = np.ascontiguousarray(pixels[..., :3] if pixels.ndim == 3 else pixels, dtype=np.uint8)
     h, w = arr.shape[:2]
     ctype = 2 if arr.ndim == 3 else 0
-    raw = b"".join(b"\x00" + arr[y].tobytes() for y in range(h))
+    # Each scanline starts with filter byte 0 (none).
+    raw = np.hstack([np.zeros((h, 1), np.uint8), arr.reshape(h, -1)]).tobytes()
 
     def chunk(tag: bytes, body: bytes) -> bytes:
         return (
@@ -225,8 +232,6 @@ def _vision_call(image: bytes, mime: str, label: str) -> str | None:
         {"role": "user", "content": [{"type": "text", "text": f"{label}:"},
                                      {"type": "image_url", "image_url": {"url": url}}]},
     ]  # fmt: skip
-    from convexity.helpers import Cancelled
-
     deadline = Deadline(_STAGE_DEADLINE_S)
     for attempt in range(4):
         try:
@@ -235,10 +240,16 @@ def _vision_call(image: bytes, mime: str, label: str) -> str | None:
         except Cancelled:
             print("[import] vision step timed out waiting for NIM", flush=True)
             return None
+        # The deadline bounds the calls and their retries too, not just the
+        # waits: four 90 s attempts would otherwise outlast it by minutes.
+        left = deadline.at - time.time()
+        if left < 5:
+            print("[import] vision step out of time", flush=True)
+            return None
         try:
             r = client.chat.completions.create(
                 model=VISION_MODEL, messages=messages, temperature=0.0, max_tokens=2500,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}}, timeout=90.0,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}}, timeout=min(90.0, left),
             )  # fmt: skip
             return (r.choices[0].message.content or "").strip()
         except Exception as exc:
@@ -358,7 +369,6 @@ _UNSURE = re.compile(
 
 def _structure(text: str, today: str, base: str) -> dict | None:
     from convexity import news_sentiment as ns
-    from convexity.helpers import Cancelled
 
     try:
         return ns._nvidia_call(_system(today, base), text, (), Deadline(_STAGE_DEADLINE_S), schema=_schema(),
@@ -369,7 +379,7 @@ def _structure(text: str, today: str, base: str) -> dict | None:
         return None
 
 
-_TWICE_CHARS = 4000  # blocks this short are read twice (about 2 s each)
+_TWICE_LINES = 20  # blocks this short (typed text, a phone screen) are read twice
 
 
 def _score(out) -> tuple[int, int]:
@@ -385,15 +395,27 @@ def _score(out) -> tuple[int, int]:
 
 
 def _read_block(blk: str, today: str, base: str) -> dict | None:
-    """One block through the text stage. A short one is read twice at once
-    and the reading that found more entries wins: about one read in twenty
-    left a plain typed holding out, without saying why (eval, 2026-10-06),
-    and the second read costs seconds, not a missing position."""
-    if len(blk) > _TWICE_CHARS:
-        return _structure(blk, today, base)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        a, b = pool.map(lambda _: _structure(blk, today, base), range(2))
-    return a if _score(a) >= _score(b) else b
+    """One block through the text stage.
+
+    - A short block is read twice at once and the fuller reading wins: about
+      one read in twenty left a plain typed holding out, without saying why
+      (eval, 2026-10-06), and the second read costs seconds.
+    - The prompt forbids leaving out an entry out of doubt, yet about one
+      read in eight did ("the ticker can't be confirmed"): such a block is
+      read once more, naming what was dropped."""
+    if blk.count("\n") + 1 > _TWICE_LINES:
+        out = _structure(blk, today, base)
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            a, b = pool.map(lambda _: _structure(blk, today, base), range(2))
+        out = a if _score(a) >= _score(b) else b
+    unsure = [str(s) for s in (out or {}).get("skipped") or [] if _UNSURE.search(str(s))]
+    if unsure:
+        again = _structure(blk + "\n\nLast time these entries were left out; include each one "
+                           "as an item with your best guess:\n- " + "\n- ".join(unsure), today, base)  # fmt: skip
+        if _score(again) > _score(out):
+            out = again
+    return out
 
 
 def _chunks(block: str) -> list[str]:
@@ -658,16 +680,16 @@ def read(
 
     text = (text or "").strip()
     if len(text) > MAX_TEXT:
-        raise ImportError_(
+        raise ImportRefused(
             f"That's more than {MAX_TEXT:,} characters. Split it, or add the file instead."
         )
     got = _decode_files(files)
     if not text and not got:
-        raise ImportError_("Add a screenshot or a file, or type what you hold.")
+        raise ImportRefused("Add a screenshot or a file, or type what you hold.")
     if sum(len(f["data"]) for f in got) > 20 * 1024 * 1024:
-        raise ImportError_("Those files add up to more than 20 MB. Add fewer at a time.")
+        raise ImportRefused("Those files add up to more than 20 MB. Add fewer at a time.")
     if not ns.NVIDIA_API_KEY:
-        raise ImportError_(
+        raise ImportRefused(
             "Reading needs an NVIDIA key. Add one in Settings → API keys, or add holdings by hand.",
             409,
         )
@@ -684,7 +706,7 @@ def read(
         images += [{"name": f"{f['name']} (scanned page {k + 1})", "mime": "image/png", "data": png}
                    for k, png in enumerate(scans)]  # fmt: skip
     if len(images) > MAX_FILES * 2:
-        raise ImportError_("That's too many pages to read at once. Add fewer files.")
+        raise ImportRefused("That's too many pages to read at once. Add fewer files.")
     if images:
         with ThreadPoolExecutor(max_workers=min(3, len(images))) as pool:
             outs = list(pool.map(lambda a: _vision_call(a[1]["data"], a[1]["mime"], f"Image {a[0] + 1}"),
@@ -694,35 +716,27 @@ def read(
         # (already in ``blocks``), files or typed text still go ahead, and
         # the page names whatever couldn't be read (``unread``).
         if failed and len(failed) == len(images) and not (blocks or sheets or text):
-            raise ImportError_(
+            raise ImportRefused(
                 "The screenshots couldn't be read right now. Try again in a minute.", 503
             )
         blocks += [f"Image {i + 1} ({images[i]['name']}):\n{o}" for i, o in enumerate(outs) if o]
     else:
         failed = []
     for f in sheets:
-        body = sheet_text(f["name"], f["data"])
-        blocks += [f"File {f['name']}, csv rows:\n{c}" for c in _chunks(body)]
+        for label, body in sheet_parts(f["name"], f["data"]):
+            blocks += [f"File {label}, csv rows:\n{c}" for c in _chunks(body)]
     if text:
         blocks += [f"Typed or pasted text:\n{c}" for c in _chunks(text)]
     t1 = time.time()
     today = date.today().isoformat()
     raw_items, skipped = [], []
-    for blk in blocks:
-        out = _read_block(blk, today, base)
+    # Blocks are read a few at a time (order kept): a long statement is a
+    # dozen 30-row chunks, each a NIM call of ~10 s.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        outs = list(pool.map(lambda blk: _read_block(blk, today, base), blocks))
+    for blk, out in zip(blocks, outs, strict=True):
         if not isinstance(out, dict):
-            raise ImportError_("The reading step didn't answer. Try again in a minute.", 503)
-        unsure = [str(s) for s in out.get("skipped") or [] if _UNSURE.search(str(s))]
-        if unsure:
-            # The prompt forbids it, yet about one read in eight left out a
-            # real entry "because the ticker can't be confirmed" (eval,
-            # 2026-10-06). Read that block once more, naming what was dropped.
-            again = _structure(blk + "\n\nLast time these entries were left out; include each one "
-                               "as an item with your best guess:\n- " + "\n- ".join(unsure), today, base)  # fmt: skip
-            if isinstance(again, dict) and len(again.get("items") or []) > len(
-                out.get("items") or []
-            ):
-                out = again
+            raise ImportRefused("The reading step didn't answer. Try again in a minute.", 503)
         for x in out.get("items") or []:
             if isinstance(x, dict) and x.get("type") == "holding" and _num(x.get("qty")) is None:
                 # A "holding" with no share count is a line the model
@@ -741,7 +755,7 @@ def read(
     rows = [_review_item(i, it, base, aliases) for i, it in enumerate(raw_items)]
     _reconcile(rows, held or {})
     print(f"[import] read {len(images)} image(s), {len(sheets) + n_pdf} file(s), text={bool(text)}: "
-          f"{len(rows)} row(s), vision {t1 - t0:.1f}s, total {time.time() - t0:.1f}s", flush=True)  # fmt: skip
+          f"{len(rows)} row(s), files and screenshots {t1 - t0:.1f}s, total {time.time() - t0:.1f}s", flush=True)  # fmt: skip
     return {
         "summary": _summary(
             rows,
@@ -753,9 +767,6 @@ def read(
         "questions": _questions(rows),
         "skipped": skipped[:10],
         "unread": failed,
-        "kind": "holdings"
-        if rows and all(r["type"] == "holding" for r in rows)
-        else "transactions",
     }
 
 
@@ -775,51 +786,3 @@ def _reconcile(rows: list[dict], held: dict) -> None:
             r["checks"].append(f"Your book has {have:g} shares; this shows {qty:g}")
             if qty > have:
                 r["fix"] = {"qty": round(qty - have, 6)}
-
-
-# ------------------------------------------------------------ to the book
-
-
-def entry_of(row: dict, since: str | None = None) -> dict | None:
-    """A review row as the entry Apply sends (None while it is incomplete).
-    A holding is a quick-add in today's shares; a trade keeps the statement's
-    share count (``trade`` basis: a 2024 NVIDIA sale at $674 is pre-split),
-    and so does a holding the page added for such a sale (``basis``).
-    Twin of app.js ``invRowEntry`` (the review edits rows in the page, so the
-    page builds what Apply sends): change both together."""
-    t, d = row.get("type"), row.get("date") or since or ""
-    if not t or not d or any(m != "date" for m in row.get("missing") or []):
-        return None
-    e = {"type": "buy" if t == "holding" else t, "date": d, "note": ""}
-    if row.get("symbol"):
-        e["symbol"] = row["symbol"]
-    if row.get("ccy"):
-        e["ccy"] = row["ccy"]
-    if t in ("buy", "sell", "holding"):
-        e |= {"qty": row["qty"], "price": row["price"], "fee": row.get("fee") or 0,
-              "qty_basis": row.get("basis") or ("current" if t == "holding" else "trade")}  # fmt: skip
-    elif t == "split":
-        e["ratio"] = row["ratio"]
-    else:
-        e["amount"] = row["amount"]
-        if t == "dividend" and row.get("tax"):
-            e["tax"] = row["tax"]
-    return e
-
-
-def attach_problems(prop: dict, check) -> None:
-    """Flag the rows the ledger would refuse as things stand (``check`` is
-    investments.check_rows), with the default answers to the questions."""
-    since = date.today().isoformat()
-    idx, entries = [], []
-    for r in prop["items"]:
-        e = entry_of(r, since) if r.get("include", True) else None
-        if e is not None:
-            idx.append(r["i"])
-            entries.append(e)
-    if not entries:
-        return
-    by_i = {r["i"]: r for r in prop["items"]}
-    for k, problem in check(entries).items():
-        row = by_i[idx[k]]
-        row["problem"] = problem

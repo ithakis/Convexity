@@ -608,18 +608,22 @@ def import_context() -> dict:
     currency, the owner's remembered names, and the shares held now (so a
     holdings screenshot is reconciled, not added twice)."""
     raw = _load() or _new_book()
-    entries, base = raw["entries"], raw["settings"].get("base_ccy", "USD")
-    held: dict[str, float] = {}
-    if entries:
-        syms = sorted({e["symbol"] for e in entries if e.get("symbol")})
-        try:
-            b = ledger.replay(entries, base_ccy=base, fx_at=lambda *_: 1.0,
-                              splits=ledger.merge_splits(entries, market_splits(syms, fetch=False)))  # fmt: skip
-            held = {p.symbol: p.qty for p in b.open_positions()}
-        except ledger.LedgerError:
-            held = {}
     aliases = raw["settings"].get("aliases")
-    return {"base": base, "aliases": aliases if isinstance(aliases, dict) else {}, "held": held}
+    return {"base": raw["settings"].get("base_ccy", "USD"), "held": _held_now(raw) or {},
+            "aliases": aliases if isinstance(aliases, dict) else {}}  # fmt: skip
+
+
+def _held_now(raw: dict) -> dict[str, float] | None:
+    """Shares held now, without any network call (cached splits, FX unused);
+    None when the ledger can't replay without fresh data."""
+    entries = raw["entries"]
+    syms = sorted({e["symbol"] for e in entries if e.get("symbol")})
+    try:
+        b = ledger.replay(entries, base_ccy=raw["settings"].get("base_ccy", "USD"), fx_at=lambda *_: 1.0,
+                          splits=ledger.merge_splits(entries, market_splits(syms, fetch=False)))  # fmt: skip
+    except ledger.LedgerError:
+        return None
+    return {p.symbol: p.qty for p in b.open_positions()}
 
 
 def _remember(raw: dict, aliases, used: set[str]) -> None:
@@ -793,14 +797,10 @@ def book_symbols() -> list[str]:
         return []
     if not raw or not raw["entries"]:
         return []
-    entries = raw["entries"]
-    syms = sorted({e["symbol"] for e in entries if e.get("symbol")})
-    try:
-        b = ledger.replay(entries, base_ccy=raw["settings"].get("base_ccy", "USD"), fx_at=lambda *_: 1.0,
-                          splits=ledger.merge_splits(entries, market_splits(syms, fetch=False)))  # fmt: skip
-        return sorted(p.symbol for p in b.open_positions())
-    except ledger.LedgerError:
-        return sorted({e["symbol"] for e in entries if e.get("type") == "buy"})
+    held = _held_now(raw)
+    if held is None:
+        return sorted({e["symbol"] for e in raw["entries"] if e.get("type") == "buy"})
+    return sorted(held)
 
 
 def book() -> dict:

@@ -857,20 +857,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
 
     def _investments_import(self, p: dict) -> dict:
-        """Read text and files into a proposal (importer.read), with the
-        rows the ledger would refuse already flagged. Nothing is written."""
+        """Read text and files into a proposal (importer.read). Nothing is
+        written; the page asks /import/check which rows the ledger would
+        refuse, with the rows as it builds them for Apply."""
         from convexity import importer
 
         ctx = _investments.import_context()
-        try:
-            prop = importer.read(str(p.get("text") or ""), p.get("files"), base=ctx["base"],
-                                 aliases=ctx["aliases"], held=ctx["held"])  # fmt: skip
-        except importer.ImportError_ as exc:
-            err = _investments.BookError(exc.message)
-            err.status = exc.status
-            raise err from None
-        importer.attach_problems(prop, _investments.check_rows)
-        return prop
+        return importer.read(str(p.get("text") or ""), p.get("files"), base=ctx["base"],
+                             aliases=ctx["aliases"], held=ctx["held"])  # fmt: skip
 
     def _handle_investments_post(self, path: str) -> None:
         """Mutations of the real book. Each answers the new page payload, or

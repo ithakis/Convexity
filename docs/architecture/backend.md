@@ -500,6 +500,15 @@ request): the composer is the way into the page.
   together, 20 PDF pages, 60,000 characters of text.
 - **Deadlines:** every NIM wait (limiter, circuit breaker, call) is bounded
   at 150 s per stage; an eval call once sat 46 minutes in the shared queue.
+- **Chunks:** text goes to the model 30 rows at a time (each with its
+  header row), three chunks at once. Each row comes back as about 16 JSON
+  fields, and 90-row chunks overran the 8,000-token reply cap, so every
+  reply was cut-off JSON. Blocks of 20 lines or fewer are read twice and the
+  fuller reading wins. A block whose left-out list shows doubt is read once
+  more.
+- **Problems are checked by the page**, not at read time: the review sends
+  the rows exactly as Apply will (`invRowEntry`) to `/import/check`, and
+  Apply waits while a check is pending.
 - **Logs** carry counts and timings only, never amounts, text or files.
 - **Eval:** `scripts/eval_import.py` against `tests/data/import/gold.json`
   (synthetic: phone screenshots, three broker CSV styles, a text PDF, a
