@@ -18,7 +18,7 @@ owner says so.
 | # | Phase | Status | Branch / PR | Done |
 |---|---|---|---|---|
 | 1 | Page shell and look | Done (merged) | `feature/my-investments-p1` · [ithakis/Convexity#31](https://github.com/ithakis/Convexity/pull/31) | 2026-10-05 |
-| 2 | Ledger and manual entry | Done (merged) | `feature/my-investments-p2` · PR_LINK | 2026-10-06 |
+| 2 | Ledger and manual entry | Done (merged) | `feature/my-investments-p2` · [ithakis/Convexity#33](https://github.com/ithakis/Convexity/pull/33) | 2026-10-06 |
 | 3 | Performance | Not started | | |
 | 4 | Holdings depth | Not started | | |
 | 5 | AI import I: text and spreadsheets | Not started | | |
