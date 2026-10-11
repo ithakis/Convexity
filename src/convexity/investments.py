@@ -28,17 +28,44 @@ import re
 import secrets
 import threading
 import time
-from bisect import bisect_right
 from datetime import UTC, date, datetime, timedelta
 
+import numpy as np
+import pandas as pd
+
 from convexity import ledger, paths
-from convexity.helpers import major_ccy, price_in_major
+from convexity.helpers import SUPPORTED_FX, major_ccy, price_in_major
 
 SCHEMA_VERSION = 1
 JOURNAL_MAX = 100
 _LOCK = threading.Lock()
 
 PERIODS = ("1M", "3M", "YTD", "1Y", "3Y", "ALL")
+BENCH = "SPY"
+# What the chart can compare against (owner, 2026-10-11: the Portfolios
+# tab's list plus MSCI World). Each is a fund, not the index, so its
+# adjusted close carries the dividends: Yahoo's ^STOXX50E, ^N225 and ^KS11
+# are price indices that would flatter the book by their yield.
+# key -> (Yahoo ticker, label, quote currency).
+INV_BENCHMARKS = {
+    "SPY": ("SPY", "S&P 500", "USD"),
+    "QQQ": ("QQQ", "Nasdaq-100", "USD"),
+    "STOXX50": ("SXRT.DE", "Euro Stoxx 50", "EUR"),
+    "N225": ("1321.T", "Nikkei 225", "JPY"),
+    "KOSPI": ("069500.KS", "KOSPI 200", "KRW"),
+    "WORLD": ("URTH", "MSCI World", "USD"),
+}
+
+
+def bench_key() -> str:
+    """The benchmark the owner picked (state/prefs.json), else the S&P 500.
+    Imported here, not at the top: persistence reads INV_BENCHMARKS back."""
+    from convexity.persistence import load_prefs
+
+    k = load_prefs().get("inv_benchmark")
+    return k if k in INV_BENCHMARKS else BENCH
+
+
 _PERIOD_MONTHS = {"1M": 1, "3M": 3, "1Y": 12, "3Y": 36}
 
 SOURCES = ("manual", "quick", "import")  # what the page may send; "demo" is the seed script's
@@ -203,17 +230,46 @@ def market_splits(symbols, *, fetch: bool = True) -> dict[str, list[tuple[str, f
     return out
 
 
-def _closes(symbols: list[str]):
-    """Daily closes for the last few months (split-adjusted, quote unit)."""
+def _closes(symbols: list[str], period: str):
+    """Daily closes as traded, quote unit, ``period`` back. Not
+    dividend-adjusted, because the book books dividends as cash (an adjusted
+    close would count each one twice); still split-adjusted, like the
+    ledger's quantities (roadmap Appendix B)."""
     from convexity.analytics import _bulk_close
 
-    return _bulk_close(symbols, "3mo")
+    return _bulk_close(symbols, period, adjusted=False)
 
 
-def _fx_series(ccy: str):
-    from convexity.fx import _fx_usd_series
+def _bench_closes(period: str, ticker: str):
+    """A benchmark's total-return closes (dividends reinvested), in its
+    quote currency."""
+    from convexity.analytics import _bulk_close
 
-    return _fx_usd_series(ccy, "max")
+    df = _bulk_close([ticker], period)
+    return df[ticker] if ticker in getattr(df, "columns", ()) else None
+
+
+def _rf_closes(period: str):
+    """The 13-week T-bill yield (^IRX, percent), the risk-free rate of a USD
+    view's Sharpe and Sortino, as the Portfolio tab uses (analytics._daily_rf)."""
+    from convexity.analytics import _RF_TICKER, _bulk_close
+
+    df = _bulk_close([_RF_TICKER], period)
+    return df[_RF_TICKER] if _RF_TICKER in getattr(df, "columns", ()) else None
+
+
+def _dividends(symbol: str):
+    """Yahoo's payouts for a share (ex-date -> per current share, quote
+    unit), as fetched with its as-traded closes; None when unknown."""
+    from convexity.analytics import dividends_cached
+
+    return dividends_cached(symbol)
+
+
+def _fx_mult(ccys, disp: str, dates: list[str]) -> dict:
+    from convexity.fx import fx_multipliers
+
+    return fx_multipliers(ccys, disp, dates)
 
 
 def _fx_now(ccy: str, base: str) -> float | None:
@@ -223,9 +279,7 @@ def _fx_now(ccy: str, base: str) -> float | None:
 
 
 def _dated(series) -> tuple[list[str], list[float]]:
-    """A date-indexed series as sorted (ISO dates, values), NaNs dropped, so
-    a lookup is a bisect: the FX history runs to decades of days and is
-    looked up twice per foreign entry."""
+    """A date-indexed series as sorted (ISO dates, values), NaNs dropped."""
     if series is None or len(series) == 0:
         return [], []
     s = series.dropna()
@@ -234,33 +288,26 @@ def _dated(series) -> tuple[list[str], list[float]]:
     ]
 
 
-def _on_or_before(dated: tuple[list[str], list[float]], iso: str) -> float | None:
-    """The last value on or before ``iso`` of a ``_dated`` series."""
-    i = bisect_right(dated[0], iso)
-    return dated[1][i - 1] if i else None
-
-
-def _make_fx_at(base: str, warnings: list[str]):
-    """``fx_at(ccy, date)``: base units per one ``ccy`` on that date, from
-    Yahoo's history; today's rate (with a warning) when history is missing."""
-    memo: dict = {}
-
-    def usd_per(ccy: str, iso: str) -> float | None:
-        if ccy == "USD":
-            return 1.0
-        if ccy not in memo:
-            memo[ccy] = _dated(_fx_series(ccy))
-        dates, vals = memo[ccy]
-        # Before the history starts, its first rate is the best there is.
-        return vals[max(bisect_right(dates, iso), 1) - 1] if vals else None
+def _make_fx_at(base: str, warnings: list[str], dates):
+    """``fx_at(ccy, date)``: base units per one ``ccy`` on that date. The same
+    path as the daily series (``fx.fx_multipliers``), read once per currency
+    over the ledger's own ``dates``; today's rate, with a warning, when Yahoo
+    has no history."""
+    dates = sorted(set(dates))
+    pos, memo = {d: i for i, d in enumerate(dates)}, {}
 
     def fx_at(ccy: str, iso: str) -> float | None:
         ccy = major_ccy(ccy)
         if ccy == base:
             return 1.0
-        a, b = usd_per(ccy, iso), usd_per(base, iso)
-        if a and b:
-            return a / b
+        if iso in pos:
+            if ccy not in memo:
+                memo[ccy] = _fx_mult([ccy], base, dates).get(ccy)
+            arr, i = memo[ccy], pos[iso]
+        else:
+            arr, i = _fx_mult([ccy], base, [iso]).get(ccy), 0
+        if arr is not None and arr[i] > 0:
+            return float(arr[i])
         spot = _fx_now(ccy, base)
         if spot:
             note = f"No {ccy} history from Yahoo: trades in {ccy} use today's rate."
@@ -269,6 +316,53 @@ def _make_fx_at(base: str, warnings: list[str]):
         return spot
 
     return fx_at
+
+
+def refresh_symbols() -> list[str]:
+    """What a My Investments refresh fetches: every share the ledger names,
+    then the benchmark."""
+    try:
+        raw = _load()
+    except BookUnreadable:
+        return []
+    syms = sorted({e["symbol"] for e in (raw or {}).get("entries", []) if e.get("symbol")})
+    return [*syms, INV_BENCHMARKS[bench_key()][0]] if syms else []
+
+
+def refresh_market(symbols: list[str], *, progress=None, cancel=None, chunk: int = 4) -> None:
+    """Drop the book's cached market data, then fetch it again in small
+    chunks (the topbar Refresh on My Investments). Each chunk reports
+    ``progress(chunk, done, total)``; ``cancel`` (an Event) is checked
+    between chunks. Never touches the book file."""
+    from convexity import cache
+
+    raw = _load() or _new_book()
+    first = min((e["date"] for e in raw["entries"]), default=date.today().isoformat())
+    span = _span(first)
+    drop = set(symbols)
+    for key in [k for k in cache._BULK_CLOSE_CACHE if k[0] in drop]:
+        cache._BULK_CLOSE_CACHE.pop(key, None)
+    for s in drop:
+        cache._DIVIDENDS_CACHE.pop(s, None)
+        _SPLITS.pop(s, None)
+        _QCCY.pop(s, None)
+    for key in [k for k in cache._FX_CCY_HIST_CACHE if k.endswith("|max")]:
+        cache._FX_CCY_HIST_CACHE.pop(key, None)
+    done = 0
+    for i in range(0, len(symbols), chunk):
+        if cancel is not None and cancel.is_set():
+            return
+        part = symbols[i : i + chunk]
+        bench = INV_BENCHMARKS[bench_key()][0]
+        shares = [s for s in part if s != bench]
+        if shares:
+            _closes(shares, span)
+            market_splits(shares)
+        if bench in part:
+            _bench_closes(span, bench)
+        done += len(part)
+        if progress:
+            progress(part, done, len(symbols))
 
 
 # -------------------------------------------------------------- instruments
@@ -302,6 +396,20 @@ def _pack_hit(ticker: str):
         return None
 
 
+def _yahoo_hit(ticker: str):
+    """A listing the pack lacks, as Yahoo's Lookup names it (cached). The
+    bare ticker's lookup comes first: it brings the company's other lines,
+    whose fuller name the listing borrows ("RICHTER" alone on Budapest)."""
+    try:
+        from convexity import symbol_db
+
+        hits = [h for q in dict.fromkeys([ticker.split(".")[0], ticker])
+                for h in symbol_db.yahoo_lookup(q) if h.ticker == ticker]  # fmt: skip
+        return max(hits, key=lambda h: len(h.name.split()), default=None)
+    except Exception:
+        return None
+
+
 def ensure_instrument(raw: dict, text: str) -> str:
     """The ticker for ``text`` (a ticker or a name), recorded in
     ``raw["instruments"]`` with its name, exchange and quote currency."""
@@ -315,7 +423,7 @@ def ensure_instrument(raw: dict, text: str) -> str:
     ticker = hit.ticker if hit else _resolve(text)
     if ticker in inst:
         return ticker
-    hit = hit or _pack_hit(ticker)
+    hit = hit or _pack_hit(ticker) or _yahoo_hit(ticker)
     # A listing's quote currency never changes: an import's dry run and its
     # Apply would otherwise ask Yahoo for every new ticker twice, in a row.
     qccy = _QCCY.get(ticker) or _fetch_quote_ccy(ticker)
@@ -333,11 +441,15 @@ def ensure_instrument(raw: dict, text: str) -> str:
 
 
 def lookup(query: str, limit: int = 6) -> list[dict]:
-    """Company typeahead for the Add popover, from the symbol pack."""
+    """Company typeahead for the Add popover, from the symbol pack; a name
+    the pack lacks (Gedeon Richter) from Yahoo's live Lookup."""
     try:
         from convexity import symbol_db
 
         hits = symbol_db.lookup(query, limit=limit, min_score=60.0)
+        if len((query or "").strip()) >= 4 and (not hits or hits[0].score < 85):
+            have = {h.ticker for h in hits}
+            hits += [h for h in symbol_db.yahoo_lookup(query, limit=limit) if h.ticker not in have]
     except Exception:
         hits = []
     return [
@@ -451,6 +563,10 @@ def _clean(raw: dict, fields: dict, old: dict | None = None) -> dict:
                 raise BookError("The tax must be less than the dividend.")
     if out["ccy"] != base:
         out["fx_rate"] = _f(e.get("fx_rate"), "FX rate", positive=True)
+    # A holding already owned: performance starts at its value. Read from the
+    # page's fields (``e`` only carries _FIELDS), or kept from the old entry.
+    if t == "buy" and (fields.get("opening") is True or (old or {}).get("opening") is True):
+        out["opening"] = True
     return out
 
 
@@ -462,13 +578,16 @@ def _label(op: str, e: dict, raw: dict) -> str:
     return f"{op} {e['type']}" + (f" · {name}" if name else "")
 
 
-_TAILS = (" Corporation", " Inc.", " Inc", " plc", " PLC", " Ltd", " N.V.", " SE", " AG", " S.A.")
+_TAILS = (" Corporation", " Inc.", " Inc", " plc", " PLC", " Ltd", " N.V.", " NV", " SE", " AG", " S.A.", " SA",
+          " S.p.A.", " SpA", " Nyrt.", " A/S", " ASA", " AB")  # fmt: skip
 
 
 def _short(name: str) -> str:
+    """The name without its legal form. The comma before one goes too:
+    "Iberdrola, S.A." showed as "Iberdrola," (owner, 2026-10-09)."""
     for tail in _TAILS:
         if name.endswith(tail):
-            return name[: -len(tail)]
+            return name[: -len(tail)].rstrip(" ,")
     return name
 
 
@@ -504,7 +623,8 @@ def _check(raw: dict, entries: list[dict], changed: str | None = None) -> None:
     base = raw["settings"].get("base_ccy", "USD")
     splits = ledger.merge_splits(entries, market_splits(_trade_basis_symbols(entries)))
     try:
-        ledger.replay(entries, base_ccy=base, fx_at=_make_fx_at(base, warnings), splits=splits)
+        ledger.replay(entries, base_ccy=base, splits=splits,
+                      fx_at=_make_fx_at(base, warnings, [e["date"] for e in entries]))  # fmt: skip
     except ledger.OversellError as exc:
         name, when = _name(raw, exc.symbol), _when(exc.day)
         sell, have = ledger._qty(exc.sell), ledger._qty(exc.have)
@@ -543,7 +663,7 @@ def _check_rev(raw: dict, base_rev) -> None:
         raise StaleRev("Your investments changed in another window. Reload to see the latest.")
 
 
-def _mutate(base_rev, change) -> dict:
+def _mutate(base_rev, change, ccy=None) -> dict:
     """The one read-check-write path, for edits and undo/redo alike.
     ``change(raw)`` updates the journal and returns (new_entries, the id of
     the entry it put, for the refusal wording) or raises BookError; nothing
@@ -556,7 +676,7 @@ def _mutate(base_rev, change) -> dict:
         raw["entries"] = entries
         raw["rev"] += 1
         _save(raw)
-    return book()
+    return book(ccy)
 
 
 def _record(raw: dict, verb: str, e: dict, undo: list, redo: list):
@@ -568,7 +688,7 @@ def _record(raw: dict, verb: str, e: dict, undo: list, redo: list):
     return _apply(raw["entries"], redo), redo[0].get("put", {}).get("id")
 
 
-def add(fields: dict, base_rev) -> dict:
+def add(fields: dict, base_rev, ccy=None) -> dict:
     def change(raw):
         e = _clean(raw, fields)
         src = fields.get("source")
@@ -576,7 +696,7 @@ def add(fields: dict, base_rev) -> dict:
               "batch": None, "created_at": _now(), "updated_at": _now()}  # fmt: skip
         return _record(raw, "Added", e, [{"del": e["id"]}], [{"put": e}])
 
-    return _mutate(base_rev, change)
+    return _mutate(base_rev, change, ccy)
 
 
 def _clean_rows(raw: dict, items) -> list[dict]:
@@ -642,7 +762,7 @@ def _remember(raw: dict, aliases, used: set[str]) -> None:
     raw["settings"]["aliases"] = dict(list(keep.items())[:ALIASES_MAX])
 
 
-def add_batch(items, base_rev, aliases=None) -> dict:
+def add_batch(items, base_rev, aliases=None, ccy=None) -> dict:
     """An import's Apply: every entry in ONE journal item, so one Undo
     removes the whole batch (roadmap Phase 5). ``aliases`` are the names the
     owner corrected in the review, remembered for the next import."""
@@ -658,7 +778,47 @@ def add_batch(items, base_rev, aliases=None) -> dict:
         print(f"[investments] import {new[0]['batch']} {n} entries")
         return _apply(raw["entries"], item["redo"]), None
 
-    return _mutate(base_rev, change)
+    return _mutate(base_rev, change, ccy)
+
+
+_CLEAR_COPIES = 3
+
+
+def _copy_before_clear() -> None:
+    """A dated copy of the book next to it, before Clear empties it: Undo
+    brings the entries back, and this survives even a full journal. The
+    newest three are kept."""
+    from convexity.persistence import _atomic_write
+
+    path = _path()
+    if not path.exists():
+        return
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    _atomic_write(path.with_name(f"investments.before-clear-{stamp}.json"),
+                  path.read_text(encoding="utf-8"))  # fmt: skip
+    for old in sorted(path.parent.glob("investments.before-clear-*.json"))[:-_CLEAR_COPIES]:
+        old.unlink(missing_ok=True)
+
+
+def clear(base_rev, ccy=None) -> dict:
+    """Settings -> Clear my investments: every entry out in ONE journal
+    item, so Undo on My Investments puts them all back. Settings and the
+    remembered import names stay."""
+
+    def change(raw):
+        n = len(raw["entries"])
+        if not n:
+            raise BookError("There is nothing to clear.")
+        _copy_before_clear()
+        item = {"label": f"Cleared {n} entr{'y' if n == 1 else 'ies'}",
+                "undo": [{"put": e, "at": i} for i, e in enumerate(raw["entries"])],
+                "redo": [{"del": e["id"]} for e in raw["entries"]]}  # fmt: skip
+        raw["journal"] = (raw["journal"] + [item])[-JOURNAL_MAX:]
+        raw["redo"] = []
+        print(f"[investments] cleared {n} entries")
+        return [], None
+
+    return _mutate(base_rev, change, ccy)
 
 
 def check_rows(items) -> dict[int, dict]:
@@ -686,8 +846,9 @@ def check_rows(items) -> dict[int, dict]:
     # The usual case, everything books, costs one replay; only a refusal
     # pays for the row-by-row pass that finds which rows are at fault.
     whole = kept + rows
+    dates = [e["date"] for e in whole]
     try:
-        ledger.replay(whole, base_ccy=base, fx_at=_make_fx_at(base, warnings),
+        ledger.replay(whole, base_ccy=base, fx_at=_make_fx_at(base, warnings, dates),
                       splits=ledger.merge_splits(whole, market_splits(_trade_basis_symbols(whole))))  # fmt: skip
         return problems
     except ledger.LedgerError:
@@ -696,7 +857,9 @@ def check_rows(items) -> dict[int, dict]:
         trial, i = kept + [e], int(e["id"][1:])
         splits = ledger.merge_splits(trial, market_splits(_trade_basis_symbols(trial)))
         try:
-            ledger.replay(trial, base_ccy=base, fx_at=_make_fx_at(base, warnings), splits=splits)
+            ledger.replay(
+                trial, base_ccy=base, fx_at=_make_fx_at(base, warnings, dates), splits=splits
+            )
         except ledger.OversellError as exc:
             if exc.entry_id == e["id"]:
                 # The ledger counts today's shares; the statement the owner is
@@ -729,24 +892,24 @@ def _find(raw: dict, entry_id: str) -> tuple[int, dict]:
     raise BookError("That entry no longer exists. Reload to see the latest.")
 
 
-def update(entry_id: str, fields: dict, base_rev) -> dict:
+def update(entry_id: str, fields: dict, base_rev, ccy=None) -> dict:
     def change(raw):
         i, old = _find(raw, entry_id)
         new = old | _clean(raw, fields, old) | {"updated_at": _now()}
         return _record(raw, "Edited", new, [{"put": old, "at": i}], [{"put": new}])
 
-    return _mutate(base_rev, change)
+    return _mutate(base_rev, change, ccy)
 
 
-def delete(entry_id: str, base_rev) -> dict:
+def delete(entry_id: str, base_rev, ccy=None) -> dict:
     def change(raw):
         i, old = _find(raw, entry_id)
         return _record(raw, "Deleted", old, [{"put": old, "at": i}], [{"del": entry_id}])
 
-    return _mutate(base_rev, change)
+    return _mutate(base_rev, change, ccy)
 
 
-def _step(base_rev, frm: str, to: str) -> dict:
+def _step(base_rev, frm: str, to: str, ccy=None) -> dict:
     """Undo (journal -> redo) or redo (redo -> journal)."""
 
     def change(raw):
@@ -757,15 +920,15 @@ def _step(base_rev, frm: str, to: str) -> dict:
         print(f"[investments] {'undo' if frm == 'journal' else 'redo'}")
         return _apply(raw["entries"], item["undo" if frm == "journal" else "redo"]), None
 
-    return _mutate(base_rev, change)
+    return _mutate(base_rev, change, ccy)
 
 
-def undo(base_rev) -> dict:
-    return _step(base_rev, "journal", "redo")
+def undo(base_rev, ccy=None) -> dict:
+    return _step(base_rev, "journal", "redo", ccy)
 
 
-def redo(base_rev) -> dict:
-    return _step(base_rev, "redo", "journal")
+def redo(base_rev, ccy=None) -> dict:
+    return _step(base_rev, "redo", "journal", ccy)
 
 
 # ---------------------------------------------------------------- payload
@@ -803,10 +966,317 @@ def book_symbols() -> list[str]:
     return sorted(held)
 
 
-def book() -> dict:
-    """The page payload. The keys are the ones Phase 1 built the page
-    against (roadmap, Phase 1 Findings); performance keys stay empty until
-    Phase 3."""
+def _display_ccy(ccy, base: str) -> str:
+    c = str(ccy or "").strip().upper()
+    return c if c in SUPPORTED_FX else base
+
+
+def _span(first: str) -> str:
+    """The shortest Yahoo range that covers the whole ledger."""
+    years = (date.today() - date.fromisoformat(first)).days / 365.25
+    for limit, period in ((0.9, "1y"), (1.9, "2y"), (4.9, "5y"), (9.9, "10y")):
+        if years < limit:
+            return period
+    return "max"
+
+
+def _calendar(entries: list[dict]) -> list[str]:
+    """Every weekday from the one before the first entry to today, plus any
+    weekend entry dates. The first point is the zero day (nothing invested
+    yet), so the ALL period includes the first day's own move."""
+    d = date.fromisoformat(min(e["date"] for e in entries)) - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    out, today = {e["date"] for e in entries}, date.today()
+    while d <= today:
+        if d.weekday() < 5:
+            out.add(d.isoformat())
+        d += timedelta(days=1)
+    return sorted(out)
+
+
+def _on_dates(series, keys) -> np.ndarray:
+    """A date-indexed series read on each calendar day (the last value on or
+    before it, NaN before the series starts)."""
+    dates, vals = _dated(series)
+    if not dates:
+        return np.full(len(keys), np.nan)
+    pos = np.searchsorted(np.array(dates, dtype="datetime64[D]"), keys, side="right") - 1
+    return np.where(pos >= 0, np.array(vals)[np.maximum(pos, 0)], np.nan)
+
+
+def _rebase_fx(entries: list[dict], base: str, disp: str, fx_at) -> list[dict]:
+    """Entries' own ``fx_rate`` is in the book's base currency; viewed in
+    another currency it is carried over at that day's base-to-display rate."""
+    out = []
+    for e in entries:
+        if e.get("fx_rate") and (e.get("ccy") or base) not in (base, disp):
+            r = fx_at(base, e["date"])
+            e = e | {"fx_rate": float(e["fx_rate"]) * r if r else None}
+        out.append(e)
+    return out
+
+
+def _annualise(r: float, days: int) -> float | None:
+    """A period return as a yearly rate, in percent; None when undefined or
+    too large to mean anything (a few days of a big move)."""
+    try:
+        return ((1 + r) ** (365.0 / days) - 1) * 100 if days > 0 and r > -1 else None
+    except OverflowError:
+        return None
+
+
+_RISK_MIN_DAYS = 10  # fewer daily returns than this: no volatility or ratios
+
+
+def _risk(idx, traded, i0: int, keys, rf_daily) -> dict:
+    """Volatility, Sharpe, Sortino and max drawdown of the TWR index from
+    ``i0`` on, over trading days only, with the Portfolio tab's formulas
+    (analytics._stats: x252 / sqrt 252, excess returns over ^IRX in USD,
+    0 otherwise). Percent for volatility and drawdown."""
+    from convexity.analytics import _stats
+
+    sel = np.flatnonzero(traded[i0:]) + i0
+    if not len(sel) or sel[0] != i0:
+        sel = np.concatenate([[i0], sel])
+    if len(sel) <= _RISK_MIN_DAYS:
+        return {"vol": None, "sharpe": None, "sortino": None, "max_dd": None}
+    ix = pd.DatetimeIndex(keys[sel])
+    val = pd.Series(np.asarray(idx, dtype=float)[sel], index=ix)
+    ret = val.pct_change().iloc[1:]
+    rf = pd.Series(rf_daily[sel], index=ix) if rf_daily is not None else None
+    st = _stats(ret, val, rf)
+    return {"vol": st.get("ann_vol"), "sharpe": st.get("sharpe"), "sortino": st.get("sortino"),
+            "max_dd": st.get("max_dd")}  # fmt: skip
+
+
+def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp: str,
+                 splits: dict, warnings: list[str], bench: str = "SPY") -> dict:  # fmt: skip
+    """The daily book in the display currency: value, the money put in, the
+    benchmark (``INV_BENCHMARKS[bench]``, the S&P 500 unless the owner picked
+    another) bought with the same money, and the TWR index (roadmap Phase 3).
+
+    Every day is valued with that day's as-traded close and that day's FX
+    rate, so a GBP view shows what the pound did too. Performance flows
+    follow Appendix B (inflows at the start of the day, outflows at the end)
+    with two rules on top: an opening holding enters at its market value
+    (``ledger.is_opening``), and unrecorded Yahoo dividends count as paid out
+    to the owner (``ledger.estimate_dividends``): in returns and profit,
+    never in value or cash.
+
+    ``b`` is the replay in the book's base currency: its cash, deposits and
+    withdrawals are converted at each day's rate, so uninvested cash moves
+    with its currency like the shares do.
+    """
+    inst = raw["instruments"]
+    dates = _calendar(entries)
+    keys, n = np.array(dates, dtype="datetime64[D]"), len(dates)
+    span = _span(dates[1] if n > 1 else dates[0])
+    syms = sorted(b.positions)
+    qccy = {s: inst.get(s, {}).get("quote_ccy") or b.positions[s].ccy or disp for s in syms}
+    closes = _closes(syms, span) if syms else None
+    if syms and closes is not None and not closes.empty:
+        # A holding dated before its listing's first close (a renamed line,
+        # a young secondary listing) is priced from the same company
+        # elsewhere until then, rather than at the last trade price.
+        from convexity.analytics import _when, extend_history
+
+        names = {s: inst.get(s, {}).get("name") for s in syms}
+        held_from = {}
+        for e in entries:
+            if e.get("symbol") in qccy and e["date"] < held_from.get(e["symbol"], "9999"):
+                held_from[e["symbol"]] = e["date"]
+        closes, proxied = extend_history(
+            closes, syms, qccy, names, span, fetch=_closes, need=held_from
+        )
+        for s, (p, until) in proxied.items():
+            warnings.append(f"{names.get(s) or s}: before {_when(until)}, priced from {p}, "
+                            "the same company on another exchange.")  # fmt: skip
+    has = getattr(closes, "columns", ())
+    close = {s: _on_dates(closes[s] if s in has else None, keys) for s in syms}
+    trades = ledger.trade_prices(entries, splits)
+    b_tick, b_label, b_ccy = INV_BENCHMARKS.get(bench, INV_BENCHMARKS["SPY"])
+    ccys = {major_ccy(c) for c in qccy.values()} | {major_ccy(c or disp) for t in trades.values()
+                                                    for _, _, c in t} | {"USD", base, b_ccy}  # fmt: skip
+    mult = _fx_mult(sorted(ccys), disp, dates)
+    for c in sorted(ccys):
+        if mult.get(c) is None:
+            spot = 1.0 if c == disp else _fx_now(c, disp)
+            mult[c] = np.full(n, spot) if spot else None
+            if spot and c != "USD":
+                warnings.append(f"No {c} history from Yahoo: {c} amounts use today's rate.")
+
+    # Display-currency value of one current share on each day: the close, or
+    # the last trade price on days the share has no close yet.
+    vps, last_close = {}, {}
+    for s in syms:
+        m = mult.get(major_ccy(qccy[s]))
+        v = close[s] * price_in_major(1.0, qccy[s]) * m if m is not None else np.full(n, np.nan)
+        for d, px, c in trades.get(s, []):
+            fm = mult.get(major_ccy(c or disp))
+            if fm is None:
+                continue
+            i = int(np.searchsorted(keys, np.datetime64(d)))
+            gap = np.isnan(v[i:])
+            v[i:][gap] = px * fm[i:][gap]
+        vps[s] = v
+        finite = close[s][~np.isnan(close[s])]
+        last_close[s] = float(finite[-1]) if len(finite) else None
+
+    cr = mult[base] if mult.get(base) is not None else np.ones(n)  # display per base unit
+    value, cash = np.zeros(n), np.zeros(n)
+    d_in, w_out = np.zeros(n), np.zeros(n)  # the money actually put in and taken out
+    perf_in = np.zeros(n)  # the same, with opening holdings at their market value
+    open_mv = np.zeros(n)  # of which opening holdings, in at the day's close
+    implied = 0.0
+    j, held, cur_cash = 0, {}, 0.0
+    for i, d in enumerate(dates):
+        while j < len(b.days) and b.days[j].date <= d:
+            day = b.days[j]
+            d_in[i] += day.inflow * cr[i]
+            w_out[i] += day.outflow * cr[i]
+            perf_in[i] += day.inflow * cr[i]
+            implied += day.implied * cr[i]
+            for s, q, cost in day.openings:
+                if np.isfinite(vps[s][i]):
+                    perf_in[i] += q * vps[s][i] - cost * cr[i]
+                    open_mv[i] += q * vps[s][i]
+            held, cur_cash = day.qty, day.cash
+            j += 1
+        cash[i] = cur_cash * cr[i]
+        value[i] = cash[i] + sum(q * vps[s][i] for s, q in held.items() if np.isfinite(vps[s][i]))
+
+    # Dividends Yahoo knows about that the ledger doesn't: paid out to you.
+    paid = w_out.copy()
+    recorded: dict[str, list[str]] = {}
+    for e in entries:
+        if e.get("type") == "dividend":
+            recorded.setdefault(e["symbol"], []).append(e["date"])
+    events = {}
+    for s in syms:
+        dv = _dividends(s)
+        dd, dvals = _dated(dv)
+        if dd:
+            events[s] = list(zip(dd, dvals, strict=True))
+    est_by_sym: dict[str, float] = {}
+    for ex, s, q, per in ledger.estimate_dividends(b, events, recorded):
+        i = int(np.searchsorted(keys, np.datetime64(ex)))
+        m = mult.get(major_ccy(qccy[s]))
+        if i >= n or m is None:
+            continue
+        amt = float(q * price_in_major(per, qccy[s]) * m[i])
+        paid[i] += amt
+        est_by_sym[s] = est_by_sym.get(s, 0.0) + amt
+
+    idx = ledger.twr_index([(d, value[i], perf_in[i], paid[i]) for i, d in enumerate(dates)])
+
+    # The benchmark (total return) bought with the same money on the same days,
+    # one line per period: it starts with your value on the period's first
+    # day (owner, 2026-10-11: the two lines meet at the left edge), then
+    # buys with each inflow at the previous close (an opening holding's value
+    # at the day's close, as it enters your value) and sells for each outflow
+    # at the day's close. Estimated dividends count as outflows too: they
+    # leave your value, so the S&P pays the same amount out.
+    starts, last = period_starts(dates), date.fromisoformat(dates[-1])
+    spy_raw = _bench_closes(span, b_tick)
+    spy = _on_dates(spy_raw, keys)
+    bench_value = {}
+    if np.isfinite(spy).any() and mult.get(b_ccy) is not None:
+        first = spy[np.isfinite(spy)][0]
+        spy = np.where(np.isfinite(spy), spy, first) * mult[b_ccy]
+        for p in PERIODS:
+            i0 = starts[p]
+            units, line = value[i0] / spy[i0], np.zeros(n - i0)
+            line[0] = value[i0]
+            for i in range(i0 + 1, n):
+                units += (perf_in[i] - open_mv[i]) / spy[i - 1] + open_mv[i] / spy[i]
+                units = max(units - paid[i] / spy[i], 0.0)
+                line[i - i0] = units * spy[i]
+            bench_value[p] = line
+        bench_index = spy / spy[0]
+    else:
+        bench_value = bench_index = None
+        warnings.append(f"No {b_label} prices from Yahoo right now: the comparison is missing.")
+
+    # Trading days, for the risk figures: a weekday with no close anywhere
+    # (a holiday) is a flat day that would shrink the volatility.
+    traded = np.zeros(n, dtype=bool)
+    for col in [spy_raw] + ([closes[c] for c in closes.columns] if len(has) else []):
+        dd, _ = _dated(col)
+        if dd:
+            traded |= np.isin(keys, np.array(dd, dtype="datetime64[D]"))
+    rf_daily = None
+    if disp == "USD":
+        y = _on_dates(_rf_closes(span), keys)
+        if np.isfinite(y).any():
+            rf_daily = (1.0 + np.nan_to_num(y, nan=float(np.nanmean(y))) / 100.0) ** (1 / 252) - 1
+
+    per = {k: {} for k in ("twr", "bench_twr", "twr_ann", "mwr", "mwr_ann", "years", "since_start",
+                           "value_change", "net_in", "vol", "sharpe", "sortino", "max_dd",
+                           "bench_vol")}  # fmt: skip
+    for p in PERIODS:
+        i0 = starts[p]
+        days = (last - date.fromisoformat(dates[i0])).days
+        r = idx[-1] / idx[i0] - 1.0
+        per["twr"][p] = r * 100
+        per["bench_twr"][p] = (
+            (bench_index[-1] / bench_index[i0] - 1) * 100 if bench_index is not None else None
+        )
+        per["twr_ann"][p] = _annualise(r, days)
+        flows = [(dates[t], paid[t] - perf_in[t]) for t in range(i0 + 1, n)]
+        ann, rp = ledger.period_mwr(dates[i0], value[i0], flows, dates[-1], value[-1])
+        per["mwr"][p] = rp * 100 if rp is not None else None
+        per["mwr_ann"][p] = ann * 100 if ann is not None else None
+        per["years"][p] = days / 365.0
+        per["since_start"][p] = p != "ALL" and i0 == 0
+        per["value_change"][p] = value[-1] - value[i0]
+        per["net_in"][p] = float(np.sum(d_in[i0 + 1 :] - w_out[i0 + 1 :]))
+        for k, v in _risk(idx, traded, i0, keys, rf_daily).items():
+            per[k][p] = v
+        per["bench_vol"][p] = (
+            _risk(bench_index, traded, i0, keys, rf_daily)["vol"]
+            if bench_index is not None
+            else None
+        )
+
+    per = {
+        k: {p: float(v) if isinstance(v, float) else v for p, v in d.items()}
+        for k, d in per.items()
+    }
+
+    # The past month (the 1M pill's window), less the money put in or taken
+    # out (opening holdings at their value, estimated dividends as paid out).
+    ims = starts["1M"]
+    month_abs = value[-1] - value[ims] - perf_in[ims + 1 :].sum() + paid[ims + 1 :].sum()
+    month = {"abs": float(month_abs), "pct": float((idx[-1] / idx[ims] - 1) * 100), "ims": ims}
+
+    rnd = lambda a, k: [round(float(x), k) for x in a]  # noqa: E731
+    series = {
+        "dates": dates,
+        "value": rnd(value, 2),
+        "invested": rnd(np.cumsum(d_in - w_out), 2),
+        "bench_value": {p: rnd(v, 2) for p, v in bench_value.items()} if bench_value else None,
+        "twr_index": rnd(idx, 8),
+        "bench_index": rnd(bench_index, 8) if bench_index is not None else None,
+        "period_start": starts,
+    }
+    priced = not syms or any(np.isfinite(c).any() for c in close.values())
+    return {"series": series if priced else None, "periods": per if priced else None,
+            "cash": float(cash[-1]), "net_deposits": float(np.sum(d_in - w_out)),
+            "implied": float(implied), "month": month, "close": close, "last_close": last_close, "mult": mult,
+            "qccy": qccy, "est": est_by_sym}  # fmt: skip
+
+
+def book(ccy: str | None = None) -> dict:
+    """The page payload, in the display currency ``ccy`` (the book's base
+    currency when it isn't one the app supports). The keys are the ones
+    Phase 1 built the page against (roadmap, Phase 1 Findings).
+
+    Everything is in the display currency, every day at its own rate: the
+    value and the money put in come from the replay in the book's base
+    currency, converted day by day (so cash moves with its currency), and
+    each holding's cost and profit from a replay in the display currency.
+    The gap between the two is the currency effect on cash (``cash_fx``)."""
     try:
         raw = _load()
     except BookUnreadable as exc:
@@ -815,108 +1285,133 @@ def book() -> dict:
         return {"empty": True, "rev": raw["rev"] if raw else 0,
                 "undo_label": _top(raw, "journal"), "redo_label": _top(raw, "redo")}  # fmt: skip
     base = raw["settings"].get("base_ccy", "USD")
+    disp = _display_ccy(ccy, base)
     inst, entries, warnings = raw["instruments"], raw["entries"], []
     splits = ledger.merge_splits(entries, market_splits(_trade_basis_symbols(entries)))
-    fx_at = _make_fx_at(base, warnings)
     try:
-        b = ledger.replay(entries, base_ccy=base, fx_at=fx_at, splits=splits)
+        # The book replays in its base currency (cash, deposits, the value);
+        # a second replay in the display currency gives each holding's cost and
+        # profit at its own days' rates (the price/FX split is against it).
+        days = [e["date"] for e in entries]
+        b = ledger.replay(entries, base_ccy=base, fx_at=_make_fx_at(base, warnings, days),
+                          splits=splits)  # fmt: skip
     except ledger.LedgerError as exc:
         # The stored book no longer replays (new split data, say): show the
         # ledger so it can be fixed, never a half-computed book.
-        return {"empty": False, "broken": f"{exc.message}.", "rev": raw["rev"], "ccy": base,
+        return {"empty": False, "broken": f"{exc.message}.", "rev": raw["rev"], "ccy": disp,
                 "entries": _entries_out(raw), "undo_label": _top(raw, "journal"),
                 "redo_label": _top(raw, "redo"), "positions": [], "headline": None}  # fmt: skip
-
-    ms_iso = (date.today().replace(day=1) - timedelta(days=1)).isoformat()  # last month's close
-    ms_qty, ms_cash = ledger.qty_at(b, ms_iso)
-    syms = sorted({p.symbol for p in b.open_positions()} | set(ms_qty))
-    closes = _closes(syms) if syms else None
-    dated = {s: _dated(closes.get(s) if closes is not None else None) for s in syms}
-    fx_memo: dict[str, float | None] = {}
-
-    def fxn(ccy: str) -> float | None:
-        if ccy not in fx_memo:
-            fx_memo[ccy] = 1.0 if ccy == base else _fx_now(ccy, base)
-        return fx_memo[ccy]
+    bd = b
+    if disp != base:
+        try:
+            fx_at = _make_fx_at(disp, warnings, days)
+            bd = ledger.replay(_rebase_fx(entries, base, disp, fx_at), base_ccy=disp, fx_at=fx_at,
+                               splits=splits)  # fmt: skip
+        except ledger.LedgerError:
+            # The book is fine; the display currency has no rates right now.
+            warnings.append(f"No {disp} rates from Yahoo right now: shown in {base}.")
+            disp = base
+    bench = bench_key()
+    perf = _performance(raw, b, entries, base, disp, splits, warnings, bench)
+    ims = perf["month"]["ims"]
 
     positions, value_pos = [], 0.0
-    for p in b.open_positions():
+    for p in bd.open_positions():
         meta = inst.get(p.symbol, {})
-        name, qccy = meta.get("name") or p.symbol, meta.get("quote_ccy") or p.ccy or base
-        last_q = (dated[p.symbol][1] or [None])[-1]
+        name, qccy = meta.get("name") or p.symbol, perf["qccy"][p.symbol]
+        last_q = perf["last_close"][p.symbol]
         price, pccy, note = price_in_major(last_q, qccy), major_ccy(qccy), None
         if price is None:
-            price, pccy = p.last_price, p.ccy or base
+            price, pccy = p.last_price, p.ccy or disp
             note = "No price from Yahoo: valued at your last trade price."
             warnings.append(f"{name}: no price from Yahoo, valued at the last trade price.")
-        rate = fxn(pccy)
+        m_arr = perf["mult"].get(major_ccy(pccy))
+        rate = float(m_arr[-1]) if m_arr is not None else None
         if price is None or not rate:
             warnings.append(f"{name}: no price or {pccy} rate, so it is left out of the value.")
             continue
         m = ledger.mark(p, price, pccy, rate)
-        ms_q = _on_or_before(dated[p.symbol], ms_iso)
+        ms_q = perf["close"][p.symbol][ims]
         # Prices show in the share's quote unit (pence for LSE), like Yahoo.
         to_quote = 100.0 if qccy != pccy and pccy == major_ccy(qccy) else 1.0
         avg = p.avg_cost_loc if p.ccy == pccy else None
+        est = perf["est"].get(p.symbol, 0.0)
         positions.append({
             "symbol": p.symbol, "name": _short(name), "exchange": meta.get("exchange"),
             "quote_ccy": qccy, "shares": round(p.qty, 6),
             "avg_price": avg * to_quote if avg is not None else None,
             "price": price * to_quote, "value": m.value,
-            "month_pct": ((last_q / ms_q - 1) * 100 if last_q and ms_q else None),
+            "month_pct": ((last_q / ms_q - 1) * 100 if last_q and ms_q and np.isfinite(ms_q) else None),
             "profit_held": m.unrealised, "profit_sold": p.realised, "dividends": p.dividends,
-            "profit_price": m.profit_price if pccy != base else None,
-            "profit_fx": m.profit_fx if pccy != base else None,
+            "dividends_est": est,
+            "profit_price": m.profit_price if pccy != disp else None,
+            "profit_fx": m.profit_fx if pccy != disp else None,
             "return_pct": m.unrealised / m.cost * 100 if m.cost > 0 else None,
-            "note": note, "profit": m.unrealised + p.realised + p.dividends,
+            "note": note, "profit": m.unrealised + p.realised + p.dividends + est,
         })  # fmt: skip
         value_pos += m.value
-    value = value_pos + b.cash
+    value = value_pos + perf["cash"]
     for x in positions:
         x["weight"] = x["value"] / value * 100 if value else None
     positions.sort(key=lambda x: -x["value"])
 
-    # This month: the change in value since last month's close, less the
-    # money put in or taken out this month. Month-start holdings are valued
-    # at that day's close and today's FX (Phase 3 brings daily FX).
-    ms_value = ms_cash
-    for sym, q in ms_qty.items():
-        qccy = inst.get(sym, {}).get("quote_ccy") or base
-        px = price_in_major(_on_or_before(dated[sym], ms_iso), qccy)
-        rate = fxn(major_ccy(qccy))
-        if px is None or not rate:
-            ms_value = None
-            break
-        ms_value += q * px * rate
-    flows_in = sum(d.inflow for d in b.days if d.date > ms_iso)
-    flows_out = sum(d.outflow for d in b.days if d.date > ms_iso)
-    month_abs = value - ms_value - flows_in + flows_out if ms_value is not None else None
-    denom = (ms_value or 0.0) + flows_in
-    sold = sum(p.realised for p in b.positions.values())
-    divs = sum(p.dividends for p in b.positions.values())
-    held_profit = sum(x["profit_held"] for x in positions)
-    return {
+    est_total = sum(perf["est"].values())
+    if perf["est"]:
+        k = len(perf["est"])
+        warnings.append(
+            f"Dividends from {k} holding{'s' if k > 1 else ''} are estimated from Yahoo. "
+            "Add them for exact figures."
+        )
+    per = perf["periods"] or {}
+    sold = sum(p.realised for p in bd.positions.values())
+    divs = sum(p.dividends for p in bd.positions.values())
+    held = sum(x["profit_held"] for x in positions)
+    profit_total = value - perf["net_deposits"] + est_total
+    # Viewed in another currency, uninvested cash gains or loses with its
+    # currency; that is the only part the holdings' own profit doesn't hold.
+    cash_fx = profit_total - (held + sold + divs + est_total - bd.fees) if disp != base else 0.0
+    out = {
         "demo": all(e.get("source") == "demo" for e in entries),
         "empty": False,
         "rev": raw["rev"],
-        "ccy": base,
+        "ccy": disp,
+        "benchmark": {"key": bench, "label": INV_BENCHMARKS[bench][1]},
+        "benchmarks": [{"key": k, "label": v[1]} for k, v in INV_BENCHMARKS.items()],
         "headline": {
             "value": value,
-            "cash": b.cash,
-            "cash_weight": b.cash / value * 100 if value else None,
-            "month_abs": month_abs,
-            "month_pct": month_abs / denom * 100 if month_abs is not None and denom > 0 else None,
-            "profit_total": value - b.net_deposits,
-            "profit_held": held_profit,
+            "cash": perf["cash"],
+            "cash_weight": perf["cash"] / value * 100 if value else None,
+            "month_abs": perf["month"]["abs"] if perf["series"] else None,
+            "month_pct": perf["month"]["pct"] if perf["series"] else None,
+            "profit_total": profit_total,
+            "profit_held": held,
             "profit_sold": sold,
             "dividends": divs,
-            "fees": b.fees,
-            "net_deposits": b.net_deposits,
-            "implied_deposits": b.implied,
-            "twr": dict.fromkeys(PERIODS),
-            "bench_twr": dict.fromkeys(PERIODS),
-            "mwr_ann": None,
-        },
+            "dividends_est": est_total,
+            "fees": bd.fees,
+            "cash_fx": cash_fx,
+            "net_deposits": perf["net_deposits"],
+            "implied_deposits": perf["implied"],
+            **{
+                k: per.get(k) or dict.fromkeys(PERIODS)
+                for k in (
+                    "twr",
+                    "bench_twr",
+                    "twr_ann",
+                    "mwr",
+                    "mwr_ann",
+                    "years",
+                    "since_start",
+                    "value_change",
+                    "net_in",
+                    "vol",
+                    "sharpe",
+                    "sortino",
+                    "max_dd",
+                    "bench_vol",
+                )
+            },
+        },  # fmt: skip
         "positions": positions,
         "entries": _entries_out(raw),
         "undo_label": _top(raw, "journal"),
@@ -925,6 +1420,9 @@ def book() -> dict:
         "upcoming": [],
         "attention": [],
     }
+    if perf["series"]:
+        out["series"] = perf["series"]
+    return out
 
 
 def _top(raw: dict | None, key: str) -> str | None:

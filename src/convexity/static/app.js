@@ -138,10 +138,10 @@ const COLS = [
     sortValue: (r) => r.recommendation_mean },
   { key: "rec_trend_fh", label: "Rec Δ6M", w: 72, align: "center", sortable: true,
     sortValue: (r) => recTrendScore(r.rec_trend_fh),
-    render: (r) => recTrendCell(r.rec_trend_fh) },
+    render: (r) => recTrendCell(r.rec_trend_fh, r) },
   { key: "insider_mspr", label: "MSPR", w: 62, align: "center", sortable: true,
     sortValue: (r) => r.insider_mspr?.mspr ?? null,
-    render: (r) => msprBadge(r.insider_mspr) },
+    render: (r) => msprBadge(r.insider_mspr, r) },
   /* Target upside derived client-side from analyst mean target and last price. */
   { key: "target_upside_pct", label: "Target Δ", w: 86, align: "right", sortable: true,
     heat: { kind: "div", anchor: 30 },
@@ -948,10 +948,18 @@ function applyTableTransformFit() {
 // having each scheduled pass bail out once superseded makes only the latest
 // render's measurement ever take effect.
 let _fitGen = 0;
+/* A render while the table is hidden (My Investments is showing; a resize
+   or a refresh re-renders it) measured a 0px-wide wrap, so the scale fell
+   to its 0.4 floor and the table came back tiny (owner, 2026-10-11). Keep
+   the last good scale then; showPage() renders again once it shows, and a
+   window that was hidden fires resize, which renders too. */
+let _fitDeferred = false, _fitLastScale = 1;
 function applyTableFitMode(columns = getActiveColumns()) {
   const wrap = document.querySelector(".table-wrap");
   if (!wrap) return 1;
-  const scale = fitScaleForColumns(columns);
+  // clientWidth alone is not enough: a hidden window still counts the padding.
+  if (STATE.fitColumns && tableContentWidth(wrap) <= 0) { _fitDeferred = true; return _fitLastScale; }
+  const scale = _fitLastScale = fitScaleForColumns(columns);
   wrap.classList.toggle("fit-columns", !!STATE.fitColumns);
   wrap.style.setProperty("--table-scale", scale.toFixed(3));
   // Schedule the post-layout measurement after the browser has applied
@@ -1087,6 +1095,11 @@ const FX_NAMES = {
   MXN: "Mexican Peso",    SGD: "Singapore Dollar",
   HKD: "Hong Kong Dollar", INR: "Indian Rupee",
 };
+/* Every number in the app groups thousands with commas and uses a dot for
+ * decimals, whatever the Mac's region (owner, 2026-10-11: "$238.488" read
+ * as $238). Dates keep their own formatters. Inputs that echo a number
+ * (the import review) are read back with the commas stripped. */
+const NUM_LOCALE = "en-US";
 const FX_SYMBOL = {
   USD: "$",   EUR: "€",   GBP: "£",   JPY: "¥",   CHF: "Fr",
   CAD: "C$",  AUD: "A$",  NZD: "NZ$", CNY: "CN¥", ZAR: "R",
@@ -1103,11 +1116,26 @@ let FX_INDEX_INFLIGHT = {}; // { ccy: Promise }
 let FX_HOVER_REQ_ID = 0;
 let FX_HOVER_CCY = null;
 
-function fxLoadPref() {
+/* Settings that must outlive the page (state/prefs.json, GET /api/prefs):
+   fetched first thing, and the boot below waits for them, briefly. */
+let APP_PREFS = {};
+const BOOT_PREFS = fetch("/api/prefs").then(r => r.ok ? r.json() : {}).catch(() => ({}));
+async function savePrefs(changes) {
   try {
-    const saved = localStorage.getItem("fx_quote");
-    if (saved && FX_SUPPORTED.indexOf(saved) >= 0) FX_QUOTE = saved;
+    const r = await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(changes) });
+    if (r.ok) APP_PREFS = await r.json();
   } catch (e) {}
+  return APP_PREFS;
+}
+/* The app opens in the default currency (Settings -> General); the topbar
+   switch lasts until the app is closed (owner, 2026-10-11), so it is kept
+   per session, not per browser. */
+function fxLoadPref() {
+  let c = null;
+  try { c = sessionStorage.getItem("fx_quote"); localStorage.removeItem("fx_quote"); } catch (e) {}
+  if (FX_SUPPORTED.indexOf(c) < 0) c = APP_PREFS.default_ccy;
+  if (FX_SUPPORTED.indexOf(c) >= 0) FX_QUOTE = c;
 }
 
 async function fxLoadRates() {
@@ -1163,7 +1191,7 @@ function fmtMoney(v, ccy) {
   const converted = fxConvert(v, ccy);
   const sym = FX_SYMBOL[FX_QUOTE] || (FX_QUOTE + " ");
   const dec = fxDecimals(FX_QUOTE);
-  return sym + Number(converted).toLocaleString(undefined, {minimumFractionDigits: dec, maximumFractionDigits: dec});
+  return sym + Number(converted).toLocaleString(NUM_LOCALE, {minimumFractionDigits: dec, maximumFractionDigits: dec});
 }
 function fmtCompactMoney(v, ccy) {
   if (v == null || !isFinite(v) || v === 0) return na();
@@ -1460,13 +1488,33 @@ function epsSurpriseBars(arr) {
   return `<span data-tip="${tip}"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="vertical-align:middle">${svg}</svg></span>`;
 }
 
-/* Insider Monthly Share Purchase Ratio badge. */
-function msprBadge(o) {
-  if (!o || o.mspr == null) return na();
+/* The company's US line when Finnhub was asked for it instead of the row's
+   own listing (TTE for TTE.PA: the free plan covers US lines only), else
+   null. `row.us_line` is in Finnhub's spelling (BRK.B for BRK-B). */
+function fhVia(row) {
+  const u = row && row.us_line;
+  return u && u.replace(".", "-") !== row.symbol ? u : null;
+}
+
+/* Insider Monthly Share Purchase Ratio badge. MSPR is built from SEC Form 4,
+   which only US companies file: an n/a on a European company says so. */
+function msprBadge(o, row) {
+  if (!o || o.mspr == null) {
+    if (!row || row.us_line === undefined) return na();
+    if (row.quote_type && row.quote_type !== "EQUITY") return na();  // funds have no insiders
+    const who = escapeHtml(row.name || row.symbol || "This company");
+    const why = row.us_line == null
+      ? `No MSPR: ${who} has no US listing, and MSPR comes from SEC Form 4 filings.`
+      : fhVia(row)
+        ? `No MSPR: ${who} is not a US filer. Its insiders report their trades under their home market's rules, not SEC Form 4 (checked via ${escapeHtml(row.us_line)}).`
+        : "No insider filings in the last five years.";
+    return `<span class="na" data-tip="${why}">n/a</span>`;
+  }
   const v = o.mspr;
   const color = v > 5 ? "var(--pos)" : (v < -5 ? "var(--neg)" : "var(--muted)");
   const label = (v >= 0 ? "+" : "") + v.toFixed(1);
-  const tip = `MSPR ${label} — Monthly Share Purchase Ratio. +100 = all insiders buying, −100 = all selling. ${o.month}/${o.year}`;
+  const via = o.via ? ` From ${escapeHtml(o.via)}, the company's US listing.` : "";
+  const tip = `MSPR ${label} — Monthly Share Purchase Ratio. +100 = all insiders buying, −100 = all selling. ${o.month}/${o.year}.${via}`;
   return `<span style="color:${color}" data-tip="${tip}">${label}</span>`;
 }
 
@@ -1639,8 +1687,17 @@ function nsHoverCardHtml(sym, s, row) {
     <div class="ns-hc-news">${newsHtml}</div>
     <div class="ns-hc-market">${mHtml}</div>
     ${div}${stale}
-    <div class="ns-hc-foot">${[age, mAge].filter(Boolean).join(" · ")}</div>
+    <div class="ns-hc-foot">${[age, mAge, nsSourceNote(row)].filter(Boolean).join(" · ")}</div>
   </div>`;
+}
+
+/* Where a non-US row's headlines come from: Finnhub's free plan covers US
+   listings only, so it is asked for the company's US line (TTE for TTE.PA). */
+function nsSourceNote(row) {
+  if (!row || row.us_line === undefined || !/[.]/.test(row.symbol || "")) return "";
+  return row.us_line
+    ? `Finnhub headlines via ${escapeHtml(row.us_line)}`
+    : "No US listing: Yahoo headlines only";
 }
 
 /* One floating card for the whole page, positioned by placeTip (viewport-
@@ -1687,7 +1744,7 @@ function recTrendScore(arr) {
   return newest - oldest;
 }
 
-function recTrendCell(arr) {
+function recTrendCell(arr, row) {
   if (!arr || arr.length < 2) return na();
   const newest = fhConsensus(arr[0]);
   const oldest = fhConsensus(arr[arr.length - 1]);
@@ -1700,7 +1757,12 @@ function recTrendCell(arr) {
   else { glyph = "—"; color = "var(--muted)"; }
   const sign = delta > 0 ? "+" : (delta < 0 ? "−" : "");
   const label = `${glyph} ${sign}${Math.abs(delta).toFixed(2)}`;
-  const tip = `Analyst consensus trend over ${n} months. Score = (2×SB+B−S−2×SS)/total. Current: ${newest.toFixed(2)}, ${n}M ago: ${oldest.toFixed(2)}, Δ = ${delta.toFixed(2)}`;
+  const src = row && row.rec_src;
+  const from = !src ? ""
+    : src.source === "Yahoo" ? " Source: Yahoo (no US listing for Finnhub to cover)."
+    : fhVia(row) ? ` Source: Finnhub, via ${escapeHtml(row.us_line)} (the company's US listing; Finnhub's free plan covers US listings only).`
+    : " Source: Finnhub.";
+  const tip = `Analyst consensus trend over ${n} months. Score = (2×SB+B−S−2×SS)/total. Current: ${newest.toFixed(2)}, ${n - 1}M ago: ${oldest.toFixed(2)}, Δ = ${delta.toFixed(2)}.${from}`;
   return `<span style="color:${color}" data-tip="${tip}">${label}</span>`;
 }
 
@@ -2464,7 +2526,6 @@ document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.target && e.target.closest("input, textarea, select, [contenteditable]")) return;
   if (SCROLL_LOCK.depth > 0) return;
-  if (document.body.dataset.page === "investments") return;  // Refresh is research-only until Phase 3
   e.preventDefault();
   rfStart(e.shiftKey ? "all" : "current");
 });
@@ -4274,7 +4335,13 @@ async function loadBookSymbols() {
 }
 async function bookLoadWeights() {
   if (!INV.book || INV.book.empty == null) {
-    try { INV.book = await (await fetch("/api/investments")).json(); } catch (e) { return; }
+    const seq = ++INV.seq;
+    try {
+      const d = await (await fetch("/api/investments?ccy=" + encodeURIComponent(FX_QUOTE))).json();
+      if (seq !== INV.seq) return;  // a newer load or a change answered first
+      INV.book = d;
+      invRender();  // it may have superseded the page's own load
+    } catch (e) { return; }
   }
   bookTabSync({quiet: true});
 }
@@ -4829,6 +4896,17 @@ async function requestAnalytics(opts) {
   }
 }
 
+/* Where the chart's prices come from when they aren't simply each
+ * holding's own: another listing standing in before a young line's first
+ * close, a holding that starts later, glitches left out, no prices at all.
+ * Quiet and folded: the chart is still the point. */
+function pfNotesHtml(a) {
+  const w = a.warnings || [];
+  if (!w.length) return "";
+  return `<details class="pf-notes"><summary>About these prices · ${w.length} note${w.length > 1 ? "s" : ""}</summary>
+    <ul>${w.map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul></details>`;
+}
+
 function renderAnalyticsBody() {
   const body = $("#pf-analytics-body");
   if (!DATA.length) {
@@ -4853,6 +4931,7 @@ function renderAnalyticsBody() {
         <div class="pf-chart-card">
           <div class="pf-chart-wrap" id="pf-chart-host"></div>
           <div class="pf-chart-legend" id="pf-chart-legend"></div>
+          ${pfNotesHtml(a)}
         </div>
       </div>
       <div class="pf-card">
@@ -5050,15 +5129,18 @@ const METRIC_INFO = {
    (the native <select> rendered an OS menu with a blank selected row). Only
    the stats follow the pick; the chart always compares against SPY. */
 function benchSelectHtml(a) {
-  const cur = activeBench(a);
-  const B = a.benchmarks || {};
+  return benchMenuHtml(a.benchmarks || {}, activeBench(a), "pf-bench", "Benchmark for the risk &amp; return stats");
+}
+/* The same popover for any {key: {label}} list; My Investments uses it for
+   the chart's comparison line. */
+function benchMenuHtml(B, cur, id, title) {
   const opts = Object.entries(B).map(([k, b]) =>
     `<button type="button" role="option" class="bench-opt${k === cur ? " on" : ""}" data-bench="${escapeHtml(k)}" aria-selected="${k === cur}">
        <span class="bench-opt-label">${escapeHtml(b.label)}</span><span class="bench-opt-key">${escapeHtml(k)}</span>
        <svg class="bench-opt-check" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
      </button>`).join("");
-  return `<span class="bench-dd" id="pf-bench">
-    <button type="button" class="bench-trigger" aria-haspopup="listbox" aria-expanded="false" title="Benchmark for the risk &amp; return stats">
+  return `<span class="bench-dd" id="${id}">
+    <button type="button" class="bench-trigger" aria-haspopup="listbox" aria-expanded="false" title="${title}">
       <span>${escapeHtml((B[cur] || {}).label || cur)}</span>
       <svg class="bench-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
@@ -5123,7 +5205,17 @@ function renderStatsHtml(a) {
       <span class="l"><i class="bench-swatch" style="background:${l.color}"></i>${escapeHtml(l.label)} return</span>
       <span class="v ${cls(l.ret)}">${fmtPctSigned(l.ret)}</span>
     </div>`).join("");
-  return `<div class="pf-stats">${html}</div>` + (extras ? `<div class="pf-stats pf-bench-extra">${extras}</div>` : "");
+  return `<div class="pf-stats">${html}</div>` + (extras ? `<div class="pf-stats pf-bench-extra">${extras}</div>` : "") + bookTestNote();
+}
+/* The book tab tests today's holdings at today's weights over the whole
+ * period, rebalanced daily: hindsight, since today's winners carry today's
+ * larger weights all along. My Investments replays what you actually held.
+ * The owner kept the test (2026-10-11) with this line beside it. */
+function bookTestNote() {
+  if (!viewIsBook(STATE.activeView)) return "";
+  const p = STATE.period === "MAX" ? "ALL" : STATE.period, t = INV.book?.headline?.twr?.[p];
+  const actual = invOk(t) ? ` Your actual return over ${p === "ALL" ? "all your history" : p}: <b class="${t >= 0 ? "pos" : "neg"}">${invPct(t)}</b>, on My Investments.` : " Your actual return is on My Investments.";
+  return `<div class="pf-book-note">Today's holdings at today's weights, held through the whole period.${actual}</div>`;
 }
 
 /* ---------------------------- Analyst sentiment dashboard ---------------------------- */
@@ -7082,6 +7174,7 @@ const REFRESH = {
 };
 const REFRESH_LONG_MS = 600;
 const REFRESH_SS_KEY = "refresh_job";
+const INV_BOOK_VIEW = "__investments__";  // jobs.BOOK_VIEW: My Investments' refresh
 
 function rfSave() {
   try {
@@ -7097,7 +7190,7 @@ function rfRender() {
   if (!label || !bar || !chip) return;
   const c = REFRESH.counts;
   const running = REFRESH.state === "quotes" || REFRESH.state === "news"
-                  || REFRESH.state === "queued";
+                  || REFRESH.state === "book" || REFRESH.state === "queued";
   btn.classList.toggle("running", running);
   if (!running) {
     bar.style.width = "0%";
@@ -7118,10 +7211,10 @@ function rfRender() {
   const pct = Math.max(REFRESH.pct, Math.round((done / Math.max(1, total)) * 100));
   REFRESH.pct = pct;
   bar.style.width = `${pct}%`;
-  label.textContent = REFRESH.state === "news" ? "News…"
+  label.textContent = REFRESH.state === "news" ? "News…" : REFRESH.state === "book" ? "Prices…"
                     : REFRESH.state === "quotes" ? "Quotes…" : "Starting…";
   const parts = [`${pct}%`];
-  if (c.quotes_total) parts.push(`Quotes ${Math.min(c.quotes_done, c.quotes_total)}/${c.quotes_total}`);
+  if (c.quotes_total) parts.push(`${REFRESH.state === "book" ? "Prices" : "Quotes"} ${Math.min(c.quotes_done, c.quotes_total)}/${c.quotes_total}`);
   if (c.news_total) {
     parts.push(`News ${Math.min(c.news_done, c.news_total)}/${c.news_total}`
       + (c.news_failed ? ` · ${c.news_failed} failed` : ""));
@@ -7229,6 +7322,7 @@ function rfHandle(msg) {
       break;
     case "phase":
       if (msg.state === "start") REFRESH.state = msg.phase;
+      if (msg.view === INV_BOOK_VIEW) REFRESH.touchedViews.add(msg.view);
       if (msg.state === "end" && msg.phase === "news") REFRESH.newsEnd = msg;
       if (msg.state === "end" && msg.view) REFRESH.touchedViews.add(msg.view);
       if (msg.state === "end" && msg.reason === "degraded") {
@@ -7308,6 +7402,13 @@ async function rfFinish(state) {
   const touched = new Set(REFRESH.touchedViews);
   rfReset(state);
   closeNsProgress();
+  if (touched.has(INV_BOOK_VIEW)) {
+    // My Investments' refresh fetched the book's market data only: reload
+    // the page payload; the research tabs were never touched.
+    REFRESH.touchedViews.clear();
+    if (state === "done") invLoad();
+    return;
+  }
   if (state === "cancelled") {
     // A cancelled phase never saves, so there's nothing on disk to re-read.
     // Any views that DID complete before the cancel were saved and are
@@ -7394,8 +7495,12 @@ async function rfConfirmAll() {
 
 async function rfStart(scope) {
   if (REFRESH.id) { toast("A refresh is already running."); return; }
-  const body = {scope, days: NS.lookbackDays, phases: ["quotes", "news"]};
-  if (scope === "all") {
+  const onBook = document.body.dataset.page === "investments";
+  const body = onBook ? {scope: "current", view: INV_BOOK_VIEW, phases: ["book"]}
+                      : {scope, days: NS.lookbackDays, phases: ["quotes", "news"]};
+  if (onBook) {
+    // My Investments refreshes the book only, whether pressed or held.
+  } else if (scope === "all") {
     if (!await rfConfirmAll()) return;
     body.on_conflict = "supersede";
   } else {
@@ -7412,6 +7517,7 @@ async function rfStart(scope) {
   REFRESH.pct = 0;
   REFRESH.state = "queued";
   REFRESH.touchedViews.clear();
+  if (onBook) REFRESH.touchedViews.add(INV_BOOK_VIEW);
   rfRender();
   try {
     const r = await fetch("/api/refresh-job", {
@@ -7423,6 +7529,8 @@ async function rfStart(scope) {
       // Single-flight: attach to the job that IS running rather than starting
       // a second one that would only fight it for the same API budget.
       toast("Already refreshing — showing that job's progress.");
+      // Not necessarily a book refresh: its own phase frames say what it is.
+      REFRESH.touchedViews.delete(INV_BOOK_VIEW);
       rfAttach(j.job_id, 0);
       return;
     }
@@ -7473,6 +7581,7 @@ function setupRefreshControl() {
   // Clicking the chip body opens the detailed per-ticker view — opt-in now,
   // rather than a modal thrown up on every refresh.
   chip.addEventListener("click", () => {
+    if (REFRESH.touchedViews.has(INV_BOOK_VIEW)) return;  // a book refresh has no per-ticker news view
     openNsProgress({market: true, symbols: nsSymbols(), days: NS.lookbackDays});
   });
 
@@ -8311,7 +8420,7 @@ function trackVerdictCard(title, eng, explain, portfolioCov) {
     <div class="ns-tr-kv"><span>Trading days scored</span><b>${days}</b></div>
     <div class="ns-tr-kv"><span>Daily IC (${eng ? eng.horizon_days : 1}d)</span><b>${ic.mean != null ? fmtSig(ic.mean, 3) : "—"}${ic.t != null ? ` <span class="ns-muted">t ${ic.t.toFixed(1)}</span>` : ""}</b></div>
     <div class="ns-tr-kv"><span>Hit rate (5d)</span><b>${hrTxt}</b></div>
-    <div class="ns-tr-kv"><span>Coverage</span><b>${portfolioCov}<span class="ns-muted"> · ${(cov.n_records || 0).toLocaleString()} records</span></b></div>
+    <div class="ns-tr-kv"><span>Coverage</span><b>${portfolioCov}<span class="ns-muted"> · ${(cov.n_records || 0).toLocaleString(NUM_LOCALE)} records</span></b></div>
     <div class="ns-tr-explain">${explain}</div>
   </div>`;
 }
@@ -8893,7 +9002,7 @@ const MPT_METRIC_INFO = {
     return {
       label: "CVaR band (bootstrap)",
       formula: String.raw`\left[\,P_{10},\ P_{90}\,\right] \text{ of CVaR over } ${nBoot || "B"} \text{ replicas}`,
-      desc: `Sampling uncertainty of the CVaR at this point. The daily returns were resampled ${nBoot ? nBoot.toLocaleString() + " times" : "repeatedly"} and CVaR recomputed each time; the band's relative width is applied to the 30-day figure.`,
+      desc: `Sampling uncertainty of the CVaR at this point. The daily returns were resampled ${nBoot ? nBoot.toLocaleString(NUM_LOCALE) + " times" : "repeatedly"} and CVaR recomputed each time; the band's relative width is applied to the 30-day figure.`,
       range: "Narrow: the history pins the tail risk down. Wide: a handful of bad days drive it, so treat the CVaR (and the ranking of nearby points) as rough. A bigger compute budget steadies the band's edges; it does not narrow it.",
     };
   },
@@ -9483,7 +9592,7 @@ function mptRenderChart(opts = {}) {
     <span data-legend="cap" title="Click to jump to the cap-weight portfolio.">${legendSwatch("cap")}Cap-weight</span>
     <span data-legend="current" title="Click to jump to the current portfolio.">${legendSwatch("current")}Current</span>
     <span class="no-click">${legendSwatch("selected")}Selected</span>
-    <span class="no-click" style="margin-left:auto">${(d.cloud || []).length.toLocaleString()} portfolios · ${d.meta?.n_obs || "?"} daily obs · ${blNote} · ${d.meta?.total_ms || "?"}ms</span>
+    <span class="no-click" style="margin-left:auto">${(d.cloud || []).length.toLocaleString(NUM_LOCALE)} portfolios · ${d.meta?.n_obs || "?"} daily obs · ${blNote} · ${d.meta?.total_ms || "?"}ms</span>
   `;
   legend.querySelectorAll("span[data-legend]").forEach(el => {
     el.addEventListener("click", () => mptLegendClick(el.dataset.legend));
@@ -9968,10 +10077,10 @@ function mptAssetTip(sym) {
   if (mu != null) rows += row("BL posterior return", signed(mu));
   if (an) {
     rows += `<div class="tip-sub">Analyst target</div>`;
-    if (an.target_mean != null) rows += row("Mean target", an.target_mean.toLocaleString(undefined, {maximumFractionDigits: 2}));
+    if (an.target_mean != null) rows += row("Mean target", an.target_mean.toLocaleString(NUM_LOCALE, {maximumFractionDigits: 2}));
     if (an.upside_pct != null) rows += row("Implied upside", signed(an.upside_pct / 100), an.upside_pct >= 0 ? "pos" : "neg");
     if (an.target_low != null && an.target_high != null) {
-      rows += row("Range (low–high)", `${an.target_low.toLocaleString(undefined, {maximumFractionDigits: 2})}–${an.target_high.toLocaleString(undefined, {maximumFractionDigits: 2})}`);
+      rows += row("Range (low–high)", `${an.target_low.toLocaleString(NUM_LOCALE, {maximumFractionDigits: 2})}–${an.target_high.toLocaleString(NUM_LOCALE, {maximumFractionDigits: 2})}`);
     }
     if (an.disp != null) rows += row("Target dispersion", pct(an.disp) + (an.n_analysts ? ` · ${an.n_analysts} an.` : ""));
   }
@@ -10546,10 +10655,12 @@ function fxSelect(ccy) {
   if (!ccy || FX_SUPPORTED.indexOf(ccy) < 0) return;
   const prev = FX_QUOTE;
   FX_QUOTE = ccy;
-  try { localStorage.setItem("fx_quote", ccy); } catch (e) {}
+  try { sessionStorage.setItem("fx_quote", ccy); } catch (e) {}
   fxUpdateButton();
   fxRenderDropdown();
-  invRender();
+  // My Investments is computed in the display currency, day by day at each
+  // day's rate, so a switch asks the server again rather than rescaling.
+  if (document.body.dataset.page === "investments" && prev !== ccy) invLoad(); else invRender();
   if (DATA && DATA.length) {
     if (prev !== ccy) {
       // Invalidate every tab's analytics — returns must be recomputed in the new currency.
@@ -10897,12 +11008,14 @@ const SETTINGS_SECTIONS = [
     id: "general",
     group: "Settings",
     label: "General",
-    description: "Appearance and table layout. These preferences are stored in this "
-               + "browser and apply to every portfolio tab.",
-    keywords: ["appearance", "preferences", "display", "theme", "colours", "colors", "layout"],
+    description: "Appearance, currency and table layout. The default currency is kept with "
+               + "your data; the others are stored in this window and apply to every portfolio tab.",
+    keywords: ["appearance", "preferences", "display", "theme", "colours", "colors", "layout", "currency"],
     items: [
       { id: "theme", label: "Theme",
         keywords: ["dark", "light", "bloomberg", "terminal", "night mode", "colour scheme"] },
+      { id: "currency", label: "Default currency",
+        keywords: ["currency", "euro", "eur", "dollar", "usd", "pound", "ccy", "fx", "default", "display"] },
       { id: "fit", label: "Fit to screen",
         keywords: ["columns", "table width", "scale", "compact", "horizontal scroll"] },
     ],
@@ -10952,6 +11065,20 @@ const SETTINGS_SECTIONS = [
                    "download", "github", "weekly"] },
     ],
     render: renderSettingsModels,
+  },
+  {
+    id: "investments",
+    group: "Settings",
+    label: "My Investments",
+    description: "Your real book: every holding, trade, dividend and deposit you added. "
+               + "It is kept in state/investments.json in the data folder, on this machine only.",
+    keywords: ["investments", "book", "clear", "remove", "delete", "reset", "start over",
+               "erase", "holdings", "entries", "clean"],
+    items: [
+      { id: "inv-clear", label: "Clear my investments",
+        keywords: ["clear", "remove", "delete", "reset", "start over", "erase", "clean", "wipe"] },
+    ],
+    render: renderSettingsInvestments,
   },
   {
     id: "keys",
@@ -11158,12 +11285,26 @@ function renderSettingsGeneral(el) {
       control: `<div class="settings-seg">${themeOpts}</div>`,
     }) +
     settingsRow({
+      id: "currency",
+      label: "Default currency",
+      help: "The currency the app opens in. The currency switch in the top bar changes it "
+          + "until you close the app.",
+      control: benchMenuHtml(Object.fromEntries(FX_SUPPORTED.map(c => [c, { label: FX_NAMES[c] || c }])),
+        APP_PREFS.default_ccy || "USD", "settings-ccy", "Default currency"),
+    }) +
+    settingsRow({
       id: "fit",
       label: "Fit to screen",
       help: "Scale column widths and font size down just enough to keep the active view "
           + "inside the window, instead of scrolling horizontally.",
       control: `<label class="settings-check"><input type="checkbox" id="settings-fit"></label>`,
     });
+  // Saved on the server (prefs.json), then shown at once.
+  wireBenchSelect(el.querySelector("#settings-ccy"), async (c) => {
+    await savePrefs({ default_ccy: c });
+    fxSelect(c);
+    renderSettingsGeneral(el);
+  });
   // These controls MUTATE nothing themselves — they call the same functions the
   // topbar controls call, and the sync helpers paint both surfaces. Setting
   // STATE.fitColumns directly here would skip the table re-scale in render().
@@ -11469,7 +11610,7 @@ function referenceBody(r) {
   if (inst) {
     rows.push(kv("Data from", `${escapeHtml(inst.date)} · ${referenceAgeText(inst.age_days)}`
       + (inst.stale ? ` <span class="settings-bad-text">(too old to use)</span>` : "")));
-    rows.push(kv("Coverage", `${inst.n_names || "—"} names · ${((inst.rows || {}).history || 0).toLocaleString()} ticker-days`));
+    rows.push(kv("Coverage", `${inst.n_names || "—"} names · ${((inst.rows || {}).history || 0).toLocaleString(NUM_LOCALE)} ticker-days`));
   } else {
     rows.push(kv("Data", r.enabled ? "not downloaded yet" : "—"));
   }
@@ -11502,7 +11643,7 @@ function symbolsPill(r) {
 function symbolsBody(r) {
   const kv = (k, v) => `<div class="settings-kv-k">${k}</div><div class="settings-kv-v">${v}</div>`;
   const rows = [r.installed
-    ? kv("Data from", `${escapeHtml(r.installed.date)} · ${Number(r.installed.rows).toLocaleString()} listings`)
+    ? kv("Data from", `${escapeHtml(r.installed.date)} · ${Number(r.installed.rows).toLocaleString(NUM_LOCALE)} listings`)
     : kv("Data", r.state === "disabled" ? "switched off" : "not downloaded yet")];
   if (r.state === "failed" && r.error) {
     rows.push(kv("Last check", `<span class="settings-bad-text">${escapeHtml(r.error)}</span> — ignored`));
@@ -11685,6 +11826,55 @@ function renderSettingsLogs(el) {
   });
   renderLogLines();
   startLogPolling();
+}
+
+/* Settings → My Investments. Clear is one journal step on the server, so
+ * Undo on My Investments brings every entry back; a dated copy of the book
+ * is also kept in the data folder (investments.clear). Two clicks: the first
+ * only asks. */
+async function renderSettingsInvestments(el) {
+  let b = INV.book;
+  if (!b || b.error) {
+    el.innerHTML = `<div class="settings-row-help">Loading…</div>`;
+    try { b = await (await fetch("/api/investments?ccy=" + encodeURIComponent(FX_QUOTE))).json(); }
+    catch (e) { b = { empty: true, error: true }; }
+  }
+  let n = (b.entries || []).length;
+  const paint = (asking, err = "") => {
+    el.innerHTML = settingsRow({
+      id: "inv-clear",
+      label: "Clear my investments",
+      help: n ? `Removes all ${n} entr${n === 1 ? "y" : "ies"} from My Investments, to start again (say, to
+          re-import a screenshot). Undo on My Investments brings them back, and a copy of the book
+          is kept in the data folder (<code>state/investments.before-clear-…json</code>).`
+        : "There is nothing to clear: My Investments has no entries.",
+      control: asking
+        ? `<div class="settings-btn-row" style="margin-top:0"><button class="settings-btn" id="inv-clear-cancel">Cancel</button>
+             <button class="settings-btn danger" id="inv-clear-go">Clear ${n} entr${n === 1 ? "y" : "ies"}</button></div>`
+        : `<button class="settings-btn danger" id="inv-clear-ask"${n ? "" : " disabled"}>Clear…</button>`,
+    }) + (err ? `<div class="inv-form-err" role="alert">${escapeHtml(err)}</div>` : "");
+    el.querySelector("#inv-clear-ask")?.addEventListener("click", () => paint(true));
+    el.querySelector("#inv-clear-cancel")?.addEventListener("click", () => paint(false));
+    el.querySelector("#inv-clear-go")?.addEventListener("click", async (ev) => {
+      ev.currentTarget.disabled = true;
+      try {
+        const d = await invPost("clear", { base_rev: b.rev ?? 0 });
+        INV.book = d; INV.imp = null;
+        closeSettings();
+        $("#inv-btn").click();
+        toast(d.undo_label || "Cleared", { label: "Undo", fn: () => invUndo(false) });
+      } catch (err) {
+        // Changed elsewhere (another window, an import): reload the book so
+        // the count and the revision are current, then ask again.
+        try { b = await (await fetch("/api/investments?ccy=" + encodeURIComponent(FX_QUOTE))).json(); INV.book = b; }
+        catch (e2) { /* keep the old one */ }
+        n = (b.entries || []).length;
+        paint(n > 0, /another window/.test(err.message)
+          ? "Your investments changed in the meantime; the count above is up to date now." : err.message);
+      }
+    });
+  };
+  paint(false);
 }
 
 function renderSettingsAbout(el) {
@@ -11876,7 +12066,16 @@ function showPage(name) {
   for (const [id, n] of [["#inv-btn", "investments"], ["#edit-btn", "portfolio"], ["#news-btn", "news"]]) {
     $(id).classList.toggle("active", name === n);
   }
+  const rf = $("#refresh");
+  if (rf) {
+    rf.dataset.researchTip ??= rf.dataset.tip || "";
+    rf.dataset.tip = name === "investments" ? "Refresh your investments' prices and exchange rates. Runs in the background; cancel from the status chip." : rf.dataset.researchTip;
+  }
   try { localStorage.setItem("page", name); } catch (e) {}
+  if (name !== "investments" && _fitDeferred) {
+    _fitDeferred = false;
+    requestAnimationFrame(() => render());
+  }
 }
 
 /* ===========================================================================
@@ -11885,7 +12084,9 @@ function showPage(name) {
  * are in docs/architecture/frontend.md ("Pages and My Investments").
  * Amounts arrive in INV.book.ccy and are converted to FX_QUOTE for display.
  * --------------------------------------------------------------------------- */
-const INV = { book: null, period: "1Y", mode: "value", rail: "attention", editing: null };
+/* seq: every load and change takes a number, and only the newest may set
+   INV.book, so a slow GET (an FX switch, a save in between) can't land last. */
+const INV = { book: null, period: "1Y", mode: "value", rail: "attention", editing: null, seq: 0 };
 const INV_PERIODS = ["1M", "3M", "YTD", "1Y", "3Y", "ALL"];
 const INV_PERIOD_WORDS = { "1M": "the last month", "3M": "the last 3 months", "YTD": "this year so far",
   "1Y": "the last year", "3Y": "the last 3 years", "ALL": "since you started" };
@@ -11897,7 +12098,7 @@ const invSym = () => FX_SYMBOL[FX_QUOTE] || FX_QUOTE + " ";
 function invMoney(v, signed) {
   if (!invOk(v)) return na();
   const x = fxConvert(v, INV.book?.ccy || "USD");
-  return (signed ? invSign(x) : x < 0 ? "−" : "") + invSym() + Math.round(Math.abs(x)).toLocaleString();
+  return (signed ? invSign(x) : x < 0 ? "−" : "") + invSym() + Math.round(Math.abs(x)).toLocaleString(NUM_LOCALE);
 }
 function invPct(v, d = 1, unit = "%") {
   if (!invOk(v)) return na();
@@ -11907,18 +12108,26 @@ function invPct(v, d = 1, unit = "%") {
 /* A price in the share's own quote unit (pence for LSE), never converted. */
 function invQuotePrice(v, qccy) {
   if (!invOk(v)) return na();
-  if (qccy === "GBp") return Math.round(v).toLocaleString() + "p";
-  return escapeHtml(FX_SYMBOL[qccy] || qccy + " ") + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  if (qccy === "GBp") return Math.round(v).toLocaleString(NUM_LOCALE) + "p";
+  return escapeHtml(FX_SYMBOL[qccy] || qccy + " ") + Number(v).toLocaleString(NUM_LOCALE, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 }
 const invDate = (d) => escapeHtml(fmtDateMDY(d));
 
 async function invLoad() {
+  // The first load of a session reads years of daily prices from Yahoo (a
+  // few seconds); a calm line beats an empty page.
+  const host = $("#inv-page");
+  if (!INV.book && host && !host.classList.contains("hidden")) host.innerHTML = `<div class="inv-loading">Reading your prices…</div>`;
+  const seq = ++INV.seq;
+  let d;
   try {
-    const r = await fetch("/api/investments");
-    INV.book = r.ok ? await r.json() : { empty: true, error: true };
+    const r = await fetch("/api/investments?ccy=" + encodeURIComponent(FX_QUOTE));
+    d = r.ok ? await r.json() : { empty: true, error: true };
   } catch (e) {
-    INV.book = { empty: true, error: true };
+    d = { empty: true, error: true };
   }
+  if (seq !== INV.seq) return;
+  INV.book = d;
   invRender();
   if (!INV.book.error) bookTabSync();
 }
@@ -11926,11 +12135,16 @@ async function invLoad() {
 function invRender() {
   const b = INV.book, host = $("#inv-page");
   if (!b || host.classList.contains("hidden")) return;
+  // A background redraw (the import check) waits while a review menu is
+  // open, or the picker would vanish under the owner's cursor.
+  if (_invMenu && INV.imp?.prop && _invMenu.anchor.isConnected) { _invMenu.pending = true; return; }
+  invMenuClose();  // its anchor is about to be redrawn
   // The review of an import takes the page until it is applied or cancelled.
   if (INV.imp?.prop) { host.innerHTML = invReviewHtml(); return; }
   if (b.empty) {
     const err = typeof b.error === "string" ? b.error : b.error ? "Couldn't load your investments. Try again in a moment." : "";
     host.innerHTML = invWelcomeHtml(b, err);
+    host.querySelectorAll("[data-inv-comp-text]").forEach(invCompFit);
     return;
   }
   host.innerHTML = `
@@ -11943,43 +12157,122 @@ function invRender() {
       <aside class="inv-rail" aria-label="Attention">${invRailHtml(b)}</aside>
     </div>`;
   drawInvChart();
+  wireBenchSelect($("#inv-bench"), invPickBench);
+}
+
+/* The benchmark's name, as the server priced it (S&P 500 unless picked). */
+const invBench = () => escapeHtml(INV.book?.benchmark?.label || "S&P 500");
+/* The chart's comparison (owner, 2026-10-11, as on Portfolios): saved on
+   the server (state/prefs.json), so the desktop app keeps it too. */
+async function invPickBench(key) {
+  if (key === INV.book?.benchmark?.key) return;
+  try {
+    await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inv_benchmark: key }) });
+  } catch (e) {}
+  invLoad();
 }
 
 function invHeroHtml(b) {
-  const h = b.headline, p = INV.period, twr = h.twr[p], diff = invOk(twr) && invOk(h.bench_twr[p]) ? twr - h.bench_twr[p] : null;
+  const h = b.headline, p = INV.period, twr = h.twr[p], spx = h.bench_twr[p];
   // A figure Phase 3 hasn't computed yet is a quiet dash, never a made-up number.
-  const kpi = (tip, label, v, html) => `<div class="inv-kpi" data-rich-tip="inv:${tip}" tabindex="0"><div class="inv-kpi-k">${label}</div><div class="inv-kpi-v ${invCls(v)}">${invOk(v) ? html : '<span class="inv-gap">—</span>'}</div></div>`;
+  const kpi = (tip, label, v, html, sub = "", cls = invCls(v)) => `<div class="inv-kpi" data-rich-tip="inv:${tip}" tabindex="0"><div class="inv-kpi-k">${label}</div><div class="inv-kpi-v ${cls}">${invOk(v) ? html : '<span class="inv-gap">—</span>'}</div>${sub ? `<div class="inv-kpi-s">${sub}</div>` : ""}</div>`;
   const pills = (attr, keys, cur, labels = keys) => keys.map((k, i) => `<button type="button" data-inv-${attr}="${k}" class="${k === cur ? "active" : ""}" aria-pressed="${k === cur}">${labels[i]}</button>`).join("");
+  // Layout A1 (owner, 2026-10-11): last month under the value; the KPIs are
+  // lifetime profit, the period's return beside the benchmark's, the change
+  // in value with the money put in, and risk.
+  const chg = h.value_change?.[p], netIn = h.net_in?.[p], vol = h.vol?.[p];
+  const ratio = (v) => invOk(v) ? (v < 0 ? "−" : "") + Math.abs(v).toFixed(2) : "—";
+  const arrow = invOk(h.month_abs) ? (h.month_abs > 0 ? "▲ " : h.month_abs < 0 ? "▼ " : "") : "";
   return `
     <div class="inv-sheet">
       <div class="inv-hero">
         <span class="inv-value">${invMoney(h.value)}</span>
-        ${invOk(h.month_abs) ? `<span class="inv-month ${invCls(h.month_abs)}">${invMoney(h.month_abs, true)}${invOk(h.month_pct) ? ` (${invPct(h.month_pct)})` : ""} this month</span>` : ""}
         ${b.demo ? `<span class="inv-demo" data-tip="Made-up figures from the demo book, used while the page is being designed.">Demo data</span>` : ""}
       </div>
+      ${invOk(h.month_abs) ? `<div class="inv-month"><span class="${invCls(h.month_abs)}">${arrow}${invMoney(Math.abs(h.month_abs))}${invOk(h.month_pct) ? ` (${invPct(h.month_pct)})` : ""}</span> <span class="inv-month-w">past month</span></div>` : ""}
       <div class="inv-kpis">
-        ${kpi("profit", "Total profit", h.profit_total, invMoney(h.profit_total, true))}
-        ${kpi("twr", `Return · ${p}`, twr, invPct(twr))}
-        ${kpi("vs", "vs S&amp;P 500", diff, invPct(diff, 1, " pp"))}
-        ${kpi("mwr", "Your money", h.mwr_ann, invOk(h.mwr_ann) ? invPct(h.mwr_ann) + " / yr" : na())}
+        ${kpi("profit", "Total profit", h.profit_total, invMoney(h.profit_total, true), "not counting money you put in")}
+        ${kpi("twr", `Return · ${p}`, twr, invPct(twr), invOk(spx) ? `${invBench()} ${invPct(spx)}` : "")}
+        ${kpi("change", `Change in portfolio value · ${p}`, chg, invMoney(chg, true), invOk(netIn) ? (Math.abs(netIn) < 0.5 ? "no money put in or taken out" : netIn > 0 ? `${invMoney(netIn)} of it put in by you` : `after ${invMoney(-netIn)} taken out by you`) : "")}
+        ${kpi("risk", `Volatility · ${p}`, vol, invOk(vol) ? vol.toFixed(1) + "%" : "", invOk(vol) ? `Sharpe ${ratio(h.sharpe?.[p])} · Sortino ${ratio(h.sortino?.[p])}` : "", "")}
       </div>
       <div class="pf-chart-card inv-chart-card">
         ${b.series ? `<div class="inv-chart-bar">
           <span class="pf-contrib-toggle" role="group" aria-label="Chart">${pills("mode", ["value", "return"], INV.mode, ["Value", "Return %"])}</span>
+          ${b.benchmarks?.length ? `<span class="inv-vs">vs ${benchMenuHtml(Object.fromEntries(b.benchmarks.map(x => [x.key, x])), b.benchmark?.key, "inv-bench", "What to compare your investments with")}</span>` : ""}
           <div class="pf-period-tabs inv-periods" role="group" aria-label="Period">${pills("period", INV_PERIODS, p)}</div>
         </div>` : ""}
         ${b.series ? `<svg id="inv-svg" class="inv-svg" aria-label="Value chart"></svg>
-        <div class="inv-readout" id="inv-readout"></div>` : `<div class="inv-chart-soon">Performance arrives in the next update.</div>`}
+        <div class="chart-measure" id="inv-measure"></div>
+        <div class="inv-readout" id="inv-readout"></div>` : `<div class="inv-chart-soon">Prices are unavailable right now. Try ↻ Refresh.</div>`}
       </div>
     </div>`;
 }
 
+/* The holdings' columns: header, sort value, and the direction a first
+ * click sorts (biggest first, names A to Z). */
+const INV_COLS = [
+  ["name", "Holding", x => (x.name || x.symbol || "").toLowerCase(), 1],
+  ["shares", "Shares", x => x.shares, -1],
+  ["avg", "Avg price", x => x.avg_price, -1],
+  ["value", "Value", x => x.value, -1],
+  ["weight", "Weight", x => x.weight, -1],
+  ["month", "Month", x => x.month_pct, -1],
+  ["profit", "Profit", x => x.profit, -1],
+  ["ret", "Return", x => x.return_pct, -1],
+];
+/* Sorting (owner, 2026-10-11): a header click sorts, a second flips it, a
+ * third goes back to "your order", which rows can be dragged into. Both are
+ * kept per browser; a holding not in the saved order goes to the end, in
+ * the server's order (by value). */
+function invSortState() {
+  if (INV.sort === undefined) {
+    try {
+      INV.sort = JSON.parse(localStorage.getItem("inv_sort") || "null");
+      INV.order = JSON.parse(localStorage.getItem("inv_order") || "null");
+    } catch (e) { INV.sort = null; }
+    if (!INV_COLS.some(c => c[0] === INV.sort?.key)) INV.sort = null;
+    if (!Array.isArray(INV.order)) INV.order = null;
+  }
+  return INV.sort;
+}
+function invOrdered(positions) {
+  const sort = invSortState();
+  if (sort) {
+    const get = INV_COLS.find(c => c[0] === sort.key)[2];
+    // A missing figure sorts last whichever way.
+    return [...positions].sort((a, b) => {
+      const x = get(a), y = get(b), nx = x == null || (typeof x === "number" && !isFinite(x)), ny = y == null || (typeof y === "number" && !isFinite(y));
+      if (nx || ny) return nx - ny;
+      return (typeof x === "string" ? x.localeCompare(y) : x - y) * sort.dir;
+    });
+  }
+  const at = new Map((INV.order || []).map((s, i) => [s, i]));
+  return positions.map((x, i) => [x, at.has(x.symbol) ? at.get(x.symbol) : 1e6 + i]).sort((a, b) => a[1] - b[1]).map(r => r[0]);
+}
+function invSortClick(key) {
+  const cur = invSortState(), first = INV_COLS.find(c => c[0] === key)[3];
+  INV.sort = cur?.key !== key ? { key, dir: first } : cur.dir === first ? { key, dir: -first } : null;
+  try { localStorage.setItem("inv_sort", JSON.stringify(INV.sort)); } catch (e) {}
+  invRender();
+}
+function invMoveRow(sym, beforeSym) {
+  const syms = invOrdered(INV.book?.positions || []).map(x => x.symbol).filter(s => s !== sym);
+  const at = beforeSym ? syms.indexOf(beforeSym) : -1;
+  syms.splice(at < 0 ? syms.length : at, 0, sym);
+  INV.order = syms;
+  try { localStorage.setItem("inv_order", JSON.stringify(syms)); } catch (e) {}
+  invRender();
+}
+
 function invHoldingsHtml(b) {
   const tipped = (key, sym, html) => `<span class="inv-tipped" data-rich-tip="inv:${key}" data-sym="${escapeHtml(sym)}" tabindex="0">${html}</span>`;
-  const rows = b.positions.map(x => `
-    <tr>
-      <td class="left">${tipped("pos", x.symbol, `${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span>`)}</td>
-      <td>${invOk(x.shares) ? Number(x.shares).toLocaleString() : na()}</td>
+  const sort = invSortState(), drag = !sort;
+  const rows = invOrdered(b.positions).map(x => `
+    <tr data-inv-sym="${escapeHtml(x.symbol)}"${drag ? ' draggable="true"' : ""}>
+      <td class="left">${drag ? '<span class="inv-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>' : ""}${tipped("pos", x.symbol, `${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span>`)}</td>
+      <td>${invOk(x.shares) ? Number(x.shares).toLocaleString(NUM_LOCALE) : na()}</td>
       <td>${invQuotePrice(x.avg_price, x.quote_ccy)}</td>
       <td>${invMoney(x.value)}</td>
       <td>${invPct(x.weight, 1, "%").replace("+", "")}</td>
@@ -11987,9 +12280,13 @@ function invHoldingsHtml(b) {
       <td class="${invCls(x.profit)}">${tipped("posprofit", x.symbol, invMoney(x.profit, true))}</td>
       <td class="${invCls(x.return_pct)}">${invPct(x.return_pct, 0)}</td>
     </tr>`).join("");
+  const head = INV_COLS.map(([k, label]) => {
+    const on = sort?.key === k;
+    return `<th class="${k === "name" ? "left " : ""}inv-th${on ? " sorted" : ""}" aria-sort="${on ? (sort.dir > 0 ? "ascending" : "descending") : "none"}"><button type="button" data-inv-sort="${k}" title="${on && sort.dir !== INV_COLS.find(c => c[0] === k)[3] ? "Back to your order" : "Sort by " + label.toLowerCase()}">${label}${on ? `<span class="arrow">${sort.dir > 0 ? "▲" : "▼"}</span>` : ""}</button></th>`;
+  }).join("");
   return `
-    <div class="inv-tbl-wrap"><table class="inv-tbl" id="inv-tbl">
-      <thead><tr><th class="left">Holding</th><th>Shares</th><th>Avg price</th><th>Value</th><th>Weight</th><th>Month</th><th>Profit</th><th>Return</th></tr></thead>
+    <div class="inv-tbl-wrap"><table class="inv-tbl${drag ? " inv-tbl-drag" : ""}" id="inv-tbl">
+      <thead><tr>${head}</tr></thead>
       <tbody>${rows}
         <tr class="inv-cash"><td class="left"><span class="inv-tipped"><span class="logo-fallback">${escapeHtml(invSym().trim())}</span><span>Cash</span></span></td><td></td><td></td><td>${invMoney(b.headline.cash)}</td><td>${invPct(b.headline.cash_weight).replace("+", "")}</td><td></td><td></td><td></td></tr>
       </tbody>
@@ -11997,7 +12294,7 @@ function invHoldingsHtml(b) {
 }
 
 /* The rail toggles between Attention and Activity (the ledger), the same
- * pill as the Portfolio tab's Table | Chart. */
+ * pill as the Portfolios tab's Table | Chart. */
 function invRailHtml(b) {
   const tabs = [["attention", "Attention"], ["activity", "Activity"]].map(([k, l]) =>
     `<button type="button" data-inv-rail="${k}" class="${INV.rail === k ? "active" : ""}" aria-pressed="${INV.rail === k}">${l}</button>`).join("");
@@ -12010,29 +12307,105 @@ function invRailHtml(b) {
     + section("Upcoming", b.upcoming, u => `<div class="inv-rail-item">${escapeHtml(`${u.name} ${u.what}`)}<div class="inv-rail-sub">${invDate(u.date)}</div></div>`, "No events in the next two weeks.");
 }
 
-/* Hover cards: plain words, then a breakdown, then the technical name. */
-function invTip(title, body, rows, tech) {
+/* Hover cards: plain words, then a breakdown, then the formula. `tex` is the
+ * body of a LaTeX aligned block (owner, 2026-10-11: equations set like the
+ * Portfolios tab's, the "=" signs lined up), typeset by _RICH_TIP's KaTeX
+ * pass; `tech` is a plain muted line (an exchange, what the symbols mean). */
+function invTip(title, body, rows, tech, tex) {
   const table = rows?.length ? `<table class="mt-table inv-tip-table"><tbody>${rows.map(([k, v]) => `<tr><th>${k}</th><td class="${invCls(v)}">${invMoney(v, true)}</td></tr>`).join("")}</tbody></table>` : "";
-  return `<div class="pf-metric-tip inv-tip" role="tooltip"><div class="mt-name">${title}</div>${body ? `<div class="mt-desc">${body}</div>` : ""}${table}${tech ? `<div class="inv-tip-tech">${tech}</div>` : ""}</div>`;
+  return `<div class="pf-metric-tip inv-tip" role="tooltip"><div class="mt-name">${title}</div>${body ? `<div class="mt-desc">${body}</div>` : ""}${table}${invTex(tex)}${tech ? `<div class="inv-tip-tech">${tech}</div>` : ""}</div>`;
+}
+const invTex = (tex) => tex ? `<div class="mt-formula">$$\\begin{aligned}${tex}\\end{aligned}$$</div>` : "";
+/* Figures inside the formulas: money as text (its symbol and grouping, the
+ * sign in math so it is a real minus), percent in math. */
+const texEsc = (t) => String(t).replace(/[\\{}$%&#_^~]/g, (c) => c === "\\" ? "\\backslash " : "\\" + c);
+function texMoney(v, signed) {
+  if (!invOk(v)) return "\\text{—}";
+  const x = fxConvert(v, INV.book?.ccy || "USD"), r = Math.round(Math.abs(x));
+  return (x < 0 && r ? "-" : signed && r ? "+" : "") + `\\text{${texEsc(invSym() + r.toLocaleString(NUM_LOCALE))}}`;
+}
+function texPct(v, d = 1) {
+  if (!invOk(v)) return "\\text{—}";
+  const r = Number(v.toFixed(d));
+  return (r < 0 ? "-" : r > 0 ? "+" : "") + Math.abs(r).toFixed(d) + "\\%";
 }
 const invTipFor = (fn) => (host) => INV.book?.headline ? fn(INV.book.headline, host) : "";
 const invPos = (host) => (INV.book?.positions || []).find(x => x.symbol === host.dataset.sym);
 const invWords = () => INV_PERIOD_WORDS[INV.period];
-RICH_TIPS["inv:profit"] = invTipFor(h => invTip("Total profit since you started", "What your investments have earned you, after fees.",
-  [["On what you still hold", h.profit_held], ["On what you sold", h.profit_sold], ["Dividends", h.dividends], ...(h.fees ? [["Fees", -h.fees]] : [])], "= value − money you put in"));
-const INV_SOON = "Arrives with the Performance update, which reads your daily prices.";
-RICH_TIPS["inv:twr"] = invTipFor((h) => invTip("How your investments performed", `The growth of your holdings over ${invWords()}, ignoring when you added or took out money. This is the fair number to compare with the S&amp;P 500, or with a friend.${invOk(h.twr[INV.period]) ? "" : " " + INV_SOON}`, null, "time-weighted return (TWR)"));
-RICH_TIPS["inv:vs"] = invTipFor(h => {
-  const t = h.twr[INV.period], s = h.bench_twr[INV.period];
-  if (!invOk(t) || !invOk(s)) return invTip("Against the market", `How your return compares with the S&amp;P 500's. ${INV_SOON}`, null, "");
-  return invTip(t >= s ? "Ahead of the market" : "Behind the market", `Over ${invWords()} you ${t >= s ? "beat" : "trailed"} the S&amp;P 500 by ${Math.abs(t - s).toFixed(1)} percentage points: ${invPct(t)} against ${invPct(s)} (with dividends).`, null, "pp = percentage points");
+/* Your money: per year from a one-year span up, the period's own figure under
+ * a year (roadmap Phase 3: never annualise a short period). */
+const invLong = (h, p = INV.period) => (h.years?.[p] ?? 0) >= 1 - 1e-9;
+const invMwr = (h, p = INV.period) => invLong(h, p) ? h.mwr_ann?.[p] : h.mwr?.[p];
+const invTwrComparable = (h, p = INV.period) => invLong(h, p) ? h.twr_ann?.[p] : h.twr?.[p];
+/* "over the last year", or "since you started (Mar 3, 2025)" when the book is
+ * younger than the pill. */
+const invSpan = (h) => h.since_start?.[INV.period] && INV.book?.series ? `since you started (${invDate(INV.book.series.dates[1] || INV.book.series.dates[0])})` : `over ${invWords()}`;
+const invEstNote = (h) => h.dividends_est > 0 ? " It includes dividends estimated from Yahoo for payouts you haven't added." : "";
+RICH_TIPS["inv:profit"] = invTipFor(h => {
+  const est = h.dividends_est > 0;
+  return invTip("Total profit since you started", "What your investments have earned you, after fees.",
+    [["On what you still hold", h.profit_held], ["On what you sold", h.profit_sold], ["Dividends", h.dividends],
+     ...(est ? [["Dividends, estimated", h.dividends_est]] : []), ...(h.fees ? [["Fees", -h.fees]] : []),
+     ...(Math.abs(h.cash_fx || 0) >= 0.5 ? [["Currency on cash", h.cash_fx]] : [])],
+    `V value now · In − Out the money you put in, less what you took out${est ? " · D̂ dividends estimated from Yahoo, gross" : ""}`,
+    `\\text{Profit} &= V - (\\text{In} - \\text{Out})${est ? " + \\hat D" : ""} \\\\[3pt]`
+    + ` &= ${texMoney(h.value)} - ${texMoney(h.net_deposits)}${est ? ` + ${texMoney(h.dividends_est)}` : ""} \\\\[3pt]`
+    + ` &= ${texMoney(h.profit_total, true)}`);
 });
-RICH_TIPS["inv:mwr"] = invTipFor(h => {
-  if (!invOk(h.mwr_ann)) return invTip("How your actual money grew", `The yearly growth of the money you put in, counting when you added or withdrew it. ${INV_SOON}`, null, "money-weighted return (MWR), per year");
-  const gap = h.mwr_ann - h.twr["1Y"];
-  const why = !invOk(gap) ? "" : Math.abs(gap) < 0.3 ? " About the same as your 1-year Return: when you added money made little difference."
-    : ` It's ${Math.abs(gap).toFixed(1)} points ${gap > 0 ? "above" : "below"} your 1-year Return because ${gap > 0 ? "you added money before prices rose. Good timing." : "more of your money went in before prices fell."}`;
-  return invTip("How your actual money grew", `The yearly growth of the money you put in, counting when you added or withdrew it.${why}`, null, "money-weighted return (MWR), per year");
+/* Return's card also holds "Your money" (MWR) and the timing effect: the
+ * owner found the two side by side a duplicate (2026-10-11). */
+RICH_TIPS["inv:twr"] = invTipFor((h) => {
+  const t = h.twr[INV.period], a = h.twr_ann?.[INV.period], s = h.bench_twr[INV.period];
+  const yrs = h.years?.[INV.period] ?? 0, bn = invBench();
+  const tech = `V value · D money in · W money out (estimated dividends too) · CF your flows, IRR = your money (MWR) · ${bn}: a fund with its dividends reinvested`;
+  if (!invOk(t)) return invTip("How your investments performed", "Needs daily prices from Yahoo. Try ↻ Refresh.", null, tech);
+  const ann = invLong(h) && invOk(a) && Math.abs(yrs - 1) > 0.02 ? `, or ${invPct(a)} a year` : "";
+  const vs = invOk(s) ? ` The ${bn} returned ${invPct(s)} with its dividends reinvested, in ${escapeHtml(INV.book.ccy)}: you ${t >= s ? "beat" : "trailed"} it by ${Math.abs(t - s).toFixed(1)}%.` : "";
+  const m = invMwr(h), tc = invTwrComparable(h), long = invLong(h), gap = invOk(m) && invOk(tc) ? m - tc : null;
+  const why = !invOk(gap) ? "" : Math.abs(gap) < 0.3 ? " When you added money made little difference."
+    : ` Your money grew ${Math.abs(gap).toFixed(1)} points ${gap > 0 ? "faster, because you added money before prices rose" : "slower, because more of your money went in before prices fell"}.`;
+  const rows = invOk(m) ? `<table class="mt-table inv-tip-table"><tbody>
+    <tr><th>Return</th><td class="${invCls(tc)}">${invPct(tc)}${long ? " / yr" : ""}</td></tr>
+    <tr><th>Your money</th><td class="${invCls(m)}">${invPct(m)}${long ? " / yr" : ""}</td></tr>
+    ${invOk(gap) ? `<tr><th>Timing</th><td class="${invCls(gap)}">${invPct(gap, 1, " pts")}</td></tr>` : ""}</tbody></table>` : "";
+  const tex = `r_t &= \\frac{V_t + W_t}{V_{t-1} + D_t} - 1 \\\\[4pt]`
+    + ` R_{\\text{${INV.period}}} &= \\prod_t \\left(1 + r_t\\right) - 1 = ${texPct(t)}`
+    + (invOk(m) ? ` \\\\[4pt] 0 &= \\sum_k \\frac{CF_k}{(1 + \\text{IRR})^{\\tau_k}} \\;\\Rightarrow\\; \\text{IRR} = ${texPct(m)}${long ? "\\,/\\,\\text{yr}" : ""}` : "");
+  return `<div class="pf-metric-tip inv-tip" role="tooltip"><div class="mt-name">How your investments performed</div><div class="mt-desc">${invPct(t)} ${invSpan(h)}${ann}. The growth of your holdings, ignoring when you added or took out money: the fair number to compare with the ${bn}, or with a friend.${vs}${why}${invEstNote(h)}</div>${rows}${invTex(tex)}<div class="inv-tip-tech">${tech}</div></div>`;
+});
+RICH_TIPS["inv:change"] = invTipFor(h => {
+  const p = INV.period, c = h.value_change?.[p], i0 = INV.book.series?.period_start?.[p];
+  if (!invOk(c)) return invTip("Change in portfolio value", "Needs daily prices from Yahoo. Try ↻ Refresh.", null, "");
+  const start = INV.book.series && i0 != null ? INV.book.series.value[i0] : null, inn = h.net_in?.[p];
+  const tex = `\\Delta V &= V_{\\text{now}} - V_{\\text{start}} \\\\[3pt]`
+    + ` &= ${texMoney(h.value)} - ${texMoney(start)} = ${texMoney(c, true)}`
+    + (invOk(inn) ? ` \\\\[3pt] &= \\underbrace{${texMoney(c - inn, true)}}_{\\text{gain}} \\; ${inn < 0 ? "-" : "+"} \\underbrace{${texMoney(Math.abs(inn))}}_{\\text{${inn < 0 ? "taken out" : "put in"}}}` : "");
+  return invTip("Change in portfolio value", `How much your portfolio's value moved ${invSpan(h)}, with the money you put in or took out. Total profit leaves that money out.`, null, "", tex);
+});
+/* Volatility's card (owner, 2026-10-11, mockup C): five named bands with
+ * yours lit, the benchmark's volatility beside it, and Sharpe on a red to
+ * green line. The bands are fixed so a number always reads the same. */
+const INV_VOL_BANDS = [[6, "Very calm"], [12, "Calm"], [20, "Market-like"], [30, "Bumpy"], [Infinity, "Wild"]];
+const invVolBand = (v) => INV_VOL_BANDS.findIndex(([hi]) => v < hi);
+RICH_TIPS["inv:risk"] = invTipFor(h => {
+  const p = INV.period, v = h.vol?.[p];
+  if (!invOk(v)) return invTip("How bumpy the ride was", "Needs at least two weeks of daily prices.", null, "");
+  const r = (x) => invOk(x) ? x.toFixed(2) : "—", usd = INV.book.ccy === "USD", bn = invBench();
+  const dd = h.max_dd?.[p], bv = h.bench_vol?.[p], k = invVolBand(v), sh = h.sharpe?.[p], so = h.sortino?.[p];
+  const calmer = invOk(bv) ? (v < bv - 0.5 ? `: calmer than the ${bn}` : v > bv + 0.5 ? `: bumpier than the ${bn}` : `, about as much as the ${bn}`) : "";
+  const bands = INV_VOL_BANDS.map(([hi, name], i) => `<div class="inv-band b${i}${i === k ? " on" : ""}"></div>`).join("");
+  const names = INV_VOL_BANDS.map(([hi, name], i) => `<span class="${i === k ? "on" : ""}">${name}<br>${i === 0 ? "&lt;6%" : i === 4 ? "30%+" : `${INV_VOL_BANDS[i - 1][0]}–${hi}%`}</span>`).join("");
+  const shPos = invOk(sh) ? Math.max(0, Math.min(1, sh / 2)) * 100 : null;
+  const tex = `\\sigma_{\\text{yr}} &= \\sigma_d\\,\\sqrt{252} && = ${v.toFixed(1)}\\% \\\\[4pt]`
+    + ` \\text{Sharpe} &= \\frac{\\bar r_d - r_f}{\\sigma_d}\\,\\sqrt{252} && = ${r(sh)} \\\\[4pt]`
+    + ` \\text{Sortino} &= \\frac{\\bar r_d - r_f}{\\sigma_d^{\\downarrow}}\\,\\sqrt{252} && = ${r(so)}`;
+  return `<div class="pf-metric-tip inv-tip inv-risk" role="tooltip"><div class="mt-name">How bumpy the ride was</div>
+    <div class="mt-desc">Your value swung by about ${v.toFixed(1)}% a year ${invSpan(h)}${calmer}.</div>
+    <div class="inv-bands">${bands}</div><div class="inv-band-names">${names}</div>
+    ${invOk(shPos) ? `<div class="inv-sh-k">Reward for the risk (Sharpe ${r(sh)})</div>
+    <div class="inv-sh"><i style="left:${shPos.toFixed(1)}%"></i></div><div class="inv-sh-l"><span>0 poor</span><span>1 good</span><span>2+ great</span></div>` : ""}
+    <table class="mt-table inv-tip-table"><tbody>${invOk(bv) ? `<tr><th>${bn} volatility</th><td>${bv.toFixed(1)}% · ${INV_VOL_BANDS[invVolBand(bv)][1].toLowerCase()}</td></tr>` : ""}<tr><th>Sortino</th><td>${r(so)}</td></tr>${invOk(dd) ? `<tr><th>Worst fall</th><td class="neg">${invPct(dd)}</td></tr>` : ""}</tbody></table>
+    ${invTex(tex)}<div class="inv-tip-tech">σ<sub>d</sub> daily standard deviation, trading days only · σ<sub>d</sub><sup>↓</sup> downside deviation · r<sub>f</sub> ${usd ? "the 13-week T-bill (^IRX)" : "0 outside USD"}, as in the Portfolios tab</div></div>`;
 });
 RICH_TIPS["inv:pos"] = (host) => {
   const x = invPos(host); if (!x) return "";
@@ -12046,13 +12419,15 @@ RICH_TIPS["inv:posprofit"] = (host) => {
     ? [["From the price", x.profit_price], ["From the currency", x.profit_fx]] : [["Still holding", x.profit_held]];
   if (x.profit_sold) rows.push(["Sold", x.profit_sold]);
   if (x.dividends) rows.push(["Dividends", x.dividends]);
+  if (x.dividends_est) rows.push(["Dividends, estimated", x.dividends_est]);
   return invTip(`Profit on ${escapeHtml(x.name)}`, "", rows, "");
 };
 
 /* The chart, drawn at its real pixel width so text and the hover dot are
  * never stretched. Value mode: your value (area), the same deposits in the
- * S&P 500 (dotted), the money you put in (dashed). Return mode: your return
- * against the S&P 500, both from 0% at the period start. The period's base
+ * benchmark (red dashes, owner 2026-10-11), the money you put in (gray
+ * dashes). Return mode: your return against the benchmark, both from 0% at
+ * the period start. The period's base
  * index comes from the server (series.period_start), the same base as the
  * headline's returns. */
 function drawInvChart() {
@@ -12060,16 +12435,21 @@ function drawInvChart() {
   if (!svg || !b?.series || !svg.clientWidth) return;
   const s = b.series, i0 = s.period_start?.[INV.period] ?? 0, n = s.dates.length - i0;
   const W = svg.clientWidth, H = 240, L = 56, R = 12, T = 10, B = 22;
-  const rebase = (arr) => arr.slice(i0).map(v => (v / arr[i0] - 1) * 100);
-  const lines = INV.mode === "value" ? [
+  const rebase = (arr) => arr && arr.slice(i0).map(v => (v / arr[i0] - 1) * 100);
+  // A missing benchmark (Yahoo had no prices) drops its line, never the
+  // chart. The benchmark's value line is the server's own for this period: it starts
+  // with your value on the period's first day (owner, 2026-10-11).
+  const benchOff = invBenchHidden();
+  const lines = (INV.mode === "value" ? [
     { label: "Your value", vals: s.value.slice(i0), cls: "main", area: true },
-    { label: "Same money in the S&amp;P 500", vals: s.bench_value.slice(i0), cls: "bench" },
+    { label: `Same money in the ${invBench()}`, vals: s.bench_value?.[INV.period], cls: "bench", off: benchOff },
     { label: "Money you put in", vals: s.invested.slice(i0), cls: "invested" },
   ] : [
     { label: "Your return", vals: rebase(s.twr_index), cls: "main" },
-    { label: "S&amp;P 500", vals: rebase(s.bench_index), cls: "bench" },
-  ];
-  const all = lines.flatMap(l => l.vals);
+    { label: invBench(), vals: rebase(s.bench_index), cls: "bench", off: benchOff },
+  ]).filter(l => l.vals);
+  const shown = lines.filter(l => !l.off);
+  const all = shown.flatMap(l => l.vals);
   let lo = Math.min(...all), hi = Math.max(...all);
   const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
   const X = (i) => L + i * (W - L - R) / Math.max(1, n - 1);
@@ -12089,21 +12469,33 @@ function drawInvChart() {
     g += `<line class="inv-grid-l" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text class="inv-axis" x="${L - 6}" y="${Y(v) + 3}" text-anchor="end">${fmtAxis(v)}</text>`;
   }
   if (INV.mode === "return" && lo < 0 && hi > 0) g += `<line class="inv-zero" x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}"/>`;
-  for (const l of [...lines].reverse()) {
+  for (const l of [...shown].reverse()) {
     if (l.area) g += `<polygon class="inv-area" points="${X(0)},${Y(lo)} ${pts(l.vals)} ${X(n - 1)},${Y(lo)}"/>`;
     g += `<polyline class="inv-l-${l.cls}" points="${pts(l.vals)}"/>`;
   }
   g += `<text class="inv-axis" x="${L}" y="${H - 6}">${invDate(s.dates[i0])}</text><text class="inv-axis" x="${W - R}" y="${H - 6}" text-anchor="end">${invDate(s.dates.at(-1))}</text>`
-    + `<line class="inv-cross" x1="0" x2="0" y1="${T}" y2="${H - B}"/><circle class="inv-dot" r="3.5"/><rect class="inv-hit" x="${L}" y="0" width="${W - L - R}" height="${H}"/>`;
+    + `<line class="inv-cross" x1="0" x2="0" y1="${T}" y2="${H - B}"/><circle class="inv-dot" r="3.5"/>`
+    + `<rect class="sel-rect" id="inv-sel" x="0" y="${T}" width="0" height="${H - T - B}" style="display:none"/>`
+    + `<rect class="inv-hit" x="${L}" y="0" width="${W - L - R}" height="${H}"/>`;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = g;
   // The legend lives in this fixed-height reading, not the toolbar, so the
   // card is the same size in both modes (frontend.md).
+  // The benchmark entry is a switch: click it to hide or show its line (owner,
+  // 2026-10-11), remembered in this browser.
   const readoutAt = (i) => {
-    readout.innerHTML = lines.map(l => `<span class="inv-ro"><i class="inv-sw-${l.cls}"></i><span class="inv-ro-k">${l.label}</span><b>${fmtV(l.vals[i])}</b></span>`).join("")
+    readout.innerHTML = lines.map(l => l.cls === "bench"
+      ? `<button type="button" class="inv-ro inv-ro-sw${l.off ? " off" : ""}" data-inv-bench aria-pressed="${!l.off}" title="${l.off ? "Show" : "Hide"} the ${invBench()}"><i class="inv-sw-${l.cls}"></i><span class="inv-ro-k">${l.label}</span><b>${fmtV(l.vals[i])}</b></button>`
+      : `<span class="inv-ro"><i class="inv-sw-${l.cls}"></i><span class="inv-ro-k">${l.label}</span><b>${fmtV(l.vals[i])}</b></span>`).join("")
       + `<span class="inv-ro-date">${invDate(s.dates[i0 + i])}</span>`;
   };
   readoutAt(n - 1);
+  readout.onclick = (e) => {
+    if (!e.target.closest("[data-inv-bench]")) return;
+    try { localStorage.setItem("inv_bench_off", benchOff ? "0" : "1"); } catch (err) {}
+    INV.hideBench = !benchOff;
+    drawInvChart();
+  };
   const cross = svg.querySelector(".inv-cross"), dot = svg.querySelector(".inv-dot"), hit = svg.querySelector(".inv-hit");
   hit.addEventListener("mousemove", (e) => {
     const px = (e.clientX - svg.getBoundingClientRect().left) * (W / svg.clientWidth);
@@ -12114,6 +12506,27 @@ function drawInvChart() {
     readoutAt(i);
   });
   hit.addEventListener("mouseleave", () => { svg.classList.remove("hovering"); readoutAt(n - 1); });
+  // Drag to measure the return between two days, in both modes (owner,
+  // 2026-10-11), the same brush as the Portfolio charts. It always measures
+  // the return indexes, never the value line, so money put in between the
+  // two days never reads as a gain.
+  // Days are evenly spaced on screen (weekends and holidays take no room),
+  // so the brush maps pixels to days through the index, not linear time.
+  const t = s.dates.slice(i0).map(d => Date.parse(d + "T00:00:00")), tPts = t.map(v => [v, 0]);
+  const toIdx = (px) => Math.max(0, Math.min(n - 1, Math.round((px - L) / ((W - L - R) / Math.max(1, n - 1)))));
+  const measured = [["Your return", s.twr_index], [b.benchmark?.label || "S&P 500", benchOff ? null : s.bench_index]].filter(([, a]) => a);
+  attachRangeBrush({
+    svg, overlay: hit, selRect: svg.querySelector("#inv-sel"), badge: $("#inv-measure"),
+    geom: { W, padL: L, padR: R, t0: t[0], t1: t[n - 1], xScale: (tt) => X(nearestPointIdx(tPts, tt)), xInv: (px) => t[toIdx(px)] },
+    lines: measured.map(([label, a]) => ({ label, pts: a.slice(i0).map((v, i) => [t[i], v]) })),
+  });
+}
+/* Whether the owner hid the benchmark line (per browser, like the theme). */
+function invBenchHidden() {
+  if (INV.hideBench == null) {
+    try { INV.hideBench = localStorage.getItem("inv_bench_off") === "1"; } catch (e) { INV.hideBench = false; }
+  }
+  return INV.hideBench;
 }
 
 /* ---------------------------------------------------------------------------
@@ -12141,9 +12554,9 @@ const invUnit = (qccy, ccy) => INV_MINOR[qccy] && (!ccy || ccy === INV_MINOR[qcc
 function invNative(v, ccy, signed = true) {
   if (!invOk(v)) return "";
   const s = (signed ? invSign(v) : v < 0 ? "−" : "") + escapeHtml(FX_SYMBOL[ccy] || ccy + " ");
-  return s + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return s + Math.abs(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-const invQty = (q) => Number(q).toLocaleString(undefined, { maximumFractionDigits: 6 });
+const invQty = (q) => Number(q).toLocaleString(NUM_LOCALE, { maximumFractionDigits: 6 });
 
 function invActivityHtml(b) {
   const undo = b.undo_label, redo = b.redo_label;
@@ -12173,7 +12586,7 @@ function invActRow(e) {
   if (e.name) what += " " + escapeHtml(e.name);
   if (e.type === "buy" || e.type === "sell") {
     const u = invUnit(e.quote_ccy, e.ccy);
-    sub = `${invQty(e.qty)} @ ${u === 100 ? Math.round(e.price * 100).toLocaleString() + "p" : invNative(e.price, e.ccy, false)}${e.fee ? ` · fee ${invNative(e.fee, e.ccy, false)}` : ""}${e.qty_basis === "current" ? " · as held today" : ""}`;
+    sub = `${invQty(e.qty)} @ ${u === 100 ? Math.round(e.price * 100).toLocaleString(NUM_LOCALE) + "p" : invNative(e.price, e.ccy, false)}${e.fee ? ` · fee ${invNative(e.fee, e.ccy, false)}` : ""}${e.qty_basis === "current" ? " · as held today" : ""}`;
   } else if (e.type === "dividend" && e.tax) sub = `${invNative(e.amount, e.ccy, false)} less ${invNative(e.tax, e.ccy, false)} tax`;
   else if (e.type === "split") sub = `${invQty(e.ratio)} for 1`;
   if (e.note) sub += (sub ? " · " : "") + escapeHtml(e.note);
@@ -12345,40 +12758,64 @@ function invFormRerender(form, patch) {
  * batch. Purple marks what the AI guessed, amber what it couldn't find. */
 const INV_IMP_ACCEPT = "image/png,image/jpeg,image/webp,application/pdf,.pdf,.csv,.tsv,.txt,.xlsx";
 const INV_IMP_MAX_FILE = 8 * 1024 * 1024, INV_IMP_MAX_TOTAL = 20 * 1024 * 1024;
-const invImp = () => (INV.imp ||= { text: "", files: [], busy: false, error: "", prop: null, answers: {}, sinceDate: "" });
+const invImp = () => (INV.imp ||= { text: "", files: [], busy: false, error: "", prop: null, answers: {} });
 const INV_CLIP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></svg>';
+const _INV_SVG = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const INV_SEND = _INV_SVG('<path d="M12 19V5M5.5 11.5L12 5l6.5 6.5" stroke-width="2.2"/>');
+const INV_PHOTO = _INV_SVG('<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 16l-5-5-8 8.5"/>');
+const INV_DOC = _INV_SVG('<path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/><path d="M14 3.5v5h5M9 13h6M9 16.5h6"/>');
+const INV_CAL = _INV_SVG('<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>');
+const INV_CARET = '<svg viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const INV_WARN = _INV_SVG('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5.5M12 16.3v.2" stroke-width="2.2"/>');
 
 function invComposerHtml(compact = false) {
   const m = invImp(), n = m.files.length, shots = m.files.filter(f => f.image).length, docs = n - shots;
   const what = [shots && `${shots} screenshot${shots > 1 ? "s" : ""}`, docs && `${docs} file${docs > 1 ? "s" : ""}`,
     m.text.trim() && "your text"].filter(Boolean).join(" and ");
-  return `<div class="inv-composer${compact ? " compact" : ""}${m.busy ? " busy" : ""}" data-inv-drop>
-    <textarea class="inv-comp-text" data-inv-comp-text rows="${compact ? 3 : 4}" ${m.busy ? "disabled" : ""}
-      placeholder="Paste from your broker, or describe it: &quot;Bought 10 Apple at 182 in March 2024, 300 Shell since 2023&quot;">${escapeHtml(m.text)}</textarea>
+  // A chat-style pill (owner's pick, 2026-10-10): files as chips above the
+  // text, which grows with what's typed (no drag handle), the clip and a
+  // round send button inside. Enter sends; Shift+Enter is a new line.
+  return `<div class="inv-comp-wrap${compact ? " compact" : ""}">
+  <div class="inv-composer${compact ? " compact" : ""}${m.busy ? " busy" : ""}" data-inv-drop>
     ${n ? `<div class="inv-comp-files">${m.files.map((f, i) => `<span class="inv-comp-file">${f.image ? `<img src="${f.url}" alt="">` : `<span class="inv-comp-ext">${escapeHtml((f.name.split(".").pop() || "").toUpperCase())}</span>`}<span>${escapeHtml(f.name)}</span>${m.busy ? "" : `<button type="button" data-inv-unfile="${i}" aria-label="Remove ${escapeHtml(f.name)}">×</button>`}</span>`).join("")}</div>` : ""}
-    <div class="inv-comp-bar">
-      <button type="button" class="inv-comp-attach" data-inv-attach ${m.busy ? "disabled" : ""}>${INV_CLIP}Attach</button>
-      <span class="inv-comp-hint">${m.busy ? `Reading ${what}…` : compact ? "Screenshots, PDF, CSV or Excel" : "Screenshots, PDF statements, CSV or Excel. You can paste an image too."}</span>
-      <button type="button" class="primary" data-inv-read ${m.busy ? "disabled" : ""}>${m.busy ? "Reading…" : "Read it"}</button>
+    <div class="inv-comp-row">
+      <textarea class="inv-comp-text" data-inv-comp-text rows="1" ${m.busy ? "disabled" : ""} aria-label="Paste or describe your investments"
+        placeholder="${compact ? "Paste, or describe a trade" : "Paste, or describe: &quot;10 Apple at $182 in March 2024&quot;"}">${escapeHtml(m.text)}</textarea>
+      <button type="button" class="inv-comp-icon" data-inv-attach ${m.busy ? "disabled" : ""} title="Attach screenshots, PDF, CSV or Excel" aria-label="Attach files">${INV_CLIP}</button>
+      <button type="button" class="inv-comp-send" data-inv-read ${m.busy ? "disabled" : ""} title="${m.busy ? "Reading…" : "Read it"}" aria-label="Read it">${m.busy ? '<span class="inv-comp-spin"></span>' : INV_SEND}</button>
     </div>
     ${m.busy ? '<div class="inv-comp-progress"><span></span></div>' : ""}
-    ${m.error ? `<div class="inv-comp-err" role="alert">${escapeHtml(m.error)}</div>` : ""}
+  </div>
+  ${m.busy ? `<div class="inv-comp-status">Reading ${what}…</div>` : ""}
+  ${m.error ? `<div class="inv-comp-err" role="alert">${escapeHtml(m.error)}</div>` : ""}
+  ${compact || m.busy ? "" : `<div class="inv-comp-starters">
+    <button type="button" class="inv-comp-starter" data-inv-attach data-accept="image/png,image/jpeg,image/webp">${INV_PHOTO}Upload a screenshot</button>
+    <button type="button" class="inv-comp-starter" data-inv-attach data-accept="application/pdf,.pdf,.csv,.tsv,.txt,.xlsx">${INV_DOC}Broker statement</button>
+  </div>`}
   </div>`;
+}
+
+/* The composer's text grows with its content, up to a cap, like a chat box. */
+function invCompFit(t) {
+  if (!t) return;
+  t.style.height = "auto";
+  t.style.height = Math.min(t.scrollHeight, 220) + "px";
 }
 
 function invWelcomeHtml(b, err) {
   return `<div class="inv-welcome">
     <h2 class="inv-welcome-title">Bring in your investments</h2>
-    <p class="inv-welcome-body">Drop broker screenshots or statements, paste what your app shows, or just describe it. You check everything before it's added.</p>
+    <p class="inv-welcome-body">Drop screenshots or statements, paste, or describe them.</p>
     ${err ? `<div class="inv-welcome-err" role="alert">${escapeHtml(err)}</div>` : invComposerHtml()}
-    <div class="inv-welcome-alt">or <button type="button" class="inv-link" data-inv-add data-inv-hand>add one holding by hand</button>${b.undo_label ? ` · <button type="button" class="inv-link" data-inv-undo>Undo: ${escapeHtml(b.undo_label)}</button>` : ""}</div>
-    <div class="inv-welcome-soon">Screenshots and text are read by NVIDIA NIM. Nothing is added until you press Apply.</div>
+    ${b.undo_label ? `<div class="inv-welcome-alt"><button type="button" class="inv-link" data-inv-undo>Undo: ${escapeHtml(b.undo_label)}</button></div>` : ""}
+    <div class="inv-welcome-soon">Read by NVIDIA NIM. Nothing is added until you press Apply.</div>
   </div>`;
 }
 
 /* Re-render just the composer wherever it is (welcome or popover). */
 function invComposerRefresh() {
-  for (const box of document.querySelectorAll(".inv-composer")) box.outerHTML = invComposerHtml(box.classList.contains("compact"));
+  for (const box of document.querySelectorAll(".inv-comp-wrap")) box.outerHTML = invComposerHtml(box.classList.contains("compact"));
+  document.querySelectorAll("[data-inv-comp-text]").forEach(invCompFit);
 }
 
 function invAddFiles(list) {
@@ -12421,7 +12858,6 @@ async function invRead() {
     try { d = await r.json(); } catch (e) { /* non-JSON error */ }
     if (!r.ok) throw new Error(d.message || (r.status === 400 && d.error ? "That was too much to send at once. Add fewer or smaller files." : "Couldn't read that. Try again in a moment."));
     m.prop = d; m.answers = Object.fromEntries((d.questions || []).map(q => [q.id, q.default]));
-    m.sinceDate = invToday();
     invClosePop();
   } catch (err) {
     m.error = err.message;
@@ -12441,11 +12877,15 @@ const INV_REV_TYPES = [["holding", "Holding"], ["buy", "Buy"], ["sell", "Sell"],
  * with the questions' answers applied. The only place rows become entries:
  * the dry run (/import/check) and Apply both get what this builds. */
 function invRowEntry(r) {
-  const m = invImp(), since = m.answers.since === "pick" ? m.sinceDate : invToday();
-  const d = r.date || ((r.type === "holding" || r.type === "deposit") && m.prop.questions.some(q => q.id === "since" && q.rows.includes(r.i)) ? since : "");
+  const d = r.date;
   const need = (k) => r[k] == null || r[k] === "";
   if (!r.type || !d) return null;
-  const e = { type: r.type === "holding" ? "buy" : r.type, date: d, note: "" };
+  // The listing note goes with the entry, so the holding keeps saying where
+  // its price comes from ("Shown on Budapest; priced from RIG2.F").
+  // Only a stand-in's note is worth keeping ("On Xetra, as shown" is not),
+  // and it stays when the owner confirms that listing in the question.
+  const note = r.note && r.symbol && r.symbol === r.matched && !r.note.startsWith("On ") ? r.note.slice(0, 200) : "";
+  const e = { type: r.type === "holding" ? "buy" : r.type, date: d, note };
   if (["holding", "buy", "sell", "dividend", "split"].includes(r.type)) { if (!r.symbol) return null; e.symbol = r.symbol; }
   if (r.ccy) e.ccy = r.ccy;
   if (["holding", "buy", "sell"].includes(r.type)) {
@@ -12453,6 +12893,8 @@ function invRowEntry(r) {
     // A holding counts today's shares, unless it was added for a statement's
     // sale (basis "trade": shares as on that day, before later splits).
     Object.assign(e, { qty: +r.qty, price: +r.price, fee: +(r.fee || 0), qty_basis: r.basis || (r.type === "holding" ? "current" : "trade") });
+    // A holding already owned: its performance starts at that day's value.
+    if (r.type === "holding") e.opening = true;
   } else if (r.type === "split") { if (need("ratio")) return null; e.ratio = +r.ratio; }
   else { if (need("amount")) return null; e.amount = +r.amount; if (r.type === "dividend" && r.tax) e.tax = +r.tax; }
   return e;
@@ -12462,60 +12904,87 @@ function invReviewHtml() {
   const m = invImp(), p = m.prop, rows = p.items;
   const sym = (r) => escapeHtml(FX_SYMBOL[r.ccy] || (r.ccy ? r.ccy + " " : ""));
   const cls = (r, k) => (r.missing.includes(k) ? " m" : "") + (r.guessed.includes(k) ? " g" : "");
-  const shown = (v) => typeof v === "number" ? v.toLocaleString(undefined, { maximumFractionDigits: 6 }) : v ?? "";
+  const shown = (v) => typeof v === "number" ? v.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 6 }) : v ?? "";
   const inp = (r, k, attrs = "") => `<input class="inv-rev-in${cls(r, k)}" data-inv-rk="${k}" value="${escapeHtml(shown(r[k]))}" ${attrs}>`;
   const numIn = (r, k) => inp(r, k, `inputmode="decimal" autocomplete="off" placeholder="${r.missing.includes(k) ? "needed" : "—"}"`);
+  // A price or amount with its currency sign right against the number, like
+  // the rest of the app ("€48.46"): the pair is one field, sized to what it
+  // holds (owner, 2026-10-11: the sign sat far left of a wide box).
+  const moneyIn = (r, k) => {
+    const ph = r.missing.includes(k) ? "needed" : "—";
+    return `<label class="inv-rev-money${cls(r, k)}"><span class="inv-rev-ccy">${sym(r)}</span><input class="inv-rev-in" data-inv-rk="${k}" value="${escapeHtml(shown(r[k]))}" inputmode="decimal" autocomplete="off" placeholder="${ph}" style="width:${invFieldCh(shown(r[k]), ph)}ch"></label>`;
+  };
   const trade = (r) => ["holding", "buy", "sell"].includes(r.type);
+  // One line per row (owner's pick, 2026-10-10): the name in bold, the ticker
+  // muted, the exchange a link that opens the other listings. What the AI
+  // guessed is marked once, by the ✦ at the left, never by coloured text.
   const company = (r) => {
     if (!["holding", "buy", "sell", "dividend", "split"].includes(r.type)) return `<span class="inv-rev-muted">${escapeHtml(r.name || "Cash")}</span>`;
     if (!r.symbol) return `<input class="inv-rev-in m inv-rev-find" data-inv-rk="find" placeholder="Find ${escapeHtml(r.name || "the company")}" title="Type a name or ticker, then press Enter" spellcheck="false">`;
-    const opts = [{ symbol: r.symbol, name: r.name, exchange: r.exchange }, ...(r.alts || [])];
-    return `<span class="inv-rev-co${cls(r, "symbol")}"><b>${escapeHtml(shortName(r.name || r.symbol))}</b>
-      ${opts.length > 1 ? `<select data-inv-rk="symbol" aria-label="Listing">${opts.map(o => `<option value="${escapeHtml(o.symbol)}" ${o.symbol === r.symbol ? "selected" : ""}>${escapeHtml([o.symbol, o.exchange].filter(Boolean).join(" · "))}</option>`).join("")}</select>`
-        : `<span>${escapeHtml([r.symbol, r.exchange].filter(Boolean).join(" · "))}</span>`}</span>`;
+    const ex = escapeHtml(r.exchange || "Listing");
+    return `<span class="inv-rev-co"><b title="${escapeHtml(r.name || r.symbol)}">${escapeHtml(shortName(r.name || r.symbol))}</b><span class="inv-rev-tk">${escapeHtml(r.symbol)} ·</span>${(r.alts || []).length
+      ? `<button type="button" class="inv-rev-ex" data-inv-menu="listing" title="Other listings of this company"><span>${ex}</span>${INV_CARET}</button>`
+      : `<span class="inv-rev-tk">${ex}</span>`}</span>`;
   };
-  const since = (p.questions || []).find(q => q.id === "since");
+  // The left mark: ⚠ when the row needs the owner, ✦ when the AI guessed
+  // something; its tooltip says what, and where the row was read.
+  const GUESS_WORDS = { symbol: "the company", ccy: "the currency", date: "the date", qty: "the shares", price: "the price", type: "the type", amount: "the amount" };
+  const mark = (r) => {
+    const src = r.source ? ` (${r.source})` : "";
+    if (r.include && (r.problem || r.missing.length || r.checks.length || !invRowEntry(r))) return `<span class="inv-rev-mark warn" title="Needs you${escapeHtml(src)}">${INV_WARN}</span>`;
+    if (r.guessed.length) return `<span class="inv-rev-mark ai" title="${escapeHtml(`The AI's guess: ${[...new Set(r.guessed.map(g => GUESS_WORDS[g] || g))].join(", ")}${src}`)}">✦</span>`;
+    return `<span class="inv-rev-mark" title="${escapeHtml(r.source || "")}"></span>`;
+  };
+  const mixed = rows.some(r => r.type !== "holding");
   const body = rows.map(r => {
     const off = !r.include;
     const note = r.problem ? `<div class="inv-rev-note warn">${escapeHtml(r.problem.message)}
         ${r.problem.kind === "oversell" ? `<button type="button" class="inv-link" data-inv-rev-fix="hold">Add the ${invQty(r.problem.short)} shares as held before</button> ·` : ""}
         <button type="button" class="inv-link" data-inv-rev-fix="skip">Leave it out</button></div>`
       : r.checks.length ? `<div class="inv-rev-note">${escapeHtml(r.checks[0])}.
-        ${r.fix?.price != null ? `<button type="button" class="inv-link" data-inv-rev-fix="price">Use ${escapeHtml(String(r.fix.price))} (from the total)</button> ·` : ""}
+        ${r.fix?.price != null ? `<button type="button" class="inv-link" data-inv-rev-fix="price">${r.fix_label ? escapeHtml(r.fix_label) : `Use ${escapeHtml(String(r.fix.price))} (from the total)`}</button> ·` : ""}
         ${r.fix?.qty != null ? `<button type="button" class="inv-link" data-inv-rev-fix="qty">Add only the ${invQty(r.fix.qty)} more</button> ·` : ""}
         ${!r.include && r.book_qty != null ? `<button type="button" class="inv-link" data-inv-rev-fix="anyway">Add it anyway</button>`
-          : `<button type="button" class="inv-link" data-inv-rev-fix="keep">Keep it as shown</button>`}</div>` : "";
-    const dateCell = r.date || !(since && since.rows.includes(r.i))
-      ? `<input type="date" class="inv-rev-in${cls(r, "date")}" data-inv-rk="date" value="${escapeHtml(r.date || "")}" max="${invToday()}">`
-      : `<span class="inv-rev-muted">${m.answers.since === "pick" ? escapeHtml(fmtDateMDY(m.sinceDate)) : "Today"}</span>`;
+          : `<button type="button" class="inv-link" data-inv-rev-fix="keep">${r.fix_label ? "Use the pence reading" : "Keep it as shown"}</button>`}</div>` : "";
+    // Where the price comes from, when the exchange shown decided it (or
+    // Yahoo has no line there and another listing stands in).
+    // Only a stand-in's note earns a line ("Shown on Budapest; priced from
+    // …"): "On Xetra, as shown" is what the exchange link already says.
+    const venue = r.note && r.symbol && r.symbol === r.matched && !r.note.startsWith("On ") ? `<div class="inv-rev-note">${escapeHtml(r.note)}</div>` : "";
+    // Every row has its own buy date; performance counts from the oldest
+    // (no "Since when" question: owner, 2026-10-10). A holding the source
+    // gave no date starts today, shown quietly until the owner sets it.
+    const dv = r.date, dflt = r.date_default && dv;
+    const dateCell = `<button type="button" class="inv-rev-date${dflt ? " q" : ""}${!dv && r.include ? " m" : ""}" data-inv-date${dflt ? ` title="No buy date was shown, so it starts today. Pick when you bought it."` : ""}>${INV_CAL}<span>${dv ? invDayLabel(dv) : "Pick date"}</span></button>`;
+    const typeCell = `<button type="button" class="inv-rev-type${r.missing.includes("type") ? " m" : ""}" data-inv-menu="type">${escapeHtml((INV_REV_TYPES.find(t => t[0] === r.type) || [, "Type"])[1])}${INV_CARET}</button>`;
+    const span = mixed ? 8 : 7;
     return `<tr class="${off ? "off" : ""}" data-inv-ri="${r.i}">
-      <td><input type="checkbox" data-inv-rk="include" ${r.include ? "checked" : ""} aria-label="Include this row"></td>
+      <td class="inv-rev-chk"><input type="checkbox" data-inv-rk="include" ${r.include ? "checked" : ""} aria-label="Include this row"></td>
+      <td class="inv-rev-mk">${mark(r)}</td>
       <td>${dateCell}</td>
-      <td><select class="inv-rev-in${cls(r, "type")}" data-inv-rk="type">${INV_REV_TYPES.map(([k, l]) => `<option value="${k}" ${k === r.type ? "selected" : ""}>${l}</option>`).join("")}</select></td>
-      <td>${company(r)}</td>
+      ${mixed ? `<td>${typeCell}</td>` : ""}
+      <td class="inv-rev-cotd">${company(r)}</td>
       <td class="num">${trade(r) ? numIn(r, "qty") : r.type === "split" ? numIn(r, "ratio") : ""}</td>
-      <td class="num">${trade(r) ? `<span class="inv-rev-ccy">${sym(r)}</span>${numIn(r, "price")}` : ""}</td>
-      <td class="num">${trade(r) ? (invOk(+r.qty) && invOk(+r.price) && r.qty !== "" && r.price !== "" ? invNative(r.qty * r.price, r.ccy || "USD", false) : "") : ["dividend", "deposit", "withdrawal", "fee"].includes(r.type) ? `<span class="inv-rev-ccy">${sym(r)}</span>${numIn(r, "amount")}` : ""}</td>
-      <td class="inv-rev-src">${escapeHtml(r.source || "")}</td>
-    </tr>${note ? `<tr class="inv-rev-sub" data-inv-ri="${r.i}"><td></td><td colspan="7">${note}</td></tr>` : ""}`;
+      <td class="num">${trade(r) ? moneyIn(r, "price") : ""}</td>
+      <td class="num inv-rev-amt">${trade(r) ? (invOk(+r.qty) && invOk(+r.price) && r.qty !== "" && r.price !== "" ? invNative(r.qty * r.price, r.ccy || "USD", false) : "") : ["dividend", "deposit", "withdrawal", "fee"].includes(r.type) ? moneyIn(r, "amount") : ""}</td>
+    </tr>${note || venue ? `<tr class="inv-rev-sub" data-inv-ri="${r.i}"><td></td><td></td><td colspan="${span - 2}">${venue}${note}</td></tr>` : ""}`;
   }).join("");
   const ready = rows.filter(r => r.include && invRowEntry(r) && !r.problem).length;
   const waiting = rows.filter(r => r.include && (!invRowEntry(r) || r.problem)).length;
   const qs = (p.questions || []).map(q => `<div class="inv-rev-q"><span>${escapeHtml(q.text)}</span>
       ${q.options.map(o => `<button type="button" class="inv-chip${m.answers[q.id] === o.value ? " on" : ""}" data-inv-q="${escapeHtml(q.id)}" data-v="${escapeHtml(o.value)}">${escapeHtml(o.label)}</button>`).join("")}
-      ${q.id === "since" && m.answers.since === "pick" ? `<input type="date" class="inv-chip inv-chip-date on" data-inv-since value="${escapeHtml(m.sinceDate)}" max="${invToday()}">` : ""}
       ${q.hint ? `<em>${escapeHtml(q.hint)}</em>` : ""}</div>`).join("");
   const thumbs = m.files.filter(f => f.image).map((f, i) => `<a class="inv-rev-thumb" href="${f.url}" target="_blank" rel="noopener" title="${escapeHtml(f.name)}"><img src="${f.url}" alt="Image ${i + 1}"><span>Image ${i + 1}</span></a>`).join("");
   return `<div class="inv-review">
     <div class="inv-rev-head">
       <div><div class="inv-rev-kicker">Check before adding</div><h2 class="inv-rev-title">${escapeHtml(p.summary)}</h2></div>
-      <div class="inv-rev-legend"><span class="g">The AI's guess</span><span class="m">Needs you</span></div>
+      <div class="inv-rev-legend"><span><i class="inv-rev-mark ai">✦</i>The AI's guess</span><span><i class="inv-rev-mark warn">${INV_WARN}</i>Needs you</span></div>
     </div>
     ${thumbs ? `<div class="inv-rev-thumbs">${thumbs}</div>` : ""}
     ${p.unread?.length ? `<div class="inv-rev-unread" role="alert">Couldn't read ${p.unread.map(escapeHtml).join(", ")}, so ${p.unread.length > 1 ? "their" : "its"} entries aren't below. Try ${p.unread.length > 1 ? "them" : "it"} again on ${p.unread.length > 1 ? "their" : "its"} own.</div>` : ""}
     ${qs ? `<div class="inv-rev-qs">${qs}</div>` : ""}
     <div class="inv-tbl-wrap"><table class="inv-rev-tbl">
-      <thead><tr><th></th><th>Date</th><th>What</th><th>Company</th><th class="num">Shares</th><th class="num">Price</th><th class="num">Amount</th><th>From</th></tr></thead>
+      <thead><tr><th></th><th></th><th>Bought</th>${mixed ? "<th>Type</th>" : ""}<th>Company</th><th class="num">Shares</th><th class="num">Price</th><th class="num">Amount</th></tr></thead>
       <tbody>${body}</tbody></table></div>
     ${p.skipped?.length ? `<details class="inv-rev-skipped"><summary>Left out ${p.skipped.length} thing${p.skipped.length > 1 ? "s" : ""} that aren't entries</summary><ul>${p.skipped.map(s => `<li>${escapeHtml(s.replace(/^[:\s]+/, ""))}</li>`).join("")}</ul></details>` : ""}
     <div class="inv-rev-foot">
@@ -12573,12 +13042,27 @@ function invReviewClick(e) {
   const q = e.target.closest("[data-inv-q]"), fix = e.target.closest("[data-inv-rev-fix]");
   if (e.target.closest("[data-inv-rev-cancel]")) { for (const f of m.files) if (f.url) URL.revokeObjectURL(f.url); INV.imp = null; invRender(); return true; }
   if (e.target.closest("[data-inv-apply]")) { invApply(); return true; }
+  const menu = e.target.closest("[data-inv-menu]"), dbtn = e.target.closest("[data-inv-date]");
+  if ((menu || dbtn) && row) {
+    if (_invMenu?.anchor === (menu || dbtn)) { invMenuClose(); return true; }
+    // Closing an open menu may run a deferred redraw: find the button anew.
+    invMenuClose();
+    const line = document.querySelector(`.inv-review tr[data-inv-ri="${row.i}"]:not(.inv-rev-sub)`);
+    const a = line?.querySelector(menu ? `[data-inv-menu="${menu.dataset.invMenu}"]` : "[data-inv-date]");
+    if (!a) return true;
+    if (menu) invRowMenu(a, row, menu.dataset.invMenu);
+    else {
+      const prev = m.prop.items[m.prop.items.indexOf(row) - 1], pd = prev?.date;
+      invDatePick(a, row.date || "", (iso) => invRowSet(row, "date", iso), pd ? { label: "Same as above", iso: pd } : null);
+    }
+    return true;
+  }
   if (q) {
     m.answers[q.dataset.invQ] = q.dataset.v;
     if (q.dataset.invQ.startsWith("listing-")) {
       const r = m.prop.items.find(x => `listing-${x.i}` === q.dataset.invQ);
       const alt = r && [{ symbol: r.symbol, name: r.name, exchange: r.exchange }, ...r.alts].find(a => a.symbol === q.dataset.v);
-      if (alt) Object.assign(r, alt, { guessed: r.guessed.filter(g => g !== "symbol"), corrected: true });
+      if (alt) { const { ccy, ...rest } = alt; Object.assign(r, rest, { listing_ccy: ccy ?? r.listing_ccy, guessed: r.guessed.filter(g => g !== "symbol"), corrected: true }); }
     }
     invRecheck(); invRender(); return true;
   }
@@ -12603,6 +13087,9 @@ function invReviewClick(e) {
   return false;
 }
 
+/* A money field's width in ch: its text (or placeholder), plus a little room. */
+const invFieldCh = (v, ph) => Math.max(String(v ?? "").length || String(ph).length, 2) + 0.5;
+
 function invReviewInput(t) {
   const m = invImp(), tr = t.closest("[data-inv-ri]"), k = t.dataset.invRk;
   const row = tr && m.prop?.items.find(r => r.i === +tr.dataset.invRi);
@@ -12619,32 +13106,145 @@ function invReviewInput(t) {
     }).catch(() => {});
     return;
   }
-  if (k === "include") row.include = t.checked;
-  else if (k === "symbol") {
-    const alt = [{ symbol: row.symbol, name: row.name, exchange: row.exchange }, ...row.alts].find(a => a.symbol === t.value);
+  invRowSet(row, k, k === "include" ? t.checked : t.value, false);
+}
+
+/* --- the review's menus: listing, type, and the buy-date picker -----------
+ * Drawn by the app, not native <select>/<input type=date>: the desktop
+ * shell painted those with black highlights, and a date is entered fastest
+ * as year, then month, then day (owner, 2026-10-10). One floating menu at a
+ * time; a click outside, Esc or a redraw closes it. */
+const INV_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const invDayLabel = (iso) => iso === invToday() ? "Today" : `${+iso.slice(8, 10)} ${INV_MON[+iso.slice(5, 7) - 1]} ${iso.slice(0, 4)}`;
+let _invMenu = null;
+function invMenuClose() {
+  if (!_invMenu) return;
+  const pending = _invMenu.pending;
+  _invMenu.anchor.classList.remove("open");
+  _invMenu.el.remove();
+  document.removeEventListener("mousedown", _invMenu.away, true);
+  document.removeEventListener("keydown", _invMenu.esc, true);
+  window.removeEventListener("scroll", _invMenu.away, true);
+  _invMenu = null;
+  if (pending) invRender();
+}
+function invMenuOpen(anchor, cls, onClick) {
+  const again = _invMenu?.anchor === anchor;
+  invMenuClose();
+  // A second click on the same button closes it; a deferred redraw may just
+  // have replaced the button clicked.
+  if (again || !anchor.isConnected) return null;
+  const el = document.createElement("div");
+  el.className = "inv-menu " + cls;
+  el.setAttribute("role", "menu");
+  document.body.appendChild(el);
+  anchor.classList.add("open");
+  const away = (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) invMenuClose(); };
+  const esc = (e) => { if (e.key === "Escape") { e.stopPropagation(); invMenuClose(); } };
+  el.addEventListener("click", (e) => { e.stopPropagation(); onClick(e); });
+  document.addEventListener("mousedown", away, true);
+  document.addEventListener("keydown", esc, true);
+  window.addEventListener("scroll", away, true);
+  _invMenu = { el, anchor, away, esc };
+  return el;
+}
+/* Below the anchor, or above it when there is no room; kept on screen. */
+function invMenuPlace(el, anchor) {
+  const a = anchor.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
+  el.style.left = Math.max(8, Math.min(a.left, window.innerWidth - w - 8)) + "px";
+  el.style.top = (a.bottom + 4 + h > window.innerHeight - 8 && a.top - 4 - h > 8 ? a.top - 4 - h : a.bottom + 4) + "px";
+}
+
+function invRowMenu(anchor, row, kind) {
+  const opts = kind === "listing"
+    ? [{ symbol: row.symbol, exchange: row.exchange, ccy: row.listing_ccy }, ...(row.alts || [])]
+        .map(o => ({ v: o.symbol, html: `<b>${escapeHtml(o.symbol)}</b><span>${escapeHtml([o.exchange, o.ccy].filter(Boolean).join(" · "))}</span>`, on: o.symbol === row.symbol }))
+    : INV_REV_TYPES.map(([k, l]) => ({ v: k, html: `<b>${l}</b>`, on: k === row.type }));
+  const el = invMenuOpen(anchor, "inv-menu-list", (e) => {
+    const it = e.target.closest("[data-v]");
+    if (!it) return;
+    invMenuClose();
+    if (it.dataset.v !== (kind === "listing" ? row.symbol : row.type)) invRowSet(row, kind === "listing" ? "symbol" : "type", it.dataset.v);
+  });
+  if (!el) return;
+  el.innerHTML = opts.map(o => `<button type="button" role="menuitem" class="inv-menu-it${o.on ? " on" : ""}" data-v="${escapeHtml(o.v)}"><i>${o.on ? "✓" : ""}</i>${o.html}</button>`).join("");
+  invMenuPlace(el, anchor);
+}
+
+/* Year, then month, then day. `extra` is an optional shortcut
+ * ({label, iso}: "Same as above"); every pick closes the picker. */
+function invDatePick(anchor, cur, onPick, extra = null) {
+  const today = invToday(), ty = +today.slice(0, 4), tm = +today.slice(5, 7) - 1, td = +today.slice(8, 10);
+  const st = { y: null, m: null, from: ty };
+  const el = invMenuOpen(anchor, "inv-menu-date", (e) => {
+    const b = e.target.closest("button");
+    if (!b || b.disabled) return;
+    const d = b.dataset;
+    if (d.pick) { invMenuClose(); onPick(d.pick); return; }
+    if (d.y) st.y = +d.y;
+    else if (d.m) st.m = +d.m;
+    else if (d.day) { invMenuClose(); onPick(`${st.y}-${String(st.m + 1).padStart(2, "0")}-${String(+d.day).padStart(2, "0")}`); return; }
+    else if (d.back === "y") { st.y = null; st.m = null; }
+    else if (d.back === "m") st.m = null;
+    else if (d.page) st.from += +d.page;
+    draw();
+  });
+  if (!el) return;
+  const iso = (y, m, dd) => `${y}-${String(m + 1).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+  function draw() {
+    const crumbs = [`<button type="button" class="inv-dp-crumb${st.y == null ? " on" : ""}" data-back="y">${st.y ?? "Year"}</button>`];
+    if (st.y != null) crumbs.push(`<button type="button" class="inv-dp-crumb${st.m == null ? " on" : ""}" data-back="m">${st.m != null ? INV_MON[st.m] : "Month"}</button>`);
+    if (st.m != null) crumbs.push('<span class="inv-dp-crumb on">Day</span>');
+    let grid;
+    if (st.y == null) {
+      const ys = Array.from({ length: 12 }, (_, i) => st.from - i);
+      grid = `<div class="inv-dp-grid c4">${ys.map(y => `<button type="button" data-y="${y}"${y > ty ? " disabled" : ""} class="${cur.startsWith(y + "-") ? "cur" : ""}">${y}</button>`).join("")}</div>
+        <div class="inv-dp-pager"><button type="button" data-page="12"${st.from >= ty ? " disabled" : ""}>Later</button><button type="button" data-page="-12">Earlier</button></div>`;
+    } else if (st.m == null) {
+      grid = `<div class="inv-dp-grid c4">${INV_MON.map((n, i) => `<button type="button" data-m="${i}"${st.y === ty && i > tm ? " disabled" : ""} class="${cur.startsWith(iso(st.y, i, 1).slice(0, 8)) ? "cur" : ""}">${n}</button>`).join("")}</div>`;
+    } else {
+      const n = new Date(st.y, st.m + 1, 0).getDate(), lead = (new Date(st.y, st.m, 1).getDay() + 6) % 7;
+      const future = (dd) => st.y === ty && st.m === tm && dd > td;
+      grid = `<div class="inv-dp-grid c7 inv-dp-dow">${["M", "T", "W", "T", "F", "S", "S"].map(x => `<span>${x}</span>`).join("")}</div>
+        <div class="inv-dp-grid c7">${"<span></span>".repeat(lead)}${Array.from({ length: n }, (_, i) => i + 1).map(dd => `<button type="button" data-day="${dd}"${future(dd) ? " disabled" : ""} class="${cur === iso(st.y, st.m, dd) ? "cur" : ""}">${dd}</button>`).join("")}</div>
+        <button type="button" class="inv-dp-wide" data-pick="${iso(st.y, st.m, 1)}">Don't know the day: use the 1st</button>`;
+    }
+    el.innerHTML = `<div class="inv-dp-head">${crumbs.join('<span class="inv-dp-sep">›</span>')}</div>${grid}
+      <div class="inv-dp-quick"><button type="button" data-pick="${today}">Today</button>${extra ? `<button type="button" data-pick="${escapeHtml(extra.iso)}">${escapeHtml(extra.label)} (${escapeHtml(invDayLabel(extra.iso))})</button>` : ""}</div>`;
+    invMenuPlace(el, anchor);
+  }
+  draw();
+}
+
+/* One edit to a review row, from an input or one of the row's menus. */
+function invRowSet(row, k, value, redraw = true) {
+  if (k === "include") { row.include = value; invRecheck(); invRender(); return; }
+  if (k === "symbol") {
+    const alt = [{ symbol: row.symbol, name: row.name, exchange: row.exchange, ccy: row.listing_ccy }, ...row.alts].find(a => a.symbol === value);
     if (alt) {
-      const old = { symbol: row.symbol, name: row.name, exchange: row.exchange };
+      const old = { symbol: row.symbol, name: row.name, exchange: row.exchange, ccy: row.listing_ccy };
       // A listing the owner picked is remembered for this name on Apply.
-      Object.assign(row, alt, { corrected: true });
+      // (Its currency is the listing's, kept apart from the row's own ccy.)
+      const { ccy, ...rest } = alt;
+      Object.assign(row, rest, { listing_ccy: ccy, corrected: true });
       row.alts = [old, ...row.alts.filter(a => a.symbol !== alt.symbol)];
     }
   } else if (["qty", "price", "amount", "ratio"].includes(k)) {
     // Not a number (a stray letter) stays "needed", never a silent NaN.
-    const x = Number(t.value.replace(/,/g, "").trim());
-    row[k] = t.value.trim() !== "" && Number.isFinite(x) ? x : null;
-  } else row[k] = t.value;
+    const x = Number(String(value).replace(/,/g, "").trim());
+    row[k] = String(value).trim() !== "" && Number.isFinite(x) ? x : null;
+  } else row[k] = value;
+  if (k === "date") row.date_default = false;  // the owner's own buy date
   // What the owner typed is theirs: no longer a guess; an emptied cell is
   // needed again (amber), a filled one no longer is.
   row.guessed = row.guessed.filter(g => g !== k);
-  if (k !== "include") {
-    if (row[k] != null && row[k] !== "") row.missing = row.missing.filter(x => x !== k);
-    else if (!row.missing.includes(k)) row.missing.push(k);
-  }
+  if (row[k] != null && row[k] !== "") row.missing = row.missing.filter(x => x !== k);
+  else if (!row.missing.includes(k)) row.missing.push(k);
   if (k === "price") { row.checks = []; row.fix = null; }
   invRecheck();
   // A plain number edit doesn't redraw the table (tabbing on would lose its
   // focus), so only the Apply button shows the pending check.
-  if (["type", "symbol", "include"].includes(k) || t.type === "date" || row[k] == null) invRender();
+  if (["type", "symbol", "date"].includes(k) || redraw || row[k] == null) invRender();
   else {
     const btn = document.querySelector("[data-inv-apply]");
     if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
@@ -12653,11 +13253,17 @@ function invReviewInput(t) {
 
 document.addEventListener("change", (e) => {
   if (e.target.closest?.(".inv-review") && e.target.dataset.invRk) invReviewInput(e.target);
-  else if (e.target.matches?.("[data-inv-since]")) { invImp().sinceDate = e.target.value; invRecheck(); invRender(); }
   else if (e.target.id === "inv-file") { invAddFiles([...e.target.files]); e.target.value = ""; }
 });
 document.addEventListener("input", (e) => {
-  if (e.target.matches?.("[data-inv-comp-text]")) invImp().text = e.target.value;
+  if (e.target.matches?.("[data-inv-comp-text]")) { invImp().text = e.target.value; invCompFit(e.target); }
+  else if (e.target.matches?.(".inv-rev-money input")) e.target.style.width = invFieldCh(e.target.value, e.target.placeholder) + "ch";
+});
+document.addEventListener("keydown", (e) => {
+  // Enter sends, as in a chat; Shift+Enter (or an IME composing) is a new line.
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing || !e.target.matches?.("[data-inv-comp-text]")) return;
+  e.preventDefault();
+  invRead();
 });
 document.addEventListener("paste", (e) => {
   if (!e.target.closest?.(".inv-composer")) return;
@@ -12674,15 +13280,16 @@ for (const ev of ["dragover", "drop"]) document.addEventListener(ev, (e) => {
   if (ev === "drop") invAddFiles([...e.dataTransfer.files]);
 });
 document.addEventListener("dragleave", (e) => { if (!e.relatedTarget) document.querySelector(".inv-composer")?.classList.remove("over"); });
-function invAttach() {
+function invAttach(accept) {
   let input = $("#inv-file");
-  if (!input) { input = document.createElement("input"); input.type = "file"; input.id = "inv-file"; input.multiple = true; input.accept = INV_IMP_ACCEPT; input.hidden = true; document.body.appendChild(input); }
+  if (!input) { input = document.createElement("input"); input.type = "file"; input.id = "inv-file"; input.multiple = true; input.hidden = true; document.body.appendChild(input); }
+  input.accept = accept || INV_IMP_ACCEPT;
   input.click();
 }
 function invComposerClick(e) {
-  if (!e.target.closest(".inv-composer")) return false;
-  const rm = e.target.closest("[data-inv-unfile]");
-  if (e.target.closest("[data-inv-attach]")) invAttach();
+  if (!e.target.closest(".inv-comp-wrap")) return false;
+  const rm = e.target.closest("[data-inv-unfile]"), att = e.target.closest("[data-inv-attach]");
+  if (att) invAttach(att.dataset.accept);
   else if (e.target.closest("[data-inv-read]")) invRead();
   else if (rm) { const m = invImp(), [f] = m.files.splice(+rm.dataset.invUnfile, 1); if (f?.url) URL.revokeObjectURL(f.url); invComposerRefresh(); }
   else return false;
@@ -12754,8 +13361,9 @@ async function invPriceFill(form) {
 
 /* --- mutations ---------------------------------------------------------- */
 async function invPost(path, body) {
+  INV.seq++;  // a change's answer supersedes any load still in flight
   const r = await fetch("/api/investments/" + path, { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ base_rev: INV.book?.rev ?? 0, ...body }) });
+    body: JSON.stringify({ base_rev: INV.book?.rev ?? 0, ccy: FX_QUOTE, ...body }) });
   let d = {};
   try { d = await r.json(); } catch (e) { /* non-JSON error */ }
   if (!r.ok) throw new Error(d.message || "Couldn't save that. Try again in a moment.");
@@ -12877,27 +13485,64 @@ $("#inv-page").addEventListener("click", (e) => {
   } else if (m) {
     // Only the chart depends on the mode, so only the chart is redrawn.
     INV.mode = m.dataset.invMode;
+    try { localStorage.setItem("inv_mode", INV.mode); } catch (e2) {}
     for (const btn of document.querySelectorAll("#inv-page [data-inv-mode]")) {
       btn.classList.toggle("active", btn === m);
       btn.setAttribute("aria-pressed", String(btn === m));
     }
     drawInvChart();
+  } else if (e.target.closest("[data-inv-sort]")) {
+    invSortClick(e.target.closest("[data-inv-sort]").dataset.invSort);
   } else if (p) {
     INV.period = p.dataset.invPeriod;
     try { localStorage.setItem("inv_period", INV.period); } catch (e2) {}
     invRender();
   }
 });
+/* Your order: drag a holding's row (only while no column sorts). */
+$("#inv-page").addEventListener("dragstart", (e) => {
+  const tr = e.target.closest?.("#inv-tbl tr[data-inv-sym]");
+  if (!tr) return;
+  INV.dragSym = tr.dataset.invSym;
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", INV.dragSym);
+  tr.classList.add("dragging");
+});
+$("#inv-page").addEventListener("dragover", (e) => {
+  const tr = INV.dragSym && e.target.closest?.("#inv-tbl tbody tr");
+  if (!tr) return;
+  e.preventDefault();
+  document.querySelectorAll("#inv-tbl .drop-before").forEach(r => r.classList.remove("drop-before"));
+  tr.classList.add("drop-before");
+});
+$("#inv-page").addEventListener("drop", (e) => {
+  const tr = INV.dragSym && e.target.closest?.("#inv-tbl tbody tr");
+  if (!tr) return;
+  e.preventDefault();
+  const sym = INV.dragSym; INV.dragSym = null;
+  // Dropped on the cash row: to the end.
+  if (tr.dataset.invSym !== sym) invMoveRow(sym, tr.dataset.invSym || null);
+  else invRender();
+});
+$("#inv-page").addEventListener("dragend", () => {
+  INV.dragSym = null;
+  document.querySelectorAll("#inv-tbl .dragging, #inv-tbl .drop-before").forEach(r => r.classList.remove("dragging", "drop-before"));
+});
 $("#inv-btn").onclick = () => { showPage("investments"); invLoad(); };
 window.addEventListener("resize", () => drawInvChart());
 try { const p = localStorage.getItem("inv_period"); if (INV_PERIODS.includes(p)) INV.period = p; } catch (e) {}
+try { const m = localStorage.getItem("inv_mode"); if (m === "value" || m === "return") INV.mode = m; } catch (e) {}
 try { if (localStorage.getItem("inv_rail") === "activity") INV.rail = "activity"; } catch (e) {}
 
 setTheme(readTheme());
-fxInit();
-renderHeader();
-setupSettings();
-setupTapeFullscreen();
-loadAllAtStartup();
-loadAppVersion();
-try { if (localStorage.getItem("page") === "investments") $("#inv-btn").click(); } catch (e) {}
+(async () => {
+  // A local request; the cap only guards a server busy importing at launch.
+  APP_PREFS = await Promise.race([BOOT_PREFS, new Promise(r => setTimeout(() => r({}), 1500))]);
+  fxInit();
+  renderHeader();
+  setupSettings();
+  setupTapeFullscreen();
+  loadAllAtStartup();
+  loadAppVersion();
+  try { if (localStorage.getItem("page") === "investments") $("#inv-btn").click(); } catch (e) {}
+})();

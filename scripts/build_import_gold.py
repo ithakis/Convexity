@@ -73,6 +73,9 @@ def main() -> None:
     # minimum width, and a fluid page laid out wider loses its right column.
     shot(SRC / "activity.html", GOLD / "activity.png", 393, 640, 3)
     shot(SRC / "holdings.html", GOLD / "holdings.png", 393, 560, 3)
+    # A broker positions table: tickers with the exchange in small grey
+    # beside them, no currency shown (an IBKR-style positions screen).
+    shot(SRC / "positions.html", GOLD / "positions.png", 393, 520, 3)
     pdf(SRC / "statement.html", GOLD / "statement.pdf")
     # A scanned statement: the page as a picture inside a PDF, no text layer.
     with tempfile.TemporaryDirectory() as tmp:

@@ -19,12 +19,25 @@ not reintroduce one; the engines answer different questions.
 | Window | the user's 3/7/14/30D | always 7 days |
 
 *Fetch and cache (`news_sentiment.py`).*
-- Finnhub `/company-news` + yfinance `tk.news`, merged and deduplicated with
+- Finnhub `/company-news` for the company's US line (`symbol_db.us_line`:
+  TTE for TTE.PA; the free plan answers 403 to every other listing, so a
+  company with none skips Finnhub — see backend.md, Finnhub supplemental
+  columns) + yfinance `get_news`, merged and deduplicated with
   the title dedup in `relevance.py` (rapidfuzz `token_set_ratio`); the
   syndication count survives as `n_duplicates` and every article gets a stable
   `aid` (md5 of url, else normalised title) that lens reads link back to. The
   retained set is `relevance.window_sample(60, min_recent=15)` — a
   window-spanning sample, not newest-N.
+- **yfinance `get_news` returns `[]` for every ticker** (2026-10-11, yfinance
+  1.7.0: Yahoo's `xhr/ncp` answers 404, KO included). `_yf_search_news` then
+  takes Yahoo's search-box news, keeping only items tagged with the ticker
+  (`relatedTickers`): it covers US lines and returns nothing for European
+  ones, so when the ticker finds nothing the company's name is searched
+  (`_company_query`: `symbol_db.name_key`, stocks only), keeping items tagged
+  with any listing of its pack group or its US line (Engie 23 of 25, Repsol
+  39 of 40 tagged; most are older than a week). Cache keys, history and the Market read stay on the row's own symbol,
+  and relevance ranks by the row's company name, so an ADR's feed (general
+  sector stories included) is read as the company's.
 - `_NEWS_CACHE` / `_SENTIMENT_CACHE` (30-day TTL, 1800 s negative, transient
   failures never cached) are disk-backed in `<data>/state/news.json`
   (format v3, which also persists the LLM status). Sentiment entries without a

@@ -66,7 +66,9 @@ def run_case(case: dict) -> tuple[bool, list[str], float]:
             if exc.status != 503 or attempt == 2:
                 return False, [f"refused: {exc.message}"], time.time() - t0
             time.sleep(8)
-    got = list(out["items"])
+    # A holding the source gave no date starts today as a default
+    # (``date_default``): for the gold set that is still "no date read".
+    got = [g | {"date": ""} if g.get("date_default") else g for g in out["items"]]
     notes = []
     for want in case["rows"]:
         match = next((g for g in got if _key(g) == _key(want)), None)

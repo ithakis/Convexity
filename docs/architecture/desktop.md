@@ -198,6 +198,21 @@ install): `CONVEXITY_SOURCE` (local checkout or archive URL; `-Source`),
 
 ### Gotchas discovered during implementation
 
+- **Qt 6's default web profile is off-the-record** (found 2026-10-11): the
+  window kept no localStorage between launches, so every per-window choice
+  (My Investments' sort and row order, chart period, hidden line, theme) was
+  forgotten at each start; no Convexity QtWebEngine folder existed on disk.
+  `_persistent_profile()` gives the page a named profile stored in
+  `<data folder>/webengine/` (cache in `webengine/cache/`). **Its path must
+  be absolute**: a relative one was silently not used (measured). Chromium
+  commits localStorage on its own timer, 3 to 8 s after a change, and
+  deleting the page and profile before `os._exit(0)` does not flush it
+  (measured, single-process): a change made in the last seconds before ⌘Q
+  can be lost. Anything that must never be lost lives on the server
+  (`state/prefs.json`: the default currency, the benchmark). The app's
+  responses are `no-store`, so the disk cache never serves an old `app.js`
+  after an update.
+
 - **`ThreadingHTTPServer.daemon_threads` defaults to `False`.** Without
   `start_server()` setting it `True`, a per-connection handler thread stuck
   on a long-lived request can block process exit indefinitely even after

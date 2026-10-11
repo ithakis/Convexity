@@ -53,6 +53,7 @@ POST_PATHS = [
     "/api/investments/entries/delete",
     "/api/investments/undo",
     "/api/investments/redo",
+    "/api/prefs",
     "/api/no-such-route",
 ]
 DELETE_PATHS = [
@@ -200,6 +201,19 @@ def test_same_origin_requests_still_work(srv):
         )[0]
         == 404
     )
+
+
+def test_prefs_route_saves_only_allowed_values(srv):
+    """Settings -> Default currency and My Investments' benchmark."""
+    same = {"Content-Type": "application/json", "Origin": srv}
+    body = json.dumps({"default_ccy": "EUR", "inv_benchmark": "nope", "x": 1}).encode()
+    code, out = _req(srv, "POST", "/api/prefs", same, body)
+    assert code == 200 and json.loads(out) == {"default_ccy": "EUR"}
+    code, out = _req(srv, "GET", "/api/prefs")
+    assert code == 200 and json.loads(out) == {"default_ccy": "EUR"}
+    _req(srv, "POST", "/api/prefs", {"Content-Type": "text/plain"}, b'{"default_ccy": "JPY"}')
+    assert persistence.load_prefs() == {"default_ccy": "EUR"}
+    persistence.save_prefs({"default_ccy": None})
 
 
 def test_every_frontend_post_sends_json():

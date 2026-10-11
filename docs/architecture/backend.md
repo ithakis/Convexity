@@ -76,6 +76,15 @@ Two separate JSON files (in `<data>/state/`) because they evolve independently:
   flag + which view to restore on next launch. The `__current__` key is
   the ad-hoc / unsaved tab.
 
+**`prefs.json`** (`persistence.load_prefs` / `save_prefs`, 2026-10-11) holds
+the settings that must outlive the page: `default_ccy` (Settings → General,
+the currency the app opens in) and `inv_benchmark` (My Investments' "vs"
+menu, a key of `investments.INV_BENCHMARKS`). The browser's storage is per
+origin (port), and the desktop window's was wiped on every launch (desktop.md),
+so neither could live there. Allow-listed keys and values only; anything else
+in the file or a request is dropped, a malformed file reads as `{}`, and a key
+sent as null is removed.
+
 Renaming a portfolio touches BOTH files (`rename_watchlist` +
 `rename_view`) — see `/api/portfolio/rename` handler. Failure on the
 view side rolls back the watchlist rename.
@@ -232,9 +241,35 @@ if you run the app from a different directory, put it in the data folder's
 TTLs (3600/1800/3600s), and each call is individually try/excepted so a
 failing endpoint never breaks a row. Cold build = up to 2 calls/symbol
 (within Finnhub's 60/min free budget at 5 workers); warm build = zero.
-Non-US tickers return empty data silently; only HTTP 429 logs one line.
+Only HTTP 429 logs one line.
 The columns are `Rec Δ6M` and `MSPR` (Fundamentals preset). The third
 Finnhub-style column, `EPS Surp.`, is now yfinance-sourced (see above).
+
+**Finnhub's free plan covers US listings only (checked 2026-10-11).** Every
+other ticker (REP.MC, TTE.PA, CCC3.DE…) answers HTTP 403 on recommendation,
+insider-sentiment and company-news alike, while the same company's US line
+answers: its home (KO for CCC3.DE), an ADR (TTE, NVO, SAP) or an OTC ADR
+(REPYY, BNPQY). So every Finnhub call is made for `symbol_db.us_line(symbol)`
+(through `finnhub_adapter.finnhub_symbol`, which also spells BRK-B as
+BRK.B): the company group's US listings in the symbol pack, home first, then
+exchange lines before OTC, then the busiest. It reads only the pack, so it is
+safe in `fetch_one`. A company the pack has no US line for (SCGLY, Société
+Générale's ADR, is missing from Yahoo's screener) is looked up by name with
+Yahoo's Lookup by `symbol_db.discover_us_line`, a network call made only from
+the news refresh; the answer, a miss too, is kept for the process and the
+table uses it from the next build. With no US line Finnhub is not asked at
+all, and a 403 is negative-cached like an empty answer (it used to be
+retried on every build: three wasted calls per European row).
+- **Rec:** Finnhub answers an ADR with the company's worldwide consensus (TTE
+  comes back as TTE.PA). With no US line, or no answer, the trend is Yahoo's
+  for the row's own listing — the `tk.recommendations` frame `fetch_one`
+  already reads for `rating_dist`, so no extra request (PHIL.MI). The row
+  carries `rec_src` ({source, via}) and `us_line` for the tooltips. Both
+  sources now return four months, so the column's Δ spans three.
+- **MSPR** is built from SEC Form 4, which only US companies file: a US
+  company's German line gets it through its home (CCC3.DE via KO), a foreign
+  company never does, ADR or not (EU insider dealings are published regulator
+  by regulator; there is no free feed). The n/a cell says why.
 
 ### Analytics (`/api/portfolio-analytics-multi`)
 `analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
@@ -353,7 +388,8 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/views`                     — list of saved views (metadata only)
 - `/api/views/<name>`              — full view payload (rows included)
 - `/api/watchlists`                — `{name: entries_string}` map
-- `/api/investments`               — My Investments page payload (`investments.book()`), computed by replaying the ledger. Never writes the book file. See "My Investments" below
+- `/api/investments`               — My Investments page payload (`investments.book(ccy)`, `?ccy=` the display currency; the benchmark comes from `prefs.json`), computed by replaying the ledger. Never writes the book file. See "My Investments" below
+- `/api/prefs`                     — the saved preferences (`persistence.load_prefs`), allow-listed
 - `/api/investments/symbols`       — open positions only, no network (the Portfolio tab's pinned book pill)
 - `/api/investments/lookup?q=…`    — company typeahead for the Add popover (symbol pack)
 - `/api/investments/price?symbol=…&date=…` — that day's close as traded (Yahoo's split adjustment undone), for the price auto-fill
@@ -367,6 +403,7 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/quotes-stream` (preferred) — NDJSON streaming, the fast path
 - `/api/search`                    — company search `{q}` or `{query}` (an edited chip set), `{offset}` — §6
 - `/api/watchlists`                — upsert `{name, entries}`
+- `/api/prefs`                     — merge `{default_ccy?, inv_benchmark?}` into `prefs.json` (null removes a key); answers what is saved
 - `/api/investments/entries`, `…/entries/update`, `…/entries/delete`, `…/undo`, `…/redo` — change the real book; body carries `base_rev`. Answer the new page payload, or `{error, message}`: 400 bad input, 409 stale rev or a damaged file, 422 a change the ledger refuses
 - `/api/investments/import`         — read `{text, files: [{name, type, data(base64)}]}` into rows to review (`importer.read`); writes nothing. 409 when there is no NVIDIA key, 503 when NIM didn't answer
 - `/api/investments/import/check`   — dry run `{entries}` against the book: `{problems: {row: {kind, message, short?}}}`; writes nothing
@@ -431,8 +468,9 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
   their date; Yahoo dates a split on its ex-date, so "after" is strict).
   Same-day order: deposit, dividend, sell, buy, fee, withdrawal, so a buy
   and a sell of the same share on one day books the sell first and is refused
-  if nothing was held. `twr`/`mwr` are there for the acceptance test; Phase 3
-  feeds them daily closes.
+  if nothing was held. TWR is `twr_index` (a running index) and MWR is
+  `period_mwr` (XIRR solved per period length); the acceptance test and the
+  page's daily points both use them (below).
 - **`investments.py` owns `state/investments.json`.** One lock around every
   read-modify-write; an atomic write after copying the old file to `.bak`; a
   malformed or newer-schema file is **never overwritten** (409, the page
@@ -450,14 +488,101 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
   entry to another company drops the old currency and FX rate. A book file
   whose entries lack a date, a known type or a symbol is unreadable (409),
   never a 500.
-- **Known gap until Phase 3:** "This month" values month-start holdings at
-  `_bulk_close`'s dividend-adjusted close, so in a month with an ex-dividend
-  date a recorded dividend is counted twice (small). Phase 3's as-traded
-  daily closes remove it.
-- Network calls sit in small functions (`_closes`, `_fx_series`, `_fx_now`,
-  `_fetch_splits`, `_fetch_quote_ccy`) that the tests stub.
-- Until Phase 3 the payload leaves `twr`, `bench_twr`, `mwr_ann` as null and
-  sends no `series`; the page shows calm gaps.
+- Network calls sit in small functions (`_closes`, `_bench_closes`,
+  `_dividends`, `_fx_mult`, `_fx_now`, `_fetch_splits`,
+  `_fetch_quote_ccy`) that the tests stub.
+
+### My Investments performance (Phase 3: `investments._performance`)
+- **Value the book with as-traded closes**: `_bulk_close(symbols, period,
+  adjusted=False)` (one path with the adjusted closes, its own cache key). The book books dividends
+  as cash, so a dividend-adjusted close would count each one twice. Yahoo's
+  `auto_adjust=False` close is still split-adjusted, which matches the
+  ledger's quantities in today's shares. The raw closes have their own cache
+  key (`|raw`) and store no bars. The dividends that come with them (per
+  current share, quote unit: pence for LSE) go to `cache._DIVIDENDS_CACHE`
+  (`analytics.dividends_cached`). The default `_bulk_close` path is unchanged
+  (a test pins its exact `yf.download` call). **The S&P 500 benchmark stays
+  total return** (SPY, the adjusted path).
+- **The daily series.** The calendar is every weekday from the one before
+  the first entry (a zero day, so ALL includes day one) to today, plus any
+  weekend entry dates. Closes are forward-filled. Before a share's first
+  close, its last trade price is used (`ledger.trade_prices`, per current
+  share). FX is `fx.fx_multipliers` (Yahoo's `ccyUSD=X` history crossed
+  through USD, first rate before the history starts; today's spot with a
+  warning when there is none). It is the only FX path: the replays' `fx_at`
+  (`_make_fx_at`) reads it once per currency over the ledger's own dates. TWR follows Appendix B, r = (V + W)/(V₋₁ + D)
+  − 1, as a running index (`ledger.twr_index`). Every period figure is a
+  ratio of two of its points, at the server's `period_starts` base.
+- **Two replays, one currency.** The page asks for its display currency
+  (`book(ccy)`, `?ccy=` / a POST's `ccy`; unknown codes fall back to the
+  base, and so does a display currency Yahoo has no rates for, with a
+  warning: the book isn't broken). The replay in the book's base currency gives cash, deposits and
+  withdrawals, converted at each day's rate, so uninvested cash moves with
+  its currency. A replay in the display currency (entries' own `fx_rate`
+  carried over by `_rebase_fx`) gives each holding's cost, realised profit,
+  dividends and price/FX split at its own days' rates. Their difference is
+  `headline.cash_fx` ("Currency on cash" in the profit card); it is 0 when
+  the display currency is the base.
+- **Opening holdings** (`ledger.is_opening`: a quick-add, `source: "quick"`,
+  or an imported current holding, `opening: true`; also `source: "import"`
+  with `qty_basis: "current"`, because Apply dropped the flag until
+  2026-10-11 — `_clean` copies only `_FIELDS`, so `opening` is read from the
+  page's fields) start their performance
+  at that day's market value. `Day.openings` lets the series swap cost for
+  value in the day's inflow, so the gap from the average price stays in
+  lifetime Total profit and never becomes a one-day return.
+- **Estimated dividends** (`ledger.estimate_dividends`). Each Yahoo payout
+  with no recorded dividend of that share from 5 days before to 45 days
+  after its ex-date is estimated as shares held at the previous close × the
+  amount (gross). Matching is one to one, nearest first, preferring a
+  recorded dividend after the ex-date, so a monthly payer is matched payout
+  by payout and a recorded dividend always replaces its estimate. Estimates
+  count **as paid out**: an outflow on the ex-date for TWR and MWR, a
+  "Dividends, estimated" row in Total profit, never Value or Cash. The rail
+  says when there are any.
+- **The benchmark** (owner, 2026-10-11: as on Portfolios, plus MSCI World)
+  is `INV_BENCHMARKS[bench_key()]`: SPY, QQQ, SXRT.DE (Euro Stoxx 50),
+  1321.T (Nikkei 225), 069500.KS (KOSPI 200) or URTH (MSCI World). Each is a
+  **fund**, so its adjusted close carries the dividends; Yahoo's ^STOXX50E,
+  ^N225 and ^KS11 are price indices that would flatter the book by their
+  yield. It is priced in its own currency, converted day by day
+  (`mult[bench ccy]`), and `bench_vol` is its volatility on the same trading
+  days (the Volatility card). The pick is read from `prefs.json` by
+  `book()`, so every route that answers the payload uses it. The book file's
+  own `settings.benchmark` is unused.
+- **The benchmark line, one per period** (owner, 2026-10-11: the two lines meet
+  at the left edge of every pill). `bench_value[p]` starts with your value on
+  the period's base day, buys the benchmark (total return, in the display currency)
+  with each later performance inflow at the previous close (an opening
+  holding's value at the day's close, as it enters your value) and sells for
+  every outflow at the day's close, **estimated dividends included**: they
+  leave your value, so the S&P pays the same out (a book that is only SPY
+  sits exactly on its line). `bench_index` is SPY's own index, so the
+  Return card's S&P figure compares like with like.
+- **Risk** (`_risk`): volatility, Sharpe, Sortino and max drawdown of the TWR
+  index inside each period, with the Portfolio tab's formulas
+  (`analytics._stats`), over trading days only (a weekday with no close for
+  SPY or any holding is a holiday, dropped so it can't shrink the
+  volatility). Excess returns over ^IRX (`_rf_closes`) in a USD view, over
+  0 in any other currency, as `analytics._daily_rf`. Ten daily returns at
+  least, else null.
+- **Payload.** `series{dates, value, invested, bench_value{period},
+  twr_index, bench_index, period_start}`; per period `twr`, `bench_twr`,
+  `twr_ann`, `mwr` (the period's own money-weighted return), `mwr_ann`,
+  `years`, `since_start` (the book is younger than the pill),
+  `value_change` (value now − value at the base), `net_in` (money put in less
+  taken out after the base), `vol`, `sharpe`, `sortino`, `max_dd`,
+  `bench_vol`. Top level: `benchmark{key, label}` and `benchmarks[{key, label}]`.
+  `month_abs` / `month_pct` are the 1M window's gain and TWR (the hero's
+  "past month"; the holdings' Month column uses the same base). Returns are cumulative.
+  The page shows Your money per year when `years` ≥ 1, else the period
+  figure. `ledger.period_mwr` solves per period length, so a short period
+  can't overflow the annualising. With no closes at all there is no
+  `series`, and every period figure is null (a dash).
+- **Refresh** on the page runs `jobs._run_book_phase` (the `__investments__`
+  sink, jobs.md): `investments.refresh_market` drops the book's raw closes,
+  dividends, splits, quote currencies, the FX histories and the benchmark, then fetches
+  them again four symbols at a time. It never writes the book file.
 
 ### My Investments import (`importer.py`)
 Roadmap Phases 5–6 (run together, ahead of Performance, at the owner's
@@ -512,9 +637,123 @@ request): the composer is the way into the page.
 - **Logs** carry counts and timings only, never amounts, text or files.
 - **Eval:** `scripts/eval_import.py` against `tests/data/import/gold.json`
   (synthetic: phone screenshots, three broker CSV styles, a text PDF, a
-  scanned PDF, typed text). Rebuild its images with
-  `scripts/build_import_gold.py`. Run it live after any prompt, rule or
-  model change; all cases must pass.
+  scanned PDF, typed text, a broker positions table with exchange codes and
+  pence). Rebuild its images with `scripts/build_import_gold.py`. Run it live
+  after any prompt, rule or model change; all cases must pass (11 since
+  2026-10-10).
+
+**The exchange shown decides the listing** (owner's report, 2026-10-09).
+Euro rows shown on Paris and Madrid were booked on Xetra: currency alone
+picked the first euro line (`_CCY_SUFFIX` order, `.DE` first). Now:
+- **Plain code reads the exchange**, never the model:
+  `shown_exchange(ticker, block)` takes the word right after the ticker in
+  its cell ("AIR SBF"), or a cell of that line that is an exchange code or
+  name ("AIR | SBF", a CSV Exchange column). An `exchange` field in the
+  model's schema made it leave out rows that showed none (4 of 10 reads to
+  8 of 10 on "typed holdings"), so it was taken out again.
+- **`_VENUES`** maps Interactive Brokers' codes (SBF, IBIS, BM, BVME, AEB,
+  BUX…), ISO MICs (XPAR, XETR…), Yahoo's own codes and plain names to
+  (Yahoo exchange codes, ticker suffix, currency). No key names two venues
+  (tested).
+- **`match_listing(..., shown)` → `_on_venue`**:
+  1. its own line: `base + suffix` in the pack, else the company by name on
+     that exchange, else Yahoo's live Lookup (`symbol_db.yahoo_lookup`).
+     Note: "On Euronext Paris, as shown."
+  2. else a proxy, the same company (pack group, `symbol_db.listings`, or
+     Lookup), in the venue's currency first. Note: "Yahoo has no Milan line
+     for this, so it is priced from VOW3.DE (Xetra): the same company in the
+     same currency."
+  3. else its home listing, in another currency ("…values convert at each
+     day's rate").
+  Proxies are marked guessed (✦); the review shows the note under the
+  row, and a proxy's note is saved in the entry's `note`. The row's currency,
+  when not shown, is the venue's.
+- **A name that is only the ticker and its exchange code** ("GLE SBF", a
+  positions screen's instrument cell copied as the name) is no name:
+  `_company_words` hands `match_listing` the bare ticker. Checked against
+  "GLE SBF", Société Générale failed `same_company`, and every row of a
+  correctly read screenshot was marked as the AI's guess (2026-10-10).
+- **No exchange shown** (typed text, "40 Richter Gedeon at 9640 HUF"): when
+  the pack has nothing for the name, or nothing in the row's currency,
+  `match_listing` asks Yahoo's live Lookup by the name and by its first word
+  (Yahoo finds RICHT.BD for "Richter", not for "Richter Gedeon"); only the
+  same company counts, and the currency rule then picks among them. Each row
+  carries `listing_ccy` and each alternative its `ccy`, for the review's
+  listing menu (2026-10-10).
+- **Units against the market** (`_units`, after matching): the listing's
+  last close (`_last_closes`: `_bulk_close(..., "1mo", adjusted=False)` and
+  the quote currency) decides pence. ULVR on LSE read as "GBP 4380.50" with a
+  close of £45.12 is 4,380.50 p = £43.81: converted, marked, with a link to
+  keep the other reading. Any price 25x off today's gets a check line.
+- **Average vs last price by arithmetic** (`_avg_from_pnl`): a positions
+  row shows two prices that look alike, and the model took today's for the
+  average (or none) on a synthetic IBKR screen, while the vision step read
+  that table as a phone list and dropped its headings whatever the prompt
+  said. (last − average) × shares = the signed unrealised P&L on the row
+  (or a hundredth of it: pence prices, P&L in pounds) proves which is
+  which; exactly one fitting pair, or nothing changes. Numbers are read in
+  either convention ("1.234,56", "171,40"; percentages skipped), and only a
+  reading equal to the row's last price (or none) is replaced, so a format
+  misread can never overwrite a good one.
+- **Ambiguous codes:** "TSE" is Toronto at Interactive Brokers but Tokyo on
+  many screens; a numeric ticker (7203) says Tokyo. A currency taken from
+  the exchange is marked guessed. ZAc and ILA rows become ZAR and ILS.
+- **Tickers are whole words** (`_word`): "T" is not inside "T-Mobile" or
+  "AT&T".
+- **One buy date per row, no "Since when" question** (owner, 2026-10-10:
+  with a date per row it made no sense; performance counts from the oldest
+  date in the book). `_default_dates` gives an undated holding (and a
+  snapshot's cash) today with `date_default`, which the review shows quietly
+  until the owner picks that row's date; an undated trade stays "needs you".
+
+**Clear** (`investments.clear`, `POST /api/investments/clear`, Settings → My
+Investments): every entry out in one journal item ("Cleared N entries"), so
+Undo restores them in place. Settings and import aliases stay; a dated copy
+`state/investments.before-clear-<UTC stamp>.json` is written first (newest
+three kept).
+
+### Short listings' history (`analytics.extend_history`, 2026-10-09)
+A listing younger than its company used to cut a whole basket to its own
+start (`dropna(how="any")`): a US company's young Xetra line starts a few
+months ago, and Gedeon Richter's Budapest ticker was renamed RICHTER.BD → RICHT.BD
+on 2026-10-09 (Yahoo then answers only "1d"/"5d" for it).
+- **Splice:** before a short line's first close, the same company's other
+  listing stands in (`_proxy_candidates`: pack group, else Yahoo Lookup by
+  the bare ticker and name; exchange lines before OTC and order-book lines),
+  converted into the short line's currency at each day's rate
+  (`fx.fx_multipliers`) and scaled to meet it at that close. Minor units on
+  either side are a constant the scale absorbs.
+- **Only clean, trading data stands in** (`_clean_tail`): Yahoo's old data
+  has glitches (Frankfurt's Richter lines are *negative* when
+  dividend-adjusted before June 2026; Unilever's London line jumps x52 in
+  1993). A close ≤ 0 or a day more than tripling or losing two thirds starts
+  the usable stretch after it; a stand-in must show a new price on half its
+  days (the London order-book line moved six times in five years). When the
+  adjusted history is broken, the as-traded one is tried.
+- **Short** means: starting after `need[symbol]` (My Investments: the day the
+  book first holds it), else later than most of the frame's lines (MAX must
+  not splice ADRs onto a 2000 start next to Unilever's 1988).
+- **A hole counts as a late start** (`_after_gap`, `_GAP_ROWS` = 60, added
+  2026-10-10): Yahoo has no NOT.DE (Novartis, Xetra) close from Sep 2019 to
+  Jan 2025, and junk before it; ffill drew five flat years. A line with a
+  hole of more than 60 rows starts, for splicing, after it: the part before
+  is blanked and the stand-in fills it. With no stand-in the line's own data
+  is restored untouched (a real suspension stays as it was). A month's gap
+  is not a hole. A stand-in's own hole (over 92 days) starts its usable
+  stretch in `_clean_tail`.
+- **Ragged baskets:** a holding with no stand-in no longer truncates the
+  others. Before its first close the basket is the other holdings, their
+  weights scaled back to 100% (`_basket_weights`; contributions still add
+  up to the total); the frame starts once half the holdings have a price;
+  impossible one-day moves (over eight-fold, or losing more than 94%: unit
+  changes, not markets) are counted as no move; no OHLC band when a
+  holding starts inside the period shown (the line is drawn).
+- **Dividends merge** (`cache._dividends_put`): a short as-traded fetch (an
+  import's one-month price check) used to replace years of cached payouts,
+  and the book's estimated dividends vanished until the cache expired. Baskets whose holdings start together are unchanged (tested).
+- **Notes:** every splice, late start or ignored glitch inside the period is
+  a warning, shown folded under the Portfolio chart ("About these prices")
+  and in My Investments' rail.
 
 ## 6. Symbol pack + company search (`symbol_db.py`, `symbol_build.py`, `search.py`)
 
@@ -659,6 +898,23 @@ the page shows it as chips, every search prints one `[search]` line.
   every listing it is led by microcaps with tiny equity. A lowest-first
   ranking adds `field >= 0` at the screener: negative D/E or P/E is negative
   equity or a loss, which Yahoo would sort to the top.
+
+### Names the pack lacks (`symbol_db.yahoo_lookup`)
+Yahoo's screener misses some listings entirely: no Gedeon Richter line, on
+any venue, is in the pack (2026-10-04). Its live Lookup endpoint knows them.
+`yahoo_lookup(query)` wraps `yf.Lookup(q).get_all()` (equities and ETFs),
+keeps lines with a close in the last three months, orders home venues first,
+borrows the fullest name among the company's lines ("RICHTER" on Budapest),
+and caches a day (an empty answer ten minutes). Group `YAHOO_GROUP` (-1).
+Used only when the pack can't place a name: company search (best pack score
+under 85; a Yahoo name containing the typed words ranks first), AI picks the
+pack lacks, the Add popover, an import row, and a history stand-in.
+`same_company(a, b)`: equal names without legal forms, the shorter (two
+words or more) inside the longer, or the same first two words when neither
+is generic (`_GENERIC`: Bank of America is not Bank of Ireland, China
+Resources Beverage not China Resources Land); one shared word is never
+enough (Apple vs Apple Hospitality REIT). An AI pick or a pasted name that
+only Yahoo knows must match by ticker or name, never Lookup's first hit.
 
 ### Wiring
 `resolver._symbol_db_lookup()` uses `lookup()`. With no pack yet (first

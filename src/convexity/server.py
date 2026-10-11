@@ -187,6 +187,16 @@ class Handler(BaseHTTPRequestHandler):
         # job long after this request answered 202.
         asked = payload.get("phases")
         asked = asked if isinstance(asked, list) else ["quotes", "news"]
+        if payload.get("view") == jobs.BOOK_VIEW:
+            # My Investments: the book's own prices and FX only (jobs._run_book_phase).
+            syms = _investments.refresh_symbols()
+            if not syms:
+                self._send_json(400, {"error": "nothing to refresh"})
+                return
+            job, outcome = jobs.submit(scope="current", phases=["book"], days=None,
+                                       entries_by_view={jobs.BOOK_VIEW: ", ".join(syms)})  # fmt: skip
+            self._send_refresh_job(job, outcome)
+            return
         phases = [p for p in ("quotes", "news") if p in asked]
         if not phases:
             self._send_json(400, {"error": "phases must include quotes or news"})
@@ -225,6 +235,9 @@ class Handler(BaseHTTPRequestHandler):
             context=context,
             on_conflict=on_conflict,
         )
+        self._send_refresh_job(job, outcome)
+
+    def _send_refresh_job(self, job, outcome: str) -> None:
         if outcome == "rejected":
             # 409 + the running job's id: the client attaches to it rather than
             # starting a second one. See the single-flight note in jobs.py.
@@ -650,6 +663,13 @@ class Handler(BaseHTTPRequestHandler):
 
             self._send_json(200, reference_pack.status())
             return
+        if parsed.path == "/api/prefs":
+            # Settings -> General "Default currency", and My Investments'
+            # benchmark: allow-listed values only (persistence.load_prefs).
+            from convexity.persistence import load_prefs
+
+            self._send_json(200, load_prefs())
+            return
         if parsed.path == "/api/news-diagnostics":
             try:
                 from convexity import ml_sentiment as _ml
@@ -834,7 +854,7 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(parsed.query)
         try:
             if parsed.path == "/api/investments":
-                self._send_json(200, _investments.book())
+                self._send_json(200, _investments.book((q.get("ccy") or [None])[0]))
             elif parsed.path == "/api/investments/symbols":
                 self._send_json(200, {"symbols": _investments.book_symbols()})
             elif parsed.path == "/api/investments/lookup":
@@ -872,25 +892,28 @@ class Handler(BaseHTTPRequestHandler):
         (never overwritten), 422 a change the ledger refuses (an oversell)."""
         p = self._read_json()
         rev, entry = p.get("base_rev"), p.get("entry") or {}
+        ccy = p.get("ccy") if isinstance(p.get("ccy"), str) else None  # the display currency
         try:
             if not isinstance(entry, dict):
                 raise _investments.BookError("entry must be an object")
             if path == "/api/investments/entries":
-                out = _investments.add(entry, rev)
+                out = _investments.add(entry, rev, ccy)
             elif path == "/api/investments/entries/update":
-                out = _investments.update(str(p.get("id") or ""), entry, rev)
+                out = _investments.update(str(p.get("id") or ""), entry, rev, ccy)
             elif path == "/api/investments/entries/delete":
-                out = _investments.delete(str(p.get("id") or ""), rev)
+                out = _investments.delete(str(p.get("id") or ""), rev, ccy)
             elif path == "/api/investments/undo":
-                out = _investments.undo(rev)
+                out = _investments.undo(rev, ccy)
             elif path == "/api/investments/redo":
-                out = _investments.redo(rev)
+                out = _investments.redo(rev, ccy)
+            elif path == "/api/investments/clear":
+                out = _investments.clear(rev, ccy)
             elif path == "/api/investments/import":
                 out = self._investments_import(p)
             elif path == "/api/investments/import/check":
                 out = {"problems": _investments.check_rows(p.get("entries"))}
             elif path == "/api/investments/import/apply":
-                out = _investments.add_batch(p.get("entries"), rev, p.get("aliases"))
+                out = _investments.add_batch(p.get("entries"), rev, p.get("aliases"), ccy)
             else:
                 self._send_json(404, {"error": "not found"})
                 return
@@ -949,6 +972,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(
                     400, {"error": 'expected {"enabled": bool} or {"action": "refresh"}'}
                 )
+            return
+        if parsed.path == "/api/prefs":
+            from convexity.persistence import save_prefs
+
+            self._send_json(200, save_prefs(self._read_json()))
             return
         if parsed.path.startswith("/api/investments/"):
             self._handle_investments_post(parsed.path)

@@ -342,36 +342,54 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             out["earnings_surprise"] = _earnings_surprise_yf(tk, symbol)
 
             rating_dist = None
+            yf_trend: list[dict] = []
             try:
                 recs = tk.recommendations
                 if recs is not None and not recs.empty:
-                    rec_row = recs.iloc[0]
-                    row_lower = {str(k).lower(): v for k, v in rec_row.items()}
+                    for _, rec_row in recs.iterrows():
+                        row_lower = {str(k).lower(): v for k, v in rec_row.items()}
 
-                    def _rd_int(key):
-                        v = row_lower.get(key, 0)
-                        if v is None or (isinstance(v, float) and math.isnan(v)):
-                            return 0
-                        try:
-                            return int(v)
-                        except (TypeError, ValueError):
-                            return 0
+                        def _rd_int(key, row_lower=row_lower):
+                            v = row_lower.get(key, 0)
+                            if v is None or (isinstance(v, float) and math.isnan(v)):
+                                return 0
+                            try:
+                                return int(v)
+                            except (TypeError, ValueError):
+                                return 0
 
-                    d = {
-                        "strongBuy": _rd_int("strongbuy"),
-                        "buy": _rd_int("buy"),
-                        "hold": _rd_int("hold"),
-                        "sell": _rd_int("sell"),
-                        "strongSell": _rd_int("strongsell"),
-                    }
-                    if any(d.values()):
-                        rating_dist = d
+                        d = {
+                            "strongBuy": _rd_int("strongbuy"),
+                            "buy": _rd_int("buy"),
+                            "hold": _rd_int("hold"),
+                            "sell": _rd_int("sell"),
+                            "strongSell": _rd_int("strongsell"),
+                        }
+                        if not any(d.values()):
+                            break
+                        yf_trend.append({"period": str(row_lower.get("period", "")), **d})
+                    if yf_trend:
+                        rating_dist = {k: v for k, v in yf_trend[0].items() if k != "period"}
             except Exception:
                 pass
             out["rating_dist"] = rating_dist
 
+            # Finnhub answers only US lines, so both are asked of the
+            # company's US line (TTE for TTE.PA). With none, the trend falls
+            # back to Yahoo's for this listing, already fetched above (REP.MC,
+            # GLE.PA, PHIL.MI): no extra request on the hot path.
             out["insider_mspr"] = _fh.get_insider_sentiment(symbol)
-            out["rec_trend_fh"] = _fh.get_recommendation_trend(symbol)
+            fh_trend = _fh.get_recommendation_trend(symbol)
+            fsym = _fh.finnhub_symbol(symbol)
+            if fh_trend:
+                out["rec_trend_fh"] = fh_trend
+                out["rec_src"] = {"source": "Finnhub", "via": fsym}
+            elif len(yf_trend) >= 2:
+                out["rec_trend_fh"] = yf_trend[:6]
+                out["rec_src"] = {"source": "Yahoo", "via": symbol}
+            else:
+                out["rec_trend_fh"] = None
+            out["us_line"] = fsym
 
             # Cache-only read — never triggers a fetch from the hot path.
             out["news_sentiment"] = _ns.get_cached_sentiment(symbol)

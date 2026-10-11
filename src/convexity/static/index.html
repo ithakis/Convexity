@@ -13,7 +13,7 @@
 
 <div class="topbar" id="topbar">
   <button id="inv-btn" class="tab-btn" data-tip="Open My Investments: your real book (what you own, what it is worth, how it has done) and what needs your attention.">My Investments</button>
-  <button id="edit-btn" class="tab-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolio</button>
+  <button id="edit-btn" class="tab-btn" data-tip="Open the portfolio workspace: saved tabs, the constituents editor, and the analytics area that belongs to each portfolio.">Portfolios</button>
   <button id="news-btn" class="tab-btn" data-tip="Open the News &amp; Sentiment dashboard: for every holding, the News read (what the news says, lens by lens) beside the Market read (how prices have reacted to news like this).">News</button>
   <button id="optimize" class="research-only" data-tip="Open the Portfolio Optimization workspace: trace the mean-CVaR efficient frontier from your holdings using Black-Litterman expected returns (market-cap equilibrium + analyst-target views), pick a risk/return point, and save the chosen weights as a preset.">⚙ Optimize</button>
   <!-- One Refresh for the whole app (v1.11.0). Click (or R) refreshes the
@@ -22,7 +22,7 @@
        states the real cost first. Either way it runs as a background job that
        survives switching tabs or reloading the page, and is cancellable from
        the status chip. The bar and the radial fill live inside the button. -->
-  <button id="refresh" class="refresh-btn research-only" data-tip="Refresh this portfolio: quotes, then news &amp; sentiment. Runs in the background — you can keep working, and cancel from the status chip. Press and hold (or Shift+R) to refresh every saved portfolio.">
+  <button id="refresh" class="refresh-btn" data-tip="Refresh this portfolio: quotes, then news &amp; sentiment. Runs in the background — you can keep working, and cancel from the status chip. Press and hold (or Shift+R) to refresh every saved portfolio.">
     <span class="rf-hold" id="rf-hold" aria-hidden="true"></span>
     <span class="rf-bar" id="rf-bar" aria-hidden="true"></span>
     <span class="rf-label" id="rf-label">↻ Refresh</span>
@@ -181,10 +181,12 @@
          Market read always uses the 7-day window it was calibrated on. -->
     <div class="ns-lookback" id="ns-lookback" role="group" aria-label="News analysis window">
       <span class="ns-lb-label" data-tip="Analysis window of the News read. Applies immediately — the already-read headlines are re-weighted from cache, with no network call. Narrowing is exact; widening can only re-weight what an earlier fetch pulled, and says so. Headlines are weighted by recency e^(−age/τ) (τ scales with the window: 7D → 3.0d, 30D → 12.9d), source credibility (Reuters/Bloomberg/WSJ 1.0 · CNBC/Barron's 0.8 · PR wires 0.5) and novelty (syndicated copies discounted); headlines not about the company weigh nothing. The Market read always uses its 7-day training window.">Window</span>
-      <button data-days="3" type="button">3D</button>
-      <button data-days="7" type="button" class="active">7D</button>
-      <button data-days="14" type="button">14D</button>
-      <button data-days="30" type="button">30D</button>
+      <span class="ns-lb-periods">
+        <button data-days="3" type="button">3D</button>
+        <button data-days="7" type="button" class="active">7D</button>
+        <button data-days="14" type="button">14D</button>
+        <button data-days="30" type="button">30D</button>
+      </span>
     </div>
     <!-- The News-local Refresh button was removed in v1.11.0. There is one
          Refresh, in the topbar: a click refreshes the current portfolio's
@@ -671,7 +673,7 @@
     <div class="info-grid">
       <div class="info-card full">
         <div class="info-card-name">Workflow</div>
-        <div class="info-card-desc">Open <b>Portfolio</b> to manage saved tabs and constituents. Build or update the table, then move across analytics, FX denomination, column views, the analyst dashboard, and the row detail modal without losing the underlying portfolio state.</div>
+        <div class="info-card-desc">Open <b>Portfolios</b> to manage saved tabs and constituents. Build or update the table, then move across analytics, FX denomination, column views, the analyst dashboard, and the row detail modal without losing the underlying portfolio state.</div>
         <ul class="info-feature-list">
           <li>Use saved tabs as named portfolio workspaces with cached rows, stale markers, last-view restore, and inline rename.</li>
           <li>Build or refresh once, then inspect the same holdings through the table, analytics, sentiment, FX, and detail layers.</li>

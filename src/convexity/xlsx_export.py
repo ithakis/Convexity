@@ -180,6 +180,10 @@ HOLDINGS_SKIP_EXTRAS = {
     "earnings_surprise",
     "insider_mspr",
     "rec_trend_fh",
+    # Where those came from (the company's US line Finnhub was asked for),
+    # for the table's tooltips only.
+    "rec_src",
+    "us_line",
 }
 
 # News read (LLM, five lenses) + Market read (statistical) — the two engines

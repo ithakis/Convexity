@@ -149,14 +149,31 @@ _TAIL_OK = re.compile(r"[A-Z0-9.\-]+")
 _RESOLVED_CACHE: dict[str, str] = {}
 
 
+def _venue_suffix(code: str) -> str | None:
+    """The Yahoo suffix for an exchange code. Brokers write their own codes
+    (Interactive Brokers: SBF, IBIS, BM, BVME, AEB…) and ISO MICs; those live
+    in the import's venue table (importer._VENUES), so the Add box and the
+    import read one table. Without them "IBIS:NOV" fell through to a name
+    search and became NOV Inc. instead of Novo Nordisk (2026-10-11). This
+    table's own entries win where the two disagree (BVL: Lima here)."""
+    if code in _EXCHANGE_SUFFIX:
+        return _EXCHANGE_SUFFIX[code]
+    try:
+        from convexity.importer import _VENUE_KEY, _VENUES
+    except Exception:
+        return None
+    name = _VENUE_KEY.get(code)
+    return _VENUES[name][1] if name else None
+
+
 def _try_prefix_pair(head: str, tail: str) -> tuple[str, str] | None:
     head_up = " ".join(head.strip().upper().split())
     tail_up = tail.strip().upper()
     if not head_up or not tail_up:
         return None
-    if head_up not in _EXCHANGE_SUFFIX:
+    suffix = _venue_suffix(head_up)
+    if suffix is None:
         return None
-    suffix = _EXCHANGE_SUFFIX[head_up]
     tail_clean = tail_up.lstrip(".")
     if not _TAIL_OK.fullmatch(tail_clean):
         return None
@@ -228,6 +245,26 @@ def _refine_via_search(tail: str, expected_suffix: str) -> str | None:
     return None
 
 
+def _broker_pair(entry: str) -> tuple[str, str] | None:
+    """A ticker with a broker's exchange code, as a portfolio screen shows it:
+    "SBF:GLE" / "GLE:SBF", or "GLE SBF" (ticker first, then the code). The
+    colon form is split here because a code may carry a dot (NASDAQ.NMS,
+    BVME.ETF), which the dotted path would cut in the wrong place. The space
+    form accepts only a broker code or MIC (importer._VENUE_CODES), never a
+    country shorthand: "SAP SE" is a company name, not SAP on Stockholm."""
+    if ":" in entry:
+        head, _, tail = entry.partition(":")
+        return _try_prefix_pair(head, tail) or _try_prefix_pair(tail, head)
+    words = entry.split()
+    if len(words) != 2 or not _looks_like_ticker(words[0]):
+        return None
+    try:
+        from convexity.importer import _VENUE_CODES
+    except Exception:
+        return None
+    return _try_prefix_pair(words[1], words[0]) if words[1].upper() in _VENUE_CODES else None
+
+
 def _normalize_google_colon(entry: str) -> str:
     if ":" not in entry:
         return entry
@@ -249,7 +286,7 @@ def resolve_symbol(entry: str) -> str | None:
 
     normalised = _normalize_google_colon(entry)
 
-    mapped = _normalize_exchange_prefix(normalised)
+    mapped = _broker_pair(entry) or _normalize_exchange_prefix(normalised)
     if mapped is not None:
         symbol, suffix = mapped
         if _yf_symbol_has_data(symbol):

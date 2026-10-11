@@ -794,3 +794,49 @@ def set_active_column_view(name: str) -> dict:
         raw["active_view"] = clean_name
         _write_column_views_raw(raw)
         return raw
+
+
+# ----------------------------- App preferences ------------------------------
+#
+# Settings that must outlive the page (2026-10-11): the browser's storage is
+# per origin (port) and the desktop window's was wiped on every launch, so
+# the default display currency and My Investments' benchmark live here.
+# Allow-listed keys only; anything else in the file or a request is dropped.
+
+_PREFS_LOCK = threading.Lock()
+
+
+def _prefs_allowed() -> dict:
+    from convexity.helpers import SUPPORTED_FX
+    from convexity.investments import INV_BENCHMARKS
+
+    return {"default_ccy": set(SUPPORTED_FX), "inv_benchmark": set(INV_BENCHMARKS)}
+
+
+def _clean_prefs(raw) -> dict:
+    allowed = _prefs_allowed()
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k in allowed and isinstance(v, str) and v in allowed[k]}
+
+
+def load_prefs() -> dict:
+    """The saved preferences, allow-listed; a missing or malformed file is {}."""
+    try:
+        raw = json.loads(paths.state_file("prefs").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return _clean_prefs(raw)
+
+
+def save_prefs(changes: dict) -> dict:
+    """Merge the allow-listed ``changes`` into the file; returns what is saved.
+    A key sent as null is removed (back to the app's default)."""
+    with _PREFS_LOCK:
+        cur = load_prefs()
+        if isinstance(changes, dict):
+            for k in [k for k, v in changes.items() if v is None and k in cur]:
+                cur.pop(k)
+            cur.update(_clean_prefs(changes))
+        _atomic_write(paths.state_file("prefs"), json.dumps(cur, indent=2))
+        return cur

@@ -18,6 +18,8 @@ from convexity.cache import (
     _bulk_close_get_cached,
     _bulk_close_put,
     _cache_get,
+    _dividends_get,
+    _dividends_put,
     _cache_put,
 )
 from convexity.fetcher import _SECTOR_ETF
@@ -253,6 +255,14 @@ def _market_cap_usd(row: dict) -> float | None:
     return convert_amount(cap, major_ccy(row.get("currency")), "USD")
 
 
+def _basket_weights(avail: pd.DataFrame, w: pd.Series) -> pd.DataFrame:
+    """Each day's weights when some holdings have no price yet: the target
+    weights of the ones that do, scaled back up to 100% (rows = days)."""
+    m = avail[w.index].astype(float) * w
+    tot = m.sum(axis=1)
+    return m.div(tot.where(tot > 0), axis=0).fillna(0.0)
+
+
 def _linked_contribution(win_ret: pd.DataFrame, w: pd.Series) -> dict[str, float]:
     """Each holding's contribution (percentage points) to the portfolio's
     period return, adding up to it exactly.
@@ -268,14 +278,21 @@ def _linked_contribution(win_ret: pd.DataFrame, w: pd.Series) -> dict[str, float
     if win_ret is None or win_ret.empty:
         return {}
     w = w.reindex(win_ret.columns).fillna(0.0)
-    daily = win_ret.mul(w, axis=1)
+    return {s: v * 100.0 for s, v in _carino_link(win_ret.mul(w, axis=1)).items()}
+
+
+def _carino_link(daily: pd.DataFrame) -> dict[str, float]:
+    """Carino-link daily contributions (rows = days, columns = buckets,
+    each cell a fraction of that day's start capital) so they add up to the
+    compounded total of the row sums. Fractions in, fractions out. Shared by
+    the research tabs and My Investments' per-holding contribution."""
     rp = daily.sum(axis=1).to_numpy(dtype=float)
     total = float(np.prod(1.0 + rp) - 1.0)
     with np.errstate(divide="ignore", invalid="ignore"):
         kt = np.where(np.abs(rp) > 1e-12, np.log1p(rp) / rp, 1.0)
     k = math.log1p(total) / total if abs(total) > 1e-12 else 1.0
     scaled = daily.mul(kt / k, axis=0)
-    return {s: float(scaled[s].sum()) * 100.0 for s in win_ret.columns}
+    return {s: float(scaled[s].sum()) for s in daily.columns}
 
 
 def _mcap_bucket(mcap: float | None) -> str:
@@ -293,26 +310,56 @@ def _mcap_bucket(mcap: float | None) -> str:
     return "Micro (<$300M)"
 
 
-def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
+def _bulk_close(symbols: list[str], period: str, adjusted: bool = True) -> pd.DataFrame:
     """Close prices indexed by date, columns = symbols (those that returned data).
 
     `period` is an app label ("1Y") or a raw yfinance period ("2y", "10y").
     Caches per-symbol. Retries missing symbols individually with backoff.
     A repeated symbol is fetched once (the result is keyed by symbol anyway,
-    so a repeat would only cost a wasted download and a doubled retry sleep)."""
+    so a repeat would only cost a wasted download and a doubled retry sleep).
+
+    ``adjusted=False`` returns closes as traded, for My Investments: the book
+    books dividends as cash, so a dividend-adjusted close would count each one
+    twice. Yahoo's ``auto_adjust=False`` close is still split-adjusted, which
+    matches the ledger's quantities in today's shares. These closes have their
+    own cache key (``|raw``), store no bars (the portfolio's OHLC is
+    adjusted), and bring each symbol's dividends (per current share, quote
+    unit: pence for LSE) to ``cache._dividends_put``."""
     symbols = list(dict.fromkeys(symbols or []))
     if not symbols:
         return pd.DataFrame()
     period_yf = _PERIOD_YF.get(period.upper(), period.lower())
+    key = period_yf if adjusted else f"{period_yf}|raw"
+    actions = {} if adjusted else {"actions": True}
 
     out: dict[str, pd.Series] = {}
     to_fetch: list[str] = []
     for s in symbols:
-        cached = _bulk_close_get_cached(s, period_yf)
-        if cached is _BULK_CLOSE_MISS:
-            to_fetch.append(s)
+        cached = _bulk_close_get_cached(s, key)
+        if cached is _BULK_CLOSE_MISS or (
+            not adjusted and cached is not None and not cached.empty and _dividends_get(s) is None
+        ):
+            to_fetch.append(s)  # raw closes and their dividends: both or neither
         elif cached is not None and not cached.empty:
             out[s] = cached
+
+    def keep(sym: str, frame: pd.DataFrame) -> bool:
+        """Store one symbol's closes (and its bars or dividends); False when
+        the frame has none."""
+        try:
+            col = frame["Close"].dropna()
+        except (KeyError, ValueError):
+            return False
+        if col.empty:
+            return False
+        out[sym] = col
+        _bulk_close_put(sym, key, col)
+        if adjusted:
+            _put_bars(sym, period_yf, frame.loc[col.index])
+        else:
+            divs = frame["Dividends"].dropna() if "Dividends" in frame.columns else col.iloc[:0]
+            _dividends_put(sym, divs[divs > 0])
+        return True
 
     if to_fetch:
         try:
@@ -320,7 +367,8 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
                 tickers=to_fetch,
                 period=period_yf,
                 interval="1d",
-                auto_adjust=True,
+                auto_adjust=adjusted,
+                **actions,
                 group_by="ticker",
                 threads=True,
                 progress=False,
@@ -329,58 +377,42 @@ def _bulk_close(symbols: list[str], period: str) -> pd.DataFrame:
             df = None
         got: set[str] = set()
         if df is not None and not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                for s in to_fetch:
-                    try:
-                        col = df[s]["Close"].dropna()
-                    except (KeyError, ValueError):
-                        continue
-                    if not col.empty:
-                        out[s] = col
-                        _bulk_close_put(s, period_yf, col)
-                        _put_bars(s, period_yf, df[s].loc[col.index])
-                        got.add(s)
-            else:
+            multi = isinstance(df.columns, pd.MultiIndex)
+            for s in to_fetch if multi else to_fetch[:1]:
                 try:
-                    col = df["Close"].dropna()
-                    if not col.empty:
-                        out[to_fetch[0]] = col
-                        _bulk_close_put(to_fetch[0], period_yf, col)
-                        _put_bars(to_fetch[0], period_yf, df.loc[col.index])
-                        got.add(to_fetch[0])
-                except (KeyError, ValueError):
-                    pass
+                    if keep(s, df[s] if multi else df):
+                        got.add(s)
+                except KeyError:
+                    continue
 
         missing = [s for s in to_fetch if s not in got]
         for i, s in enumerate(missing):
             delay = 0.4 + 0.2 * min(i, 6)
             time.sleep(delay)
-            ser = None
             for attempt in range(3):
                 try:
                     tk = yf.Ticker(s)
-                    h = tk.history(period=period_yf, interval="1d", auto_adjust=True)
-                    if h is not None and not h.empty:
-                        col = h["Close"].dropna()
-                        if not col.empty:
-                            # Same date keys as the yf.download path above; the
-                            # old tz_convert(None) moved bars to UTC, off by a
-                            # day for London and off-midnight for New York.
-                            ser = by_trading_date(col)
-                            _put_bars(s, period_yf, by_trading_date(h.loc[col.index]))
-                            break
+                    h = tk.history(period=period_yf, interval="1d", auto_adjust=adjusted, **actions)
+                    # Same date keys as the yf.download path above; the old
+                    # tz_convert(None) moved bars to UTC, off by a day for
+                    # London and off-midnight for New York.
+                    if h is not None and not h.empty and keep(s, by_trading_date(h)):
+                        break
                 except Exception:
                     pass
                 time.sleep(0.6 * (attempt + 1))
-            if ser is not None:
-                out[s] = ser
-                _bulk_close_put(s, period_yf, ser)
             else:
-                _bulk_close_put(s, period_yf, pd.Series(dtype=float))
+                _bulk_close_put(s, key, pd.Series(dtype=float))
 
     if not out:
         return pd.DataFrame()
     return pd.concat(out, axis=1).sort_index()
+
+
+def dividends_cached(sym: str) -> pd.Series | None:
+    """The dividends the last as-traded download brought for ``sym``
+    (ex-date -> per current share, quote unit), or None when not cached."""
+    return _dividends_get(sym)
 
 
 def _put_bars(sym: str, period_yf: str, frame: pd.DataFrame) -> None:
@@ -568,6 +600,243 @@ def _analyst_for(symbol: str, row: dict | None = None) -> dict:
     return out
 
 
+# ------------------------------------------------- short listings' history
+# A listing younger than the company (a US company's young Xetra line;
+# Gedeon Richter's Budapest ticker was renamed on 2026-10-09 and starts that
+# day) used to cut a whole basket's history to its own start. Before a
+# short line's first close, the same company's longest other listing stands
+# in: converted into the short line's currency at each day's rate and scaled
+# to meet it at that first close, so returns are the company's and nothing
+# jumps at the join.
+_PROXY_TTL_S = 24 * 3600.0
+_PROXY: dict[str, tuple[float, tuple[str, ...]]] = {}
+_SHORT_ROWS = 5  # a line starting this many rows into the frame is "short"
+# A stretch this long with no close inside a listing's history is a hole in
+# Yahoo's data, not a quiet market: Novartis's Xetra line (NOT.DE) has none
+# from Sep 2019 to Jan 2025, which ffill drew as five flat years.
+_GAP_ROWS = 60
+
+
+def _after_gap(col: pd.Series):
+    """The first close after the last hole of more than ``_GAP_ROWS`` rows
+    in ``col`` (None when it has none)."""
+    pos = np.flatnonzero(col.notna().to_numpy())
+    if len(pos) < 2:
+        return None
+    big = np.flatnonzero(np.diff(pos) > _GAP_ROWS)
+    return col.index[pos[big[-1] + 1]] if len(big) else None
+
+
+def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
+    """The same company's other listings: its pack group, else Yahoo's live
+    Lookup by name (cached a day)."""
+    hit = _PROXY.get(symbol)
+    if hit and time.time() - hit[0] < _PROXY_TTL_S:
+        return hit[1]
+    from convexity import symbol_db as sdb
+
+    out: list[str] = []
+    try:
+        h = sdb.get(symbol)
+        if h is not None and h.group != sdb.YAHOO_GROUP:
+            out = [x for x in sdb.listings(h.group) if x.ticker != symbol]
+            name = name or h.name
+        if not out:
+            # By the bare ticker, then by name: Lookup finds Gedeon Richter's
+            # Frankfurt lines for "RICHT", not for its full English name. The
+            # line's own hit there names the company better than a short
+            # stored name ("Richter").
+            hits = [x for q in dict.fromkeys([symbol.split(".")[0], name or ""]) if q
+                    for x in sdb.yahoo_lookup(q, limit=10)]  # fmt: skip
+            me = [x.name for x in hits if x.ticker == symbol] + [name or ""]
+            ref = max(me, key=lambda n: len(n.split()))
+            out = [x for x in hits if x.ticker != symbol and sdb.same_company(x.name, ref)]
+    except Exception as e:
+        print(f"[analytics] no history proxy for {symbol}: {type(e).__name__}", flush=True)
+    # Exchange lines first, then re-listing venues; OTC and order-book lines
+    # (GEDSF, 0QFP.IL) last: they trade on few days.
+    thin = {"PNK", "OQB", "OQX", "IOB", "DXE", "CXE", "AQS"}
+    out.sort(key=lambda x: (x.exchange in thin, sdb.relisting(x.ticker, x.exchange)))
+    found = tuple(dict.fromkeys(x.ticker for x in out))[:6]
+    # An empty answer (often a timeout) is asked again in ten minutes.
+    _PROXY[symbol] = (time.time() - (0 if found else _PROXY_TTL_S - 600.0), found)
+    return found
+
+
+def extend_history(
+    wide: pd.DataFrame, symbols: list[str], ccy_of: dict, names: dict, period: str,
+    adjusted: bool = True, fetch=None, need: dict | None = None,
+) -> tuple[pd.DataFrame, dict[str, tuple[str, str]]]:  # fmt: skip
+    """``wide`` (closes in each listing's quote unit, columns = symbols) with
+    every short listing's history extended back by the same company's
+    longest other listing. Returns the frame and {symbol: (proxy, first own
+    close ISO)} for the ones extended. A line with no usable proxy is left
+    as it is. ``fetch(symbols, period)`` gets closes (default: this
+    module's ``_bulk_close`` with ``adjusted``). ``need`` ({symbol: ISO
+    date}) is when each line's prices are first needed (a book holds it
+    from then); without it a line is short when it starts later than most
+    of the frame's lines."""
+
+    fetch = fetch or (lambda syms, period: _bulk_close(syms, period, adjusted=adjusted))
+
+    if wide is None or wide.empty or len(wide.index) <= _SHORT_ROWS:
+        return wide, {}
+    wide = wide.copy()
+    lost = [s for s in symbols if s not in wide.columns and _known_listing(s)]
+    if lost:
+        # A line so new that Yahoo refuses a long period for it (a ticker
+        # renamed yesterday answers only "1d"/"5d"): its last month, to join on.
+        try:
+            recent = fetch(lost, "1mo")
+        except Exception:
+            recent = None
+        for s in lost:
+            if recent is not None and s in recent.columns:
+                col = recent[s].dropna()
+                col.index = pd.DatetimeIndex(col.index).normalize()
+                own = col.reindex(pd.DatetimeIndex(wide.index).normalize())
+                if own.notna().any():
+                    wide[s] = own.to_numpy()
+    # Short means younger than most of the basket (or than the frame, when
+    # the frame is a fixed period): on MAX, a 2000 start is not short next to
+    # Unilever's 1988, and no ADR should stand in for it.
+    firsts = sorted(wide.index.get_loc(f) for s in symbols if s in wide.columns
+                    and (f := wide[s].first_valid_index()) is not None)  # fmt: skip
+    floor = firsts[(len(firsts) - 1) // 2] if len(firsts) >= 3 else 0
+    short, gapped = {}, set()
+    for s in symbols:
+        if s not in wide.columns:
+            continue
+        fv = wide[s].first_valid_index()
+        if fv is None:
+            continue
+        # A line with a hole starts, for this purpose, after the hole: the
+        # same company elsewhere fills everything before it.
+        if (g := _after_gap(wide[s])) is not None:
+            fv = g
+            gapped.add(s)
+        if need is not None:
+            if s in need and fv > pd.Timestamp(need[s]) + pd.Timedelta(days=7):
+                short[s] = fv
+        elif wide.index.get_loc(fv) > floor + _SHORT_ROWS:
+            short[s] = fv
+    if not short:
+        return wide, {}
+    out, done = wide, {}
+    for s, fv in short.items():
+        orig = out[s].copy()
+        if s in gapped:
+            out.loc[out.index < fv, s] = np.nan
+        _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch)
+        if s not in done:
+            out[s] = orig  # no stand-in: the line's own data, hole and all
+    return out, done
+
+
+def _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch) -> None:
+    """Extend ``out[s]`` back from ``fv`` with the best stand-in (see
+    extend_history); records it in ``done`` when it did."""
+    from convexity import fx
+    from convexity.investments import _QCCY, _fetch_quote_ccy
+
+    cands = _proxy_candidates(s, names.get(s))
+    if not cands:
+        return
+    try:
+        pw = fetch(list(cands), period)
+    except Exception:
+        return
+    start = out.index[0] + pd.Timedelta(days=7)
+
+    def usable(frame):
+        clean = {}
+        for c in cands:
+            if c in frame.columns:
+                col = _clean_tail(frame[c].loc[:fv])
+                # A stand-in must trade: a new price on at least half its
+                # days (Gedeon Richter's London order-book line moved six
+                # times in five years: a flat line, not the company).
+                if len(col) > 1 and col.index[0] < fv and (col.diff() != 0).mean() >= 0.5:
+                    clean[c] = col
+        return clean
+
+    clean = usable(pw)
+    if adjusted and not any(c.index[0] <= start for c in clean.values()):
+        # Yahoo's dividend adjustment can break a whole history (Frankfurt's
+        # Richter lines read negative before June 2026); as traded, the
+        # same line is fine, and a dividend a year is a small error next
+        # to no history at all.
+        with contextlib.suppress(Exception):
+            clean = usable(_bulk_close(list(cands), period, adjusted=False)) or clean
+    if not clean:
+        return
+    # The first line (in _proxy_candidates' order: exchanges before OTC)
+    # that reaches back to the frame's start, else the one reaching
+    # furthest back.
+    best = next((c for c in clean if clean[c].index[0] <= start), None) or min(
+        clean, key=lambda c: clean[c].index[0]
+    )
+    pq = _QCCY.get(best) or _fetch_quote_ccy(best)
+    if not pq:
+        return
+    _QCCY[best] = pq
+    idx = out.index
+    dates = [str(d)[:10] for d in idx]
+    mult = fx.fx_multipliers([pq], ccy_of.get(s) or pq, dates).get(pq)
+    if mult is None:
+        return
+    conv = clean[best].reindex(idx.union(clean[best].index)).ffill().reindex(idx) * mult
+    conv = conv.where(idx >= clean[best].index[0])
+    at = conv.loc[fv]
+    if pd.isna(at) or at <= 0:
+        return
+    # Minor units on either side (pence, cents) are a constant factor:
+    # the scale at the join absorbs them.
+    back = (conv * (out.at[fv, s] / at)).loc[idx < fv]
+    out.loc[back.index, s] = out.loc[back.index, s].fillna(back)
+    done[s] = (best, str(fv)[:10])
+
+
+def _known_listing(symbol: str) -> bool:
+    """Is this a real listing (the pack or Yahoo's Lookup knows it)? A
+    ticker Yahoo has never heard of would otherwise cost a second round of
+    download retries (~7 s) on every first load."""
+    from convexity import symbol_db as sdb
+
+    try:
+        return sdb.get(symbol) is not None or any(
+            h.ticker == symbol for h in sdb.yahoo_lookup(symbol)
+        )
+    except Exception:
+        return False
+
+
+def _clean_tail(col: pd.Series) -> pd.Series:
+    """The unbroken stretch of a stand-in's closes that ends at the join.
+    Yahoo's old data has glitches: Frankfurt's Gedeon Richter line has
+    negative closes in 2009, London's Unilever a 52x jump in 1993 (a unit
+    change), Xetra's Novartis no close for five years. A close at or below
+    zero, a day more than tripling or losing two thirds, or a hole of more
+    than three months starts the stretch at the first close after it."""
+    col = col.dropna()
+    if col.empty:
+        return col
+    r = col / col.shift(1)
+    # More than three months without a close is a hole in the data too.
+    # (Marked on the last close before it, so the stretch keeps the first after.)
+    gap = pd.DatetimeIndex(col.index).to_series().diff().dt.days.to_numpy() > 92
+    hole = pd.Series(np.append(gap[1:], False), index=col.index)
+    bad = (col <= 0) | (r > 3) | (r < 1 / 3) | hole
+    if bad.any():
+        col = col.loc[bad[bad].index[-1] :].iloc[1:]
+    return col
+
+
+def _when(iso: str) -> str:
+    d = pd.Timestamp(iso)
+    return f"{d:%b} {d.day}, {d.year}"
+
+
 def analyze_portfolio(
     rows: list[dict], weights_in: dict, period: str, display_ccy: str = "USD"
 ) -> dict:
@@ -637,6 +906,15 @@ def analyze_portfolios_multi(
         list(dict.fromkeys(symbols + bench_tickers + sec_etfs + rf_tickers)), warmup_yf
     )
     warnings: list[str] = []
+    # Short lines first: one Yahoo serves only a few days of (a ticker
+    # renamed yesterday) joins here, and is not "missing".
+    names = {s: by_sym.get(s, {}).get("name") for s in symbols}
+    wide, proxied = extend_history(
+        wide, symbols, {s: by_sym.get(s, {}).get("currency") for s in symbols}, names, warmup_yf
+    )
+    for s, (p, until) in proxied.items():
+        warnings.append(f"{names.get(s) or s} ({s}): before {_when(until)} the prices are "
+                        f"{p}'s, the same company on another exchange.")  # fmt: skip
     missing = [s for s in symbols if s not in wide.columns]
     if missing:
         warnings.append(f"No price history for: {', '.join(missing)}")
@@ -647,8 +925,26 @@ def analyze_portfolios_multi(
     wide = _apply_fx_to_closes(wide, ccy_by_sym, display_ccy, warmup_yf)
 
     # Trading calendar = days any holding traded (foreign indices must not
-    # inject their own holidays as zero-return days).
-    wide_sym = wide[active].dropna(how="all").ffill().dropna(how="any")
+    # inject their own holidays as zero-return days). A holding that starts
+    # later than the others (a young company, no older listing to stand in)
+    # no longer cuts everyone's history: before its first close the basket
+    # is the other holdings, reweighted (see _basket_returns). The frame
+    # starts once at least half the holdings have a price.
+    wide_sym = wide[active].dropna(how="all").ffill()
+    # Holdings that start within a few rows of each other (a holiday on one
+    # exchange on the first day) are not late: start once all have a close.
+    firsts = [wide_sym[s].first_valid_index() for s in active]
+    prompt = [f for f in firsts if f is not None and wide_sym.index.get_loc(f) <= _SHORT_ROWS]
+    if prompt:
+        wide_sym = wide_sym.loc[max(prompt) :]
+    have = wide_sym.notna().sum(axis=1)
+    wide_sym = wide_sym.loc[have >= max(1, (len(active) + 1) // 2)]
+    ragged = bool(len(wide_sym)) and bool(wide_sym.isna().any().any())
+    late = (
+        {s: wide_sym[s].first_valid_index() for s in active if wide_sym[s].isna().any()}
+        if ragged
+        else {}
+    )
     if len(wide_sym) < 3:
         return {"error": "insufficient overlapping history", "warnings": warnings}
     start = _period_start(period_u, wide_sym.index[-1])
@@ -656,7 +952,26 @@ def analyze_portfolios_multi(
     if len(sym_closes) < 3:
         return {"error": "insufficient overlapping history", "warnings": warnings}
     common_index = sym_closes.index
+    for s, fv in late.items():  # only a start inside the period shown is worth saying
+        if fv > common_index[0]:
+            warnings.append(f"{names.get(s) or s} ({s}) has prices only since {_when(str(fv)[:10])}; "
+                            "before that the basket is the other holdings.")  # fmt: skip
+    # A day counts for a holding when it has that close and the one before.
+    avail = (wide_sym.notna() & wide_sym.shift(1).notna()) if ragged else None
     wide_ret = wide_sym.pct_change().fillna(0.0)
+    if ragged:
+        # A ragged basket reaches decades back, into Yahoo's glitches
+        # (Unilever's London line: x52 in 1993, -98% in 1997, unit changes):
+        # a day more than eight-fold or losing over 94% counts as no move.
+        # Real days go past -67% or +200% (a biotech's trial, a squeeze);
+        # these bounds are unit changes, not markets (adversarial review).
+        glitch = (wide_ret > 7.0) | (wide_ret < -0.94)
+        if glitch.to_numpy().any():
+            wide_ret = wide_ret.mask(glitch, 0.0)
+            hit = [s for s in active if glitch[s].loc[common_index[0] :].any()]
+            if hit:
+                warnings.append("Ignored impossible one-day moves in Yahoo's prices for "
+                                f"{', '.join(hit)} (a unit change, not a market move).")  # fmt: skip
     rf_daily = _daily_rf(wide, common_index, display_ccy)
     rf_source = "US 13-week T-bill (^IRX)" if rf_daily is not None else "0 (no short-rate series)"
 
@@ -696,7 +1011,9 @@ def analyze_portfolios_multi(
     mcap_usd = {s: _market_cap_usd(by_sym.get(s, {})) for s in active}
 
     period_returns = {
-        s: float(sym_closes[s].iloc[-1] / sym_closes[s].iloc[0] - 1.0) * 100.0 for s in active
+        s: float(col.iloc[-1] / col.iloc[0] - 1.0) * 100.0
+        for s in active
+        if len(col := sym_closes[s].dropna())
     }
     # Daily holding returns inside the window (the base bar excluded), for the
     # linked contribution below.
@@ -713,7 +1030,11 @@ def analyze_portfolios_multi(
         w_vec = pd.Series([weights[s] for s in active], index=active)
         # Daily-rebalanced index over the whole warm-up window; the reported
         # series is its period slice rebased to 100.
-        port_ext = (1.0 + (wide_ret[active] * w_vec).sum(axis=1)).cumprod()
+        daily_w = _basket_weights(avail, w_vec) if ragged else None
+        if ragged:
+            port_ext = (1.0 + (wide_ret[active] * daily_w).sum(axis=1)).cumprod()
+        else:
+            port_ext = (1.0 + (wide_ret[active] * w_vec).sum(axis=1)).cumprod()
         base = port_ext.loc[common_index[0]]
         port_val = 100.0 * port_ext.loc[common_index] / base
         port_ret = port_val.pct_change().dropna()
@@ -866,7 +1187,11 @@ def analyze_portfolios_multi(
         herfindahl = float(sum(w * w for w in weights.values()))
         effective_n = (1.0 / herfindahl) if herfindahl > 0 else 0.0
 
-        linked = _linked_contribution(win_ret, w_vec)
+        if ragged:  # each day's own weights, so the parts still add up to the whole
+            linked = {k: v * 100.0 for k, v in
+                      _carino_link(win_ret * daily_w.loc[win_ret.index, active]).items()}  # fmt: skip
+        else:
+            linked = _linked_contribution(win_ret, w_vec)
         contribution = []
         for s in active:
             w = weights.get(s, 0.0)
@@ -883,7 +1208,15 @@ def analyze_portfolios_multi(
             )
         contribution.sort(key=lambda x: x["contribution"], reverse=True)
 
-        approx = _portfolio_bars(port_val, w_vec, warmup_yf, wide_sym)
+        # A basket whose members change inside the period has no clean bar:
+        # the line is drawn. A holding that listed during the warm-up,
+        # before the period, leaves the bars intact.
+        whole = not sym_closes[active].isna().to_numpy().any()
+        approx = (
+            _portfolio_bars(port_val, w_vec, warmup_yf, wide_sym)
+            if whole
+            else {"ohlc": [], "volume": []}
+        )
         out_one = {
             "period": period_u,
             "display_ccy": display_ccy,

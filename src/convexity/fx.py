@@ -106,6 +106,48 @@ def _fx_usd_series(ccy: str, period_yf: str) -> pd.Series | None:
     return series
 
 
+def fx_multipliers(ccys, base: str, dates: list[str]) -> dict[str, np.ndarray | None]:
+    """Daily ``base`` units per one unit of each currency, on each ISO date.
+
+    My Investments values a real book in its display currency day by day, at
+    each day's own rate. Rates come from Yahoo's ``ccyUSD=X`` history (max
+    range, the shared 4 h cache) and are crossed through USD. A date between
+    fixings takes the last one on or before it; a date before the history
+    starts takes its first rate, the best there is. Minor units (GBp) map to
+    their major currency. A currency with no history maps to None, so the
+    caller can fall back to today's rate and say so.
+    """
+    base = _norm_ccy_for_fx(base or "USD")
+    keys = np.array(dates, dtype="datetime64[D]")
+
+    def usd_per(ccy: str) -> np.ndarray | None:
+        if ccy == "USD":
+            return np.ones(len(dates))
+        s = _fx_usd_series(ccy, "max")
+        if s is None or len(s) == 0:
+            return None
+        s = s.dropna()
+        s = s[s > 0]
+        if s.empty:
+            return None
+        idx = np.array([str(d)[:10] for d in s.index], dtype="datetime64[D]")
+        order = np.argsort(idx, kind="stable")
+        idx, vals = idx[order], s.to_numpy(dtype=float)[order]
+        pos = np.searchsorted(idx, keys, side="right") - 1
+        return vals[np.maximum(pos, 0)]
+
+    out: dict[str, np.ndarray | None] = {}
+    base_usd = usd_per(base)
+    for c in dict.fromkeys(ccys):
+        m = _norm_ccy_for_fx(c or "USD")
+        if m == base:
+            out[c] = np.ones(len(dates))
+            continue
+        a = usd_per(m)
+        out[c] = a / base_usd if a is not None and base_usd is not None else None
+    return out
+
+
 def _apply_fx_to_closes(
     sym_closes: pd.DataFrame,
     by_sym: dict,

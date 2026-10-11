@@ -53,6 +53,38 @@ def _bulk_close_put(sym: str, period_yf: str, ser) -> None:
     _BULK_CLOSE_CACHE[(sym, period_yf)] = (time.time(), ser)
 
 
+# Dividends per symbol (ex-date -> amount per current share, quote unit), kept
+# by the as-traded close download (analytics._bulk_close(adjusted=False)) that
+# My Investments values the book with.
+_DIVIDENDS_CACHE: dict[str, tuple[float, object]] = {}
+
+
+def _dividends_get(sym: str):
+    hit = _DIVIDENDS_CACHE.get(sym)
+    if hit is None:
+        return None
+    # Full TTL even when empty: most shares that pay nothing return an empty
+    # series, and a short TTL would re-download years of closes with it. A
+    # failed download caches empty closes on the short TTL, and their refetch
+    # rewrites this entry.
+    ts, ser = hit
+    return ser if time.time() - ts <= _BULK_CLOSE_TTL else None
+
+
+def _dividends_put(sym: str, ser) -> None:
+    """Merge, never replace: a short fetch (an import's one-month price check)
+    would otherwise overwrite years of payouts with its own window, and the
+    book, whose long closes are still cached, would never ask again
+    (adversarial review, 2026-10-10). The newer value wins on a shared date."""
+    old = _DIVIDENDS_CACHE.get(sym)
+    if old is not None and old[1] is not None and len(old[1]) and ser is not None:
+        import pandas as pd
+
+        ser = pd.concat([old[1], ser])
+        ser = ser[~ser.index.duplicated(keep="last")].sort_index()
+    _DIVIDENDS_CACHE[sym] = (time.time(), ser)
+
+
 # Open/High/Low/Close/Volume per symbol, in the listing's own currency, stored
 # beside the bulk close by the same download (analytics._bulk_close). Only the
 # approximate portfolio bars read it, so a miss just means "no bars", never a
