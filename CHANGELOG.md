@@ -9,7 +9,7 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
-## Unreleased
+## 1.22.0 — 2026-10-11
 
 - **My Investments: performance** (issue #1, roadmap Phase 3). Return, vs S&P 500 and Your money now show real figures for the period you pick (1M to ALL), and Total profit stays lifetime. The chart draws your value every day, the money you put in, and the same money in the S&P 500 (dividends reinvested). Switch it to Return % to compare your return with the S&P's, and drag across it to measure any span. Your money shows a yearly rate from one year up; its hover card explains the timing effect. A quick-added holding's return starts at its value on its Since day, so the gap from your average price stays in Total profit. Dividends Yahoo knows about but you haven't added are estimated (shown as such, never added to your cash). Pick another display currency and the whole book is recomputed in it, every day at that day's rate. The topbar Refresh works on this page and refreshes your book's prices only.
 - **My Investments: imports land on the right exchange.** The exchange a screenshot shows next to a ticker (SBF, IBIS, BM, LSE…) now decides the listing: AIR on SBF is Paris, ITX on BM is Madrid. When Yahoo has no line there, the same company stands in, in the same currency first, and the review says which and why. A London price shown in pence without a currency is caught against the market price, so it is no longer booked at 100 times its cost. Each holding in the review has its own buy date.
