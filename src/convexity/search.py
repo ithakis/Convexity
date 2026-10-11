@@ -148,7 +148,10 @@ EXCHANGE_NAMES.update({"PCX": "NYSE Arca", "BTS": "Cboe", "TAI": "Taiwan", "TWO"
                        "HEL": "Helsinki", "VIE": "Vienna", "BRU": "Brussels", "LIS": "Lisbon",
                        "ISE": "Dublin", "SAO": "B3", "BUE": "Buenos Aires", "JNB": "Johannesburg",
                        "SES": "Singapore", "TLV": "Tel Aviv", "CNQ": "CSE", "VAN": "TSX Venture",
-                       "PNK": "OTC", "NAS": "Nasdaq"})  # fmt: skip
+                       "PNK": "OTC", "NAS": "Nasdaq", "BUD": "Budapest", "WSE": "Warsaw",
+                       "PRA": "Prague", "ATH": "Athens", "IST": "Istanbul", "FRA": "Frankfurt",
+                       "STU": "Stuttgart", "MUN": "Munich", "DUS": "Düsseldorf", "BER": "Berlin",
+                       "HAM": "Hamburg", "IOB": "LSE intl. order book"})  # fmt: skip
 # "low leverage", "high dividend yield": a moderate threshold the chip shows
 # (and the user can edit), never a lowest-first ranking — "small leverage"
 # ranked by lowest D/E returned companies with no debt at all.
@@ -607,6 +610,13 @@ def run(q: dict, offset: int = 0, limit: int = _TOP_N) -> dict:
             # Smith Micro Software); keep the ones within 15 points.
             typed = q["text"].strip().upper()  # a typed ticker keeps that listing
             base = [_card(h, keep=h.ticker == typed) for h in hits if h.score >= hits[0].score - 15]
+            if not hits or hits[0].score < 85:  # a name the pack lacks (Gedeon Richter)
+                live = _yahoo_cards(q["text"], {c["ticker"] for c in base})
+                # A company whose name has the typed word in it ("richter")
+                # beats the pack's partial matches (Richtech Robotics).
+                words = set(sdb.name_key(q["text"]).split())
+                exact = [c for c in live if words and words <= set(sdb.name_key(c["name"]).split())]
+                base = exact + base + [c for c in live if c not in exact]
         elif q["kind"] in ("name", "theme"):
             base, dropped = _verify_picks(q["picks"])
             if q["regions"]:  # "... in Europe": the company's home, not the AI's say-so
@@ -675,8 +685,22 @@ def _run_list(q: dict, t0: float) -> dict:
     cards, seen, missing = [], set(), []
     for part in _parts(q["text"])[:_LIST_MAX]:
         h = sdb.get(part) or next(iter(sdb.lookup(part, limit=1)), None)
-        if h is None:
-            missing.append(part)
+        if h is None or (h.score < 85 and h.ticker != part.upper()):
+            # A weak pack match ("richter" -> Richtech Robotics) loses to a
+            # company Yahoo names with the typed words in it.
+            words = set(sdb.name_key(part).split())
+            card = next((c for c in _yahoo_cards(part, seen, part)
+                         if c["ticker"] == part.upper() or (words and words <= set(sdb.name_key(c["name"]).split()))),
+                        None)  # fmt: skip
+            if card is None and h is not None and h.ticker not in seen:
+                seen.add(h.ticker)
+                cards.append(_card(h))
+                continue
+            if card is None:
+                missing.append(part)
+            else:
+                seen.add(card["ticker"])
+                cards.append(card)
         elif h.ticker not in seen:
             seen.add(h.ticker)
             cards.append(_card(h, keep=h.ticker == part.upper()))
@@ -709,6 +733,46 @@ def _card(h: sdb.Hit, why: str = "", keep: bool = False, exchanges=()) -> dict:
     }
 
 
+def _yahoo_cards(text: str, have=(), ticker: str = "") -> list[dict]:
+    """Companies Yahoo's live Lookup knows and the pack lacks, one card per
+    company: its first listing (a home venue first), the others as
+    alternates. ``ticker`` (an AI pick's) puts that listing first."""
+    want = (ticker or "").strip().upper()
+    found = sdb.yahoo_lookup(text, limit=12)
+    if want and want.split(".")[0] != text.strip().upper():
+        found += sdb.yahoo_lookup(
+            want.split(".")[0], limit=12
+        )  # Budapest's RICHT.BD is found by "RICHT"
+    words = [w for w in sdb.name_key(text).split() if len(w) >= 4]
+    if found and len(words) > 1 and all(sdb.relisting(h.ticker, h.exchange) for h in found):
+        # Only secondary lines for the full name ("gedeon richter"): a word
+        # on its own can find the home line (RICHT.BD for "richter").
+        for w in words:
+            found += [
+                h for h in sdb.yahoo_lookup(w, limit=12) if sdb.same_company(h.name, found[0].name)
+            ]
+    hits = list({h.ticker: h for h in found if h.ticker not in have}.values())
+    if not hits:
+        return []
+    hits.sort(key=lambda h: (h.ticker != want, sdb.relisting(h.ticker, h.exchange)))
+    by_co: dict[str, list] = {}
+    for h in hits:
+        by_co.setdefault(sdb.name_key(h.name)[:12], []).append(h)
+    cards = []
+    for group in by_co.values():
+        h, rest = group[0], group[1:]
+        cards.append({
+            **{k: v for k, v in asdict(h).items() if k != "score"},
+            "exchange_name": EXCHANGE_NAMES.get(h.exchange or "", h.exchange),
+            "why": "From Yahoo Finance: not in the offline symbol list.",
+            "alternates": [{"ticker": a.ticker, "exchange": a.exchange, "region": a.region,
+                            "exchange_name": EXCHANGE_NAMES.get(a.exchange or "", a.exchange)}
+                           for a in rest[:6]],
+            "values": {},
+        })  # fmt: skip
+    return cards
+
+
 def _codes(q: dict) -> list[str]:
     return [c for name in q["exchanges"] for c in EXCHANGES[name][0].split()]
 
@@ -721,7 +785,15 @@ def _verify_picks(picks: list[dict]) -> tuple[list[dict], int]:
         h = sdb.get(p.get("ticker", "")) or next(
             iter(sdb.lookup(p.get("name", ""), limit=1, min_score=88)), None
         )
-        if h is None:
+        if h is None:  # not in the pack: Yahoo must still know it, live
+            # Verified like a pack pick: the AI's ticker exactly, or the
+            # company it named, never Lookup's first fuzzy hit.
+            want = (p.get("ticker") or "").strip().upper()
+            card = next((c for c in _yahoo_cards(p.get("name", ""), seen, want)
+                         if c["ticker"] == want or sdb.same_company(c["name"], p.get("name"))), None)  # fmt: skip
+            if card is not None:
+                seen.add(card["ticker"])
+                out.append({**card, "why": p.get("why", "")})
             continue
         h = sdb.home(h.group) or h
         if h.ticker not in seen:

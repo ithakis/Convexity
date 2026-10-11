@@ -21,8 +21,8 @@ owner says so.
 | 2 | Ledger and manual entry | Done (merged) | `feature/my-investments-p2` · [ithakis/Convexity#33](https://github.com/ithakis/Convexity/pull/33) | 2026-10-06 |
 | 5 | AI import I: text and spreadsheets, and the front door | Done (merged) | `feature/my-investments-p5` (with 6) · [ithakis/Convexity#34](https://github.com/ithakis/Convexity/pull/34) | 2026-10-06 |
 | 6 | AI import II: screenshots and PDFs | Done (merged) | `feature/my-investments-p5` (with 5) · [ithakis/Convexity#34](https://github.com/ithakis/Convexity/pull/34) | 2026-10-06 |
-| 3 | Performance | Not started (decisions taken) | | |
-| 4 | Holdings depth | Not started | | |
+| 3 | Performance | Done (PR open) | `feature/my-investments-p3` | 2026-10-11 |
+| 4 | Holdings depth | Next | | |
 | 7 | Attention rail I: risk and events | Not started | | |
 | 8 | Attention rail II: plans and price alerts | Not started | | |
 | 9 | Notifications | Not started | | |
@@ -41,12 +41,14 @@ Paste this into a new Claude Code session to carry on:
 
 ```
 Read docs/plans/my-investments-roadmap.md. Continue the My Investments roadmap:
-take the first phase in the progress table (run order) that is not Done. That is Phase 3,
-Performance: read its section, the feedback log and Part 2 of the engine design in the plan
-file, and run it with the phase loop (suggest → prototype → build → verify → review →
-sign-off). Locked decisions: Total profit is lifetime; Return, vs S&P and Your money follow
-the period pill; the chart defaults to Value; the topbar Refresh refreshes the book only;
-quick-add performance starts at the Since-day market value. Follow CLAUDE.md. Never use my
+take the first phase in the progress table (run order) that is not Done. That is Phase 4,
+Holdings depth: read its section, the Phase 3 feedback log (the holdings table and the
+numbers it shows were settled there) and Appendix D, and run it with the phase loop
+(suggest → prototype → build → verify → review → sign-off). Start with the split-fetch
+robustness item in its Build list. Locked decisions from Phase 3: Total profit is lifetime;
+Return, vs S&P and Your money follow the period pill; the benchmark is the owner's pick
+(a fund); the book is valued with as-traded closes; estimated dividends are paid out, never
+in Value or Cash. Follow CLAUDE.md. Never use my
 real data; run live checks with my API keys as env vars. Ask before any version bump.
 ```
 
@@ -379,26 +381,31 @@ the owner reacts to something that looks real.
   never confused.
 
 **Build:**
-- [ ] `_bulk_close(adjusted=False)` with dividends and splits cached; the
-      default path stays byte-identical.
-- [ ] `fx.fx_multipliers`.
-- [ ] Extract `analytics._carino_link`.
-- [ ] Daily TWR and MWR (XIRR via `brentq`).
-- [ ] Periods 1M, 3M, YTD, 1Y, 3Y and ALL; under one year, compare the period
+- [x] `_bulk_close(adjusted=False)` with dividends cached (splits stay with
+      `market_splits`); the default path stays byte-identical.
+- [x] `fx.fx_multipliers`.
+- [x] Extract `analytics._carino_link`.
+- [x] Daily TWR and MWR (XIRR via `brentq`, solved per period length).
+- [x] Periods 1M, 3M, YTD, 1Y, 3Y and ALL; under one year, compare the period
       figures rather than annualised ones.
-- [ ] `drawInvChart`:
+- [x] `drawInvChart`:
       - Value mode: value, net deposits, and the same deposits invested in the
         S&P 500.
       - Return mode: TWR index against SPY total return, with the measure brush.
-- [ ] FX display currency and the price-versus-FX split.
-- [ ] Refresh on this page through the `__investments__` sink in `jobs.py`;
+- [x] FX display currency and the price-versus-FX split.
+- [x] Refresh on this page through the `__investments__` sink in `jobs.py`;
       research tabs untouched.
-- [ ] `RICH_TIPS`: `inv:twr`, `inv:mwr`, `inv:timing`.
+- [x] `RICH_TIPS`: `inv:twr`, `inv:mwr`, `inv:timing` (the Your money card's
+      breakdown).
+- [x] Estimated dividends (owner's choice, paid out) and the opening-holding
+      rule; `opening: true` on imported current holdings.
 
 **Verify:**
-- [ ] NVDA's 10:1 split (2024-06-10) values a quick-add dated 2023 correctly.
-- [ ] Switching between USD and GBP.
-- [ ] The S&P line in the chart matches SPY total return over 1Y.
+- [x] NVDA's 10:1 split (2024-06-10) values a quick-add dated 2023 correctly
+      (live: 100 x Yahoo's close on 2023-03-01, 2024-06-07 and 2024-06-11).
+- [x] Switching between USD and GBP.
+- [x] The S&P line in the chart matches SPY total return over 1Y (live:
+      17.2549% both ways).
 
 **Feedback log:**
 - 2026-10-06: Chat mockups and questions (asked while this phase was first in line). The owner chose:
@@ -410,8 +417,171 @@ the owner reacts to something that looks real.
   - **A quick-added holding's performance starts at that day's market
     value.** The gap from its average price stays in lifetime Total profit
     and is never a one-day return, which keeps the Since tooltip's promise.
+- 2026-10-06: Second round of questions (Phase 3 picked up). The owner chose:
+  - **Cumulative returns.** Return and vs S&P 500 are cumulative on every
+    pill, so the headline equals the end of the Return % chart. Your money
+    is "/ yr" from 1Y up and a plain period % under a year. The hover shows
+    the other form ("+48.6% in 3 years, or 14.1% a year").
+  - **Display currency: each day at its own rate.** The book is computed in
+    the display currency, so a GBP view includes what the pound did; the
+    S&P line is converted the same way.
+  - **Unrecorded dividends are filled in from Yahoo, per payout** (not per
+    holding, which double-counts a partly recorded history). A payout with no
+    recorded dividend from 5 days before to 45 days after its ex-date is
+    estimated as shares held x amount per share, gross. A recorded one
+    replaces its estimate.
+  - **Estimates count as paid out to the owner:** in Return, vs S&P, Your
+    money and Total profit ("Dividends, estimated"), never in Value or Cash.
+  - **The timing effect lives in the Your money hover card**; four KPI cells
+    stay.
+- 2026-10-09: The owner's first real import (an Interactive Brokers positions
+  screenshot, installed build) and five issues:
+  - **Wrong listings:** read the exchange from the screenshot; use that line
+    when Yahoo has it, else the best proxy (same company, same currency
+    first), and say which and why. "Invest a lot of effort" in loading
+    trades correctly.
+  - **History:** each holding's buy date is set in its own row in the first
+    import's review, not one date for the whole list.
+  - **Optimize on My Investments:** wanted as a rebalancing tool, then
+    "forget about the optimize part for now". Not started.
+  - Selected text unreadable in light mode; a Settings action to clear the
+    book; Gedeon Richter (Budapest) not findable.
+- 2026-10-11: Rounds 2 and 3, all done. The owner chose "C · five bands +
+  Sharpe" for the Volatility card, total-return + MSCI World as the benchmark
+  picker's default, and "opens in My Investments, topbar switches". Asked for:
+  tiny Portfolios table fixed, "Portfolio" renamed "Portfolios", a red dashed
+  benchmark line, a default currency in Settings, LaTeX hover cards, and
+  Rec Δ6M, MSPR and news for European listings (Finnhub's US line, Yahoo
+  fallbacks). Then: broker exchange codes in the Add box (`AIR SBF`,
+  `IBIS:SAP`), "vs" centred between the toggle and the picker (option A), and
+  one period selector everywhere: a big pill with the chosen period as a
+  raised pill inside (the owner's own design).
+- Parked: Optimize on My Investments; dividends not counted during a history
+  stand-in stretch. The split-fetch robustness fix moved to Phase 4's Build.
 
 **Findings:**
+- **Replaying the whole ledger in the display currency was wrong for
+  cash.** It froze uninvested USD cash at its arrival-day rate, so a GBP view
+  ignored what the dollar did to it (a test with half the book in cash
+  caught it). Now the base-currency replay gives cash and deposits,
+  converted day by day, and a display-currency replay gives each holding's
+  cost; the difference is "Currency on cash" in the profit card, so the
+  breakdown still adds up.
+- Per-payout dividend matching (5 days before to 45 after the ex-date, one
+  to one, nearest first) is what makes "fill them in from Yahoo" safe: a
+  per-holding switch to total-return prices double-counts a partly recorded
+  history.
+- A zero day before the first entry lets ALL include the first day's own
+  move, and makes the XIRR start explicit (it is shift-invariant).
+- The first page load of a session reads years of daily closes (~8 s cold
+  for six names); a "Reading your prices…" line replaces the blank page.
+  Later loads are cached (GBP after USD: 0.1 s).
+- **Adversarial review (owner's /verify request, 2026-10-07)** fixed 7
+  issues, each with a test or a live check:
+  - a share that pays no dividends re-downloaded years of closes on almost
+    every page load (its empty dividend cache expired in 60 s);
+  - a display currency with no Yahoo rates showed "your investments can't be
+    totalled": it now falls back to the base currency with a warning;
+  - the S&P line could 500 when the USD rate was missing;
+  - annualising a few days of a big move could overflow;
+  - the Portfolio tab's startup load fetched the book without the display
+    currency, and a slow load could land after a newer one (a load sequence
+    now drops stale answers);
+  - on My Investments, attaching to a running research refresh skipped the
+    research reload when it finished.
+  Removed:
+  - `ledger.twr` and `ledger.mwr` (superseded by `twr_index` and
+    `period_mwr`);
+  - `_on_or_before`, the `_fx_series` hook and the replay's own FX lookup
+    (`_make_fx_at` now reads `fx.fx_multipliers`, the one FX path);
+  - `_bulk_close_raw`, merged into `_bulk_close` (one download and retry
+    path for both modes; the default call is pinned by a test).
+  Scale check: a 20-year, 40-share, 800-trade book computes in 0.64 s.
+- **The owner's first import (2026-10-09)** booked euro rows shown on Paris
+  and Madrid on Xetra (currency alone picked the first euro line) and a
+  London row's pence as pounds (no currency on screen: a 100x cost, which
+  was the whole "loss" on the page). Plain code now reads the exchange
+  beside the ticker and checks units against the market price; the eval gained a synthetic broker positions case (11/11
+  live). Asking the model for the exchange made it drop rows that showed none
+  (4 → 8 of 10 reads on "typed holdings"), so code reads it instead. On a
+  positions table the model took today's price for the average; prompt
+  changes either lost the headings or broke the phone list, so a row's own
+  arithmetic ((last − average) × shares = its P&L) decides instead.
+- **Yahoo's screener has no Gedeon Richter line at all**, and Yahoo renamed
+  its Budapest ticker (RICHTER.BD → RICHT.BD) the day of the report, leaving
+  one day of history. `symbol_db.yahoo_lookup` (live Lookup) covers names the
+  pack lacks; `analytics.extend_history` lends a short line the same
+  company's older history. Yahoo's old data needed guards: Frankfurt's Richter
+  lines are negative when dividend-adjusted before June 2026, Unilever's
+  London line jumps x52 in 1993, and an order-book line moved six times in
+  five years.
+- The Portfolio tab cut a basket to its youngest line (`dropna(how="any")`);
+  it now starts without that holding and reweights the rest. Its analytics
+  warnings had never been shown anywhere; they are now under the chart.
+- **Adversarial review of the follow-up (owner's /verify, 2026-10-10)**
+  fixed, each with a test: a short price fetch wiped the cached dividend
+  history; decimal commas made the P&L arithmetic "prove" a 100x price;
+  "TSE" (Tokyo on many screens) booked a yen price as Canadian dollars;
+  `same_company` took Bank of America for Bank of Ireland; a pence
+  conversion left a stale fix; unverified AI picks via Yahoo; "T" matched
+  inside "T-Mobile"; real -70% days were masked as glitches; a missing
+  ticker cost a second ~7 s of retries; "richter" in a pasted list became
+  Richtech Robotics; Settings → Clear stayed stuck after a conflict.
+- Two Phase 3 tests compared against "today's" price, which fails on a
+  weekend (the last close is Friday's); they use the last trading day now.
+- **2026-10-10: the import UI, redesigned with the owner from mockups.**
+  Three rounds in chat. Composer: the owner first liked a tall card, then
+  chose **the ChatGPT-style pill with starter chips**, minus "Add one by
+  hand" ("the pill is adding one by hand") and with a one-line placeholder.
+  Review rows: **ticker-first layout C, swapped to name first in bold and
+  ticker muted**, the ✦ mark on the left (as in Portfolio search) instead of
+  purple, and the exchange clickable to a **simple listing list**. Header:
+  **a light navy band with bold labels** ("they get lost"). Date: neither
+  mockup; **year buttons, then month, then day**, "super optimized for
+  speed of input and very visually inviting", in a compact chip with a
+  calendar icon; **no auto-advance** to the next row. Also: the portfolio
+  name/cache line hides on My Investments. Built live; the typed-text path
+  now finds RICHT.BD from its HUF price (Yahoo Lookup by the first word).
+  Live import eval 11/11 (two clean runs; one earlier flake dropped a row).
+- **2026-10-10, owner: drop the "Since when" question** ("performance
+  should automatically count since the oldest day"; with a date per row it
+  made no sense). Undated holdings default to today, shown faintly.
+  **/verify with the owner's own positions screenshot (21 rows, kept out of
+  the repo):** all 21 read right (quantities, averages, exchanges, DGE in
+  pence), every listing within a few % of the screen's last price. Found and
+  fixed: every row showed ✦ (the model copied "GLE SBF" as the name), and
+  Novartis's Xetra line has no Yahoo data from 2019 to 2025 (now filled from
+  NOVN.SW). The review's company cell now keeps ticker and exchange visible
+  when space is tight. Live eval 11/11 twice.
+- **2026-10-11, owner's review of their real book** (screenshot of the page).
+  Picked from mockups: layout A1. Last month under the value; Total profit
+  (lifetime), Return with the S&P's beside it, "Change in portfolio value"
+  (owner's wording) with the money put in, and a risk cell the owner added
+  (volatility, Sharpe, Sortino). "Your money" moved into the Return card (a
+  duplicate of Return side by side); "pp" gone. The S&P line starts at your
+  value for every pill and hides from its legend; drag-to-measure in Value
+  mode too; holdings sort by column or drag into your own order; numbers
+  always en-US (owner's choice); the review's € hugs its price.
+  **Bug found:** Apply dropped `opening`, so the owner's 21 imported holdings
+  (average prices from later buys, dated Jan–Feb 2025) were booked as bought
+  at those prices then: ALL TWR −71% (MWR +12.6%). Fixed, and old imports
+  read as opening without a rewrite: ALL TWR +49.9%. **Why the Portfolio tab
+  differs** (1Y, owner's book): +8.5% actual; +9.2% buy-and-hold total
+  return; +12.5% start mix rebalanced daily; +17.1% today's mix rebalanced
+  daily (the tab's test: hindsight weights). The owner kept the test, with a
+  note giving the actual return beside it.
+- **2026-10-11, second round** (installed build). The owner asked for: the
+  benchmark line red and dashed, and a choice of benchmark as on Portfolios
+  (picked: the Portfolios list plus MSCI World, each priced through a
+  total-return fund, kept in `prefs.json`); a default currency in Settings
+  (picked: the app opens in it, the topbar switch lasts until the app
+  closes); LaTeX in the hover cards with aligned equations; a green to red
+  volatility scale (mockup C picked from three: five named bands plus a
+  Sharpe line); "Portfolio" renamed "Portfolios". **Bugs found:** the
+  Portfolios table shrank to 40% after a render while My Investments showed
+  (it measured a hidden table), and the desktop app forgot every
+  localStorage choice at each launch (Qt 6's default profile is
+  off-the-record; now a persistent profile in the data folder).
 
 ---
 
@@ -427,6 +597,15 @@ the owner reacts to something that looks real.
 - How suggested dividends are presented in the rail.
 
 **Build:**
+- [ ] **Don't mark the book broken on a split-fetch miss** (found 2026-10-11,
+      first, because the table builds on it). `investments._fetch_splits`
+      turns a failed Yahoo answer into "no splits" and `market_splits` caches
+      that for 10 minutes, so a pre-split `qty_basis: "trade"` entry replays
+      at face value, the ledger oversells, and `page()` returns `broken`
+      for a book that is fine. Tell "Yahoo failed" (None) from "no splits"
+      (empty): keep the last good list per ticker and retry soon; with none,
+      show a "split data unavailable, retrying" notice and compute what can
+      be computed, never "broken". Test with a stubbed failing fetch.
 - [ ] Columns:
       - News read and Market read tier (`nsDot`)
       - contribution in pp (Carino-linked, plus a "Cash and fees" bucket)

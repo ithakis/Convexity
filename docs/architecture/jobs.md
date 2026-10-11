@@ -45,6 +45,19 @@ cancellable, and there was no way to refresh the whole account. Now there is
 
 There is no separate news refresh button or route — news is a phase of the job.
 
+**On My Investments** (Phase 3) the same button and `R` refresh **the book
+only**: the page posts `{view: "__investments__", phases: ["book"]}`
+(`jobs.BOOK_VIEW`), and `_run_book_phase` calls
+`investments.refresh_market`, which fetches the book's as-traded closes,
+dividends, splits, FX and SPY four symbols at a time. Progress uses the
+`quotes_*` counts ("Prices n/m" on the chip), `job.cancel` is checked
+between chunks, nothing is saved (no `view_saved`, the book file is
+untouched), and there is no news phase. A long-press there is a plain book
+refresh. It is still a job, so single-flight holds: a research refresh and a
+book refresh share Yahoo and never run at once (409, the page attaches). On
+`done` the client reloads the page payload (`invLoad`) and skips the
+research reload (`rfFinish` checks `touchedViews` for the book view).
+
 ### Four rules that are load-bearing
 
 1. **Single-flight.** `submit()` rejects a second concurrent job with `409` and

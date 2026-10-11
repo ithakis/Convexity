@@ -37,6 +37,7 @@ from __future__ import annotations
 import base64
 import io
 import re
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -67,13 +68,163 @@ _EXCH_CCY = {
     **dict.fromkeys(("GER", "FRA", "STU", "DUS", "MUN", "BER", "HAM", "AMS", "PAR", "MIL",
                      "MCE", "BRU", "LIS", "ISE", "HEL", "VIE", "ENX"), "EUR"),  # fmt: skip
     "EBS": "CHF", "TOR": "CAD", "VAN": "CAD", "CNQ": "CAD", "ASX": "AUD", "JPX": "JPY",
-    "HKG": "HKD", "STO": "SEK", "CPH": "DKK", "OSL": "NOK",
+    "HKG": "HKD", "STO": "SEK", "CPH": "DKK", "OSL": "NOK", "BUD": "HUF", "WSE": "PLN",
+    "PRA": "CZK", "ATH": "EUR", "IST": "TRY",
 }  # fmt: skip
 _CCY_SUFFIX = {
     "GBP": (".L",), "EUR": (".DE", ".AS", ".PA", ".MI", ".MC", ".BR", ".IR", ".HE", ".VI", ".LS"),
     "CHF": (".SW",), "CAD": (".TO", ".V"), "AUD": (".AX",), "JPY": (".T",), "HKD": (".HK",),
     "SEK": (".ST",), "DKK": (".CO",), "NOK": (".OL",),
 }  # fmt: skip
+
+
+# The exchange a broker shows next to a row -> where Yahoo lists it. A
+# screenshot's exchange decides the listing: AIR on SBF is AIR.PA, not the
+# first euro line found (AIR.DE), which is what currency alone picked
+# (owner's report, 2026-10-09). Keys: Interactive Brokers' codes, ISO
+# MICs, Yahoo's own codes and plain names, upper-cased.
+# name -> (Yahoo exchange codes, ticker suffix, currency, "CODES|NAME|NAME")
+_VENUES = {
+    "Euronext Paris": ("PAR", ".PA", "EUR", "SBF XPAR PAR PARIS|EURONEXT PARIS"),
+    "Xetra": ("GER", ".DE", "EUR", "IBIS IBIS2 XETR GER XETRA|GETTEX|TRADEGATE"),
+    "Frankfurt": ("FRA", ".F", "EUR", "FWB FWB2 XFRA FRA FRANKFURT|BOERSE FRANKFURT|FRANKFURT STOCK EXCHANGE"),
+    "Stuttgart": ("STU", ".SG", "EUR", "SWB XSTU STU STUTTGART"),
+    "Madrid": ("MCE", ".MC", "EUR", "BM XMAD MCE MADRID|BOLSA DE MADRID|BME|BOLSA MADRID"),
+    "Milan": ("MIL", ".MI", "EUR", "BVME BVME.ETF XMIL MIL MILAN|BORSA ITALIANA|EURONEXT MILAN"),
+    "Euronext Amsterdam": ("AMS", ".AS", "EUR", "AEB XAMS AMS AMSTERDAM|EURONEXT AMSTERDAM"),
+    "Euronext Brussels": ("BRU", ".BR", "EUR", "ENEXT.BE XBRU BRU BRUSSELS|EURONEXT BRUSSELS"),
+    "Euronext Lisbon": ("LIS", ".LS", "EUR", "BVL XLIS LIS LISBON|EURONEXT LISBON"),
+    "Euronext Dublin": ("ISE", ".IR", "EUR", "ISED XDUB DUBLIN|EURONEXT DUBLIN"),
+    "Vienna": ("VIE", ".VI", "EUR", "VSE XWBO VIE VIENNA|WIENER BOERSE|WIENER BORSE"),
+    "Helsinki": ("HEL", ".HE", "EUR", "HEX XHEL HEL HELSINKI|NASDAQ HELSINKI"),
+    "Athens": ("ATH", ".AT", "EUR", "ATHEX XATH ATH ATHENS"),
+    "London": ("LSE", ".L", "GBP", "LSE LSEETF XLON LONDON|LONDON STOCK EXCHANGE"),
+    "SIX Swiss": ("EBS", ".SW", "CHF", "EBS SWX XSWX XVTX SIX|SIX SWISS EXCHANGE|SWISS EXCHANGE"),
+    "Stockholm": ("STO", ".ST", "SEK", "SFB XSTO STO STOCKHOLM|NASDAQ STOCKHOLM"),
+    "Copenhagen": ("CPH", ".CO", "DKK", "CPH CPHSE XCSE COPENHAGEN|NASDAQ COPENHAGEN"),
+    "Oslo": ("OSL", ".OL", "NOK", "OSE XOSL OSL OSLO|OSLO BORS"),
+    "Budapest": ("BUD", ".BD", "HUF", "BUX BUD XBUD BUDAPEST|BUDAPEST STOCK EXCHANGE"),
+    "Warsaw": ("WSE", ".WA", "PLN", "WSE XWAR WARSAW|GPW"),
+    "Prague": ("PRA", ".PR", "CZK", "PRA XPRA PRAGUE"),
+    "NYSE": ("NYQ", "", "USD", "NYSE XNYS NYQ|NEW YORK STOCK EXCHANGE"),
+    "Nasdaq": ("NMS NGM NCM", "", "USD", "NASDAQ NASDAQ.NMS NASDAQ.NGS NASDAQ.SCM ISLAND XNAS NMS NGM NCM"),
+    "NYSE Arca": ("PCX", "", "USD", "ARCA ARCX PCX|NYSE ARCA|NYSEARCA"),
+    "NYSE American": ("ASE", "", "USD", "AMEX XASE ASE|NYSE AMERICAN|NYSE MKT"),
+    "Toronto": ("TOR", ".TO", "CAD", "TSE XTSE TOR TORONTO|TSX|TORONTO STOCK EXCHANGE"),
+    "ASX": ("ASX", ".AX", "AUD", "ASX XASX|AUSTRALIAN SECURITIES EXCHANGE"),
+    "Hong Kong": ("HKG", ".HK", "HKD", "SEHK XHKG HKG|HONG KONG|HKEX"),
+    "Tokyo": ("JPX", ".T", "JPY", "TSEJ TYO XTKS JPX TOKYO|TOKYO STOCK EXCHANGE"),
+}  # fmt: skip
+_VENUE_KEY = {
+    k: name
+    for name, (_c, _s, _y, keys) in _VENUES.items()
+    for k in keys.split("|")[0].split() + keys.split("|")[1:]
+}
+
+
+_VENUE_CODES = {k for _c, _s, _y, keys in _VENUES.values() for k in keys.split("|")[0].split()}
+
+
+def _word(ticker: str) -> re.Pattern:
+    """A ticker as a whole word: "T" is not inside "T-Mobile" or "AT&T"."""
+    return re.compile(rf"(?<![A-Za-z0-9.&-]){re.escape(ticker)}(?![A-Za-z0-9&-])")
+
+
+def shown_exchange(ticker: str, block: str) -> str | None:
+    """The exchange a row shows beside its ticker, read by plain code from
+    the transcript or file (never asked of the model: an exchange field made
+    it leave out rows that had none, eval 2026-10-10). A cell of the
+    ticker's line that is an exchange code (``AIR | SBF``, ``AIR SBF``, a
+    CSV Exchange column), or a whole cell that names one ("Xetra")."""
+    t = (ticker or "").strip().upper()
+    if not t or not block:
+        return None
+    pat = _word(t)
+    for line in block.split("\n"):
+        if not pat.search(line):
+            continue
+        cells = [c.strip() for c in re.split(r"[|,;\t]", line)]
+        own = next((c for c in cells if pat.search(c)), "")
+        after = own[pat.search(own).end() :].split()[:1] if own else []  # "AIR SBF": the next word
+        # The next word must be a code; a whole cell may also be a name
+        # (an Exchange column saying "TSX" or "Euronext Paris").
+        for tok, whole in [(w, False) for w in after] + [(c, True) for c in cells if c != own]:
+            key = tok.strip("()[]:").upper()
+            if key in _VENUE_CODES or (whole and key in _VENUE_KEY):
+                return tok.strip("()[]:")
+    return None
+
+
+def ticker_line(ticker: str, block: str) -> str:
+    """The first line of ``block`` that shows ``ticker`` as a word."""
+    t = (ticker or "").strip().upper()
+    if not t:
+        return ""
+    pat = _word(t)
+    return next((ln for ln in (block or "").split("\n") if pat.search(ln)), "")
+
+
+_NUM = re.compile(r"(?<![\w.,])[-−+]?\d[\d.,]*(?![\d.,]*%)(?!\d)")
+
+
+def _number(tok: str) -> float | None:
+    """A number as written, in either convention: "1,234.56", "1.234,56",
+    "171,40" (a decimal comma: two digits after it) and "2,500" (thousands)."""
+    t = tok.replace("−", "-").rstrip(".,")
+    if "," in t and "." in t:
+        t = (
+            t.replace(".", "").replace(",", ".")
+            if t.rfind(",") > t.rfind(".")
+            else t.replace(",", "")
+        )
+    elif "," in t:
+        t = (
+            t.replace(",", ".")
+            if re.search(r",\d{1,2}$", t) and t.count(",") == 1
+            else t.replace(",", "")
+        )
+    elif t.count(".") > 1:
+        t = t.replace(".", "")
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _avg_from_pnl(qty: float, line: str) -> tuple[float, float] | None:
+    """(average price, last price) proved by a positions row's arithmetic:
+    (last - average) x shares = the signed unrealised P&L shown on it. The
+    sign tells the two prices apart, which the model can't (an IBKR row
+    "AIR SBF | 171.40 | 158.85 | 40 | 502.00"). None unless exactly one
+    pair of the row's numbers fits."""
+    nums = [x for m in _NUM.finditer(line or "") if (x := _number(m.group())) is not None]
+    if not qty or len(nums) < 4:
+        return None
+    fits = set()
+    for i, last in enumerate(nums):
+        for j, avg in enumerate(nums):
+            if i == j or last <= 0 or avg <= 0 or abs(last - qty) < 1e-9 or abs(avg - qty) < 1e-9:
+                continue
+            for k, pnl in enumerate(nums):
+                if k in (i, j) or abs(pnl) < 1e-9:
+                    continue
+                # Pence prices with a P&L in pounds (London): a hundredth.
+                for gain in ((last - avg) * qty, (last - avg) * qty / 100):
+                    if abs(gain - pnl) <= 0.005 * abs(pnl) + 0.01 * qty + 0.02:
+                        fits.add((avg, last))
+    return fits.pop() if len(fits) == 1 else None
+
+
+def venue(text: str | None, ticker: str = "") -> str | None:
+    """The exchange a row shows -> a `_VENUES` name, or None. "TSE" is
+    Toronto at Interactive Brokers but Tokyo on many screens: a numeric
+    ticker (7203) says Tokyo."""
+    t = " ".join(re.sub(r"[^A-Za-z0-9. ]", " ", text or "").upper().split())
+    if not t:
+        return None
+    if t == "TSE" and re.fullmatch(r"\d{4}(\.T)?", (ticker or "").strip().upper()):
+        return "Tokyo"
+    return _VENUE_KEY.get(t) or _VENUE_KEY.get(t.split(".")[0])
 
 
 class ImportRefused(BookError):
@@ -290,6 +441,8 @@ joined by ' | '.
   amount. Never leave out the smaller lines. Skip logos and icons.
 - In a table, output the column headers once as the first line, then each
   row's cells in order.
+- Keep the small labels beside a ticker or name (an exchange or market code)
+  as their own cell on that row.
 Copy every character exactly as it appears: dates in their own format with
 their year, numbers, signs and currency symbols. Never reformat, convert,
 round, or add anything that is not in the image (no times, years or words of
@@ -311,7 +464,9 @@ Return one item per transaction or holding you can see. Types:
   positive.
 - split: a stock split. ratio = new shares per old share.
 - holding: a position in a list of current holdings (a snapshot, not a trade).
-  qty = shares held; price = the average price paid if shown, else null;
+  qty = shares held; price = the average price paid if shown (a column like
+  Avg price, Average cost, Cost per share, Buy price), else null. Never the
+  last, current or market price: that is today's price, not what was paid;
   date = the date shown for it, else "" (never today's date as a guess).
 - A cash balance in a holdings list ("Cash", "USD 4,050") is a deposit with
   total = the balance, name "Cash balance", date "" unless one is shown.
@@ -436,6 +591,19 @@ def _exch_ccy(hit) -> str | None:
     return _EXCH_CCY.get(hit.exchange or "") if hit else None
 
 
+def _company_words(name: str, ticker: str, code: str) -> str:
+    """The name as a company name, or the bare ticker when it is only the
+    ticker and its exchange code. A positions screen's instrument cell is
+    "GLE SBF"; the model copies it as the name, and checking Société
+    Générale against "GLE SBF" marked every row of a correctly read
+    screenshot as the AI's guess (owner's screenshot, 2026-10-10)."""
+    words = re.findall(r"[A-Za-z0-9]+", name or "")
+    drop = {w.upper() for w in re.findall(r"[A-Za-z0-9]+", f"{ticker} {code}")}
+    if ticker and words and all(w.upper() in drop for w in words):
+        return ticker
+    return name
+
+
 def alias_key(name: str | None) -> str:
     """How a name as written is remembered: lower-case words only, so
     "Shell", "SHELL" and "Shell " are one alias."""
@@ -443,20 +611,24 @@ def alias_key(name: str | None) -> str:
 
 
 def match_listing(
-    name: str, ticker: str, ccy: str | None, aliases: dict | None = None
-) -> tuple[object | None, list, bool]:
-    """(the listing, alternatives, guessed) for a row. A name the owner has
-    corrected before wins outright (``aliases``, saved on Apply). Otherwise
-    the row's currency picks among a company's listings; with no currency
-    the pack's ranking stands and the same company's other listings become
-    a question."""
+    name: str, ticker: str, ccy: str | None, aliases: dict | None = None, shown: str | None = None
+) -> tuple[object | None, list, bool, str]:
+    """(the listing, alternatives, guessed, note) for a row.
+
+    A name the owner has corrected before wins outright (``aliases``, saved
+    on Apply). Then the exchange the row shows (``shown``, a `_VENUES`
+    name): its own line when Yahoo has one; else the best proxy, the same
+    company in the same currency first, then its home listing, and the note
+    says which and why. With no exchange shown, the row's currency picks
+    among a company's listings; with no currency either the pack's ranking
+    stands and the same company's other listings become a question."""
     from convexity import symbol_db
 
     remembered = (aliases or {}).get(alias_key(name))
     if remembered:
         hit = symbol_db.get(remembered)
         if hit is not None:
-            return hit, [], False
+            return hit, [], False, ""
     ccy = major_ccy(ccy) if ccy else None
     seen: dict[str, object] = {}
 
@@ -484,8 +656,21 @@ def match_listing(
         for h in symbol_db.lookup(t, limit=3, min_score=90.0):
             add(h)
     cands = list(seen.values())
+    if shown in _VENUES:
+        return _on_venue(shown, name, base, cands)
+    # Nothing in the pack, or nothing in the row's currency (typed text has no
+    # exchange column: "40 Richter Gedeon at 9640 HUF"): Yahoo's live Lookup,
+    # by the name and by its first word (Yahoo finds RICHT.BD for "Richter",
+    # not for "Richter Gedeon"). Only the same company counts.
+    if name and (not cands or (ccy and not any(_exch_ccy(h) == ccy for h in cands))):
+        first = re.findall(r"[A-Za-z0-9]+", name)[:1]
+        for q in dict.fromkeys([name, *(w for w in first if len(w) >= 4)]):
+            for h in symbol_db.yahoo_lookup(q):
+                if symbol_db.same_company(h.name, name):
+                    add(h)
+        cands = list(seen.values())
     if not cands:
-        return None, [], True
+        return None, [], True, ""
     if ccy:
         same = [h for h in cands if _exch_ccy(h) == ccy]
         if same:
@@ -496,6 +681,7 @@ def match_listing(
                 pick,
                 [h for h in cands if h is not pick and _stem(h.name) == stem][:3],
                 not exact,
+                "",
             )
     pick = cands[0]
     exact = bool(t) and pick.ticker == t
@@ -503,7 +689,75 @@ def match_listing(
     # name-alike like Apple Hospitality is not worth a question).
     stem = _stem(pick.name)
     others = [h for h in cands[1:6] if _exch_ccy(h) != _exch_ccy(pick) and _stem(h.name) == stem]
-    return pick, others[:3], not exact
+    return pick, others[:3], not exact, ""
+
+
+def _on_venue(
+    shown: str, name: str, base: str, cands: list
+) -> tuple[object | None, list, bool, str]:
+    """The row's own exchange, else the best proxy for it (see match_listing)."""
+    from convexity import symbol_db
+
+    codes, suffix, vccy, _keys = _VENUES[shown]
+    codes = codes.split()
+    if name and re.sub(r"\W", "", name).upper() == base:
+        name = ""  # the name column showed the ticker: no name to check against
+    who = name or base
+    # Its own line: the ticker as shown on that exchange, else the company
+    # by name there; Yahoo's live Lookup for lines the pack lacks.
+    on = [h for h in [symbol_db.get(base + suffix) if base else None, *cands]
+          if h is not None and h.exchange in codes]  # fmt: skip
+    if not on and (base or name):
+        live = symbol_db.yahoo_lookup(base + suffix) if base else []
+        live += symbol_db.yahoo_lookup(name) if name else []
+        on = [
+            h
+            for h in live
+            if h.exchange in codes
+            and (h.ticker == base + suffix or symbol_db.same_company(h.name, name))
+        ]
+    if on:
+        exact = [h for h in on if base and h.ticker == base + suffix]
+        pick = (exact or on)[0]
+        # A ticker that names another company on that exchange is a guess.
+        guessed = not exact or bool(name) and not symbol_db.same_company(pick.name, name)
+        alts = list({h.ticker: h for h in cands if h.ticker != pick.ticker
+                     and symbol_db.same_company(h.name, pick.name)}.values())[:3]  # fmt: skip
+        return pick, alts, guessed, f"On {shown}, as shown."
+    # A proxy: the same company elsewhere. Its pack listings (Frankfurt
+    # lines too), then Yahoo's.
+    ref = next((h for h in cands if not name or symbol_db.same_company(h.name, name)), None)
+    pool = [h for h in cands if ref is not None and symbol_db.same_company(h.name, ref.name)]
+    if ref is not None:
+        pool += [
+            h for h in symbol_db.listings(ref.group) if h.ticker not in {p.ticker for p in pool}
+        ]
+    if not pool and who:
+        pool = [
+            h
+            for h in symbol_db.yahoo_lookup(who)
+            if not name or symbol_db.same_company(h.name, name)
+        ]
+    if not pool:
+        return None, [], True, f"Not found on {shown} or elsewhere on Yahoo Finance."
+    rank = lambda h: symbol_db.relisting(h.ticker, h.exchange)  # noqa: E731
+    same = sorted((h for h in pool if _exch_ccy(h) == vccy), key=rank)
+    pick = same[0] if same else min(pool, key=rank)
+    where = _exchange_label(pick)
+    if same:
+        note = (f"Yahoo has no {shown} line for this, so it is priced from {pick.ticker} "
+                f"({where}): the same company in the same currency.")  # fmt: skip
+    else:
+        note = (f"Yahoo has no {shown} line for this, so it is priced from {pick.ticker} "
+                f"({where}, {_exch_ccy(pick) or 'another currency'}); values convert at each day's rate.")  # fmt: skip
+    alts = list({h.ticker: h for h in pool if h.ticker != pick.ticker}.values())[:3]
+    return pick, alts, True, note
+
+
+def _exchange_label(h) -> str:
+    from convexity.investments import _exchange_name
+
+    return _exchange_name(h.exchange) or h.exchange or "another exchange"
 
 
 _CORP_WORDS = frozenset(["the", "inc", "incorporated", "corp", "corporation", "co", "company", "plc", "ltd", "limited", "holding", "holdings", "group", "nv", "sa", "ag", "se", "spa", "ab", "asa", "oyj", "adr", "ads", "class"])  # fmt: skip
@@ -538,9 +792,16 @@ def _review_item(i: int, it: dict, base: str, aliases: dict | None = None) -> di
     t = it.get("type") if it.get("type") in TYPES else None
     cur = (it.get("currency") or "").strip()
     ccy_raw = cur.upper()
-    # Pence: Yahoo writes GBp, brokers GBX; the case matters (GBP is pounds).
-    pence = cur in ("GBp", "GBX", "gbx", "GBx") or cur.lower() in ("pence", "p")
-    ccy = "GBP" if pence else (ccy_raw if re.fullmatch(r"[A-Z]{3}", ccy_raw) else None)
+    # Minor units: Yahoo writes GBp, brokers GBX; the case matters (GBP is
+    # pounds). Johannesburg cents (ZAc) and Tel Aviv agorot (ILA) likewise.
+    if cur in ("GBp", "GBX", "gbx", "GBx") or cur.lower() in ("pence", "p"):
+        minor = "GBP"
+    elif ccy_raw in ("ZAC", "ILA"):  # not ISO codes: always the minor unit
+        minor = {"ZAC": "ZAR", "ILA": "ILS"}[ccy_raw]
+    else:
+        minor = None
+    pence = minor is not None
+    ccy = minor or (ccy_raw if re.fullmatch(r"[A-Z]{3}", ccy_raw) else None)
     unit = 0.01 if pence else 1.0
     qty, price, fee = _num(it.get("qty")), _num(it.get("price")), _num(it.get("fee"))
     total, tax, ratio = _num(it.get("total")), _num(it.get("tax")), _num(it.get("ratio"))
@@ -548,24 +809,34 @@ def _review_item(i: int, it: dict, base: str, aliases: dict | None = None) -> di
            "exchange": None, "qty": None, "price": None, "ccy": ccy, "amount": None, "fee": None,
            "tax": None, "ratio": None, "source": (it.get("source") or "")[:60], "guessed": [],
            "missing": [], "checks": [], "fix": None, "alts": [], "include": True,
-           "as_read": (it.get("name") or "")[:60]}  # fmt: skip
+           "as_read": (it.get("name") or "")[:60], "note": ""}  # fmt: skip
     if t == "holding" and it.get("date_guessed") and row["date"] == date.today().isoformat():
-        row["date"] = ""  # "since today" is the question's default, not a reading
+        row["date"] = ""  # today is the default below, not a reading
     if it.get("date_guessed") and row["date"]:
         row["guessed"].append("date")
+    shown = venue(it.get("exchange"), it.get("ticker") or "")
+    row["exchange_shown"] = shown or ((it.get("exchange") or "").strip()[:30] or None)
     if t in ("buy", "sell", "dividend", "split", "holding"):
         remembered = alias_key(row["name"]) in (aliases or {})
-        hit, alts, guessed = match_listing(row["name"], it.get("ticker") or "", ccy, aliases)
+        hit, alts, guessed, row["note"] = match_listing(
+            _company_words(row["name"], it.get("ticker") or "", it.get("exchange") or ""),
+            it.get("ticker") or "", ccy, aliases, shown,
+        )  # fmt: skip
+        if shown and not ccy:  # the exchange says the currency better than a listing would
+            row["ccy"] = ccy = _VENUES[shown][2]
+            row["guessed"].append("ccy")
         if hit is None:
             row["missing"].append("symbol")
         else:
             row |= {
+                "matched": hit.ticker,  # the note below is about this listing
                 "symbol": hit.ticker,
                 "name": hit.name,
                 "exchange": _exchange_name(hit.exchange),
+                "listing_ccy": _exch_ccy(hit),  # for the review's listing menu
             }
-            row["alts"] = [{"symbol": h.ticker, "name": h.name, "exchange": _exchange_name(h.exchange)}
-                           for h in alts]  # fmt: skip
+            row["alts"] = [{"symbol": h.ticker, "name": h.name, "exchange": _exchange_name(h.exchange),
+                            "ccy": _exch_ccy(h)} for h in alts]  # fmt: skip
             # A name the owner corrected before is theirs, not a guess.
             if not remembered and (guessed or it.get("ticker_guessed")):
                 row["guessed"].append("symbol")
@@ -573,6 +844,22 @@ def _review_item(i: int, it: dict, base: str, aliases: dict | None = None) -> di
                 row["ccy"] = _exch_ccy(hit)
                 if row["ccy"]:
                     row["guessed"].append("ccy")
+    if t == "holding" and qty:
+        # The model may take today's price for the average one (or leave it
+        # out); a positions row's own arithmetic says which is which.
+        # Only a reading that is that row's last price (or none) is put
+        # right: a number read another way (a misparsed format) never
+        # replaces what the model read.
+        proved = _avg_from_pnl(qty, it.get("_line") or "")
+        same = lambda a, b: abs(a - b) <= 1e-6 * max(1.0, abs(b))  # noqa: E731
+        if proved and (price is None or (same(price, proved[1]) and not same(price, proved[0]))):
+            took = price
+            price = proved[0]
+            row["guessed"].append("price")
+            if took is not None:
+                row["checks"].append(
+                    f"Used the average price {proved[0]:,.2f}: {took:,.2f} is today's price on that row"
+                )
     if t in ("buy", "sell", "holding"):
         row["qty"] = qty
         row["price"] = price * unit if price is not None else None
@@ -622,17 +909,25 @@ def _review_item(i: int, it: dict, base: str, aliases: dict | None = None) -> di
     return row
 
 
+def _default_dates(rows: list[dict]) -> None:
+    """An undated holding (and a snapshot's cash) starts today, marked as a
+    default (``date_default``) for the review to show quietly; the owner sets
+    each row's own buy date there. There is no "Since when" question any more
+    (owner, 2026-10-10: with a date per row it made no sense): performance
+    counts from the oldest date in the book."""
+    today = date.today().isoformat()
+    snapshot = any(r["type"] == "holding" for r in rows)
+    for r in rows:
+        if "date" in r["missing"] and (
+            r["type"] == "holding" or (snapshot and r["type"] == "deposit")
+        ):
+            r["date"], r["date_default"] = today, True
+            r["missing"].remove("date")
+
+
 def _questions(rows: list[dict]) -> list[dict]:
     """At most three one-click questions, each with its default chosen."""
     qs = []
-    snapshot = any(r["type"] == "holding" for r in rows)
-    held = [r for r in rows if "date" in r["missing"]
-            and (r["type"] == "holding" or (snapshot and r["type"] == "deposit"))]  # fmt: skip
-    if held:
-        qs.append({"id": "since", "text": f"Since when have you held {'these' if len(held) > 1 else 'this'}?",
-                   "hint": "Performance counts from this date. Today is fine if you don't know.",
-                   "options": [{"value": "today", "label": "Today"}, {"value": "pick", "label": "Pick a date"}],
-                   "default": "today", "rows": [r["i"] for r in held]})  # fmt: skip
     for r in rows:
         if len(qs) >= 3:
             break
@@ -748,12 +1043,18 @@ def read(
                 # otherwise it is the model's guess, whatever it says.
                 tk = re.escape((x.get("ticker") or "").strip())
                 # Case-sensitive: tickers like ON, ALL or IT are ordinary words.
-                if tk and not re.search(rf"(?<![A-Za-z0-9]){tk}(?![A-Za-z0-9])", blk):
+                read = bool(tk) and re.search(rf"(?<![A-Za-z0-9]){tk}(?![A-Za-z0-9])", blk)
+                if not read:
                     x["ticker_guessed"] = True
+                x["exchange"] = shown_exchange(x.get("ticker") or "", blk) if read else None
+                x["_line"] = ticker_line(x.get("ticker") or "", blk) if read else ""
                 raw_items.append(x)
         skipped += [str(x)[:80] for x in out.get("skipped") or []][:10]
     rows = [_review_item(i, it, base, aliases) for i, it in enumerate(raw_items)]
+    _units(rows, _last_closes([r["symbol"] for r in rows
+                               if r["symbol"] and r["type"] in ("buy", "sell", "holding")]))  # fmt: skip
     _reconcile(rows, held or {})
+    _default_dates(rows)
     print(f"[import] read {len(images)} image(s), {len(sheets) + n_pdf} file(s), text={bool(text)}: "
           f"{len(rows)} row(s), files and screenshots {t1 - t0:.1f}s, total {time.time() - t0:.1f}s", flush=True)  # fmt: skip
     return {
@@ -768,6 +1069,75 @@ def read(
         "skipped": skipped[:10],
         "unread": failed,
     }
+
+
+def _last_closes(symbols: list[str]) -> dict[str, tuple[float, str]]:
+    """{symbol: (last close in the major unit, quote currency)}; whatever
+    Yahoo doesn't answer is left out (the check then says nothing)."""
+    from convexity import analytics, investments
+    from convexity.helpers import price_in_major
+
+    symbols = list(dict.fromkeys(symbols))
+    if not symbols:
+        return {}
+    try:
+        wide = analytics._bulk_close(symbols, "1mo", adjusted=False)
+    except Exception as e:
+        print(f"[import] price check skipped: {type(e).__name__}", flush=True)
+        return {}
+
+    def qccy(sym):
+        q = investments._QCCY.get(sym) or investments._fetch_quote_ccy(sym)
+        if q:
+            investments._QCCY[sym] = q
+        return q
+
+    have = [x for x in symbols if x in wide.columns and wide[x].notna().any()]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        ccys = dict(zip(have, pool.map(qccy, have), strict=True))
+    out = {}
+    for sym in have:
+        last = price_in_major(float(wide[sym].dropna().iloc[-1]), ccys[sym])
+        if last and ccys[sym]:
+            out[sym] = (last, ccys[sym])
+    return out
+
+
+_MINOR = {"GBp": "pence", "GBX": "pence", "ZAc": "cents", "ILA": "agorot"}
+_FAR = 25.0  # an average price this many times off today's is worth a look
+
+
+def _units(rows: list[dict], last: dict[str, tuple[float, str]]) -> None:
+    """Prices against the market, in plain code: the model is never trusted
+    on units. A London line's price read as pounds that is a pence price
+    (ULVR "4380.50" with a close of 45.12 pounds: a screen that shows no
+    currency once got a London row booked at 100x its cost) is converted
+    and marked; a price far from today's is flagged."""
+    for r in rows:
+        if r["type"] not in ("buy", "sell", "holding") or not r["price"] or r["symbol"] not in last:
+            continue
+        close, qccy = last[r["symbol"]]
+        if major_ccy(qccy) != r["ccy"]:
+            continue  # a proxy in another currency: nothing to compare
+        ratio = r["price"] / close
+        minor = _MINOR.get(qccy)
+        if minor and abs(math.log(ratio / 100)) + math.log(3) < abs(math.log(ratio)):
+            was = r["price"]
+            r["price"] = was / 100
+            r["fee"] = r["fee"] / 100 if r["fee"] else r["fee"]
+            r["guessed"].append("price")
+            r["checks"].append(
+                f"Read as {minor}: {r['symbol']} trades in {minor}, so {was:,.2f} is "
+                f"{r['price']:,.4f} {r['ccy']}"
+            )
+            # The total check (if any) was about the pence reading: gone.
+            r["checks"] = [c for c in r["checks"] if "total shown" not in c]
+            r["fix"] = {"price": was}
+            r["fix_label"] = f"Keep {was:,.2f} {r['ccy']}"
+        elif ratio > _FAR or ratio < 1 / _FAR:
+            r["checks"].append(
+                f"{r['price']:,.2f} is far from today's price ({close:,.2f} {r['ccy']}); check the units"
+            )
 
 
 def _reconcile(rows: list[dict], held: dict) -> None:

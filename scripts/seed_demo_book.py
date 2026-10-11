@@ -8,7 +8,10 @@ made-up quantities only, so screenshots of it are safe to publish.
 The book is shaped to exercise the engine's hard cases (roadmap Appendix B):
 a pre-split NVDA buy on the contract-note basis (10:1 split on 2024-06-10),
 an LSE line quoted in pence, a EUR ETF, a partial sell, dividends with
-withholding tax, a later top-up, a standalone fee and a withdrawal.
+withholding tax, a later top-up, a standalone fee and a withdrawal. A
+quick-added holding (GOOGL, ``opening``) at an average price far below its
+Since-day close shows the Phase 3 rule: its performance starts at that day's
+value. Most payouts are left unrecorded, so Yahoo's dividends get estimated.
 
 Refuses to run without CONVEXITY_HOME, so it can never write into the real
 data folder, and refuses to overwrite an existing book without --force.
@@ -31,6 +34,7 @@ INSTRUMENTS = {
     "NVDA": {"name": "NVIDIA Corporation", "quote_ccy": "USD", "ccy": "USD"},
     "SHEL.L": {"name": "Shell plc", "quote_ccy": "GBp", "ccy": "GBP"},
     "VWCE.DE": {"name": "Vanguard FTSE All-World UCITS ETF", "quote_ccy": "EUR", "ccy": "EUR"},
+    "GOOGL": {"name": "Alphabet Inc.", "quote_ccy": "USD", "ccy": "USD"},
 }
 
 # Each row holds only its own fields; build_book() fills the rest from BLANK.
@@ -46,6 +50,7 @@ LEDGER = [
     {"date": "2024-05-16", "type": "dividend", "symbol": "AAPL", "amount": 15.00, "tax": 2.25},
     {"date": "2024-08-15", "type": "dividend", "symbol": "MSFT", "amount": 30.00, "tax": 4.50},
     {"date": "2025-02-03", "type": "sell", "symbol": "NVDA", "qty": 80, "price": 116.66, "fee": 1.0},
+    {"date": "2025-03-03", "type": "buy", "symbol": "GOOGL", "qty": 30, "price": 95.00, "fee": 0.0, "opening": True},
     {"date": "2025-06-02", "type": "buy", "symbol": "MSFT", "qty": 10, "price": 461.97, "fee": 1.0},
     {"date": "2025-09-30", "type": "fee", "amount": 25.0},
     {"date": "2025-11-13", "type": "dividend", "symbol": "AAPL", "amount": 15.60, "tax": 2.34},
@@ -61,7 +66,7 @@ def build_book() -> dict:
     exercises the split logic."""
     entries = [
         BLANK | row | {"id": f"e_demo_{i:03d}", "created_at": CREATED, "updated_at": CREATED}
-        | ({"qty_basis": "trade"} if row["type"] in ("buy", "sell") else {})
+        | ({"qty_basis": "current" if row.get("opening") else "trade"} if row["type"] in ("buy", "sell") else {})
         for i, row in enumerate(LEDGER, 1)
     ]  # fmt: skip
     return {

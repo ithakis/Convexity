@@ -10,7 +10,7 @@
        {"type": "buy", "date": "2024-02-06", "symbol": "MSFT", "qty": 20, "price": 405.00, "ccy": "USD"},
        {"type": "buy", "date": "2024-02-02", "symbol": "VUSA.L", "qty": 19.5, "price": 82.58, "ccy": "GBP"}
      ]},
-    {"name": "phone holdings screenshot", "files": ["holdings.png"], "questions": ["since"],
+    {"name": "phone holdings screenshot", "files": ["holdings.png"],
      "rows": [
        {"type": "holding", "date": "", "symbol": "AAPL", "qty": 40, "price": 151.20, "ccy": "USD"},
        {"type": "holding", "date": "", "symbol": "GOOGL", "qty": 25, "price": 139.80, "ccy": "USD"},
@@ -63,7 +63,7 @@
        {"type": "buy", "date": "2024-03-12", "symbol": "AAPL", "qty": 10, "price": 182.40, "ccy": "USD"},
        {"type": "sell", "date": "2024-04-02", "symbol": "MSFT", "qty": 5, "price": 421.90, "fee": 1.0, "ccy": "USD"}
      ]},
-    {"name": "typed holdings", "text": "I have 300 Shell shares in London, average 25.40 pounds, and 40 Coca-Cola at 61.15 dollars.", "questions": ["since"],
+    {"name": "typed holdings", "text": "I have 300 Shell shares in London, average 25.40 pounds, and 40 Coca-Cola at 61.15 dollars.",
      "rows": [
        {"type": "holding", "date": "", "symbol": "SHEL.L", "qty": 300, "price": 25.40, "ccy": "GBP"},
        {"type": "holding", "date": "", "symbol": "KO", "qty": 40, "price": 61.15, "ccy": "USD"}
@@ -72,6 +72,17 @@
      "rows": [
        {"type": "dividend", "date": "2024-04-01", "symbol": "KO", "amount": 9.70, "ccy": "USD"},
        {"type": "fee", "date": "2024-06-30", "amount": 1.00, "ccy": "USD"}
+     ]},
+    {"name": "broker positions: exchange codes, pence, no currency shown", "files": ["positions.png"],
+     "rows": [
+       {"type": "holding", "date": "", "symbol": "AIR.PA", "qty": 40, "price": 158.85, "ccy": "EUR"},
+       {"type": "holding", "date": "", "symbol": "ITX.MC", "qty": 120, "price": 51.30, "ccy": "EUR"},
+       {"type": "holding", "date": "", "symbol": "ALV.DE", "qty": 12, "price": 338.10, "ccy": "EUR"},
+       {"type": "holding", "date": "", "symbol": "ULVR.L", "qty": 25, "price": 43.805, "ccy": "GBP"},
+       {"type": "holding", "date": "", "symbol": "ASML.AS", "qty": 8, "price": 655.00, "ccy": "EUR"},
+       {"type": "holding", "date": "", "symbol": "ENI.MI", "qty": 400, "price": 15.20, "ccy": "EUR"},
+       {"type": "holding", "date": "", "symbol": "OTP.BD", "qty": 15, "price": 25100.00, "ccy": "HUF"},
+       {"type": "holding", "date": "", "symbol": "AAPL", "qty": 35, "price": 182.75, "ccy": "USD"}
      ]}
   ]
 }

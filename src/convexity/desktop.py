@@ -47,7 +47,7 @@ from PySide6.QtGui import (
     QPixmap,
     QShortcut,
 )
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineDownloadRequest
+from PySide6.QtWebEngineCore import QWebEngineDownloadRequest, QWebEnginePage, QWebEngineProfile
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QSplashScreen
 
@@ -232,8 +232,8 @@ class _ExternalLinkPage(QWebEnginePage):
     dangling native popup.
     """
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, profile: QWebEngineProfile, parent=None):
+        super().__init__(profile, parent)
         self._popup_pages: list[QWebEnginePage] = []
 
     def acceptNavigationRequest(self, url: QUrl, nav_type, is_main_frame: bool) -> bool:
@@ -288,6 +288,31 @@ def _handle_download(download: QWebEngineDownloadRequest, window: "_MainWindow")
     download.stateChanged.connect(_on_state_changed)
 
 
+def _persistent_profile(parent) -> QWebEngineProfile:
+    """The page's storage, on disk in the data folder (2026-10-11).
+
+    Qt 6's default profile is off-the-record, so every launch started with
+    an empty localStorage: the owner's sort order, chart period, hidden
+    lines and theme were forgotten each time. A named profile is persistent;
+    its path must be absolute (a relative one is silently not used).
+
+    Chromium commits localStorage on its own timer, 3 to 8 s after a change
+    (measured: deleting the page and profile before quit does not flush it,
+    and quit must stay os._exit, see shutdown_server). A change made in the
+    last seconds before Cmd-Q can be lost; anything that must never be lost
+    lives on the server (state/prefs.json, persistence.load_prefs). The app's
+    own responses are sent no-store, so the disk cache never serves an old
+    app.js after an update."""
+    from convexity import paths
+
+    store = (paths.data_dir() / "webengine").resolve()
+    store.mkdir(parents=True, exist_ok=True)
+    profile = QWebEngineProfile("convexity", parent)
+    profile.setPersistentStoragePath(str(store))
+    profile.setCachePath(str(store / "cache"))
+    return profile
+
+
 class _MainWindow(QMainWindow):
     def __init__(self, url: str):
         super().__init__()
@@ -296,7 +321,8 @@ class _MainWindow(QMainWindow):
         self._url = url
 
         self.view = QWebEngineView(self)
-        self.page = _ExternalLinkPage(self.view)
+        self.profile = _persistent_profile(self)
+        self.page = _ExternalLinkPage(self.profile, self.view)
         self.view.setPage(self.page)
         self.setCentralWidget(self.view)
         self.page.profile().downloadRequested.connect(

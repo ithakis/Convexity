@@ -39,4 +39,9 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("CONVEXITY_HOME", str(home))
     monkeypatch.delenv("CONVEXITY_LEGACY_ROOT", raising=False)
     monkeypatch.delenv("CONVEXITY_LEGACY_HOME", raising=False)
+    # Yahoo's live Lookup (names the symbol pack lacks) is network: off
+    # unless a test stubs it with its own answer.
+    from convexity import symbol_db
+
+    monkeypatch.setattr(symbol_db, "yahoo_lookup", lambda *a, **k: [])
     yield home

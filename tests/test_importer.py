@@ -43,6 +43,11 @@ def offline(monkeypatch):
         return [PACK[t] for t in NAMES.get(key, [])][:limit]
 
     monkeypatch.setattr(symbol_db, "lookup", lookup)
+    monkeypatch.setattr(
+        symbol_db, "listings", lambda g: [h for h in PACK.values() if h.group == g and g]
+    )
+    monkeypatch.setattr(symbol_db, "yahoo_lookup", lambda q, **k: [])
+    monkeypatch.setattr(im, "_last_closes", lambda syms: {})
     monkeypatch.setattr(ns, "NVIDIA_API_KEY", "test-key")
 
     def no_network(*a, **k):
@@ -129,13 +134,18 @@ def test_a_fee_inside_the_total_is_not_a_mismatch(monkeypatch):
     assert im.read("MSFT")["items"][0]["checks"] == []
 
 
-def test_undated_holdings_ask_since_when_and_today_is_not_a_reading(monkeypatch):
+def test_undated_holdings_start_today_as_a_quiet_default_not_a_question(monkeypatch):
+    # No "Since when" question (owner, 2026-10-10): each row has its own date.
     today = date.today().isoformat()
-    _model(monkeypatch, [_row(type="holding", date=today, date_guessed=True, qty=40, price=151.2)])
+    _model(monkeypatch, [_row(type="holding", date=today, date_guessed=True, qty=40, price=151.2),
+                         _row(type="buy", date="", qty=1, price=100.0)])  # fmt: skip
     out = im.read("Apple 40 avg 151.20")
-    r = out["items"][0]
-    assert r["date"] == "" and "date" in r["missing"]
-    assert out["questions"][0]["id"] == "since" and out["questions"][0]["default"] == "today"
+    held, buy = out["items"]
+    assert held["date"] == today and held.get("date_default") and "date" not in held["missing"]
+    assert "date" not in held["guessed"]
+    # A trade with no date still needs the owner.
+    assert buy["date"] == "" and "date" in buy["missing"] and not buy.get("date_default")
+    assert not any(q["id"] == "since" for q in out["questions"])
 
 
 def test_a_holding_with_no_share_count_is_left_out(monkeypatch):
@@ -328,3 +338,265 @@ def test_other_listings_are_the_same_company_only(monkeypatch):
     assert im.read("Bought 10 AAPL at 182.40")["items"][0]["alts"] == []
     _model(monkeypatch, [_row(name="Shell", ticker="SHEL", currency="GBP", price=24.1)])
     assert [a["symbol"] for a in im.read("Shell SHEL")["items"][0]["alts"]] == ["SHEL"]
+
+
+# ---------------------------------------------------- the exchange shown
+
+
+def _grp(ticker, name, exchange, group):
+    return Hit(ticker, name, "stock", exchange, None, None, None, None, group, 100.0)
+
+
+EU = {h.ticker: h for h in [
+    _grp("AIR.PA", "Airbus SE", "PAR", 11), _grp("AIR.DE", "Airbus SE", "GER", 11),
+    _grp("ITX.MC", "Industria de Diseno Textil, S.A.", "MCE", 12),
+    _grp("ITX.DE", "Industria de Diseno Textil, S.A.", "GER", 12),
+    _grp("ALV.DE", "Allianz SE", "GER", 13), _grp("ALIZY", "Allianz SE", "PNK", 13),
+    _grp("ULVR.L", "Unilever PLC", "LSE", 14), _grp("UL", "Unilever PLC", "NYQ", 14),
+    _grp("VOW3.DE", "Volkswagen AG", "GER", 15), _grp("VOW3.F", "Volkswagen AG", "FRA", 15),
+    _grp("YNG", "Young Co, Inc.", "NMS", 16),
+]}  # fmt: skip
+EU_NAMES = {"airbus": ["AIR.DE", "AIR.PA"], "industria": ["ITX.DE", "ITX.MC"], "allianz": ["ALV.DE", "ALIZY"],
+            "unilever": ["ULVR.L", "UL"], "volkswagen": ["VOW3.DE", "VOW3.F"], "young": ["YNG"]}  # fmt: skip
+
+
+@pytest.fixture
+def eu_pack(monkeypatch):
+    every = {**PACK, **EU}
+    monkeypatch.setattr(symbol_db, "get", lambda t: every.get((t or "").upper()))
+
+    def lookup(q, *, limit=5, min_score=72.0):
+        key = (q or "").lower().split()[0] if q else ""
+        return [every[t] for t in EU_NAMES.get(key, NAMES.get(key, []))][:limit]
+
+    monkeypatch.setattr(symbol_db, "lookup", lookup)
+    monkeypatch.setattr(symbol_db, "listings", lambda g: [h for h in EU.values() if h.group == g])
+
+
+@pytest.mark.parametrize(
+    ("code", "want"),
+    [("SBF", "Euronext Paris"), ("IBIS", "Xetra"), ("IBIS2", "Xetra"), ("BM", "Madrid"),
+     ("BVME", "Milan"), ("AEB", "Euronext Amsterdam"), ("LSE", "London"), ("NYSE", "NYSE"),
+     ("NASDAQ.NMS", "Nasdaq"), ("BUX", "Budapest"), ("XPAR", "Euronext Paris"),
+     ("euronext paris", "Euronext Paris"), ("Xetra", "Xetra"), ("ARCA", "NYSE Arca"),
+     ("TSE", "Toronto"), ("TSEJ", "Tokyo"), ("Foo", None), ("", None)],
+)  # fmt: skip
+def test_the_exchanges_brokers_show(code, want):
+    assert im.venue(code) == want
+
+
+@pytest.mark.parametrize(
+    ("line", "want"),
+    [("AIR | SBF | 171.40 | 166.85", "SBF"), ("AIR SBF | 171.40", "SBF"), ("AIR NASDAQ.NMS | 181.20", "NASDAQ.NMS"),
+     ("2024-01-02,AIR,Xetra,10", "Xetra"), ("I have 300 AIR shares in London", None),
+     ("AIR | 171.40 | Moon", None), ("AIRP | SBF", None)],
+)  # fmt: skip
+def test_the_exchange_is_read_by_code_beside_the_ticker(line, want):
+    assert im.shown_exchange("AIR", "header\n" + line) == want
+
+
+def test_no_exchange_code_names_two_venues():
+    keys = [
+        k
+        for _c, _s, _y, ks in im._VENUES.values()
+        for k in ks.split("|")[0].split() + ks.split("|")[1:]
+    ]
+    assert len(keys) == len(set(keys))
+
+
+@pytest.mark.parametrize(
+    ("ticker", "name", "shown", "want"),
+    [("AIR", "Airbus", "SBF", "AIR.PA"), ("ITX", "Industria de Diseno Textil", "BM", "ITX.MC"),
+     ("ALV", "Allianz", "IBIS", "ALV.DE"), ("UL", "Unilever", "NYSE", "UL")],
+)  # fmt: skip
+def test_the_exchange_shown_decides_the_listing(monkeypatch, eu_pack, ticker, name, shown, want):
+    # Owner's report: every euro row went to the first euro line (.DE).
+    _model(monkeypatch, [_row(type="holding", date="", name=name, ticker=ticker, currency="",
+                              exchange=shown, qty=100, price=50.0)])  # fmt: skip
+    r = im.read(f"{ticker} {shown} 100 50")["items"][0]
+    assert r["symbol"] == want and "symbol" not in r["guessed"]
+    assert r["note"].startswith("On ") and r["exchange_shown"]
+    assert r["ccy"] == im._VENUES[im.venue(shown)][2]
+
+
+def test_a_venue_yahoo_lacks_gets_the_same_currency_proxy_and_says_so(monkeypatch, eu_pack):
+    # Volkswagen shown on Milan: no Milan line, so a euro line stands in.
+    _model(monkeypatch, [_row(type="holding", date="", name="Volkswagen", ticker="VOW3",
+                              currency="EUR", exchange="BVME", qty=10, price=90.0)])  # fmt: skip
+    r = im.read("VOW3 BVME 10 90")["items"][0]
+    assert r["symbol"] == "VOW3.DE" and "symbol" in r["guessed"]
+    assert "no Milan line" in r["note"] and "same currency" in r["note"]
+
+
+def test_no_same_currency_line_falls_back_to_the_home_listing(monkeypatch, eu_pack):
+    _model(monkeypatch, [_row(type="holding", date="", name="Young Co", ticker="YNG",
+                              currency="EUR", exchange="IBIS", qty=10, price=80.0)])  # fmt: skip
+    r = im.read("YNG IBIS 10 80")["items"][0]
+    assert r["symbol"] == "YNG" and "convert" in r["note"]
+
+
+def test_a_line_only_yahoo_knows_is_found_live(monkeypatch, eu_pack):
+    live = _grp("RICHT.BD", "Richter Gedeon Chemical Factory", "BUD", symbol_db.YAHOO_GROUP)
+    monkeypatch.setattr(symbol_db, "yahoo_lookup", lambda q, **k: [live])
+    _model(monkeypatch, [_row(type="holding", date="", name="Richter Gedeon", ticker="RICHT",
+                              currency="", exchange="BUX", qty=20, price=12000.0)])  # fmt: skip
+    r = im.read("RICHT BUX 20 12000")["items"][0]
+    assert r["symbol"] == "RICHT.BD" and r["ccy"] == "HUF" and r["note"] == "On Budapest, as shown."
+
+
+def test_typed_text_finds_a_line_only_yahoo_knows_by_currency(monkeypatch, eu_pack):
+    # No exchange column ("40 Richter Gedeon at 9640 HUF"): the currency asks
+    # for a line the pack lacks, and Yahoo finds it by the name's first word.
+    live = _grp("RICHT.BD", "Richter Gedeon Chemical Factory", "BUD", symbol_db.YAHOO_GROUP)
+    asked = []
+    monkeypatch.setattr(
+        symbol_db,
+        "yahoo_lookup",
+        lambda q, **k: asked.append(q) or ([live] if q == "Richter" else []),
+    )
+    _model(monkeypatch, [_row(type="holding", date="", name="Richter Gedeon", ticker="",
+                              currency="HUF", exchange="", qty=40, price=9640.0)])  # fmt: skip
+    r = im.read("40 Richter Gedeon at 9640 HUF")["items"][0]
+    assert r["symbol"] == "RICHT.BD" and r["listing_ccy"] == "HUF"
+    assert asked == ["Richter Gedeon", "Richter"]
+
+
+def test_review_rows_carry_each_listings_currency(monkeypatch, eu_pack):
+    _model(monkeypatch, [_row(name="Airbus", ticker="AIR", currency="EUR", exchange="SBF")])
+    r = im.read("AIR SBF")["items"][0]
+    assert r["listing_ccy"] == "EUR" and all("ccy" in a for a in r["alts"])
+
+
+def test_an_unknown_exchange_keeps_the_currency_rule(monkeypatch, eu_pack):
+    _model(monkeypatch, [_row(name="Airbus", ticker="AIR", currency="EUR", exchange="Moon")])
+    r = im.read("AIR Moon")["items"][0]
+    assert r["symbol"] == "AIR.DE" and r["note"] == "" and r["exchange_shown"] is None
+
+
+def test_pence_read_as_pounds_are_caught_by_the_market_price(monkeypatch, eu_pack):
+    # No currency on screen: 4380.50 is pence next to a close of 45.12 GBP.
+    monkeypatch.setattr(im, "_last_closes", lambda syms: {"ULVR.L": (45.12, "GBp")})
+    _model(monkeypatch, [_row(type="holding", date="", name="Unilever", ticker="ULVR",
+                              currency="", exchange="LSE", qty=25, price=4380.50)])  # fmt: skip
+    r = im.read("ULVR LSE 25 4380.50")["items"][0]
+    assert r["symbol"] == "ULVR.L" and r["ccy"] == "GBP"
+    assert r["price"] == pytest.approx(43.805) and "price" in r["guessed"]
+    assert "pence" in r["checks"][0] and r["fix"] == {"price": 4380.50}
+
+
+def test_a_pounds_price_stays_pounds(monkeypatch, eu_pack):
+    monkeypatch.setattr(im, "_last_closes", lambda syms: {"ULVR.L": (45.12, "GBp")})
+    _model(monkeypatch, [_row(type="holding", date="", name="Unilever", ticker="ULVR",
+                              currency="GBP", exchange="LSE", qty=25, price=43.81)])  # fmt: skip
+    r = im.read("ULVR LSE 25 43.81")["items"][0]
+    assert r["price"] == pytest.approx(43.81) and r["checks"] == []
+
+
+def test_a_price_far_from_the_market_is_flagged(monkeypatch):
+    monkeypatch.setattr(im, "_last_closes", lambda syms: {"MSFT": (400.0, "USD")})
+    _model(monkeypatch, [_row(ticker="MSFT", name="Microsoft", qty=1, price=4.0)])
+    assert "far from today's price" in im.read("MSFT 1 4")["items"][0]["checks"][0]
+
+
+def test_the_listing_choices_never_repeat_the_pick(monkeypatch, eu_pack):
+    _model(monkeypatch, [_row(type="holding", date="", name="Airbus", ticker="AIR", currency="",
+                              qty=100, price=150.0)])  # fmt: skip
+    r = im.read("AIR | SBF | 100 | 150")["items"][0]
+    assert r["symbol"] == "AIR.PA" and [a["symbol"] for a in r["alts"]] == ["AIR.DE"]
+
+
+@pytest.mark.parametrize(
+    ("qty", "line", "want"),
+    [(40, "AIR SBF | 171.40 | 158.85 | 40 | 502.00", (158.85, 171.40)),
+     (120, "ITX BM | 48.92 | 51.30 | 120 | -285.60", (51.30, 48.92)),
+     (25, "ULVR LSE | 4512.00 | 4380.50 | 25 | 32.88", (4380.50, 4512.00)),  # pence, P&L in pounds
+     (10, "Apple | 10 shares at $182.40 | -$1,824.00", None),
+     (40, "Apple | 40 shares · avg $151.20 | $10,016.00 | +65.6%", None)],
+)  # fmt: skip
+def test_a_positions_rows_arithmetic_tells_average_from_last(qty, line, want):
+    assert im._avg_from_pnl(qty, line) == want
+
+
+def test_todays_price_taken_for_the_average_is_put_right(monkeypatch, eu_pack):
+    _model(monkeypatch, [_row(type="holding", date="", name="Airbus", ticker="AIR", currency="",
+                              qty=40, price=171.40)])  # fmt: skip
+    r = im.read("INSTRUMENT | LAST | AVG | POS | P&L\nAIR SBF | 171.40 | 158.85 | 40 | 502.00")[
+        "items"
+    ][0]
+    assert r["price"] == pytest.approx(158.85) and "price" in r["guessed"]
+    assert "today's price" in r["checks"][0] and r["symbol"] == "AIR.PA"
+
+
+@pytest.mark.parametrize(
+    ("qty", "line", "want"),
+    [(40, "AIR SBF | 171,40 | 158,85 | 40 | 502,00", (158.85, 171.40)),  # decimal commas
+     (40, "AIR SBF | 1.171,40 | 1.158,85 | 40 | 502,00", (1158.85, 1171.40)),
+     (1000, "X | 12.50 | 10.00 | 1,000 | 2,500.00", (10.0, 12.5))],
+)  # fmt: skip
+def test_the_arithmetic_reads_either_number_format(qty, line, want):
+    assert im._avg_from_pnl(qty, line) == want
+
+
+def test_a_price_the_arithmetic_cant_place_is_left_as_read(monkeypatch, eu_pack):
+    # The model read 158.85 (the average) but the row parses another way: keep it.
+    _model(monkeypatch, [_row(type="holding", date="", name="Airbus", ticker="AIR", currency="",
+                              qty=40, price=99.0)])  # fmt: skip
+    r = im.read("AIR SBF | 171.40 | 158.85 | 40 | 502.00")["items"][0]
+    assert r["price"] == pytest.approx(99.0) and "price" not in r["guessed"]
+
+
+def test_tse_with_a_numeric_ticker_is_tokyo():
+    assert im.venue("TSE", "7203") == "Tokyo" and im.venue("TSE", "SHOP") == "Toronto"
+
+
+def test_a_one_letter_ticker_is_a_whole_word():
+    block = "h\nT-Mobile US | NASDAQ | 10\nAT&T Inc | NYSE | 5\nT | NYSE | 20"
+    assert im.ticker_line("T", block) == "T | NYSE | 20" and im.shown_exchange("T", block) == "NYSE"
+
+
+def test_an_exchange_column_may_name_the_venue():
+    assert im.venue(im.shown_exchange("SHOP", "h\nSHOP | TSX | 10 | 120.00")) == "Toronto"
+
+
+def test_percentages_are_not_numbers_for_the_arithmetic():
+    assert [m.group() for m in im._NUM.finditer("+7.90% | −3.5% | 1.234,56 | 40")] == [
+        "1.234,56",
+        "40",
+    ]
+
+
+@pytest.mark.parametrize(("cur", "want"), [("ZAc", "ZAR"), ("ILA", "ILS"), ("GBX", "GBP")])
+def test_minor_units_become_their_currency(monkeypatch, cur, want):
+    _model(monkeypatch, [_row(ticker="MSFT", name="Microsoft", currency=cur, qty=10, price=1234.0)])
+    r = im.read("MSFT 10 1234")["items"][0]
+    assert r["ccy"] == want and r["price"] == pytest.approx(12.34)
+
+
+def test_the_pence_reading_replaces_a_stale_total_fix(monkeypatch, eu_pack):
+    monkeypatch.setattr(im, "_last_closes", lambda syms: {"ULVR.L": (45.12, "GBp")})
+    _model(monkeypatch, [_row(type="holding", date="", name="Unilever", ticker="ULVR", currency="",
+                              qty=10, price=4380.50, total=438.05)])  # fmt: skip
+    r = im.read("ULVR LSE 10 4380.50 438.05")["items"][0]
+    assert r["price"] == pytest.approx(43.805) and r["fix"] == {"price": 4380.50}
+    assert not any("total shown" in c for c in r["checks"])
+
+
+def test_a_currency_taken_from_the_exchange_is_marked(monkeypatch, eu_pack):
+    _model(monkeypatch, [_row(type="holding", date="", name="Airbus", ticker="AIR", currency="",
+                              qty=10, price=150.0)])  # fmt: skip
+    r = im.read("AIR SBF 10 150")["items"][0]
+    assert r["ccy"] == "EUR" and "ccy" in r["guessed"]
+
+
+def test_a_name_that_is_only_ticker_and_exchange_is_not_a_company_name(monkeypatch, eu_pack):
+    # A positions screen's instrument cell is "AIR SBF": the model copies it
+    # as the name, and every correctly read row was marked as the AI's guess.
+    _model(monkeypatch, [_row(type="holding", date="", name="AIR SBF", ticker="AIR",
+                              currency="", exchange="SBF", qty=10, price=150.0)],
+           transcript="INSTRUMENT | LAST | AVG | POS\nAIR SBF | 152.10 | 150.00 | 10")  # fmt: skip
+    r = im.read("", [_file("shot.png", b"\x89PNG fake", "image/png")])["items"][0]
+    assert r["symbol"] == "AIR.PA" and "symbol" not in r["guessed"]
+    assert im._company_words("NVDA NASDAQ.NMS", "NVDA", "NASDAQ.NMS") == "NVDA"
+    assert im._company_words("Airbus SE", "AIR", "SBF") == "Airbus SE"
+    assert im._company_words("SBF", "", "SBF") == "SBF"  # no ticker: never an empty name
+    assert im._company_words("Shell", "SHELL", "AEB") == "SHELL"

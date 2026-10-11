@@ -112,6 +112,11 @@ def _fh_call(path: str, params: dict[str, Any], symbol: str) -> Any | None:
                     return None
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                # "Not on your plan": the free plan's answer to every non-US
+                # ticker. Permanent, so callers negative-cache it like an
+                # empty answer instead of asking again on every build.
+                return {}
             if exc.code == 429 and attempt < _MAX_RETRIES - 1:
                 _FH_LIMITER.penalize()
                 print(
@@ -140,6 +145,21 @@ def _fh_call(path: str, params: dict[str, Any], symbol: str) -> Any | None:
     return None
 
 
+def finnhub_symbol(symbol: str) -> str | None:
+    """The ticker to ask Finnhub for a row: the company's US line
+    (symbol_db.us_line: TTE for TTE.PA, KO for CCC3.DE), in Finnhub's
+    class-share spelling (BRK.B). None when the company has no US line —
+    the free plan answers 403 to every other listing, so there is nothing
+    to ask."""
+    try:
+        from convexity import symbol_db
+
+        us = symbol_db.us_line(symbol)
+    except Exception:
+        us = symbol if symbol and "." not in symbol else None
+    return us.replace("-", ".") if us else None
+
+
 def get_insider_sentiment(symbol: str) -> dict | None:
     """Most-recent monthly insider sentiment (MSPR). TTL 1800s.
 
@@ -152,22 +172,28 @@ def get_insider_sentiment(symbol: str) -> dict | None:
     which used to blank the MSPR column. We pull the wide window in the same
     single call (zero extra API cost) and select the newest available month;
     the UI tooltip surfaces its month/year so a stale reading is visible.
+
+    Asked of the company's US line (`finnhub_symbol`); ``via`` names it when
+    it is not the row's own ticker. MSPR comes from SEC Form 4, which only
+    US companies file: an ADR (TTE, NVO) has none, but KO answers for
+    CCC3.DE.
     """
-    if not FINNHUB_API_KEY:
+    fsym = finnhub_symbol(symbol)
+    if not FINNHUB_API_KEY or not fsym:
         return None
-    cache_key = f"insider|{symbol}"
+    cache_key = f"insider|{fsym}"
     cached = _fh_get(cache_key)
     if cached is _MISS:
         return None
     if cached is not None:
-        return cached
+        return _via(cached, fsym, symbol)
     try:
         today = datetime.now(UTC).date()
         frm = (today - timedelta(days=5 * 365)).isoformat()
         to = today.isoformat()
         raw = _fh_call(
             "stock/insider-sentiment",
-            {"symbol": symbol, "from": frm, "to": to},
+            {"symbol": fsym, "from": frm, "to": to},
             symbol,
         )
         if raw is None:
@@ -187,7 +213,7 @@ def get_insider_sentiment(symbol: str) -> dict | None:
             "month": int(latest.get("month") or 0),
         }
         _fh_put(cache_key, out, 1800.0)
-        return out
+        return _via(out, fsym, symbol)
     except Exception:
         return None
 
@@ -197,17 +223,21 @@ def get_recommendation_trend(symbol: str) -> list[dict] | None:
 
     Each entry carries period/strongBuy/buy/hold/sell/strongSell as
     returned by Finnhub (already newest-first). ``None`` if no data.
+
+    Asked of the company's US line (`finnhub_symbol`): Finnhub answers an
+    ADR with the company's worldwide consensus (TTE comes back as TTE.PA).
     """
-    if not FINNHUB_API_KEY:
+    fsym = finnhub_symbol(symbol)
+    if not FINNHUB_API_KEY or not fsym:
         return None
-    cache_key = f"rec|{symbol}"
+    cache_key = f"rec|{fsym}"
     cached = _fh_get(cache_key)
     if cached is _MISS:
         return None
     if cached is not None:
         return cached
     try:
-        raw = _fh_call("stock/recommendation", {"symbol": symbol}, symbol)
+        raw = _fh_call("stock/recommendation", {"symbol": fsym}, symbol)
         if raw is None:
             return None  # transient failure — don't cache, retry next build
         if not isinstance(raw, list):
@@ -221,3 +251,8 @@ def get_recommendation_trend(symbol: str) -> list[dict] | None:
         return out
     except Exception:
         return None
+
+
+def _via(out: dict, fsym: str, symbol: str) -> dict:
+    """``out`` with the line that answered, when it is another listing."""
+    return {**out, "via": fsym} if fsym.replace(".", "-") != symbol.upper() else out

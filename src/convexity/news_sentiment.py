@@ -493,6 +493,8 @@ def _fetch_yf_news(symbol: str, days: int, cancel=None) -> list[dict]:
                 time.sleep(2.0 + attempt * 2.0 + random.random() * 0.5)
                 continue
             return []
+    if not raw:
+        raw = _yf_search_news(symbol, count, cancel=cancel)
     cutoff = datetime.now(UTC).timestamp() - days * 86400
     out: list[dict] = []
     for n in raw:
@@ -532,6 +534,59 @@ def _fetch_yf_news(symbol: str, days: int, cancel=None) -> list[dict]:
     return out
 
 
+def _yf_search_news(symbol: str, count: int, cancel=None) -> list:
+    """Yahoo's search-box news, for when get_news() comes back empty: its
+    `xhr/ncp` endpoint answered 404 for every ticker when checked on
+    2026-10-11 (yfinance 1.7.0, KO included). Search is a keyword match, so only items
+    Yahoo tags with this ticker are kept. It covers US lines (KO: ~50 over
+    five days) and returns nothing for European tickers.
+
+    When the ticker finds nothing, the company's NAME is searched instead
+    ("repsol", "societe generale"), keeping items Yahoo tags with any listing
+    of the company (REP.MC, GLE.PA, DEO for Diageo). Checked 2026-10-11: 23
+    of 25 Engie items, 39 of 40 Repsol, 50 of 50 Diageo were tagged to the
+    company; Finnhub on their thin OTC ADRs gave 3-4 a week. US names almost
+    always answer the ticker query, so the reference pack's S&P 500 set
+    (which shares this path) is unchanged."""
+    import yfinance as yf
+
+    def search(q: str, keep: set[str]) -> list:
+        _YF_LIMITER.acquire(cancel=cancel)
+        try:
+            items = yf.Search(q, news_count=min(count, 50), max_results=1).news or []
+        except Exception:
+            return []
+        return [n for n in items
+                if isinstance(n, dict) and keep & set(n.get("relatedTickers") or [])]  # fmt: skip
+
+    found = search(symbol, {symbol.upper()})
+    if found:
+        return found
+    q, keep = _company_query(symbol)
+    return search(q, keep) if q else []
+
+
+def _company_query(symbol: str) -> tuple[str, set[str]]:
+    """(name to search, the company's tickers) from the symbol pack: every
+    listing of its company group plus its US line. ("", …) for a fund (a
+    UCITS ETF's long name matches nothing useful) or a name too short to be
+    unambiguous."""
+    try:
+        from convexity import symbol_db
+
+        hit = symbol_db.get(symbol)
+        if hit is None or hit.type != "stock":
+            return "", set()
+        keep = {symbol.upper()} | {h.ticker for h in symbol_db.listings(hit.group)}
+        us = symbol_db.us_line(symbol)
+        if us:
+            keep.add(us)
+        q = symbol_db.name_key(hit.name)
+        return (q if len(q) >= 4 else ""), keep
+    except Exception:
+        return "", set()
+
+
 def collect_company_news(
     symbol: str, days: int = 7, cancel=None, finnhub_symbol: str | None = None
 ) -> tuple[list[dict], bool, int]:
@@ -543,14 +598,20 @@ def collect_company_news(
     builder (reference_build.py), so the pack's Market read scores the SAME
     article set the app would — train/serve-style parity for the anchor.
     `finnhub_symbol` lets the builder pass Finnhub's class-share spelling
-    (BRK.B) for a Yahoo ticker (BRK-B)."""
+    (BRK.B) for a Yahoo ticker (BRK-B), and the app the company's US line
+    (TTE for TTE.PA: Finnhub's free plan answers 403 to every other
+    listing). An empty string means the company has none: Finnhub is not
+    asked."""
     to_date = datetime.now(UTC).strftime("%Y-%m-%d")
     from_date = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
-    raw = _fh_call(
-        "company-news",
-        {"symbol": finnhub_symbol or symbol, "from": from_date, "to": to_date},
-        cancel=cancel,
-    )
+    if finnhub_symbol == "":
+        raw = []
+    else:
+        raw = _fh_call(
+            "company-news",
+            {"symbol": finnhub_symbol or symbol, "from": from_date, "to": to_date},
+            cancel=cancel,
+        )
     articles: list[dict] = []
     fh_ok = raw is not None  # None = transient failure, [] = "returned but empty"
     if isinstance(raw, list):
@@ -577,6 +638,20 @@ def collect_company_news(
     return articles, fh_ok, len(yf_items)
 
 
+def _finnhub_line(symbol: str) -> str:
+    """The ticker Finnhub is asked for this row's news: the company's US
+    line ("" when it has none). The Yahoo Lookup that finds an ADR missing
+    from the symbol pack (SCGLY) runs here, off the table's hot path; the
+    table's Rec and MSPR then use it too (symbol_db.us_line)."""
+    try:
+        from convexity import finnhub_adapter, symbol_db
+
+        symbol_db.discover_us_line(symbol)
+        return finnhub_adapter.finnhub_symbol(symbol) or ""
+    except Exception:
+        return symbol
+
+
 def fetch_company_news(symbol: str, days: int = 7, cancel=None) -> list[dict] | None:
     """Fetch recent news for a single ticker from Finnhub + yfinance,
     deduplicated. Returns normalised article list (most recent first).
@@ -589,7 +664,9 @@ def fetch_company_news(symbol: str, days: int = 7, cancel=None) -> list[dict] | 
     if cached is not None:
         return cached
 
-    articles, fh_ok, _ = collect_company_news(symbol, days, cancel=cancel)
+    articles, fh_ok, _ = collect_company_news(
+        symbol, days, cancel=cancel, finnhub_symbol=_finnhub_line(symbol)
+    )
     fh_failed = not fh_ok
     if not articles:
         if fh_failed:

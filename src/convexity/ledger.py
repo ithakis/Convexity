@@ -20,12 +20,22 @@ so an edit to a 2023 trade can never leave a stale number behind
   one day never trip the oversell check in the wrong order.
 - **No shorts.** Selling more than is held raises ``OversellError``.
 
-TWR and MWR are pure functions over valuation points; the Appendix B
-acceptance test checks them here, and Phase 3 feeds them daily closes.
+TWR (``twr_index``) and MWR (``period_mwr``) are pure functions over
+valuation points; the Appendix B acceptance test checks them, and
+``investments.book`` feeds them daily closes (roadmap Phase 3). Two performance-only rules live here too:
+
+- **An opening holding** (a quick-add, or a holding read from a statement's
+  list of current holdings) starts its performance at that day's market
+  value: ``Day.openings`` lets the caller swap its cost for its value in the
+  day's inflow, so the gap from its average price stays in lifetime profit and
+  is never a one-day return.
+- **Unrecorded dividends** are estimated per Yahoo payout
+  (``estimate_dividends``) and count as paid out to the owner: an outflow for
+  TWR and MWR, never cash in the book.
 """
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 from scipy.optimize import brentq
 
@@ -84,6 +94,9 @@ class Day:
     cash: float
     inflow: float  # deposits + implied deposits, counted at the start of the day
     outflow: float  # withdrawals, counted at the end of the day
+    # Opening holdings bought this day: (symbol, qty, cost in the base ccy).
+    openings: list[tuple[str, float, float]] = field(default_factory=list)
+    implied: float = 0.0  # the part of ``inflow`` that is implied deposits
 
 
 @dataclass
@@ -136,6 +149,20 @@ def sort_entries(entries: list[dict]) -> list[dict]:
     return [e for _, e in indexed]
 
 
+def is_opening(e: dict) -> bool:
+    """A buy that records a holding already owned (quick add, or a holding
+    from an imported list of current holdings), not a trade on that day.
+
+    An import's holding row is the only one saved with ``source`` "import"
+    and ``qty_basis`` "current" (a statement's trades and its held-before
+    rows are "trade"): books imported before the opening flag was kept on
+    Apply (fixed 2026-10-11) read the same way without being rewritten."""
+    if e.get("type") != "buy":
+        return False
+    return (bool(e.get("opening")) or e.get("source") == "quick"
+            or (e.get("source") == "import" and e.get("qty_basis") == "current"))  # fmt: skip
+
+
 def _num(e: dict, k: str) -> float:
     v = e.get(k)
     return float(v) if v is not None else 0.0
@@ -171,6 +198,7 @@ def replay(entries: list[dict], *, base_ccy: str, fx_at, splits: dict | None = N
             short = amount - book.cash
             book.implied += short
             cur.inflow += short
+            cur.implied += short
             book.cash = 0.0
         else:
             book.cash -= amount
@@ -228,6 +256,8 @@ def replay(entries: list[dict], *, base_ccy: str, fx_at, splits: dict | None = N
             if t == "buy":
                 gross_loc = qty * price + fee
                 take_cash(gross_loc * rate)
+                if is_opening(e):
+                    cur.openings.append((sym, qty, gross_loc * rate))
                 pos.qty += qty
                 pos.cost_base += gross_loc * rate
                 pos.cost_loc += gross_loc
@@ -298,34 +328,27 @@ def mark(pos: Position, price: float, price_ccy: str, fx_now: float) -> Mark:
 # --------------------------------------------------------------- performance
 
 
-def twr(points: list[tuple[str, float, float, float]]) -> float | None:
-    """Time-weighted return over valuation points (date, value, inflow, outflow).
+def twr_index(points: list[tuple[str, float, float, float]]) -> list[float]:
+    """Time-weighted return as a running index: the growth of 1 invested,
+    after each valuation point (date, value, inflow, outflow).
 
     r_t = (V_t + W_t) / (V_{t-1} + D_t) - 1: inflows count at the start of the
-    day, outflows at the end. The first point's V_{t-1} is 0, so the first
-    deposit is the base. Returns a fraction, or None with nothing invested.
-    """
-    growth, prev, seen = 1.0, 0.0, False
+    day, outflows at the end. Any period's return is a ratio of two of its
+    points. 1.0 until money arrives; flat while nothing is invested."""
+    out, growth, prev = [], 1.0, 0.0
     for _d, v, inflow, outflow in points:
         base = prev + inflow
         if base > _EPS:
             growth *= (v + outflow) / base
-            seen = True
+        out.append(growth)
         prev = v
-    return growth - 1.0 if seen else None
+    return out
 
 
-def mwr(flows: list[tuple[str, float]], end: str, end_value: float) -> float | None:
-    """Money-weighted return per year (XIRR), as a fraction.
-
-    ``flows`` are (date, amount) from the investor's side: money put in is
-    negative, money taken out positive; the end value is the last inflow.
-    None when the flows never change sign (nothing to solve for).
-    """
-    d0 = date.fromisoformat(min([d for d, _ in flows] + [end]))
-    cfs = [((date.fromisoformat(d) - d0).days / 365.0, a) for d, a in flows if abs(a) > _EPS]
-    cfs.append(((date.fromisoformat(end) - d0).days / 365.0, end_value))
-    if not (any(a < 0 for _, a in cfs) and any(a > 0 for _, a in cfs)):
+def _irr(cfs: list[tuple[float, float]]) -> float | None:
+    """The rate per time unit that zeroes sum(a / (1+r)^t); None when the
+    flows never change sign or no root is bracketed."""
+    if not (any(a < -_EPS for _, a in cfs) and any(a > _EPS for _, a in cfs)):
         return None
 
     def npv(r: float) -> float:
@@ -333,5 +356,96 @@ def mwr(flows: list[tuple[str, float]], end: str, end_value: float) -> float | N
 
     try:
         return brentq(npv, -0.9999, 100.0, xtol=1e-12, maxiter=500)
-    except ValueError:
+    except (ValueError, OverflowError, ZeroDivisionError):
         return None
+
+
+def period_mwr(
+    start: str, start_value: float, flows: list[tuple[str, float]], end: str, end_value: float
+) -> tuple[float | None, float | None]:
+    """Money-weighted return (XIRR) over one period: (per year, over it).
+
+    The period's opening value counts as money put in on ``start``; ``flows``
+    are the investor-side flows after it (put in negative, taken out
+    positive). The root is solved per period length rather than per year, so
+    a three-day period can't overflow the annualising, and the yearly rate is
+    derived from it. Under a year the page shows the period rate (roadmap
+    Phase 3: compare period figures, not annualised ones)."""
+    d0 = date.fromisoformat(start)
+    span = (date.fromisoformat(end) - d0).days
+    if span <= 0:
+        return None, None
+    cfs = [(0.0, -start_value)] if start_value > _EPS else []
+    cfs += [((date.fromisoformat(d) - d0).days / span, a) for d, a in flows if abs(a) > _EPS]
+    cfs.append((1.0, end_value))
+    per = _irr(cfs)
+    if per is None:
+        return None, None
+    try:
+        ann = (1.0 + per) ** (365.0 / span) - 1.0
+    except OverflowError:
+        ann = None
+    return ann, per
+
+
+# ---------------------------------------------------------------- dividends
+
+DIV_BEFORE, DIV_AFTER = 5, 45  # days around the ex-date a recorded dividend covers
+
+
+def estimate_dividends(
+    book: Book, events: dict[str, list[tuple[str, float]]], recorded: dict[str, list[str]]
+) -> list[tuple[str, str, float, float]]:
+    """Yahoo payouts the ledger hasn't recorded: [(ex_date, symbol, qty, per_share)].
+
+    ``events`` maps symbol -> [(ex_date, amount per current share)];
+    ``recorded`` maps symbol -> the dates of its recorded dividends. Each
+    recorded dividend covers at most one payout: the nearest whose ex-date is
+    within DIV_BEFORE days after it or DIV_AFTER days before it (a dividend is
+    paid weeks after its ex-date), preferring a payout on or before it. So a
+    monthly payer's dividends are matched one to one, and a recorded dividend
+    always replaces its estimate. Shares count at the close before the
+    ex-date, in today's shares like the per-share amounts.
+    """
+    out = []
+    for sym, evs in events.items():
+        evs = sorted(evs)
+        taken = [False] * len(evs)
+        for r in sorted(recorded.get(sym, [])):
+            rd, best = date.fromisoformat(r), None
+            for i, (ex, _a) in enumerate(evs):
+                gap = (rd - date.fromisoformat(ex)).days
+                if taken[i] or not (-DIV_BEFORE <= gap <= DIV_AFTER):
+                    continue
+                key = (gap < 0, abs(gap))
+                if best is None or key < best[0]:
+                    best = (key, i)
+            if best is not None:
+                taken[best[1]] = True
+        for i, (ex, amount) in enumerate(evs):
+            if taken[i] or amount <= 0:
+                continue
+            day_before = (date.fromisoformat(ex) - timedelta(days=1)).isoformat()
+            q = qty_at(book, day_before)[0].get(sym, 0.0)
+            if q > _EPS:
+                out.append((ex, sym, q, amount))
+    return out
+
+
+def trade_prices(entries: list[dict], splits: dict | None = None) -> dict[str, list]:
+    """Every trade's price per current share: symbol -> [(date, price, ccy)].
+
+    The valuation's fallback for days a share has no close yet (a listing
+    Yahoo doesn't carry, or before its history starts): the last trade price
+    on or before the day."""
+    splits = splits or {}
+    out: dict[str, list] = {}
+    for e in sort_entries(entries):
+        if e.get("type") not in TRADES or not _num(e, "price"):
+            continue
+        sym = e["symbol"]
+        factor = (
+            split_factor(splits.get(sym, []), e["date"]) if e.get("qty_basis") == "trade" else 1.0
+        )
+        out.setdefault(sym, []).append((e["date"], _num(e, "price") / factor, e.get("ccy")))
+    return out

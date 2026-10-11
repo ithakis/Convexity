@@ -12,6 +12,10 @@
     --accent: #187aba;
     --accent-rgb: 24, 122, 186;
     --accent-soft: #e3f0f9;
+    /* Selected text. Without these the desktop shell's own palette showed
+       light-mode selections as near-black text on dark gray (owner, 2026-10-09). */
+    --sel-bg: #b9dbf3;
+    --sel-fg: #0b2239;
     /* Corner-radius scale (F4). One knob per size tier so the whole app's
        roundness tunes from four values. Pills/circles stay literal (999px/50%).
        Current level: "Sharp" — crisp, terminal-like edges. */
@@ -33,6 +37,7 @@
     --warn-rgb: 191, 135, 0;
     --bg-rgb: 255, 255, 255;
     --row-alt: #f6f9fc;
+    --rev-head-bg: #eaf1f8;  /* the import review's header band */
     --header-bg: #f2f6fa;
     --hover: #e8f2fa;       /* was a yellow #fff8c5 — the most "default" thing on the page */
     --hlc-hi: #00a8e0;      /* HLC area: the high line + its band (Morgan Stanley cyan) */
@@ -54,6 +59,8 @@
     --text: #e6edf3;
     --muted: #8a99ab;
     --accent: #4ba3e3;
+    --sel-bg: #1e4a7a;
+    --sel-fg: #ffffff;
     --accent-rgb: 75, 163, 227;
     --accent-soft: #13304a;
     --pos: #3fb950;
@@ -66,6 +73,7 @@
     --warn-rgb: 210, 153, 34;
     --bg-rgb: 10, 14, 20;
     --row-alt: #0f151e;
+    --rev-head-bg: #13202e;
     --header-bg: #111823;
     --hover: #152132;
     --on-accent: #04121f;   /* white on the lighter dark-mode blue is only ~2.8:1 */
@@ -98,6 +106,8 @@
     --text: #f2f2f2;            /* WHITE — data values, like the real terminal */
     --muted: #f49f31;           /* Bloomberg amber — labels/secondary text */
     --accent: #fb8b1e;          /* Bloomberg orange — buttons, active states */
+    --sel-bg: #14273f;          /* the terminal's selection-bar blue */
+    --sel-fg: #ffffff;
     --accent-rgb: 251, 139, 30;
     --accent-soft: #38230a;
     --pos: #33d17a;
@@ -110,6 +120,7 @@
     --warn-rgb: 245, 179, 1;
     --bg-rgb: 0, 0, 0;
     --row-alt: #0e0e0e;
+    --rev-head-bg: #1a1208;
     --header-bg: #141414;
     --hover: #14273f;           /* dark blue — Bloomberg's selection-bar blue */
     --on-accent: #050505;       /* near-black text on the bright orange accent */
@@ -120,6 +131,7 @@
     --ns-bear: #8f2c28;
     --ns-vbear: #ff433d;
   }
+  ::selection { background: var(--sel-bg); color: var(--sel-fg); }
   /* Bloomberg fidelity overrides — amber where the terminal uses amber. */
   [data-theme="bloomberg"] table#tbl th { color: var(--muted); }
   [data-theme="bloomberg"] td.sym,
@@ -238,6 +250,11 @@
      (app.js syncRefreshNeeded). `.topbar` prefix: see the .rf-chip-x note. */
   .topbar .refresh-btn.needs-refresh {
     color: var(--neg); border-color: var(--neg); background: rgba(var(--neg-rgb), 0.08);
+  }
+  /* On My Investments the button refreshes the book, so the research tab's
+     "needs refresh" cue doesn't apply there. */
+  body[data-page="investments"] .topbar .refresh-btn.needs-refresh:not(:hover):not(.running) {
+    color: var(--text); border-color: var(--border); background: var(--bg-canvas);
   }
   /* Sweeps a conic wedge around the button over the hold threshold. Driven by
      one animation rather than JS so it can't drift from REFRESH_LONG_MS. */
@@ -830,18 +847,26 @@
     background: var(--bg-canvas);
     border-bottom: 1px solid var(--border);
   }
-  .pf-mode-toggle, .pf-period-tabs {
-    display: inline-flex; background: var(--bg-canvas); border: 1px solid var(--border);
-    border-radius: var(--r-md); overflow: hidden;
+  /* THE period selector, one look everywhere (owner's pick, 2026-10-11):
+     a tinted track pill with the chosen period as a raised pill inside it,
+     the same shape as the Value / Return % toggle (.pf-contrib-toggle).
+     Portfolio chart, My Investments, the detail modal, the News window and timeline. */
+  .pf-period-tabs, .m-range-tabs, .ns-tl-periods, .ns-lb-periods {
+    display: inline-flex; align-items: center; gap: 2px; padding: 3px; flex: none;
+    background: rgba(var(--accent-rgb), 0.10); border: none; border-radius: 999px;
   }
-  .pf-mode-toggle button, .pf-period-tabs button {
-    background: transparent; border: none; padding: 5px 10px; font-size: 11.5px;
-    color: var(--muted); cursor: pointer; border-right: 1px solid var(--border);
+  .pf-period-tabs button, .m-range-tabs button, .ns-tl-periods button, .ns-lb-periods button {
+    background: transparent; border: none; border-radius: 999px; color: var(--muted);
+    font-size: 11.5px; font-weight: 500; padding: 4px 12px; cursor: pointer;
+    font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0;
+    transition: background .15s, color .15s, box-shadow .15s;
   }
-  .pf-mode-toggle button:last-child, .pf-period-tabs button:last-child { border-right: none; }
-  .pf-mode-toggle button:hover, .pf-period-tabs button:hover { color: var(--text); background: var(--bg-subtle); }
-  .pf-mode-toggle button.active, .pf-period-tabs button.active {
-    background: var(--accent); color: var(--on-accent);
+  .pf-period-tabs button:hover:not(.active), .m-range-tabs button:hover:not(.active),
+  .ns-tl-periods button:hover:not(.active), .ns-lb-periods button:hover:not(.active) { color: var(--text); }
+  .pf-period-tabs button.active, .m-range-tabs button.active, .ns-tl-periods button.active,
+  .ns-lb-periods button.active {
+    background: var(--bg-canvas); color: var(--text); font-weight: 600;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
   }
   /* Preset pill bar — replaces the rigid 3-button mode toggle. Built/Cap pills
      stay first; named presets follow; trailing + / ✎ controls open the
@@ -1046,6 +1071,8 @@
   .bench-opt.on { color: var(--accent); font-weight: 600; }
   .bench-opt.on .bench-opt-check { visibility: visible; }
   .pf-stat-row .bench-v { color: var(--muted); font-weight: 400; }
+  /* The settings pane clips its content: the list scrolls inside a short box. */
+  .settings-row .bench-menu { left: auto; right: 0; max-height: min(200px, 30vh); overflow-y: auto; }
   .pf-bench-extra { margin-top: 10px; }
   .bench-swatch { display: inline-block; width: 10px; height: 10px; border-radius: var(--r-xs); margin-right: 6px; vertical-align: middle; }
 
@@ -2497,13 +2524,6 @@
     display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
     margin-bottom: 10px;
   }
-  .m-range-tabs { display: inline-flex; gap: 2px; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-md); padding: 2px; }
-  .m-range-tabs button {
-    border: none; background: transparent; color: var(--muted);
-    padding: 4px 10px; border-radius: var(--r-sm); font-size: 12px; cursor: pointer; font-weight: 600;
-  }
-  .m-range-tabs button:hover { color: var(--text); }
-  .m-range-tabs button.active { background: var(--bg-canvas); color: var(--accent); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
   .m-toolbar-spacer { flex: 1; }
   .m-toolbar-btn {
     border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text);
@@ -2755,14 +2775,8 @@
   .ns-updated { font-size: 11px; color: var(--muted); }
   .ns-lookback { display: inline-flex; align-items: center; gap: 4px; }
   .ns-lb-label { font-size: 11px; color: var(--muted); margin-right: 2px; cursor: default; }
-  .ns-lookback button {
-    background: transparent; border: 1px solid var(--border); color: var(--muted);
-    border-radius: var(--r-sm); font-size: 10.5px; padding: 3px 8px; cursor: pointer;
-    font-variant-numeric: tabular-nums;
-  }
-  .ns-lookback button:hover { border-color: var(--accent); color: var(--text); }
   /* Track record source switch: "Your holdings" | "Model (500 names)".
-     Same look as the News window buttons above. */
+     Bordered buttons: a source switch, not a period (those are pills). */
   .ns-tr-src { display: inline-flex; gap: 4px; margin: 2px 0 10px; }
   .ns-tr-src button {
     background: transparent; border: 1px solid var(--border); color: var(--muted);
@@ -2770,10 +2784,6 @@
   }
   .ns-tr-src button:hover { border-color: var(--accent); color: var(--text); }
   .ns-tr-src button.active {
-    border-color: var(--accent); color: var(--accent); font-weight: 700;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-  }
-  .ns-lookback button.active {
     border-color: var(--accent); color: var(--accent); font-weight: 700;
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
@@ -2904,16 +2914,6 @@
   .ns-tl-controls {
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;
   }
-  .ns-tl-periods { display: inline-flex; gap: 2px; }
-  .ns-tl-p {
-    background: transparent; border: 1px solid var(--border); color: var(--muted);
-    font-size: 10.5px; padding: 3px 8px; cursor: pointer;
-    border-radius: 0; border-right-width: 0;
-  }
-  .ns-tl-p:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
-  .ns-tl-p:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; border-right-width: 1px; }
-  .ns-tl-p:hover { color: var(--text); }
-  .ns-tl-p.active { color: var(--accent); font-weight: 700; background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .ns-tl-legend { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; font-size: 10px; color: var(--muted); }
   .ns-tl-lg { display: inline-flex; align-items: flex-end; gap: 4px; }
   .ns-tl-lg i { display: inline-block; width: 4px; border-radius: var(--r-xs) var(--r-xs) 0 0; }
@@ -3420,20 +3420,29 @@
   }
   .inv-hero { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; padding: 0 8px; }
   .inv-value { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
-  .inv-month { font-size: 13px; }
+  /* Last month's change, its own line under the value (owner's layout A1). */
+  .inv-month { font-size: 13.5px; font-weight: 600; padding: 2px 8px 0; }
+  .inv-month-w { color: var(--muted); font-weight: 400; }
   .inv-demo { margin-left: auto; font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 6px; }
   .inv-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; margin: 10px 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
   .inv-kpi { padding: 6px 8px; border-radius: var(--r-md); }
   .inv-kpi:hover, .inv-kpi:focus-visible { background: var(--bg-canvas); }
   .inv-kpi-k { font-size: 11px; color: var(--muted); }
   .inv-kpi-v { font-size: 17px; font-weight: 700; margin-top: 2px; color: var(--text); }
+  .inv-kpi-s { font-size: 11px; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 760px) { .inv-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   #inv-page .pos, .inv-tip .pos { color: var(--pos); }
   #inv-page .neg, .inv-tip .neg { color: var(--neg); }
   #inv-page, .inv-tip { font-variant-numeric: tabular-nums; }
   /* Fixed-height single-line toolbar and reading: the card never resizes. */
-  .inv-chart-card { container-type: inline-size; }
+  .inv-chart-card { container-type: inline-size; position: relative; }
+  .inv-svg .sel-rect { fill: var(--accent); opacity: 0.12; pointer-events: none; }
+  .inv-chart-card.measuring .inv-cross, .inv-chart-card.measuring .inv-dot { opacity: 0 !important; }
   .inv-chart-bar { display: flex; align-items: center; gap: 12px; height: 30px; padding: 0 2px 6px; }
   .inv-chart-bar .pf-contrib-toggle { margin-left: 0; }
+  /* "vs" sits halfway between the toggle and the picker: its gap to the
+     picker equals the bar's gap to the toggle (a plain space was ~3px). */
+  .inv-vs { display: inline-flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; white-space: nowrap; }
   .inv-periods { margin-left: auto; flex: none; }
   .inv-svg { display: block; width: 100%; height: 240px; }
   .inv-readout { display: flex; gap: 16px; align-items: center; height: 20px; overflow: hidden; font-size: 11.5px; color: var(--text); padding: 2px 4px 0; }
@@ -3441,6 +3450,11 @@
   .inv-ro-k, .inv-ro-date { color: var(--muted); }
   .inv-ro b { font-weight: 600; }
   .inv-ro-date { margin-left: auto; }
+  /* The S&P entry doubles as its line's switch. */
+  .inv-ro-sw { font: inherit; color: inherit; background: none; border: 0; padding: 1px 4px; margin: -1px -4px; border-radius: var(--r-sm); cursor: pointer; }
+  .inv-ro-sw:hover { background: var(--hover); }
+  .inv-ro-sw.off .inv-ro-k, .inv-ro-sw.off b { text-decoration: line-through; opacity: 0.55; }
+  .inv-ro-sw.off i { opacity: 0.35; }
   @container (max-width: 680px) { .inv-ro-k { display: none; } }
   .inv-axis { font-size: 10px; fill: var(--muted); }
   .inv-grid-l { stroke: var(--border); stroke-width: 0.6; }
@@ -3448,10 +3462,10 @@
   .inv-area { fill: var(--accent); opacity: 0.08; }
   .inv-l-main, .inv-l-bench, .inv-l-invested { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-linejoin: round; }
   .inv-l-main { stroke: var(--accent); stroke-width: 1.6; }
-  .inv-l-bench { stroke-dasharray: 2 3; }
+  .inv-l-bench { stroke: var(--neg); stroke-width: 1.4; stroke-dasharray: 5 4; }  /* owner, 2026-10-11: red dashes */
   .inv-l-invested { stroke-dasharray: 6 4; opacity: 0.8; }
   .inv-sw-main, .inv-sw-bench, .inv-sw-invested { display: inline-block; width: 16px; border-top: 2px solid var(--accent); }
-  .inv-sw-bench { border-top: 2px dotted var(--muted); }
+  .inv-sw-bench { border-top: 2px dashed var(--neg); }
   .inv-sw-invested { border-top: 2px dashed var(--muted); }
   .inv-cross { stroke: var(--muted); stroke-width: 0.7; }
   .inv-dot { fill: var(--accent); }
@@ -3460,12 +3474,25 @@
   .inv-hit { fill: transparent; cursor: crosshair; }
   .inv-anchor { margin: 18px 0 8px; }
   .inv-count { margin-left: 8px; color: var(--muted); letter-spacing: 0; font-weight: 600; }
+  .pf-book-note { font-size: 11px; color: var(--muted); line-height: 1.45; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+  .pf-book-note b { font-weight: 600; }
   .inv-tbl-wrap { overflow-x: auto; }  /* a narrow window scrolls the table, never the page */
   .inv-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
   .inv-tbl th { color: var(--muted); font-weight: 600; font-size: 11px; text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .inv-tbl td { text-align: right; padding: 4px 8px; height: 26px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .inv-tbl .left { text-align: left; }
   .inv-tbl tbody tr:hover td { background: var(--hover); }
+  /* Sortable headers (owner, 2026-10-11): the whole label is the button. */
+  .inv-th button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; white-space: nowrap; }
+  .inv-th button:hover, .inv-th.sorted button { color: var(--text); }
+  .inv-th .arrow { margin-left: 3px; font-size: 9px; }
+  /* Your order: a grip on hover, a line where the row will land. */
+  .inv-tbl-drag td.left { position: relative; }
+  .inv-grip { position: absolute; left: -1px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 10px; letter-spacing: -2px; opacity: 0; cursor: grab; user-select: none; }
+  .inv-tbl-drag tbody tr:hover .inv-grip { opacity: 1; }
+  .inv-tbl-drag tbody tr[draggable] { cursor: grab; }
+  .inv-tbl tr.dragging td { opacity: 0.45; }
+  .inv-tbl tr.drop-before td { box-shadow: inset 0 2px 0 var(--accent); }
   .inv-cash td { color: var(--muted); }
   .inv-tipped { display: inline-flex; align-items: center; gap: 8px; border-radius: var(--r-sm); padding: 1px 3px; }
   .inv-rail { border-left: 1px solid var(--border); padding-left: 18px; min-height: 200px; }
@@ -3478,9 +3505,23 @@
     .inv-grid { grid-template-columns: minmax(0, 1fr); }
     .inv-rail { border-left: none; padding-left: 0; border-top: 1px solid var(--border); }
   }
-  .rich-tip-float .pf-metric-tip.inv-tip { width: 280px; }
+  .rich-tip-float .pf-metric-tip.inv-tip { width: 320px; }
   .inv-tip-table th { text-align: left; font-weight: 500 !important; }
-  .inv-tip-tech { margin-top: 6px; color: var(--muted); font-size: 10.5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .inv-tip-tech { margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+  .inv-tip .mt-formula { margin: 8px 0 2px; }
+  /* Volatility's card (mockup C): five fixed bands, classic data colours
+     (green, amber, red: the owner's rule), yours lit and outlined. */
+  .inv-bands { display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; margin: 8px 0 4px; align-items: center; }
+  .inv-band { height: 9px; border-radius: var(--r-sm); opacity: 0.3; }
+  .inv-band.on { height: 15px; opacity: 1; outline: 2px solid var(--text); outline-offset: 1px; }
+  .inv-band.b0 { background: #1f883d; } .inv-band.b1 { background: #7cc35a; } .inv-band.b2 { background: #e3a008; }
+  .inv-band.b3 { background: #e5534b; } .inv-band.b4 { background: #a4262c; }
+  .inv-band-names { display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; font-size: 10.5px; line-height: 1.3; color: var(--muted); text-align: center; }
+  .inv-band-names .on { color: var(--text); font-weight: 600; }
+  .inv-sh-k { margin: 10px 0 4px; font-size: 11.5px; color: var(--muted); }
+  .inv-sh { position: relative; height: 7px; border-radius: 4px; background: linear-gradient(90deg, #e5534b, #e3a008 30%, #7cc35a 60%, #1f883d); }
+  .inv-sh i { position: absolute; top: -4px; width: 3px; height: 15px; margin-left: -1.5px; border-radius: 2px; background: var(--text); }
+  .inv-sh-l { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--muted); margin: 3px 0 6px; }
   /* The empty page (Phases 5-6): the composer is the welcome (owner's W1). */
   .inv-welcome { max-width: 620px; margin: clamp(32px, 10vh, 110px) auto 48px; padding: 0 16px; text-align: center; }
   .inv-welcome-title { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.015em; color: var(--text); }
@@ -3491,46 +3532,64 @@
   .inv-link { border: none; background: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
   .inv-link:hover { text-decoration: underline; text-underline-offset: 2px; }
 
-  /* The composer: one box that takes text, pasted images and dropped files. */
+  /* The composer (owner's pick, 2026-10-10): a chat-style pill. Files sit as
+     chips above the text; the text grows with what's typed (no drag handle);
+     the clip and a round send button sit inside; starter chips below. */
+  .inv-comp-wrap { text-align: left; }
   .inv-composer {
-    text-align: left; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-canvas);
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 6px 24px rgba(0,0,0,0.05); transition: border-color 0.15s, box-shadow 0.15s;
+    border: 1px solid var(--border); border-radius: 26px; background: var(--bg-canvas);
+    box-shadow: 0 1px 2px rgba(11,34,57,0.05), 0 4px 18px rgba(11,34,57,0.06); transition: border-color 0.15s, box-shadow 0.15s;
   }
   .inv-composer:focus-within { border-color: rgba(var(--accent-rgb), 0.6); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12); }
   .inv-composer.over { border-color: var(--accent); border-style: dashed; background: rgba(var(--accent-rgb), 0.04); }
-  .inv-composer.compact { box-shadow: none; }
+  .inv-composer.compact { box-shadow: none; border-radius: 20px; }
+  .inv-comp-row { display: flex; align-items: flex-end; gap: 4px; padding: 7px 7px 7px 20px; }
   .inv-comp-text {
-    display: block; width: 100%; box-sizing: border-box; resize: vertical; min-height: 84px; padding: 14px 16px 6px;
-    border: none; outline: none; background: transparent; color: var(--text); font: inherit; font-size: 14.5px; line-height: 1.55;
+    flex: 1; min-width: 0; display: block; box-sizing: border-box; resize: none; overflow-y: auto; height: 40px; max-height: 220px;
+    padding: 9px 0; border: none; outline: none; background: transparent; color: var(--text); font: inherit; font-size: 15px; line-height: 22px;
   }
-  .inv-composer.compact .inv-comp-text { min-height: 64px; font-size: 13.5px; padding: 12px 12px 4px; }
-  .inv-comp-text::placeholder { color: var(--muted); opacity: 0.85; }
-  .inv-comp-files { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 14px 2px; }
+  .inv-composer.compact .inv-comp-text { font-size: 13.5px; }
+  .inv-comp-text::placeholder { color: var(--muted); opacity: 0.85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .inv-comp-icon, .inv-comp-send {
+    flex: none; width: 36px; height: 36px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+    border: none; padding: 0; cursor: pointer; margin-bottom: 2px;
+  }
+  .inv-comp-icon { background: transparent; color: var(--muted); }
+  .inv-comp-icon:hover:not(:disabled) { background: var(--bg-subtle); color: var(--text); }
+  .inv-comp-icon svg { width: 19px; height: 19px; }
+  .inv-comp-send { background: var(--accent); color: var(--on-accent); }
+  .inv-comp-send:hover:not(:disabled) { filter: brightness(1.08); }
+  .inv-comp-send:disabled { cursor: default; }
+  .inv-comp-send svg { width: 18px; height: 18px; }
+  .inv-comp-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.4); border-top-color: var(--on-accent); animation: inv-spin 0.8s linear infinite; }
+  @keyframes inv-spin { to { transform: rotate(360deg); } }
+  .inv-comp-files { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 0; }
   .inv-comp-file {
     display: inline-flex; align-items: center; gap: 6px; max-width: 220px; padding: 3px 4px 3px 3px;
-    border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--text); background: var(--bg-subtle);
+    border: 1px solid var(--border); border-radius: 10px; font-size: 12px; color: var(--text); background: var(--bg-subtle);
   }
-  .inv-comp-file img { width: 28px; height: 28px; object-fit: cover; border-radius: 5px; }
-  .inv-comp-ext { width: 28px; height: 28px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: var(--accent); background: var(--accent-soft); }
+  .inv-comp-file img { width: 30px; height: 30px; object-fit: cover; border-radius: 7px; }
+  .inv-comp-ext { width: 30px; height: 30px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: var(--accent); background: var(--accent-soft); }
   .inv-comp-file > span:not(.inv-comp-ext) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .inv-comp-file button { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px; }
-  .inv-comp-bar { display: flex; align-items: center; gap: 10px; padding: 8px 10px 10px 12px; }
-  .inv-comp-attach {
-    display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px;
-    background: var(--bg-canvas); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer;
+  .inv-comp-progress { height: 2px; margin: 0 22px 8px; border-radius: 2px; background: var(--bg-subtle); overflow: hidden; }
+  .inv-comp-progress span { display: block; height: 100%; width: 35%; background: var(--accent); border-radius: 2px; animation: inv-prog 1.3s ease-in-out infinite; }
+  @keyframes inv-prog { 0% { transform: translateX(-100%); } 100% { transform: translateX(290%); } }
+  .inv-comp-status { margin-top: 10px; text-align: center; font-size: 12.5px; color: var(--muted); }
+  .inv-comp-err { margin-top: 10px; text-align: center; font-size: 12.5px; color: var(--neg); }
+  .inv-comp-wrap.compact .inv-comp-status, .inv-comp-wrap.compact .inv-comp-err { text-align: left; padding-left: 4px; }
+  .inv-comp-starters { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .inv-comp-starter {
+    display: inline-flex; align-items: center; gap: 7px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--bg-canvas); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; transition: border-color .15s, background .15s;
   }
-  .inv-comp-attach:hover:not(:disabled) { border-color: var(--accent); }
-  .inv-comp-attach svg { width: 14px; height: 14px; }
-  .inv-comp-hint { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .inv-comp-bar .primary, .inv-review .primary, .inv-pop .primary {
+  .inv-comp-starter:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+  .inv-comp-starter svg { width: 15px; height: 15px; color: var(--accent); }
+  .inv-review .primary, .inv-pop .primary {
     padding: 7px 18px; border-radius: var(--r-md); border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent);
     font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
   }
-  .inv-comp-bar .primary:disabled, .inv-review .primary:disabled { opacity: 0.55; cursor: default; }
-  .inv-comp-progress { height: 2px; margin: 0 12px 10px; border-radius: 2px; background: var(--bg-subtle); overflow: hidden; }
-  .inv-comp-progress span { display: block; height: 100%; width: 35%; background: var(--accent); border-radius: 2px; animation: inv-prog 1.3s ease-in-out infinite; }
-  @keyframes inv-prog { 0% { transform: translateX(-100%); } 100% { transform: translateX(290%); } }
-  .inv-comp-err { padding: 0 14px 12px; font-size: 12.5px; color: var(--neg); }
+  .inv-review .primary:disabled { opacity: 0.55; cursor: default; }
   .inv-pop-compose .inv-form-head { margin-bottom: 10px; }
   .inv-pop-note { margin-top: 8px; font-size: 11px; color: var(--muted); }
 
@@ -3540,9 +3599,7 @@
   .inv-rev-kicker { font-size: 10.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
   .inv-rev-title { margin: 4px 0 0; font-size: 19px; font-weight: 600; color: var(--text); }
   .inv-rev-legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
-  .inv-rev-legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
-  .inv-rev-legend .g::before { background: var(--ai); }
-  .inv-rev-legend .m::before { background: rgba(var(--warn-rgb), 0.55); }
+  .inv-rev-legend > span { display: inline-flex; align-items: center; gap: 6px; }
   .inv-rev-thumbs { display: flex; gap: 10px; margin-top: 14px; }
   .inv-rev-thumb { display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 11px; color: var(--muted); text-decoration: none; }
   .inv-rev-thumb img { height: 120px; border-radius: 6px; border: 1px solid var(--border); }
@@ -3559,13 +3616,36 @@
   .inv-chip:hover { border-color: var(--accent); }
   .inv-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
   /* Native date pickers draw their icon from color-scheme, not from color. */
-  .inv-chip-date, .inv-rev-in[type="date"], .inv-f input[type="date"] { color-scheme: light; }
-  [data-theme="dark"] :is(.inv-chip-date, .inv-rev-in[type="date"], .inv-f input[type="date"]),
-  [data-theme="bloomberg"] :is(.inv-chip-date, .inv-rev-in[type="date"], .inv-f input[type="date"]) { color-scheme: dark; }
-  .inv-chip-date { padding: 3px 9px; height: auto; }
-  .inv-rev-tbl { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; font-variant-numeric: tabular-nums; }
-  .inv-rev-tbl th { text-align: left; font-size: 11px; font-weight: 600; color: var(--muted); padding: 6px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  .inv-rev-tbl td { padding: 4px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+  .inv-f input[type="date"] { color-scheme: light; }
+  [data-theme="dark"] .inv-f input[type="date"], [data-theme="bloomberg"] .inv-f input[type="date"] { color-scheme: dark; }
+  /* One line per row; the header is a light navy band (owner's pick, 2026-10-10). */
+  .inv-rev-tbl { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 16px; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .inv-rev-tbl th {
+    text-align: left; font-size: 11.5px; font-weight: 600; color: var(--text); background: var(--rev-head-bg); padding: 8px 6px; white-space: nowrap;
+  }
+  .inv-rev-tbl th:first-child { border-radius: 6px 0 0 6px; }
+  .inv-rev-tbl th:last-child { border-radius: 0 6px 6px 0; padding-right: 10px; }
+  .inv-rev-tbl td { height: 42px; padding: 0 6px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+  .inv-rev-tbl td.inv-rev-amt { padding-right: 10px; }
+  .inv-rev-tbl tbody tr:not(.inv-rev-sub):hover td { background: var(--row-alt); }
+  .inv-rev-chk { width: 18px; }
+  .inv-rev-chk input { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; vertical-align: middle; }
+  .inv-rev-mk { width: 16px; padding: 0 2px !important; text-align: center; }
+  .inv-rev-mark { display: inline-flex; align-items: center; justify-content: center; width: 16px; font-style: normal; font-size: 13px; color: var(--accent); cursor: default; }
+  .inv-rev-mark.warn { color: var(--warn); }
+  .inv-rev-mark svg { width: 15px; height: 15px; }
+  .inv-rev-cotd { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* The buy date: a compact chip; it opens the year > month > day picker. */
+  .inv-rev-date, .inv-rev-type {
+    display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; border: 1px solid transparent; border-radius: 7px;
+    background: var(--bg-subtle); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+  }
+  .inv-rev-type { background: transparent; padding: 0 6px; gap: 5px; }
+  .inv-rev-date svg { width: 14px; height: 14px; color: var(--accent); flex: none; }
+  .inv-rev-type svg, .inv-rev-ex svg { width: 9px; height: 6px; color: var(--muted); }
+  .inv-rev-date:hover, .inv-rev-date.open, .inv-rev-type:hover, .inv-rev-type.open { border-color: var(--accent); background: var(--accent-soft); }
+  .inv-rev-date.q span { color: var(--muted); }
+  .inv-rev-date.m, .inv-rev-type.m { background: rgba(var(--warn-rgb), 0.16); border-color: rgba(var(--warn-rgb), 0.45); color: var(--warn); }
   .inv-rev-tbl .num { text-align: right; }
   .inv-rev-tbl tr.off td { opacity: 0.45; }
   .inv-rev-tbl tr.inv-rev-sub td { border-bottom: 1px solid var(--border); padding-top: 0; }
@@ -3574,22 +3654,91 @@
     height: 28px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--r-sm); background: transparent;
     color: var(--text); font: inherit; font-variant-numeric: tabular-nums; max-width: 120px;
   }
-  td.num .inv-rev-in { text-align: right; width: 90px; }
+  td.num .inv-rev-in { text-align: right; width: 84px; }
+  .inv-rev-tbl td.num:nth-last-child(3) .inv-rev-in { width: 64px; }  /* shares */
   .inv-rev-in:hover { border-color: var(--border); }
   .inv-rev-in:focus { outline: none; border-color: var(--accent); background: var(--bg-canvas); }
-  .inv-rev-in.g, .inv-rev-co.g b, .inv-rev-co.g select, .inv-rev-co.g span { color: var(--ai); }
   .inv-rev-in.m { background: rgba(var(--warn-rgb), 0.16); border-color: rgba(var(--warn-rgb), 0.45); }
   .inv-rev-in.m::placeholder { color: var(--warn); }
   .inv-rev-find { max-width: 200px; width: 200px; }
-  .inv-rev-co { display: inline-flex; flex-direction: column; line-height: 1.25; }
-  .inv-rev-co b { font-weight: 600; }
-  .inv-rev-co span, .inv-rev-co select { font-size: 11px; color: var(--muted); }
-  .inv-rev-co select { border: none; background: transparent; padding: 0; font: inherit; font-size: 11px; cursor: pointer; }
-  .inv-rev-ccy { color: var(--muted); font-size: 12px; margin-right: 1px; }
+  /* Only the name shortens when space is tight: the ticker and the exchange
+     link (the way to the other listings) always stay visible. */
+  .inv-rev-co { display: flex; align-items: baseline; gap: 6px; min-width: 0; max-width: 100%; }
+  /* When space runs out the exchange label shortens first, then the name. */
+  .inv-rev-co b { font-weight: 600; color: var(--text); flex: 0 1 auto; min-width: 3.5em; overflow: hidden; text-overflow: ellipsis; }
+  .inv-rev-co .inv-rev-tk { flex: none; }
+  .inv-rev-co .inv-rev-ex, .inv-rev-co .inv-rev-tk + .inv-rev-tk { flex: 0 1000 auto; min-width: 3em; overflow: hidden; }
+  .inv-rev-ex span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inv-rev-co .inv-rev-tk + .inv-rev-tk { text-overflow: ellipsis; }
+  .inv-rev-tk { font-size: 12px; color: var(--muted); }
+  .inv-rev-ex {
+    display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px; margin-left: -4px; border: none; border-radius: 4px;
+    background: transparent; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .inv-rev-ex svg { color: var(--accent); }
+  .inv-rev-ex:hover, .inv-rev-ex.open { background: var(--accent-soft); }
+  .inv-rev-ccy { color: var(--muted); font-size: 12px; }
+  /* Sign and number as one field: the box (hover, focus, needed, guessed)
+     is the wrapper's; the input inside is bare and sized to its text. */
+  .inv-rev-money { display: inline-flex; align-items: center; height: 28px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--r-sm); cursor: text; }
+  .inv-rev-money:hover { border-color: var(--border); }
+  .inv-rev-money:focus-within { border-color: var(--accent); background: var(--bg-canvas); }
+  .inv-rev-money.m { background: rgba(var(--warn-rgb), 0.16); border-color: rgba(var(--warn-rgb), 0.45); }
+  .inv-rev-money.m input::placeholder { color: var(--warn); }
+  td.num .inv-rev-money .inv-rev-in { min-width: 0; max-width: 14ch; height: 26px; padding: 0 0 0 1px; border: 0; background: transparent; text-align: left; }
+  .inv-rev-money .inv-rev-in:focus { background: transparent; }
   .inv-rev-muted { color: var(--muted); }
-  .inv-rev-src { color: var(--muted); font-size: 11.5px; }
   .inv-rev-note { padding: 2px 0 8px 6px; font-size: 12.5px; color: var(--muted); white-space: normal; }
   .inv-rev-note.warn { color: var(--warn); }
+  .pf-notes { margin: 6px 2px 0; font-size: 12px; color: var(--muted); }
+  .pf-notes summary { cursor: pointer; width: max-content; }
+  .pf-notes ul { margin: 4px 0 2px; padding-left: 18px; }
+  .pf-notes li { margin: 2px 0; }
+  .inv-rev-note + .inv-rev-note { padding-top: 0; }
+  /* The review's floating menus (app.js invMenuOpen): listing, type, date. */
+  .inv-menu {
+    position: fixed; z-index: 95; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(11,34,57,0.16), 0 2px 6px rgba(11,34,57,0.06); padding: 6px; font-size: 12.5px; color: var(--text);
+  }
+  .inv-menu button { font: inherit; color: inherit; cursor: pointer; }
+  .inv-menu-list { min-width: 200px; display: flex; flex-direction: column; }
+  .inv-menu-it { display: flex; align-items: center; gap: 8px; padding: 7px 10px 7px 6px; border: none; border-radius: 6px; background: transparent; text-align: left; }
+  .inv-menu-it i { width: 14px; font-style: normal; color: var(--accent); font-weight: 700; }
+  .inv-menu-it b { font-weight: 600; }
+  .inv-menu-it span { color: var(--muted); font-size: 12px; }
+  .inv-menu-it:hover { background: var(--bg-subtle); }
+  .inv-menu-it.on { background: var(--accent-soft); }
+  .inv-menu-date { width: 288px; padding: 12px; }
+  .inv-dp-head { display: flex; align-items: center; gap: 4px; margin-bottom: 10px; }
+  .inv-dp-crumb { border: none; background: none; padding: 2px 6px; border-radius: 5px; font-size: 13px; font-weight: 600; color: var(--accent) !important; }
+  .inv-dp-crumb.on { color: var(--text) !important; cursor: default; }
+  button.inv-dp-crumb:not(.on):hover { background: var(--accent-soft); }
+  .inv-dp-sep { color: var(--muted); }
+  .inv-dp-grid { display: grid; gap: 6px; }
+  .inv-dp-grid.c4 { grid-template-columns: repeat(4, 1fr); }
+  .inv-dp-grid.c7 { grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .inv-dp-grid button {
+    height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-canvas); font-size: 13px; transition: background .1s, border-color .1s;
+  }
+  .inv-dp-grid.c7 button { height: 32px; font-size: 12.5px; }
+  .inv-dp-grid button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+  .inv-dp-grid button.cur { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .inv-dp-grid button:disabled { opacity: 0.3; cursor: default; }
+  .inv-dp-dow { margin-bottom: 4px; }
+  .inv-dp-dow span { text-align: center; font-size: 11px; color: var(--muted); }
+  .inv-dp-pager { display: flex; justify-content: space-between; margin-top: 8px; }
+  .inv-dp-pager button, .inv-dp-wide { border: none; background: none; color: var(--accent) !important; font-size: 12px; padding: 4px 2px; }
+  .inv-dp-pager button:disabled { visibility: hidden; }
+  .inv-dp-wide { display: block; width: 100%; margin-top: 8px; text-align: center; border-radius: 6px; }
+  .inv-dp-wide:hover, .inv-dp-pager button:hover { background: var(--accent-soft); }
+  .inv-dp-quick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .inv-dp-quick button { padding: 4px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-canvas); font-size: 12px; }
+  .inv-dp-quick button:hover { border-color: var(--accent); color: var(--accent); }
+  .inv-chip-date { display: inline-flex; align-items: center; gap: 6px; }
+  .inv-chip-date svg { width: 13px; height: 13px; }
+  /* My Investments has its own header: the Portfolio tab's name/cache line
+     ("AI Developers · cached 5d ago") means nothing here (owner, 2026-10-10). */
+  body[data-page="investments"] .topbar .status { visibility: hidden; }
   .inv-rev-skipped { margin-top: 12px; font-size: 12px; color: var(--muted); }
   .inv-rev-skipped summary { cursor: pointer; }
   .inv-rev-skipped ul { margin: 6px 0 0; padding-left: 18px; }
@@ -3620,6 +3769,7 @@
 
   /* My Investments, Phase 2: the ledger (Activity), the Add popover, undo. */
   .inv-gap { color: var(--muted); font-weight: 400; }
+  .inv-loading { padding: 64px 0; text-align: center; color: var(--muted); font-size: 13px; }
   .inv-chart-soon { height: 64px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12.5px; }
   .inv-broken { padding: 14px 8px; color: var(--neg); font-size: 13px; }
   .inv-anchor .inv-add { order: 3; }

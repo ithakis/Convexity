@@ -415,6 +415,124 @@ def name_key(name: str) -> str:
     return " ".join(_SUFFIX.sub(" ", f).split()) or f
 
 
+# Words that say what or where a company is, not which one.
+_GENERIC = frozenset(
+    [
+        "bank",
+        "banco",
+        "banca",
+        "banque",
+        "of",
+        "de",
+        "del",
+        "la",
+        "le",
+        "the",
+        "and",
+        "royal",
+        "first",
+        "national",
+        "general",
+        "united",
+        "american",
+        "international",
+        "global",
+        "china",
+        "chinese",
+        "hong",
+        "kong",
+        "japan",
+        "korea",
+        "india",
+        "indian",
+        "new",
+        "power",
+        "energy",
+        "capital",
+        "resources",
+        "group",
+        "holding",
+        "holdings",
+        "industries",
+        "industrial",
+        "grupo",
+        "financiero",
+        "financial",
+        "investment",
+        "investments",
+        "trust",
+        "fund",
+        "etf",
+        "ishares",
+        "vanguard",
+        "spdr",
+        "amundi",
+        "xtrackers",
+        "lyxor",
+        "invesco",
+        "wisdomtree",
+        "ubs",
+        "world",
+        "europe",
+        "european",
+        "asia",
+        "pacific",
+        "emerging",
+        "market",
+        "markets",
+        "north",
+        "south",
+        "east",
+        "west",
+        "real",
+        "estate",
+        "insurance",
+        "life",
+        "petroleum",
+        "oil",
+        "gas",
+        "mining",
+        "metals",
+        "steel",
+        "motor",
+        "motors",
+        "electric",
+        "telecom",
+        "communications",
+        "pharma",
+        "pharmaceutical",
+        "pharmaceuticals",
+        "technologies",
+        "technology",
+        "systems",
+    ]
+)
+
+
+def same_company(a: str | None, b: str | None) -> bool:
+    """Do two listing names name one company? Equal once legal forms are
+    dropped ("Iberdrola, S.A." / "Iberdrola"), or the shorter, of two words or
+    more, inside the longer ("Richter Gedeon" / "Richter Gedeon Chemical
+    Factory"), or the same first two words. One word inside a longer name
+    is not enough: Apple is not Apple Hospitality REIT."""
+    ka, kb = name_key(a or "").split(), name_key(b or "").split()
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    small, big = sorted((ka, kb), key=len)
+    if len(small) < 2:
+        return False
+    if set(small) <= set(big):
+        return True
+    # Or the same first two words, when they name the company rather than
+    # its kind or place: one company's lines under a translated legal name
+    # ("Richter Gedeon Vegyeszeti Gyar" on Stuttgart), but Bank of America
+    # is not Bank of Ireland, nor China Resources Beverage China Resources
+    # Land (adversarial review, 2026-10-10).
+    return ka[:2] == kb[:2] and all(w not in _GENERIC and len(w) > 2 for w in ka[:2])
+
+
 def acronym(name: str) -> str:
     """'Taiwan Semiconductor Manufacturing Company Limited' -> 'tsmcl', so a
     query of 'tsmc' or 'ibm' finds the company by its initials."""
@@ -571,6 +689,19 @@ def _listings(group: int) -> list[tuple]:
     return [r for r in rows if not relisting(r[0], r[3])]
 
 
+def listings(group: int) -> list[Hit]:
+    """Every listing of a company, re-listing venues included, most traded
+    first (an import's proxy may need a Frankfurt line)."""
+    con = _connect() if group != YAHOO_GROUP else None
+    if con is None:
+        return []
+    with closing(con):
+        rows = con.execute(
+            _SELECT + " WHERE grp = ? ORDER BY home DESC, COALESCE(adv_usd, 0) DESC", (group,)
+        ).fetchall()
+    return [_hit(r, 100.0) for r in rows]
+
+
 def top(group: int, exchanges=()) -> Hit | None:
     """The company's most traded listing — what a card shows and adds (NVO
     for Novo Nordisk, 7203.T for Toyota); its home listing when none trades.
@@ -624,6 +755,82 @@ def get(ticker: str) -> Hit | None:
     return _hit(row, 100.0) if row else None
 
 
+# Exchange lines before OTC ones when a company has several US lines (TTE
+# over a TTE pink sheet); the home line beats both (KO for CCC3.DE).
+_US_EXCHANGES = {"NYQ", "NMS", "NGM", "NCM", "NAS", "ASE", "BTS", "PCX"}
+# US lines found off the hot path by a name lookup (the pack misses some
+# ADRs: SCGLY for Société Générale). {symbol: US ticker}, this process only.
+_US_LEARNED: dict[str, str] = {}
+
+
+def us_line(symbol: str) -> str | None:
+    """The same company's US line, for sources that only cover US tickers
+    (Finnhub's free plan answers 403 to REP.MC, but REPYY has its analysts
+    and news). A US ticker is its own line; a company with none (Philogen,
+    a UCITS ETF) is None. Reads only the pack (and what `learn_us_line`
+    found), never the network: `fetch_one`'s hot path calls it."""
+    s = (symbol or "").upper()
+    if s in _US_LEARNED:
+        return _US_LEARNED[s] or None
+    return _us_line(s, _sig())
+
+
+def discover_us_line(symbol: str) -> str | None:
+    """`us_line`, plus Yahoo's live Lookup by the company's name when the
+    pack has no US line for a company that may have one (SCGLY, Société
+    Générale's ADR, is missing from the screener). A network call, so never
+    from the hot path: the news refresh asks, and the answer (a miss too)
+    is kept for this process, where `us_line` then finds it."""
+    s = (symbol or "").upper()
+    found = us_line(s)
+    if found or s in _US_LEARNED:
+        return found
+    me = get(s)
+    if me is None or me.type != "stock" or me.group == YAHOO_GROUP:
+        return None
+    try:
+        hits = yahoo_lookup(me.name, limit=10)
+    except Exception:
+        return None  # a timeout is asked again next time
+    us = [h for h in hits if _looks_us(h.ticker) and same_company(h.name, me.name)]
+    # Exchange lines, then sponsored ADRs (five letters ending in Y: SCGLY,
+    # not the ordinary-share pink sheet SCGLF), then Yahoo's order.
+    us.sort(key=lambda h: (h.exchange not in _US_EXCHANGES, not h.ticker.endswith("Y")))
+    _US_LEARNED[s] = us[0].ticker if us else ""
+    return us[0].ticker if us else None
+
+
+def _looks_us(ticker: str) -> bool:
+    return bool(ticker) and not any(c in ticker for c in ".^=")
+
+
+@lru_cache(maxsize=2048)
+def _us_line(s: str, sig) -> str | None:
+    me = get(s) if s else None
+    if me is None:
+        # Not in the pack (or no pack yet): a plain ticker is taken as US,
+        # which is what every caller assumed before this lookup existed.
+        return s if _looks_us(s) else None
+    if me.region == "us":
+        return s
+    if me.group == YAHOO_GROUP or me.type != "stock":
+        return None
+    con = _connect()
+    if con is None:
+        return None
+    with closing(con):
+        rows = con.execute(
+            "SELECT ticker, exchange, home, COALESCE(adv_usd, 0) FROM symbols"
+            " WHERE grp = ? AND region = 'us'",
+            (me.group,),
+        ).fetchall()
+    rows = [r for r in rows if _looks_us(r[0])]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (-r[2], r[1] not in _US_EXCHANGES, -r[3]))
+    return rows[0][0]
+
+
 def category(
     *,
     sectors=(),
@@ -661,3 +868,120 @@ def category(
             (*args, limit, offset),
         ).fetchall()
     return [_hit(r, 100.0) for r in rows]
+
+
+# ------------------------------------------------------------ Yahoo fallback
+# Yahoo's screener, which the pack is built from, does not list every
+# listing: Gedeon Richter (Budapest) is in no screener result at all, on any
+# venue (pack of 2026-10-04). Its live Lookup endpoint does know it. So a
+# name the pack can't place is looked up live, verified (a line must have a
+# close in the last three months: renamed and dead lines have none) and
+# cached. Group -1: these listings belong to no pack group.
+YAHOO_GROUP = -1
+_YL: dict[str, tuple[float, tuple]] = {}
+_YL_LOCK = threading.Lock()
+_YL_TTL_S, _YL_EMPTY_TTL_S = 24 * 3600.0, 600.0
+_YL_TYPES = {"equity": "stock", "etf": "etf"}
+
+
+@lru_cache(maxsize=1)
+def _exch_region() -> dict:
+    try:
+        from yfinance import const
+
+        maps = (const.EQUITY_SCREENER_EQ_MAP, const.ETF_SCREENER_EQ_MAP)
+        return {x: r for m in maps for r, xs in m["exchange"].items() for x in xs}
+    except Exception:
+        return {}
+
+
+def _yl_name(raw) -> str:
+    n = " ".join(raw.split())[:160] if isinstance(raw, str) else ""
+    return n.title() if n.isupper() else n
+
+
+def _yl_clean(n: str) -> bool:
+    """A name worth showing: words ("Apple Inc."), not a bare ticker-like
+    word ("RICHTER") or abbreviations ("Richt.Gede.Veg.Gyar Uf100")."""
+    return bool(n) and not re.search(r"\.\w", n) and len(n.split()) >= 2
+
+
+def _yahoo_fetch(q: str, timeout: float) -> tuple:
+    import concurrent.futures as cf
+
+    import yfinance as yf
+
+    def work():
+        df = yf.Lookup(q).get_all(count=25)
+        if df is None or not len(df):
+            return ()
+        rows = [
+            (str(tk).upper(), r) for tk, r in df.iterrows()
+            if _YL_TYPES.get(str(r.get("quoteType") or "").lower())
+            and _TICKER.match(str(tk).upper()) and "-USD" not in str(tk).upper()
+        ][:12]  # fmt: skip
+        if not rows:
+            return ()
+        closes = yf.download([t for t, _ in rows], period="3mo", auto_adjust=False,
+                             progress=False, threads=True)["Close"]  # fmt: skip
+        seen = closes.notna().sum() if hasattr(closes, "notna") else {}
+        # The fullest name among the lines stands for the company ("RICHTER"
+        # on Budapest, "Richter Gedeon Vegyeszeti Gyar" on Frankfurt).
+        names = [_yl_name(r.get("shortName")) for _, r in rows]
+        out = []
+        for i, (tk, r) in enumerate(rows):
+            n = int(seen.get(tk, 0)) if hasattr(seen, "get") else 0
+            if n < 1:
+                continue
+            nm = names[i]
+            if not _yl_clean(nm):
+                # Borrow only a name that contains this one's word ("RICHTER"
+                # in "Richter Gedeon..."), or shares the start of an
+                # abbreviation ("Richt.Gede..."): never AIRBUS -> Airbnb.
+                own = name_key(nm).split()
+                stem = name_key(nm)[:4]
+                fuller = [x for x in names if _yl_clean(x) and own and (
+                    (len(own) == 1 and own[0] in name_key(x).split())
+                    or (re.search(r"\.\w", nm) and name_key(x)[:4] == stem))]  # fmt: skip
+                nm = max(fuller, key=len) if fuller else nm
+            if not nm:  # a nameless line can't be told apart from another company
+                continue
+            ex = str(r.get("exchange") or "") or None
+            sector = r.get("industryName") if isinstance(r.get("industryName"), str) else None
+            hit = Hit(tk, nm, _YL_TYPES[str(r.get("quoteType")).lower()], ex,
+                      _exch_region().get(ex), sector, None, None, YAHOO_GROUP, 100.0)  # fmt: skip
+            # Home venues first in Yahoo's own order, then re-listing lines
+            # by how much history they have.
+            out.append(((relisting(tk, ex), -n if relisting(tk, ex) else 0, i), hit))
+        return tuple(h for _k, h in sorted(out, key=lambda x: x[0]))
+
+    pool = cf.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(work).result(timeout=timeout)
+    finally:
+        pool.shutdown(wait=False)
+
+
+def yahoo_lookup(query: str, *, limit: int = 6, timeout: float = 8.0) -> list[Hit]:
+    """Listings for ``query`` from Yahoo's live Lookup, for names the pack
+    lacks. Verified and cached (a day; an empty answer ten minutes); never
+    raises: a failure is an empty list and a log line."""
+    q = " ".join((query or "").split())
+    if not 2 <= len(q) <= 60:
+        return []
+    key = q.lower()
+    now = time.time()
+    with _YL_LOCK:
+        c = _YL.get(key)
+    if c and now - c[0] < (_YL_TTL_S if c[1] else _YL_EMPTY_TTL_S):
+        return list(c[1][:limit])
+    try:
+        hits = _yahoo_fetch(q, timeout)
+    except Exception as e:
+        _log(f"Yahoo lookup for {q!r} failed: {type(e).__name__}")
+        hits = ()
+    with _YL_LOCK:
+        if len(_YL) > 200:
+            _YL.clear()
+        _YL[key] = (now, hits)
+    return list(hits[:limit])

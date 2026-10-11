@@ -70,6 +70,9 @@ _MAX_FINISHED = 3
 # replace good data with "no data" while the user was on another tab.
 _MAX_ERROR_FRACTION = 0.20
 
+# The view name a My Investments refresh runs under (phases == ("book",)).
+BOOK_VIEW = "__investments__"
+
 _JOBS: OrderedDict[str, "Job"] = OrderedDict()
 _REG_LOCK = threading.Lock()
 _CURRENT: "Job | None" = None
@@ -377,6 +380,10 @@ def _run(job: Job) -> None:
     job.state = "running"
     job.emit("job", state="running")
     try:
+        if job.phases == ("book",):
+            _run_book_phase(job)
+            _finish(job, "cancelled" if job.cancel.is_set() else "done")
+            return
         rows_by_symbol: dict[str, dict] = {}
         for i, view in enumerate(job.views):
             if job.cancel.is_set():
@@ -511,6 +518,33 @@ def _run_quotes_phase(job: Job, view: str, index: int, rows_by_symbol: dict) -> 
         failed=failed,
         reason=reason,
     )
+
+
+def _run_book_phase(job: Job) -> None:
+    """My Investments' Refresh (the ``__investments__`` sink): fresh closes,
+    dividends, splits and FX for the book's own symbols, nothing else.
+
+    The research tabs are untouched: no portfolio is fetched or saved and no
+    news is read. The book file is never written either (it holds only the
+    ledger; every figure is derived on the next page load). It runs through
+    the job registry for the single-flight rule: a research refresh and a
+    book refresh share Yahoo, so they never run at once.
+    """
+    from convexity import investments
+
+    job.phase = "book"
+    syms = investments.refresh_symbols()
+    job.set_count("quotes_total", len(syms))
+    job.emit("phase", phase="book", state="start", view=BOOK_VIEW, total=len(syms), symbols=syms)
+
+    def progress(chunk: list[str], done: int, total: int) -> None:
+        job.bump("quotes_done", len(chunk))
+        job.emit("item", phase="book", view=BOOK_VIEW, symbol=chunk[-1], state="ok",
+                 done=done, total=total)  # fmt: skip
+
+    investments.refresh_market(syms, progress=progress, cancel=job.cancel)
+    job.emit("phase", phase="book", state="end", view=BOOK_VIEW,
+             reason="cancelled" if job.cancel.is_set() else None)  # fmt: skip
 
 
 def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:

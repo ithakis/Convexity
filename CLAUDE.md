@@ -100,7 +100,11 @@ Each of these has cost real debugging time; the link goes to the full story.
   `pytest tests/test_metrics.py -k cvar_pdip` after any solver edit.
   [mpt.md](docs/architecture/mpt.md#the-cloud-and-the-frontier-must-share-one-feasible-set-v1113)
 - **Desktop: `--single-process` is load-bearing** (blank window otherwise),
-  and `shutdown_server()` must `os._exit(0)`.
+  and `shutdown_server()` must `os._exit(0)`. **The window's profile must stay
+  persistent** (Qt 6's default is off-the-record: every launch forgot its
+  localStorage); a setting that must never be lost goes to `prefs.json`, not
+  localStorage. **A hidden table is never fit** (a render while My Investments
+  shows made the Portfolios table tiny).
   [desktop.md → Gotchas](docs/architecture/desktop.md#gotchas-discovered-during-implementation)
 - **Windows PowerShell 5.1 ≠ pwsh 7** for the installer (native stderr, TLS,
   `[Uri]`). [desktop.md → Gotchas](docs/architecture/desktop.md#gotchas-discovered-during-implementation)
@@ -123,15 +127,48 @@ Each of these has cost real debugging time; the link goes to the full story.
   mirror of the book**: the server refuses the name on portfolio write routes.
   [frontend.md → Pages](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv) ·
   [backend.md → My Investments](docs/architecture/backend.md#my-investments-the-ledger-and-the-book-file-ledgerpy-investmentspy)
+- **My Investments values the book with as-traded closes**
+  (`_bulk_close(adjusted=False)`: the book books dividends as cash, and Yahoo
+  keeps those closes split-adjusted like the ledger's quantities); the SPY
+  benchmark stays total return. **Estimated dividends are paid out, never in
+  Value or Cash**; a quick-added holding's performance starts at its Since-day
+  value. The book is computed in the display currency, each day at its own
+  rate (cash from the base-currency replay, holdings' cost from a
+  display-currency replay). **The S&P line is one per period and starts at
+  your value that day**; it pays out estimated dividends too. The benchmark
+  is the owner's pick (`INV_BENCHMARKS`, kept in `prefs.json`), always a
+  **fund**, so its adjusted close carries dividends (Yahoo's index lines do
+  not). **`_clean`
+  keeps only `_FIELDS`**: a new entry flag (like `opening`) must be read from
+  the page's fields, or it is silently dropped (2026-10-11).
+  [backend.md → My Investments performance](docs/architecture/backend.md#my-investments-performance-phase-3-investments_performance)
 - **My Investments import: the model may suggest, never decide.** Plain code
   verifies every ticker against the symbol pack (the row's currency picks
   the listing), checks qty × price against the total, and marks guesses
-  (purple) and gaps (amber); nothing is written before the owner's Apply, one
+  (✦) and gaps (⚠ amber); nothing is written before the owner's Apply, one
   undoable batch. Screenshots must reach the vision model at full resolution
   (shrunk, it misreads digits). Every NIM wait has a deadline. After any
   change to the prompts, matching rules or models, run
   `scripts/eval_import.py` live (all 10 synthetic cases must pass).
   [backend.md → My Investments import](docs/architecture/backend.md#my-investments-import-importerpy)
+- **An import's exchange decides the listing** (AIR on SBF is AIR.PA, never
+  the first euro line): plain code reads it beside the ticker (an exchange
+  field made the model drop rows); a proxy is the same company, same
+  currency first, and the review says which and why. Units are checked
+  against the market (pence read as pounds).
+  [backend.md → My Investments import](docs/architecture/backend.md#my-investments-import-importerpy)
+- **Yahoo's screener misses some listings** (no Gedeon Richter line at all):
+  search, Add, import and history stand-ins fall back to Yahoo's live Lookup
+  (`symbol_db.yahoo_lookup`). **A short listing never cuts a basket's
+  history**: the same company elsewhere stands in (clean, trading data only:
+  Yahoo's old data has negative and x52 glitches), else the basket starts
+  without it. [backend.md → Short listings' history](docs/architecture/backend.md#short-listings-history-analyticsextend_history-2026-10-09)
+- **Finnhub's free plan answers US listings only** (403 for REP.MC, TTE.PA,
+  CCC3.DE…): every Finnhub call goes to the company's US line
+  (`symbol_db.us_line`, from the pack's company group). MSPR is SEC Form 4,
+  so a foreign company never has one. **yfinance `get_news` returns `[]` for
+  every ticker** (Yahoo 404, 2026-10-11); search news backs it up for US lines.
+  [backend.md → Finnhub supplemental columns](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -249,9 +286,11 @@ overrides it):
 │   ├── news.json               ← News + sentiment cache, LLM status
 │   ├── sentiment_history.json  ← One record per ticker-day read: Track record + live anchor
 │   ├── reference_pack.json     ← {"enabled": bool} — the Settings switch for the reference pack
+│   ├── prefs.json              ← {default_ccy, inv_benchmark}: settings that must outlive the page (persistence.load_prefs)
 │   └── investments.json        ← My Investments: the user's REAL book (ledger, from roadmap Phase 2) — never overwrite a malformed one
 ├── models/mlsent-v1.1/         ← The Market read artifact (was ~/.convexity/ml_model/)
 ├── reference/                  ← The downloaded reference pack (a cache; reference_pack.py)
+├── webengine/                  ← The desktop window's web storage (localStorage, cache): desktop._persistent_profile
 └── logs/desktop.log            ← Desktop-app boot log (was ~/Library/Logs/Convexity.log)
 ```
 

@@ -10,6 +10,7 @@ import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -17,8 +18,10 @@ from convexity import investments as inv
 from convexity import paths, server
 
 SEED = Path(__file__).resolve().parents[1] / "scripts" / "seed_demo_book.py"
-QUOTE = {"AAPL": "USD", "MSFT": "USD", "NVDA": "USD", "SHEL.L": "GBp", "VWCE.DE": "EUR"}
-LAST = {"AAPL": 250.0, "MSFT": 500.0, "NVDA": 180.0, "SHEL.L": 2700.0, "VWCE.DE": 140.0}
+QUOTE = {"AAPL": "USD", "MSFT": "USD", "NVDA": "USD", "SHEL.L": "GBp", "VWCE.DE": "EUR",
+         "GOOGL": "USD"}  # fmt: skip
+LAST = {"AAPL": 250.0, "MSFT": 500.0, "NVDA": 180.0, "SHEL.L": 2700.0, "VWCE.DE": 140.0,
+        "GOOGL": 240.0}  # fmt: skip
 FX = {"USD": 1.0, "GBP": 1.3, "EUR": 1.1}
 
 
@@ -33,16 +36,30 @@ def offline(monkeypatch):
     monkeypatch.setattr(
         inv, "_fetch_splits", lambda s: [("2024-06-10", 10.0)] if s == "NVDA" else []
     )
-    monkeypatch.setattr(
-        inv, "_fx_series", lambda ccy: pd.Series([FX[ccy]], index=pd.to_datetime(["2000-01-03"]))
-    )
     monkeypatch.setattr(inv, "_fx_now", lambda ccy, base: FX[ccy] / FX[base])
 
-    def closes(symbols):
-        days = pd.to_datetime([date.today() - timedelta(days=45), date.today() - timedelta(days=1)])
+    def closes(symbols, period):
+        # The last close on the last weekday before today: the book's calendar
+        # has weekdays only, so a Saturday close would never be read.
+        last = date.today() - timedelta(days=1)
+        while last.weekday() >= 5:
+            last -= timedelta(days=1)
+        days = pd.to_datetime([last - timedelta(days=45), last])
         return pd.DataFrame({s: [LAST[s] * 0.9, LAST[s]] for s in symbols if s in LAST}, index=days)
 
     monkeypatch.setattr(inv, "_closes", closes)
+    monkeypatch.setattr(
+        inv,
+        "_bench_closes",
+        lambda period, ticker: pd.Series([400.0], index=pd.to_datetime(["2000-01-03"])),
+    )
+    monkeypatch.setattr(inv, "_dividends", lambda s: None)
+    monkeypatch.setattr(inv, "_rf_closes", lambda period: None)
+    monkeypatch.setattr(
+        inv,
+        "_fx_mult",
+        lambda ccys, disp, dates: {c: np.full(len(dates), FX[c] / FX[disp]) for c in ccys},
+    )
 
 
 def _seed():
@@ -253,7 +270,7 @@ def test_changing_the_company_of_an_entry_takes_the_new_currency():
 
 
 def test_a_pence_holding_without_a_yahoo_price_is_shown_in_pence(monkeypatch):
-    monkeypatch.setattr(inv, "_closes", lambda symbols: pd.DataFrame())
+    monkeypatch.setattr(inv, "_closes", lambda symbols, period: pd.DataFrame())
     b = inv.add(BUY | {"symbol": "SHEL.L", "price": 25.0, "fee": 0}, 0)
     p = b["positions"][0]
     assert p["quote_ccy"] == "GBp" and p["price"] == pytest.approx(2500)
@@ -280,8 +297,11 @@ def test_seeded_demo_book_replays_through_the_engine():
         h["profit_total"]
     )
     assert h["net_deposits"] == pytest.approx(65000)
-    # Performance arrives in Phase 3: empty, never made up.
-    assert h["mwr_ann"] is None and set(h["twr"].values()) == {None} and "series" not in b
+    # Performance (Phase 3): the chart's last point is the headline value.
+    s = b["series"]
+    assert s["value"][-1] == pytest.approx(h["value"], abs=0.01)
+    assert s["invested"][-1] == pytest.approx(h["net_deposits"], abs=0.01)
+    assert all(isinstance(h[k][p], float) for k in ("twr", "bench_twr", "mwr") for p in inv.PERIODS)
     # FX split only for holdings quoted in another currency.
     assert pos["MSFT"]["profit_fx"] is None
     assert pos["VWCE.DE"]["profit_price"] + pos["VWCE.DE"]["profit_fx"] == pytest.approx(
@@ -502,3 +522,80 @@ def test_the_dry_run_refuses_bad_shapes_in_plain_words():
     }
     with pytest.raises(inv.BookError):
         inv.check_rows({"not": "a list"})
+
+
+def test_routes_answer_in_the_display_currency(srv):
+    code, b = _post(srv, "/api/investments/entries", {"base_rev": 0, "entry": BUY, "ccy": "GBP"})
+    assert code == 200 and b["ccy"] == "GBP"
+    assert b["headline"]["value"] == pytest.approx(2500 / 1.3)
+    with urllib.request.urlopen(srv + "/api/investments?ccy=EUR") as r:
+        assert json.loads(r.read())["ccy"] == "EUR"
+    with urllib.request.urlopen(srv + "/api/investments?ccy=nope") as r:
+        assert json.loads(r.read())["ccy"] == "USD"
+    code, b = _post(srv, "/api/investments/undo", {"base_rev": 1, "ccy": ["GBP"]})
+    assert code == 200 and b.get("ccy") in (None, "USD")  # a non-string ccy is ignored
+
+
+def test_book_refresh_route_needs_a_book(srv, monkeypatch):
+    from convexity import jobs
+
+    code, b = _post(srv, "/api/refresh-job", {"view": jobs.BOOK_VIEW, "phases": ["book"]})
+    assert code == 400 and b["error"] == "nothing to refresh"
+    monkeypatch.setattr(inv, "refresh_market", lambda symbols, **kw: None)
+    inv.add(BUY, 0)
+    code, b = _post(srv, "/api/refresh-job", {"view": jobs.BOOK_VIEW, "phases": ["book"]})
+    assert code == 202 and b["job_id"]
+    job = jobs.get(b["job_id"])
+    for _ in range(200):
+        if job.is_terminal():
+            break
+        threading.Event().wait(0.02)
+    assert job.state == "done" and job.views == [jobs.BOOK_VIEW] and job.phases == ("book",)
+
+
+# ------------------------------------------------------------------- clear
+
+
+def test_clear_is_one_undoable_step_with_a_copy_kept():
+    inv.add(BUY, 0)
+    inv.add(BUY | {"symbol": "MSFT", "price": 400}, 1)
+    raw = _raw()
+    raw["settings"]["aliases"] = {"apple": "AAPL"}
+    paths.state_file("investments").write_text(json.dumps(raw), encoding="utf-8")
+    b = inv.clear(2)
+    assert b["empty"] is True and b["undo_label"] == "Cleared 2 entries"
+    assert _raw()["settings"]["aliases"] == {"apple": "AAPL"}
+    copies = list(paths.state_file("investments").parent.glob("investments.before-clear-*.json"))
+    assert len(copies) == 1 and len(json.loads(copies[0].read_text())["entries"]) == 2
+    inv.undo(3)
+    assert _raw()["entries"] == raw["entries"]  # every entry back, in its place
+    with pytest.raises(inv.StaleRev):
+        inv.clear(3)
+
+
+def test_clear_keeps_the_newest_three_copies(monkeypatch):
+    inv.add(BUY, 0)
+    folder = paths.state_file("investments").parent
+    for k in range(4):
+        (folder / f"investments.before-clear-2026010{k}-000000.json").write_text("{}")
+    inv.clear(1)
+    left = sorted(p.name for p in folder.glob("investments.before-clear-*.json"))
+    assert len(left) == 3 and "20260100" not in " ".join(left)
+
+
+def test_nothing_to_clear_is_said_plainly():
+    with pytest.raises(inv.BookError, match="nothing to clear"):
+        inv.clear(0)
+
+
+def test_apply_keeps_the_opening_flag_of_imported_holdings():
+    """The review sends ``opening`` for every holding row; Apply used to drop
+    it (2026-10-11), booking each holding as bought on its date."""
+    rows = [{"type": "buy", "symbol": "AAPL", "date": "2025-01-02", "qty": 10, "price": 150,
+             "qty_basis": "current", "opening": True},
+            {"type": "buy", "symbol": "MSFT", "date": "2025-01-02", "qty": 1, "price": 300,
+             "qty_basis": "trade"}]  # fmt: skip
+    inv.add_batch(rows, 0)
+    saved = {e["symbol"]: e for e in _raw()["entries"]}
+    assert saved["AAPL"]["opening"] is True
+    assert not saved["MSFT"].get("opening")

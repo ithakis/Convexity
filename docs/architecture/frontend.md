@@ -14,21 +14,83 @@ dependency (loaded from CDN, used only for column-guide formulas).
 - `showPage(name)` is the only page switch: `"investments"` (`#inv-page`),
   `"portfolio"`, `"news"` or `"table"`. It sets the active topbar tab and
   `body[data-page]`; on `investments` CSS hides every `.research-only` block
-  (main table, column views, analyst section, Optimize, Refresh). The R
-  shortcut is off there too. My Investments reopens on launch if it was last.
+  (main table, column views, analyst section, Optimize). Refresh and R stay:
+  there they refresh the book only (jobs.md, the `__investments__` sink), with
+  their own tooltip; the research tab's red "needs refresh" cue is muted on
+  this page. My Investments reopens on launch if it was last.
 - The page renders `GET /api/investments` into `INV.book` with its own
   table (`#inv-tbl`, not `#tbl`/`COLS`: positions have a cash row and, later,
-  closed lots). Amounts arrive in `book.ccy` and convert to `FX_QUOTE`.
-  `fxSelect` and the startup rate load re-render it.
+  closed lots). The page asks for `?ccy=FX_QUOTE` (and every POST sends
+  `ccy`): the server computes the whole book in the display currency, each day
+  at its own rate, so `fxSelect` on this page reloads it rather than
+  rescaling. `book.ccy` equals `FX_QUOTE`, so `fxConvert` is the identity.
+  The first load of a session reads years of prices ("Reading your prices…").
 - The chart's period base indexes come from the server
   (`series.period_start`), the same base as the headline returns, so the two
   can't disagree. It is drawn at its pixel width (no stretched text). A
   Value / Return % switch redraws only the chart; the toolbar and reading are
-  fixed-height single lines, so the card never resizes.
+  fixed-height single lines, so the card never resizes. It opens in Value and
+  remembers the mode (`inv_mode`) and the pill (`inv_period`). Both modes
+  have the drag-to-measure brush (`attachRangeBrush`, the Portfolio charts'
+  own; owner, 2026-10-11), always measuring the TWR and SPY indexes, so money
+  put in between two days never reads as a gain. Days are evenly spaced, so
+  the brush maps pixels to days through `xInv`. The benchmark entry in the reading
+  is a switch that hides or shows its line in both modes (`inv_bench_off`;
+  a hidden line leaves the y-range and the brush). The value-mode benchmark line
+  is the server's own per pill (`bench_value[period]`), starting on your
+  value. A missing benchmark drops its line, never the chart.
+- **The benchmark (owner, 2026-10-11).** "vs [S&P 500 ▾]" beside the Value |
+  Return % switch is the Portfolios tab's popover (`benchMenuHtml`, which
+  `benchSelectHtml` now wraps, and `wireBenchSelect`) over
+  `INV.book.benchmarks`. A pick POSTs `{inv_benchmark}` to `/api/prefs` and
+  reloads the book; it is never kept in the browser. Every label reads
+  `invBench()` (the KPI sub-line, the legend, the brush, `inv:twr`,
+  `inv:risk`). The line is red and dashed (`.inv-l-bench`, `var(--neg)`), the
+  money put in stays a gray dash.
+- **Performance: the top of the page (owner's layout A1, 2026-10-11).** The
+  value, then last month's change on its own line ("▼ $2,326 (−1.0%) past
+  month", the 1M window). Four KPIs: **Total profit** (lifetime, "not
+  counting money you put in"), **Return · period** (TWR, with the S&P 500's
+  return under it), **Change in portfolio value · period** (with the money
+  put in or taken out under it) and **Volatility · period** (Sharpe and
+  Sortino under it). There is no "vs S&P" cell and no "pp": the owner found
+  Return and Your money side by side a duplicate, so Your money (MWR, "/ yr"
+  from a one-year span up, `invMwr`) and the timing effect live in the
+  Return card (`inv:twr`). Cards: `inv:profit`, `inv:twr`, `inv:change`,
+  `inv:risk`. A book younger than the pill reads "since you started".
+  Estimated dividends and the currency on cash are rows in the profit card.
+- **The cards' formulas are LaTeX** (owner, 2026-10-11): `invTip(title,
+  body, rows, tech, tex)` puts `tex` in a `$$\begin{aligned}…\end{aligned}$$`
+  `.mt-formula` block that `_RICH_TIP`'s KaTeX pass typesets (and caches),
+  with the owner's own figures in it: `texMoney` (money as `\text{}`, the
+  sign in math so it is a real minus, `$` escaped) and `texPct`. `tech` is
+  one plain muted line saying what the symbols mean. In a JS template
+  literal every TeX backslash is doubled (`\\;`); a single one is silently
+  eaten (`\;` became ";"). The Volatility card (mockup C) adds five fixed
+  bands (`INV_VOL_BANDS`: <6, 6–12, 12–20, 20–30, 30%+) with yours lit, the
+  benchmark's volatility in its band, and Sharpe marked on a red to green
+  line from 0 to 2+.
+- **Holdings order (owner, 2026-10-11).** A header click sorts (`INV_COLS`:
+  biggest first, names A to Z), a second flips it, a third returns to "your
+  order", where rows drag by a grip shown on hover (HTML5 drag on the `tr`,
+  only while no column sorts). Both are per browser (`inv_sort`,
+  `inv_order`); a holding missing from the saved order goes to the end in
+  the server's order (by value). Cash stays last.
+- **Numbers are en-US everywhere** (`NUM_LOCALE`, owner 2026-10-11:
+  "$238.488" read as $238 on a Mac set to a dot-grouping region). Every
+  `toLocaleString` on a number passes it; dates keep their own formatters.
+- **The Portfolios tab's book view** says what it is (the tab was renamed
+  from "Portfolio" on 2026-10-11): under the stats,
+  `bookTestNote()` reads "Today's holdings at today's weights, held through
+  the whole period", with the actual return from `INV.book` for the same
+  pill. The test is daily rebalanced at today's weights, so it has hindsight;
+  on the owner's book (1Y, 2026-10-11) it read +17.1% against +8.5% actual:
+  +9.2% buy-and-hold total return, +12.5% at the start mix rebalanced daily,
+  +17.1% at today's mix (the owner kept the test, with this note).
 - **Owner's rules for this page:** one number per headline cell, with details
   in `RICH_TIPS` hover cards (`inv:*`: plain words, technical name small);
-  no dotted underlines or info icons; company names, not tickers; "this
-  month", not daily, in the headline (the chart itself is daily).
+  no dotted underlines or info icons; company names, not tickers; "past
+  month", not daily, under the value (the chart itself is daily).
 - **The ledger (Phase 2).** The rail toggles **Attention | Activity** (the
   `.pf-contrib-toggle` pill, remembered in localStorage `inv_rail`). Activity
   lists the entries newest first, grouped by month; a row click edits it in
@@ -44,23 +106,63 @@ dependency (loaded from CDN, used only for column-guide formulas).
   Undo: a toast with an Undo button (`toast(msg, {label, fn})`), Undo/Redo in
   the Activity header (the hover names the step), ⌘Z / ⇧⌘Z on the page when
   no field has focus.
-- **The front door (Phases 5–6, owner's W1).** The empty page *is* the
-  composer (`invWelcomeHtml` → `invComposerHtml`): one box for typed or
-  pasted text, pasted images, and dropped or attached files (screenshots,
-  PDF, CSV, Excel), with "add one holding by hand" under it. "+ Add" on a
-  full page opens the same composer in `#inv-pop`, "By hand" one click away.
-  State is `INV.imp` (`text, files, busy, error, prop, answers`); "Read it"
-  posts base64 files to `/api/investments/import`.
+- **The front door (Phases 5–6, owner's W1; restyled 2026-10-10).** The
+  empty page *is* the composer (`invWelcomeHtml` → `invComposerHtml`, all
+  inside `.inv-comp-wrap`, which `invComposerRefresh` redraws): a chat-style
+  pill, the owner's pick from mockups ("like ChatGPT, keep the theme"). Files
+  sit as chips above the text; the text grows with what's typed
+  (`invCompFit`, capped at 220px, no drag handle); the clip and a round send
+  button sit inside; Enter sends, Shift+Enter is a new line. Under it two
+  starter chips ("Upload a screenshot", "Broker statement") open the file
+  picker with their own `accept`. No "by hand" link on the welcome: typing
+  in the pill *is* adding by hand (owner). "+ Add" on a full page opens the
+  same pill, compact and without starters, in `#inv-pop`, "By hand" one
+  click away. State is `INV.imp` (`text, files, busy, error, prop,
+  answers`); sending posts base64 files to `/api/investments/import`. The
+  topbar's portfolio name/cache line is hidden on this page
+  (`body[data-page="investments"] .topbar .status`).
 - **The review** (`invReviewHtml`) takes the page until Apply or Cancel:
   summary, screenshot thumbnails, at most three one-click questions, and an
-  editable table. Purple (`--ai`) marks what the AI guessed, amber what it
-  needs from the owner; "From" names the source row. The read and every
+  editable table, **one line per row** (owner's pick, 2026-10-10): the
+  header is a light navy band (`--rev-head-bg`); the company is its name in
+  bold, the ticker muted, and the exchange a link (`.inv-rev-ex`) that opens
+  the same company's other listings with their currency
+  (`listing_ccy`, `alts[].ccy` from the importer). A mark column on the left
+  is the only AI colour: ✦ when the AI guessed something (its tooltip says
+  what, and the source row), ⚠ amber when the row needs the owner; no purple
+  text anywhere. The Type column appears only when an import has more than
+  holdings. The read and every
   edit run `/import/check` (debounced, newest answer wins) so a sale the
   book can't cover is flagged before Apply, with "Add the N shares as held
   before" or "Leave it out"; Apply waits ("Checking…") while a check is in
   flight. `invRowEntry` is the only place rows become entries: the dry run
-  and Apply both send what it builds. Apply sends the rows and the names the
-  owner corrected (`aliases`) in one batch.
+  and Apply both send what it builds; `invRowSet` is the one place a row is
+  edited (inputs and menus). Apply sends the rows and the names the owner
+  corrected (`aliases`) in one batch. A price or amount is one field with
+  its currency sign (`.inv-rev-money`, a `label` that carries the border,
+  hover and focus), the input bare and sized to its text (`invFieldCh`), so
+  it reads "€48.46" like the rest of the app (owner, 2026-10-11: the sign sat
+  far left of a fixed-width box). Each holding row sends `opening: true`;
+  the server keeps it (`investments._clean`).
+  **Every row has its own buy date** (owner, 2026-10-09: "rather than just
+  edit for the whole portfolio"); the "Since when" question is gone
+  (2026-10-10): performance counts from the oldest date entered. A holding
+  the source gave no date starts today (`r.date_default`), shown muted
+  (`.inv-rev-date.q`) until the owner picks its own date. A stand-in's note
+  ("Yahoo has no Budapest line…, priced from …") is the one extra line a
+  row can have, with the check/oversell notes; "On Xetra, as shown" is not
+  shown, the exchange link already says it.
+  **The review's menus are drawn by the app** (`invMenuOpen`/`invMenuClose`,
+  one `.inv-menu` at a time, closed by a click outside, Esc, scroll or a
+  second click): native `<select>` and `<input type=date>` were painted
+  with black highlights by the desktop shell. The date picker
+  (`invDatePick`) goes year → month → day, built for speed (owner: "super
+  optimized for speed of input"): 12 years per page, future months and days
+  disabled, "Don't know the day: use the 1st", Today and "Same as above";
+  every pick closes it (the owner chose no auto-advance). **While a menu is open, `invRender` defers** (the
+  background `/import/check` would otherwise redraw the picker away under
+  the cursor); closing the menu runs the deferred redraw, and a row click
+  re-finds its button after it.
 - **Adding by hand and editing (owner's E2).** `invFormHtml` is a card: the
   company as a header once chosen (initial, name, ticker, today's close via
   `invNowFill`), big number fields with the unit in the label, date chips
@@ -297,7 +399,10 @@ picked.
   1. **`SETTINGS_SECTIONS` is the only place a section is declared**
      (`{id, group, label, description, keywords, items, render}`).
      `renderSettingsNav()` rebuilds the nav from it. Add a section there, never
-     back in `index.html`. Sections today: General, Column Presets, Models & Data, API keys, Logs, About.
+     back in `index.html`. Sections today: General, Column Presets, My Investments, Models & Data, API keys, Logs, About.
+     **My Investments → Clear my investments** asks once inline ("Clear N
+     entries" / Cancel, no native dialog), then switches to the page with an
+     Undo toast; the server keeps a dated copy (backend.md).
   2. **The search `<input>` stays static in `index.html`.** Only
      `#settings-nav-list` is re-rendered; an input inside that subtree would be
      destroyed mid-keystroke, blurring the field. For the same reason typing
@@ -512,6 +617,19 @@ picked.
   it through the `--table-scale` CSS variable. The active view should
   remain readable, but the explicit goal is "keep the current preset on
   screen before falling back to horizontal overflow."
+  **A hidden table is never measured** (owner, 2026-10-11: "the table gets
+  really small"): a `render()` while My Investments shows (a resize, a
+  refresh) read a 0px wrap, floored the width to 320px and the scale to 0.4.
+  `applyTableFitMode` now keeps the last good scale when the wrap has no
+  content width (`tableContentWidth`; `clientWidth` alone still counts the
+  padding) and sets `_fitDeferred`, and `showPage()` renders again when the
+  table shows.
+- **Default currency (owner, 2026-10-11).** Settings → General picks it
+  (`benchMenuHtml` over `FX_SUPPORTED`), saved as `default_ccy` in
+  `prefs.json`. The boot waits for `/api/prefs` (`BOOT_PREFS`, at most
+  1.5 s) before `fxInit`, so the first load is already in that currency.
+  The topbar switch is kept in **sessionStorage** (`fx_quote`): it lasts
+  until the app or tab closes, and a new one opens in the default.
 
 - **The limits panel PUSHES the workspace down; it never takes height from it.**
   `.pf-mpt-scroll` (wrapping `.pf-mpt-bounds` + `.pf-mpt-body`) is the single
@@ -654,6 +772,14 @@ picked.
   `#4ba3e3` and a **dark** `--on-accent` (`#04121f`) because white on that blue
   is only ~2.8:1. `THEME_COLORS` in app.js mirrors these values — change both.
   Use `rgba(var(--accent-rgb), a)`, never a literal blue.
+- **One period selector (2026-10-11, the owner's pick).** Every chart period
+  control is the same pill: a tinted track with the chosen period as a raised
+  pill inside, the shape of the Value / Return % switch (`.pf-contrib-toggle`).
+  One rule in style.css styles `.pf-period-tabs` (Portfolios chart, My
+  Investments), `.m-range-tabs` (detail modal), `.ns-tl-periods` (News
+  timeline) and `.ns-lb-periods` (News window). A new period control joins
+  that rule, never gets its own look. Non-period switches (Optimize lookback,
+  Track record source) keep their own styles.
 - **Chrome vs data colours (v1.19.2, the user's call).** Navy & Denim is for
   the chrome only (buttons, tabs, accents, kickers). **Data colours stay
   classic**: `--pos`/`--neg` are the pre-1.19 green/red (`#1f883d`/`#cf222e`
@@ -662,6 +788,9 @@ picked.
   Dark mode is **"Ink"** (`#0a0e14`, surfaces `#111823`, borders `#1d2938`):
   near-black with navy-tinted, not gray, surfaces; the 1.19 navy `#08182a` was
   too blue. The desktop splash (`desktop.py` `_BG`/`_ACCENT`) mirrors it.
+- **Selected text has its own tokens** (`--sel-bg` / `--sel-fg` per theme,
+  one `::selection` rule): without them the desktop shell's palette showed
+  light-mode selections as near-black text on dark gray (owner, 2026-10-09).
 - **Corner-radius scale** (`--r-lg` / `--r-md` / `--r-sm` / `--r-xs` in the base
   `:root`, currently the "Sharp" 6/4/2/1 px tier). Every non-circular
   `border-radius` reads a token, so app-wide roundness tunes from these four

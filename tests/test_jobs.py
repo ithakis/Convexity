@@ -566,3 +566,64 @@ def test_parse_entries_matches_what_the_phase_fetches(fake_quotes, isolated_stat
     assert _run_to_completion(job)
     frames = job.events_since(0)[0]
     assert {f["counts"]["quotes_total"] for f in frames if f.get("counts")} == {4}
+
+
+# ----------------------------------------------- My Investments (book phase)
+
+
+@pytest.fixture()
+def fake_book(monkeypatch):
+    """investments.refresh_market without the network: records its chunks and
+    can be held open so a second submit or a cancel has something to meet."""
+    from convexity import investments
+
+    state = {"chunks": [], "gate": threading.Event()}
+    state["gate"].set()
+
+    def _refresh(symbols, *, progress=None, cancel=None, chunk=4):
+        done = 0
+        for i in range(0, len(symbols), 2):
+            state["gate"].wait(5)
+            if cancel is not None and cancel.is_set():
+                return
+            part = symbols[i : i + 2]
+            state["chunks"].append(part)
+            done += len(part)
+            progress(part, done, len(symbols))
+
+    monkeypatch.setattr(investments, "refresh_symbols", lambda: ["AAPL", "MSFT", "NVDA", "SPY"])
+    monkeypatch.setattr(investments, "refresh_market", _refresh)
+    return state
+
+
+def _book_job():
+    return jobs.submit(scope="current", phases=["book"], days=None,
+                       entries_by_view={jobs.BOOK_VIEW: "AAPL, MSFT, NVDA, SPY"})  # fmt: skip
+
+
+def test_book_job_fetches_the_book_only_and_never_saves(fake_book, fake_quotes, isolated_state):
+    job, outcome = _book_job()
+    assert outcome == "created"
+    _run_to_completion(job)
+    assert job.state == "done"
+    assert fake_book["chunks"] == [["AAPL", "MSFT"], ["NVDA", "SPY"]]
+    assert fake_quotes["calls"] == []  # no research quotes, no news
+    frames, _ = job.events_since(0)
+    kinds = [f["type"] for f in frames]
+    assert "view_saved" not in kinds and job.counts["news_total"] == 0
+    starts = [f for f in frames if f["type"] == "phase" and f["state"] == "start"]
+    assert [(f["phase"], f["view"]) for f in starts] == [("book", jobs.BOOK_VIEW)]
+    assert job.counts["quotes_done"] == job.counts["quotes_total"] == 4
+    assert not (isolated_state / "views.json").exists()
+
+
+def test_book_job_is_single_flight_and_cancellable(fake_book, fake_quotes, isolated_state):
+    fake_book["gate"].clear()
+    job, _ = _book_job()
+    other, outcome = jobs.submit(scope="current", phases=["quotes"], days=7,
+                                 entries_by_view={"p": "AAPL"})  # fmt: skip
+    assert outcome == "rejected" and other is job
+    assert jobs.cancel(job.id)
+    fake_book["gate"].set()
+    _run_to_completion(job)
+    assert job.state == "cancelled" and fake_book["chunks"] == []
