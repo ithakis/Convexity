@@ -1274,6 +1274,7 @@ def build_workbook(
     analytics_runner=None,
     period: str = "1Y",
     display_ccy: str = "USD",
+    book: dict | None = None,
 ) -> bytes:
     """Build an .xlsx blob covering every saved portfolio.
 
@@ -1289,6 +1290,9 @@ def build_workbook(
         still build but the analytics block notes that nothing was run.
     period, display_ccy
         Forwarded to ``analytics_runner``.
+    book
+        My Investments' page payload (``investments.book``), when there is a
+        book: it adds the "Positions" and "Ledger" sheets after Overview.
     """
     wb = Workbook()
     used_names: set[str] = set()
@@ -1370,11 +1374,117 @@ def build_workbook(
     _write_overview(wb, summaries, metric_periods)
     # Move Overview to the front (openpyxl appends it after creation).
     wb.move_sheet("Overview", offset=-len(wb.sheetnames) + 1)
+    if book and not book.get("empty") and book.get("headline"):
+        for i, title in enumerate(("Positions", "Ledger"), 1):
+            ws = wb.create_sheet(_sanitize_sheet_name(title, used_names), i)
+            (_write_positions if title == "Positions" else _write_ledger)(ws, book, period)
     _write_definitions(wb, _sanitize_sheet_name("Definitions", used_names))
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+_MONEY, _PCT, _QTY = "#,##0.00", "0.0%", "#,##0.######"
+
+
+def _pct(v):
+    """A percent figure (12.5) as the fraction Excel formats (0.125)."""
+    v = _maybe_num(v)
+    return v / 100 if v is not None else None
+
+
+def _write_table(ws, r: int, cols: list[tuple[str, str | None]], rows: list[list]) -> int:
+    """Header plus rows; ``cols`` is (label, number format). Returns the
+    next free row."""
+    _write_header_cells(ws, r, [c[0] for c in cols])
+    for vals in rows:
+        r += 1
+        for k, ((_, fmt), v) in enumerate(zip(cols, vals, strict=True), 1):
+            cell = ws.cell(row=r, column=k, value=v)
+            if isinstance(v, str) and v.startswith("="):
+                cell.data_type = "s"  # a note or a name, never a formula Excel runs
+            if fmt and isinstance(v, int | float):
+                cell.number_format = fmt
+    for k, (label, _) in enumerate(cols, 1):
+        ws.column_dimensions[get_column_letter(k)].width = max(12, len(label) + 4)
+    ws.column_dimensions["A"].width = 32
+    return r + 1
+
+
+def _write_positions(ws, book: dict, period: str) -> None:
+    """My Investments' holdings as the page shows them (Phase 4): money in
+    the display currency, prices in each share's quote unit, then cash, the
+    total and the sold-out holdings."""
+    ccy, h = book.get("ccy") or "USD", book["headline"]
+    contrib = (h.get("contrib") or {}).get(period) or {}
+    ws["A1"] = "My Investments — Positions"
+    ws["A1"].font = _TITLE_FONT
+    ws["A2"] = (f"Generated: {datetime.now(UTC).isoformat(timespec='seconds')} · money in {ccy} · "
+                f"contribution over {period}, in points of the return")  # fmt: skip
+    ws["A2"].font = Font(italic=True, color="6B7280")
+    cols = [("Holding", None), ("Ticker", None), ("Exchange", None), ("Quote ccy", None),
+            ("Shares", _QTY), ("Avg price", _MONEY), ("Price", _MONEY), (f"Value ({ccy})", _MONEY),
+            ("Weight", _PCT), ("Risk share", _PCT), ("Month", _PCT), (f"Profit ({ccy})", _MONEY),
+            ("On what you hold", _MONEY), ("On what you sold", _MONEY), ("Dividends", _MONEY),
+            ("Dividends, estimated", _MONEY), ("Return", _PCT), (f"Contribution {period} (pts)", "0.00"),
+            ("Yield on cost", _PCT), ("Analyst upside", _PCT)]  # fmt: skip
+    rows = []
+    for x in book.get("positions") or []:
+        if x.get("pending"):
+            rows.append([x.get("name"), x.get("symbol"), x.get("exchange"), x.get("quote_ccy")]
+                        + [None] * (len(cols) - 5) + ["waiting for Yahoo's split history"])  # fmt: skip
+            continue
+        rs = _maybe_num(x.get("risk_share"))
+        rows.append([x.get("name"), x.get("symbol"), x.get("exchange"), x.get("quote_ccy"),
+                     x.get("shares"), x.get("avg_price"), x.get("price"), x.get("value"),
+                     _pct(x.get("weight")), rs, _pct(x.get("month_pct")), x.get("profit"),
+                     x.get("profit_held"), x.get("profit_sold"), x.get("dividends"),
+                     x.get("dividends_est"), _pct(x.get("return_pct")), contrib.get(x.get("symbol")),
+                     _pct(x.get("yoc")), _pct(x.get("upside_pct"))])  # fmt: skip
+    labels = [c[0] for c in cols]
+
+    def line(**by_label):
+        return [by_label.get(k) for k in labels]
+
+    rows.append(line(Holding="Cash", **{"Quote ccy": ccy, f"Value ({ccy})": h.get("cash"),
+                     "Weight": _pct(h.get("cash_weight")), "Risk share": 0.0,
+                     f"Contribution {period} (pts)": contrib.get("_cash")}))  # fmt: skip
+    rows.append(line(Holding="Total", **{f"Value ({ccy})": h.get("value"), "Weight": 1.0,
+                     "Risk share": 1.0, "Month": _pct(h.get("month_pct")),
+                     f"Profit ({ccy})": h.get("profit_total"),
+                     f"Contribution {period} (pts)": (h.get("twr") or {}).get(period)}))  # fmt: skip
+    r = _write_table(ws, 4, cols, rows)
+    closed = book.get("closed") or []
+    if closed:
+        r = _write_section(ws, r + 1, "Closed")
+        _write_table(ws, r, [("Holding", None), ("Ticker", None), (f"Profit ({ccy})", _MONEY),
+                             ("On what you sold", _MONEY), ("Dividends", _MONEY),
+                             ("Dividends, estimated", _MONEY), (f"Contribution {period} (pts)", "0.00")],
+                     [[x.get("name"), x.get("symbol"), x.get("profit"), x.get("profit_sold"),
+                       x.get("dividends"), x.get("dividends_est"), contrib.get(x.get("symbol"))]
+                      for x in closed])  # fmt: skip
+
+
+def _write_ledger(ws, book: dict, period: str) -> None:
+    """Every ledger entry, oldest first, as entered (amounts in each
+    entry's own currency), with its effect on cash in the book's base
+    currency."""
+    ws["A1"] = "My Investments — Ledger"
+    ws["A1"].font = _TITLE_FONT
+    ws["A2"] = f"Generated: {datetime.now(UTC).isoformat(timespec='seconds')}"
+    ws["A2"].font = Font(italic=True, color="6B7280")
+    cols = [("Date", None), ("Type", None), ("Holding", None), ("Ticker", None), ("Quantity", _QTY),
+            ("Price", _MONEY), ("Fee", _MONEY), ("Amount", _MONEY), ("Tax", _MONEY), ("Currency", None),
+            ("FX rate", "0.000000"), ("Quantity basis", None), ("Cash effect", _MONEY),
+            ("Source", None), ("Note", None)]  # fmt: skip
+    rows = [[e.get("date"), e.get("type"), e.get("name"), e.get("symbol"), e.get("qty"),
+             e.get("price"), e.get("fee"), e.get("amount"), e.get("tax"), e.get("ccy"),
+             e.get("fx_rate"), e.get("qty_basis"), e.get("cash"), e.get("source"), e.get("note")]
+            for e in reversed(book.get("entries") or [])]  # fmt: skip
+    _write_table(ws, 4, cols, rows)
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["C"].width = 32
 
 
 def _cap_weights(rows: list[dict]) -> dict[str, float]:

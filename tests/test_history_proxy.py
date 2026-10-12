@@ -273,3 +273,24 @@ def test_an_ai_pick_yahoo_answers_with_another_company_is_dropped(monkeypatch):
         [{"ticker": "ZZQ", "name": "Zeta Quantum Labs", "why": "x"}]
     )
     assert cards == [] and dropped == 1
+
+
+def test_stand_in_candidates_are_fetched_without_retry_sleeps(monkeypatch):
+    # A candidate Yahoo has no batch data for is simply not a candidate: the
+    # one-by-one retries (up to ~5 s each) were most of a cold book's wait.
+    from convexity import cache
+
+    monkeypatch.setattr(A.yf, "download", lambda **k: pd.DataFrame())
+    monkeypatch.setattr(A.time, "sleep", lambda s: pytest.fail("slept"))
+    monkeypatch.setattr(A.yf, "Ticker", lambda s: pytest.fail("retried one by one"))
+    assert A._bulk_close(["NOPE1.X", "NOPE2.X"], "2y", adjusted=False, retry=False).empty
+    assert all(k[0] != "NOPE1.X" or v[1].empty for k, v in cache._BULK_CLOSE_CACHE.items())
+
+
+def test_found_stand_ins_are_kept_across_launches(monkeypatch):
+    A._PROXY.clear()
+    assert A.known_proxies("YNG.DE") == ()
+    A._proxy_disk_put("YNG.DE", ("YNG", "YNG.F"))
+    assert A.known_proxies("YNG.DE") == ("YNG", "YNG.F")  # from disk, no lookup
+    monkeypatch.setattr(A, "_PROXY_DISK_TTL_S", -1.0)
+    assert A.known_proxies("YNG.DE") == ()  # too old: looked up again

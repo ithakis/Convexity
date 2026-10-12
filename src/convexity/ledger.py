@@ -97,6 +97,10 @@ class Day:
     # Opening holdings bought this day: (symbol, qty, cost in the base ccy).
     openings: list[tuple[str, float, float]] = field(default_factory=list)
     implied: float = 0.0  # the part of ``inflow`` that is implied deposits
+    # Money into each holding this day, base ccy, fees left out (they are the
+    # contribution's "Cash and fees" bucket): buys less sells, less dividends
+    # it paid. Opening holdings are not here: they enter at market value.
+    flows: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -237,6 +241,7 @@ def replay(entries: list[dict], *, base_ccy: str, fx_at, splits: dict | None = N
             net = (_num(e, "amount") - _num(e, "tax")) * fx(e)
             book.cash += net
             pos.dividends += net
+            cur.flows[e["symbol"]] = cur.flows.get(e["symbol"], 0.0) - net
         elif t in TRADES:
             sym, ccy = e["symbol"], e.get("ccy") or base_ccy
             factor = (
@@ -258,6 +263,8 @@ def replay(entries: list[dict], *, base_ccy: str, fx_at, splits: dict | None = N
                 take_cash(gross_loc * rate)
                 if is_opening(e):
                     cur.openings.append((sym, qty, gross_loc * rate))
+                else:
+                    cur.flows[sym] = cur.flows.get(sym, 0.0) + qty * price * rate
                 pos.qty += qty
                 pos.cost_base += gross_loc * rate
                 pos.cost_loc += gross_loc
@@ -268,6 +275,7 @@ def replay(entries: list[dict], *, base_ccy: str, fx_at, splits: dict | None = N
                 cost_b, cost_l = pos.cost_base * share, pos.cost_loc * share
                 proceeds = (qty * price - fee) * rate
                 book.cash += proceeds
+                cur.flows[sym] = cur.flows.get(sym, 0.0) - qty * price * rate
                 pos.realised += proceeds - cost_b
                 pos.qty -= qty
                 pos.cost_base -= cost_b

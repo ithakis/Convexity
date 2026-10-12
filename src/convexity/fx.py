@@ -106,6 +106,40 @@ def _fx_usd_series(ccy: str, period_yf: str) -> pd.Series | None:
     return series
 
 
+def prefetch_usd_series(ccys, period_yf: str = "max") -> None:
+    """Fill ``_fx_usd_series``' cache for several currencies at once, in
+    parallel (My Investments' cold page read them one after another: ~2 s
+    each). Uses ``Ticker.history``, which keeps its state per object, so it
+    can run beside a ``yf.download`` (concurrent downloads share yfinance's
+    module state). Same dates and closes as the download path (checked
+    2026-10-12). A failure caches nothing: the normal path asks again."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    todo = []
+    for c in dict.fromkeys(_norm_ccy_for_fx(c) for c in ccys if c):
+        hit = _FX_CCY_HIST_CACHE.get(f"{c}|{period_yf}")
+        if c != "USD" and not (
+            hit and (time.time() - hit[0]) < _FX_CCY_HIST_TTL and not hit[1].empty
+        ):
+            todo.append(c)
+
+    def one(c: str) -> None:
+        try:
+            h = yf.Ticker(f"{c}USD=X").history(period=period_yf, auto_adjust=True)
+            series = h["Close"].dropna() if "Close" in h.columns else pd.Series(dtype=float)
+        except Exception:
+            return
+        if series.empty:
+            return
+        if getattr(series.index, "tz", None) is not None:
+            series.index = series.index.tz_localize(None).normalize()
+        _FX_CCY_HIST_CACHE[f"{c}|{period_yf}"] = (time.time(), series)
+
+    if todo:
+        with ThreadPoolExecutor(max_workers=min(4, len(todo))) as ex:
+            list(ex.map(one, todo))
+
+
 def fx_multipliers(ccys, base: str, dates: list[str]) -> dict[str, np.ndarray | None]:
     """Daily ``base`` units per one unit of each currency, on each ISO date.
 

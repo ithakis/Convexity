@@ -9,6 +9,7 @@
     --border: #d6e0ea;
     --text: #0b2239;
     --muted: #587089;
+    --th-ink: #34506b;   /* table headers: a step brighter than --muted (owner, 2026-10-12) */
     --accent: #187aba;
     --accent-rgb: 24, 122, 186;
     --accent-soft: #e3f0f9;
@@ -58,6 +59,7 @@
     --border: #1d2938;
     --text: #e6edf3;
     --muted: #8a99ab;
+    --th-ink: #c3cad6;
     --accent: #4ba3e3;
     --sel-bg: #1e4a7a;
     --sel-fg: #ffffff;
@@ -105,6 +107,7 @@
     --border: #333333;          /* neutral gray dividers, not amber-tinted */
     --text: #f2f2f2;            /* WHITE — data values, like the real terminal */
     --muted: #f49f31;           /* Bloomberg amber — labels/secondary text */
+    --th-ink: #f49f31;          /* headers stay terminal amber */
     --accent: #fb8b1e;          /* Bloomberg orange — buttons, active states */
     --sel-bg: #14273f;          /* the terminal's selection-bar blue */
     --sel-fg: #ffffff;
@@ -3422,6 +3425,8 @@
   .inv-value { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
   /* Last month's change, its own line under the value (owner's layout A1). */
   .inv-month { font-size: 13.5px; font-weight: 600; padding: 2px 8px 0; }
+  .inv-stale { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+  .inv-stale.failed { color: var(--warn); }
   .inv-month-w { color: var(--muted); font-weight: 400; }
   .inv-demo { margin-left: auto; font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 6px; }
   .inv-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; margin: 10px 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
@@ -3438,14 +3443,17 @@
   .inv-chart-card { container-type: inline-size; position: relative; }
   .inv-svg .sel-rect { fill: var(--accent); opacity: 0.12; pointer-events: none; }
   .inv-chart-card.measuring .inv-cross, .inv-chart-card.measuring .inv-dot { opacity: 0 !important; }
-  .inv-chart-bar { display: flex; align-items: center; gap: 12px; height: 30px; padding: 0 2px 6px; }
+  .inv-chart-bar { display: flex; align-items: center; gap: 12px; height: 30px; padding: 6px 4px 0; margin-bottom: 12px; }
+  .inv-sma { display: inline-flex; gap: 6px; font-size: 11.5px; }
+  .inv-sma .pf-overlay-pill { padding: 3px 9px; }
+  @container (max-width: 860px) { .inv-sma { display: none; } }
   .inv-chart-bar .pf-contrib-toggle { margin-left: 0; }
   /* "vs" sits halfway between the toggle and the picker: its gap to the
      picker equals the bar's gap to the toggle (a plain space was ~3px). */
   .inv-vs { display: inline-flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; white-space: nowrap; }
   .inv-periods { margin-left: auto; flex: none; }
-  .inv-svg { display: block; width: 100%; height: 240px; }
-  .inv-readout { display: flex; gap: 16px; align-items: center; height: 20px; overflow: hidden; font-size: 11.5px; color: var(--text); padding: 2px 4px 0; }
+  .inv-svg { display: block; width: 100%; height: 252px; }
+  .inv-readout { display: flex; gap: 16px; align-items: center; height: 20px; overflow: hidden; font-size: 11.5px; color: var(--text); padding: 0 4px; margin: 10px 0 4px; }
   .inv-ro { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
   .inv-ro-k, .inv-ro-date { color: var(--muted); }
   .inv-ro b { font-weight: 600; }
@@ -3463,10 +3471,12 @@
   .inv-l-main, .inv-l-bench, .inv-l-invested { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-linejoin: round; }
   .inv-l-main { stroke: var(--accent); stroke-width: 1.6; }
   .inv-l-bench { stroke: var(--neg); stroke-width: 1.4; stroke-dasharray: 5 4; }  /* owner, 2026-10-11: red dashes */
-  .inv-l-invested { stroke-dasharray: 6 4; opacity: 0.8; }
-  .inv-sw-main, .inv-sw-bench, .inv-sw-invested { display: inline-block; width: 16px; border-top: 2px solid var(--accent); }
+  .inv-l-invested { stroke-width: 1.5; opacity: 0.9; }
+  .inv-l-sma { fill: none; stroke-width: 1.2; opacity: 0.9; stroke-linejoin: round; }
+  .inv-in-lbl { font-size: 10.5px; fill: var(--muted); }
+  .inv-sw-main, .inv-sw-bench, .inv-sw-invested, .inv-sw-sma { display: inline-block; width: 16px; border-top: 2px solid var(--accent); }
   .inv-sw-bench { border-top: 2px dashed var(--neg); }
-  .inv-sw-invested { border-top: 2px dashed var(--muted); }
+  .inv-sw-invested { border-top: 2px solid var(--muted); }
   .inv-cross { stroke: var(--muted); stroke-width: 0.7; }
   .inv-dot { fill: var(--accent); }
   .inv-cross, .inv-dot { opacity: 0; }
@@ -3478,14 +3488,18 @@
   .pf-book-note b { font-weight: 600; }
   .inv-tbl-wrap { overflow-x: auto; }  /* a narrow window scrolls the table, never the page */
   .inv-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
-  .inv-tbl th { color: var(--muted); font-weight: 600; font-size: 11px; text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  /* Headers (owner's "kicker" pick, 2026-10-12): caps, tracked, a step
+     brighter than --muted. Every label ends on its numbers' right edge: the
+     sort arrow hangs in the cell's right padding instead of pushing it. */
+  .inv-tbl th { color: var(--th-ink); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; text-align: right; vertical-align: bottom; padding: 8px 8px 7px; border-bottom: 1px solid var(--border); white-space: nowrap; position: relative; }
   .inv-tbl td { text-align: right; padding: 4px 8px; height: 26px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .inv-tbl .left { text-align: left; }
   .inv-tbl tbody tr:hover td { background: var(--hover); }
   /* Sortable headers (owner, 2026-10-11): the whole label is the button. */
-  .inv-th button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; white-space: nowrap; }
+  .inv-th button { font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; background: none; border: 0; padding: 0; cursor: pointer; white-space: nowrap; }
   .inv-th button:hover, .inv-th.sorted button { color: var(--text); }
-  .inv-th .arrow { margin-left: 3px; font-size: 9px; }
+  .inv-th .arrow { position: absolute; right: -1px; bottom: 9px; margin: 0; font-size: 8px; letter-spacing: 0; }
+  .inv-th.left .arrow { position: static; margin-left: 4px; }
   /* Your order: a grip on hover, a line where the row will land. */
   .inv-tbl-drag td.left { position: relative; }
   .inv-grip { position: absolute; left: -1px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 10px; letter-spacing: -2px; opacity: 0; cursor: grab; user-select: none; }
@@ -3494,6 +3508,27 @@
   .inv-tbl tr.dragging td { opacity: 0.45; }
   .inv-tbl tr.drop-before td { box-shadow: inset 0 2px 0 var(--accent); }
   .inv-cash td { color: var(--muted); }
+  /* Phase 4: weight and risk share as two thin bars (weight gray, risk a
+     classic data blue, the same in every theme: never brand-tinted). */
+  .inv-wr { display: inline-flex; align-items: center; gap: 8px; border-radius: var(--r-sm); padding: 1px 0; }
+  .inv-wr-bars { display: inline-flex; flex-direction: column; gap: 2px; width: 56px; }
+  .inv-wr-bars i, .inv-wr-key { display: block; height: 4px; border-radius: var(--r-xs); }
+  .inv-wr-bars i.w, .inv-wr-key.w { background: var(--ns-flat); }
+  .inv-wr-bars i.r, .inv-wr-key.r { background: #3b7ddd; }
+  .inv-wr-key { display: inline-block; width: 12px; margin-right: 6px; vertical-align: middle; }
+  .inv-tbl tfoot td { border-bottom: 1px solid var(--border); }
+  .inv-tbl tr.inv-total td { font-weight: 700; color: var(--text); border-top: 1px solid var(--text); }
+  .inv-closed-btn { border: none; background: none; padding: 1px 3px; font: inherit; color: var(--muted); cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+  .inv-closed-btn:hover { color: var(--text); }
+  .inv-caret { width: 10px; font-size: 10px; }
+  .inv-tbl tr.inv-closed td { color: var(--muted); }
+  .inv-tbl tr.inv-closed-head td, .inv-tbl tr.inv-closed td { font-size: 12px; }
+  .inv-divs { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .inv-div-list { padding: 2px 0 6px; border-bottom: 1px solid var(--border); max-height: 340px; overflow-y: auto; }
+  .inv-div-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 5px 0; font-size: 12.5px; }
+  .inv-div-row b { font-weight: 600; }
+  .inv-div-amt { font-variant-numeric: tabular-nums; }
+  .inv-div-foot { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding-top: 4px; }
   .inv-tipped { display: inline-flex; align-items: center; gap: 8px; border-radius: var(--r-sm); padding: 1px 3px; }
   .inv-rail { border-left: 1px solid var(--border); padding-left: 18px; min-height: 200px; }
   .inv-rail-anchor { margin: 4px 0 8px; }
@@ -3772,7 +3807,10 @@
   .inv-loading { padding: 64px 0; text-align: center; color: var(--muted); font-size: 13px; }
   .inv-chart-soon { height: 64px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12.5px; }
   .inv-broken { padding: 14px 8px; color: var(--neg); font-size: 13px; }
+  .inv-waiting { padding: 14px 8px; color: var(--muted); font-size: 13px; }
+  .inv-tbl td.inv-pending-note { color: var(--muted); font-size: 12px; }
   .inv-anchor .inv-add { order: 3; }
+  .inv-anchor .inv-cols-btn { margin-right: 6px; }
   .inv-anchor::after { order: 2; }
   .inv-add {
     flex: none; font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: var(--r-md); cursor: pointer;

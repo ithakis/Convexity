@@ -483,6 +483,26 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
   `ccy` (GBP, not pence); the page converts to the quote unit for display.
   `price_on` undoes Yahoo's split adjustment (`auto_adjust=False` only drops
   the dividend one): NVDA on 1 May 2024 fills ~830, not 83.
+- **A failed split fetch is not "no splits"** (Phase 4, 2026-10-11).
+  yfinance swallows a failed download into an empty frame, and the old code
+  cached that as "no splits" for 12 h: a pre-split `qty_basis: "trade"` buy
+  replayed at face value, the ledger oversold and the page said "broken".
+  `_fetch_splits` now returns None on an empty or failed history and `[]`
+  only on a real answer. `market_splits` keeps the last good list per ticker
+  (`_SPLITS_GOOD`, also in `state/splits.json`, market data only, so a
+  restart during an outage still has it) and retries a failure after 60 s.
+  A ticker Yahoo doesn't carry (delisted) never gets a list either, and
+  yfinance reports it exactly like an outage ("no timezone"):
+  `_not_on_yahoo` uses the page's cached price download to tell them apart
+  (the benchmark fund has prices and the ticker has none = not on Yahoo: its
+  trades count as entered, with a warning, asked again in 12 h).
+  A trade-basis ticker with no good list at all is **pending**
+  (`splits_unknown`): `book()` replays without its entries (as if never
+  bought, cash flows included), lists it in `splits_pending` and as a
+  figure-less last holdings row, and the page reloads itself every minute
+  until it loads. A write that touches a pending ticker is refused ("try
+  again in a minute"); the import dry run marks its rows `splits_pending`;
+  `price_on` returns no price rather than one off by a split factor.
 - **Validation** (`_clean`, `_load`): numbers must be finite, not booleans,
   and at most 1e12 (JSON has no infinity); `ccy` is three letters; editing an
   entry to another company drops the old currency and FX rate. A book file
@@ -583,6 +603,68 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
   sink, jobs.md): `investments.refresh_market` drops the book's raw closes,
   dividends, splits, quote currencies, the FX histories and the benchmark, then fetches
   them again four symbols at a time. It never writes the book file.
+
+### My Investments holdings depth (Phase 4)
+- **Contribution** (`_contrib_daily`, `_contrib_linked`): each holding's day
+  P&L (value change, less the money put into it from `ledger.Day.flows` with
+  fees left out, plus its dividends, recorded or estimated; an opening
+  holding enters at that day's value) over the TWR's own denominator
+  V_{t-1} + D_t. The rest of each day's return is `CASH_BUCKET` ("Cash and
+  fees": fees, and in another display currency what the currency did to
+  cash), so the row sums are the TWR's daily returns exactly. Per period,
+  `analytics._carino_link` makes them add up to the period's TWR
+  (`headline.contrib[period][symbol]`, points; closed holdings included).
+- **Risk share** (`_risk_share`): RC_i = w_i(Σw)_i / w'Σw at today's
+  weights, Σ = `mpt.annualized_cov(…, "daily", "ledoit")` of the last year's
+  trading-day returns in the display currency. Cash has no variance, so the
+  holdings' shares add up to 1 whether or not cash is in w. A listing with
+  fewer than 20 returns in the window (an IPO) is left out alone (None);
+  fewer than 20 shared days for the rest gives {}. Contributions are None,
+  not a 500, when a day loses everything (Carino has no log link at -100%).
+- **Yield on cost**: the last 12 months of Yahoo payouts per share x shares
+  / the holding's cost, gross, at today's FX. **News / Market read and
+  analyst upside** come from caches only (`_research_extras`: the sentiment
+  cache, and the `__book__` rows, else any saved portfolio's row for the
+  share), never a fetch here. The export writes text that starts with "="
+  as text, never a formula.
+- **Closed** holdings (`closed`) and **suggested dividends**
+  (`suggested_dividends`, every estimate with its ex-date, shares and per
+  share amount) ride in the payload; `add_dividends` books picked ones as one
+  journal item, source `suggested`.
+- **Export**: with a book, `build_workbook(book=…)` adds "Positions" (as the
+  page, plus cash, total and closed) and "Ledger" (oldest first, each entry
+  in its own currency, with its cash effect) after Overview, in the page's
+  display currency (`/api/export-xlsx?ccy=`). A book alone is enough to
+  export.
+
+### My Investments page speed (2026-10-12)
+- **`investments.page(ccy)`** is what the route, the export and every change
+  call: one computation per display currency at a time (a lock per
+  currency; a second caller waits for the first's answer), kept a minute
+  (`PAGE_MEMO_TTL`, keyed by rev, currency, benchmark, day and the book's
+  path; `refresh_market` clears it). `book()` stays the plain computation
+  (tests call it with different stubs at one rev).
+- **The last good page on disk**: a healthy page (series, nothing pending,
+  broken or waiting) is written to `state/book_cache.json`. `GET
+  /api/investments?cached=1` returns it with `stale: true, computed_at` only
+  when rev, currency and benchmark still match, else `{"nocache": true}`; a
+  change bumps the rev, so it can never stand in for an edited book.
+- **Warm-up**: `server.start_server` runs `investments.warm(prefs ccy)` and
+  the mpt/numba import on daemon threads (the desktop app never runs
+  `main()`, so numba used to compile on My Investments' first request).
+- **`_prefetch`** (top of `book()`): the holdings' closes, then the stand-ins
+  already known (`analytics.known_proxies`, `retry=False`), then the
+  benchmark, in one worker (one `yf.download` at a time: concurrent
+  downloads share yfinance's module state), beside every currency's
+  history in parallel (`fx.prefetch_usd_series`, `Ticker.history`, the same
+  dates and closes as the download path). The ordered steps after it read
+  the same caches.
+- **Stand-ins**: `_proxy_candidates` keeps found ones a week in
+  `state/proxies.json` (market data only); candidate closes are fetched with
+  `_bulk_close(retry=False)`, so a dead candidate costs nothing beyond the
+  batch (the retries sleep up to ~5 s each).
+- `_research_extras` reads the saved portfolios' analyst rows once per
+  `views.json` change (`_analyst_rows`, keyed by path and mtime).
 
 ### My Investments import (`importer.py`)
 Roadmap Phases 5–6 (run together, ahead of Performance, at the owner's

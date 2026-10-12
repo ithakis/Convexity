@@ -142,6 +142,22 @@ Each of these has cost real debugging time; the link goes to the full story.
   keeps only `_FIELDS`**: a new entry flag (like `opening`) must be read from
   the page's fields, or it is silently dropped (2026-10-11).
   [backend.md → My Investments performance](docs/architecture/backend.md#my-investments-performance-phase-3-investments_performance)
+- **A failed Yahoo split fetch is not "no splits"** (yfinance returns an
+  empty frame): the last good list is kept (`state/splits.json`), a failure
+  retries in a minute, and a trade-basis holding with no list yet is left out
+  of the totals (`splits_pending`), never a "broken" book (2026-10-11).
+  [backend.md → My Investments](docs/architecture/backend.md#my-investments-the-ledger-and-the-book-file-ledgerpy-investmentspy)
+- **My Investments opens on its last good page** (`state/book_cache.json`,
+  "Updated hh:mm · refreshing") and computes through `investments.page`
+  (one computation per currency, warmed at server start). Never fetch the
+  book twice from the frontend: share `INV.loading` (a second request used to
+  race the first and discard it). Stand-in candidates use
+  `_bulk_close(retry=False)`: the per-symbol retries sleep up to ~5 s each
+  (2026-10-12). [backend.md → page speed](docs/architecture/backend.md#my-investments-page-speed-2026-10-12)
+- **Holding contributions add up to the TWR exactly** (Phase 4): a new
+  entry type that moves money into or out of a holding must land in
+  `ledger.Day.flows`, or "Cash and fees" silently absorbs it.
+  [backend.md → holdings depth](docs/architecture/backend.md#my-investments-holdings-depth-phase-4)
 - **My Investments import: the model may suggest, never decide.** Plain code
   verifies every ticker against the symbol pack (the row's currency picks
   the listing), checks qty × price against the total, and marks guesses
@@ -287,7 +303,10 @@ overrides it):
 │   ├── sentiment_history.json  ← One record per ticker-day read: Track record + live anchor
 │   ├── reference_pack.json     ← {"enabled": bool} — the Settings switch for the reference pack
 │   ├── prefs.json              ← {default_ccy, inv_benchmark}: settings that must outlive the page (persistence.load_prefs)
-│   └── investments.json        ← My Investments: the user's REAL book (ledger, from roadmap Phase 2) — never overwrite a malformed one
+│   ├── investments.json        ← My Investments: the user's REAL book (ledger, from roadmap Phase 2) — never overwrite a malformed one
+│   ├── splits.json             ← Yahoo's last good split list per ticker (a cache, market data only; investments.market_splits)
+│   ├── proxies.json            ← found stand-in listings per young listing, a week (market data only; analytics._proxy_candidates)
+│   └── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)
 ├── models/mlsent-v1.1/         ← The Market read artifact (was ~/.convexity/ml_model/)
 ├── reference/                  ← The downloaded reference pack (a cache; reference_pack.py)
 ├── webengine/                  ← The desktop window's web storage (localStorage, cache): desktop._persistent_profile

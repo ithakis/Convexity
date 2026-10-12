@@ -3,8 +3,10 @@
 
 import http.server
 import importlib.util
+import io
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import date, timedelta
@@ -29,6 +31,8 @@ FX = {"USD": 1.0, "GBP": 1.3, "EUR": 1.1}
 def offline(monkeypatch):
     """No network: quote currencies, names, splits, closes and FX are fixed."""
     inv._SPLITS.clear()
+    inv._SPLITS_GOOD.clear()
+    inv._PAGE_MEMO.clear()
     inv._QCCY.clear()
     monkeypatch.setattr(inv, "_fetch_quote_ccy", lambda s: QUOTE.get(s))
     monkeypatch.setattr(inv, "_pack_hit", lambda t: None)
@@ -599,3 +603,311 @@ def test_apply_keeps_the_opening_flag_of_imported_holdings():
     saved = {e["symbol"]: e for e in _raw()["entries"]}
     assert saved["AAPL"]["opening"] is True
     assert not saved["MSFT"].get("opening")
+
+
+# ------------------------------------------------- split history (Phase 4)
+# A failed split fetch is not "no splits": the seeded book's 20 NVIDIA bought
+# before the 10:1 split and the 80 sold after it oversell at face value, so a
+# Yahoo outage used to show a sound book as broken.
+
+NVDA_SPLITS = [("2024-06-10", 10.0)]
+_REAL_FETCH_SPLITS = inv._fetch_splits  # read at import, before the offline stub
+
+
+def _yahoo_down_for(monkeypatch, *down):
+    monkeypatch.setattr(
+        inv, "_fetch_splits", lambda s: None if s in down else (NVDA_SPLITS if s == "NVDA" else [])
+    )
+
+
+def test_a_failed_split_fetch_leaves_the_holding_out_never_broken(monkeypatch):
+    _seed()
+    _yahoo_down_for(monkeypatch, "NVDA")
+    b = inv.book()
+    assert "broken" not in b and b["headline"] is not None
+    assert [p["symbol"] for p in b["splits_pending"]] == ["NVDA"]
+    nv = [p for p in b["positions"] if p["symbol"] == "NVDA"]
+    assert nv == [b["splits_pending"][0]] and nv[0]["pending"] is True
+    assert b["positions"][-1]["symbol"] == "NVDA"  # last, with no figures
+    assert any("left out of the totals" in w for w in b["warnings"])
+    # The rest is the book without NVIDIA, computed in full.
+    h, held = b["headline"], [p for p in b["positions"] if not p.get("pending")]
+    assert sum(p["value"] for p in held) + h["cash"] == pytest.approx(h["value"])
+    assert h["profit_total"] == pytest.approx(h["value"] - h["net_deposits"])
+
+
+def test_a_failure_after_a_good_answer_keeps_the_last_good_list(monkeypatch):
+    _seed()
+    good = inv.book()
+    clock = [1e9]
+    monkeypatch.setattr(inv.time, "time", lambda: clock[0])
+    inv._SPLITS.clear()
+    inv.book()  # fetched at the fake clock
+    _yahoo_down_for(monkeypatch, "NVDA")
+    clock[0] += inv._SPLITS_TTL + 1  # due again, and Yahoo fails
+    b = inv.book()
+    assert not b["splits_pending"] and b["headline"]["value"] == pytest.approx(
+        good["headline"]["value"]
+    )
+    assert inv._SPLITS["NVDA"][1] is False  # failure noted: retried after _MISS_TTL
+    calls = []
+    monkeypatch.setattr(inv, "_fetch_splits", lambda s: calls.append(s) or NVDA_SPLITS)
+    clock[0] += inv._MISS_TTL - 1
+    inv.market_splits(["NVDA"])
+    assert calls == []
+    clock[0] += 2
+    inv.market_splits(["NVDA"])
+    assert calls == ["NVDA"] and inv._SPLITS["NVDA"][1] is True
+
+
+def test_good_split_lists_survive_a_restart_and_a_bad_file_is_ignored(monkeypatch):
+    _seed()
+    inv.book()
+    saved = json.loads(paths.state_file("splits").read_text(encoding="utf-8"))
+    assert saved["NVDA"] == [["2024-06-10", 10.0]]
+    # A restart (memory gone) during an outage still has the list.
+    inv._SPLITS.clear()
+    inv._SPLITS_GOOD.clear()
+    monkeypatch.setattr(inv, "_splits_loaded", None)
+    _yahoo_down_for(monkeypatch, "NVDA", "MSFT", "AAPL", "SHEL.L", "VWCE.DE")
+    assert not inv.book()["splits_pending"]
+    paths.state_file("splits").write_text("{not json", encoding="utf-8")
+    inv._SPLITS.clear()
+    inv._SPLITS_GOOD.clear()
+    monkeypatch.setattr(inv, "_splits_loaded", None)
+    assert [p["symbol"] for p in inv.book()["splits_pending"]] == sorted(QUOTE.keys() - {"GOOGL"})
+
+
+def test_fetch_splits_tells_a_failure_from_no_splits(monkeypatch):
+    import yfinance as yf
+
+    frames = {
+        "DOWN": pd.DataFrame(),
+        "NONE": pd.DataFrame({"Close": [1.0, 2.0], "Stock Splits": [0.0, 0.0]},
+                             index=pd.to_datetime(["2024-01-02", "2024-01-03"])),
+        "TEN": pd.DataFrame({"Close": [1.0, 2.0], "Stock Splits": [0.0, 10.0]},
+                            index=pd.to_datetime(["2024-06-07", "2024-06-10"])),
+    }  # fmt: skip
+
+    class T:
+        def __init__(self, s):
+            self.s = s
+
+        def history(self, **kw):
+            if self.s == "RAISE":
+                raise RuntimeError("rate limited")
+            return frames[self.s]
+
+    monkeypatch.setattr(yf, "Ticker", T)
+    assert _REAL_FETCH_SPLITS("DOWN") is None and _REAL_FETCH_SPLITS("RAISE") is None
+    assert _REAL_FETCH_SPLITS("NONE") == []
+    assert _REAL_FETCH_SPLITS("TEN") == [("2024-06-10", 10.0)]
+
+
+def test_an_edit_to_a_pending_holding_waits_and_others_go_through(monkeypatch):
+    _seed()
+    rev = inv.book()["rev"]
+    inv._SPLITS.clear()
+    inv._SPLITS_GOOD.clear()
+    _yahoo_down_for(monkeypatch, "NVDA")
+    with pytest.raises(inv.Refused) as ex:
+        inv.add({"type": "sell", "symbol": "NVDA", "date": "2025-03-03", "qty": 10, "price": 110,
+                 "qty_basis": "trade"}, rev)  # fmt: skip
+    assert "split history for NVIDIA didn't load" in ex.value.message
+    assert _raw()["rev"] == rev  # nothing saved
+    b = inv.add(BUY, rev)
+    assert b["rev"] == rev + 1 and [p["symbol"] for p in b["splits_pending"]] == ["NVDA"]
+
+
+def test_the_dry_run_says_a_pending_row_cant_be_checked_yet(monkeypatch):
+    _yahoo_down_for(monkeypatch, "NVDA")
+    probs = inv.check_rows([
+        {"type": "sell", "date": "2024-02-21", "symbol": "NVDA", "qty": 5, "price": 674.1, "qty_basis": "trade"},
+        {"type": "buy", "date": "2024-03-12", "symbol": "AAPL", "qty": 10, "price": 182.4, "qty_basis": "trade"},
+    ])  # fmt: skip
+    assert list(probs) == [0] and probs[0]["kind"] == "splits_pending"
+
+
+# ---------------------------------------- holdings depth (Phase 4), the rest
+
+
+def test_suggested_dividends_are_added_as_one_undoable_batch(monkeypatch):
+    rev = inv.add(BUY, 0)["rev"]
+    with pytest.raises(inv.BookError):
+        inv.add_dividends([{**BUY, "type": "buy"}], rev)  # dividends only
+    divs = [{"type": "dividend", "symbol": "AAPL", "date": d, "amount": 2.5, "tax": 0, "ccy": "USD"}
+            for d in ("2025-05-12", "2025-08-11")]  # fmt: skip
+    b = inv.add_dividends(divs, rev)
+    assert b["undo_label"] == "Added 2 dividends from Yahoo"
+    raw = _raw()
+    added = [e for e in raw["entries"] if e["type"] == "dividend"]
+    assert {e["source"] for e in added} == {"suggested"} and len({e["batch"] for e in added}) == 1
+    assert len(inv.undo(b["rev"])["entries"]) == 1
+
+
+def test_the_export_has_positions_and_ledger_sheets(srv):
+    from openpyxl import load_workbook
+
+    _seed()
+    with urllib.request.urlopen(srv + "/api/export-xlsx?ccy=USD") as r:
+        wb = load_workbook(io.BytesIO(r.read()))
+    assert wb.sheetnames[:3] == ["Overview", "Positions", "Ledger"]
+    pos = wb["Positions"]
+    names = [pos.cell(row=k, column=1).value for k in range(5, pos.max_row + 1)]
+    assert "Cash" in names and "Total" in names and "NVIDIA" in " ".join(n or "" for n in names)
+    led = wb["Ledger"]
+    assert led.cell(row=4, column=1).value == "Date"
+    assert led.max_row - 4 == len(_raw()["entries"])
+    dates = [led.cell(row=k, column=1).value for k in range(5, led.max_row + 1)]
+    assert dates == sorted(dates)  # oldest first
+
+
+# ------------------------------------------- adversarial review (Phase 4)
+
+
+def test_a_ticker_yahoo_doesnt_carry_counts_as_entered_not_pending(monkeypatch):
+    # No prices and no split history for it, while Yahoo answers for the
+    # benchmark: a delisted line. Its trades count as entered, with a note,
+    # and it never sits "pending" (which would also block its edits).
+    QUOTE["OLDCO"] = "USD"
+    monkeypatch.setitem(QUOTE, "OLDCO", "USD")
+    _yahoo_down_for(monkeypatch, "OLDCO")
+    b = inv.add({"type": "buy", "symbol": "OLDCO", "date": "2025-01-02", "qty": 10, "price": 20,
+                 "qty_basis": "trade"}, 0)  # fmt: skip
+    assert not b["splits_pending"] and "broken" not in b
+    assert any("Yahoo has no history for" in w for w in b["warnings"])
+    b = inv.add({"type": "sell", "symbol": "OLDCO", "date": "2025-02-03", "qty": 4, "price": 21,
+                 "qty_basis": "trade"}, b["rev"])  # fmt: skip
+    assert b["rev"] == 2
+
+
+def test_in_an_outage_even_the_benchmark_is_missing_so_it_stays_pending(monkeypatch):
+    _seed()
+    _yahoo_down_for(monkeypatch, "NVDA")
+    monkeypatch.setattr(inv, "_bench_closes", lambda period, ticker: None)
+    b = inv.book()
+    assert [p["symbol"] for p in b["splits_pending"]] == ["NVDA"]
+
+
+def test_split_cache_survives_threads():
+    import concurrent.futures as cf
+
+    syms = [f"S{i}" for i in range(60)]
+    with cf.ThreadPoolExecutor(8) as ex:
+        list(ex.map(lambda k: inv.market_splits(syms[k % 7 :]), range(40)))
+    saved = json.loads(paths.state_file("splits").read_text(encoding="utf-8"))
+    assert set(saved) == set(syms)
+
+
+def test_suggested_dividends_may_exceed_one_imports_limit():
+    rev = inv.add(BUY, 0)["rev"]
+    divs = [{"type": "dividend", "symbol": "AAPL", "date": "2025-02-03", "amount": 0.01,
+             "ccy": "USD"}] * (inv.IMPORT_MAX + 1)  # fmt: skip
+    assert (
+        inv.add_dividends(divs, rev)["undo_label"]
+        == f"Added {inv.IMPORT_MAX + 1} dividends from Yahoo"
+    )
+
+
+def test_the_export_never_writes_a_formula(srv):
+    from openpyxl import load_workbook
+
+    rev = inv.add(BUY, 0)["rev"]
+    inv.add({"type": "deposit", "date": "2025-01-02", "amount": 5, "ccy": "USD",
+             "note": '=HYPERLINK("http://example.com","x")'}, rev)  # fmt: skip
+    with urllib.request.urlopen(srv + "/api/export-xlsx?ccy=USD") as r:
+        wb = load_workbook(io.BytesIO(r.read()))
+    led = wb["Ledger"]
+    notes = [led.cell(row=k, column=15) for k in range(5, led.max_row + 1)]
+    hit = [c for c in notes if c.value and str(c.value).startswith("=")]
+    assert hit and all(c.data_type == "s" for c in hit)
+
+
+def test_yield_on_cost_is_none_without_dividends_and_contrib_is_never_nan():
+    assert inv._yield_on_cost("AAPL", "USD", 10, 1000.0, {"USD": np.ones(3)}) is None
+    daily = pd.DataFrame({"A": [0.0, -1.0], inv.CASH_BUCKET: [0.0, 0.0]})
+    out = inv._contrib_linked(daily, -1)
+    assert all(v is None or np.isfinite(v) for v in out.values())
+    json.dumps(out, allow_nan=False)
+
+
+def test_analyst_upside_comes_from_any_saved_portfolio_when_the_book_tab_hasnt_loaded():
+    from convexity import persistence
+
+    persistence.save_view(
+        "Tech", "AAPL", [{"symbol": "AAPL", "price": 200.0, "target_mean_price": 250.0}]
+    )
+    b = inv.add(BUY, 0)
+    assert b["positions"][0]["upside_pct"] == pytest.approx(25.0)
+
+
+# ------------------------------------------------- the page, fast (2026-10-12)
+
+
+def test_page_computes_once_for_concurrent_callers(monkeypatch):
+    inv.add(BUY, 0)
+    inv._PAGE_MEMO.clear()
+    calls, real = [], inv.book
+
+    def slow(ccy=None):
+        calls.append(ccy)
+        time.sleep(0.2)
+        return real(ccy)
+
+    monkeypatch.setattr(inv, "book", slow)
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(inv.page("USD"))) for _ in range(3)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(calls) == 1 and len(out) == 3 and all(o is out[0] for o in out)
+    # A change bumps the rev: the next page is computed again.
+    inv.add(BUY | {"symbol": "MSFT"}, 1)
+    calls.clear()
+    assert inv.page("USD")["rev"] == 2 and calls == []  # the change already computed it
+    assert inv.page("USD", fresh=True)["rev"] == 2 and len(calls) == 1
+
+
+def test_the_last_good_page_is_saved_and_only_served_for_the_same_book():
+    assert inv.cached_page("USD") is None  # nothing saved yet
+    b = inv.add(BUY, 0)
+    c = inv.cached_page("USD")
+    assert c["stale"] is True and c["computed_at"] and c["rev"] == b["rev"] == 1
+    assert c["headline"]["value"] == pytest.approx(b["headline"]["value"])
+    assert inv.cached_page("GBP") is None  # another currency: not this page
+    inv.add(BUY | {"symbol": "MSFT"}, 1)
+    path = paths.state_file("book_cache")
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["rev"] = 1  # an older book's page
+    path.write_text(json.dumps(body), encoding="utf-8")
+    assert inv.cached_page("USD") is None
+    path.write_text("{not json", encoding="utf-8")
+    assert inv.cached_page("USD") is None  # a damaged cache is ignored
+
+
+def test_an_unhealthy_page_is_never_saved(monkeypatch):
+    inv.add(BUY | {"symbol": "NVDA", "qty_basis": "trade"}, 0)
+    inv.add(BUY, 1)
+    paths.state_file("book_cache").unlink()
+    monkeypatch.setattr(inv, "_fetch_splits", lambda s: None)  # Yahoo down, nothing known
+    inv._SPLITS.clear()
+    inv._SPLITS_GOOD.clear()
+    paths.state_file("splits").unlink(missing_ok=True)
+    monkeypatch.setattr(inv, "_splits_loaded", None)
+    b = inv.page("USD", fresh=True)
+    assert b["splits_pending"] and inv.cached_page("USD") is None
+
+
+def test_the_cached_route_answers_at_once(srv):
+    with urllib.request.urlopen(srv + "/api/investments?cached=1&ccy=USD") as r:
+        assert json.loads(r.read()) == {"nocache": True}
+    _post(srv, "/api/investments/entries", {"base_rev": 0, "entry": BUY})
+    with urllib.request.urlopen(srv + "/api/investments?cached=1&ccy=USD") as r:
+        c = json.loads(r.read())
+    assert c["stale"] is True and c["rev"] == 1
+
+
+def test_warm_skips_an_empty_book(monkeypatch):
+    monkeypatch.setattr(inv, "page", lambda ccy=None: pytest.fail("no book, no work"))
+    inv.warm("EUR")
