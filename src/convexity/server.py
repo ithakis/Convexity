@@ -701,7 +701,17 @@ class Handler(BaseHTTPRequestHandler):
                     if not name or name in (_CURRENT_KEY, BOOK_VIEW):
                         continue
                     full[name] = load_view(name)
-                if not full:
+                # My Investments' Positions and Ledger sheets (Phase 4), in
+                # the page's display currency.
+                qs = parse_qs(parsed.query)
+                ccy = (qs.get("ccy") or ["USD"])[0]
+                try:
+                    book = _investments.page(ccy)
+                except Exception as exc:  # the research sheets still export
+                    print(f"[export] book skipped: {type(exc).__name__}", file=sys.stderr)
+                    book = None
+                has_book = bool(book and not book.get("empty") and book.get("headline"))
+                if not full and not has_book:
                     self._send_json(404, {"error": "no saved portfolios to export"})
                     return
                 blob = xlsx_export.build_workbook(
@@ -709,6 +719,7 @@ class Handler(BaseHTTPRequestHandler):
                     analytics_runner=analyze_portfolios_multi,
                     period="1Y",
                     display_ccy="USD",
+                    book=book if has_book else None,
                 )
                 stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
                 fname = f"convexity_export_{stamp}.xlsx"
@@ -854,7 +865,13 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(parsed.query)
         try:
             if parsed.path == "/api/investments":
-                self._send_json(200, _investments.book((q.get("ccy") or [None])[0]))
+                ccy = (q.get("ccy") or [None])[0]
+                if (q.get("cached") or [""])[0] == "1":
+                    # The last good page, for an instant first paint; the page
+                    # asks for the fresh one straight after.
+                    self._send_json(200, _investments.cached_page(ccy) or {"nocache": True})
+                else:
+                    self._send_json(200, _investments.page(ccy))
             elif parsed.path == "/api/investments/symbols":
                 self._send_json(200, {"symbols": _investments.book_symbols()})
             elif parsed.path == "/api/investments/lookup":
@@ -914,6 +931,8 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"problems": _investments.check_rows(p.get("entries"))}
             elif path == "/api/investments/import/apply":
                 out = _investments.add_batch(p.get("entries"), rev, p.get("aliases"), ccy)
+            elif path == "/api/investments/dividends":
+                out = _investments.add_dividends(p.get("entries"), rev, ccy)
             else:
                 self._send_json(404, {"error": "not found"})
                 return
@@ -1539,8 +1558,8 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
         # lightgbm + scipy + sklearn and takes ~3 s; doing it lazily meant the
         # first news refresh raced against it. Warming here (rather than in
         # main()) is deliberate: the desktop app calls start_server() straight
-        # from its boot worker and never runs main(), which is exactly why
-        # main()'s _warm_optimizer has never warmed numba for the desktop app.
+        # from its boot worker and never runs main() (the numba warm-up below
+        # lives here for the same reason).
         # Best-effort — _load() never raises, and a failure just leaves the
         # model unavailable with a real reason on /api/runtime-status.
         try:
@@ -1584,6 +1603,29 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
     # them daemon so a graceful quit can never hang the process.
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="pt-httpd", daemon=True).start()
+
+    def _warm_book() -> None:
+        # Compute My Investments once while the window loads (the app opens
+        # on it): prices, FX and the benchmark land in the caches and the
+        # last good page on disk, so the first request answers at once.
+        from convexity.persistence import load_prefs
+
+        _investments.warm(load_prefs().get("default_ccy"))
+
+    def _warm_optimizer() -> None:
+        # Import mpt off the request path: the import JIT-compiles numba
+        # (~1.7 s cached, ~7 s after an install). Here rather than in main()
+        # so the desktop app gets it too; My Investments' risk share and the
+        # first Optimize click both need it.
+        try:
+            import importlib
+
+            importlib.import_module("convexity.mpt")  # import triggers _warm_jit()
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm_optimizer, name="pt-warm-mpt", daemon=True).start()
+    threading.Thread(target=_warm_book, name="pt-warm-book", daemon=True).start()
     return server, port
 
 
@@ -1621,18 +1663,6 @@ def main() -> None:
     print("  Open that URL in your browser. Press Ctrl+C to stop.")
     print("=" * 60)
 
-    def _warm_optimizer() -> None:
-        # Import mpt off the startup path so the first Optimize click never pays
-        # the one-time numba JIT compile (~7 s) — it warms in the background here
-        # while the user reads their dashboard. Best-effort; failure is harmless.
-        try:
-            import importlib
-
-            importlib.import_module("convexity.mpt")  # import triggers _warm_jit()
-        except Exception:
-            pass
-
-    threading.Thread(target=_warm_optimizer, name="pt-warm-mpt", daemon=True).start()
     try:
         # serve_forever() now runs on a background thread (see start_server);
         # block the main thread on an interruptible sleep so Ctrl+C still

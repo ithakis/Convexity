@@ -76,6 +76,41 @@ dependency (loaded from CDN, used only for column-guide formulas).
   only while no column sorts). Both are per browser (`inv_sort`,
   `inv_order`); a holding missing from the saved order goes to the end in
   the server's order (by value). Cash stays last.
+- **Holdings columns (Phase 4).** `INV_COLS` is a registry of objects
+  (`k`, `label`, `get` for sorting, `dir`, `on` by default, `menu` wording,
+  `cell`). On by default (owner, 2026-10-11): today's eight plus
+  Contribution and Risk; News read, Market read, Dividends, Yield on cost
+  and Analyst Δ start off. The Columns button beside "+ Add" opens a
+  checklist (`invColsMenu`, kept per browser in `inv_cols`). `risk` is
+  `merged`: it draws risk share as a blue bar under the gray weight bar in
+  the Weight cell (`invWeightCell`, scaled to the biggest of either; risk
+  blue is a fixed data colour, never the theme accent), exact figures in
+  `inv:risk_share`. Contribution follows the period pill (`invContrib`),
+  shown as points; its colour uses the rounded figure (`invPtsCls`).
+  The `<tfoot>` holds Cash (with the "Cash and fees" contribution), a bold
+  Total (value, 100%, Total profit, the period's Return as the
+  contributions' sum) and a collapsed "Closed (n)" (`inv_closed`), so drag
+  and drop only ever sees the holdings in `<tbody>`.
+- **Headers and chart (owner, 2026-10-12).** Holdings headers are the
+  "kicker" style (11px caps, `--th-ink`, a step brighter than `--muted` per
+  theme); the header `button` must inherit `text-transform` and
+  `letter-spacing` (a button resets both), and the sort arrow is absolute in
+  the cell's right padding so every label ends on its numbers' right edge.
+  The chart has more air (T 16, B 28, readout margin), SMA 20/50/200 pills
+  (`invSmaPillsHtml`, the shared `CHART_SMA`; the average runs on the TWR
+  index over the whole history, scaled back to value in Value mode so a
+  deposit never jumps it), and "Money you put in" as a solid step line with
+  a "Put in €Xk" label in a right gutter (R 84 when the card is 560px+).
+  The value axis never goes below 0.
+- **Opening fast.** `invLoad` paints `?cached=1` (the last good page, "Updated
+  hh:mm · refreshing…", `.inv-stale`) and swaps in the fresh one; if the
+  fresh one fails the note says "couldn't refresh" and the old figures stay
+  labelled. All callers share `INV.loading`; `bookLoadWeights` awaits it
+  instead of sending its own request (the two used to race at launch).
+- **Suggested dividends (Phase 4).** One Attention item ("N dividends to
+  add · $X estimated", `invDivsHtml`); Review lists them newest first with
+  Add and Add all, both through `POST /api/investments/dividends` (one
+  journal item). They are never added on their own.
 - **Numbers are en-US everywhere** (`NUM_LOCALE`, owner 2026-10-11:
   "$238.488" read as $238 on a Mac set to a dot-grouping region). Every
   `toLocaleString` on a number passes it; dates keep their own formatters.

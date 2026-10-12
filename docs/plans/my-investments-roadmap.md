@@ -21,8 +21,8 @@ owner says so.
 | 2 | Ledger and manual entry | Done (merged) | `feature/my-investments-p2` · [ithakis/Convexity#33](https://github.com/ithakis/Convexity/pull/33) | 2026-10-06 |
 | 5 | AI import I: text and spreadsheets, and the front door | Done (merged) | `feature/my-investments-p5` (with 6) · [ithakis/Convexity#34](https://github.com/ithakis/Convexity/pull/34) | 2026-10-06 |
 | 6 | AI import II: screenshots and PDFs | Done (merged) | `feature/my-investments-p5` (with 5) · [ithakis/Convexity#34](https://github.com/ithakis/Convexity/pull/34) | 2026-10-06 |
-| 3 | Performance | Done (PR open) | `feature/my-investments-p3` | 2026-10-11 |
-| 4 | Holdings depth | Next | | |
+| 3 | Performance | Done (merged) | `feature/my-investments-p3` · [ithakis/Convexity#37](https://github.com/ithakis/Convexity/pull/37) | 2026-10-11 |
+| 4 | Holdings depth | Done (PR open) | `feature/my-investments-p4` | 2026-10-12 |
 | 7 | Attention rail I: risk and events | Not started | | |
 | 8 | Attention rail II: plans and price alerts | Not started | | |
 | 9 | Notifications | Not started | | |
@@ -41,11 +41,10 @@ Paste this into a new Claude Code session to carry on:
 
 ```
 Read docs/plans/my-investments-roadmap.md. Continue the My Investments roadmap:
-take the first phase in the progress table (run order) that is not Done. That is Phase 4,
-Holdings depth: read its section, the Phase 3 feedback log (the holdings table and the
-numbers it shows were settled there) and Appendix D, and run it with the phase loop
-(suggest → prototype → build → verify → review → sign-off). Start with the split-fetch
-robustness item in its Build list. Locked decisions from Phase 3: Total profit is lifetime;
+take the first phase in the progress table (run order) that is not Done. That is Phase 7,
+Attention rail I: read its section, the Phase 3 and Phase 4 feedback logs (the holdings
+table, its columns and the numbers it shows were settled there) and Appendix D, and run it with the phase loop
+(suggest → prototype → build → verify → review → sign-off). Start with the first item in its Build list. Locked decisions from Phase 3: Total profit is lifetime;
 Return, vs S&P and Your money follow the period pill; the benchmark is the owner's pick
 (a fund); the book is valued with as-traded closes; estimated dividends are paid out, never
 in Value or Cash. Follow CLAUDE.md. Never use my
@@ -597,7 +596,7 @@ the owner reacts to something that looks real.
 - How suggested dividends are presented in the rail.
 
 **Build:**
-- [ ] **Don't mark the book broken on a split-fetch miss** (found 2026-10-11,
+- [x] **Don't mark the book broken on a split-fetch miss** (found 2026-10-11,
       first, because the table builds on it). `investments._fetch_splits`
       turns a failed Yahoo answer into "no splits" and `market_splits` caches
       that for 10 minutes, so a pre-split `qty_basis: "trade"` entry replays
@@ -606,26 +605,161 @@ the owner reacts to something that looks real.
       (empty): keep the last good list per ticker and retry soon; with none,
       show a "split data unavailable, retrying" notice and compute what can
       be computed, never "broken". Test with a stubbed failing fetch.
-- [ ] Columns:
+- [x] Columns:
       - News read and Market read tier (`nsDot`)
       - contribution in pp (Carino-linked, plus a "Cash and fees" bucket)
       - risk share (`mpt.annualized_cov`, Ledoit)
       - dividends and yield on cost
       - analyst upside
-- [ ] `INV_COLS` registry and Columns menu.
-- [ ] Collapsible "Closed (n)" section, cash row and totals footer.
-- [ ] Suggested dividends (Yahoo ex-date × quantity held), added with one
+- [x] `INV_COLS` registry and Columns menu.
+- [x] Collapsible "Closed (n)" section, cash row and totals footer.
+- [x] Suggested dividends (Yahoo ex-date × quantity held), added with one
       click and never applied automatically.
-- [ ] Export: "Positions" and "Ledger" sheets.
-- [ ] `RICH_TIPS`: `inv:contrib`, `inv:risk_share`, `inv:yoc`.
+- [x] Export: "Positions" and "Ledger" sheets.
+- [x] `RICH_TIPS`: `inv:contrib`, `inv:risk_share`, `inv:yoc`.
 
 **Verify:**
-- [ ] Contributions add up to the TWR and risk shares add up to 1.
-- [ ] Export opens in Excel with the new sheets.
+- [x] Contributions add up to the TWR and risk shares add up to 1 (tests in
+      USD and GBP with fees, a sale, a dividend and a withdrawal; live demo
+      book 1Y: +21.0 pts = +21.0%, cash bucket 0.0).
+- [ ] Export opens in Excel with the new sheets (opens in openpyxl, live
+      GBP export checked; the owner to open it in Excel).
+- [x] A simulated Yahoo split outage (NVDA, seeded demo book) leaves NVIDIA
+      out with a note, the rest computed; the page healed itself 44 s after
+      the outage lifted (120 shares); a restart during the outage used the
+      saved list.
 
 **Feedback log:**
+- 2026-10-11: Split-fetch miss. The owner chose **"leave it out, retry"**
+  over "compute anyway, warn" and "ledger only": with no known split list
+  for a holding, totals, chart and returns are computed without it; it stays
+  in the table with dashes and a "waiting for Yahoo's split history" note;
+  the page retries every minute. No number is ever off by a split factor.
+- 2026-10-11: Suggest round (chat mockups, four questions). The owner chose
+  every recommendation:
+  - **Default columns: today's 8 plus Contribution and Risk**; News read,
+    Market read, Dividends, Yield on cost and Analyst upside start off in a
+    Columns menu.
+  - **Risk share sits with weight as paired bars** in one cell (weight gray,
+    risk blue, exact figures on hover).
+  - **Suggested dividends: one grouped Attention item** ("4 dividends to add ·
+    $214 estimated", Review opens a list with Add per row and Add all as one
+    undoable batch). Never applied automatically.
+  - **Table foot: Cash, a Total row, then a collapsed "Closed (n)"** with the
+    sold-out holdings' realised profit and dividends.
+  - Taken as defaults (not asked): Contribution follows the period pill and
+    adds up to that period's Return with a "Cash and fees" line; risk share
+    uses the last year of daily returns at today's weights.
+- 2026-10-12: Owner review of the installed build (real book, six points).
+  Chosen from chat mockups:
+  - **Holdings headers "kicker"**: 11px caps, tracked, a step brighter than
+    muted (`--th-ink`); every label ends on its numbers' right edge, the sort
+    arrow hangs in the padding. "Weight · Risk" became **"Weight & Risk"**.
+  - **Chart**: more air above and below, **SMA 20/50/200** pills (shared with
+    the Portfolio chart), the dashed flat line replaced by a **solid stepped
+    "money you put in" line** labelled "Put in €Xk" at its right end (it was
+    that line all along, flat because nothing went in or out over 1Y).
+  - **Opening fast: show the last page at once, then refresh** ("Updated
+    hh:mm · refreshing…"), rather than only fresh numbers.
+  - Asked: why the My Investments 1Y return is far below the Portfolios book
+    tab's. Both were re-computed from a scratch copy of the owner's book and
+    are right (Findings).
 
 **Findings:**
+- **Opening My Investments took about 30 s of Yahoo on a cold launch** (a
+  book of 20+ holdings, two of them young listings, 2026-10-12), behind
+  "Reading your prices". Causes and fixes:
+  - the page asked twice at once (`bookLoadWeights` raised `INV.seq`, so the
+    first answer was thrown away): both now share `INV.loading`;
+  - each young listing's stand-in candidates that Yahoo had no batch data
+    for went through `_bulk_close`'s one-by-one retries (up to ~5 s each, 16
+    s in all): candidates now use `retry=False`;
+  - the stand-in lookup (four Yahoo calls) repeated every launch: found
+    stand-ins are kept a week in `state/proxies.json`;
+  - closes, stand-ins and the benchmark download in one worker while every
+    currency's history comes in parallel (`fx.prefetch_usd_series`, Ticker
+    history, which can run beside a download);
+  - the server computes the page at startup and keeps it a minute
+    (`investments.page`, one computation per currency at a time), and the
+    last good page is on disk (`state/book_cache.json`): the window opens
+    on it while the fresh one computes.
+  Measured: a cold compute about 30 s -> 9 s, identical figures; the desktop
+  window opens at +7.5 s on the saved page, fresh numbers follow.
+- **My Investments' 1Y return vs the Portfolios book tab's Period return:
+  both correct, different questions.** The gap on the owner's real book (a
+  year of buy-and-hold, no trades) was taken apart step by step on a scratch
+  copy, each step re-computed on the same prices:
+  1. the book itself (the shares held, dividends paid out): the base;
+  2. **hindsight weights, about +5.6 pts**: the tab starts the year at
+     *today's* weights, which already favour the year's winners. Holding
+     today's weights from day one instead of what was held then is
+     (today's weight - weight then) x the holding's return, summed; one big
+     winner that was a small position a year ago and one loser that was a
+     big one account for most of it;
+  3. **daily rebalancing, about +2.4 pts**: the tab resets to those weights
+     every day, selling what rose and buying what fell, which pays in a
+     volatile basket; the book never rebalanced;
+  4. **dividends reinvested, about +1 pt**: the tab uses dividend-adjusted
+     closes (each payout bought back into the same share); the book pays
+     them out as cash;
+  the steps add up to the tab's figure to 0.01 pt (and the tab's own number
+  was reproduced exactly from its saved rows). Of the book's own return, the
+  price part is about 12 pts and dividends about 2.3; each holding's
+  contribution matched its price change plus dividends within 0.1 pts.
+  Side notes: a holding's early prices can come from a stand-in listing, as
+  the page warns; and imported entries that are today's average costs dated
+  early on skew ALL and the first days, not 1Y.
+- **yfinance never raised on a failed split fetch.** `Ticker.splits` reads
+  `history(period="max")`, which turns a failed download into an empty frame,
+  so `_fetch_splits` returned `[]` ("no splits"), cached for 12 h (not the
+  10-minute miss TTL the roadmap assumed: that only caught the rarer None).
+  It now reads the history itself and calls an empty one a failure.
+- Leaving a holding out removes its cash flows too ("as if never bought"),
+  so Value, Total profit and TWR stay one coherent book; the only figure the
+  owner would see differ from the broker is Cash, and the Attention note says
+  the holding is out. Positions are independent in the ledger and a cash
+  shortfall is an implied deposit, so dropping one holding can't break the
+  replay of the others.
+- Writes touching a pending holding are refused rather than accepted
+  unchecked: an accepted edit could break once the splits arrive (a
+  trade-basis sale checked against current-basis shares).
+- **Contribution needed the ledger's per-holding flows.** `ledger.Day` now
+  records the money into each holding per day (buys less sells less its
+  dividends, fees left out); with the opening holdings at market value, the
+  holdings' day P&L plus a "Cash and fees" remainder is exactly the TWR's
+  daily return, so Carino linking adds up to the headline Return to 1e-8.
+- Risk share is the same whether cash is in the weights or not (cash has no
+  variance and RC is homogeneous of degree 0), so it is safe to show beside
+  the portfolio weight; the hover says "cash carries none".
+- **Adversarial review (owner's /verify, 2026-10-12)** fixed, each with a
+  test:
+  - a ticker Yahoo doesn't carry (delisted) sat "pending" forever and
+    blocked its own edits: yfinance reports an outage and an unknown ticker
+    the same way, so the page's price download decides (prices for the
+    benchmark but none for it = not on Yahoo: trades as entered, a warning,
+    asked again in 12 h);
+  - a day that lost everything (a zero close on a one-holding book) crashed
+    the Carino link and would have 500ed the page;
+  - the split cache's dict could change size mid-save between a page load
+    and the refresh job (now under a lock);
+  - one listing younger than a month blanked every holding's risk bar (it is
+    now left out alone);
+  - "Add all" on more than 500 suggested dividends was refused (limit 5,000);
+  - a note starting with "=" became a live formula in the Excel export;
+  - yield on cost showed 0% instead of nothing when the cost or rate was
+    missing; a sort by a column switched off stayed applied invisibly;
+    switching Weight off hid the risk bars while Risk stayed ticked;
+  - analyst upside was blank until the Portfolios book tab had loaded once:
+    it now falls back to any saved portfolio's cached row.
+  Checked clean: bad input on the dividends route (400/409), cross-origin
+  and non-JSON posts (403), odd display currencies (contributions add up in
+  USD, GBP and JPY), no key in any log or response, a 20-year 40-share
+  800-trade book (contributions exact, risk shares sum to 1; the time is in
+  Phase 3's price handling), and live: Portfolios refresh with News (Finnhub
+  5 calls, NIM 13), Optimize (40,000 portfolios), desktop boot offscreen.
+- The demo book has 58 unrecorded payouts, so the review list scrolls
+  (340 px). Analyst upside reads the Portfolios tab's cached book rows: it
+  is a dash until that tab has loaded the book once.
 
 ---
 

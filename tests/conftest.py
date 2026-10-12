@@ -44,4 +44,9 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     from convexity import symbol_db
 
     monkeypatch.setattr(symbol_db, "yahoo_lookup", lambda *a, **k: [])
+    # My Investments' parallel FX prefetch is network too: off (the tests
+    # stub the FX paths the page reads).
+    from convexity import fx
+
+    monkeypatch.setattr(fx, "prefetch_usd_series", lambda *a, **k: None)
     yield home

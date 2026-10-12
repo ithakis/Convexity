@@ -310,7 +310,9 @@ def _mcap_bucket(mcap: float | None) -> str:
     return "Micro (<$300M)"
 
 
-def _bulk_close(symbols: list[str], period: str, adjusted: bool = True) -> pd.DataFrame:
+def _bulk_close(
+    symbols: list[str], period: str, adjusted: bool = True, retry: bool = True
+) -> pd.DataFrame:
     """Close prices indexed by date, columns = symbols (those that returned data).
 
     `period` is an app label ("1Y") or a raw yfinance period ("2y", "10y").
@@ -324,7 +326,12 @@ def _bulk_close(symbols: list[str], period: str, adjusted: bool = True) -> pd.Da
     matches the ledger's quantities in today's shares. These closes have their
     own cache key (``|raw``), store no bars (the portfolio's OHLC is
     adjusted), and bring each symbol's dividends (per current share, quote
-    unit: pence for LSE) to ``cache._dividends_put``."""
+    unit: pence for LSE) to ``cache._dividends_put``.
+
+    ``retry=False`` skips the one-by-one retries (each sleeps up to ~5 s):
+    for stand-in candidates, where a line Yahoo has no batch data for is
+    simply not a candidate. On a book with two young listings the retries
+    were 16 of a cold page's 26 seconds (2026-10-12)."""
     symbols = list(dict.fromkeys(symbols or []))
     if not symbols:
         return pd.DataFrame()
@@ -386,6 +393,10 @@ def _bulk_close(symbols: list[str], period: str, adjusted: bool = True) -> pd.Da
                     continue
 
         missing = [s for s in to_fetch if s not in got]
+        if not retry:
+            for s in missing:
+                _bulk_close_put(s, key, pd.Series(dtype=float))
+            missing = []
         for i, s in enumerate(missing):
             delay = 0.4 + 0.2 * min(i, 6)
             time.sleep(delay)
@@ -627,12 +638,59 @@ def _after_gap(col: pd.Series):
     return col.index[pos[big[-1] + 1]] if len(big) else None
 
 
-def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
-    """The same company's other listings: its pack group, else Yahoo's live
-    Lookup by name (cached a day)."""
+_PROXY_DISK_TTL_S = 7 * 24 * 3600.0  # a company's other listings rarely change
+
+
+def _proxy_disk() -> dict:
+    """Found stand-ins saved across launches (``state/proxies.json``): the
+    Lookup behind them is several Yahoo calls, which every launch of My
+    Investments used to repeat. Market data only; a bad file is ignored."""
+    import json
+
+    from convexity import paths
+
+    try:
+        d = json.loads(paths.state_file("proxies").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _proxy_disk_put(symbol: str, found: tuple[str, ...]) -> None:
+    import json
+
+    from convexity import paths
+    from convexity.persistence import _atomic_write
+
+    d = _proxy_disk()
+    d[symbol] = [time.time(), list(found)]
+    with contextlib.suppress(OSError):
+        _atomic_write(paths.state_file("proxies"), json.dumps(d, sort_keys=True))
+
+
+def known_proxies(symbol: str) -> tuple[str, ...]:
+    """Stand-ins already found for ``symbol`` (memory or disk), never a
+    fetch: My Investments downloads their closes with the holdings'."""
     hit = _PROXY.get(symbol)
     if hit and time.time() - hit[0] < _PROXY_TTL_S:
         return hit[1]
+    row = _proxy_disk().get(symbol)
+    if (isinstance(row, list) and len(row) == 2 and isinstance(row[0], int | float)
+            and time.time() - row[0] < _PROXY_DISK_TTL_S
+            and isinstance(row[1], list) and all(isinstance(t, str) for t in row[1])):  # fmt: skip
+        return tuple(row[1])
+    return ()
+
+
+def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
+    """The same company's other listings: its pack group, else Yahoo's live
+    Lookup by name (cached a day in memory, a week on disk)."""
+    hit = _PROXY.get(symbol)
+    if hit and time.time() - hit[0] < _PROXY_TTL_S:
+        return hit[1]
+    if saved := known_proxies(symbol):
+        _PROXY[symbol] = (time.time(), saved)
+        return saved
     from convexity import symbol_db as sdb
 
     out: list[str] = []
@@ -660,6 +718,8 @@ def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
     found = tuple(dict.fromkeys(x.ticker for x in out))[:6]
     # An empty answer (often a timeout) is asked again in ten minutes.
     _PROXY[symbol] = (time.time() - (0 if found else _PROXY_TTL_S - 600.0), found)
+    if found:
+        _proxy_disk_put(symbol, found)
     return found
 
 
@@ -677,7 +737,12 @@ def extend_history(
     from then); without it a line is short when it starts later than most
     of the frame's lines."""
 
-    fetch = fetch or (lambda syms, period: _bulk_close(syms, period, adjusted=adjusted))
+    def fetch_default(syms, period, retry=True):
+        if retry:  # the plain call, so a stubbed _bulk_close needs no ``retry``
+            return _bulk_close(syms, period, adjusted=adjusted)
+        return _bulk_close(syms, period, adjusted=adjusted, retry=False)
+
+    fetch = fetch or fetch_default
 
     if wide is None or wide.empty or len(wide.index) <= _SHORT_ROWS:
         return wide, {}
@@ -743,7 +808,10 @@ def _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch) -> Non
     if not cands:
         return
     try:
-        pw = fetch(list(cands), period)
+        try:
+            pw = fetch(list(cands), period, retry=False)
+        except TypeError:  # a fetch that takes no ``retry`` (tests' stubs)
+            pw = fetch(list(cands), period)
     except Exception:
         return
     start = out.index[0] + pd.Timedelta(days=7)
@@ -767,7 +835,11 @@ def _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch) -> Non
         # same line is fine, and a dividend a year is a small error next
         # to no history at all.
         with contextlib.suppress(Exception):
-            clean = usable(_bulk_close(list(cands), period, adjusted=False)) or clean
+            try:
+                raw = _bulk_close(list(cands), period, adjusted=False, retry=False)
+            except TypeError:  # tests' stubs take no ``retry``
+                raw = _bulk_close(list(cands), period, adjusted=False)
+            clean = usable(raw) or clean
     if not clean:
         return
     # The first line (in _proxy_candidates' order: exchanges before OTC)

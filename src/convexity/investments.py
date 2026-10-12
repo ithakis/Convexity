@@ -70,6 +70,7 @@ _PERIOD_MONTHS = {"1M": 1, "3M": 3, "1Y": 12, "3Y": 36}
 
 SOURCES = ("manual", "quick", "import")  # what the page may send; "demo" is the seed script's
 IMPORT_MAX = 500  # entries in one Apply
+DIVIDENDS_MAX = 5000  # suggested dividends in one "Add all"
 _MAX_NUMBER = 1e12  # far above any real holding; keeps every sum finite (JSON has no inf)
 _FIELDS = ("date", "type", "symbol", "qty", "price", "fee", "amount", "tax", "ratio",
            "fx_rate", "ccy", "qty_basis", "note")  # fmt: skip
@@ -196,48 +197,120 @@ def _now() -> str:
 # Each fetch is a small function so the tests can stub the network. Every
 # cache stores failures only briefly (CLAUDE.md §9: never cache empty forever).
 
-_SPLITS: dict[str, tuple[float, list]] = {}
-_SPLITS_TTL, _MISS_TTL = 12 * 3600.0, 600.0
+# Split history. A failed fetch is not "no splits" (2026-10-11): yfinance
+# swallows a failed download into an empty frame, and caching that as "no
+# splits" replayed a pre-split trade at face value, so the ledger oversold
+# and a sound book showed as broken. So: _SPLITS times the next try (12 h
+# after an answer, a minute after a failure), _SPLITS_GOOD keeps the last
+# good list per ticker (a failure never replaces it), and the good lists are
+# kept on disk so a restart during a Yahoo outage still has them. A ticker
+# with no good list at all is "pending": book() leaves it out of the totals.
+_SPLITS: dict[str, tuple[float, bool]] = {}
+_SPLITS_GOOD: dict[str, list[tuple[str, float]]] = {}
+_SPLITS_TTL, _MISS_TTL = 12 * 3600.0, 60.0
+_splits_loaded: str | None = None  # the file the good lists were read from
+# Page loads and the refresh job run book() on different threads: the good
+# lists change under one lock (never held across a Yahoo call).
+_SPLITS_LOCK = threading.RLock()
 
 
 def _fetch_splits(symbol: str) -> list[tuple[str, float]] | None:
+    """Yahoo's splits for ``symbol``; None when Yahoo didn't answer (an
+    error, or no price history at all), [] when it answered with none."""
     import yfinance as yf
 
     try:
-        s = yf.Ticker(symbol).splits
+        h = yf.Ticker(symbol).history(period="max", actions=True, auto_adjust=False)
     except Exception:
         return None
-    if s is None:
+    if h is None or h.empty:
         return None
+    if "Stock Splits" not in h.columns:
+        return []
+    s = h["Stock Splits"]
     return [(ts.date().isoformat(), float(r)) for ts, r in s.items() if r and float(r) > 0]
 
 
+def _splits_file():
+    return paths.state_file("splits")
+
+
+def _load_good_splits() -> None:
+    """The last good lists from disk, once per data folder; a malformed file
+    is ignored (it is only a cache of Yahoo's answers)."""
+    global _splits_loaded
+    path = _splits_file()
+    with _SPLITS_LOCK:
+        if _splits_loaded == str(path):
+            return
+        _splits_loaded = str(path)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            got = {str(sym): [(str(d), float(r)) for d, r in rows if float(r) > 0]
+                   for sym, rows in data.items()}  # fmt: skip
+        except Exception as exc:
+            print(f"[investments] split cache unreadable, ignored: {type(exc).__name__}")
+            return
+        for sym, rows in got.items():
+            _SPLITS_GOOD.setdefault(sym, rows)
+
+
+def _save_good_splits() -> None:
+    from convexity.persistence import _atomic_write
+
+    path = _splits_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _SPLITS_LOCK:
+            body = {s: [list(x) for x in v] for s, v in sorted(_SPLITS_GOOD.items())}
+            _atomic_write(path, json.dumps(body, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        print(f"[investments] split cache not saved: {type(exc).__name__}")
+
+
 def market_splits(symbols, *, fetch: bool = True) -> dict[str, list[tuple[str, float]]]:
-    """Yahoo's split history per symbol, cached. ``fetch=False`` answers from
-    the cache only (the cheap symbol list at startup)."""
-    out, now = {}, time.time()
+    """Yahoo's split history per symbol: the last good list, refetched when
+    due. ``fetch=False`` answers from memory and disk only (the cheap symbol
+    list at startup). A symbol with no good list is missing from the answer;
+    ``splits_unknown`` names it."""
+    _load_good_splits()
+    out, now, changed = {}, time.time(), False
     for sym in symbols:
         hit = _SPLITS.get(sym)
-        if hit and now - hit[0] < (_SPLITS_TTL if hit[1] is not None else _MISS_TTL):
-            got = hit[1]
-        elif fetch:
+        due = not hit or now - hit[0] >= (_SPLITS_TTL if hit[1] else _MISS_TTL)
+        if fetch and due:
             got = _fetch_splits(sym)
-            _SPLITS[sym] = (now, got)
-        else:
-            got = None
-        if got:
-            out[sym] = got
+            with _SPLITS_LOCK:
+                _SPLITS[sym] = (now, got is not None)
+                if got is None:
+                    print(f"[investments] split history unavailable: {sym}")
+                elif _SPLITS_GOOD.get(sym) != got:
+                    _SPLITS_GOOD[sym], changed = got, True
+        good = _SPLITS_GOOD.get(sym)
+        if good:
+            out[sym] = good
+    if changed:
+        _save_good_splits()
     return out
 
 
-def _closes(symbols: list[str], period: str):
+def splits_unknown(symbols) -> set[str]:
+    """Symbols whose split history has never loaded (call after
+    ``market_splits``): their trade-basis quantities can't be trusted."""
+    _load_good_splits()
+    return {s for s in symbols if s not in _SPLITS_GOOD}
+
+
+def _closes(symbols: list[str], period: str, retry: bool = True):
     """Daily closes as traded, quote unit, ``period`` back. Not
     dividend-adjusted, because the book books dividends as cash (an adjusted
     close would count each one twice); still split-adjusted, like the
     ledger's quantities (roadmap Appendix B)."""
     from convexity.analytics import _bulk_close
 
-    return _bulk_close(symbols, period, adjusted=False)
+    return _bulk_close(symbols, period, adjusted=False, retry=retry)
 
 
 def _bench_closes(period: str, ticker: str):
@@ -336,6 +409,7 @@ def refresh_market(symbols: list[str], *, progress=None, cancel=None, chunk: int
     between chunks. Never touches the book file."""
     from convexity import cache
 
+    _PAGE_MEMO.clear()  # the page recomputes with what this fetches
     raw = _load() or _new_book()
     first = min((e["date"] for e in raw["entries"]), default=date.today().isoformat())
     span = _span(first)
@@ -482,7 +556,13 @@ def price_on(symbol: str, iso: str) -> dict:
         raw = float(col.iloc[-1]) if col is not None and len(col) else None
         on = col.index[-1].date().isoformat() if raw is not None else None
         if raw is not None:
-            raw *= ledger.split_factor(market_splits([symbol]).get(symbol, []), on)
+            sp = market_splits([symbol])
+            # No split history yet: no price beats one off by a split factor.
+            raw = (
+                None
+                if splits_unknown([symbol])
+                else raw * ledger.split_factor(sp.get(symbol, []), on)
+            )
         qccy = _fetch_quote_ccy(symbol)
     except Exception:
         raw, on, qccy = None, None, None
@@ -615,13 +695,77 @@ def _trade_basis_symbols(entries: list[dict]) -> list[str]:
     )
 
 
+def _split_state(entries: list[dict]) -> tuple[dict, set[str], set[str]]:
+    """The splits to replay with; the trade-basis symbols whose split
+    history has never loaded ("pending": their quantities can't be
+    trusted); and those Yahoo doesn't carry at all, whose trades count as
+    entered, as before Phase 4."""
+    syms = _trade_basis_symbols(entries)
+    splits = ledger.merge_splits(entries, market_splits(syms))
+    pending = splits_unknown(syms)
+    unlisted = _not_on_yahoo(pending, entries) if pending else set()
+    return splits, pending - unlisted, unlisted
+
+
+def _not_on_yahoo(symbols: set[str], entries: list[dict]) -> set[str]:
+    """Symbols Yahoo has no prices for while it does answer for the
+    benchmark fund: a ticker it doesn't carry (delisted, or a line it never
+    had), whose split history can never load. yfinance reports an outage and
+    an unknown ticker the same way ("no timezone"), so the page's own price
+    download tells them apart; in an outage the benchmark is missing too and
+    the holdings stay pending. Same cached downloads as ``_performance``."""
+    span = _span(min(e["date"] for e in entries))
+    try:
+        bench = _bench_closes(span, INV_BENCHMARKS[bench_key()][0])
+        if bench is None or not np.isfinite(np.asarray(bench, dtype=float)).any():
+            return set()
+        closes = _closes(sorted(symbols), span)
+    except Exception:
+        return set()
+    has = getattr(closes, "columns", ())
+    out = {s for s in symbols if s not in has or not closes[s].notna().any()}
+    with _SPLITS_LOCK:
+        for s in out:  # asked again in 12 h, not every minute
+            _SPLITS[s] = (time.time(), True)
+    return out
+
+
+def _without(entries: list[dict], symbols: set[str]) -> list[dict]:
+    """The ledger minus every entry of ``symbols``, as if never bought: a
+    holding's positions are independent of the others', and its cash flows
+    go with it (a shortfall elsewhere is an implied deposit, never an error)."""
+    return [e for e in entries if e.get("symbol") not in symbols] if symbols else entries
+
+
+def _names(raw: dict, symbols) -> str:
+    n = [_name(raw, s) for s in sorted(symbols)]
+    return n[0] if len(n) == 1 else ", ".join(n[:-1]) + " and " + n[-1]
+
+
+def _touched(before: list[dict], after: list[dict]) -> set[str]:
+    """Symbols of the entries a change adds, removes or edits."""
+    old = {e.get("id"): e for e in before}
+    new = {e.get("id"): e for e in after}
+    return {e.get("symbol") for k in old.keys() | new.keys()
+            for e in (old.get(k), new.get(k)) if e and old.get(k) != new.get(k)} - {None}  # fmt: skip
+
+
 def _check(raw: dict, entries: list[dict], changed: str | None = None) -> None:
     """Replay the candidate ledger. A refusal is explained in plain words:
     about the entry just changed, or about the later entry it breaks (an
-    edit that leaves a later sell short of shares)."""
+    edit that leaves a later sell short of shares).
+
+    A change to a holding whose split history hasn't loaded is refused until
+    it has (it can't be checked); the rest of the book replays without it."""
     warnings: list[str] = []
     base = raw["settings"].get("base_ccy", "USD")
-    splits = ledger.merge_splits(entries, market_splits(_trade_basis_symbols(entries)))
+    splits, pending, _ = _split_state(entries)
+    if hit := pending & _touched(raw["entries"], entries):
+        raise Refused(
+            f"Yahoo's split history for {_names(raw, hit)} didn't load, so this can't be "
+            "checked yet. Try again in a minute."
+        )
+    entries = _without(entries, pending)
     try:
         ledger.replay(entries, base_ccy=base, splits=splits,
                       fx_at=_make_fx_at(base, warnings, [e["date"] for e in entries]))  # fmt: skip
@@ -676,7 +820,7 @@ def _mutate(base_rev, change, ccy=None) -> dict:
         raw["entries"] = entries
         raw["rev"] += 1
         _save(raw)
-    return book(ccy)
+    return page(ccy, fresh=True)
 
 
 def _record(raw: dict, verb: str, e: dict, undo: list, redo: list):
@@ -699,13 +843,13 @@ def add(fields: dict, base_rev, ccy=None) -> dict:
     return _mutate(base_rev, change, ccy)
 
 
-def _clean_rows(raw: dict, items) -> list[dict]:
+def _clean_rows(raw: dict, items, source: str = "import", most: int = IMPORT_MAX) -> list[dict]:
     """An import's rows as entries, each cleaned like a hand-added one; the
     first refusal names its row and nothing is kept."""
     if not isinstance(items, list) or not items:
         raise BookError("Nothing to add.")
-    if len(items) > IMPORT_MAX:
-        raise BookError(f"Add at most {IMPORT_MAX} entries at a time.")
+    if len(items) > most:
+        raise BookError(f"Add at most {most} entries at a time.")
     batch, out = "b_" + secrets.token_hex(6), []
     for n, fields in enumerate(items, 1):
         if not isinstance(fields, dict):
@@ -714,7 +858,7 @@ def _clean_rows(raw: dict, items) -> list[dict]:
             e = _clean(raw, fields)
         except BookError as exc:
             raise BookError(f"Row {n}: {exc.message}") from None
-        e |= {"id": "e_" + secrets.token_hex(6), "source": "import", "batch": batch,
+        e |= {"id": "e_" + secrets.token_hex(6), "source": source, "batch": batch,
               "created_at": _now(), "updated_at": _now()}  # fmt: skip
         out.append(e)
     return out
@@ -776,6 +920,29 @@ def add_batch(items, base_rev, aliases=None, ccy=None) -> dict:
         raw["journal"] = (raw["journal"] + [item])[-JOURNAL_MAX:]
         raw["redo"] = []
         print(f"[investments] import {new[0]['batch']} {n} entries")
+        return _apply(raw["entries"], item["redo"]), None
+
+    return _mutate(base_rev, change, ccy)
+
+
+def add_dividends(items, base_rev, ccy=None) -> dict:
+    """The rail's suggested dividends, added on the owner's click (one or
+    all): dividend entries only, in one journal item so one Undo takes them
+    all back. Each replaces its estimate (the matching window in
+    ``ledger.estimate_dividends``)."""
+
+    def change(raw):
+        if isinstance(items, list) and any(not isinstance(x, dict) or x.get("type") != "dividend"
+                                           for x in items):  # fmt: skip
+            raise BookError("Only dividends can be added here.")
+        # Twenty years of quarterly payouts on forty holdings is 3,200.
+        new = _clean_rows(raw, items, source="suggested", most=DIVIDENDS_MAX)
+        n = len(new)
+        item = {"label": f"Added {n} dividend{'' if n == 1 else 's'} from Yahoo",
+                "undo": [{"del": e["id"]} for e in new], "redo": [{"put": e} for e in new]}  # fmt: skip
+        raw["journal"] = (raw["journal"] + [item])[-JOURNAL_MAX:]
+        raw["redo"] = []
+        print(f"[investments] dividends {new[0]['batch']} {n} entries")
         return _apply(raw["entries"], item["redo"]), None
 
     return _mutate(base_rev, change, ccy)
@@ -843,19 +1010,27 @@ def check_rows(items) -> dict[int, dict]:
             problems[i] = {"kind": "invalid", "message": exc.message}
     kept = list(raw["entries"])
     warnings: list[str] = []
+    # A holding whose split history hasn't loaded can't be checked: its rows
+    # say so (never a false oversell), and the rest replays without it.
+    splits, pending, _ = _split_state(kept + rows)
+    for e in rows:
+        if e.get("symbol") in pending:
+            problems[int(e["id"][1:])] = {
+                "kind": "splits_pending",
+                "message": "Yahoo's split history for this share didn't load. Try again in a minute.",
+            }
+    kept, rows = _without(kept, pending), _without(rows, pending)
     # The usual case, everything books, costs one replay; only a refusal
     # pays for the row-by-row pass that finds which rows are at fault.
     whole = kept + rows
     dates = [e["date"] for e in whole]
     try:
-        ledger.replay(whole, base_ccy=base, fx_at=_make_fx_at(base, warnings, dates),
-                      splits=ledger.merge_splits(whole, market_splits(_trade_basis_symbols(whole))))  # fmt: skip
+        ledger.replay(whole, base_ccy=base, fx_at=_make_fx_at(base, warnings, dates), splits=splits)
         return problems
     except ledger.LedgerError:
         pass
     for e in sorted(rows, key=lambda x: x["date"]):
         trial, i = kept + [e], int(e["id"][1:])
-        splits = ledger.merge_splits(trial, market_splits(_trade_basis_symbols(trial)))
         try:
             ledger.replay(
                 trial, base_ccy=base, fx_at=_make_fx_at(base, warnings, dates), splits=splits
@@ -1129,6 +1304,11 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
     perf_in = np.zeros(n)  # the same, with opening holdings at their market value
     open_mv = np.zeros(n)  # of which opening holdings, in at the day's close
     implied = 0.0
+    # Per holding, for its contribution: shares held, money into it (fees
+    # left out) and opening holdings at the day's value, display currency.
+    qty_s = {s: np.zeros(n) for s in syms}
+    flow_s = {s: np.zeros(n) for s in syms}
+    open_s = {s: np.zeros(n) for s in syms}
     j, held, cur_cash = 0, {}, 0.0
     for i, d in enumerate(dates):
         while j < len(b.days) and b.days[j].date <= d:
@@ -1141,8 +1321,13 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
                 if np.isfinite(vps[s][i]):
                     perf_in[i] += q * vps[s][i] - cost * cr[i]
                     open_mv[i] += q * vps[s][i]
+                    open_s[s][i] += q * vps[s][i]
+            for s, f in day.flows.items():
+                flow_s[s][i] += f * cr[i]
             held, cur_cash = day.qty, day.cash
             j += 1
+        for s, q in held.items():
+            qty_s[s][i] = q
         cash[i] = cur_cash * cr[i]
         value[i] = cash[i] + sum(q * vps[s][i] for s, q in held.items() if np.isfinite(vps[s][i]))
 
@@ -1159,6 +1344,8 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
         if dd:
             events[s] = list(zip(dd, dvals, strict=True))
     est_by_sym: dict[str, float] = {}
+    est_s = {s: np.zeros(n) for s in syms}
+    suggested = []  # each estimate, for the rail's "dividends to add"
     for ex, s, q, per in ledger.estimate_dividends(b, events, recorded):
         i = int(np.searchsorted(keys, np.datetime64(ex)))
         m = mult.get(major_ccy(qccy[s]))
@@ -1167,8 +1354,12 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
         amt = float(q * price_in_major(per, qccy[s]) * m[i])
         paid[i] += amt
         est_by_sym[s] = est_by_sym.get(s, 0.0) + amt
+        est_s[s][i] += amt
+        suggested.append({"symbol": s, "date": ex, "qty": float(q), "ccy": major_ccy(qccy[s]),
+                          "per_share": float(price_in_major(per, qccy[s])), "amount": amt})  # fmt: skip
 
     idx = ledger.twr_index([(d, value[i], perf_in[i], paid[i]) for i, d in enumerate(dates)])
+    contrib_daily = _contrib_daily(syms, vps, qty_s, flow_s, open_s, est_s, value, perf_in, paid)
 
     # The benchmark (total return) bought with the same money on the same days,
     # one line per period: it starts with your value on the period's first
@@ -1213,7 +1404,7 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
 
     per = {k: {} for k in ("twr", "bench_twr", "twr_ann", "mwr", "mwr_ann", "years", "since_start",
                            "value_change", "net_in", "vol", "sharpe", "sortino", "max_dd",
-                           "bench_vol")}  # fmt: skip
+                           "bench_vol", "contrib")}  # fmt: skip
     for p in PERIODS:
         i0 = starts[p]
         days = (last - date.fromisoformat(dates[i0])).days
@@ -1233,6 +1424,7 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
         per["net_in"][p] = float(np.sum(d_in[i0 + 1 :] - w_out[i0 + 1 :]))
         for k, v in _risk(idx, traded, i0, keys, rf_daily).items():
             per[k][p] = v
+        per["contrib"][p] = _contrib_linked(contrib_daily, i0)
         per["bench_vol"][p] = (
             _risk(bench_index, traded, i0, keys, rf_daily)["vol"]
             if bench_index is not None
@@ -1264,7 +1456,86 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
     return {"series": series if priced else None, "periods": per if priced else None,
             "cash": float(cash[-1]), "net_deposits": float(np.sum(d_in - w_out)),
             "implied": float(implied), "month": month, "close": close, "last_close": last_close, "mult": mult,
-            "qccy": qccy, "est": est_by_sym}  # fmt: skip
+            "qccy": qccy, "est": est_by_sym, "suggested": suggested,
+            "risk_share": _risk_share(syms, vps, qty_s, traded, starts["1Y"])}  # fmt: skip
+
+
+CASH_BUCKET = "_cash"  # the contribution of cash, fees and currency on cash
+
+
+def _contrib_daily(syms, vps, qty_s, flow_s, open_s, est_s, value, perf_in, paid) -> pd.DataFrame:
+    """Each holding's share of each day's TWR, as a fraction of that day's
+    start capital (V_{t-1} + D_t, the TWR's own denominator, Appendix B).
+
+    A holding's day P&L is its value change less the money put into it
+    (fees left out), with dividends it paid (recorded or estimated) counted
+    as its income; an opening holding enters at that day's value, so its
+    first day is 0. What the holdings don't explain is ``CASH_BUCKET``: fees,
+    and in another display currency what the currency did to cash. The row
+    sums are exactly the TWR's daily returns."""
+    n = len(value)
+    prev = np.concatenate([[0.0], value[:-1]])
+    base = prev + perf_in
+    ok = base > 1e-9
+    r = np.where(ok, (value + paid) / np.where(ok, base, 1.0) - 1.0, 0.0)
+    cols = {}
+    for s in syms:
+        pv = qty_s[s] * np.nan_to_num(vps[s], nan=0.0)
+        pnl = pv - np.concatenate([[0.0], pv[:-1]]) - flow_s[s] - open_s[s] + est_s[s]
+        cols[s] = np.where(ok, pnl / np.where(ok, base, 1.0), 0.0)
+    df = pd.DataFrame(cols, index=range(n))
+    df[CASH_BUCKET] = r - (df.sum(axis=1).to_numpy() if syms else 0.0)
+    return df
+
+
+def _contrib_linked(daily: pd.DataFrame, i0: int) -> dict[str, float]:
+    """The period's contributions in percentage points, Carino-linked so
+    they add up exactly to the period's TWR (``idx[-1] / idx[i0] - 1``)."""
+    from convexity.analytics import _carino_link
+
+    rows = daily.iloc[i0 + 1 :]
+    if rows.empty:
+        return dict.fromkeys(daily.columns, 0.0)
+    # A day that loses everything (r = -100%, a zero close from Yahoo on a
+    # one-holding book) has no log link: no figures rather than a 500 or a
+    # NaN, which isn't JSON.
+    try:
+        linked = _carino_link(rows)
+    except (ValueError, ZeroDivisionError):
+        return dict.fromkeys(daily.columns)
+    return {k: v * 100 if math.isfinite(v) else None for k, v in linked.items()}
+
+
+def _risk_share(syms, vps, qty_s, traded, i0: int) -> dict[str, float]:
+    """Each holding's share of the holdings' variance at today's weights:
+    RC_i = w_i (Σw)_i / σ², Σ from the last year of daily returns in the
+    display currency (Ledoit-Wolf, ``mpt.annualized_cov``). Adds up to 1;
+    {} with fewer than 20 shared trading days."""
+    from convexity import mpt
+
+    held = [s for s in syms if qty_s[s][-1] > 1e-9 and np.isfinite(vps[s][-1])]
+    if not held:
+        return {}
+    days = np.flatnonzero(traded[i0:]) + i0
+    px = pd.DataFrame({s: vps[s][days] for s in held})
+    rets = px.pct_change(fill_method=None).iloc[1:]
+    # A listing younger than a month (an IPO) is left out rather than
+    # cutting everyone's window to its few days; it shows no figure.
+    held = [s for s in held if rets[s].notna().sum() >= 20]
+    rets = rets[held].dropna(how="any")
+    w = np.array([qty_s[s][-1] * vps[s][-1] for s in held])
+    if len(held) == 1:
+        return {held[0]: 1.0}
+    if len(held) < 1 or len(rets) < 20 or w.sum() <= 0:
+        return {}
+    w = w / w.sum()
+    cov = mpt.annualized_cov(rets, "daily", "ledoit").to_numpy()
+    sw = cov @ w
+    var = float(w @ sw)
+    if not np.isfinite(var) or var <= 0:
+        return {}
+    out = {s: float(w[k] * sw[k] / var) for k, s in enumerate(held)}
+    return out if all(math.isfinite(v) for v in out.values()) else {}
 
 
 def book(ccy: str | None = None) -> dict:
@@ -1287,7 +1558,26 @@ def book(ccy: str | None = None) -> dict:
     base = raw["settings"].get("base_ccy", "USD")
     disp = _display_ccy(ccy, base)
     inst, entries, warnings = raw["instruments"], raw["entries"], []
-    splits = ledger.merge_splits(entries, market_splits(_trade_basis_symbols(entries)))
+    splits, pending, unlisted = _split_state(entries)
+    if unlisted:
+        warnings.append(f"Yahoo has no history for {_names(raw, unlisted)}: "
+                        "trades are counted as you entered them, with no splits.")  # fmt: skip
+    if pending:
+        # No split history for these yet: leave them out rather than replay a
+        # pre-split trade at face value (owner's choice, 2026-10-11). The page
+        # reloads itself while ``splits_pending`` is set.
+        entries = _without(entries, pending)
+        who = _names(raw, pending)
+        warnings.append(f"{who} {'is' if len(pending) == 1 else 'are'} left out of the totals "
+                        "until Yahoo's split history loads. Retrying every minute.")  # fmt: skip
+        if not entries:
+            return {"empty": False, "waiting": f"Waiting for Yahoo's split history for {who}. "
+                                               "Retrying every minute.",
+                    "splits_pending": _pending_rows(raw, pending), "rev": raw["rev"],
+                    "ccy": _display_ccy(ccy, base), "entries": _entries_out(raw),
+                    "undo_label": _top(raw, "journal"), "redo_label": _top(raw, "redo"),
+                    "positions": [], "headline": None, "warnings": warnings}  # fmt: skip
+    _prefetch(raw, entries, base, disp)
     try:
         # The book replays in its base currency (cash, deposits, the value);
         # a second replay in the display currency gives each holding's cost and
@@ -1314,6 +1604,7 @@ def book(ccy: str | None = None) -> dict:
     bench = bench_key()
     perf = _performance(raw, b, entries, base, disp, splits, warnings, bench)
     ims = perf["month"]["ims"]
+    extras = _research_extras(sorted(bd.positions))
 
     positions, value_pos = [], 0.0
     for p in bd.open_positions():
@@ -1348,6 +1639,9 @@ def book(ccy: str | None = None) -> dict:
             "profit_fx": m.profit_fx if pccy != disp else None,
             "return_pct": m.unrealised / m.cost * 100 if m.cost > 0 else None,
             "note": note, "profit": m.unrealised + p.realised + p.dividends + est,
+            "risk_share": perf["risk_share"].get(p.symbol),
+            "yoc": _yield_on_cost(p.symbol, qccy, p.qty, m.cost, perf["mult"]),
+            **extras.get(p.symbol, {}),
         })  # fmt: skip
         value_pos += m.value
     value = value_pos + perf["cash"]
@@ -1355,13 +1649,20 @@ def book(ccy: str | None = None) -> dict:
         x["weight"] = x["value"] / value * 100 if value else None
     positions.sort(key=lambda x: -x["value"])
 
+    # Sold out: what each made, for the table's collapsed "Closed (n)".
+    closed = []
+    for p in bd.positions.values():
+        if p.qty > 1e-9 or p.symbol in pending:
+            continue
+        est = perf["est"].get(p.symbol, 0.0)
+        closed.append({"symbol": p.symbol, "name": _short(inst.get(p.symbol, {}).get("name") or p.symbol),
+                       "profit_sold": p.realised, "dividends": p.dividends, "dividends_est": est,
+                       "profit": p.realised + p.dividends + est})  # fmt: skip
+    closed.sort(key=lambda x: -x["profit"])
+
     est_total = sum(perf["est"].values())
-    if perf["est"]:
-        k = len(perf["est"])
-        warnings.append(
-            f"Dividends from {k} holding{'s' if k > 1 else ''} are estimated from Yahoo. "
-            "Add them for exact figures."
-        )
+    suggested = sorted(({**x, "name": _name(raw, x["symbol"])} for x in perf["suggested"]),
+                       key=lambda x: x["date"], reverse=True)  # fmt: skip
     per = perf["periods"] or {}
     sold = sum(p.realised for p in bd.positions.values())
     divs = sum(p.dividends for p in bd.positions.values())
@@ -1371,10 +1672,11 @@ def book(ccy: str | None = None) -> dict:
     # currency; that is the only part the holdings' own profit doesn't hold.
     cash_fx = profit_total - (held + sold + divs + est_total - bd.fees) if disp != base else 0.0
     out = {
-        "demo": all(e.get("source") == "demo" for e in entries),
+        "demo": all(e.get("source") == "demo" for e in raw["entries"]),
         "empty": False,
         "rev": raw["rev"],
         "ccy": disp,
+        "base_ccy": base,
         "benchmark": {"key": bench, "label": INV_BENCHMARKS[bench][1]},
         "benchmarks": [{"key": k, "label": v[1]} for k, v in INV_BENCHMARKS.items()],
         "headline": {
@@ -1409,19 +1711,237 @@ def book(ccy: str | None = None) -> dict:
                     "sortino",
                     "max_dd",
                     "bench_vol",
+                    "contrib",
                 )
             },
         },  # fmt: skip
-        "positions": positions,
+        "positions": positions + _pending_rows(raw, pending),  # left out: last, no figures
         "entries": _entries_out(raw),
         "undo_label": _top(raw, "journal"),
         "redo_label": _top(raw, "redo"),
         "warnings": warnings,
+        "splits_pending": _pending_rows(raw, pending),
+        "closed": closed,
+        "suggested_dividends": suggested,
         "upcoming": [],
         "attention": [],
     }
     if perf["series"]:
         out["series"] = perf["series"]
+    return out
+
+
+# ------------------------------------------------- the page, fast (2026-10-12)
+#
+# The page used to wait several seconds on every launch: ``book()`` reads two
+# years of prices, FX and the benchmark from Yahoo, every cache is in memory,
+# and the page asked twice at once. Three things fix it without ever showing
+# a number that wasn't computed from the ledger:
+#
+# - one computation per display currency at a time (a second caller waits for
+#   the first's answer instead of downloading it all again), kept for a minute;
+# - the last good page on disk (``state/book_cache.json``), keyed by the book's
+#   rev, the display currency and the benchmark: the page opens on it at once,
+#   marked as such, while the fresh one computes. Any change bumps the rev, so
+#   an old copy never stands in for an edited book;
+# - the server computes it once at startup (``server.start_server``), while
+#   the window is still loading.
+
+_PAGE_LOCKS: dict[str, threading.Lock] = {}
+_PAGE_GUARD = threading.Lock()
+_PAGE_MEMO: dict[tuple, tuple[float, dict]] = {}
+PAGE_MEMO_TTL = 60.0
+
+
+def _page_key(ccy) -> tuple | None:
+    """(rev, display currency, benchmark, day) or None for an unreadable book."""
+    try:
+        raw = _load()
+    except BookUnreadable:
+        return None
+    base = (raw or _new_book())["settings"].get("base_ccy", "USD")
+    return (raw["rev"] if raw else 0, _display_ccy(ccy, base), bench_key(), date.today().isoformat(),
+            str(_path()))  # fmt: skip
+
+
+def _healthy(out: dict) -> bool:
+    """A page worth keeping: computed, with prices, nothing left out."""
+    return bool(out.get("series")) and not any(
+        out.get(k) for k in ("empty", "broken", "waiting", "error", "splits_pending")
+    )
+
+
+def page(ccy: str | None = None, *, fresh: bool = False) -> dict:
+    """``book(ccy)`` for the page route: one computation per currency at a
+    time, reused for a minute, and saved to disk as the last good page."""
+    key = _page_key(ccy)
+    lock_key = key[1] if key else "?"
+    with _PAGE_GUARD:
+        lock = _PAGE_LOCKS.setdefault(lock_key, threading.Lock())
+    with lock:
+        hit = _PAGE_MEMO.get(key) if key and not fresh else None
+        if hit and time.monotonic() - hit[0] < PAGE_MEMO_TTL:
+            return hit[1]
+        t0 = time.monotonic()
+        out = book(ccy)
+        took = time.monotonic() - t0
+        if out.get("positions"):
+            print(f"[investments] book computed in {took:.1f}s ({out.get('ccy')})")
+        if key and _healthy(out):
+            _PAGE_MEMO.clear()  # one book: older keys are stale by definition
+            _PAGE_MEMO[key] = (time.monotonic(), out)
+            _save_cached_page(key, out)
+        return out
+
+
+def _cache_path():
+    return paths.state_file("book_cache")
+
+
+def _save_cached_page(key: tuple, out: dict) -> None:
+    from convexity.persistence import _atomic_write
+
+    try:
+        body = {"rev": key[0], "ccy": key[1], "bench": key[2], "computed_at": _now(), "book": out}
+        _atomic_write(_cache_path(), json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"[investments] saving the last page failed: {type(exc).__name__}")
+
+
+def cached_page(ccy: str | None = None) -> dict | None:
+    """The last good page when it still describes this book (same rev,
+    currency and benchmark), marked ``stale`` with when it was computed;
+    else None. A malformed file is ignored (it is only a cache)."""
+    key = _page_key(ccy)
+    if not key:
+        return None
+    try:
+        body = json.loads(_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(body, dict) or not isinstance(body.get("book"), dict):
+        return None
+    if (body.get("rev"), body.get("ccy"), body.get("bench")) != key[:3]:
+        return None
+    return {**body["book"], "stale": True, "computed_at": body.get("computed_at")}
+
+
+def warm(ccy: str | None = None) -> None:
+    """Compute the page once in the background at startup (server.py), so
+    the window's first request finds prices, FX and numba already loaded."""
+    try:
+        if book_symbols():
+            page(ccy)
+    except Exception as exc:  # best effort: the page computes it anyway
+        print(f"[investments] warm-up failed: {type(exc).__name__}")
+
+
+def _prefetch(raw: dict, entries: list[dict], base: str, disp: str) -> None:
+    """Download what the page needs in parallel before it is computed in
+    order (2026-10-12): the holdings' closes, then the stand-ins already
+    known for young listings, in one worker (one ``yf.download`` at a time),
+    beside every currency's history in others. The steps after it read the
+    same caches, so a failure here only costs the time it took."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from convexity import analytics, fx
+
+    syms = sorted({e["symbol"] for e in entries if e.get("symbol")})
+    if not syms:
+        return
+    inst = raw["instruments"]
+    dates = _calendar(entries)
+    span = _span(dates[1] if len(dates) > 1 else dates[0])
+    ccys = {major_ccy(inst.get(s, {}).get("quote_ccy") or base) for s in syms}
+    ccys |= {major_ccy(e["ccy"]) for e in entries if isinstance(e.get("ccy"), str)}
+    ccys |= {"USD", base, disp, INV_BENCHMARKS.get(bench_key(), INV_BENCHMARKS["SPY"])[2]}
+    stand_ins = sorted({p for s in syms for p in analytics.known_proxies(s)} - set(syms))
+
+    def closes() -> None:
+        _closes(syms, span)
+        if stand_ins:
+            _closes(stand_ins, span, retry=False)
+        _bench_closes(span, INV_BENCHMARKS.get(bench_key(), INV_BENCHMARKS["SPY"])[0])
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            jobs = [ex.submit(closes), ex.submit(fx.prefetch_usd_series, sorted(ccys))]
+            for j in jobs:
+                j.result()
+    except Exception as exc:
+        print(f"[investments] prefetch failed: {type(exc).__name__}")
+
+
+def _yield_on_cost(symbol: str, qccy: str, qty: float, cost: float, mult: dict) -> float | None:
+    """The last twelve months of Yahoo's payouts per share, on what the
+    holding cost: percent, gross, in the display currency at today's rate."""
+    dd, vals = _dated(_dividends(symbol))
+    m = mult.get(major_ccy(qccy))
+    if not dd or m is None or cost <= 0:
+        return None
+    since = (date.today() - timedelta(days=365)).isoformat()
+    ttm = sum(price_in_major(v, qccy) for d, v in zip(dd, vals, strict=True) if d > since)
+    return ttm * qty * float(m[-1]) / cost * 100
+
+
+_ANALYST_ROWS: tuple = (None, {})  # (views.json mtime, {symbol: row}) - the file is MBs
+
+
+def _analyst_rows(persistence) -> dict:
+    """The saved portfolios' rows that carry an analyst target, the book's
+    mirror first; parsed again only when views.json changes."""
+    global _ANALYST_ROWS
+    try:
+        vp = persistence._views_path()
+        mtime = (str(vp), vp.stat().st_mtime_ns)
+    except OSError:
+        mtime = None
+    if mtime is not None and _ANALYST_ROWS[0] == mtime:
+        return _ANALYST_ROWS[1]
+    with persistence._VIEWS_LOCK:
+        views = persistence._read_views_raw().get("views") or {}
+    if not isinstance(views, dict):
+        views = {}
+    rows: dict = {}
+    for name in ["__book__", *(k for k in views if k != "__book__")]:
+        view = views.get(name)
+        for r in (view.get("rows") or []) if isinstance(view, dict) else []:
+            if isinstance(r, dict) and r.get("symbol") and r.get("target_mean_price") is not None:
+                rows.setdefault(r["symbol"], r)
+    _ANALYST_ROWS = (mtime, rows)
+    return rows
+
+
+def _research_extras(symbols: list[str]) -> dict[str, dict]:
+    """What the research tabs already know about each holding, from cache
+    only (never a fetch on this page): the News and Market reads, and the
+    analyst target from the Portfolios tab's mirror of the book, else from
+    any saved portfolio that holds the share."""
+    from convexity import news_sentiment as ns
+    from convexity import persistence
+
+    rows = _analyst_rows(persistence)
+    out = {}
+    for s in symbols:
+        r = rows.get(s) or {}
+        t, px = r.get("target_mean_price"), r.get("price")
+        up = (t / px - 1) * 100 if _num_ok(t) and _num_ok(px) and px > 0 else None
+        out[s] = {"news_sentiment": ns.get_cached_sentiment(s), "upside_pct": up}
+    return out
+
+
+def _num_ok(v) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _pending_rows(raw: dict, pending: set[str]) -> list[dict]:
+    """A holdings row per holding left out for want of split history: name
+    and ticker only, since even its share count depends on the splits."""
+    out = []
+    for s in sorted(pending):
+        meta = raw["instruments"].get(s, {})
+        out.append({"symbol": s, "name": _short(meta.get("name") or s), "exchange": meta.get("exchange"),
+                    "quote_ccy": meta.get("quote_ccy"), "pending": True})  # fmt: skip
     return out
 
 

@@ -61,6 +61,8 @@ class Market:
     def install(self, mp, quote=None):
         quote = quote or {}
         inv._SPLITS.clear()
+        inv._SPLITS_GOOD.clear()
+        inv._PAGE_MEMO.clear()
         inv._QCCY.clear()
         mp.setattr(inv, "_fetch_quote_ccy", lambda s: quote.get(s, "USD"))
         mp.setattr(inv, "_pack_hit", lambda t: None)
@@ -234,7 +236,17 @@ def test_estimated_dividends_count_as_paid_out_never_as_value(monkeypatch):
     # A flat price: the return is the two dividends alone, 10 on 1,000 then 10
     # on 1,010 (the recorded one stayed as cash): exactly 2%.
     assert h["twr"]["ALL"] / 100 == pytest.approx(0.02, rel=1e-9)
-    assert any("estimated from Yahoo" in w for w in b["warnings"])
+    # The unrecorded payout is offered for the rail, never booked.
+    (sug,) = b["suggested_dividends"]
+    assert sug["symbol"] == "AAA" and sug["date"] == _ago(100) and sug["qty"] == pytest.approx(10)
+    assert sug["per_share"] == pytest.approx(1.0) and sug["amount"] == pytest.approx(10.0)
+    # Contributions: the dividends are AAA's, and with no fees and a flat
+    # price nothing is left for cash; the parts add up to the TWR.
+    for p in inv.PERIODS:
+        c = h["contrib"][p]
+        assert sum(c.values()) == pytest.approx(h["twr"][p], abs=1e-9)
+    assert h["contrib"]["ALL"]["AAA"] == pytest.approx(2.0, abs=1e-9)
+    assert h["contrib"]["ALL"][inv.CASH_BUCKET] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_a_young_book_reads_since_you_started(monkeypatch):
@@ -428,3 +440,55 @@ def test_a_picked_benchmark_is_priced_in_its_own_currency(monkeypatch):
     assert s["bench_value"]["1Y"][0] == pytest.approx(s["value"][i0], abs=0.01)
     assert h["bench_vol"]["1Y"] > 0
     assert inv.refresh_symbols() == ["AAA", "SXRT.DE"]
+
+
+# ---------------------------------------------- holdings depth (Phase 4)
+
+
+def test_contributions_add_up_to_the_twr_and_risk_shares_to_one(monkeypatch):
+    m = Market(
+        prices={"AAA": (date(2024, 1, 1), 100.0, 0.0004), "BBB": (date(2024, 1, 1), 50.0, -0.0002),
+                "CCC": (date(2024, 1, 1), 20.0, 0.0001)},
+        fx={"USD": (1.0, 0.0), "GBP": (1.25, 0.00005)}, wiggle=0.01,
+        divs={"BBB": [(_ago(150), 0.5)]},
+    )  # fmt: skip
+    m.install(monkeypatch)
+    t = {"fee": 2.0, "ccy": "USD", "qty_basis": "trade"}
+    _book([
+        {"date": _ago(500), "type": "deposit", "amount": 20000.0, "ccy": "USD"},
+        {"date": _ago(500), "type": "buy", "symbol": "AAA", "qty": 50, "price": m.px("AAA", date.fromisoformat(_ago(500))), **t},
+        {"date": _ago(400), "type": "buy", "symbol": "BBB", "qty": 100, "price": m.px("BBB", date.fromisoformat(_ago(400))), **t},
+        {"date": _ago(300), "type": "buy", "symbol": "CCC", "qty": 100, "price": m.px("CCC", date.fromisoformat(_ago(300))), **t},
+        {"date": _ago(200), "type": "sell", "symbol": "CCC", "qty": 100, "price": m.px("CCC", date.fromisoformat(_ago(200))), **t},
+        {"date": _ago(120), "type": "fee", "amount": 15.0, "ccy": "USD"},
+        {"date": _ago(90), "type": "withdrawal", "amount": 1000.0, "ccy": "USD"},
+    ], dict.fromkeys(("AAA", "BBB", "CCC"), USD_INST))  # fmt: skip
+    for ccy in ("USD", "GBP"):
+        h = inv.book(ccy)["headline"]
+        for p in inv.PERIODS:
+            assert sum(h["contrib"][p].values()) == pytest.approx(h["twr"][p], abs=1e-8), (ccy, p)
+        if ccy == "USD":
+            # In the base currency the cash bucket is the fees alone: a cost.
+            assert h["contrib"]["ALL"][inv.CASH_BUCKET] < 0
+    b = inv.book()
+    rs = [x["risk_share"] for x in b["positions"]]
+    assert len(rs) == 2 and sum(rs) == pytest.approx(1.0)
+    (c,) = b["closed"]
+    assert c["symbol"] == "CCC" and c["profit"] == pytest.approx(c["profit_sold"])
+    bbb = next(x for x in b["positions"] if x["symbol"] == "BBB")
+    assert bbb["yoc"] > 0  # one 0.5 payout in the last year, on what it cost
+
+
+def test_a_young_listing_has_no_risk_share_and_the_rest_still_do(monkeypatch):
+    ipo = TODAY - timedelta(days=12)
+    m = Market(prices={"AAA": (date(2024, 1, 1), 100.0, 0.0004), "BBB": (date(2024, 1, 1), 50.0, -0.0002),
+                       "NEW": (ipo, 10.0, 0.001)}, wiggle=0.01)  # fmt: skip
+    m.install(monkeypatch)
+    t = {"fee": 0, "ccy": "USD", "qty_basis": "trade"}
+    _book([
+        {"date": _ago(400), "type": "buy", "symbol": "AAA", "qty": 10, "price": 100.0, **t},
+        {"date": _ago(400), "type": "buy", "symbol": "BBB", "qty": 10, "price": 50.0, **t},
+        {"date": _ago(5), "type": "buy", "symbol": "NEW", "qty": 10, "price": 10.0, **t},
+    ], dict.fromkeys(("AAA", "BBB", "NEW"), USD_INST))  # fmt: skip
+    rs = {x["symbol"]: x["risk_share"] for x in inv.book()["positions"]}
+    assert rs["NEW"] is None and rs["AAA"] + rs["BBB"] == pytest.approx(1.0)

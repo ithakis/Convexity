@@ -4334,20 +4334,19 @@ async function loadBookSymbols() {
   catch (e) { BOOK.symbols = []; }
 }
 async function bookLoadWeights() {
-  if (!INV.book || INV.book.empty == null) {
-    const seq = ++INV.seq;
-    try {
-      const d = await (await fetch("/api/investments?ccy=" + encodeURIComponent(FX_QUOTE))).json();
-      if (seq !== INV.seq) return;  // a newer load or a change answered first
-      INV.book = d;
-      invRender();  // it may have superseded the page's own load
-    } catch (e) { return; }
+  // Share My Investments' own load (one request at launch, not two racing:
+  // the second used to discard the first's answer). A saved page is not
+  // enough: the book tab's weights wait for today's prices.
+  if (!INV.book || INV.book.empty == null || INV.book.stale) {
+    try { await (INV.loading || invLoad()); } catch (e) { return; }
   }
   bookTabSync({quiet: true});
 }
 /* Keep the book pill in step with My Investments after any change there. */
 function bookTabSync(opts) {
-  if (INV.book?.broken) return;  // a book that can't be totalled keeps its pill as it was
+  // A book that can't be totalled, or one waiting for a holding's split
+  // history, keeps its pill as it was.
+  if (INV.book?.broken || INV.book?.waiting || INV.book?.splits_pending?.length) return;
   const pos = INV.book?.positions || [];
   const before = bookEntries();
   BOOK.symbols = pos.map(p => p.symbol).sort();
@@ -4761,7 +4760,7 @@ async function exportXlsx() {
   btn.disabled = true;
   btn.innerHTML = lcHtml("exporting", {bar: true});
   try {
-    const r = await fetch("/api/export-xlsx");
+    const r = await fetch("/api/export-xlsx?ccy=" + encodeURIComponent(FX_QUOTE));  // the book's sheets in the display currency
     if (!r.ok) {
       let msg = "Export failed (HTTP " + r.status + ").";
       try { const j = await r.json(); if (j && j.error) msg = j.error; } catch {}
@@ -12114,26 +12113,57 @@ function invQuotePrice(v, qccy) {
 const invDate = (d) => escapeHtml(fmtDateMDY(d));
 
 async function invLoad() {
-  // The first load of a session reads years of daily prices from Yahoo (a
-  // few seconds); a calm line beats an empty page.
+  // Opening fast (owner, 2026-10-12): the server keeps the last page it
+  // computed for this book (same rev, currency and benchmark), so a first
+  // load paints that at once, marked "Updated hh:mm · refreshing", and the
+  // fresh page replaces it when it lands. Without one, a calm line.
+  // Every caller shares one request (INV.loading): the Portfolios book tab
+  // used to fire a second, identical one at launch.
   const host = $("#inv-page");
-  if (!INV.book && host && !host.classList.contains("hidden")) host.innerHTML = `<div class="inv-loading">Reading your prices…</div>`;
-  const seq = ++INV.seq;
-  let d;
-  try {
-    const r = await fetch("/api/investments?ccy=" + encodeURIComponent(FX_QUOTE));
-    d = r.ok ? await r.json() : { empty: true, error: true };
-  } catch (e) {
-    d = { empty: true, error: true };
-  }
-  if (seq !== INV.seq) return;
-  INV.book = d;
-  invRender();
-  if (!INV.book.error) bookTabSync();
+  const seq = ++INV.seq, q = "/api/investments?ccy=" + encodeURIComponent(FX_QUOTE);
+  const visible = host && !host.classList.contains("hidden");
+  const run = (async () => {
+    const fresh = fetch(q).then(r => r.ok ? r.json() : { empty: true, error: true }).catch(() => ({ empty: true, error: true }));
+    if (!INV.book) {
+      try {
+        const c = await (await fetch(q + "&cached=1")).json();
+        if (c && !c.nocache && seq === INV.seq && !INV.book) { INV.book = c; invRender(); }
+      } catch (e) { /* no saved page: wait for the fresh one */ }
+      if (!INV.book && visible) host.innerHTML = `<div class="inv-loading">Reading your prices…</div>`;
+    }
+    const d = await fresh;
+    if (seq !== INV.seq) return;
+    if (d.error && INV.book?.stale) {
+      // Keep the saved page, but say it couldn't be brought up to date.
+      INV.book = { ...INV.book, refresh_failed: true };
+      invRender();
+      return;
+    }
+    INV.book = d;
+    invRender();
+    if (!INV.book.error) bookTabSync();
+  })();
+  INV.loading = run;
+  try { await run; } finally { if (INV.loading === run) INV.loading = null; }
+}
+
+/* A holding whose split history Yahoo hasn't sent yet is left out of the
+ * totals (splits_pending); the page asks again every minute until it loads.
+ * Hidden, it waits: opening My Investments reloads anyway. */
+let _invRetry = null;
+function invRetrySchedule() {
+  const waiting = !!INV.book?.splits_pending?.length;
+  if (!waiting) { clearTimeout(_invRetry); _invRetry = null; return; }
+  if (_invRetry) return;
+  _invRetry = setTimeout(() => {
+    _invRetry = null;
+    if (document.body.dataset.page === "investments") invLoad();
+  }, 60000);
 }
 
 function invRender() {
   const b = INV.book, host = $("#inv-page");
+  invRetrySchedule();
   if (!b || host.classList.contains("hidden")) return;
   // A background redraw (the import check) waits while a review menu is
   // open, or the picker would vanish under the owner's cursor.
@@ -12150,9 +12180,10 @@ function invRender() {
   host.innerHTML = `
     <div class="inv-grid">
       <div class="inv-main">
-        ${b.broken ? `<div class="inv-broken">Your investments can't be totalled: ${escapeHtml(b.broken)} Fix or delete that entry in Activity.</div>` : invHeroHtml(b)}
-        <div class="section-anchor inv-anchor"><span class="sa-kicker">Holdings<span class="inv-count">${b.positions.length}</span></span><button type="button" class="inv-add" data-inv-add>+ Add</button></div>
-        ${b.broken ? "" : invHoldingsHtml(b)}
+        ${b.broken ? `<div class="inv-broken">Your investments can't be totalled: ${escapeHtml(b.broken)} Fix or delete that entry in Activity.</div>`
+          : b.waiting ? `<div class="inv-waiting">${escapeHtml(b.waiting)}</div>` : invHeroHtml(b)}
+        <div class="section-anchor inv-anchor"><span class="sa-kicker">Holdings<span class="inv-count">${b.positions.length}</span></span>${b.broken || b.waiting ? "" : '<button type="button" class="inv-add inv-cols-btn" data-inv-cols aria-haspopup="menu">Columns</button>'}<button type="button" class="inv-add" data-inv-add>+ Add</button></div>
+        ${b.broken || b.waiting ? "" : invHoldingsHtml(b)}
       </div>
       <aside class="inv-rail" aria-label="Attention">${invRailHtml(b)}</aside>
     </div>`;
@@ -12173,6 +12204,13 @@ async function invPickBench(key) {
   invLoad();
 }
 
+/* When a saved page was computed: the time today, else the date. */
+function invStaleWhen(iso) {
+  const t = iso ? new Date(iso) : null;
+  if (!t || isNaN(t)) return "earlier";
+  const same = t.toDateString() === new Date().toDateString();
+  return same ? t.toLocaleTimeString(NUM_LOCALE, { hour: "2-digit", minute: "2-digit" }) : fmtDateMDY(t.toISOString().slice(0, 10));
+}
 function invHeroHtml(b) {
   const h = b.headline, p = INV.period, twr = h.twr[p], spx = h.bench_twr[p];
   // A figure Phase 3 hasn't computed yet is a quiet dash, never a made-up number.
@@ -12188,6 +12226,7 @@ function invHeroHtml(b) {
     <div class="inv-sheet">
       <div class="inv-hero">
         <span class="inv-value">${invMoney(h.value)}</span>
+        ${b.stale ? `<span class="inv-stale${b.refresh_failed ? " failed" : ""}" data-tip="${b.refresh_failed ? "Yahoo didn't answer, so these are the figures from your last visit. Try ↻ Refresh." : "The figures from your last visit, while today's prices load."}">Updated ${escapeHtml(invStaleWhen(b.computed_at))} · ${b.refresh_failed ? "couldn't refresh" : "refreshing…"}</span>` : ""}
         ${b.demo ? `<span class="inv-demo" data-tip="Made-up figures from the demo book, used while the page is being designed.">Demo data</span>` : ""}
       </div>
       ${invOk(h.month_abs) ? `<div class="inv-month"><span class="${invCls(h.month_abs)}">${arrow}${invMoney(Math.abs(h.month_abs))}${invOk(h.month_pct) ? ` (${invPct(h.month_pct)})` : ""}</span> <span class="inv-month-w">past month</span></div>` : ""}
@@ -12201,6 +12240,7 @@ function invHeroHtml(b) {
         ${b.series ? `<div class="inv-chart-bar">
           <span class="pf-contrib-toggle" role="group" aria-label="Chart">${pills("mode", ["value", "return"], INV.mode, ["Value", "Return %"])}</span>
           ${b.benchmarks?.length ? `<span class="inv-vs">vs ${benchMenuHtml(Object.fromEntries(b.benchmarks.map(x => [x.key, x])), b.benchmark?.key, "inv-bench", "What to compare your investments with")}</span>` : ""}
+          ${invSmaPillsHtml()}
           <div class="pf-period-tabs inv-periods" role="group" aria-label="Period">${pills("period", INV_PERIODS, p)}</div>
         </div>` : ""}
         ${b.series ? `<svg id="inv-svg" class="inv-svg" aria-label="Value chart"></svg>
@@ -12210,18 +12250,64 @@ function invHeroHtml(b) {
     </div>`;
 }
 
-/* The holdings' columns: header, sort value, and the direction a first
- * click sorts (biggest first, names A to Z). */
+/* The holdings' columns (Phase 4): header, sort value, the direction a
+ * first click sorts (biggest first, names A to Z), on by default or not
+ * (owner, 2026-10-11: today's eight plus Contribution and Risk), the
+ * Columns menu's wording, and the cell. "risk" has no cell of its own: it
+ * pairs a risk bar with the weight (owner's pick). */
+const invContrib = (x, p = INV.period) => INV.book?.headline?.contrib?.[p]?.[x.symbol];
+const invPts = (v) => invOk(v) ? invPct(v, 1, " pts") : na();
+const invPtsCls = (v) => invOk(v) ? invCls(Number(v.toFixed(1))) : "";  // a tiny cost rounds to 0.0, never red
 const INV_COLS = [
-  ["name", "Holding", x => (x.name || x.symbol || "").toLowerCase(), 1],
-  ["shares", "Shares", x => x.shares, -1],
-  ["avg", "Avg price", x => x.avg_price, -1],
-  ["value", "Value", x => x.value, -1],
-  ["weight", "Weight", x => x.weight, -1],
-  ["month", "Month", x => x.month_pct, -1],
-  ["profit", "Profit", x => x.profit, -1],
-  ["ret", "Return", x => x.return_pct, -1],
+  { k: "name", label: "Holding", get: x => (x.name || x.symbol || "").toLowerCase(), dir: 1, fixed: true },
+  { k: "shares", label: "Shares", get: x => x.shares, dir: -1, on: true,
+    cell: x => invOk(x.shares) ? Number(x.shares).toLocaleString(NUM_LOCALE) : na() },
+  { k: "avg", label: "Avg price", get: x => x.avg_price, dir: -1, on: true, cell: x => invQuotePrice(x.avg_price, x.quote_ccy) },
+  { k: "value", label: "Value", get: x => x.value, dir: -1, on: true, cell: x => invMoney(x.value) },
+  { k: "weight", label: "Weight", get: x => x.weight, dir: -1, on: true, cell: (x, c) => invWeightCell(x.weight, x.risk_share, c) },
+  { k: "risk", label: "Risk share", get: x => x.risk_share, dir: -1, on: true, merged: true, menu: "Risk share (bars beside the weight)" },
+  { k: "month", label: "Month", get: x => x.month_pct, dir: -1, on: true,
+    cell: x => `<span class="${invOk(x.month_pct) ? invCls(Number(x.month_pct.toFixed(1))) : ""}">${invPct(x.month_pct)}</span>` },
+  { k: "profit", label: "Profit", get: x => x.profit, dir: -1, on: true,
+    cell: x => `<span class="${invCls(x.profit)}">${invTipped("posprofit", x.symbol, invMoney(x.profit, true))}</span>` },
+  { k: "ret", label: "Return", get: x => x.return_pct, dir: -1, on: true,
+    cell: x => `<span class="${invCls(x.return_pct)}">${invPct(x.return_pct, 0)}</span>` },
+  { k: "contrib", label: "Contribution", get: x => invContrib(x), dir: -1, on: true, tip: "contrib",
+    cell: x => `<span class="${invPtsCls(invContrib(x))}">${invTipped("contrib", x.symbol, invPts(invContrib(x)))}</span>` },
+  { k: "news", label: "News", get: x => x.news_sentiment?.news?.score, dir: -1, menu: "News read",
+    cell: x => invNsCell(x, "news") },
+  { k: "market", label: "Market", get: x => x.news_sentiment?.market?.score ?? x.news_sentiment?.market?.sar, dir: -1, menu: "Market read",
+    cell: x => invNsCell(x, "market") },
+  { k: "divs", label: "Dividends", get: x => (x.dividends || 0) + (x.dividends_est || 0), dir: -1,
+    cell: x => invTipped("posprofit", x.symbol, invMoney((x.dividends || 0) + (x.dividends_est || 0))) },
+  { k: "yoc", label: "Yield on cost", get: x => x.yoc, dir: -1, tip: "yoc",
+    cell: x => invTipped("yoc", x.symbol, invPct(x.yoc, 1).replace("+", "")) },
+  { k: "upside", label: "Analyst Δ", get: x => x.upside_pct, dir: -1, menu: "Analyst upside",
+    cell: x => `<span class="${invCls(x.upside_pct)}">${invPct(x.upside_pct, 0)}</span>` },
 ];
+const invCol = (k) => INV_COLS.find(c => c.k === k);
+function invColsOn() {
+  if (!INV.cols) {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem("inv_cols") || "{}") || {}; } catch (e) {}
+    INV.cols = Object.fromEntries(INV_COLS.map(c => [c.k, c.fixed || (typeof saved[c.k] === "boolean" ? saved[c.k] : !!c.on)]));
+  }
+  return INV.cols;
+}
+const invTipped = (key, sym, html) => `<span class="inv-tipped" data-rich-tip="inv:${key}" data-sym="${escapeHtml(sym)}" tabindex="0">${html}</span>`;
+/* Weight with its risk share as two thin bars (weight gray, risk blue),
+ * scaled to the biggest of either in the table; exact figures on hover. */
+function invWeightCell(w, r, ctx) {
+  const txt = ctx.weight === false ? (invOk(r) ? (r * 100).toFixed(1) + "%" : na()) : invPct(w, 1, "%").replace("+", "");
+  if (!ctx.risk) return txt;
+  const bar = (v, cls) => `<i class="${cls}" style="width:${invOk(v) ? Math.max(1, v / ctx.max * 100).toFixed(1) : 0}%"></i>`;
+  const rp = invOk(r) ? r * 100 : null;
+  return `<span class="inv-wr" data-rich-tip="inv:risk_share" data-sym="${escapeHtml(ctx.sym || "")}" tabindex="0"><span class="inv-wr-bars">${bar(w, "w")}${bar(rp, "r")}</span>${txt}</span>`;
+}
+function invNsCell(x, which) {
+  const s = x.news_sentiment, r = s?.[which], tier = r?.tier;
+  return `<span class="ns-dots ns-hover" data-ns-sym="${escapeHtml(x.symbol)}" aria-label="${which === "news" ? "News" : "Market"} read ${tier ? NS_LABELS[tier] : "none"}">${nsTierDot(tier)}</span>`;
+}
 /* Sorting (owner, 2026-10-11): a header click sorts, a second flips it, a
  * third goes back to "your order", which rows can be dragged into. Both are
  * kept per browser; a holding not in the saved order goes to the end, in
@@ -12232,15 +12318,16 @@ function invSortState() {
       INV.sort = JSON.parse(localStorage.getItem("inv_sort") || "null");
       INV.order = JSON.parse(localStorage.getItem("inv_order") || "null");
     } catch (e) { INV.sort = null; }
-    if (!INV_COLS.some(c => c[0] === INV.sort?.key)) INV.sort = null;
+    if (!INV_COLS.some(c => c.k === INV.sort?.key)) INV.sort = null;
     if (!Array.isArray(INV.order)) INV.order = null;
   }
   return INV.sort;
 }
 function invOrdered(positions) {
-  const sort = invSortState();
+  const sort = invSortActive();
   if (sort) {
-    const get = INV_COLS.find(c => c[0] === sort.key)[2];
+    // Weight switched off and risk on: that column shows (and sorts by) risk.
+    const get = sort.key === "weight" && !invColsOn().weight ? (x => x.risk_share) : invCol(sort.key).get;
     // A missing figure sorts last whichever way.
     return [...positions].sort((a, b) => {
       const x = get(a), y = get(b), nx = x == null || (typeof x === "number" && !isFinite(x)), ny = y == null || (typeof y === "number" && !isFinite(y));
@@ -12251,8 +12338,15 @@ function invOrdered(positions) {
   const at = new Map((INV.order || []).map((s, i) => [s, i]));
   return positions.map((x, i) => [x, at.has(x.symbol) ? at.get(x.symbol) : 1e6 + i]).sort((a, b) => a[1] - b[1]).map(r => r[0]);
 }
+/* A sort by a column since switched off is set aside (drag order shows),
+ * so the table is never sorted by something it doesn't show. */
+function invSortActive() {
+  const sort = invSortState();
+  const on = invColsOn();
+  return sort && (on[sort.key] || (sort.key === "weight" && on.risk)) ? sort : null;
+}
 function invSortClick(key) {
-  const cur = invSortState(), first = INV_COLS.find(c => c[0] === key)[3];
+  const cur = invSortState(), first = invCol(key).dir;
   INV.sort = cur?.key !== key ? { key, dir: first } : cur.dir === first ? { key, dir: -first } : null;
   try { localStorage.setItem("inv_sort", JSON.stringify(INV.sort)); } catch (e) {}
   invRender();
@@ -12267,30 +12361,87 @@ function invMoveRow(sym, beforeSym) {
 }
 
 function invHoldingsHtml(b) {
-  const tipped = (key, sym, html) => `<span class="inv-tipped" data-rich-tip="inv:${key}" data-sym="${escapeHtml(sym)}" tabindex="0">${html}</span>`;
-  const sort = invSortState(), drag = !sort;
-  const rows = invOrdered(b.positions).map(x => `
+  const sort = invSortActive(), drag = !sort, on = invColsOn(), h = b.headline, p = INV.period;
+  // Risk has no column of its own: it rides in the Weight cell, which shows
+  // while either is on.
+  const cols = INV_COLS.filter(c => c.k === "weight" ? on.weight || on.risk : on[c.k] && !c.merged);
+  const live = b.positions.filter(x => !x.pending);
+  const ctx = { risk: on.risk, weight: on.weight, max: Math.max(1e-9, ...live.map(x => Math.max(x.weight || 0, (x.risk_share || 0) * 100)), h.cash_weight || 0) };
+  const grip = drag ? '<span class="inv-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>' : "";
+  const td = (c, html) => `<td${c.k === "name" ? ' class="left"' : ""}>${html ?? ""}</td>`;
+  const rows = invOrdered(b.positions).map(x => x.pending ? `
+    <tr data-inv-sym="${escapeHtml(x.symbol)}" class="inv-pending"${drag ? ' draggable="true"' : ""}>
+      <td class="left">${grip}<span class="inv-tipped">${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span></td>
+      <td colspan="${cols.length - 1}" class="left inv-pending-note">Left out of the totals: waiting for Yahoo's split history</td>
+    </tr>` : `
     <tr data-inv-sym="${escapeHtml(x.symbol)}"${drag ? ' draggable="true"' : ""}>
-      <td class="left">${drag ? '<span class="inv-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>' : ""}${tipped("pos", x.symbol, `${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span>`)}</td>
-      <td>${invOk(x.shares) ? Number(x.shares).toLocaleString(NUM_LOCALE) : na()}</td>
-      <td>${invQuotePrice(x.avg_price, x.quote_ccy)}</td>
-      <td>${invMoney(x.value)}</td>
-      <td>${invPct(x.weight, 1, "%").replace("+", "")}</td>
-      <td class="${invOk(x.month_pct) ? invCls(Number(x.month_pct.toFixed(1))) : ""}">${invPct(x.month_pct)}</td>
-      <td class="${invCls(x.profit)}">${tipped("posprofit", x.symbol, invMoney(x.profit, true))}</td>
-      <td class="${invCls(x.return_pct)}">${invPct(x.return_pct, 0)}</td>
+      ${cols.map(c => c.k === "name"
+        ? td(c, grip + invTipped("pos", x.symbol, `${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span>`))
+        : td(c, c.cell(x, { ...ctx, sym: x.symbol }))).join("")}
     </tr>`).join("");
-  const head = INV_COLS.map(([k, label]) => {
-    const on = sort?.key === k;
-    return `<th class="${k === "name" ? "left " : ""}inv-th${on ? " sorted" : ""}" aria-sort="${on ? (sort.dir > 0 ? "ascending" : "descending") : "none"}"><button type="button" data-inv-sort="${k}" title="${on && sort.dir !== INV_COLS.find(c => c[0] === k)[3] ? "Back to your order" : "Sort by " + label.toLowerCase()}">${label}${on ? `<span class="arrow">${sort.dir > 0 ? "▲" : "▼"}</span>` : ""}</button></th>`;
+  const head = cols.map(c => {
+    const k = c.k, act = sort?.key === k;
+    const label = k !== "weight" ? c.label : on.weight && on.risk ? "Weight & Risk" : on.weight ? "Weight" : "Risk";
+    return `<th class="${k === "name" ? "left " : ""}inv-th${act ? " sorted" : ""}" aria-sort="${act ? (sort.dir > 0 ? "ascending" : "descending") : "none"}"><button type="button" data-inv-sort="${k}" title="${act && sort.dir !== c.dir ? "Back to your order" : "Sort by " + label.toLowerCase()}">${label}${act ? `<span class="arrow">${sort.dir > 0 ? "▲" : "▼"}</span>` : ""}</button></th>`;
   }).join("");
+  // The foot: cash, the total, then sold-out holdings (owner's pick).
+  const foot = (cls, cells, attrs = "") => `<tr class="${cls}"${attrs}>${cols.map(c => td(c, cells[c.k])).join("")}</tr>`;
+  const cb = h.contrib?.[p]?.[INV_CASH_BUCKET];
+  const cash = foot("inv-cash", {
+    name: `<span class="inv-tipped"><span class="logo-fallback">${escapeHtml(invSym().trim())}</span><span>Cash</span></span>`,
+    value: invMoney(h.cash), weight: invWeightCell(h.cash_weight, invOk(h.cash_weight) ? 0 : null, ctx),
+    contrib: `<span class="${invPtsCls(cb)}">${invTipped("contrib", INV_CASH_BUCKET, invPts(cb))}</span>`,
+  });
+  const divAll = b.positions.reduce((a, x) => a + (x.dividends || 0) + (x.dividends_est || 0), 0);
+  const total = foot("inv-total", {
+    name: "<span>Total</span>", value: invMoney(h.value), weight: "100%",
+    month: `<span class="${invCls(h.month_pct)}">${invPct(h.month_pct)}</span>`,
+    profit: `<span class="${invCls(h.profit_total)}">${invMoney(h.profit_total, true)}</span>`,
+    contrib: `<span class="${invCls(h.twr?.[p])}">${invTipped("contrib", "_total", invPts(h.twr?.[p]))}</span>`,
+    divs: invMoney(divAll),
+  });
+  const closed = b.closed || [];
+  let closedRows = "";
+  if (closed.length) {
+    const sum = (f) => closed.reduce((a, x) => a + (f(x) || 0), 0);
+    const open = !!INV.showClosed, cp = sum(x => x.profit), cc = sum(x => invContrib(x));
+    closedRows = foot("inv-closed-head", {
+      name: `<button type="button" class="inv-closed-btn" data-inv-closed aria-expanded="${open}"><span class="inv-caret">${open ? "▾" : "▸"}</span>Closed (${closed.length})</button>`,
+      profit: `<span class="${invCls(cp)}">${invMoney(cp, true)}</span>`,
+      contrib: `<span class="${invPtsCls(cc)}">${invPts(cc)}</span>`,
+    }) + (open ? closed.map(x => foot("inv-closed", {
+      name: `<span class="inv-tipped">${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span>`,
+      profit: `<span class="${invCls(x.profit)}">${invMoney(x.profit, true)}</span>`,
+      contrib: `<span class="${invPtsCls(invContrib(x))}">${invPts(invContrib(x))}</span>`,
+      divs: invMoney((x.dividends || 0) + (x.dividends_est || 0)),
+    })).join("") : "");
+  }
   return `
     <div class="inv-tbl-wrap"><table class="inv-tbl${drag ? " inv-tbl-drag" : ""}" id="inv-tbl">
       <thead><tr>${head}</tr></thead>
-      <tbody>${rows}
-        <tr class="inv-cash"><td class="left"><span class="inv-tipped"><span class="logo-fallback">${escapeHtml(invSym().trim())}</span><span>Cash</span></span></td><td></td><td></td><td>${invMoney(b.headline.cash)}</td><td>${invPct(b.headline.cash_weight).replace("+", "")}</td><td></td><td></td><td></td></tr>
-      </tbody>
+      <tbody>${rows}</tbody>
+      <tfoot>${cash}${total}${closedRows}</tfoot>
     </table></div>`;
+}
+const INV_CASH_BUCKET = "_cash";  // investments.CASH_BUCKET
+
+/* The Columns menu: every column but the holding's name, ticked when on.
+ * Kept per browser (a view preference, like the sort). */
+function invColsMenu(anchor) {
+  const on = invColsOn();
+  const el = invMenuOpen(anchor, "inv-menu-list inv-cols-menu", (e) => {
+    const it = e.target.closest("[data-v]");
+    if (!it) return;
+    on[it.dataset.v] = !on[it.dataset.v];
+    try { localStorage.setItem("inv_cols", JSON.stringify(on)); } catch (e2) {}
+    invRender();
+    const again = $("#inv-page [data-inv-cols]");
+    if (again) invColsMenu(again);
+  });
+  if (!el) return;
+  el.innerHTML = INV_COLS.filter(c => !c.fixed).map(c =>
+    `<button type="button" role="menuitemcheckbox" aria-checked="${!!on[c.k]}" class="inv-menu-it${on[c.k] ? " on" : ""}" data-v="${c.k}"><i>${on[c.k] ? "✓" : ""}</i><b>${escapeHtml(c.menu || c.label)}</b></button>`).join("");
+  invMenuPlace(el, anchor);
 }
 
 /* The rail toggles between Attention and Activity (the ledger), the same
@@ -12303,8 +12454,37 @@ function invRailHtml(b) {
   const section = (title, items, item, calm) => `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">${title}</span></div>`
     + (items?.length ? items.map(item).join("") : `<div class="inv-calm">${calm}</div>`);
   const att = [...(b.attention || []).map(a => a.text), ...(b.warnings || [])];
-  return head + section("Attention", att, t => `<div class="inv-rail-item">${escapeHtml(t)}</div>`, "Nothing needs you today.")
+  const divs = invDivsHtml(b);
+  return head + section("Attention", att, t => `<div class="inv-rail-item">${escapeHtml(t)}</div>`, divs ? "" : "Nothing needs you today.").replace(/<div class="inv-calm"><\/div>$/, "") + divs
     + section("Upcoming", b.upcoming, u => `<div class="inv-rail-item">${escapeHtml(`${u.name} ${u.what}`)}<div class="inv-rail-sub">${invDate(u.date)}</div></div>`, "No events in the next two weeks.");
+}
+
+/* Suggested dividends (owner, 2026-10-11): payouts Yahoo knows about that
+ * the ledger lacks, as ONE calm Attention item; Review lists them, newest
+ * first, with Add per row and Add all (one undoable batch). Never added on
+ * their own: until added they stay estimates, paid out, never in Cash. */
+function invDivsHtml(b) {
+  const sug = b.suggested_dividends || [];
+  if (!sug.length) return "";
+  const total = sug.reduce((a, x) => a + x.amount, 0), open = !!INV.divOpen;
+  const head = `<div class="inv-rail-item inv-divs"><span>${sug.length} dividend${sug.length > 1 ? "s" : ""} to add · ${invMoney(total)} estimated</span>
+    <button type="button" class="inv-link" data-inv-divs aria-expanded="${open}">${open ? "Hide" : "Review"}</button></div>`;
+  if (!open) return head;
+  const per = (x) => x.ccy === "GBP" ? `${(x.per_share * 100).toFixed(2)}p` : (FX_SYMBOL[x.ccy] || x.ccy + " ") + x.per_share.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 4 });
+  const rows = sug.map((x, i) => `<div class="inv-div-row">
+      <div><b>${escapeHtml(x.name)}</b><div class="inv-rail-sub">${invDate(x.date)} · ${Number(x.qty).toLocaleString(NUM_LOCALE)} × ${escapeHtml(per(x))}</div></div>
+      <span class="inv-div-amt">${invMoney(x.amount)}</span>
+      <button type="button" class="inv-link" data-inv-div-add="${i}">Add</button></div>`).join("");
+  return head + `<div class="inv-div-list">${rows}
+    <div class="inv-div-foot"><span class="inv-rail-sub">Gross, from Yahoo's ex-dates. Edit an added one to put in withholding tax.</span>${sug.length > 1 ? '<button type="button" class="inv-link" data-inv-div-add="all">Add all</button>' : ""}</div></div>`;
+}
+async function invAddDividends(which) {
+  const sug = INV.book?.suggested_dividends || [];
+  const pick = which === "all" ? sug : [sug[+which]].filter(Boolean);
+  if (!pick.length) return;
+  const entries = pick.map(x => ({ type: "dividend", symbol: x.symbol, date: x.date,
+    amount: Math.round(x.qty * x.per_share * 1e6) / 1e6, tax: 0, ccy: x.ccy }));
+  await invCommit("dividends", { entries });
 }
 
 /* Hover cards: plain words, then a breakdown, then the formula. `tex` is the
@@ -12407,6 +12587,35 @@ RICH_TIPS["inv:risk"] = invTipFor(h => {
     <table class="mt-table inv-tip-table"><tbody>${invOk(bv) ? `<tr><th>${bn} volatility</th><td>${bv.toFixed(1)}% · ${INV_VOL_BANDS[invVolBand(bv)][1].toLowerCase()}</td></tr>` : ""}<tr><th>Sortino</th><td>${r(so)}</td></tr>${invOk(dd) ? `<tr><th>Worst fall</th><td class="neg">${invPct(dd)}</td></tr>` : ""}</tbody></table>
     ${invTex(tex)}<div class="inv-tip-tech">σ<sub>d</sub> daily standard deviation, trading days only · σ<sub>d</sub><sup>↓</sup> downside deviation · r<sub>f</sub> ${usd ? "the 13-week T-bill (^IRX)" : "0 outside USD"}, as in the Portfolios tab</div></div>`;
 });
+/* Contribution (Phase 4): each holding's share of the period's Return, in
+ * points; with cash and fees they add up to it exactly (Carino linking). */
+RICH_TIPS["inv:contrib"] = (host) => {
+  const h = INV.book?.headline, p = INV.period, c = h?.contrib?.[p];
+  if (!c) return "";
+  const sym = host.dataset.sym, x = invPos(host) || (INV.book.closed || []).find(y => y.symbol === sym);
+  const t = h.twr?.[p], tech = "r<sub>i,t</sub> a holding's profit that day over the day's starting money · k Carino's link factors";
+  const tex = `C_i &= \\sum_t r_{i,t}\\,\\frac{k_t}{k} \\\\[4pt] \\sum_i C_i + C_{\\text{cash}} &= R_{\\text{${p}}} = ${texPct(t)}`;
+  if (sym === "_total") return invTip("Contributions add up to your return", `Your holdings, cash and fees together made ${invPct(t)} ${invSpan(h)}: the Return figure above.`, null, tech, tex);
+  if (sym === INV_CASH_BUCKET) return invTip("Cash and fees", `What fees${INV.book.ccy !== INV.book.base_ccy ? " and the currency on your cash" : ""} did to your return ${invSpan(h)}: ${invPts(c[sym])}. Uninvested cash earns nothing here.`, null, tech, tex);
+  if (!x) return "";
+  return invTip(`What ${escapeHtml(x.name)} added`, `${invPts(c[sym])} of your ${invPct(t)} return ${invSpan(h)}: its price moves and dividends, weighted by how much of your money it was each day.`, null, tech, tex);
+};
+RICH_TIPS["inv:risk_share"] = (host) => {
+  const x = invPos(host); if (!x) return "";
+  const w = x.weight, r = invOk(x.risk_share) ? x.risk_share * 100 : null;
+  if (!invOk(r)) return invTip(`${escapeHtml(x.name)}: ${invPct(w, 1).replace("+", "")} of your money`, "Too little price history yet (a month at least) to measure its share of your risk.", null, "");
+  const more = r > w * 1.25 ? "more of the ups and downs than its weight" : r < w * 0.8 ? "less of the ups and downs than its weight" : "about its weight's share of the ups and downs";
+  const tex = `RC_i &= \\frac{w_i\\,(\\Sigma w)_i}{w^\\top \\Sigma w} = ${r.toFixed(1)}\\%`;
+  return `<div class="pf-metric-tip inv-tip" role="tooltip"><div class="mt-name">${escapeHtml(x.name)}: weight and risk</div><div class="mt-desc">It is ${invPct(w, 1).replace("+", "")} of your portfolio but ${r.toFixed(1)}% of its risk: ${more}. Cash carries none.</div>
+    <table class="mt-table inv-tip-table"><tbody><tr><th><i class="inv-wr-key w"></i>Weight</th><td>${invPct(w, 1).replace("+", "")}</td></tr><tr><th><i class="inv-wr-key r"></i>Risk share</th><td>${r.toFixed(1)}%</td></tr></tbody></table>
+    ${invTex(tex)}<div class="inv-tip-tech">w today's weights · Σ the last year of daily returns in ${escapeHtml(INV.book.ccy)}, Ledoit-Wolf shrunk, as in Optimize · risk shares add up to 100%</div></div>`;
+};
+RICH_TIPS["inv:yoc"] = (host) => {
+  const x = invPos(host); if (!x) return "";
+  if (!invOk(x.yoc)) return invTip("Yield on cost", "No dividends from Yahoo for this holding.", null, "");
+  return invTip("Yield on cost", `The last twelve months of ${escapeHtml(x.name)}'s dividends, on what you paid for your shares: ${invPct(x.yoc, 1).replace("+", "")} a year. Gross, at today's exchange rate.`, null,
+    "D<sub>12m</sub> Yahoo's payouts per share over the last 12 months · q your shares · C what they cost you", `\\text{YoC} &= \\frac{D_{12m}\\,q}{C} = ${x.yoc.toFixed(1)}\\%`);
+};
 RICH_TIPS["inv:pos"] = (host) => {
   const x = invPos(host); if (!x) return "";
   const ccy = x.quote_ccy === "GBp" ? "GBP" : x.quote_ccy;
@@ -12434,7 +12643,10 @@ function drawInvChart() {
   const svg = $("#inv-svg"), readout = $("#inv-readout"), b = INV.book;
   if (!svg || !b?.series || !svg.clientWidth) return;
   const s = b.series, i0 = s.period_start?.[INV.period] ?? 0, n = s.dates.length - i0;
-  const W = svg.clientWidth, H = 240, L = 56, R = 12, T = 10, B = 22;
+  // Room to breathe (owner, 2026-10-12): more air above and below the plot,
+  // and a right gutter for the money-in label when the card is wide enough.
+  const W = svg.clientWidth, H = 252, L = 56, T = 16, B = 28;
+  const R = INV.mode === "value" && W >= 560 ? 84 : 14;
   const rebase = (arr) => arr && arr.slice(i0).map(v => (v / arr[i0] - 1) * 100);
   // A missing benchmark (Yahoo had no prices) drops its line, never the
   // chart. The benchmark's value line is the server's own for this period: it starts
@@ -12448,10 +12660,24 @@ function drawInvChart() {
     { label: "Your return", vals: rebase(s.twr_index), cls: "main" },
     { label: invBench(), vals: rebase(s.bench_index), cls: "bench", off: benchOff },
   ]).filter(l => l.vals);
+  // Moving averages, as on the Portfolio chart (shared toggles, CHART_SMA).
+  // They average the return index over the whole history (so SMA 200 spans
+  // the period from its first day); in Value mode the index is scaled back to
+  // your value day by day, so money put in never makes the average jump.
+  for (const k of SMA_PERIODS) {
+    if (!CHART_SMA[k]) continue;
+    const avg = smaSeries(s.twr_index.map((v, i) => [i, v]), k).map(p => p[1]);
+    const vals = INV.mode === "value"
+      ? s.value.slice(i0).map((v, i) => v * avg[i0 + i] / s.twr_index[i0 + i])
+      : avg.slice(i0).map(v => (v / s.twr_index[i0] - 1) * 100);
+    lines.push({ label: `SMA ${k}`, vals, cls: "sma", color: SMA_COLORS[k] });
+  }
   const shown = lines.filter(l => !l.off);
   const all = shown.flatMap(l => l.vals);
   let lo = Math.min(...all), hi = Math.max(...all);
-  const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
+  const pad = (hi - lo) * 0.08 || 1, floor = lo >= 0 && INV.mode === "value";
+  lo -= pad; hi += pad;
+  if (floor) lo = Math.max(0, lo);  // money never reads below zero on the axis
   const X = (i) => L + i * (W - L - R) / Math.max(1, n - 1);
   const Y = (v) => T + (hi - v) * (H - T - B) / (hi - lo);
   const fmtV = (v) => INV.mode === "value" ? invMoney(v) : invPct(v);
@@ -12469,9 +12695,14 @@ function drawInvChart() {
     g += `<line class="inv-grid-l" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text class="inv-axis" x="${L - 6}" y="${Y(v) + 3}" text-anchor="end">${fmtAxis(v)}</text>`;
   }
   if (INV.mode === "return" && lo < 0 && hi > 0) g += `<line class="inv-zero" x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}"/>`;
+  // Money put in moves only on the days money moves: drawn as steps, solid,
+  // labelled at its right end (owner, 2026-10-12; the dashed flat line read
+  // as a reference line).
+  const steps = (vals) => vals.map((v, i) => (i ? `${X(i).toFixed(1)},${Y(vals[i - 1]).toFixed(1)} ` : "") + `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
   for (const l of [...shown].reverse()) {
     if (l.area) g += `<polygon class="inv-area" points="${X(0)},${Y(lo)} ${pts(l.vals)} ${X(n - 1)},${Y(lo)}"/>`;
-    g += `<polyline class="inv-l-${l.cls}" points="${pts(l.vals)}"/>`;
+    g += `<polyline class="inv-l-${l.cls}"${l.color ? ` style="stroke:${l.color}"` : ""} points="${l.cls === "invested" ? steps(l.vals) : pts(l.vals)}"/>`;
+    if (l.cls === "invested" && R > 40) g += `<text class="inv-axis inv-in-lbl" x="${X(n - 1) + 8}" y="${Y(l.vals.at(-1)) + 3}">Put in ${fmtAxis(l.vals.at(-1))}</text>`;
   }
   g += `<text class="inv-axis" x="${L}" y="${H - 6}">${invDate(s.dates[i0])}</text><text class="inv-axis" x="${W - R}" y="${H - 6}" text-anchor="end">${invDate(s.dates.at(-1))}</text>`
     + `<line class="inv-cross" x1="0" x2="0" y1="${T}" y2="${H - B}"/><circle class="inv-dot" r="3.5"/>`
@@ -12486,7 +12717,7 @@ function drawInvChart() {
   const readoutAt = (i) => {
     readout.innerHTML = lines.map(l => l.cls === "bench"
       ? `<button type="button" class="inv-ro inv-ro-sw${l.off ? " off" : ""}" data-inv-bench aria-pressed="${!l.off}" title="${l.off ? "Show" : "Hide"} the ${invBench()}"><i class="inv-sw-${l.cls}"></i><span class="inv-ro-k">${l.label}</span><b>${fmtV(l.vals[i])}</b></button>`
-      : `<span class="inv-ro"><i class="inv-sw-${l.cls}"></i><span class="inv-ro-k">${l.label}</span><b>${fmtV(l.vals[i])}</b></span>`).join("")
+      : `<span class="inv-ro"><i class="inv-sw-${l.cls}"${l.color ? ` style="border-color:${l.color}"` : ""}></i><span class="inv-ro-k">${l.label}</span><b>${fmtV(l.vals[i])}</b></span>`).join("")
       + `<span class="inv-ro-date">${invDate(s.dates[i0 + i])}</span>`;
   };
   readoutAt(n - 1);
@@ -12521,6 +12752,24 @@ function drawInvChart() {
     lines: measured.map(([label, a]) => ({ label, pts: a.slice(i0).map((v, i) => [t[i], v]) })),
   });
 }
+/* SMA 20/50/200 on the My Investments chart: the Portfolio chart's pills and
+ * the same shared toggles (CHART_SMA), so switching one on shows it on both. */
+function invSmaPillsHtml() {
+  return `<span class="inv-sma" role="group" aria-label="Moving averages">${SMA_PERIODS.map(k => `<span class="pf-overlay-pill" data-inv-sma="${k}" data-on="${CHART_SMA[k] ? 1 : 0}" role="switch" aria-checked="${!!CHART_SMA[k]}" tabindex="0"><span class="swatch sma${k}"></span>SMA ${k}</span>`).join("")}</span>`;
+}
+function invSmaToggle(k) {
+  CHART_SMA[k] = !CHART_SMA[k];
+  writeChartSma(CHART_SMA);
+  syncSmaPills();
+  drawInvChart();
+}
+SMA_PILL_SYNCS.push(() => {
+  for (const el of document.querySelectorAll("#inv-page [data-inv-sma]")) {
+    const on = !!CHART_SMA[+el.dataset.invSma];
+    el.dataset.on = on ? "1" : "0";
+    el.setAttribute("aria-checked", String(on));
+  }
+});
 /* Whether the owner hid the benchmark line (per browser, like the theme). */
 function invBenchHidden() {
   if (INV.hideBench == null) {
@@ -13475,6 +13724,15 @@ $("#inv-page").addEventListener("click", (e) => {
   const rail = e.target.closest("[data-inv-rail]"), edit = e.target.closest("[data-inv-edit]"), add = e.target.closest("[data-inv-add]");
   if (add) $("#inv-pop")?.hidden === false ? invClosePop() : invOpenAdd(add);
   else if (e.target.closest("[data-inv-undo]")) invUndo(false);
+  else if (e.target.closest("[data-inv-cols]")) invColsMenu(e.target.closest("[data-inv-cols]"));
+  else if (e.target.closest("[data-inv-sma]")) invSmaToggle(+e.target.closest("[data-inv-sma]").dataset.invSma);
+  else if (e.target.closest("[data-inv-closed]")) {
+    INV.showClosed = !INV.showClosed;
+    try { localStorage.setItem("inv_closed", INV.showClosed ? "1" : ""); } catch (e2) {}
+    invRender();
+  }
+  else if (e.target.closest("[data-inv-divs]")) { INV.divOpen = !INV.divOpen; const a = $("#inv-page .inv-rail"); if (a) a.innerHTML = invRailHtml(INV.book); }
+  else if (e.target.closest("[data-inv-div-add]")) invAddDividends(e.target.closest("[data-inv-div-add]").dataset.invDivAdd);
   else if (e.target.closest("[data-inv-redo]")) invUndo(true);
   else if (edit) invStartEdit(edit.dataset.invEdit);
   else if (rail) {
@@ -13533,6 +13791,7 @@ window.addEventListener("resize", () => drawInvChart());
 try { const p = localStorage.getItem("inv_period"); if (INV_PERIODS.includes(p)) INV.period = p; } catch (e) {}
 try { const m = localStorage.getItem("inv_mode"); if (m === "value" || m === "return") INV.mode = m; } catch (e) {}
 try { if (localStorage.getItem("inv_rail") === "activity") INV.rail = "activity"; } catch (e) {}
+try { INV.showClosed = localStorage.getItem("inv_closed") === "1"; } catch (e) {}
 
 setTheme(readTheme());
 (async () => {
