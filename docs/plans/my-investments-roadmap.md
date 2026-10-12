@@ -49,6 +49,10 @@ Return, vs S&P and Your money follow the period pill; the benchmark is the owner
 (a fund); the book is valued with as-traded closes; estimated dividends are paid out, never
 in Value or Cash. Follow CLAUDE.md. Never use my
 real data; run live checks with my API keys as env vars. Ask before any version bump.
+My Investments computes through `investments.page` and opens on `state/book_cache.json`
+(Phase 4): keep new rail data off the cold-open path, or cache it. Docs and the changelog
+name no real holdings or returns (CLAUDE.md §18). Phase 4 left Optimize on My Investments
+parked and the Excel-export check with the owner.
 ```
 
 ## The phase loop (every phase)
@@ -970,7 +974,11 @@ the owner reacts to something that looks real.
 
 **Goal:** the rail tells the owner what needs attention, calmly.
 
-**Depends on:** Phase 4.
+**Depends on:** Phase 4. It builds on what Phase 4 shipped: per-holding
+contribution and risk share (`headline.contrib`, `risk_share`), suggested
+dividends already in the rail (`invDivsHtml`, grouped, one undo) and the
+cached page (`investments.page`, `state/book_cache.json`); the X-ray rules
+should read those, never recompute them or fetch on the page's path.
 
 **Prototype questions:**
 - Severity styling, and how many items show before "more".
@@ -1052,8 +1060,8 @@ runs.
 
 ## Next: thesis and AI advisor (new issue, its own roadmap)
 
-The agreed shape is in Appendix C. Open the issue once Phase 4 is done. It
-replaces issue #1's Phase 2.
+The agreed shape is in Appendix C. Phase 4 is done, so the issue can be
+opened now (not yet opened as of 2026-10-13). It replaces issue #1's Phase 2.
 
 ---
 
