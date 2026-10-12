@@ -22,7 +22,7 @@ owner says so.
 | 5 | AI import I: text and spreadsheets, and the front door | Done (merged) | `feature/my-investments-p5` (with 6) · [ithakis/Convexity#34](https://github.com/ithakis/Convexity/pull/34) | 2026-10-06 |
 | 6 | AI import II: screenshots and PDFs | Done (merged) | `feature/my-investments-p5` (with 5) · [ithakis/Convexity#34](https://github.com/ithakis/Convexity/pull/34) | 2026-10-06 |
 | 3 | Performance | Done (merged) | `feature/my-investments-p3` · [ithakis/Convexity#37](https://github.com/ithakis/Convexity/pull/37) | 2026-10-11 |
-| 4 | Holdings depth | Done (PR open) | `feature/my-investments-p4` | 2026-10-12 |
+| 4 | Holdings depth | Done (merged) | `feature/my-investments-p4` · [ithakis/Convexity#38](https://github.com/ithakis/Convexity/pull/38) | 2026-10-12 |
 | 7 | Attention rail I: risk and events | Not started | | |
 | 8 | Attention rail II: plans and price alerts | Not started | | |
 | 9 | Notifications | Not started | | |
