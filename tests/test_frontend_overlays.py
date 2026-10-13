@@ -34,7 +34,6 @@ _OVERLAY_IDS = [
     "pf-mpt-bg",
     "pf-mpt-info-bg",
     "cv-modal-bg",
-    "info-bg",
     "modal-bg",
     "methodology-bg",
     "ns-prog-bg",

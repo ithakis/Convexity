@@ -397,9 +397,9 @@ def _bulk_close(
             for s in missing:
                 _bulk_close_put(s, key, pd.Series(dtype=float))
             missing = []
-        for i, s in enumerate(missing):
-            delay = 0.4 + 0.2 * min(i, 6)
-            time.sleep(delay)
+
+        def retry_one(i: int, s: str) -> None:
+            time.sleep(0.4 + 0.2 * (i % 4))
             for attempt in range(3):
                 try:
                     tk = yf.Ticker(s)
@@ -408,16 +408,74 @@ def _bulk_close(
                     # tz_convert(None) moved bars to UTC, off by a day for
                     # London and off-midnight for New York.
                     if h is not None and not h.empty and keep(s, by_trading_date(h)):
-                        break
+                        return
                 except Exception:
                     pass
                 time.sleep(0.6 * (attempt + 1))
-            else:
-                _bulk_close_put(s, key, pd.Series(dtype=float))
+            _bulk_close_put(s, key, pd.Series(dtype=float))
+
+        # Four at a time (Ticker.history keeps its state per object, unlike
+        # yf.download): one after another, a delisted name or two cost ~5 s
+        # each on every call.
+        if missing:
+            with ThreadPoolExecutor(max_workers=min(4, len(missing))) as pool:
+                list(pool.map(retry_one, range(len(missing)), missing))
 
     if not out:
         return pd.DataFrame()
     return pd.concat(out, axis=1).sort_index()
+
+
+_WINDOW_YEARS = {"2y": 2, "5y": 5, "10y": 10, "max": 1000}
+
+
+def prefetch_closes(rows: list[dict], periods, display_ccy: str = "USD") -> None:
+    """Warm the caches many portfolios' analytics read (the Excel export):
+    one download of every holding, benchmark, sector ETF and the short rate
+    over the longest warm-up window, the shorter windows cut from it. Beside
+    it (Ticker calls keep their state per object, unlike yf.download): the
+    FX histories, and the analyst target range of rows cached before
+    fetch_one stored it. One portfolio and period at a time, a cold export
+    of 10 portfolios took ~6 minutes (2026-10-13); Yahoo's download of ~150
+    tickers over 10 years is ~45 s of it, the floor."""
+    from convexity import fx
+
+    windows = sorted({_WARMUP_YF[p] for p in periods if p in _WARMUP_YF}, key=_WINDOW_YEARS.get)
+    if not windows:
+        return
+    by_sym = {str(r["symbol"]): r for r in rows if r.get("symbol")}
+    secs = {_SECTOR_ETF[x] for r in rows if (x := (r.get("sector") or "").strip()) in _SECTOR_ETF}
+    bench = [t for t, _, _ in _BENCHMARKS.values()]
+    syms = list(dict.fromkeys([*by_sym, *bench, *sorted(secs), _RF_TICKER]))
+    ccys = (
+        {r.get("currency") for r in rows} | {c for _, _, c in _BENCHMARKS.values()} | {display_ccy}
+    )
+    longest = windows[-1]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        side = [pool.submit(fx.prefetch_usd_series, ccys, w) for w in windows]
+        side += [pool.submit(_analyst_for, s, r) for s, r in by_sym.items()]
+        wide = _bulk_close(syms, longest)
+        for f in side:
+            with contextlib.suppress(Exception):
+                f.result()
+    # A listing Yahoo had no prices for: its check downloads too, so not
+    # beside the download above (yf.download shares module state).
+    for s in by_sym:
+        if s not in wide.columns:
+            _known_listing(s)
+    for w in windows[:-1]:
+        for s in syms:
+            if _bulk_close_get_cached(s, w) is not _BULK_CLOSE_MISS:
+                continue
+            col = _bulk_close_get_cached(s, longest)
+            if col is _BULK_CLOSE_MISS or col is None or col.empty:
+                _bulk_close_put(s, w, pd.Series(dtype=float))  # failed for the longer window too
+                continue
+            start = col.index[-1] - pd.DateOffset(years=_WINDOW_YEARS[w])
+            _bulk_close_put(s, w, col.loc[start:])
+            bars = _bulk_bars_get(s, longest)
+            if bars is not None and not bars.empty:
+                _bulk_bars_put(s, w, bars.loc[start:])
 
 
 def dividends_cached(sym: str) -> pd.Series | None:
@@ -575,7 +633,10 @@ def _analyst_for(symbol: str, row: dict | None = None) -> dict:
         "target_high": _safe_num(row.get("target_high")),
         "target_median": _safe_num(row.get("target_median")),
     }
-    if any(v is None for v in trio.values()):
+    # No mean target on a built row = no analyst coverage (a fund): the range
+    # comes from the same Yahoo block, so asking would only cost a call.
+    uncovered = out["target_mean"] is None and price is not None
+    if not uncovered and any(v is None for v in trio.values()):
         cache_key = f"analyst_targets|{symbol}"
         hit = _cache_get(cache_key)
         if hit is not None:

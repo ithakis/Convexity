@@ -202,32 +202,13 @@ def _apply_fx_to_closes(
     if not need:
         return sym_closes
 
-    pairs = [f"{c}USD=X" for c in need]
-    fx_hist: dict[str, pd.Series] = {}
-    try:
-        raw = yf.download(pairs, period=period_yf, auto_adjust=True, progress=False)
-        if not raw.empty:
-            if isinstance(raw.columns, pd.MultiIndex):
-                cl = raw["Close"]
-                for c in need:
-                    p = f"{c}USD=X"
-                    if p in cl.columns:
-                        s = cl[p].dropna()
-                        if not s.empty:
-                            fx_hist[c] = s
-            elif "Close" in raw.columns and len(pairs) == 1:
-                c = next(iter(need))
-                s = raw["Close"].dropna()
-                if not s.empty:
-                    fx_hist[c] = s
-    except Exception:
-        pass
-
-    for c in need:
-        if c not in fx_hist:
-            s = _fx_usd_series(c, period_yf)
-            if s is not None and not s.empty:
-                fx_hist[c] = s
+    # Through the per-currency cache (4 h), fetched in parallel: a batch
+    # download here ran on every analytics call, uncached (41 s of a cold
+    # ten-portfolio export, 2026-10-13).
+    prefetch_usd_series(need, period_yf)
+    fx_hist = {
+        c: s for c in need if (s := _fx_usd_series(c, period_yf)) is not None and not s.empty
+    }
 
     disp_usd = fx_hist.get(display_ccy)
     idx = sym_closes.index

@@ -751,7 +751,7 @@ def test_the_export_has_positions_and_ledger_sheets(srv):
     _seed()
     with urllib.request.urlopen(srv + "/api/export-xlsx?ccy=USD") as r:
         wb = load_workbook(io.BytesIO(r.read()))
-    assert wb.sheetnames[:3] == ["Overview", "Positions", "Ledger"]
+    assert wb.sheetnames[:4] == ["Read me", "Overview", "Positions", "Ledger"]
     pos = wb["Positions"]
     names = [pos.cell(row=k, column=1).value for k in range(5, pos.max_row + 1)]
     assert "Cash" in names and "Total" in names and "NVIDIA" in " ".join(n or "" for n in names)

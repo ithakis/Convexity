@@ -35,19 +35,14 @@
       <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 3.5 8.5 8.5 M8.5 3.5 3.5 8.5"/></svg>
     </button>
   </span>
-  <!-- Export button: exports ALL saved portfolios to a multi-sheet .xlsx, one sheet
-       per portfolio. Each sheet must include EVERY column the app can show for a
-       row (full column registry, not just the currently visible view), the News
-       read and Market read (per lens, tier, z, divergence) PLUS the
-       analyst recommendations and the portfolio analytics ratios shown in the
-       Portfolio tab, with static 1Y and 5Y portfolio statistics but no exported
-       time-series payloads. Every header carries a hover comment with its
-       definition and a last "Definitions" sheet lists them all (COLUMN_DEFS /
-       METRIC_DEFS in xlsx_export.py). Intent: user feeds the file to an AI/chatbot for
-       agentic analysis and portfolio discussion. Future maintainers — when new
-       columns or analytics are added to the UI, extend the export accordingly so
-       this stays the "everything you see in the app" artifact. -->
-  <button id="export" data-tip="Create one Excel workbook with every saved portfolio, full holdings data, analyst fields, and static 1Y and 5Y portfolio statistics. Every header explains its metric (hover comments, plus a Definitions sheet). Useful as structured input to an AI agent.">⬇ Export</button>
+  <!-- Export button: every saved portfolio and the book in one .xlsx that a
+       newcomer can read and a quant or an AI can use as context. Each portfolio
+       sheet carries EVERY column the app can show for a row (the full registry,
+       not the visible view), both news reads, the analyst block and the
+       portfolio analytics (1Y and 5Y, no time series). The sheets and their
+       contract are in xlsx_export.py's docstring: when new columns or analytics
+       land in the UI, extend the export so it stays "everything you see". -->
+  <button id="export" data-tip="One Excel workbook with every saved portfolio and My Investments: a Read me with each portfolio in plain words, 1Y and 5Y performance against the S&P 500, risk, analysts, sectors, what drove the return and every holding. A Data sheet holds every figure with its unit, and each header explains its metric.">⬇ Export</button>
   <span class="spacer"></span>
   <span class="status" id="status">Idle</span>
   <div class="fx-menu" id="fx-menu">
@@ -67,8 +62,7 @@
     <span class="ts-track" id="ts-track"><span class="ts-thumb"></span></span>
     <i class="ts-icon" id="ts-moon">&#9790;</i>
   </button>
-  <button class="info-btn" id="info-btn" title="How this works"><span class="info-icon-circle">i</span></button>
-  <button class="gear-btn" id="settings-btn" data-tip="Settings — app preferences and the backend console log." aria-label="Settings">&#9881;</button>
+  <button class="gear-btn" id="settings-btn" data-tip="Settings: preferences, the guide to every feature and column, the backend log and About." aria-label="Settings, guide and about">&#9881;</button>
 </div>
 <div class="progress-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
 
@@ -657,15 +651,8 @@
 
 <div id="analyst-dashboard" class="research-only" aria-label="Analyst sentiment dashboard"></div>
 
-<div class="info-bg" id="info-bg">
-  <div class="info-modal">
-    <div class="info-head">
-      <div>
-        <div class="info-head-title">Convexity — Guide</div>
-        <div class="info-head-sub">Feature library, workflow, and column formulas</div>
-      </div>
-      <button class="info-head-close" onclick="closeInfo()">&#215;</button>
-    </div>
+<!-- The guide: Settings → Guide renders it (renderSettingsGuide). -->
+<template id="guide-tpl">
     <p class="info-intro">
       Data is fetched live from Yahoo Finance via yfinance. Each row is one security. Click any row for a
       detail view. Use <b>⇅ Sort</b> to reorder by any visible metric. Colors are heatmaps, and most controls in the top bar and column bar explain themselves on hover.
@@ -757,12 +744,12 @@
       </div>
       <div class="info-card">
         <div class="info-card-name">Excel Export</div>
-        <div class="info-card-desc">Export produces one workbook across every saved portfolio, not just the active tab.</div>
+        <div class="info-card-desc">Export produces one workbook across every saved portfolio and My Investments, not just the active tab.</div>
         <ul class="info-feature-list">
-          <li>Overview sheet plus one sheet per saved portfolio.</li>
-          <li>Holdings data, analyst fields, exposure, concentration, and portfolio analytics blocks.</li>
+          <li>A Read me with each portfolio in plain words, then an Overview of all of them side by side.</li>
+          <li>Per portfolio: 1Y and 5Y performance against the S&amp;P 500 and Nasdaq-100, valuation, analysts, sectors, concentration, what drove the return, notes, and every holding as a filterable table.</li>
+          <li>A Data sheet with every figure as one long table and its unit, for your own analysis or an AI.</li>
           <li>Every header has a hover comment explaining the metric, and a Definitions sheet lists formula, meaning and typical range for each.</li>
-          <li>Designed as a portable input artifact for spreadsheet work or AI-assisted review.</li>
         </ul>
         <div class="info-card-why"><span class="label">Useful because:</span>it gives you a complete offline snapshot of what the app can already see, without re-querying everything manually.</div>
       </div>
@@ -859,8 +846,7 @@
         <div class="info-formula">$$\Delta_{target} = \left(\dfrac{TP_{mean}}{P} - 1\right) \times 100$$</div>
       </div>
     </div>
-  </div>
-</div>
+</template>
 
 <div class="modal-bg" id="modal-bg"><div class="modal" id="modal"></div></div>
 

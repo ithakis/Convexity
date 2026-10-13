@@ -2514,7 +2514,7 @@ function closeModal() {
 $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") closeModal(); });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    closeModal(); closeInfo(); closeNsProgress(); closeMethodology();
+    closeModal(); closeNsProgress(); closeMethodology();
     closeExportPopup(); closeSettings(); closeTapeFullscreen(); closeCoFull();
     return;
   }
@@ -4742,15 +4742,11 @@ async function loadWatchlists() {
 }
 
 /**
- * Export every saved portfolio to an .xlsx (one sheet per portfolio).
- * Server-side build — fetches analyst recs in parallel + computes the
- * analytics block from cached rows, so the download is "everything you
- * can see in the app." See xlsx_export.py and the inline comment by the
- * topbar Export button for the maintenance contract.
- *
- * UX: this can take a few seconds (the analyst-rec fetch is the slow
- * piece). We swap the button label for a loading chip while the request
- * is in flight, then restore it.
+ * Export every saved portfolio (and the book) to one .xlsx, built on the
+ * server: see xlsx_export.py for the sheets. Cold, Yahoo's price download
+ * is most of the wait (about a minute for ~150 tickers), so the chip shows
+ * the step the server reports (/api/export-progress) instead of a bare
+ * "exporting" that looks stuck; a run past five minutes is given up.
  */
 async function exportXlsx() {
   const btn = $("#export");
@@ -4759,8 +4755,16 @@ async function exportXlsx() {
   const origDisabled = btn.disabled;
   btn.disabled = true;
   btn.innerHTML = lcHtml("exporting", {bar: true});
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 5 * 60 * 1000);
+  const poll = setInterval(async () => {
+    try {
+      const p = await (await fetch("/api/export-progress")).json();
+      if (p.step && btn.disabled) btn.innerHTML = lcHtml(p.step, {bar: true, meta: p.step === "analysing" ? `${p.done + 1}/${p.total}` : null});
+    } catch {}
+  }, 1000);
   try {
-    const r = await fetch("/api/export-xlsx?ccy=" + encodeURIComponent(FX_QUOTE));  // the book's sheets in the display currency
+    const r = await fetch("/api/export-xlsx?ccy=" + encodeURIComponent(FX_QUOTE), {signal: ctl.signal});  // in the display currency
     if (!r.ok) {
       let msg = "Export failed (HTTP " + r.status + ").";
       try { const j = await r.json(); if (j && j.error) msg = j.error; } catch {}
@@ -4783,8 +4787,12 @@ async function exportXlsx() {
     // it's revoked when the popup closes (openExportPopup).
     openExportPopup(fname, url);
   } catch (err) {
-    toast(err.message || "Export failed.");
+    toast(err.name === "AbortError"
+      ? "The export took over five minutes and was stopped (Yahoo is slow). Try again: the prices it downloaded are kept."
+      : err.message || "Export failed.");
   } finally {
+    clearTimeout(timer);
+    clearInterval(poll);
     btn.innerHTML = origHtml;
     btn.disabled = origDisabled;
   }
@@ -5286,14 +5294,10 @@ function quickAnalystPreview() {
       weight,
       price,
       target_mean: targetMean,
-      // The streaming row payload carries only the mean target (fetcher.py keeps
-      // low/median/high off the hot path), so the optimistic paint leaves these
-      // null and the Upside (median) / Upside range cells render "—" until the real
-      // analytics response lands and re-renders the table. Do NOT plug the gap
-      // by adding them to fetch_one — that is the per-row hot loop.
-      target_median: null,
-      target_low: null,
-      target_high: null,
+      // An older cached row has no range: "—" until the analytics land.
+      target_median: row.target_median ?? null,
+      target_low: row.target_low ?? null,
+      target_high: row.target_high ?? null,
       upside_pct: upside,
       mean_rating: meanRating,
       rec_key: row.rec_key || null,
@@ -6409,25 +6413,8 @@ function toast(msg, action) {
   clearTimeout(window._toastT); window._toastT = setTimeout(() => t.classList.remove("show"), action ? 6000 : 2400);
 }
 
-/* ===========================================================================
- * Info panel
- * --------------------------------------------------------------------------- */
-let _katexRendered = false;
-function openInfo() {
-  showOverlay("#info-bg");
-  if (!_katexRendered && window.renderMathInElement) {
-    renderMathInElement(document.getElementById("info-bg"), {
-      delimiters: [{ left: "$$", right: "$$", display: true }],
-      throwOnError: false,
-    });
-    _katexRendered = true;
-  }
-}
-function closeInfo() { hideOverlay("#info-bg"); }
-$("#info-bg").addEventListener("click", (e) => { if (e.target.id === "info-bg") closeInfo(); });
-
 // About-MPT modal — layered on top of the MPT overlay (z-index 95 vs 90).
-// Mirrors openInfo()/closeInfo() so KaTeX renders math the same way.
+// KaTeX renders its math once, like Settings → Guide.
 let _mptKatexRendered = false;
 function openMptInfo() {
   const bg = document.getElementById("pf-mpt-info-bg");
@@ -6816,7 +6803,6 @@ $("#edit-btn").onclick = () => {
     if (DATA.length && (!STATE.analytics || STATE.analytics.error)) requestAnalytics();
   }
 };
-$("#info-btn").onclick = openInfo;
 /* Theme switch: a short click toggles light↔dark (bloomberg counts as
    non-light, so it exits to light); a long-press (≥500ms) reveals the hidden
    Bloomberg terminal theme. Pointer events cover mouse + touch in one path. */
@@ -11124,6 +11110,16 @@ const SETTINGS_SECTIONS = [
     render: renderSettingsLogs,
   },
   {
+    id: "guide",
+    group: "Help",
+    label: "Guide",
+    description: "What each part of the app does, how to move through it, and the formula "
+               + "behind every core column.",
+    keywords: ["help", "guide", "how", "features", "workflow", "columns", "formulas", "info"],
+    items: guideItems(),
+    render: renderSettingsGuide,
+  },
+  {
     id: "about",
     group: "Diagnostics",
     label: "About",
@@ -11988,15 +11984,39 @@ function renderSettingsAbout(el) {
   highlightSettingsMatches(el);
 }
 
+/* Settings → Guide: the feature and column guide (index.html #guide-tpl), one
+   search item per card, so a search for "RS Rank" lands on its card. */
+function guideItems() {
+  const tpl = document.getElementById("guide-tpl");
+  return [...(tpl ? tpl.content.querySelectorAll(".info-card") : [])].map((c, i) => ({
+    id: `guide-${i}`,
+    label: c.querySelector(".info-card-name")?.textContent || "",
+    keywords: [c.textContent.replace(/\$\$[^$]*\$\$/g, " ")],
+  }));
+}
+
+function renderSettingsGuide(el) {
+  const wrap = document.createElement("div");
+  wrap.className = "settings-guide";
+  wrap.append(document.getElementById("guide-tpl").content.cloneNode(true));
+  wrap.querySelectorAll(".info-card").forEach((c, i) => { c.dataset.item = `guide-${i}`; });
+  el.replaceChildren(wrap);
+  if (window.renderMathInElement) {
+    renderMathInElement(wrap, { delimiters: [{ left: "$$", right: "$$", display: true }], throwOnError: false });
+  }
+  highlightSettingsMatches(el);
+}
+
 /* Tint the rows a live search query matched, so jumping to a section from a
-   search result lands the eye on the right row. */
+   search result lands the eye on the right row (scrolled to, in the long Guide). */
 function highlightSettingsMatches(el) {
   const hit = settingsFilter(SETTINGS.query).find(h => h.section.id === SETTINGS.section);
   if (!hit || !hit.matchedItemIds.length) return;
   for (const id of hit.matchedItemIds) {
-    const row = el.querySelector(`.settings-row[data-item="${id}"]`);
+    const row = el.querySelector(`[data-item="${id}"]`);
     if (row) row.classList.add("hit");
   }
+  el.querySelector(".hit")?.scrollIntoView({ block: "nearest" });
 }
 
 function startLogPolling() {

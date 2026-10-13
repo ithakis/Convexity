@@ -450,7 +450,13 @@ picked.
   1. **`SETTINGS_SECTIONS` is the only place a section is declared**
      (`{id, group, label, description, keywords, items, render}`).
      `renderSettingsNav()` rebuilds the nav from it. Add a section there, never
-     back in `index.html`. Sections today: General, Column Presets, My Investments, Models & Data, API keys, Logs, About.
+     back in `index.html`. Sections today: General, Column Presets, My Investments, Attention, Models & Data, API keys, Logs, Guide, About.
+     **Guide** (2026-10-13) is the old topbar "i" overlay, merged into Settings at
+     the owner's request: its markup is `<template id="guide-tpl">` in
+     `index.html`, `renderSettingsGuide` clones it and runs KaTeX, and
+     `guideItems()` makes one search item per card (searching "RS Rank" lands on
+     that card). Its cards are hairline rows there (`.settings-guide`), not
+     cards in the modal. The MPT info modal still uses the shared `.info-*` CSS.
      **My Investments → Clear my investments** asks once inline ("Clear N
      entries" / Cancel, no native dialog), then switches to the page with an
      Undo toast; the server keeps a dated copy (backend.md).

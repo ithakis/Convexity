@@ -45,6 +45,7 @@ from convexity import envcheck, keys as _keys, logbuf
 from convexity.analytics import (
     analyze_portfolio,
     analyze_portfolios_multi,
+    prefetch_closes,
 )
 from convexity import jobs
 from convexity import investments as _investments
@@ -346,6 +347,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_response(404)
             self.end_headers()
+            return
+        if parsed.path == "/api/export-progress":
+            from convexity import xlsx_export
+
+            self._send_json(200, xlsx_export.PROGRESS)
             return
         if parsed.path == "/api/health":
             # env_ok is find_spec-only (see envcheck._importable) — no imports,
@@ -704,7 +710,8 @@ class Handler(BaseHTTPRequestHandler):
                 # My Investments' Positions and Ledger sheets (Phase 4), in
                 # the page's display currency.
                 qs = parse_qs(parsed.query)
-                ccy = (qs.get("ccy") or ["USD"])[0]
+                ccy = (qs.get("ccy") or ["USD"])[0].upper()
+                ccy = ccy if ccy in SUPPORTED_FX else "USD"
                 try:
                     book = _investments.page(ccy)
                 except Exception as exc:  # the research sheets still export
@@ -714,11 +721,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not full and not has_book:
                     self._send_json(404, {"error": "no saved portfolios to export"})
                     return
+                # In the page's currency, like the book: the analytics the
+                # tabs already computed are then cache hits.
                 blob = xlsx_export.build_workbook(
                     full,
                     analytics_runner=analyze_portfolios_multi,
+                    prefetch=prefetch_closes,
                     period="1Y",
-                    display_ccy="USD",
+                    display_ccy=ccy,
                     book=book if has_book else None,
                 )
                 stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
