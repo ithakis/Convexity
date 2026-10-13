@@ -1,58 +1,51 @@
-"""Excel export — one sheet per saved portfolio, intended to be the
-"everything you can see in the app" artifact you'd hand to an AI/chatbot.
+"""Excel export: every saved portfolio (and My Investments' book) in one
+workbook that a newcomer can read and a quant, or a model, can use as a
+reference.
 
-Design contract (matches the inline comment next to the Export button in
-static/app.js — keep them in sync when extending):
+Sheets, in order:
 
-  • Every saved portfolio becomes its own sheet (sheet name = portfolio
-    name, Excel-sanitized).
-  • Each sheet contains, top-to-bottom:
-       1. Meta block: portfolio name, constituents string, cache info.
-         2. Portfolio analytics summary with static 1Y and 5Y risk/return
-             sections (Sharpe / drawdown / beta / ann return / etc. from
-             analyze_portfolios_multi). Time-series payloads are deliberately
-             excluded from the workbook.
-       3. Holdings table: one row per ticker, every field the row payload
-          carries, the two news reads (SENTIMENT_COLS: News read tier, one
-          column per lens, Market read tier and z, the divergence sentence),
-          PLUS analyst recommendations fetched at export time.
-  • The first sheet ("Overview") lists every portfolio with the headline
-    analytics side-by-side, for quick cross-portfolio comparison.
+  • Read me: what each sheet is, one plain sentence per portfolio, how to
+    read the numbers (periods, currency, units, colours).
+  • Overview: every portfolio side by side, 1Y and 5Y.
+  • Positions / Ledger: My Investments, when there is a book.
+  • One sheet per portfolio, story first: headline, Performance (each
+    period next to SPY and QQQ, with what each metric means), Valuation,
+    Analysts, Where the money is, Concentration, What drove the return,
+    Notes (stand-in listings, missing history), then the Holdings table
+    (an Excel table: every row field, both news reads, the analyst block).
+  • Data: every portfolio figure as one long table with its unit.
+  • Definitions: formula, meaning and typical range of every column and
+    metric; the same text is on each header as a hover comment, and
+    mirrors the app's hover tips (COL_INFO / METRIC_INFO in static/app.js).
 
-  • Every header carries a hover comment explaining the metric, and a last
-    "Definitions" sheet lists them all (Metric | Formula | Meaning | Typical
-    range). The text lives in COLUMN_DEFS / METRIC_DEFS below and mirrors the
-    app's hover tips (COL_INFO / METRIC_INFO in static/app.js).
+Speed: the server passes ``analytics.prefetch_closes``, which downloads
+every portfolio's prices once before the per-portfolio runs (they then read
+the cache), and the analyst fields come from the rows, never a per-symbol
+Yahoo call (10 portfolios: ~6 minutes cold before, 2026-10-13).
 
-When new columns / analytics / fields land in the dashboard, add them
-here so the file stays the comprehensive view. The format is forgiving:
-unknown row keys go into the holdings table automatically (see
-``HOLDINGS_PRIMARY_COLS`` + the "extras" pass at the end of each row).
-A new column also needs a COLUMN_DEFS entry (and a readable EXTRA_LABELS
-header if it is an extra): tests/test_xlsx_definitions.py fails without one.
+Unknown row keys go into the holdings table automatically (the "extras"
+pass). A new column also needs a COLUMN_DEFS entry (and a readable
+EXTRA_LABELS header if it is an extra): tests/test_xlsx_definitions.py fails
+without one.
 """
 
 import io
 import re
 import time
-import warnings
 from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 
 from openpyxl import Workbook
 from openpyxl.comments import Comment
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.formatting.rule import CellIsRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
-import yfinance as yf
-
-# Numeric coercion + dividend-yield normalisation live in helpers.py — the
-# canonical copies. `_maybe_num` is an alias for `_safe_num` (identical finite-
-# float-or-None semantics) kept only so the many call sites below read the same.
+# `_maybe_num` is helpers._safe_num (finite float or None), named for the
+# many call sites below.
 from convexity.analytics import _market_cap_usd
-from convexity.fetcher import _positive
-from convexity.helpers import _normalize_dividend_yield, major_ccy, _safe_num as _maybe_num
+from convexity.helpers import _safe_num as _maybe_num
 
 
 # --------------------------------------------------------------------------
@@ -65,6 +58,7 @@ HOLDINGS_PRIMARY_COLS: list[tuple[str, str]] = [
     # (row_key, header_label)
     ("symbol", "Ticker"),
     ("name", "Company"),
+    ("weight", "Weight"),
     ("exchange", "Exchange"),
     ("currency", "Currency"),
     ("price", "Price"),
@@ -103,6 +97,7 @@ ANALYST_COLS: list[tuple[str, str]] = [
     ("target_mean", "Target Mean"),
     ("target_high", "Target High"),
     ("target_low", "Target Low"),
+    ("target_median", "Target Median"),
     ("target_upside_pct", "Target Upside (%)"),
     ("forward_pe", "Forward P/E"),
     ("ev_ebitda", "EV/EBITDA"),
@@ -165,6 +160,9 @@ HOLDINGS_SKIP_EXTRAS = {
     "ev_ebitda",
     "recommendation_mean",
     "target_mean_price",
+    "target_low",
+    "target_high",
+    "target_median",
     # Rendered as the dedicated SENTIMENT_COLS block below instead of a
     # "[5 keys]" blob.
     "news_sentiment",
@@ -253,6 +251,15 @@ ANALYST_AGG_KEYS: list[tuple[str, str]] = [
     ("active_count", "Active Holdings"),
 ]
 
+# The portfolio's look-through valuation (analytics["weighted"], key minus "w_").
+WEIGHTED_KEYS: list[tuple[str, str]] = [
+    ("w_pe", "P/E"),
+    ("w_ps", "P/S"),
+    ("w_ev_ebitda", "EV/EBITDA"),
+    ("w_div_yield", "Dividend Yield"),
+    ("w_market_cap", "Average Market Cap"),
+]
+
 # Concentration keys (under analytics["concentration"]).
 CONCENTRATION_KEYS: list[tuple[str, str]] = [
     ("top5", "Top-5 Concentration"),
@@ -278,6 +285,11 @@ COLUMN_DEFS: dict[str, tuple[str, str, str]] = {
         "",
     ),
     "name": ("", "Company or fund name as Yahoo reports it.", ""),
+    "weight": (
+        "the portfolio's weight in this holding",
+        "Share of the portfolio in this holding, as the app weights it.",
+        "All weights add up to 100%.",
+    ),
     "exchange": ("", "Listing exchange.", ""),
     "currency": (
         "",
@@ -540,6 +552,7 @@ COLUMN_DEFS: dict[str, tuple[str, str, str]] = {
     ),
     "target_high": ("max of 12-month price targets", "Highest analyst price target.", ""),
     "target_low": ("min of 12-month price targets", "Lowest analyst price target.", ""),
+    "target_median": ("median of 12-month price targets", "Median analyst price target.", ""),
     "target_upside_pct": (
         "target mean / price - 1",
         "Upside to the mean analyst target, in %. A price return: dividends excluded.",
@@ -635,6 +648,43 @@ METRIC_DEFS: dict[str, tuple[str, str, str]] = {
         "Period return minus SPY's, in percentage points.",
         "",
     ),
+    # WEIGHTED_KEYS
+    "w_pe": (
+        "sum_i w_i / sum_i (w_i / PE_i) over holdings with a P/E (weighted harmonic mean)",
+        "The portfolio's price-to-earnings, as if it were one company.",
+        "Lower is generally cheaper.",
+    ),
+    "w_ps": (
+        "weighted harmonic mean of P/S",
+        "The portfolio's price-to-sales, as if it were one company.",
+        "",
+    ),
+    "w_ev_ebitda": (
+        "weighted harmonic mean of EV/EBITDA",
+        "The portfolio's enterprise value to EBITDA, as if it were one company.",
+        "",
+    ),
+    "w_div_yield": (
+        "sum_i w_i y_i",
+        "The portfolio's dividend yield: what it would pay out a year per unit invested.",
+        "",
+    ),
+    "w_market_cap": (
+        "sum_i w_i cap_i, in the display currency",
+        "Weighted average company size.",
+        "",
+    ),
+    # Contribution
+    "period_return": (
+        "price_T / price_0 - 1",
+        "The holding's own return over the period, in %.",
+        "",
+    ),
+    "contribution": (
+        "linked sum_t w_i,t r_i,t (Carino)",
+        "Percentage points of the portfolio's return that came from this holding.",
+        "The holdings' contributions add up to the portfolio's total return.",
+    ),
     # ANALYST_AGG_KEYS
     "mean_rating": (
         "sum_i w_i R_i / sum_i w_i over rated holdings",
@@ -683,11 +733,12 @@ METRIC_DEFS: dict[str, tuple[str, str, str]] = {
 
 # Overview sheet: header suffix (after the period prefix) → METRIC_DEFS key.
 OVERVIEW_METRICS: tuple[tuple[str, str], ...] = (
-    ("Ann Return %", "ann_return"),
-    ("Ann Vol %", "ann_vol"),
+    ("Return", "total_return"),
+    ("vs S&P 500", "excess_vs_spy"),
+    ("Return a year", "ann_return"),
+    ("Volatility", "ann_vol"),
     ("Sharpe", "sharpe"),
-    ("Max DD %", "max_dd"),
-    ("Excess vs SPY %", "excess_vs_spy"),
+    ("Worst fall", "max_dd"),
 )
 
 
@@ -714,72 +765,63 @@ def _add_comment(cell, d: tuple[str, str, str] | None) -> None:
 
 
 # --------------------------------------------------------------------------
-# Analyst-info fetch — lean wrapper that hits only Ticker.info, parallelised
-# with a small worker pool and a per-process cache. fetch_detail() would
-# also work but pulls full history which we don't need here.
+# Units. Percent figures stay in percent points, as the app computes them
+# (12.5 = 12.5%); fractions (weights, R², margins: 0.125) keep Excel's percent
+# format. The Data sheet names the unit of every value, so a reader (or a
+# model) never has to guess which of the two a number is.
 # --------------------------------------------------------------------------
 
-_ANALYST_CACHE: dict[str, dict] = {}
-_ANALYST_TTL_S = 60 * 30  # 30 min
+METRIC_UNITS: dict[str, str] = {
+    **dict.fromkeys(["total_return", "ann_return", "ann_vol", "max_dd", "te", "rf_ann"], "%"),
+    **dict.fromkeys(["weighted_target_upside_pct", "dist"], "%"),
+    **dict.fromkeys(["r2", "rating_coverage_weight", "target_coverage_weight", "top5"], "fraction"),
+    **dict.fromkeys(["herfindahl", "w_div_yield", "weight", "coverage"], "fraction"),
+    **dict.fromkeys(["n_analysts_total", "covered_count", "active_count"], "count"),
+    "excess_vs_spy": "pts",
+    "contribution": "pts",
+    "w_market_cap": "money",
+}
+UNIT_TEXT = {
+    "%": "percent (12.5 = 12.5%)",
+    "pts": "percentage points",
+    "fraction": "fraction (0.125 = 12.5%)",
+    "ratio": "ratio",
+    "count": "count",
+}
+_SIGNED_KEYS = {"total_return", "ann_return", "excess_vs_spy", "weighted_target_upside_pct",
+                "contribution", "period_return"}  # fmt: skip
+# Only formats every viewer reads alike: a literal percent sign escaped
+# (macOS Quick Look scales a quoted "%" by 100) and [Red] for losses (it
+# ignores [Color10]); gains turn green by conditional formatting (_colour_gains).
+_FMT = {"%": "0.0\\%", "pts": "0.00", "fraction": "0.0%", "ratio": "0.00", "count": "#,##0",
+        "money": "#,##0"}  # fmt: skip
+_SIGNED_FMT = "+0.0\\%;[Red]-0.0\\%;0.0\\%"
+_SIGNED_PTS = "+0.00;[Red]-0.00;0.00"
 
 
-def _analyst_info_one(symbol: str) -> dict:
-    now = time.time()
-    cached = _ANALYST_CACHE.get(symbol)
-    if cached and (now - cached.get("_t", 0)) < _ANALYST_TTL_S:
-        return cached
-    out: dict = {"_t": now}
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            tk = yf.Ticker(symbol)
-            info = tk.info or {}
-    except Exception:
-        info = {}
-    out["recommendation_key"] = (info.get("recommendationKey") or "").lower() or None
-    out["recommendation_mean"] = _maybe_num(info.get("recommendationMean"))
-    out["num_analysts"] = _maybe_num(info.get("numberOfAnalystOpinions"))
-    out["target_mean"] = _maybe_num(info.get("targetMeanPrice"))
-    out["target_high"] = _maybe_num(info.get("targetHighPrice"))
-    out["target_low"] = _maybe_num(info.get("targetLowPrice"))
-    # Negative multiples are not meaningful (fetcher._positive); Yahoo's
-    # EV/EBITDA is only trusted when the statements share the listing
-    # currency (see fetcher._currency_consistent).
-    same_ccy = major_ccy(info.get("currency")) == major_ccy(
-        info.get("financialCurrency") or info.get("currency")
-    )
-    out["forward_pe"] = _positive(info.get("forwardPE"))
-    out["ev_ebitda"] = _positive(info.get("enterpriseToEbitda")) if same_ccy else None
-    out["peg"] = _positive(info.get("pegRatio") or info.get("trailingPegRatio"))
-    out["beta_info"] = _maybe_num(info.get("beta"))
-    out["dividend_yield"] = _normalize_dividend_yield(
-        info.get("dividendYield"),
-        price=info.get("currentPrice") or info.get("regularMarketPrice"),
-        dividend_rate=info.get("dividendRate"),
-        trailing_yield=info.get("trailingAnnualDividendYield"),
-        trailing_rate=info.get("trailingAnnualDividendRate"),
-        currency=info.get("currency"),
-        financial_currency=info.get("financialCurrency"),
-    )
-    _ANALYST_CACHE[symbol] = out
-    return out
+def _unit(key: str) -> str:
+    return METRIC_UNITS.get(key, "ratio")
 
 
-def gather_analyst_info(symbols: Iterable[str], *, max_workers: int = 5) -> dict[str, dict]:
-    """Dedup, fetch info in parallel, return ``{symbol: analyst_dict}``."""
-    uniq = sorted({s for s in symbols if s})
-    if not uniq:
-        return {}
-    out: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_analyst_info_one, s): s for s in uniq}
-        for fut in as_completed(futures):
-            s = futures[fut]
-            try:
-                out[s] = fut.result()
-            except Exception:
-                out[s] = {}
-    return out
+def _fmt(key: str) -> str:
+    if key in _SIGNED_KEYS:
+        return _SIGNED_PTS if _unit(key) == "pts" else _SIGNED_FMT
+    return _FMT[_unit(key)]
+
+
+# Percent-point holdings columns (the others are fractions, money or plain).
+_PP_COLS = {"pct_1d", "pct_2d", "pct_1w", "pct_1m", "pct_3m", "pct_6m", "pct_ytd", "pct_1y",
+            "delta_ath", "target_upside_pct", "debt_equity"}  # fmt: skip
+_HOLDING_FMT = {
+    **dict.fromkeys(["price", "change_abs_1d", "w52_high", "w52_low", "ath", "sma_20", "sma_50",
+                     "sma_200", "target_mean", "target_high", "target_low", "target_median"], "#,##0.00"),
+    **dict.fromkeys(["ps_ratio", "pe_ratio", "forward_pe", "ev_ebitda", "peg", "beta", "beta_info",
+                     "price_book", "ev_revenue", "current_ratio", "quick_ratio", "rsi_14", "bb_pct_b",
+                     "macd_hist_pct", "recommendation_mean"], "0.00"),
+    **dict.fromkeys(["market_cap", "market_cap_usd", "volume", "num_analysts"], "#,##0"),
+    **dict.fromkeys(_PP_COLS, "0.00\\%"),
+    **dict.fromkeys([*FRACTION_KEYS, "weight"], "0.0%"),
+}  # fmt: skip
 
 
 # --------------------------------------------------------------------------
@@ -787,6 +829,14 @@ def gather_analyst_info(symbols: Iterable[str], *, max_workers: int = 5) -> dict
 # --------------------------------------------------------------------------
 
 _INVALID_SHEET_CHARS = re.compile(r"[\\/?*\[\]:]")
+_RESERVED_SHEETS = ("Read me", "Overview", "Positions", "Ledger", "Data", "Definitions")
+_BENCH_SERIES = (("Portfolio", None), ("S&P 500", "SPY"), ("Nasdaq-100", "QQQ"))
+_PERIOD_WORDS = {"1Y": "the last year", "3Y": "the last 3 years", "5Y": "the last 5 years"}
+# A cold export downloads every holding once; this bounds what is left (a
+# Yahoo stall) so the button always comes back.
+ANALYTICS_BUDGET_S = 120.0
+# What the export is doing, for the button's label (GET /api/export-progress).
+PROGRESS: dict = {"step": "", "done": 0, "total": 0}
 
 
 def _sanitize_sheet_name(name: str, used: set[str]) -> str:
@@ -809,21 +859,10 @@ def _flatten_value(v):
     if isinstance(v, (int, float, str, bool)):
         return v
     if isinstance(v, (list, tuple)):
-        # Compress lists into a count so the sheet stays readable.
         return f"[{len(v)} items]"
     if isinstance(v, dict):
         return f"[{len(v)} keys]"
     return str(v)
-
-
-# --------------------------------------------------------------------------
-# Sheet writers
-# --------------------------------------------------------------------------
-
-_HEADER_FILL = PatternFill("solid", fgColor="1F2937")
-_HEADER_FONT = Font(bold=True, color="FFFFFF")
-_SECTION_FONT = Font(bold=True, size=12)
-_TITLE_FONT = Font(bold=True, size=14)
 
 
 def _analytics_result_for_period(result: dict, set_name: str = "cap") -> dict:
@@ -863,6 +902,23 @@ def _excess_vs_spy(analytics: dict) -> float | None:
     return port_tr - spy_tr
 
 
+def _series_stats(analytics: dict, bench: str | None) -> dict:
+    """The stats column for the portfolio (with its beta, R², TE, IR vs SPY)
+    or for one benchmark."""
+    if bench is None:
+        return {**(analytics.get("stats") or {}), **(_bench(analytics, "SPY").get("rel") or {}),
+                "excess_vs_spy": _excess_vs_spy(analytics)}  # fmt: skip
+    return _bench(analytics, bench).get("stats") or {}
+
+
+def _when(iso) -> str:
+    """A saved_at stamp as the reader's local date and time."""
+    try:
+        return datetime.fromisoformat(str(iso)).astimezone().strftime("%d %b %Y, %H:%M")
+    except ValueError:
+        return "the last refresh"
+
+
 def _metric_periods(primary_period: str) -> list[str]:
     periods: list[str] = []
     for candidate in (primary_period, *EXPORT_STATS_PERIODS):
@@ -872,294 +928,439 @@ def _metric_periods(primary_period: str) -> list[str]:
     return periods or list(EXPORT_STATS_PERIODS)
 
 
-def _write_overview(wb: Workbook, summaries: list[dict], metric_periods: list[str]) -> None:
-    ws = wb.active
-    ws.title = "Overview"
-    ws["A1"] = "Convexity — Export"
+def headline(analytics_by_period: dict[str, dict], periods: list[str]) -> str:
+    """The portfolio in two or three plain sentences, for the Read me and the
+    top of its sheet."""
+    out = []
+    for p in periods:
+        a = analytics_by_period.get(p) or {}
+        st = a.get("stats") or {}
+        tr = _maybe_num(st.get("total_return"))
+        if tr is None:
+            continue
+        s = f"{'Up' if tr >= 0 else 'Down'} {abs(tr):.1f}% over {_PERIOD_WORDS.get(p, p)}"
+        ar = _maybe_num(st.get("ann_return"))
+        if p != "1Y" and ar is not None:
+            s += f" ({ar:+.1f}% a year)"
+        spy = _maybe_num(_series_stats(a, "SPY").get("total_return"))
+        out.append(s + (f"; the S&P 500 {spy:+.1f}%." if spy is not None else "."))
+    first = _first_available_analytics(analytics_by_period, periods)
+    dd = _maybe_num((first.get("stats") or {}).get("max_dd"))
+    if dd is not None:
+        out.append(
+            f"Worst fall from a peak in {_PERIOD_WORDS.get(first.get('period'), 'the period')}: {dd:.1f}%."
+        )
+    top5 = _maybe_num((first.get("concentration") or {}).get("top5"))
+    if top5 is not None:
+        out.append(f"The 5 largest holdings are {top5 * 100:.0f}% of it.")
+    return " ".join(out) or "No performance figures: Yahoo had no usable price history for it."
+
+
+# --------------------------------------------------------------------------
+# Sheet writers
+# --------------------------------------------------------------------------
+
+_HEADER_FILL = PatternFill("solid", fgColor="1F2937")
+_HEADER_FONT = Font(bold=True, color="FFFFFF")
+_SECTION_FONT = Font(bold=True, size=12, color="1F2937")
+_TITLE_FONT = Font(bold=True, size=16)
+_NOTE_FONT = Font(italic=True, color="6B7280")
+_MEANING_FONT = Font(color="6B7280")
+_RULE = Border(bottom=Side(style="thin", color="9CA3AF"))
+_WRAP = Alignment(wrap_text=True, vertical="top")
+
+
+def _write_title(ws, title: str, note: str) -> None:
+    ws["A1"] = title
     ws["A1"].font = _TITLE_FONT
-    ws["A2"] = f"Generated: {datetime.now(UTC).isoformat(timespec='seconds')}"
-    ws["A2"].font = Font(italic=True, color="6B7280")
-
-    headers = ["Portfolio", "Rows", "Cached At"]
-    defs: list = [None, None, None]
-    for period in metric_periods:
-        for suffix, key in OVERVIEW_METRICS:
-            headers.append(f"{period} {suffix}")
-            defs.append(METRIC_DEFS[key])
-    row = 4
-    _write_header_cells(ws, row, headers, defs)
-    for s in summaries:
-        row += 1
-        ws.cell(row=row, column=1, value=s.get("name"))
-        ws.cell(row=row, column=2, value=s.get("rows"))
-        ws.cell(row=row, column=3, value=s.get("saved_at"))
-        col = 4
-        analytics_by_period = s.get("analytics_by_period") or {}
-        for period in metric_periods:
-            analytics = analytics_by_period.get(period) or {}
-            stats = analytics.get("stats") or {}
-            ws.cell(row=row, column=col, value=_maybe_num(stats.get("ann_return")))
-            col += 1
-            ws.cell(row=row, column=col, value=_maybe_num(stats.get("ann_vol")))
-            col += 1
-            ws.cell(row=row, column=col, value=_maybe_num(stats.get("sharpe")))
-            col += 1
-            ws.cell(row=row, column=col, value=_maybe_num(stats.get("max_dd")))
-            col += 1
-            ws.cell(row=row, column=col, value=_excess_vs_spy(analytics))
-            col += 1
-
-    for col in range(1, len(headers) + 1):
-        ws.column_dimensions[get_column_letter(col)].width = 18
-    ws.column_dimensions["A"].width = 28
+    ws["A2"] = note
+    ws["A2"].font = _NOTE_FONT
 
 
-def _write_kv(ws, r: int, label: str, value, label_bold: bool = True, definition=None) -> int:
-    """Single key/value row helper. Returns the next row index."""
-    a = ws.cell(row=r, column=1, value=label)
-    if label_bold:
-        a.font = Font(bold=True)
-    _add_comment(a, definition)
-    ws.cell(row=r, column=2, value=value)
-    return r + 1
-
-
-def _write_section(ws, r: int, title: str) -> int:
-    c = ws.cell(row=r, column=1, value=title)
-    c.font = _SECTION_FONT
+def _write_section(ws, r: int, title: str, width: int = 8) -> int:
+    """A kicker and a hairline under it, as the app draws sections."""
+    ws.cell(row=r, column=1, value=title).font = _SECTION_FONT
+    for c in range(1, width + 1):
+        ws.cell(row=r, column=c).border = _RULE
     return r + 1
 
 
 def _write_header_cells(ws, r: int, labels: Iterable[str], defs: Iterable = ()) -> None:
-    """Write one styled table-header row (bold white on dark, centered) from
-    column 1. Shared by the overview, per-period metrics, and holdings tables
-    so the three headers stay visually identical without repeating the
-    fill/font/alignment triple at each call site. `defs`, aligned with
+    """One styled table-header row from column 1; `defs`, aligned with
     `labels`, attaches each column's definition as a hover comment."""
     defs = list(defs)
     for col_idx, label in enumerate(labels, 1):
         c = ws.cell(row=r, column=col_idx, value=label)
         c.font = _HEADER_FONT
         c.fill = _HEADER_FILL
-        c.alignment = Alignment(horizontal="center")
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         if col_idx <= len(defs):
             _add_comment(c, defs[col_idx - 1])
 
 
+def _put(ws, r: int, c: int, value, fmt: str | None = None):
+    cell = ws.cell(row=r, column=c, value=value)
+    if fmt and isinstance(value, int | float) and not isinstance(value, bool):
+        cell.number_format = fmt
+        if fmt in (_SIGNED_FMT, _SIGNED_PTS):
+            ws.__dict__.setdefault("_gains", []).append(cell.coordinate)
+    return cell
+
+
+def _colour_gains(wb: Workbook) -> None:
+    """One green-for-gains rule per sheet over every signed cell _put wrote."""
+    for ws in wb.worksheets:
+        if cells := ws.__dict__.get("_gains"):
+            ws.conditional_formatting.add(" ".join(cells), CellIsRule(
+                operator="greaterThan", formula=["0"], font=Font(color="15803D")))  # fmt: skip
+
+
+def _write_kv(ws, r: int, label: str, key: str, value, defs=METRIC_DEFS, note: str = "") -> int:
+    """Label (with its definition on hover), value, then what it means."""
+    a = ws.cell(row=r, column=1, value=label)
+    a.font = Font(bold=True)
+    _add_comment(a, defs.get(key))
+    _put(ws, r, 2, value, _fmt(key))
+    meaning = note or (defs.get(key) or ("", "", ""))[1]
+    ws.cell(row=r, column=3, value=meaning or None).font = _MEANING_FONT
+    return r + 1
+
+
+class _Data:
+    """The long table behind the Data sheet: one row per number."""
+
+    HEADER = ["Portfolio", "Period", "Section", "Key", "Label", "Series", "Value", "Unit"]
+
+    def __init__(self, ccy: str) -> None:
+        self.rows: list[list] = []
+        self.ccy = ccy
+
+    def add(self, pf, period, section, key, label, value, series="Portfolio", unit=None) -> None:
+        value = _maybe_num(value)
+        if value is not None:
+            u = unit or _unit(key)
+            self.rows.append([pf, period, section, key, label, series, value,
+                              self.ccy if u == "money" else UNIT_TEXT.get(u, u)])  # fmt: skip
+
+
+def _write_overview(ws, summaries: list[dict], metric_periods: list[str], ccy: str) -> None:
+    _write_title(
+        ws,
+        "Overview",
+        f"One row per portfolio · values in {ccy} · hover a header for its definition",
+    )
+    headers = ["Portfolio", "Holdings", "Weighting"]
+    defs: list = [None, None, None]
+    for period in metric_periods:
+        for suffix, key in OVERVIEW_METRICS:
+            headers.append(f"{period} {suffix}")
+            defs.append(METRIC_DEFS[key])
+    _write_header_cells(ws, 4, headers, defs)
+    for row, s in enumerate(summaries, 5):
+        for c, v in enumerate((s["name"], s["rows"], s["weighting"]), 1):
+            ws.cell(row=row, column=c, value=v)
+        col = 4
+        for period in metric_periods:
+            stats = _series_stats(s["analytics_by_period"].get(period) or {}, None)
+            for _suffix, key in OVERVIEW_METRICS:
+                _put(ws, row, col, _maybe_num(stats.get(key)), _fmt(key))
+                col += 1
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 13
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["C"].width = 22
+    ws.row_dimensions[4].height = 32
+    ws.freeze_panes = "B5"
+
+
+def _write_readme(ws, summaries: list[dict], sheets: list[tuple[str, str]], ccy: str) -> None:
+    created = datetime.now().astimezone().strftime("%d %b %Y, %H:%M %Z")
+    _write_title(
+        ws, "Convexity export", f"Created {created} · values in {ccy} · {len(summaries)} portfolios"
+    )
+    r = _write_section(ws, 4, "What is in this file", 2)
+    for name, what in sheets:
+        ws.cell(row=r, column=1, value=name).font = Font(bold=True)
+        ws.cell(row=r, column=2, value=what).alignment = _WRAP
+        r += 1
+    r = _write_section(ws, r + 1, "At a glance", 2)
+    for s in summaries:
+        ws.cell(row=r, column=1, value=s["name"]).font = Font(bold=True)
+        ws.cell(row=r, column=2, value=s["headline"]).alignment = _WRAP
+        r += 1
+    r = _write_section(ws, r + 1, "How to read it", 2)
+    for line in (
+        f"1Y is the last 12 months and 5Y the last 5 years, up to the latest close. Returns include "
+        f"dividends and are in {ccy}, so currency moves are part of them.",
+        "Each portfolio is weighted as it is set in the app: its active weight preset, else by market "
+        "value. The benchmarks are the SPY (S&P 500) and QQQ (Nasdaq-100) funds, in the same currency.",
+        "Green is a gain, red a loss. 'pts' are percentage points: the gap between two percentages.",
+        "A % figure is in percent (12.5 means 12.5%); weights, margins and R² are Excel percentages.",
+        "Hover any column or metric name for its formula and typical range, or see Definitions.",
+        "The Data sheet has every portfolio figure in one long table (portfolio, period, metric, "
+        "value, unit) to filter, pivot or give to an AI as context.",
+        "Past returns do not predict future ones. Prices, fundamentals and analyst figures come from "
+        "Yahoo Finance and can be late or wrong; analysts' price targets lean optimistic.",
+    ):
+        ws.cell(row=r, column=2, value=line).alignment = _WRAP
+        r += 1
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 110
+
+
 def _per_symbol_analyst(analytics: dict) -> dict[str, dict]:
-    """Pull the per-holding analyst rows out of analytics["analyst"]["holdings"]
-    and key them by ticker, so the holdings table can look them up cheaply."""
+    """The per-holding analyst rows of analytics["analyst"]["holdings"], by
+    ticker."""
     out: dict[str, dict] = {}
-    if not isinstance(analytics, dict):
-        return out
-    ana = analytics.get("analyst") or {}
-    for h in ana.get("holdings") or []:
+    for h in (analytics.get("analyst") or {}).get("holdings") or []:
         if isinstance(h, dict) and h.get("symbol"):
             out[h["symbol"]] = h
     return out
 
 
+def _analyst_cell(key: str, row: dict, ana: dict):
+    """One ANALYST_COLS value: the analytics' per-holding block first (its
+    target range is fetched when an older row lacks it), else the row."""
+    if key == "target_upside_pct":
+        v = ana.get("upside_pct")
+        price, tgt = _maybe_num(row.get("price")), _maybe_num(row.get("target_mean_price"))
+        return v if v is not None or not (price and tgt) else (tgt / price - 1.0) * 100.0
+    src = {"recommendation_key": ("rec_key", "rec_key"),
+           "recommendation_mean": ("mean_rating", "recommendation_mean"),
+           "num_analysts": ("n_analysts", "n_analysts"),
+           "target_mean": ("target_mean", "target_mean_price"),
+           "target_high": ("target_high", "target_high"),
+           "target_low": ("target_low", "target_low"),
+           "target_median": ("target_median", "target_median"),
+           "beta_info": (None, "beta")}.get(key, (None, key))  # fmt: skip
+    v = ana.get(src[0]) if src[0] else None
+    return v if v is not None else row.get(src[1])
+
+
 def _write_portfolio_sheet(
-    wb: Workbook,
-    sheet_name: str,
-    portfolio_name: str,
-    view: dict,
-    analytics_by_period: dict[str, dict],
-    metric_periods: list[str],
-    analyst_fallback: dict[str, dict],
-    weighting_label: str = "cap-weighted",
+    ws, pf: dict, metric_periods: list[str], data: _Data, table_n: int
 ) -> None:
-    ws = wb.create_sheet(title=sheet_name)
-    rows = view.get("rows") or []
-    entries = view.get("entries") or ""
-    saved_at = view.get("saved_at") or ""
-    analytics_by_period = analytics_by_period or {}
-    primary_analytics = _first_available_analytics(analytics_by_period, metric_periods)
-    analyst_block = primary_analytics.get("analyst") or {}
-    analyst_by_sym = _per_symbol_analyst(primary_analytics)
-    exposure = primary_analytics.get("exposure") or {}
-    concentration = primary_analytics.get("concentration") or {}
-    has_analytics = any(a and not a.get("error") for a in analytics_by_period.values())
+    name, view, abp = pf["name"], pf["view"], pf["analytics_by_period"]
+    rows = [x for x in view.get("rows") or [] if isinstance(x, dict)]
+    primary = _first_available_analytics(abp, metric_periods)
+    period = primary.get("period") or metric_periods[0]
+    weights = primary.get("weights_applied") or pf["weights"]
+    _write_title(ws, name, f"{len(rows)} holdings · weighted {pf['weighting']} · values in {data.ccy} · "
+                           f"holdings data from {_when(view.get('saved_at'))}")  # fmt: skip
+    ws.merge_cells("A3:H3")
+    ws["A3"] = pf["headline"]
+    ws["A3"].font = Font(size=12)
+    ws["A3"].alignment = _WRAP
+    ws.row_dimensions[3].height = 36
+    r = 5
 
-    # 1) Meta block
-    r = 1
-    c = ws.cell(row=r, column=1, value=portfolio_name)
-    c.font = _TITLE_FONT
-    r += 1
-    r = _write_kv(ws, r, "Constituents:", entries)
-    ws.cell(row=r - 1, column=2).alignment = Alignment(wrap_text=True)
-    r = _write_kv(ws, r, "Cached at:", saved_at)
-    r = _write_kv(ws, r, "Holdings:", len(rows))
-    r += 1
-
-    # 2) Portfolio metrics + benchmark comparison side-by-side.
-    if not has_analytics:
-        errors = [
-            a.get("error")
-            for a in analytics_by_period.values()
-            if isinstance(a, dict) and a.get("error")
-        ]
-        msg = (
-            f"(analytics unavailable: {errors[0]})"
-            if errors
-            else "(no analytics computed for this export)"
-        )
-        ws.cell(row=r, column=1, value=msg).font = Font(italic=True, color="9CA3AF")
-        r += 2
-    else:
-        for period in metric_periods:
-            analytics = analytics_by_period.get(period) or {}
-            r = _write_section(ws, r, f"Portfolio Metrics ({weighting_label}, {period})")
-            if analytics.get("error"):
-                ws.cell(
-                    row=r, column=1, value=f"(analytics unavailable: {analytics['error']})"
-                ).font = Font(italic=True, color="9CA3AF")
-                r += 2
-                continue
-            spy = _bench(analytics, "SPY")
-            columns = [
-                {**(analytics.get("stats") or {}), **(spy.get("rel") or {})},
-                spy.get("stats") or {},
-                _bench(analytics, "QQQ").get("stats") or {},
-            ]
-            _write_header_cells(ws, r, ["Metric", "Portfolio", "SPY", "NASDAQ"])
-            r += 1
-            for key, label in STATS_KEYS:
-                lc = ws.cell(row=r, column=1, value=label)
-                lc.font = Font(bold=True)
-                _add_comment(lc, METRIC_DEFS.get(key))
-                for col, stats in enumerate(columns, start=2):
-                    ws.cell(row=r, column=col, value=_maybe_num(stats.get(key)))
-                r += 1
-            r += 1
-
-        # 3) Aggregated analyst coverage
-        if analyst_block:
-            r = _write_section(ws, r, "Analyst Coverage (portfolio-weighted)")
-            for key, label in ANALYST_AGG_KEYS:
-                v = analyst_block.get(key)
-                if v is None:
-                    continue
-                r = _write_kv(ws, r, label, _maybe_num(v), definition=METRIC_DEFS.get(key))
-            # Rating distribution
-            dist = analyst_block.get("distribution_pct") or {}
-            if dist:
-                ws.cell(row=r, column=1, value="Rating Distribution (%)").font = Font(bold=True)
-                r += 1
-                for k in ("strongBuy", "buy", "hold", "sell", "strongSell"):
-                    if k in dist:
-                        ws.cell(row=r, column=1, value=f"  {k}")
-                        ws.cell(row=r, column=2, value=_maybe_num(dist.get(k)))
-                        r += 1
-            r += 1
-
-        # 4) Sector / industry exposure
-        sec = exposure.get("by_sector") if isinstance(exposure, dict) else None
-        if sec:
-            r = _write_section(ws, r, "Sector Exposure (weight)")
-            for sname, w in sorted(sec.items(), key=lambda kv: kv[1], reverse=True):
-                ws.cell(row=r, column=1, value=sname)
-                ws.cell(row=r, column=2, value=_maybe_num(w))
-                r += 1
-            r += 1
-
-        # 5) Concentration
-        if concentration:
-            r = _write_section(ws, r, "Concentration")
-            for key, label in CONCENTRATION_KEYS:
-                v = concentration.get(key)
-                if v is None:
-                    continue
-                r = _write_kv(ws, r, label, _maybe_num(v), definition=METRIC_DEFS.get(key))
-            r += 1
-
-    # 6) Holdings table — every row field + per-symbol analyst data
-    r = _write_section(ws, r, "Holdings")
-
-    # Discover any extra row-payload keys not in HOLDINGS_PRIMARY_COLS, so
-    # future fetch_one extensions show up automatically.
-    primary_keys = {k for k, _ in HOLDINGS_PRIMARY_COLS}
-    extra_keys_all = set()
-    for row in rows:
-        if isinstance(row, dict):
-            extra_keys_all.update(row.keys())
-    extra_keys = sorted(extra_keys_all - primary_keys - HOLDINGS_SKIP_EXTRAS)
-    extra_cols = [(k, EXTRA_LABELS.get(k, k)) for k in extra_keys]
-
-    headers = HOLDINGS_PRIMARY_COLS + SENTIMENT_COLS + extra_cols + ANALYST_COLS
+    # Performance: every period side by side, the portfolio next to its benchmarks.
+    r = _write_section(ws, r, "Performance")
+    cols = [(p, label, b) for p in metric_periods for label, b in _BENCH_SERIES]
     _write_header_cells(
-        ws, r, [label for _key, label in headers], [COLUMN_DEFS.get(key) for key, _ in headers]
+        ws, r, ["Metric", *[f"{p} {label}" for p, label, _ in cols], "What it means"]
     )
-    header_row = r
-
-    analyst_col_keys = {k for k, _ in ANALYST_COLS}
-
-    for row_data in rows:
-        if not isinstance(row_data, dict):
-            continue
+    ws.row_dimensions[r].height = 30
+    r += 1
+    for key, label in [*STATS_KEYS, ("excess_vs_spy", "Excess vs SPY (pts)")]:
+        lc = ws.cell(row=r, column=1, value=label)
+        lc.font = Font(bold=True)
+        _add_comment(lc, METRIC_DEFS.get(key))
+        for c, (p, series, b) in enumerate(cols, 2):
+            v = _maybe_num(_series_stats(abp.get(p) or {}, b).get(key))
+            _put(ws, r, c, v, _fmt(key))
+            data.add(name, p, "Performance", key, label, v, series)
+        ws.cell(row=r, column=len(cols) + 2, value=METRIC_DEFS[key][1]).font = _MEANING_FONT
         r += 1
-        sym = row_data.get("symbol")
-        # Prefer analytics-engine per-symbol data (already fetched, richer);
-        # fall back to the parallel info pull only if analytics wasn't run.
-        ana_row = analyst_by_sym.get(sym) or {}
-        fallback_row = analyst_fallback.get(sym, {}) if not ana_row else {}
-        for col_idx, (key, _label) in enumerate(headers, 1):
-            if key in analyst_col_keys:
-                # Map our column key to whatever the source row uses.
-                v = None
-                if key == "target_upside_pct":
-                    v = ana_row.get("upside_pct")
-                    if v is None and fallback_row:
-                        price = _maybe_num(row_data.get("price"))
-                        tgt = _maybe_num(fallback_row.get("target_mean"))
-                        if price and tgt and price > 0:
-                            v = (tgt / price - 1.0) * 100.0
-                # The row's own fields are the last resort: they are no longer
-                # exported as extras (HOLDINGS_SKIP_EXTRAS), so a failed info
-                # pull must not leave these columns empty.
-                elif key == "recommendation_key":
-                    v = (
-                        ana_row.get("rec_key")
-                        or fallback_row.get("recommendation_key")
-                        or row_data.get("rec_key")
-                    )
-                elif key == "recommendation_mean":
-                    v = (
-                        ana_row.get("mean_rating")
-                        or fallback_row.get("recommendation_mean")
-                        or row_data.get("recommendation_mean")
-                    )
-                elif key == "num_analysts":
-                    v = (
-                        ana_row.get("n_analysts")
-                        or fallback_row.get("num_analysts")
-                        or row_data.get("n_analysts")
-                    )
-                elif key in {"target_mean", "target_high", "target_low"}:
-                    v = ana_row.get(key) or fallback_row.get(key)
-                else:
-                    # forward_pe, ev_ebitda, peg, beta_info, dividend_yield —
-                    # not in the per-portfolio analyst block. The row carries
-                    # them (fetch_one, with the ADR currency repair); the info
-                    # pull only fills a row that lacks them. Reading only the
-                    # fallback left these columns empty whenever analytics ran.
-                    rv = row_data.get("beta" if key == "beta_info" else key)
-                    v = rv if rv is not None else analyst_fallback.get(sym, {}).get(key)
-            elif key.startswith("ns:"):
-                v = _sentiment_value(key, row_data.get("news_sentiment"))
-            else:
-                v = row_data.get(key)
-            cell = ws.cell(row=r, column=col_idx, value=_flatten_value(v))
-            if key in FRACTION_KEYS and isinstance(v, (int, float)):
-                cell.number_format = "0.00%"
+    r += 1
 
-    # Approximate column widths.
-    for col_idx, (_key, label) in enumerate(headers, 1):
-        ws.column_dimensions[get_column_letter(col_idx)].width = max(12, len(str(label)) + 2)
-    ws.column_dimensions["A"].width = 14
-    ws.column_dimensions["B"].width = 32
-    # Freeze the header row + the ticker column.
-    ws.freeze_panes = ws.cell(row=header_row + 1, column=2)
+    weighted = primary.get("weighted") or {}
+    if weighted:
+        r = _write_section(ws, r, f"Valuation (the portfolio as one company, {period})")
+        cov = weighted.get("coverage") or {}
+        for key, label in WEIGHTED_KEYS:
+            v = weighted.get(key[2:])
+            c = _maybe_num(cov.get(key[2:]))
+            note = METRIC_DEFS[key][1] + (
+                f" Based on {c * 100:.0f}% of the portfolio." if c is not None else ""
+            )
+            label = f"{label} ({data.ccy})" if _unit(key) == "money" else label
+            r = _write_kv(ws, r, label, key, v, note=note)
+            data.add(name, period, "Valuation", key, label, v)
+            data.add(
+                name,
+                period,
+                "Valuation",
+                f"coverage.{key[2:]}",
+                f"{label}: coverage",
+                c,
+                unit="fraction",
+            )
+        r += 1
+
+    analyst = primary.get("analyst") or {}
+    if analyst:
+        r = _write_section(ws, r, "Analysts (weighted by holding)")
+        for key, label in ANALYST_AGG_KEYS:
+            r = _write_kv(ws, r, label, key, analyst.get(key))
+            data.add(name, period, "Analysts", key, label, analyst.get(key))
+        for k, label in (("strongBuy", "Strong buy"), ("buy", "Buy"), ("hold", "Hold"),
+                         ("sell", "Sell"), ("strongSell", "Strong sell")):  # fmt: skip
+            v = (analyst.get("distribution_pct") or {}).get(k)
+            if v is not None:
+                r = _write_kv(
+                    ws,
+                    r,
+                    f"Ratings: {label}",
+                    "dist",
+                    v,
+                    note="Share of analyst ratings, weighted by holding.",
+                )
+                data.add(name, period, "Analysts", f"dist.{k}", f"Ratings: {label}", v, unit="%")
+        r += 1
+
+    exposure = primary.get("exposure") or {}
+    if exposure:
+        r = _write_section(ws, r, "Where the money is")
+        top = r
+        for col, (key, title) in ((1, ("by_sector", "Sector")), (5, ("by_bucket", "Company size")),
+                                  (9, ("by_industry", "Industry"))):  # fmt: skip
+            rr = top
+            for c, label in enumerate((title, "Weight"), col):
+                h = ws.cell(row=rr, column=c, value=label)
+                h.font, h.fill = _HEADER_FONT, _HEADER_FILL
+            for k, w in sorted((exposure.get(key) or {}).items(), key=lambda kv: -kv[1]):
+                rr += 1
+                ws.cell(row=rr, column=col, value=k)
+                _put(ws, rr, col + 1, _maybe_num(w), _FMT["fraction"])
+                data.add(name, period, title, f"{key}.{k}", k, w, unit="fraction")
+            r = max(r, rr + 1)
+        r += 1
+
+    concentration = primary.get("concentration") or {}
+    if concentration:
+        r = _write_section(ws, r, "Concentration")
+        for key, label in CONCENTRATION_KEYS:
+            r = _write_kv(ws, r, label, key, concentration.get(key))
+            data.add(name, period, "Concentration", key, label, concentration.get(key))
+        r += 1
+
+    contribution = primary.get("contribution") or []
+    if contribution:
+        r = _write_section(ws, r, f"What drove the return ({period})")
+        _write_header_cells(ws, r, ["Holding", "Ticker", "Sector", "Weight", "Return %", "Contribution, pts"],
+                            [None, None, None, COLUMN_DEFS["weight"], METRIC_DEFS["period_return"],
+                             METRIC_DEFS["contribution"]])  # fmt: skip
+        for x in contribution:
+            r += 1
+            for c, (v, fmt) in enumerate(((x.get("name"), None), (x.get("symbol"), None), (x.get("sector"), None),
+                                          (x.get("weight"), _FMT["fraction"]),
+                                          (x.get("period_return"), _SIGNED_FMT),
+                                          (x.get("contribution"), _fmt("contribution"))), 1):  # fmt: skip
+                _put(ws, r, c, v, fmt)
+            data.add(
+                name,
+                period,
+                "Contribution",
+                f"contribution.{x.get('symbol')}",
+                x.get("name"),
+                x.get("contribution"),
+                unit="pts",
+            )
+            data.add(
+                name,
+                period,
+                "Contribution",
+                f"period_return.{x.get('symbol')}",
+                x.get("name"),
+                x.get("period_return"),
+                unit="%",
+            )
+        r += 1
+        ws.cell(row=r, column=1, value="Total").font = Font(bold=True)
+        _put(
+            ws,
+            r,
+            6,
+            sum(_maybe_num(x.get("contribution")) or 0.0 for x in contribution),
+            _fmt("contribution"),
+        )
+        r += 2
+
+    notes = list(
+        dict.fromkeys(w for p in metric_periods for w in (abp.get(p) or {}).get("warnings") or [])
+    )
+    notes += [f"{p}: {a['error']}" for p in metric_periods if (a := abp.get(p) or {}).get("error")]
+    r = _write_section(ws, r, "Notes")
+    for line in notes or ["None: every holding had a full price history."]:
+        ws.cell(row=r, column=1, value=line).font = _MEANING_FONT
+        r += 1
+    r += 1
+
+    _write_holdings(ws, _write_section(ws, r, "Holdings"), rows, weights, primary, table_n)
+    ws.column_dimensions["A"].width = 40
+    for col in range(2, 9):
+        ws.column_dimensions[get_column_letter(col)].width = 15
+    ws.column_dimensions["B"].width = 18
+
+
+def _write_holdings(
+    ws, r: int, rows: list[dict], weights: dict, primary: dict, table_n: int
+) -> None:
+    """Every row field plus the analyst columns, as an Excel table (filter
+    and sort). Unknown row keys are appended, so fetch_one additions show up."""
+    primary_keys = {k for k, _ in HOLDINGS_PRIMARY_COLS}
+    extra_keys = sorted({k for row in rows for k in row} - primary_keys - HOLDINGS_SKIP_EXTRAS)
+    headers = (
+        HOLDINGS_PRIMARY_COLS
+        + SENTIMENT_COLS
+        + [(k, EXTRA_LABELS.get(k, k)) for k in extra_keys]
+        + ANALYST_COLS
+    )
+    _write_header_cells(
+        ws, r, [label for _k, label in headers], [COLUMN_DEFS.get(k) for k, _ in headers]
+    )
+    ws.row_dimensions[r].height = 30
+    header_row = r
+    analyst_keys = {k for k, _ in ANALYST_COLS}
+    by_sym = _per_symbol_analyst(primary)
+    for row in rows:
+        r += 1
+        sym = row.get("symbol")
+        for c, (key, _label) in enumerate(headers, 1):
+            if key == "weight":
+                v = weights.get(sym)
+            elif key in analyst_keys:
+                v = _analyst_cell(key, row, by_sym.get(sym) or {})
+            elif key.startswith("ns:"):
+                v = _sentiment_value(key, row.get("news_sentiment"))
+            else:
+                v = row.get(key)
+            _put(ws, r, c, _flatten_value(v), _HOLDING_FMT.get(key))
+    if r > header_row:
+        ref = f"A{header_row}:{get_column_letter(len(headers))}{r}"
+        t = Table(displayName=f"Holdings{table_n}", ref=ref)
+        t.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=True)
+        ws.add_table(t)
+    for c, (_key, label) in enumerate(headers, 1):
+        if c > 8:
+            ws.column_dimensions[get_column_letter(c)].width = max(11, min(len(str(label)) + 2, 24))
+
+
+def _write_data(ws, data: _Data) -> None:
+    _write_title(ws, "Data", "Every portfolio figure in one long table: filter, pivot, or give it to an AI as context. "
+                             "Units are in the last column.")  # fmt: skip
+    _write_header_cells(ws, 4, _Data.HEADER)
+    for r, vals in enumerate(data.rows, 5):
+        for c, v in enumerate(vals, 1):
+            ws.cell(row=r, column=c, value=v)
+    if data.rows:
+        t = Table(displayName="Data", ref=f"A4:H{4 + len(data.rows)}")
+        t.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=True)
+        ws.add_table(t)
+    for col, width in zip("ABCDEFGH", (24, 8, 16, 30, 34, 12, 14, 26), strict=True):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A5"
 
 
 def definition_rows() -> list[tuple[str, str, str, str, str]]:
@@ -1179,9 +1380,11 @@ def definition_rows() -> list[tuple[str, str, str, str, str]]:
         if d:
             out.append(("Holdings columns", label, *d))
     for section, keys in (
-        ("Portfolio metrics", STATS_KEYS + [("excess_vs_spy", "Excess vs SPY (%)")]),
+        ("Portfolio metrics", STATS_KEYS + [("excess_vs_spy", "Excess vs SPY (pts)")]),
+        ("Valuation", WEIGHTED_KEYS),
         ("Analyst coverage", ANALYST_AGG_KEYS),
         ("Concentration", CONCENTRATION_KEYS),
+        ("Contribution", [("period_return", "Return %"), ("contribution", "Contribution, pts")]),
     ):
         for key, label in keys:
             d = METRIC_DEFS.get(key)
@@ -1190,24 +1393,16 @@ def definition_rows() -> list[tuple[str, str, str, str, str]]:
     return out
 
 
-def _write_definitions(wb: Workbook, sheet_name: str) -> None:
+def _write_definitions(ws) -> None:
     """The last sheet: every metric in the workbook, with its formula, what it
     means and a typical range, so the file explains itself when handed on."""
-    ws = wb.create_sheet(title=sheet_name)
-    ws["A1"] = "Definitions"
-    ws["A1"].font = _TITLE_FONT
-    ws["A2"] = "The same text is on each header as a hover comment."
-    ws["A2"].font = Font(italic=True, color="6B7280")
-    r = 4
-    _write_header_cells(ws, r, ["Section", "Metric", "Formula", "Meaning", "Typical range"])
-    wrap = Alignment(wrap_text=True, vertical="top")
-    for row in definition_rows():
-        r += 1
+    _write_title(ws, "Definitions", "The same text is on each header as a hover comment.")
+    _write_header_cells(ws, 4, ["Section", "Metric", "Formula", "Meaning", "Typical range"])
+    for r, row in enumerate(definition_rows(), 5):
         for col, v in enumerate(row, 1):
-            c = ws.cell(row=r, column=col, value=v or None)
-            c.alignment = wrap
+            ws.cell(row=r, column=col, value=v or None).alignment = _WRAP
         ws.cell(row=r, column=2).font = Font(bold=True)
-    for col, width in zip("ABCDE", (18, 30, 44, 60, 44)):
+    for col, width in zip("ABCDE", (18, 30, 44, 60, 44), strict=True):
         ws.column_dimensions[col].width = width
     ws.freeze_panes = "A5"
 
@@ -1258,9 +1453,10 @@ def _resolve_active_weights(view: dict, rows: list[dict]) -> tuple[dict[str, flo
                 projected[sym] = w
                 total += w
             if total > 0:
-                return ({s: w / total for s, w in projected.items()}, active_name, active_name)
+                weights = {s: w / total for s, w in projected.items()}
+                return (weights, active_name, f"by its '{active_name}' preset")
     # No usable preset → market-cap weighting (matches the frontend fallback).
-    return (_cap_weights(rows), "cap", "cap-weighted")
+    return (_cap_weights(rows), "cap", "by market value")
 
 
 # --------------------------------------------------------------------------
@@ -1272,116 +1468,89 @@ def build_workbook(
     views_map: dict[str, dict],
     *,
     analytics_runner=None,
+    prefetch=None,
     period: str = "1Y",
     display_ccy: str = "USD",
     book: dict | None = None,
 ) -> bytes:
     """Build an .xlsx blob covering every saved portfolio.
 
-    Parameters
-    ----------
-    views_map
-        ``{portfolio_name: view_dict}`` — view_dict has keys ``entries``,
-        ``rows``, ``saved_at``, ``stale``.
-    analytics_runner
-        Optional callable ``(rows, weight_sets, period, display_ccy) -> dict``
-        used to compute the analytics block per portfolio. Pass
-        ``dashboard.analyze_portfolios_multi`` here. When omitted, sheets
-        still build but the analytics block notes that nothing was run.
-    period, display_ccy
-        Forwarded to ``analytics_runner``.
-    book
-        My Investments' page payload (``investments.book``), when there is a
-        book: it adds the "Positions" and "Ledger" sheets after Overview.
+    ``analytics_runner(rows, weight_sets, period, display_ccy)`` is
+    ``analytics.analyze_portfolios_multi``; without it the sheets still build
+    with the holdings only. ``prefetch(rows, periods, ccy)`` (``analytics.
+    prefetch_closes``) downloads every portfolio's prices in one go first, so
+    the runs that follow read the cache. ``book`` is My Investments' page
+    payload; it adds the Positions and Ledger sheets.
     """
-    wb = Workbook()
-    used_names: set[str] = set()
     metric_periods = _metric_periods(period)
+    valid = [(n, v) for n, v in views_map.items() if isinstance(v, dict) and v.get("rows")]
+    if analytics_runner is not None and prefetch is not None and valid:
+        PROGRESS.update(step="downloading prices", done=0, total=len(valid))
+        try:
+            rows = [r for _n, v in valid for r in v["rows"] if isinstance(r, dict)]
+            prefetch(rows, metric_periods, display_ccy)
+        except Exception as exc:  # each run then fetches what it needs itself
+            print(f"[export] prefetch failed: {type(exc).__name__}: {exc}", flush=True)
 
-    # Pre-pass: collect valid views + every unique symbol across portfolios.
-    valid_views: list[tuple[str, dict]] = []
-    all_symbols: set[str] = set()
-    for name, view in views_map.items():
-        if not isinstance(view, dict):
-            continue
-        rows = view.get("rows") or []
-        if not rows:
-            continue
-        valid_views.append((name, view))
-        for r in rows:
-            if isinstance(r, dict) and r.get("symbol"):
-                all_symbols.add(str(r["symbol"]))
+    deadline = time.monotonic() + ANALYTICS_BUDGET_S
+    portfolios: list[dict] = []
+    for i, (name, view) in enumerate(valid):
+        PROGRESS.update(step="analysing", done=i, total=len(valid))
+        rows = view["rows"]
+        weights, set_name, weighting = _resolve_active_weights(view, rows)
+        abp: dict[str, dict] = {}
+        for p in metric_periods if analytics_runner is not None else ():
+            if time.monotonic() > deadline:
+                abp[p] = {"error": "not computed in time; export again (the prices are cached now)"}
+                continue
+            try:
+                abp[p] = _analytics_result_for_period(
+                    analytics_runner(rows, {set_name: weights}, p, display_ccy), set_name
+                )
+            except Exception as exc:
+                abp[p] = {"error": f"runner failed: {exc}"}
+        portfolios.append({"name": name, "view": view, "weights": weights, "weighting": weighting,
+                           "analytics_by_period": abp, "rows": len(rows),
+                           "headline": headline(abp, metric_periods)})  # fmt: skip
 
-    # Run analytics per portfolio. Track which symbols got per-row analyst
-    # data from the engine (the rich `analyst.holdings` block) so we only
-    # do the redundant info-only fetch for the leftovers.
-    summaries: list[dict] = []
-    # (name, view, analytics_by_period, weighting_label)
-    portfolio_analytics: list[tuple[str, dict, dict[str, dict], str]] = []
-    covered_symbols: set[str] = set()
-    for name, view in valid_views:
-        rows = view.get("rows") or []
-        # Use the portfolio's own saved active weighting, not a blanket cap
-        # assumption, so the exported metrics match what the user sees.
-        weights, set_name, weighting_label = _resolve_active_weights(view, rows)
-        analytics_by_period: dict[str, dict] = {}
-        if analytics_runner is not None:
-            for analytics_period in metric_periods:
-                try:
-                    result = analytics_runner(
-                        rows, {set_name: weights}, analytics_period, display_ccy
-                    )
-                    analytics_by_period[analytics_period] = _analytics_result_for_period(
-                        result, set_name
-                    )
-                except Exception as exc:
-                    analytics_by_period[analytics_period] = {"error": f"runner failed: {exc}"}
-        portfolio_analytics.append((name, view, analytics_by_period, weighting_label))
-        # Symbols already covered by analytics["analyst"]["holdings"].
-        for analytics in analytics_by_period.values():
-            for h in (analytics.get("analyst") or {}).get("holdings") or []:
-                if isinstance(h, dict) and h.get("symbol"):
-                    covered_symbols.add(h["symbol"])
-
-    # Fallback info fetch ONLY for symbols not covered by the engine's
-    # per-holding analyst block. Avoids the slow redundant info call when
-    # analytics succeeded for every symbol (the common case).
-    leftovers = all_symbols - covered_symbols
-    analyst_fallback = gather_analyst_info(leftovers) if leftovers else {}
-
-    # Write per-portfolio sheets + summaries.
-    for name, view, analytics_by_period, weighting_label in portfolio_analytics:
-        sheet_name = _sanitize_sheet_name(name, used_names)
-        _write_portfolio_sheet(
-            wb,
-            sheet_name,
-            name,
-            view,
-            analytics_by_period,
-            metric_periods,
-            analyst_fallback,
-            weighting_label,
+    PROGRESS.update(step="writing", done=len(valid), total=len(valid))
+    wb = Workbook()
+    used = {s.lower() for s in _RESERVED_SHEETS}
+    readme, overview = wb.active, wb.create_sheet("Overview")
+    readme.title = "Read me"
+    sheets = [
+        (
+            "Overview",
+            "Every portfolio side by side: return, risk and how it did against the S&P 500.",
         )
-        summaries.append(
-            {
-                "name": name,
-                "rows": len(view.get("rows") or []),
-                "saved_at": view.get("saved_at"),
-                "analytics_by_period": analytics_by_period,
-            }
-        )
-
-    _write_overview(wb, summaries, metric_periods)
-    # Move Overview to the front (openpyxl appends it after creation).
-    wb.move_sheet("Overview", offset=-len(wb.sheetnames) + 1)
-    if book and not book.get("empty") and book.get("headline"):
-        for i, title in enumerate(("Positions", "Ledger"), 1):
-            ws = wb.create_sheet(_sanitize_sheet_name(title, used_names), i)
-            (_write_positions if title == "Positions" else _write_ledger)(ws, book, period)
-    _write_definitions(wb, _sanitize_sheet_name("Definitions", used_names))
+    ]
+    has_book = bool(book and not book.get("empty") and book.get("headline"))
+    if has_book:
+        _write_positions(wb.create_sheet("Positions"), book, period)
+        _write_ledger(wb.create_sheet("Ledger"), book, period)
+        sheets += [("Positions", "My Investments: what you hold now, its value, profit and dividends."),
+                   ("Ledger", "My Investments: every trade, dividend, deposit and fee you entered.")]  # fmt: skip
+    data = _Data(display_ccy)
+    titles = []
+    for i, pf in enumerate(portfolios, 1):
+        titles.append(_sanitize_sheet_name(pf["name"], used))
+        _write_portfolio_sheet(wb.create_sheet(titles[-1]), pf, metric_periods, data, i)
+    if titles:
+        sheets.append(("Portfolio sheets", f"One per portfolio ({', '.join(titles)}): its summary, "
+                       "performance, risk, analysts, sectors, what drove the return, then every holding."))  # fmt: skip
+    sheets += [
+        ("Data", "Every figure above in one long table, with its unit (for analysis or AI)."),
+        ("Definitions", "What each column and metric means, with its formula and typical range."),
+    ]
+    _write_data(wb.create_sheet("Data"), data)
+    _write_definitions(wb.create_sheet("Definitions"))
+    _write_overview(overview, portfolios, metric_periods, display_ccy)
+    _write_readme(readme, portfolios, sheets, display_ccy)
 
     buf = io.BytesIO()
+    _colour_gains(wb)
     wb.save(buf)
+    PROGRESS.update(step="", done=0, total=0)
     return buf.getvalue()
 
 

@@ -15,8 +15,6 @@ Sections: §4 (caching, data folder, persistence, symbol resolution, the streami
   pay the lookup cost once."
 - **`_FX_RATES_CACHE`** (30 min), **`_FX_HIST_CACHE`** (4 h),
   **`_FX_CCY_HIST_CACHE`** (4 h) — currency-specific caches.
-- **`_ANALYST_CACHE`** (in `xlsx_export.py`, 30 min) — analyst info for
-  Excel export when analytics doesn't supply it.
 - **`_VIEWS_LOCK`, `_WATCHLISTS_LOCK`** — threading locks around the
   persistence JSON files. Always acquire before read-modify-write.
 
@@ -358,9 +356,11 @@ The conventions (audit of 2026-09-29, `docs/METRICS_AUDIT.md`):
 - **Contribution** — Carino log-linked from the daily-rebalanced portfolio,
   so the column adds up to `stats.total_return` exactly.
 
-The `analyst.holdings` list is a HUGE win for Excel export — it means we
-don't need a separate parallel `Ticker.info` fetch when analytics
-succeeded. `xlsx_export.build_workbook` does exactly this.
+The `analyst.holdings` list feeds the Excel export's analyst columns; the
+row fields are the fallback, so the export never calls `Ticker.info` itself.
+`fetch_one` stores the target range (`target_low/high/median`) from the
+`.info` it already has, so `_analyst_for` fetches it only for rows cached
+before that (and never for a row with no mean target: no coverage, a fund).
 
 ### FX
 - **`fx_rates(base)`** — spot rates against the 6 majors. 30-min cache.
@@ -397,7 +397,8 @@ succeeded. `xlsx_export.build_workbook` does exactly this.
 - `/api/fx-index?ccy=…`            — one synthetic basket index
 - `/api/fx-indexes-bulk?ccys=…`    — many in one call (sequential server-side)
 - `/api/detail?symbol=…`           — heavy per-symbol payload for the modal
-- `/api/export-xlsx`               — Excel export of every saved portfolio
+- `/api/export-xlsx?ccy=`          — Excel export of every saved portfolio and the book
+- `/api/export-progress`           — `{step, done, total}` of the running export (the button's label)
 
 **POST**
 - `/api/quotes-stream` (preferred) — NDJSON streaming, the fast path
@@ -1070,44 +1071,60 @@ keeps working.
 
 ## 7. `xlsx_export.py`
 
-### Design contract (mirror in app.js too)
-**"Everything you can see in the app, in one file."** Each saved
-portfolio → one sheet. When new columns / analytics / fields land in the
-dashboard, extend `xlsx_export.py` so the export stays comprehensive.
+### Design contract
+**"Everything you can see in the app, in one file", readable by a newcomer
+and usable by a quant or an AI as context.** When new columns / analytics /
+fields land in the dashboard, extend `xlsx_export.py`. The contract lives in
+the module docstring and the HTML comment by the topbar `#export` button
+(`index.html`); keep them in sync.
 
-Two places have the contract documented; keep them in sync:
-1. Inline HTML comment next to the topbar `#export` button
-   (`src/convexity/static/app.js`)
-2. Module docstring at the top of `xlsx_export.py`
+### Sheets (2026-10-13 redesign, "story first" — the owner's pick)
+1. **Read me** — what each sheet is, one plain sentence per portfolio
+   (`headline()`: return vs the S&P 500, worst fall, top-5 share), how to
+   read periods, currency, units and colours.
+2. **Overview** — every portfolio, 1Y and 5Y side by side.
+3. **Positions / Ledger** — My Investments, when there is a book.
+4. **One sheet per portfolio**: headline → Performance (each period's
+   Portfolio / S&P 500 / Nasdaq-100 next to each other, plus "What it
+   means") → Valuation (look-through multiples with coverage) → Analysts →
+   Where the money is (sector, size, industry) → Concentration → What drove
+   the return (Carino contributions, they sum to the total) → Notes (the
+   analytics' warnings: stand-ins, missing history) → Holdings as an Excel
+   table. Weighting = the view's active preset (`_resolve_active_weights`),
+   else by market value.
+5. **Data** — every portfolio figure as a long table (portfolio, period,
+   section, key, label, series, value, unit), built by `_Data` while the
+   sheets are written.
+6. **Definitions** — `definition_rows()`; each header's hover comment too.
 
-### Per-sheet structure
-1. **Overview sheet** (first) — every portfolio with headline metrics
-   side-by-side.
-2. **One sheet per portfolio**:
-   - Meta block (name, constituents, cached-at, holdings count)
-   - **Portfolio Metrics** — 4-column table Portfolio / SPY / NASDAQ. The
-     Portfolio column honors the view's saved **active weight preset**
-     (`_resolve_active_weights`, projected onto row symbols + renormalized), and
-     the section header names the actual weighting (e.g. "Portfolio Metrics
-     (Tilt, 1Y)"); it falls back to cap-weight only when the view has no active
-     preset. (Was previously hardcoded cap-weight regardless of saved weights.)
-   - **Analyst Coverage** — mean rating, target upside, distribution
-   - **Sector Exposure**
-   - **Concentration** — top-5, Herfindahl, effective N
-   - **Holdings table** — every row field + per-symbol analyst columns
+**Units:** percent figures stay in percent points (as the app computes
+them) with an escaped `0.0\%` format; fractions use Excel's `0.0%`. Only
+formats every viewer reads alike: macOS Quick Look scales a quoted `"%"`
+by 100 and ignores `[Color10]`, so losses are `[Red]` in the format and
+gains turn green by one conditional-format rule per sheet (`_colour_gains`).
 
-### Performance contract
-- Analytics is run per-portfolio sequentially (the inner yfinance bulk
-  download is what's slow — it has its own threadpool).
-- When `analytics["analyst"]["holdings"]` covers a symbol, we DO NOT
-  hit `Ticker.info` again. Only uncovered symbols hit
-  `gather_analyst_info` in parallel.
-- Cold cache: ~40s for 7 portfolios / ~150 unique symbols.
-- Warm cache: ~5s (analytics + analyst caches hit).
+### Performance contract (measured 2026-10-13, 10 portfolios, 138 tickers)
+- Before: each portfolio × period (20 runs) downloaded its own prices,
+  re-downloaded FX pairs uncached, retried dead tickers one after another
+  (~5 s each) and called `Ticker.info` per holding twice. Cold: **366 s**.
+- Now: `analytics.prefetch_closes` downloads every holding, benchmark,
+  sector ETF and `^IRX` once over the longest warm-up window (10y) and cuts
+  the 2y cache from it; beside that download (Ticker calls keep per-object
+  state; `yf.download` does not, so never two downloads at once) it fills
+  the FX histories and any missing analyst target ranges. FX conversion
+  reads the per-currency cache (`fx.prefetch_usd_series`), missing-symbol
+  retries run four at a time. The runs then read caches (~5 s for all 20).
+- Cold is Yahoo's floor: ~45–90 s for the one 10-year download depending on
+  Yahoo's latency; 123 s end to end on a slow-Yahoo day. Warm: **< 1 s**.
+- The analytics run in the display currency, so tabs already computed in
+  the app are cache hits. `ANALYTICS_BUDGET_S` (120 s) bounds the loop: a
+  run past it is written as "not computed in time" instead of hanging.
+- The button polls `/api/export-progress` (downloading prices → analysing
+  n/N → writing) and gives up after five minutes.
 
 ### Adding a new column to the holdings table
 - If it's a row-payload key, it appears automatically via the "extras"
   pass (any key not in `HOLDINGS_PRIMARY_COLS` or `HOLDINGS_SKIP_EXTRAS`
   gets appended).
 - If it's an analyst column, add a `(key, label)` tuple to `ANALYST_COLS`
-  and a mapping branch in `_write_portfolio_sheet`'s analyst loop.
+  and its source keys to `_analyst_cell`.

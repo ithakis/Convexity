@@ -3210,9 +3210,17 @@
   .settings-row-control { flex: none; }
   /* Search-match highlight: tints the row the query matched so jumping from a
      result lands the eye in the right place. */
-  .settings-row.hit {
+  .settings-row.hit, .settings-guide .info-card.hit {
     border-left: 2px solid var(--accent); padding-left: 8px;
     background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+  /* Settings → Guide (once the topbar's "i" overlay): its cards are hairline
+     rows in two columns here, so the pane keeps two levels of box. */
+  .settings-guide .info-intro { padding: 0 2px 6px; }
+  .settings-guide .info-grid { padding: 0; gap: 0 28px; }
+  .settings-guide .info-card {
+    background: none; border: 0; border-radius: 0; padding: 14px 2px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   /* Segmented control. Deliberately reuses .settings-nav-item.active's recipe,
      which is already proven in light/dark/bloomberg — do NOT copy

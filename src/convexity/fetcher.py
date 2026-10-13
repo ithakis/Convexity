@@ -336,6 +336,10 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             _currency_consistent(info, out, out["currency"])
             out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
             out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
+            # The range too, from the same .info: analytics._analyst_for
+            # otherwise fetches it again per holding (an export's slow part).
+            for k in ("Low", "High", "Median"):
+                out[f"target_{k.lower()}"] = _safe_num(info.get(f"target{k}Price"))
             out["rec_key"] = (info.get("recommendationKey") or "").strip().lower() or None
             out["n_analysts"] = _safe_num(info.get("numberOfAnalystOpinions"))
 

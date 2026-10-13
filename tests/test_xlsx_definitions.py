@@ -11,9 +11,10 @@ import io
 import re
 
 import pytest
+import yfinance as yf
 from openpyxl import load_workbook
 
-from convexity import fetcher
+from convexity import analytics, fetcher
 from convexity import xlsx_export as xe
 
 
@@ -24,6 +25,7 @@ def _fetch_one_keys() -> set[str]:
     keys = set(re.findall(r'out\["([a-z0-9_]+)"\]', src))
     for n in (20, 50, 200):  # out[f"sma_{n}"] / out[f"above_sma_{n}"]
         keys |= {f"sma_{n}", f"above_sma_{n}"}
+    keys |= {"target_low", "target_high", "target_median"}  # out[f"target_{k.lower()}"]
     return keys
 
 
@@ -39,7 +41,9 @@ def test_every_holdings_column_has_a_definition():
 
 
 def test_every_portfolio_metric_has_a_definition():
-    keys = [k for k, _ in xe.STATS_KEYS + xe.ANALYST_AGG_KEYS + xe.CONCENTRATION_KEYS]
+    keys = [
+        k for k, _ in xe.STATS_KEYS + xe.ANALYST_AGG_KEYS + xe.CONCENTRATION_KEYS + xe.WEIGHTED_KEYS
+    ]
     keys += [k for _, k in xe.OVERVIEW_METRICS]
     missing = [k for k in keys if not (xe.METRIC_DEFS.get(k) or ("", "", ""))[1]]
     assert not missing, f"METRIC_DEFS has no meaning for: {missing}"
@@ -61,28 +65,61 @@ def _runner(rows, weight_sets, period, display_ccy):
     """A stand-in for analyze_portfolios_multi: fixed numbers, no network."""
     (set_name,) = weight_sets
     stats = {
-        "total_return": 12.0,
+        "total_return": 12.0 if period == "1Y" else 80.0,
         "ann_return": 12.0,
         "ann_vol": 18.0,
         "sharpe": 0.6,
         "max_dd": -9.0,
     }
+    spy = {**stats, "total_return": 10.0 if period == "1Y" else 70.0}
     return {
         "results": {
             set_name: {
+                "period": period,
                 "stats": stats,
-                "benchmarks": {"SPY": {"stats": stats, "rel": {"beta": 1.1, "r2": 0.8}}},
+                "weights_applied": {"AAPL": 0.5, "MSFT": 0.5},
+                "benchmarks": {"SPY": {"stats": spy, "rel": {"beta": 1.1, "r2": 0.8}}},
+                "weighted": {"pe": 30.0, "div_yield": 0.006, "coverage": {"pe": 1.0}},
                 "analyst": {"mean_rating": 2.1, "n_analysts_total": 90, "holdings": []},
+                "exposure": {"by_sector": {"Technology": 1.0}, "by_bucket": {"Mega ($200B+)": 1.0}},
                 "concentration": {"top5": 1.0, "herfindahl": 0.5, "effective_n": 2.0},
+                "contribution": [
+                    {
+                        "symbol": "AAPL",
+                        "name": "Apple",
+                        "weight": 0.5,
+                        "period_return": 14.0,
+                        "contribution": 7.0,
+                        "sector": "Technology",
+                    },
+                    {
+                        "symbol": "MSFT",
+                        "name": "Microsoft",
+                        "weight": 0.5,
+                        "period_return": 10.0,
+                        "contribution": 5.0,
+                        "sector": "Technology",
+                    },
+                ],
+                "warnings": ["MSFT (MSFT): before 1 Jan 2020 the prices are X's."],
             }
         }
     }
 
 
+@pytest.fixture(autouse=True)
+def no_yahoo(monkeypatch):
+    """The export reads the analyst fields from the rows: never a Yahoo call."""
+
+    def boom(*a, **k):
+        raise AssertionError("the export called Yahoo")
+
+    monkeypatch.setattr(yf, "Ticker", boom)
+    monkeypatch.setattr(yf, "download", boom)
+
+
 @pytest.fixture
 def workbook(monkeypatch):
-    # The fallback analyst pull goes to Yahoo; the export must not need it here.
-    monkeypatch.setattr(xe, "gather_analyst_info", lambda symbols, **kw: {})
     rows = [
         {
             "symbol": "AAPL",
@@ -129,7 +166,7 @@ def test_metric_labels_and_overview_headers_carry_comments(workbook):
     )
     assert hhi.comment is not None
     ov = workbook["Overview"]
-    assert ov.cell(4, 4).value == "1Y Ann Return %"
+    assert ov.cell(4, 4).value == "1Y Return"
     assert ov.cell(4, 4).comment is not None
     assert ov.cell(4, 1).comment is None  # "Portfolio" needs no explanation
 
@@ -147,23 +184,22 @@ def test_definitions_sheet_is_last_and_complete(workbook):
 
 
 def test_a_portfolio_named_definitions_does_not_collide(monkeypatch):
-    monkeypatch.setattr(xe, "gather_analyst_info", lambda symbols, **kw: {})
     views = {"Definitions": {"entries": "AAPL", "rows": [{"symbol": "AAPL", "price": 1.0}]}}
     wb = load_workbook(io.BytesIO(xe.build_workbook(views)))
-    assert wb.sheetnames == ["Overview", "Definitions", "Definitions-2"]
+    assert wb.sheetnames == ["Read me", "Overview", "Definitions-2", "Data", "Definitions"]
 
 
 def test_analyst_columns_fall_back_to_the_row(monkeypatch):
-    """rec_key / n_analysts are no longer exported twice (HOLDINGS_SKIP_EXTRAS);
-    when the export's own info pull comes back empty, the analyst columns still
-    show what the row carries."""
-    monkeypatch.setattr(xe, "gather_analyst_info", lambda symbols, **kw: {})
+    """rec_key / n_analysts are not exported twice (HOLDINGS_SKIP_EXTRAS); the
+    analyst columns show what the row carries, with no Yahoo call."""
     row = {
         "symbol": "AAPL",
         "price": 200.0,
         "rec_key": "buy",
         "n_analysts": 40,
         "recommendation_mean": 1.9,
+        "target_low": 150.0,
+        "target_mean_price": 250.0,
     }
     wb = load_workbook(io.BytesIO(xe.build_workbook({"Demo": {"entries": "AAPL", "rows": [row]}})))
     ws = wb["Demo"]
@@ -172,4 +208,127 @@ def test_analyst_columns_fall_back_to_the_row(monkeypatch):
     assert got["Analyst Rating"] == "buy"
     assert got["# Analysts"] == 40
     assert got["Rec. Mean (1=Strong Buy, 5=Sell)"] == 1.9
-    assert "rec_key" not in got and "n_analysts" not in got
+    assert got["Target Low"] == 150.0 and got["Target Upside (%)"] == pytest.approx(25.0)
+    assert "rec_key" not in got and "n_analysts" not in got and "target_low" not in got
+
+
+def test_sheets_are_in_reading_order(workbook):
+    assert workbook.sheetnames == ["Read me", "Overview", "Demo", "Data", "Definitions"]
+    readme = [workbook["Read me"].cell(r, 2).value for r in range(1, 40)]
+    assert any(
+        v and v.startswith("Up 12.0% over the last year; the S&P 500 +10.0%.") for v in readme
+    )
+
+
+def test_portfolio_sheet_tells_the_story_first(workbook):
+    ws = workbook["Demo"]
+    assert ws["A3"].value.startswith("Up 12.0% over the last year")
+    col_a = [ws.cell(r, 1).value for r in range(1, ws.max_row + 1)]
+    order = [
+        "Performance",
+        "Valuation",
+        "Analysts",
+        "Where the money is",
+        "Concentration",
+        "What drove the return",
+        "Notes",
+        "Holdings",
+    ]
+    found = [
+        next(
+            i
+            for i, v in enumerate(col_a)
+            if isinstance(v, str) and (v == t or v.startswith(t + " ("))
+        )
+        for t in order
+    ]
+    assert found == sorted(found)
+    assert any(v and "the prices are X's" in v for v in col_a if isinstance(v, str))
+    assert "Holdings1" in ws.tables
+    perf = col_a.index("Performance") + 2  # 0-based list, header under the title
+    header = [ws.cell(perf, c).value for c in range(1, 9)]
+    assert header == [
+        "Metric",
+        "1Y Portfolio",
+        "1Y S&P 500",
+        "1Y Nasdaq-100",
+        "5Y Portfolio",
+        "5Y S&P 500",
+        "5Y Nasdaq-100",
+        "What it means",
+    ]
+
+
+def test_data_sheet_holds_every_figure_with_its_unit(workbook):
+    ws = workbook["Data"]
+    assert [ws.cell(4, c).value for c in range(1, 9)] == xe._Data.HEADER
+    rows = {
+        (ws.cell(r, 2).value, ws.cell(r, 4).value, ws.cell(r, 6).value): (
+            ws.cell(r, 7).value,
+            ws.cell(r, 8).value,
+        )
+        for r in range(5, ws.max_row + 1)
+    }
+    assert rows[("1Y", "total_return", "Portfolio")] == (12.0, "percent (12.5 = 12.5%)")
+    assert rows[("5Y", "total_return", "S&P 500")][0] == 70.0
+    assert rows[("1Y", "excess_vs_spy", "Portfolio")] == (2.0, "percentage points")
+    assert rows[("1Y", "contribution.AAPL", "Portfolio")][0] == 7.0
+    assert rows[("1Y", "by_sector.Technology", "Portfolio")] == (1.0, "fraction (0.125 = 12.5%)")
+
+
+def test_a_stalled_run_does_not_hold_the_export(monkeypatch):
+    monkeypatch.setattr(xe, "ANALYTICS_BUDGET_S", -1.0)
+    views = {"Demo": {"entries": "AAPL", "rows": [{"symbol": "AAPL", "price": 1.0}]}}
+    wb = load_workbook(io.BytesIO(xe.build_workbook(views, analytics_runner=_runner)))
+    notes = [wb["Demo"].cell(r, 1).value or "" for r in range(1, wb["Demo"].max_row + 1)]
+    assert any("not computed in time" in n for n in notes)
+
+
+def test_prefetch_runs_once_over_every_portfolio():
+    seen = []
+    views = {
+        n: {"entries": s, "rows": [{"symbol": s, "price": 1.0}]}
+        for n, s in (("A", "AAPL"), ("B", "MSFT"))
+    }
+    xe.build_workbook(
+        views,
+        analytics_runner=_runner,
+        prefetch=lambda rows, periods, ccy: seen.append(
+            (sorted(r["symbol"] for r in rows), periods)
+        ),
+    )
+    assert seen == [(["AAPL", "MSFT"], ["1Y", "5Y"])]
+
+
+def test_prefetch_closes_downloads_the_longest_window_once(monkeypatch):
+    import pandas as pd
+
+    from convexity import cache
+
+    calls = []
+    idx = pd.bdate_range("2016-01-01", "2026-01-01")
+    frame = pd.DataFrame({"ZZZ1": range(len(idx))}, index=idx, dtype=float)
+
+    def fake(symbols, period, **kw):
+        calls.append(period)
+        cache._bulk_close_put("ZZZ1", period, frame["ZZZ1"])
+        return frame
+
+    monkeypatch.setattr(analytics, "_bulk_close", fake)
+    monkeypatch.setattr(analytics, "_analyst_for", lambda s, r: {})
+    monkeypatch.setattr("convexity.fx.prefetch_usd_series", lambda ccys, w: None)
+    analytics.prefetch_closes([{"symbol": "ZZZ1"}], ["1Y", "5Y"])
+    assert calls == ["10y"]
+    two = cache._bulk_close_get_cached("ZZZ1", "2y")
+    assert two.index[0] >= pd.Timestamp("2024-01-01") and two.index[-1] == idx[-1]
+
+
+def test_no_target_range_call_for_a_holding_without_coverage(monkeypatch):
+    def boom(symbol):
+        raise AssertionError("asked Yahoo for a fund's price targets")
+
+    monkeypatch.setattr(analytics, "_fetch_target_trio", boom)
+    assert analytics._analyst_for("ZZZ2", {"price": 50.0})["target_low"] is None
+    row = {"price": 50.0, "target_mean_price": 60.0, "target_low": 40.0,
+           "target_high": 80.0, "target_median": 61.0}  # fmt: skip
+    assert analytics._analyst_for("ZZZ3", row)["target_median"] == 61.0
