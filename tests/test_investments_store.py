@@ -861,7 +861,12 @@ def test_page_computes_once_for_concurrent_callers(monkeypatch):
         t.start()
     for t in ts:
         t.join()
-    assert len(calls) == 1 and len(out) == 3 and all(o is out[0] for o in out)
+    # One computation shared (each answer is a copy with its own Attention rail).
+    assert (
+        len(calls) == 1
+        and len(out) == 3
+        and all(o["positions"] is out[0]["positions"] for o in out)
+    )
     # A change bumps the rev: the next page is computed again.
     inv.add(BUY | {"symbol": "MSFT"}, 1)
     calls.clear()
@@ -911,3 +916,73 @@ def test_the_cached_route_answers_at_once(srv):
 def test_warm_skips_an_empty_book(monkeypatch):
     monkeypatch.setattr(inv, "page", lambda ccy=None: pytest.fail("no book, no work"))
     inv.warm("EUR")
+
+
+# ------------------------------------------------------- attention (Phase 7)
+
+
+def test_page_carries_xray_and_the_rail(srv):
+    _seed()
+    b = inv.page("USD")
+    held = [p for p in b["positions"] if not p.get("pending")]
+    assert held and all("xray" in p for p in held)
+    att = b["attention"]
+    assert {"high", "info", "upcoming", "unread", "rules"} <= set(att)
+    # The memo and the cached page never hold the rail (it follows the
+    # thresholds at the time of asking).
+    assert "attention" not in next(iter(inv._PAGE_MEMO.values()))[1]
+    cached = json.loads(paths.state_file("book_cache").read_text(encoding="utf-8"))["book"]
+    assert "attention" not in cached
+    assert "attention" in inv.cached_page("USD")
+    assert "attention" in inv.page("USD")  # the memo's answer too
+
+
+def test_attention_route_never_computes(srv, monkeypatch):
+    _seed()
+    calls = []
+    monkeypatch.setattr(inv, "book", lambda ccy=None: calls.append(ccy) or {"empty": True})
+    with urllib.request.urlopen(srv + "/api/investments/attention?ccy=USD") as r:
+        # A book with no page computed yet: "pending", so the badge asks again;
+        # the rules still come (Settings works before the first page).
+        a = json.loads(r.read())
+        assert a["pending"] is True and a["unread"] == 0 and a["high"] == [] and a["rules"]
+    assert calls == []
+
+
+def test_attention_routes(srv):
+    _seed()
+    inv.page("USD")
+    rev = _raw()["rev"]
+    code, att = _post(srv, "/api/investments/attention/rules", {"rules": {"holding": {"value": 1}}})
+    assert code == 200
+    hold = [it for it in att["high"] if it["rule"] == "holding"]
+    assert hold, "every holding is above 1%"
+    code, att2 = _post(srv, "/api/investments/attention/dismiss",
+                       {"key": hold[0]["key"], "level": hold[0]["level"]})  # fmt: skip
+    assert code == 200 and hold[0]["key"] not in [it["key"] for it in att2["high"]]
+    code, att3 = _post(srv, "/api/investments/attention/seen",
+                       {"items": [[it["key"], it["level"]] for it in att2["high"] + att2["info"]]})  # fmt: skip
+    assert code == 200 and att3["unread"] == 0
+    for path, body in (("rules", {"rules": {"nope": {}}}), ("dismiss", {"key": "", "level": 1}),
+                       ("seen", {"items": "x"}), ("other", {})):  # fmt: skip
+        code, err = _post(srv, "/api/investments/attention/" + path, body)
+        assert code == 400, path
+    code, _ = _post(srv, "/api/investments/attention/rules", {"rules": {"holding": {"value": 1}}},
+                    ctype="text/plain")  # fmt: skip
+    assert code == 403
+    assert _raw()["rev"] == rev  # the rail's preferences never touch the book
+
+
+def test_refresh_also_fetches_event_dates(monkeypatch):
+    from convexity import attention
+
+    _seed()
+    seen = []
+    monkeypatch.setattr(
+        attention, "refresh_events", lambda syms, **k: seen.append((sorted(syms), k))
+    )
+    syms = inv.refresh_symbols()
+    inv.refresh_market(syms)
+    bench = inv.INV_BENCHMARKS[inv.bench_key()][0]
+    assert seen and seen[0][1]["force"] is True and bench not in seen[0][0]
+    assert set(seen[0][0]) == set(syms) - {bench}

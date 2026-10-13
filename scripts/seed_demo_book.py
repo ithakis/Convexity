@@ -13,6 +13,11 @@ quick-added holding (GOOGL, ``opening``) at an average price far below its
 Since-day close shows the Phase 3 rule: its performance starts at that day's
 value. Most payouts are left unrecorded, so Yahoo's dividends get estimated.
 
+``--crafted`` adds rows that trip the Attention rail's X-ray rules (roadmap
+Phase 7): a quick-added Pfizer at an average price far above today's (down
+from cost) on top of the demo's tech-heavy, NVIDIA-heavy mix (single name,
+sector) and its pound and euro lines (currency, viewed in USD).
+
 Refuses to run without CONVEXITY_HOME, so it can never write into the real
 data folder, and refuses to overwrite an existing book without --force.
 
@@ -35,6 +40,7 @@ INSTRUMENTS = {
     "SHEL.L": {"name": "Shell plc", "quote_ccy": "GBp", "ccy": "GBP"},
     "VWCE.DE": {"name": "Vanguard FTSE All-World UCITS ETF", "quote_ccy": "EUR", "ccy": "EUR"},
     "GOOGL": {"name": "Alphabet Inc.", "quote_ccy": "USD", "ccy": "USD"},
+    "PFE": {"name": "Pfizer Inc.", "quote_ccy": "USD", "ccy": "USD"},
 }
 
 # Each row holds only its own fields; build_book() fills the rest from BLANK.
@@ -56,24 +62,29 @@ LEDGER = [
     {"date": "2025-11-13", "type": "dividend", "symbol": "AAPL", "amount": 15.60, "tax": 2.34},
     {"date": "2026-03-02", "type": "withdrawal", "amount": 5000.0},
 ]  # fmt: skip
+# --crafted: the Attention rail's rules fire on this book (made-up prices).
+CRAFTED = [
+    {"date": "2025-06-02", "type": "buy", "symbol": "PFE", "qty": 200, "price": 60.00, "fee": 0.0, "opening": True},
+]  # fmt: skip
 BLANK = dict.fromkeys(("symbol", "qty", "price", "fee", "amount", "tax", "ratio", "fx_rate"))
 BLANK |= {"ccy": "USD", "qty_basis": None, "source": "demo", "batch": "b_demo", "note": ""}
 
 
-def build_book() -> dict:
+def build_book(crafted: bool = False) -> dict:
     """The demo book in the agreed schema (roadmap Appendix B). Trades carry
     qty_basis "trade" (contract-note shares), so the pre-split NVDA buy
     exercises the split logic."""
     entries = [
         BLANK | row | {"id": f"e_demo_{i:03d}", "created_at": CREATED, "updated_at": CREATED}
         | ({"qty_basis": "current" if row.get("opening") else "trade"} if row["type"] in ("buy", "sell") else {})
-        for i, row in enumerate(LEDGER, 1)
+        for i, row in enumerate(LEDGER + (CRAFTED if crafted else []), 1)
     ]  # fmt: skip
+    used = {e["symbol"] for e in entries if e["symbol"]}
     return {
         "version": SCHEMA_VERSION,
         "rev": 1,
         "settings": {"base_ccy": "USD", "benchmark": "SPY"},
-        "instruments": INSTRUMENTS,
+        "instruments": {k: v for k, v in INSTRUMENTS.items() if k in used},
         "entries": entries,
         "journal": [],
         "redo": [],
@@ -83,6 +94,7 @@ def build_book() -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--force", action="store_true", help="overwrite an existing book")
+    ap.add_argument("--crafted", action="store_true", help="add rows that trip the Attention rules")
     args = ap.parse_args()
 
     home = os.environ.get("CONVEXITY_HOME", "").strip()
@@ -94,8 +106,9 @@ def main() -> int:
         print(f"{target} already exists; pass --force to overwrite it.")
         return 1
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(build_book(), indent=2) + "\n", encoding="utf-8")
-    print(f"Seeded {len(LEDGER)} demo entries into {target}")
+    book = build_book(args.crafted)
+    target.write_text(json.dumps(book, indent=2) + "\n", encoding="utf-8")
+    print(f"Seeded {len(book['entries'])} demo entries into {target}")
     return 0
 
 

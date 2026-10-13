@@ -872,6 +872,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(200, _investments.cached_page(ccy) or {"nocache": True})
                 else:
                     self._send_json(200, _investments.page(ccy))
+            elif parsed.path == "/api/investments/attention":
+                # The topbar badge: from the computed page only, never a compute.
+                self._send_json(200, _investments.attention_now((q.get("ccy") or [None])[0]))
             elif parsed.path == "/api/investments/symbols":
                 self._send_json(200, {"symbols": _investments.book_symbols()})
             elif parsed.path == "/api/investments/lookup":
@@ -903,6 +906,25 @@ class Handler(BaseHTTPRequestHandler):
         return importer.read(str(p.get("text") or ""), p.get("files"), base=ctx["base"],
                              aliases=ctx["aliases"], held=ctx["held"])  # fmt: skip
 
+    def _investments_attention(self, path: str, p: dict, ccy) -> dict:
+        """The Attention rail's preferences (attention.py): dismiss an item,
+        mark items seen, change a rule. Never touches the book file; answers
+        the rail as it now reads."""
+        from convexity import attention
+
+        try:
+            if path == "/api/investments/attention/dismiss":
+                attention.dismiss(p.get("key"), p.get("level"))
+            elif path == "/api/investments/attention/seen":
+                attention.mark_seen(p.get("items"))
+            elif path == "/api/investments/attention/rules":
+                attention.set_rules(p.get("rules"))
+            else:
+                raise _investments.BookError("not found")
+        except ValueError as exc:
+            raise _investments.BookError(str(exc)) from exc
+        return _investments.attention_now(ccy)
+
     def _handle_investments_post(self, path: str) -> None:
         """Mutations of the real book. Each answers the new page payload, or
         {error, message}: 400 bad input, 409 stale rev or a damaged file
@@ -913,7 +935,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not isinstance(entry, dict):
                 raise _investments.BookError("entry must be an object")
-            if path == "/api/investments/entries":
+            if path.startswith("/api/investments/attention/"):
+                out = self._investments_attention(path, p, ccy)
+            elif path == "/api/investments/entries":
                 out = _investments.add(entry, rev, ccy)
             elif path == "/api/investments/entries/update":
                 out = _investments.update(str(p.get("id") or ""), entry, rev, ccy)

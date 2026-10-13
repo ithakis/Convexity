@@ -23,7 +23,7 @@ owner says so.
 | 6 | AI import II: screenshots and PDFs | Done (merged) | `feature/my-investments-p5` (with 5) · [ithakis/Convexity#34](https://github.com/ithakis/Convexity/pull/34) | 2026-10-06 |
 | 3 | Performance | Done (merged) | `feature/my-investments-p3` · [ithakis/Convexity#37](https://github.com/ithakis/Convexity/pull/37) | 2026-10-11 |
 | 4 | Holdings depth | Done (merged) | `feature/my-investments-p4` · [ithakis/Convexity#38](https://github.com/ithakis/Convexity/pull/38) | 2026-10-12 |
-| 7 | Attention rail I: risk and events | Not started | | |
+| 7 | Attention rail I: risk and events | Done (merged) | `feature/my-investments-p7` | 2026-10-13 |
 | 8 | Attention rail II: plans and price alerts | Not started | | |
 | 9 | Notifications | Not started | | |
 | → | Thesis and AI advisor (new issue) | Not started | | |
@@ -40,19 +40,24 @@ taken, and its feedback log keeps them.
 Paste this into a new Claude Code session to carry on:
 
 ```
+```
 Read docs/plans/my-investments-roadmap.md. Continue the My Investments roadmap:
-take the first phase in the progress table (run order) that is not Done. That is Phase 7,
-Attention rail I: read its section, the Phase 3 and Phase 4 feedback logs (the holdings
-table, its columns and the numbers it shows were settled there) and Appendix D, and run it with the phase loop
-(suggest → prototype → build → verify → review → sign-off). Start with the first item in its Build list. Locked decisions from Phase 3: Total profit is lifetime;
-Return, vs S&P and Your money follow the period pill; the benchmark is the owner's pick
-(a fund); the book is valued with as-traded closes; estimated dividends are paid out, never
-in Value or Cash. Follow CLAUDE.md. Never use my
+take the first phase in the progress table (run order) that is not Done. That is Phase 8,
+Attention rail II: plans and price alerts. First fix the Excel export, which hangs on
+"exporting" (found by the owner 2026-10-13, after Phase 4 added the Positions and Ledger
+sheets; check `/api/export-xlsx` and `investments.page` in the export path). Then read
+Phase 8's section, Phase 7's feedback log and Findings (`attention.py` owns the rail:
+rules, dismiss-until-worse, seen/unread, the events cache) and Appendix D (plan-based
+alerts beat price alerts: Alert for Alerts), and run it with the phase loop
+(suggest → prototype → build → verify → review → sign-off). Reuse the Phase 7 item
+shape (`key`, `level`, `severity`) and Settings → Attention for new rules. Locked decisions:
+Total profit is lifetime; Return, vs S&P and Your money follow the period pill; the
+benchmark is the owner's pick (a fund); the book is valued with as-traded closes;
+estimated dividends are paid out, never in Value or Cash. Follow CLAUDE.md. Never use my
 real data; run live checks with my API keys as env vars. Ask before any version bump.
-My Investments computes through `investments.page` and opens on `state/book_cache.json`
-(Phase 4): keep new rail data off the cold-open path, or cache it. Docs and the changelog
-name no real holdings or returns (CLAUDE.md §18). Phase 4 left Optimize on My Investments
-parked and the Excel-export check with the owner.
+My Investments computes through `investments.page` and opens on `state/book_cache.json`:
+keep new rail data off the cold-open path, or cache it. Docs and the changelog name no real
+holdings or returns (CLAUDE.md §18). Optimize on My Investments stays parked.
 ```
 
 ## The phase loop (every phase)
@@ -986,20 +991,99 @@ should read those, never recompute them or fetch on the page's path.
 - What the unread badge looks like on the topbar tab.
 
 **Build:**
-- [ ] X-ray rules, all thresholds editable:
+- [x] X-ray rules, all thresholds editable:
       - a single name above N%
       - a sector or currency cluster
       - drawdown from cost or from peak
       - a move of more than 3σ in one day
-- [ ] Events: earnings, ex-dividend dates, and News read divergence flags.
-- [ ] Severity model, dismiss, unread badge.
+- [x] Events: earnings, ex-dividend dates, and News read divergence flags.
+- [x] Severity model, dismiss, unread badge.
 
 **Verify:**
-- [ ] Each rule fires on a crafted demo book and stays quiet on a calm one.
+- [x] Each rule fires on a crafted demo book and stays quiet on a calm one
+      (`tests/test_attention.py`; live on `seed_demo_book.py --crafted`).
 
 **Feedback log:**
+- 2026-10-13: Suggest round (chat mockups, six questions). The owner chose:
+  - **Layout B, grouped by severity**: "Needs a look" then "For your
+    information" (folded after 3, "n more"); a ✕ per item.
+  - **"Needs a look"**: one holding above its limit, a day move above N
+    sigma, down from cost by its limit, and a sector or currency cluster.
+    Down from its peak, News read divergence and dividends to add are
+    information; earnings and ex-dividend dates go under Upcoming.
+  - **Thresholds in Settings -> Attention**, reached from the rail's gear
+    and an item's "Change limit". Defaults: holding 15%, sector 35%,
+    currency 60% (not the display currency), from cost 20%, from peak 25%,
+    3 sigma, events in the next 14 days, divergence 1 sigma.
+  - **Badge**: a count on the My Investments button, red when an unread
+    item needs a look, gray otherwise.
+  - **Divergence**: the News read bullish while the week's price fell more
+    than 1 sigma, or bearish while it rose (cache only).
+  - **Dismiss holds until it gets worse** (a full step: 5 pts of weight, 10
+    of drawdown) or clears and fires again.
+  - Taken as defaults (not asked): funds and ETFs don't count for the
+    single-name rule (a world ETF at 17% isn't one bet); the badge counts the
+    Attention items, not Upcoming dates or dividends to add.
+
+- 2026-10-13: Review answers. **The rail keeps only the owner's divergence
+  check** (the News tab's engine flag, `compute_divergence`, stays on the
+  News tab). **The badge stays as built**: Attention items only, not
+  Upcoming dates or dividends to add.
 
 **Findings:**
+- The prototype's first run showed no rail: the page's one-minute memo
+  path returned the page without it. Every answer now goes through
+  `with_attention` (a test pins the memo path).
+- Bucketed levels (floor of excess / step) would bring a dismissed 24%
+  holding back at 25%; the level is now the excess itself and an item
+  returns once it is a full step past where it was dismissed.
+- Cost on the seeded demo book: the X-ray metrics add about 10 ms to a
+  94 ms warm compute, a rule pass about 0.06 ms; event dates are fetched
+  only in the background (7 Yahoo calendar calls on the demo book).
+- **Adversarial review and /verify (owner's request, 2026-10-13)** on an
+  installed clean tree, plus a reviewer agent proving each issue with a
+  reproduction. Fixed, each with a test:
+  - yfinance turns a 429 into an empty calendar, which wiped the cached
+    earnings dates for a day (the split-fetch lesson again): an empty answer
+    no longer replaces a date still ahead;
+  - ex-dividend drops read as falls: a T-bill fund raised a red "4.4 sigma"
+    every month, and high yielders looked further below their peak. The
+    figures are total return now, with a sigma floor of 0.2% a day;
+  - one x52 Yahoo glitch day made a lasting "98% below its peak"; reverting
+    spikes and a unit-flipped last close are dropped (a real -70% day stays);
+  - dismissals were forgotten by a currency switch, a day with no price for
+    a holding, or a rule switched off: the page now forgets only what it
+    could check;
+  - ✕ and Settings did nothing on a page with a holding still pending (no
+    page kept to answer from); the routes answer from the last page computed;
+  - the topbar Refresh sat at 100% while it fetched every calendar one by
+    one: that runs in the background, held shares only;
+  - a 400-digit number gave a 500 instead of a 400; the seen list grew
+    without bound (now 2,000 at most);
+  - a first launch computed before the symbol list arrived, so the saved page
+    had no sectors and called a world ETF "one holding": sector and fund are
+    read when the page is answered;
+  - the badge asked once at launch and gave up when the page in that
+    currency wasn't computed yet: it asks again every 10 s for two minutes;
+  - "Apple is 15% · above your 15% limit" now reads 15.2%; items folded
+    under "n more" or behind Activity are not marked seen.
+  A second pass on the fixes (live Yahoo) found and fixed: Yahoo dates some
+  payouts a day late and lists some twice, which turned the add-back into
+  5-7 sigma false moves on a gilts fund (now placed on the day the drop
+  shows, repeats dropped: worst 2.6 sigma live); two-day and first-close
+  glitches slipped through and a real -96% last day was hidden (the filter
+  now compares with the medians either side, and at the ends drops only a
+  x100 flip); a no-page answer blanked the rail; a forced event refresh was
+  dropped while another ran; old dated keys were never cleaned up; leaving
+  the page didn't badge what wasn't read.
+  Checked clean: an empty book, a book with no rail yet (Settings still
+  shows the rules), NaN never reaches the JSON, odd and past event dates,
+  naive and aware read times, hostile POST bodies (400), XSS through names
+  and keys, the desktop window boots (`loadFinished ok=True`), the cold
+  compute is the same with and without the X-ray (13.0 s vs 13.7 s).
+- The News tab already has an engine-level flag (`compute_divergence`:
+  News vs the Market read, or vs today's move at 2 sigma of 20-day vol);
+  the owner kept it off the rail.
 
 ---
 

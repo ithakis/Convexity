@@ -437,6 +437,15 @@ def refresh_market(symbols: list[str], *, progress=None, cancel=None, chunk: int
         done += len(part)
         if progress:
             progress(part, done, len(symbols))
+    # Earnings and ex-dividend dates for the rail, fetched again in the
+    # background (attention.py): one call per share, so the job's 100% isn't
+    # held up by them; held shares only.
+    from convexity import attention
+
+    try:
+        attention.refresh_events_soon(_held_now(raw) or {}, force=True)
+    except Exception as exc:
+        print(f"[attention] events refresh failed: {type(exc).__name__}")
 
 
 # -------------------------------------------------------------- instruments
@@ -1457,10 +1466,126 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
             "cash": float(cash[-1]), "net_deposits": float(np.sum(d_in - w_out)),
             "implied": float(implied), "month": month, "close": close, "last_close": last_close, "mult": mult,
             "qccy": qccy, "est": est_by_sym, "suggested": suggested,
-            "risk_share": _risk_share(syms, vps, qty_s, traded, starts["1Y"])}  # fmt: skip
+            "risk_share": _risk_share(syms, vps, qty_s, traded, starts["1Y"]),
+            "xray": {s: _xray(closes[s] if s in has else None, _held_since(qty_s[s], dates), _dividends(s))
+                     for s in syms if qty_s[s][-1] > 1e-9}}  # fmt: skip
 
 
 CASH_BUCKET = "_cash"  # the contribution of cash, fees and currency on cash
+
+
+def _held_since(qty: np.ndarray, dates: list[str]) -> str:
+    """The first day of the current holding (after the last day it was 0)."""
+    zero = np.flatnonzero(qty <= 1e-9)
+    return dates[int(zero[-1]) + 1] if len(zero) and zero[-1] + 1 < len(dates) else dates[0]
+
+
+# A daily sigma below this (about 3% a year) is a fund that barely moves: a
+# money-market line's every tick would read as dozens of sigmas.
+XRAY_SIGMA_FLOOR = 0.002
+XRAY_SPIKE = 4.0  # a run of closes this far off both sides' medians is a Yahoo glitch
+XRAY_SIDE = 10  # closes either side that the medians read
+XRAY_FLIP = (60.0, 140.0)  # off by about x100 with one side only: pence read as pounds
+
+
+def _xray_clean(pts: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Drop Yahoo glitches a rule would read as a crash or a peak (Phase 3
+    found x52 days and pence read as pounds). A close more than
+    ``XRAY_SPIKE`` times off the median of the ``XRAY_SIDE`` closes before it
+    AND of those after it is a glitch: a run of a few bad days differs from
+    both sides, a real level shift (a crash that stays) matches the side
+    after it. At either end, with one side only, just a pence/pounds flip
+    (about x100) is dropped, so a real -96% last day still shows
+    (adversarial review, 2026-10-13)."""
+    v = np.array([p[1] for p in pts])
+    n, keep = len(v), []
+    for i in range(n):
+        before, after = v[max(0, i - XRAY_SIDE) : i], v[i + 1 : i + 1 + XRAY_SIDE]
+        off = [
+            max(v[i] / m, m / v[i]) for m in (np.median(s) for s in (before, after) if len(s) >= 3)
+        ]
+        if len(off) == 2:
+            bad = min(off) > XRAY_SPIKE
+        else:
+            bad = bool(off) and XRAY_FLIP[0] < off[0] < XRAY_FLIP[1]
+        if not bad:
+            keep.append(pts[i])
+    return keep
+
+
+def _ex_dates(divs, days: list[str], px: np.ndarray) -> np.ndarray:
+    """Each payout per share on the trading day its drop shows: Yahoo dates
+    some a day late (a gilts fund fell on the 21st, "ex" on the 22nd) and
+    lists some twice a day apart, which read as two false sigma moves. A
+    repeat of the same amount within five days is dropped; a payout goes on
+    its date or the trading day before, whichever fell more; a non-trading
+    ex-date goes to the next trading day. Over a quarter of the price is a
+    unit mismatch, not a dividend. Indexed like ``px[1:]``."""
+    out = np.zeros(len(px) - 1)
+    dd, vals = _dated(divs) if divs is not None else ([], [])
+    last: tuple[date, float] | None = None
+    for d, a in zip(dd, vals, strict=True):
+        if not a or not math.isfinite(a) or a <= 0:
+            continue
+        day = date.fromisoformat(d)
+        if last and (day - last[0]).days <= 5 and abs(a - last[1]) <= 1e-9 * max(a, 1.0):
+            continue
+        last = (day, a)
+        k = int(np.searchsorted(days, d))  # the ex-date, or the next trading day
+        if k >= len(days) or k == 0:
+            continue
+        cands = [c for c in (k, k - 1) if c >= 1]
+        k = min(cands, key=lambda c: px[c] / px[c - 1])
+        if a < 0.25 * px[k - 1]:
+            out[k - 1] += a
+    return out
+
+
+def _xray(series, since: str, divs=None) -> dict:
+    """What the Attention rail's X-ray rules read about one holding
+    (``attention.py``), from its as-traded closes in its quote currency, on
+    its own trading days (never the page's weekday calendar, whose holidays
+    are flat days that would shrink the volatility), with each ex-date's
+    dividend added back (``divs``, Yahoo's per-share payouts): the book pays
+    dividends out, so an ex-date drop is not a loss, and a T-bill fund's
+    monthly payout would otherwise read as a 4-sigma fall. So every figure
+    is a total return:
+
+    - the last day's move, and that move in sigmas of the year before it
+      (daily log returns, the last 252 trading days less that day itself);
+    - the last five trading days' move, against the same sigma x sqrt(5)
+      (the News read divergence rule);
+    - the highest point since the holding was bought, and how far below it
+      the last close is.
+
+    Computed with the page, so the rules cost nothing at response time and
+    the cached page carries them; {} for a share with too little history."""
+    dd, vals = _dated(series) if series is not None else ([], [])
+    pts = _xray_clean(
+        [(d, v) for d, v in zip(dd, vals, strict=True) if v and math.isfinite(v) and v > 0]
+    )
+    if len(pts) < 2:
+        return {}
+    days = [d for d, _ in pts]
+    px = np.array([v for _, v in pts])
+    gross = (px[1:] + _ex_dates(divs, days, px)) / px[:-1]
+    lr = np.log(gross)
+    tr = np.concatenate([[1.0], np.cumprod(gross)])
+    hist = lr[-253:-1]
+    sigma = float(np.std(hist, ddof=1)) if len(hist) >= 60 else None
+    sigma = max(sigma, XRAY_SIGMA_FLOOR) if sigma is not None and math.isfinite(sigma) else None
+    out = {"day_date": days[-1], "day_pct": (gross[-1] - 1) * 100,
+           "day_z": float(lr[-1] / sigma) if sigma else None,
+           "sigma_pct": (math.exp(sigma) - 1) * 100 if sigma else None}  # fmt: skip
+    if len(px) >= 6:
+        out["week_pct"] = (tr[-1] / tr[-6] - 1) * 100
+        out["week_z"] = float(math.log(tr[-1] / tr[-6]) / (sigma * math.sqrt(5))) if sigma else None
+        out["week_sigma_pct"] = (math.exp(sigma * math.sqrt(5)) - 1) * 100 if sigma else None
+    held = [i for i, d in enumerate(days) if d >= since]
+    if held:
+        k = held[0] + int(np.argmax(tr[held[0] :]))
+        out["peak_date"], out["peak_pct"] = days[k], (tr[-1] / tr[k] - 1) * 100
+    return {k: (round(v, 6) if isinstance(v, float) else v) for k, v in out.items()}
 
 
 def _contrib_daily(syms, vps, qty_s, flow_s, open_s, est_s, value, perf_in, paid) -> pd.DataFrame:
@@ -1641,6 +1766,7 @@ def book(ccy: str | None = None) -> dict:
             "note": note, "profit": m.unrealised + p.realised + p.dividends + est,
             "risk_share": perf["risk_share"].get(p.symbol),
             "yoc": _yield_on_cost(p.symbol, qccy, p.qty, m.cost, perf["mult"]),
+            "xray": perf["xray"].get(p.symbol, {}),
             **extras.get(p.symbol, {}),
         })  # fmt: skip
         value_pos += m.value
@@ -1723,8 +1849,6 @@ def book(ccy: str | None = None) -> dict:
         "splits_pending": _pending_rows(raw, pending),
         "closed": closed,
         "suggested_dividends": suggested,
-        "upcoming": [],
-        "attention": [],
     }
     if perf["series"]:
         out["series"] = perf["series"]
@@ -1750,6 +1874,9 @@ def book(ccy: str | None = None) -> dict:
 _PAGE_LOCKS: dict[str, threading.Lock] = {}
 _PAGE_GUARD = threading.Lock()
 _PAGE_MEMO: dict[tuple, tuple[float, dict]] = {}
+# The last page computed, healthy or not (a holding still waiting for its
+# splits): the Attention rail's routes answer from it, never recompute.
+_LAST_PAGE: dict = {"v": (None, None)}  # (key, page), swapped whole: read once, no race
 PAGE_MEMO_TTL = 60.0
 
 
@@ -1781,17 +1908,68 @@ def page(ccy: str | None = None, *, fresh: bool = False) -> dict:
     with lock:
         hit = _PAGE_MEMO.get(key) if key and not fresh else None
         if hit and time.monotonic() - hit[0] < PAGE_MEMO_TTL:
-            return hit[1]
+            return with_attention(hit[1])
         t0 = time.monotonic()
         out = book(ccy)
         took = time.monotonic() - t0
+        _LAST_PAGE["v"] = (key, out)
         if out.get("positions"):
             print(f"[investments] book computed in {took:.1f}s ({out.get('ccy')})")
         if key and _healthy(out):
             _PAGE_MEMO.clear()  # one book: older keys are stale by definition
             _PAGE_MEMO[key] = (time.monotonic(), out)
             _save_cached_page(key, out)
+        return with_attention(out, fresh=key is not None and _healthy(out))
+
+
+def with_attention(out: dict, *, fresh: bool = False) -> dict:
+    """The page with its Attention rail (``attention.evaluate``), a copy:
+    the memo and the cached page never hold the rail, which follows the
+    thresholds and dismissals at the time of asking. On a fresh, complete
+    page, items that stopped firing are forgotten and due event dates are
+    fetched in the background."""
+    from convexity import attention
+
+    if out.get("empty") or not out.get("positions"):
         return out
+    try:
+        # Sector and fund come from the symbol pack when asked, not when the
+        # page was computed: a first launch computes before the pack has
+        # downloaded, and that page is the one saved to disk.
+        held = [{**p, **_pack_kind(p["symbol"], p.get("name"))} for p in out["positions"]]
+        att = attention.evaluate({**out, "positions": held})
+        if fresh and not out.get("stale"):
+            attention.prune(set(att["firing"]), set(att["checked"]))
+            attention.refresh_events_soon(
+                p["symbol"] for p in out["positions"] if not p.get("pending")
+            )
+    except Exception as exc:  # the rail is extra: never lose the page over it
+        print(f"[attention] evaluate failed: {type(exc).__name__}")
+        return out
+    return {**out, "attention": att}
+
+
+def attention_now(ccy: str | None = None) -> dict:
+    """The rail for the topbar badge and the rail's own routes, from what is
+    already computed (the memo, the last page computed even if it wasn't
+    one to keep, else the last good page on disk); never computes the book.
+    With none of those, the rules alone (Settings works without a book) and
+    ``pending`` when there is a book whose page isn't computed yet, so the
+    badge asks again."""
+    from convexity import attention
+
+    key = _page_key(ccy)
+    hit = _PAGE_MEMO.get(key) if key else None
+    lk, lp = _LAST_PAGE["v"]
+    last = lp if key and lk == key else None
+    out = hit[1] if hit else last or cached_page(ccy)
+    att = with_attention(out).get("attention") if out else None
+    if att:
+        return att
+    # ``page: false``: these are the rules alone, not "nothing needs you"
+    # (the rail keeps what it shows; adversarial review, 2026-10-13).
+    att = attention.evaluate({"positions": []})
+    return {**att, "page": False, "pending": not out and bool(book_symbols())}
 
 
 def _cache_path():
@@ -1823,7 +2001,7 @@ def cached_page(ccy: str | None = None) -> dict | None:
         return None
     if (body.get("rev"), body.get("ccy"), body.get("bench")) != key[:3]:
         return None
-    return {**body["book"], "stale": True, "computed_at": body.get("computed_at")}
+    return with_attention({**body["book"], "stale": True, "computed_at": body.get("computed_at")})
 
 
 def warm(ccy: str | None = None) -> None:
@@ -1928,6 +2106,28 @@ def _research_extras(symbols: list[str]) -> dict[str, dict]:
         up = (t / px - 1) * 100 if _num_ok(t) and _num_ok(px) and px > 0 else None
         out[s] = {"news_sentiment": ns.get_cached_sentiment(s), "upside_pct": up}
     return out
+
+
+_FUND_NAME = re.compile(
+    r"\b(ETF|ETC|UCITS|Funds?|iShares|Vanguard|SPDR|Xtrackers|Fundsmith)\b", re.IGNORECASE
+)
+
+
+def _pack_kind(symbol: str, name: str | None = None) -> dict:
+    """``sector`` and ``fund`` from the symbol pack (local SQLite, never a
+    fetch), for the Attention rail: a fund is diversified already (the
+    single-name rule skips it) and has no sector. A listing the pack lacks
+    (Yahoo's screener misses some) is judged a fund by its name."""
+    from convexity import symbol_db
+
+    try:
+        hit = symbol_db.get(symbol)
+    except Exception:
+        hit = None
+    if not hit:
+        return {"sector": None, "fund": bool(name and _FUND_NAME.search(name))}
+    fund = hit.type in ("etf", "fund")
+    return {"sector": None if fund else hit.sector or None, "fund": fund}
 
 
 def _num_ok(v) -> bool:

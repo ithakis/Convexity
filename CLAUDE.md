@@ -154,6 +154,12 @@ Each of these has cost real debugging time; the link goes to the full story.
   race the first and discard it). Stand-in candidates use
   `_bulk_close(retry=False)`: the per-symbol retries sleep up to ~5 s each
   (2026-10-12). [backend.md → page speed](docs/architecture/backend.md#my-investments-page-speed-2026-10-12)
+- **The Attention rail never fetches on the page's path** (Phase 7): its
+  inputs (`xray`, `sector`, `fund`) are computed with the page and cached
+  with it, rules run at response time on a copy (`with_attention`), event
+  dates come from `state/events.json` filled in the background. A dismissed
+  item returns only a full step worse; `prune` runs on fresh, healthy pages
+  only. [backend.md → Attention rail](docs/architecture/backend.md#my-investments-attention-rail-phase-7-attentionpy)
 - **Holding contributions add up to the TWR exactly** (Phase 4): a new
   entry type that moves money into or out of a holding must land in
   `ledger.Day.flows`, or "Cash and fees" silently absorbs it.
@@ -253,6 +259,7 @@ sub-decision.
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
 │   ├── investments.py           ← My Investments (the real book): the book file, undo/redo, prices/FX, page payload — docs/plans/my-investments-roadmap.md
 │   ├── ledger.py                ← My Investments ledger engine: pure replay (average cost, implied deposits, splits), TWR/MWR
+│   ├── attention.py             ← My Investments' Attention rail: X-ray rules, events cache, dismiss/unread (roadmap Phase 7)
 │   ├── importer.py              ← My Investments import: text, screenshots, PDFs, CSV/Excel → rows to review (NIM vision + text, symbol-pack checks)
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
@@ -306,6 +313,8 @@ overrides it):
 │   ├── investments.json        ← My Investments: the user's REAL book (ledger, from roadmap Phase 2) — never overwrite a malformed one
 │   ├── splits.json             ← Yahoo's last good split list per ticker (a cache, market data only; investments.market_splits)
 │   ├── proxies.json            ← found stand-in listings per young listing, a week (market data only; analytics._proxy_candidates)
+│   ├── attention.json          ← the Attention rail's thresholds, dismissed and seen items (preferences; malformed = defaults)
+│   ├── events.json             ← held shares' next earnings / ex-dividend dates from Yahoo (a cache, market data only)
 │   └── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)
 ├── models/mlsent-v1.1/         ← The Market read artifact (was ~/.convexity/ml_model/)
 ├── reference/                  ← The downloaded reference pack (a cache; reference_pack.py)
