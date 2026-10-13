@@ -70,6 +70,22 @@ dependency (loaded from CDN, used only for column-guide formulas).
   bands (`INV_VOL_BANDS`: <6, 6–12, 12–20, 20–30, 30%+) with yours lit, the
   benchmark's volatility in its band, and Sharpe marked on a red to green
   line from 0 to 2+.
+- **The Attention rail (Phase 7, owner's layout B, 2026-10-13).**
+  `invAttentionHtml` renders `INV.book.attention`: "Needs a look" (red group
+  label, always shown), then "For your information" (info items, the book's
+  warnings and Phase 4's dividends to add; folded after `INV_ATT_FOLD` = 3),
+  then Upcoming (earnings and ex-dividend dates in the next N days). No boxes:
+  kicker, group labels, hairlines. ✕ dismisses (`invAttPost`, never
+  `invPost`: it must not bump `INV.seq`); "Change limit" (on hover) and the
+  kicker's gear open Settings -> Attention (`renderSettingsAttention`, a row
+  per rule: number and switch, saved on change). The topbar badge
+  (`invBadge`): a count of unread items on `#inv-btn`, red when one is
+  "Needs a look", gray otherwise, none while the page shows; read from
+  `/api/investments/attention` 1.5 s after launch, and marked seen when a
+  fresh page renders on My Investments (`invAttSeen`: only what is on
+  screen, not behind Activity or folded under "n more"); leaving the page
+  badges what wasn't read. An answer with `page: false` updates the rules
+  only, never blanks the rail. The divergence item carries the ✦ in `--ai`.
 - **Holdings order (owner, 2026-10-11).** A header click sorts (`INV_COLS`:
   biggest first, names A to Z), a second flips it, a third returns to "your
   order", where rows drag by a grip shown on hover (HTML5 drag on the `tr`,

@@ -49,4 +49,9 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     from convexity import fx
 
     monkeypatch.setattr(fx, "prefetch_usd_series", lambda *a, **k: None)
+    # The Attention rail's earnings / ex-dividend calendar: no Yahoo (a
+    # failed call, so nothing is cached); test_attention.py stubs its own.
+    from convexity import attention
+
+    monkeypatch.setattr(attention, "fetch_events", lambda s: None)
     yield home

@@ -11080,6 +11080,21 @@ const SETTINGS_SECTIONS = [
     render: renderSettingsInvestments,
   },
   {
+    id: "attention",
+    group: "Settings",
+    label: "Attention",
+    description: "What My Investments' Attention rail watches for, and the limits. Each rule "
+               + "can be switched off. Kept with your data, on this machine only.",
+    keywords: ["attention", "alerts", "rules", "x-ray", "limit", "threshold", "concentration",
+               "sector", "currency", "drawdown", "peak", "sigma", "move", "earnings",
+               "ex-dividend", "events", "news read", "divergence", "badge"],
+    items: [
+      { id: "att-rules", label: "Rules and limits",
+        keywords: ["holding", "sector", "currency", "cost", "peak", "sigma", "earnings", "dividend", "news"] },
+    ],
+    render: renderSettingsAttention,
+  },
+  {
     id: "keys",
     group: "Data & models",
     label: "API keys",
@@ -11876,6 +11891,41 @@ async function renderSettingsInvestments(el) {
   paint(false);
 }
 
+/* Settings → Attention (roadmap Phase 7): one row per rule, on/off and its
+ * limit, saved on change (attention.py validates and clamps). */
+async function renderSettingsAttention(el) {
+  let a = INV.book?.attention;
+  if (!a?.rules) {
+    el.innerHTML = `<div class="settings-row-help">Loading…</div>`;
+    try { a = await (await fetch("/api/investments/attention?ccy=" + encodeURIComponent(FX_QUOTE))).json(); }
+    catch (e) { a = null; }
+  }
+  if (!a?.rules) {
+    el.innerHTML = `<div class="settings-row-help">The rules show once My Investments has a book.</div>`;
+    return;
+  }
+  const sev = { high: "Needs a look", info: "For your information", upcoming: "Upcoming" };
+  el.innerHTML = a.rules.map(r => settingsRow({
+    id: "att-" + r.key,
+    label: escapeHtml(r.label),
+    help: `${sev[r.severity]}. Default ${r.default}${r.unit === "%" ? "%" : " " + escapeHtml(r.unit)}.${r.note ? " " + escapeHtml(r.note) : ""}`,
+    control: `<span class="att-rule"><input type="number" class="att-num" data-att-rule="${r.key}" value="${r.value}" min="${r.min}" max="${r.max}" step="${r.unit === "%" || r.unit === "days" ? 1 : 0.5}" aria-label="${escapeHtml(r.label)}"${r.on ? "" : " disabled"}>
+      <span class="att-unit">${escapeHtml(r.unit)}</span>
+      <label class="settings-check"><input type="checkbox" data-att-on="${r.key}"${r.on ? " checked" : ""} aria-label="Watch: ${escapeHtml(r.label)}"></label></span>`,
+  })).join("") + `<div class="settings-row-help" id="att-msg" role="status"></div>`;
+  const save = async (key, change) => {
+    try {
+      invAttApply(await invAttPost("rules", { rules: { [key]: change } }));
+      renderSettingsAttention(el);
+    } catch (err) { const m = el.querySelector("#att-msg"); if (m) m.textContent = err.message; }
+  };
+  el.querySelectorAll("[data-att-rule]").forEach(i => i.addEventListener("change", () => {
+    if (i.value === "" || !isFinite(+i.value)) return;
+    save(i.dataset.attRule, { value: +i.value });
+  }));
+  el.querySelectorAll("[data-att-on]").forEach(i => i.addEventListener("change", () => save(i.dataset.attOn, { on: i.checked })));
+}
+
 function renderSettingsAbout(el) {
   // APP_VERSION stays null until /api/health resolves, so guard it.
   const v = (APP_VERSION && APP_VERSION.version)
@@ -12071,6 +12121,8 @@ function showPage(name) {
     rf.dataset.tip = name === "investments" ? "Refresh your investments' prices and exchange rates. Runs in the background; cancel from the status chip." : rf.dataset.researchTip;
   }
   try { localStorage.setItem("page", name); } catch (e) {}
+  // Leaving My Investments: what wasn't read there (folded, behind Activity) badges again.
+  if (name !== "investments") invBadge(INV.book?.attention);
   if (name !== "investments" && _fitDeferred) {
     _fitDeferred = false;
     requestAnimationFrame(() => render());
@@ -12142,6 +12194,7 @@ async function invLoad() {
     INV.book = d;
     invRender();
     if (!INV.book.error) bookTabSync();
+    invAttSeen();
   })();
   INV.loading = run;
   try { await run; } finally { if (INV.loading === run) INV.loading = null; }
@@ -12451,12 +12504,99 @@ function invRailHtml(b) {
     `<button type="button" data-inv-rail="${k}" class="${INV.rail === k ? "active" : ""}" aria-pressed="${INV.rail === k}">${l}</button>`).join("");
   const head = `<div class="inv-rail-head"><span class="pf-contrib-toggle" role="group" aria-label="Rail">${tabs}</span></div>`;
   if (INV.rail === "activity") return head + invActivityHtml(b);
-  const section = (title, items, item, calm) => `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">${title}</span></div>`
-    + (items?.length ? items.map(item).join("") : `<div class="inv-calm">${calm}</div>`);
-  const att = [...(b.attention || []).map(a => a.text), ...(b.warnings || [])];
+  return head + invAttentionHtml(b);
+}
+
+/* The Attention rail (roadmap Phase 7; attention.py computes it). Owner's
+ * picks, 2026-10-13: grouped by severity ("Needs a look" always shown, "For
+ * your information" collapsed after INV_ATT_FOLD), a ✕ per item that holds
+ * until the item gets worse, thresholds in Settings → Attention (the gear,
+ * and "Change limit" on an item's hover). No boxes: kicker, hairlines. */
+const INV_ATT_FOLD = 3;
+function invAttentionHtml(b) {
+  const a = b.attention || {};
+  const kicker = (t, extra = "") => `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">${t}</span>${extra}</div>`;
+  const gear = `<button type="button" class="inv-att-gear" data-inv-att-rules data-tip="Change what the rail watches for, and the limits">⚙</button>`;
+  const x = (it) => `<button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button>`;
+  const item = (it) => `<div class="inv-rail-item inv-att" data-sev="${it.severity}">
+      <div class="inv-att-main"><span>${it.ai ? '<span class="inv-att-ai" aria-label="AI">✦</span> ' : ""}${escapeHtml(it.text)}</span>${x(it)}</div>
+      <div class="inv-rail-sub">${escapeHtml(it.sub)}${it.rule ? ` <button type="button" class="inv-link inv-att-limit" data-inv-att-rules="${it.rule}">Change limit</button>` : ""}</div></div>`;
+  const high = a.high || [], info = a.info || [];
+  const warn = (b.warnings || []).map(t => `<div class="inv-rail-item">${escapeHtml(t)}</div>`);
   const divs = invDivsHtml(b);
-  return head + section("Attention", att, t => `<div class="inv-rail-item">${escapeHtml(t)}</div>`, divs ? "" : "Nothing needs you today.").replace(/<div class="inv-calm"><\/div>$/, "") + divs
-    + section("Upcoming", b.upcoming, u => `<div class="inv-rail-item">${escapeHtml(`${u.name} ${u.what}`)}<div class="inv-rail-sub">${invDate(u.date)}</div></div>`, "No events in the next two weeks.");
+  const fyi = [...info.map(item), ...warn];
+  const more = fyi.length - INV_ATT_FOLD;
+  let html = kicker("Attention", gear);
+  if (!high.length && !fyi.length && !divs) html += `<div class="inv-calm">Nothing needs you today.</div>`;
+  if (high.length) html += `<div class="inv-att-group high">Needs a look</div>` + high.map(item).join("");
+  if (fyi.length || divs) {
+    html += `<div class="inv-att-group">For your information</div>`
+      + (INV.attMore || more <= 0 ? fyi : fyi.slice(0, INV_ATT_FOLD)).join("") + divs;
+    if (more > 0) html += `<button type="button" class="inv-link inv-att-more" data-inv-att-more aria-expanded="${!!INV.attMore}">${INV.attMore ? "Show fewer ▴" : `${more} more ▾`}</button>`;
+  }
+  const days = (a.rules || []).find(r => r.key === "events");
+  const up = a.upcoming || [];
+  html += kicker("Upcoming");
+  if (days && !days.on) html += `<div class="inv-calm">Event dates are switched off.</div>`;
+  else if (!up.length) html += `<div class="inv-calm">No earnings or ex-dividend dates in the next ${days ? days.value : 14} days.</div>`;
+  else html += up.map(u => `<div class="inv-rail-item inv-att"><div class="inv-att-main"><span>${escapeHtml(`${u.name} ${u.what}`)}</span>${x({ ...u, text: `${u.name} ${u.what}` })}</div><div class="inv-rail-sub">${invDate(u.date)}</div></div>`).join("");
+  return html;
+}
+
+/* The rail's preferences (dismiss, seen, rules) answer the rail as it now
+ * reads. Not invPost: these never touch the book or its load sequence. */
+async function invAttPost(path, body) {
+  const r = await fetch("/api/investments/attention/" + path, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ccy: FX_QUOTE, ...body }) });
+  let d = {};
+  try { d = await r.json(); } catch (e) { /* non-JSON error */ }
+  if (!r.ok) throw new Error(d.message || "Couldn't save that. Try again in a moment.");
+  return d;
+}
+function invAttApply(att) {
+  // An answer with no page behind it (page: false) carries the rules only:
+  // keep the items the rail shows, never blank it.
+  if (att && att.page === false && INV.book?.attention) att = { ...INV.book.attention, rules: att.rules };
+  if (INV.book && att && att.rules) INV.book = { ...INV.book, attention: att };
+  invBadge(att);
+  const aside = $("#inv-page .inv-rail");
+  if (aside && INV.book && INV.rail === "attention") aside.innerHTML = invRailHtml(INV.book);
+}
+/* The unread badge on the topbar button (owner, 2026-10-13): a count, red
+ * when an unread item is "Needs a look", gray otherwise; opening the page
+ * reads them. */
+function invBadge(att) {
+  const btn = $("#inv-btn");
+  if (!btn) return;
+  let el = btn.querySelector(".inv-badge");
+  // Looking at the page is reading it: no badge there.
+  const n = document.body.dataset.page === "investments" ? 0 : att?.unread || 0;
+  if (!n) { el?.remove(); return; }
+  if (!el) { el = document.createElement("span"); el.className = "inv-badge"; btn.appendChild(el); }
+  el.textContent = n > 9 ? "9+" : String(n);
+  el.classList.toggle("high", !!att.unread_high);
+  el.setAttribute("aria-label", `${n} new in Attention`);
+}
+/* On the page, what shows is read: mark it seen, then clear the badge.
+ * Only what is on screen: not while Activity shows, and not the folded
+ * "n more" until it is opened. */
+async function invAttSeen() {
+  const a = INV.book?.attention;
+  if (!a || !a.unread || document.body.dataset.page !== "investments" || INV.book.stale || INV.rail !== "attention") { invBadge(a); return; }
+  const info = INV.attMore ? (a.info || []) : (a.info || []).slice(0, INV_ATT_FOLD);
+  const items = [...(a.high || []), ...info].map(it => [it.key, it.level]);
+  try { invAttApply(await invAttPost("seen", { items })); } catch (e) { /* the badge just stays */ }
+}
+/* At launch the page may still be computing (a cold start, or the saved
+ * page is in another currency): the server says `pending`, and the badge
+ * asks again every 10 s for up to two minutes. */
+async function invBadgeLoad(tries = 12) {
+  let a = null;
+  try { a = await (await fetch("/api/investments/attention?ccy=" + encodeURIComponent(FX_QUOTE))).json(); }
+  catch (e) { /* no badge */ }
+  if (INV.book?.attention) return;  // a page load got there first and owns the badge
+  invBadge(a);
+  if (a?.pending && tries > 1) setTimeout(() => invBadgeLoad(tries - 1), 10000);
 }
 
 /* Suggested dividends (owner, 2026-10-11): payouts Yahoo knows about that
@@ -13731,6 +13871,13 @@ $("#inv-page").addEventListener("click", (e) => {
     try { localStorage.setItem("inv_closed", INV.showClosed ? "1" : ""); } catch (e2) {}
     invRender();
   }
+  else if (e.target.closest("[data-inv-dismiss]")) {
+    const d = e.target.closest("[data-inv-dismiss]");
+    invAttPost("dismiss", { key: d.dataset.invDismiss, level: +d.dataset.level })
+      .then(invAttApply).catch(err => toast(err.message));
+  }
+  else if (e.target.closest("[data-inv-att-more]")) { INV.attMore = !INV.attMore; invAttApply(INV.book?.attention); invAttSeen(); }
+  else if (e.target.closest("[data-inv-att-rules]")) { openSettings(); selectSettingsSection("attention"); }
   else if (e.target.closest("[data-inv-divs]")) { INV.divOpen = !INV.divOpen; const a = $("#inv-page .inv-rail"); if (a) a.innerHTML = invRailHtml(INV.book); }
   else if (e.target.closest("[data-inv-div-add]")) invAddDividends(e.target.closest("[data-inv-div-add]").dataset.invDivAdd);
   else if (e.target.closest("[data-inv-redo]")) invUndo(true);
@@ -13740,6 +13887,7 @@ $("#inv-page").addEventListener("click", (e) => {
     try { localStorage.setItem("inv_rail", INV.rail); } catch (e2) {}
     const aside = $("#inv-page .inv-rail");
     if (aside) aside.innerHTML = invRailHtml(INV.book);
+    invAttSeen();
   } else if (m) {
     // Only the chart depends on the mode, so only the chart is redrawn.
     INV.mode = m.dataset.invMode;
@@ -13787,6 +13935,7 @@ $("#inv-page").addEventListener("dragend", () => {
   document.querySelectorAll("#inv-tbl .dragging, #inv-tbl .drop-before").forEach(r => r.classList.remove("dragging", "drop-before"));
 });
 $("#inv-btn").onclick = () => { showPage("investments"); invLoad(); };
+setTimeout(invBadgeLoad, 1500);  // the badge, from the page the server computed at startup
 window.addEventListener("resize", () => drawInvChart());
 try { const p = localStorage.getItem("inv_period"); if (INV_PERIODS.includes(p)) INV.period = p; } catch (e) {}
 try { const m = localStorage.getItem("inv_mode"); if (m === "value" || m === "return") INV.mode = m; } catch (e) {}

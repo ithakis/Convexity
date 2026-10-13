@@ -666,6 +666,69 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
 - `_research_extras` reads the saved portfolios' analyst rows once per
   `views.json` change (`_analyst_rows`, keyed by path and mtime).
 
+### My Investments Attention rail (Phase 7: `attention.py`)
+- **Metrics with the page, rules at response time.** `book()` adds each
+  holding's `xray` (`investments._xray`, total return: as-traded closes with
+  each payout added back on the day its drop shows (`_ex_dates`: Yahoo dates
+  some a day late and lists some twice), on the share's own trading days; the
+  last day's move and its sigma against the 252 trading days before it, the
+  5-day move against sigma x sqrt(5), the highest point since the holding
+  was bought). `_xray_clean` drops Yahoo glitches first (a close more than x4
+  off the median of the 10 closes before it and of the 10 after: a run of bad
+  days differs from both sides, a crash that stays matches the side after;
+  at either end only a pence/pounds flip, about x100, so a real -96% last
+  day still shows), and sigma is never below `XRAY_SIGMA_FLOOR` (0.2% a day: a
+  money-market line's ticks would read as dozens of sigmas). The xray rides
+  in the memo and `book_cache.json`. `investments.with_attention(out)` adds
+  `attention` (`attention.evaluate`, pure, about 0.06 ms) to every answer,
+  fresh, memo or cached, as a copy: the memo and the file never hold the
+  rail, so a threshold change or a dismiss shows at once without a
+  recompute. `sector` and `fund` come from the symbol pack at that moment
+  (`_pack_kind`, local SQLite; a listing the pack lacks is a fund by its
+  name), not at compute time: a first launch computes before the pack has
+  downloaded, and that page is the one saved.
+- **Rules** (`attention.RULES`, one registry for Settings, validation and
+  the rail; owner, 2026-10-13): one holding above 15%, one sector above 35%
+  (two names or more), one currency other than the display currency above
+  60% (uninvested cash counts in the base currency), down from cost by 20%,
+  a day move of 3 sigma (shown while it is the last trading day's, up to 4
+  calendar days) are "Needs a look" (`high`); down from its peak by 25% and
+  the News read divergence (bullish while the week fell more than 1 sigma, or
+  bearish while it rose; cache only, a read older than its window + 1 day or
+  flagged stale is ignored) are "For your information" (`info`). Every
+  threshold and switch is in Settings -> Attention.
+- **Dismiss and unread** (`state/attention.json`: `rules`, `dismissed`,
+  `seen`, each `{key: level}`; a preference file, malformed reads as the
+  defaults). An item's level is how far past its limit it is; a dismissed or
+  seen item counts again once it is a full `step` worse (5 pts for weights,
+  10 for drawdowns). Dated items (a day's move, a read, an event) carry the
+  date in their key and never come back under it. `prune(firing, checked)`
+  runs on a fresh, healthy page only, and forgets a key only when the page
+  checked it (`attention.scope`: the rule on, and the holding priced, with
+  an xray or a read) and it no longer fires. A rule switched off, a holding
+  on its last trade price, or a currency item seen in another display
+  currency keeps its dismissal. Currency and down-from-cost keys carry the
+  view (`|in:GBP`): both figures depend on it. Both lists keep at most
+  `MAX_KEPT` (2,000) keys, the oldest dropped; a dated key over 30 days old
+  is dropped whatever was checked.
+- **Events** (`state/events.json`, a cache): Yahoo `Ticker.calendar` per
+  held share (next earnings, ex-dividend), a day at a time. Filled in a
+  background thread after a fresh page (`refresh_events_soon`) and by the
+  topbar Refresh (`refresh_market`, forced, also in the background: one call
+  per share must not hold the job at 100%); held shares only; single
+  flight, and a forced refresh asked for while another runs is fetched by
+  that one before it ends (`_FORCE_AGAIN`). A failed call keeps the last good dates and retries after 15
+  minutes (never "no events"). yfinance hides HTTP errors (a 429 comes back
+  as an empty calendar), so an empty answer for a share whose cached date is
+  still ahead counts as a failure; a fund's empty calendar is an answer.
+- **Routes**: `GET /api/investments/attention?ccy=` (the badge; from the memo,
+  the last page computed even if unhealthy (`_LAST_PAGE`), or the cached
+  page, never a compute; with none, the rules alone with `page: false`, which
+  the rail reads as "keep what you show", and `pending: true` when a book
+  exists, so the badge asks again every 10 s for two minutes) and JSON POSTs
+  `/api/investments/attention/{dismiss,seen,rules}`; each answers the rail as
+  it now reads and never touches the book file.
+
 ### My Investments import (`importer.py`)
 Roadmap Phases 5–6 (run together, ahead of Performance, at the owner's
 request): the composer is the way into the page.
