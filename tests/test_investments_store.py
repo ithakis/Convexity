@@ -973,6 +973,73 @@ def test_attention_routes(srv):
     assert _raw()["rev"] == rev  # the rail's preferences never touch the book
 
 
+def test_plan_routes_answer_the_rail_and_never_touch_the_book(srv):
+    _seed()
+    page = inv.page("USD")
+    rev, x = _raw()["rev"], page["positions"][0]
+    sym, price = x["symbol"], x["price"]
+    code, att = _post(srv, "/api/investments/attention/plan",
+                      {"symbol": sym, "plan": {"target": price * 0.9, "why": "demo"}, "price": price})  # fmt: skip
+    assert code == 200 and att["plans"][sym]["why"] == "demo"
+    tgt = [it for it in att["high"] if it["rule"] == "target"]
+    assert [it["symbols"] for it in tgt] == [[sym]]
+    code, att = _post(
+        srv, "/api/investments/attention/snooze", {"key": tgt[0]["key"], "until": "2099-01-01"}
+    )
+    assert code == 400  # too far
+    until = (date.today() + timedelta(days=1)).isoformat()
+    code, att = _post(
+        srv, "/api/investments/attention/snooze", {"key": tgt[0]["key"], "until": until}
+    )
+    assert code == 200 and not [it for it in att["high"] if it["rule"] == "target"]
+    code, att = _post(
+        srv, "/api/investments/attention/alert", {"symbol": sym, "level": price * 2, "price": price}
+    )
+    assert code == 200 and att["plans"][sym]["alerts"][0]["side"] == "above"
+    aid = att["plans"][sym]["alerts"][0]["id"]
+    code, att = _post(srv, "/api/investments/attention/alert/remove", {"symbol": sym, "id": aid})
+    assert code == 200 and "alerts" not in att["plans"][sym]
+    code, att = _post(srv, "/api/investments/attention/plan/clear", {"symbol": sym})
+    assert code == 200 and sym not in att["plans"]
+    for path, body in (("plan", {"symbol": "ZZZZ", "plan": {"target": 1}, "price": 1}),
+                       ("plan", {"symbol": sym, "plan": "x", "price": price}),
+                       ("alert", {"symbol": sym, "level": "high", "price": price}),
+                       ("snooze", {"key": "k", "until": "tomorrow"})):  # fmt: skip
+        code, _ = _post(srv, "/api/investments/attention/" + path, body)
+        assert code == 400, (path, body)
+    paths.state_file("plans").write_text("{oops", encoding="utf-8")
+    code, err = _post(
+        srv, "/api/investments/attention/plan", {"symbol": sym, "plan": {"target": 1}, "price": 1}
+    )
+    assert code == 409 and paths.state_file("plans").read_text(encoding="utf-8") == "{oops"
+    assert _raw()["rev"] == rev  # plans live beside the book, never in it
+
+
+def test_plan_prices_come_from_the_server_and_sold_out_plans_clear(srv, monkeypatch):
+    from convexity import attention
+
+    _seed()
+    page = inv.page("USD")
+    x = page["positions"][0]
+    sym, price = x["symbol"], x["price"]
+    # A stale page sends a price far off: the side is fixed against the server's.
+    code, att = _post(srv, "/api/investments/attention/alert",
+                      {"symbol": sym, "level": price * 1.01, "price": price * 2})  # fmt: skip
+    assert code == 200 and att["plans"][sym]["alerts"][0]["side"] == "above"
+    code, att = _post(srv, "/api/investments/attention/plan",
+                      {"symbol": sym, "plan": {"review": price / 2}, "price": 1})  # fmt: skip
+    assert code == 200 and att["plans"][sym]["set_price"] == pytest.approx(price)
+    monkeypatch.setattr(inv, "book_symbols", list)  # sold out
+    aid = attention.load_plans()[sym]["alerts"][0]["id"]
+    assert (
+        _post(srv, "/api/investments/attention/alert/remove", {"symbol": sym, "id": aid})[0] == 200
+    )
+    assert _post(srv, "/api/investments/attention/plan/clear", {"symbol": sym})[0] == 200
+    assert sym not in attention.load_plans()
+    assert _post(srv, "/api/investments/attention/plan",
+                 {"symbol": sym, "plan": {"target": 1}, "price": 1})[0] == 400  # fmt: skip
+
+
 def test_refresh_also_fetches_event_dates(monkeypatch):
     from convexity import attention
 

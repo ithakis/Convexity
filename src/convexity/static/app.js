@@ -11076,7 +11076,7 @@ const SETTINGS_SECTIONS = [
                "ex-dividend", "events", "news read", "divergence", "badge"],
     items: [
       { id: "att-rules", label: "Rules and limits",
-        keywords: ["holding", "sector", "currency", "cost", "peak", "sigma", "earnings", "dividend", "news"] },
+        keywords: ["holding", "sector", "currency", "cost", "peak", "sigma", "earnings", "dividend", "news", "plan", "target", "review", "price alert"] },
     ],
     render: renderSettingsAttention,
   },
@@ -11904,8 +11904,11 @@ async function renderSettingsAttention(el) {
   el.innerHTML = a.rules.map(r => settingsRow({
     id: "att-" + r.key,
     label: escapeHtml(r.label),
-    help: `${sev[r.severity]}. Default ${r.default}${r.unit === "%" ? "%" : " " + escapeHtml(r.unit)}.${r.note ? " " + escapeHtml(r.note) : ""}`,
-    control: `<span class="att-rule"><input type="number" class="att-num" data-att-rule="${r.key}" value="${r.value}" min="${r.min}" max="${r.max}" step="${r.unit === "%" || r.unit === "days" ? 1 : 0.5}" aria-label="${escapeHtml(r.label)}"${r.on ? "" : " disabled"}>
+    help: r.value == null ? `${sev[r.severity]}.${r.note ? " " + escapeHtml(r.note) : ""}`
+      : `${sev[r.severity]}. Default ${r.default}${r.unit === "%" ? "%" : " " + escapeHtml(r.unit)}.${r.note ? " " + escapeHtml(r.note) : ""}`,
+    control: r.value == null  // a switch (Phase 8's plan rules): the levels are each plan's
+      ? `<span class="att-rule"><label class="settings-check"><input type="checkbox" data-att-on="${r.key}"${r.on ? " checked" : ""} aria-label="Watch: ${escapeHtml(r.label)}"></label></span>`
+      : `<span class="att-rule"><input type="number" class="att-num" data-att-rule="${r.key}" value="${r.value}" min="${r.min}" max="${r.max}" step="${r.unit === "%" || r.unit === "days" ? 1 : 0.5}" aria-label="${escapeHtml(r.label)}"${r.on ? "" : " disabled"}>
       <span class="att-unit">${escapeHtml(r.unit)}</span>
       <label class="settings-check"><input type="checkbox" data-att-on="${r.key}"${r.on ? " checked" : ""} aria-label="Watch: ${escapeHtml(r.label)}"></label></span>`,
   })).join("") + `<div class="settings-row-help" id="att-msg" role="status"></div>`;
@@ -12336,6 +12339,7 @@ const INV_COLS = [
   { k: "shares", label: "Shares", get: x => x.shares, dir: -1, on: true,
     cell: x => invOk(x.shares) ? Number(x.shares).toLocaleString(NUM_LOCALE) : na() },
   { k: "avg", label: "Avg price", get: x => x.avg_price, dir: -1, on: true, cell: x => invQuotePrice(x.avg_price, x.quote_ccy) },
+  { k: "price", label: "Price", get: x => x.price, dir: -1, on: true, cell: x => invPriceCell(x) },
   { k: "value", label: "Value", get: x => x.value, dir: -1, on: true, cell: x => invMoney(x.value) },
   { k: "weight", label: "Weight", get: x => x.weight, dir: -1, on: true, cell: (x, c) => invWeightCell(x.weight, x.risk_share, c) },
   { k: "risk", label: "Risk share", get: x => x.risk_share, dir: -1, on: true, merged: true, menu: "Risk share (bars beside the weight)" },
@@ -12535,18 +12539,26 @@ function invRailHtml(b) {
 const INV_ATT_FOLD = 3;
 function invAttentionHtml(b) {
   const a = b.attention || {};
+  let html0 = "";
   const kicker = (t, extra = "") => `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">${t}</span>${extra}</div>`;
   const gear = `<button type="button" class="inv-att-gear" data-inv-att-rules data-tip="Change what the rail watches for, and the limits">⚙</button>`;
-  const x = (it) => `<button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button>`;
+  // A plan item's ✕ is a menu (Phase 8): dismiss, snooze, or edit the plan.
+  const x = (it) => it.plan
+    ? `<button type="button" class="inv-att-x" data-inv-att-menu="${escapeHtml(it.key)}" aria-haspopup="menu" aria-label="Dismiss or snooze: ${escapeHtml(it.text)}" data-tip="Dismiss or snooze">✕</button>`
+    : `<button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button>`;
+  const link = (it) => it.plan
+    ? ` <button type="button" class="inv-link inv-att-limit" data-inv-plan-open="${escapeHtml(it.symbols[0])}">Your plan</button>`
+    : it.rule ? ` <button type="button" class="inv-link inv-att-limit" data-inv-att-rules="${it.rule}">Change limit</button>` : "";
   const item = (it) => `<div class="inv-rail-item inv-att" data-sev="${it.severity}">
       <div class="inv-att-main"><span>${it.ai ? '<span class="inv-att-ai" aria-label="AI">✦</span> ' : ""}${escapeHtml(it.text)}</span>${x(it)}</div>
-      <div class="inv-rail-sub">${escapeHtml(it.sub)}${it.rule ? ` <button type="button" class="inv-link inv-att-limit" data-inv-att-rules="${it.rule}">Change limit</button>` : ""}</div></div>`;
+      <div class="inv-rail-sub">${escapeHtml(it.sub)}${link(it)}</div></div>`;
+  if (a.plans_error) html0 = `<div class="inv-rail-item">${escapeHtml(a.plans_error)}. Your plans are paused until it is fixed or removed.</div>`;
   const high = a.high || [], info = a.info || [];
   const warn = (b.warnings || []).map(t => `<div class="inv-rail-item">${escapeHtml(t)}</div>`);
   const divs = invDivsHtml(b);
   const fyi = [...info.map(item), ...warn];
   const more = fyi.length - INV_ATT_FOLD;
-  let html = kicker("Attention", gear);
+  let html = kicker("Attention", gear) + html0;
   if (!high.length && !fyi.length && !divs) html += `<div class="inv-calm">Nothing needs you today.</div>`;
   if (high.length) html += `<div class="inv-att-group high">Needs a look</div>` + high.map(item).join("");
   if (fyi.length || divs) {
@@ -12645,6 +12657,185 @@ async function invAddDividends(which) {
   const entries = pick.map(x => ({ type: "dividend", symbol: x.symbol, date: x.date,
     amount: Math.round(x.qty * x.per_share * 1e6) / 1e6, tax: 0, ccy: x.ccy }));
   await invCommit("dividends", { entries });
+}
+
+/* A holding's plan (roadmap Phase 8, owner's picks 2026-10-14): click its
+ * row for "Your plan for …" (target, review level, max weight, why, and
+ * one-shot price alerts); attention.py keeps it in state/plans.json and the
+ * rail raises the items. Levels are in the share's quote unit (pence for
+ * LSE), like the Price column. Nothing here touches the book. */
+const invPlan = (sym) => INV.book?.attention?.plans?.[sym] || {};
+/* The Price cell; a planned holding gets a thin review-to-target track
+ * under it, and the price turns green past the target, red under review. */
+function invPriceCell(x) {
+  const txt = invQuotePrice(x.price, x.quote_ccy), pl = invPlan(x.symbol), t = pl.target, r = pl.review;
+  if (!invOk(x.price) || (!t && !r)) return txt;
+  const st = t && x.price >= t ? "pos" : r && x.price <= r ? "neg" : "";
+  const q = (v) => invQuotePrice(v, x.quote_ccy);
+  const tip = ["Your plan", r ? `review ${q(r)}` : "", t ? `target ${q(t)}` : ""].filter(Boolean).join(" · ");
+  return `<span class="inv-plan-price ${st}" title="${escapeHtml(tip)}">${txt}${invPlanTrack(x.price, r, t)}</span>`;
+}
+function invPlanTrack(price, r, t, big = false) {
+  // With one level only, the other end is 20% the other way of the wider of the two.
+  const lo = r ?? Math.min(price, t) * 0.8, hi = t ?? Math.max(price, r) * 1.2;
+  const at = hi > lo ? Math.max(0, Math.min(100, (price - lo) / (hi - lo) * 100)) : 50;
+  return `<i class="inv-plan-track${big ? " big" : ""}${r ? " has-r" : ""}${t ? " has-t" : ""}" aria-hidden="true"><b style="left:${at.toFixed(1)}%"></b></i>`;
+}
+const invPlanNum = (v) => {
+  let t = String(v ?? "").replace(/[\s'_%]/g, "");
+  // "212,40" is a decimal comma, not 21,240 (adversarial review): one comma,
+  // one or two digits after it, no dot. Any other comma groups thousands.
+  t = /^[^.,]*,\d{1,2}$/.test(t) ? t.replace(",", ".") : t.replace(/,/g, "");
+  return t === "" ? null : Number(t);
+};
+function invPlanRel(v, x) {
+  if (!invOk(v) || !(v > 0) || !invOk(x.price)) return "";
+  const parts = [`${invPct((v / x.price - 1) * 100, 0)} from today`];
+  if (invOk(x.avg_price) && x.avg_price > 0) parts.push(`${invPct((v / x.avg_price - 1) * 100, 0)} from your average`);
+  return parts.join(" · ");
+}
+function invPlanHtml(x) {
+  const pl = invPlan(x.symbol), q = (v) => invQuotePrice(v, x.quote_ccy);
+  const unit = INV_MINOR[x.quote_ccy] ? "in pence" : x.quote_ccy;
+  const num = (v) => invOk(v) ? String(+v.toFixed(6)) : "";
+  const lim = INV.book?.attention?.rules?.find(r => r.key === "holding")?.value ?? 15;
+  const field = (k, label, val, hint, ph) => `<label class="inv-f"><span>${label}${hint ? ` <em>· ${escapeHtml(hint)}</em>` : ""}</span>
+      <input name="${k}" value="${escapeHtml(val)}" inputmode="decimal" autocomplete="off" placeholder="${escapeHtml(ph)}"><em data-plan-rel="${k}">${escapeHtml(k === "max_weight" ? "" : invPlanRel(invPlanNum(val), x))}</em></label>`;
+  const track = pl.target || pl.review ? `<div class="inv-plan-big">${invPlanTrack(x.price, pl.review, pl.target, true)}
+      <div class="inv-plan-ends"><span>${pl.review ? `Review ${q(pl.review)}` : ""}</span><span>${pl.target ? `Target ${q(pl.target)}${x.price >= pl.target ? " · reached" : ""}` : ""}</span></div></div>` : "";
+  const alerts = (pl.alerts || []).map(a => `<div class="inv-plan-alert"><span>${a.side === "above" ? "Above" : "Below"} ${q(a.level)}${a.fired_on ? ` <em>· crossed ${invDate(a.fired_on)}</em>` : ""}</span>
+      <button type="button" class="inv-att-x" data-inv-alert-rm="${escapeHtml(a.id)}" aria-label="Remove the alert at ${escapeHtml(q(a.level))}">✕</button></div>`).join("");
+  const hasPlan = ["target", "review", "max_weight", "why"].some(k => pl[k] != null);
+  return `<form class="inv-plan" data-plan-sym="${escapeHtml(x.symbol)}" novalidate>
+    <div class="inv-form-head"><span class="inv-form-title">Your plan for ${escapeHtml(x.name)}</span>
+      <span class="inv-plan-now">${q(x.price)} now · ${invPct(x.weight, 1).replace("+", "")}</span></div>
+    ${track}
+    <div class="inv-f-row">${field("target", "Target", num(pl.target), unit, "")}${field("review", "Review below", num(pl.review), unit, "")}</div>
+    ${field("max_weight", "Max weight", num(pl.max_weight), `% of your book · your book limit is ${lim}%`, String(lim))}
+    <label class="inv-f"><span>Why you hold it</span><input name="why" value="${escapeHtml(pl.why || "")}" maxlength="140" autocomplete="off" placeholder="One line, quoted back when the review level is hit"></label>
+    ${pl.set_on ? `<div class="inv-pop-note">Set ${invDate(pl.set_on)} at ${q(pl.set_price)}</div>` : ""}
+    <div class="inv-plan-sub">Price alerts <em>· each fires once</em></div>
+    ${alerts}
+    <div class="inv-plan-alert-add"><input name="alert" inputmode="decimal" autocomplete="off" placeholder="Alert me at a price (${escapeHtml(unit)})"><button type="button" class="inv-link" data-inv-alert-add>Add</button></div>
+    <div class="inv-plan-msg" role="status"></div>
+    <div class="inv-form-btns inv-plan-btns">${hasPlan ? '<button type="button" class="inv-link inv-plan-clear" data-inv-plan-clear>Clear plan</button>' : "<span></span>"}
+      <button type="submit" class="primary">Save</button></div>
+  </form>`;
+}
+function invPlanOpen(sym, anchor) {
+  const x = INV.book?.positions?.find(p => p.symbol === sym && !p.pending);
+  if (!x) return;
+  INV.planSym = sym;
+  const p = invPop(), w = Math.min(360, window.innerWidth - 24);
+  p.innerHTML = invPlanHtml(x);
+  p.hidden = false;
+  p.style.width = w + "px";
+  const at = anchor?.isConnected ? anchor : $(`#inv-tbl tr[data-inv-sym="${CSS.escape(sym)}"]`);
+  const r = at ? at.getBoundingClientRect() : { left: window.innerWidth / 2 - w / 2 - 24, top: 80, bottom: 80 };
+  p.style.left = Math.max(12, Math.min(r.left + 24, window.innerWidth - w - 12)) + "px";
+  const h = p.offsetHeight, below = r.bottom + 6;
+  p.style.top = Math.max(12, below + h <= window.innerHeight - 12 ? below : Math.max(12, r.top - 6 - h)) + "px";
+  invPopFit();
+  p.querySelector("input[name=target]")?.focus();
+}
+/* After a change: the rail and the Price cells read the new plans; the
+ * popover redraws in place unless it was saved. */
+function invPlanApplied(att, keepOpen) {
+  const sym = INV.planSym;
+  invAttApply(att);
+  invRender();
+  if (keepOpen && sym) invPlanOpen(sym);
+  else invClosePop();
+}
+function invPlanMsg(form, text) {
+  const m = form.querySelector(".inv-plan-msg");
+  if (m) m.textContent = text ? text.charAt(0).toUpperCase() + text.slice(1) + (/[.!?]$/.test(text) ? "" : ".") : "";
+}
+async function invPlanSave(form) {
+  const sym = form.dataset.planSym, x = INV.book?.positions?.find(p => p.symbol === sym);
+  // Only what the owner changed: a field shown rounded and sent back as is
+  // would count as a new level and reset "Set 3 Mar at 180" (adversarial review).
+  const plan = {};
+  for (const k of ["target", "review", "max_weight", "why"]) {
+    const el = form.elements[k];
+    if (el.value.trim() === el.defaultValue.trim()) continue;
+    plan[k] = k === "why" ? el.value.trim() || null : invPlanNum(el.value);
+    if (k !== "why" && plan[k] !== null && !(isFinite(plan[k]) && plan[k] > 0)) { invPlanMsg(form, "Enter a positive number, or leave it empty."); el.focus(); return; }
+  }
+  const alertAt = invPlanNum(form.elements.alert.value);
+  let att = null;
+  try {
+    if (Object.keys(plan).length) att = await invAttPost("plan", { symbol: sym, plan, price: x?.price });
+    // A pending alert typed but not added is added with the save.
+    if (alertAt > 0) att = await invAttPost("alert", { symbol: sym, level: alertAt, price: x?.price });
+    att ? invPlanApplied(att, false) : invClosePop();
+  } catch (err) {
+    if (att) invPlanApplied(att, true);  // the plan saved, the alert didn't: show both truths
+    invPlanMsg($("#inv-pop .inv-plan") || form, err.message);
+  }
+}
+document.addEventListener("submit", (e) => {
+  const form = e.target.closest(".inv-plan");
+  if (!form) return;
+  e.preventDefault();
+  invPlanSave(form);
+});
+document.addEventListener("input", (e) => {
+  const form = e.target.closest?.(".inv-plan");
+  if (!form) return;
+  invPlanMsg(form, "");
+  const rel = form.querySelector(`[data-plan-rel="${e.target.name}"]`);
+  const x = INV.book?.positions?.find(p => p.symbol === form.dataset.planSym);
+  if (rel && x && e.target.name !== "max_weight") rel.textContent = invPlanRel(invPlanNum(e.target.value), x);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.matches?.(".inv-plan input[name=alert]")) { e.preventDefault(); e.target.closest(".inv-plan").querySelector("[data-inv-alert-add]")?.click(); }
+});
+document.addEventListener("click", async (e) => {
+  const form = e.target.closest("#inv-pop .inv-plan");
+  if (!form) return;
+  const sym = form.dataset.planSym, x = INV.book?.positions?.find(p => p.symbol === sym);
+  try {
+    if (e.target.closest("[data-inv-plan-clear]")) invPlanApplied(await invAttPost("plan/clear", { symbol: sym }), true);
+    else if (e.target.closest("[data-inv-alert-rm]")) invPlanApplied(await invAttPost("alert/remove", { symbol: sym, id: e.target.closest("[data-inv-alert-rm]").dataset.invAlertRm }), true);
+    else if (e.target.closest("[data-inv-alert-add]")) {
+      const lvl = invPlanNum(form.elements.alert.value);
+      if (!(lvl > 0)) { invPlanMsg(form, "Enter the price to be alerted at."); form.elements.alert.focus(); return; }
+      invPlanApplied(await invAttPost("alert", { symbol: sym, level: lvl, price: x?.price }), true);
+    }
+  } catch (err) { invPlanMsg(form, err.message); }
+});
+/* ✕ on a plan item: dismiss (until it clears, or gets worse for a review
+ * level), snooze a day, a week or until the next earnings, or edit the
+ * plan. A fired price alert's dismiss removes it: it was one-shot. */
+function invAttMenu(anchor) {
+  const a = INV.book?.attention || {};
+  const it = [...(a.high || []), ...(a.info || [])].find(i => i.key === anchor.dataset.invAttMenu);
+  if (!it) return;
+  const day = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return invIso(d); };
+  const opts = [
+    { v: "dismiss", html: it.rule === "price_alert" ? "<b>Remove</b><span>It has fired; it won't again</span>"
+        : `<b>Dismiss</b><span>${it.rule === "review" || it.rule === "holding" ? "Back if it gets worse" : "Back if it clears and fires again"}</span>` },
+    { v: day(1), html: "<b>Snooze 1 day</b>" },
+    { v: day(7), html: "<b>Snooze 1 week</b>" },
+    ...(it.earnings ? [{ v: it.earnings, html: `<b>Snooze until earnings</b><span>${invDate(it.earnings)}</span>` }] : []),
+    { v: "plan", html: "<b>Edit the plan</b>" },
+  ];
+  const el = invMenuOpen(anchor, "inv-menu-list", async (e) => {
+    const o = e.target.closest("[data-v]");
+    if (!o) return;
+    invMenuClose();
+    const v = o.dataset.v, sym = it.symbols[0];
+    try {
+      if (v === "plan") invPlanOpen(sym, anchor);
+      else if (v === "dismiss" && it.rule === "price_alert") invAttApply(await invAttPost("alert/remove", { symbol: sym, id: it.alert_id }));
+      else if (v === "dismiss") invAttApply(await invAttPost("dismiss", { key: it.key, level: it.level }));
+      else invAttApply(await invAttPost("snooze", { key: it.key, until: v }));
+    } catch (err) { toast(err.message); }
+  });
+  if (!el) return;
+  el.innerHTML = opts.map(o => `<button type="button" role="menuitem" class="inv-menu-it" data-v="${escapeHtml(o.v)}"><i></i>${o.html}</button>`).join("");
+  invMenuPlace(el, anchor);
 }
 
 /* Hover cards: plain words, then a breakdown, then the formula. `tex` is the
@@ -13147,7 +13338,7 @@ function invPopFit() {
   const over = p.getBoundingClientRect().bottom - (window.innerHeight - 12);
   if (over > 0) p.style.top = Math.max(12, parseFloat(p.style.top) - over) + "px";
 }
-function invClosePop() { const p = $("#inv-pop"); if (p && !p.hidden) { p.hidden = true; p.innerHTML = ""; } }
+function invClosePop() { INV.planSym = null; const p = $("#inv-pop"); if (p && !p.hidden) { p.hidden = true; p.innerHTML = ""; } }
 const invFormState = (form) => form.dataset.invForm ? INV.editForm : INV.form;
 function invFormRerender(form, patch) {
   // Keep what was typed, apply the patch, redraw in place; returns the new form.
@@ -13815,7 +14006,8 @@ function invStartEdit(id) {
 document.addEventListener("click", (e) => {
   const p = $("#inv-pop");
   // The hidden file input's programmatic click must not close the composer.
-  if (p && !p.hidden && !p.contains(e.target) && !e.target.closest("[data-inv-add]") && !e.target.closest(".toast") && e.target.id !== "inv-file") invClosePop();
+  if (p && !p.hidden && !p.contains(e.target) && !e.target.closest("[data-inv-add]") && !e.target.closest(".toast") && e.target.id !== "inv-file"
+      && !e.target.closest("#inv-tbl tbody tr[data-inv-sym]:not(.inv-pending), [data-inv-plan-open], .inv-menu")) invClosePop();
 });
 function invFormClick(e) {
   const form = e.target.closest(".inv-form");
@@ -13890,6 +14082,12 @@ $("#inv-page").addEventListener("click", (e) => {
     INV.showClosed = !INV.showClosed;
     try { localStorage.setItem("inv_closed", INV.showClosed ? "1" : ""); } catch (e2) {}
     invRender();
+  }
+  else if (e.target.closest("[data-inv-att-menu]")) invAttMenu(e.target.closest("[data-inv-att-menu]"));
+  else if (e.target.closest("[data-inv-plan-open]")) invPlanOpen(e.target.closest("[data-inv-plan-open]").dataset.invPlanOpen, e.target.closest("[data-inv-plan-open]"));
+  else if (e.target.closest("#inv-tbl tbody tr[data-inv-sym]:not(.inv-pending)") && !e.target.closest("button, a, input, .inv-grip")) {
+    const tr = e.target.closest("#inv-tbl tbody tr[data-inv-sym]");
+    $("#inv-pop")?.hidden === false && INV.planSym === tr.dataset.invSym ? invClosePop() : invPlanOpen(tr.dataset.invSym, tr);
   }
   else if (e.target.closest("[data-inv-dismiss]")) {
     const d = e.target.closest("[data-inv-dismiss]");

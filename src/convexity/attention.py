@@ -25,8 +25,10 @@ read as the defaults.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
+import secrets
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -59,6 +61,16 @@ RULES: dict[str, dict] = {
                    "min": 0.5, "max": 5, "step": 0.0, "severity": "info"},
     "events": {"label": "Earnings and ex-dividend dates, next", "unit": "days", "value": 14.0,
                "min": 1, "max": 90, "step": 0.0, "severity": "upcoming"},
+    # Phase 8: the owner's own plan (set per holding, from its row). Switches
+    # only: the levels are the plan's. A target or review level reached is
+    # the plan asking for a decision, so it needs a look; a plain price
+    # alert stays information (Appendix D, *Alert for Alerts*).
+    "review": {"label": "A holding falls below your review level", "unit": None, "value": None,
+               "step": 10.0, "severity": "high", "note": "Set in a holding's plan: click its row."},
+    "target": {"label": "A holding reaches your target", "unit": None, "value": None,
+               "step": 0.0, "severity": "high", "note": "Set in a holding's plan: click its row."},
+    "price_alert": {"label": "Price alerts", "unit": None, "value": None, "step": 0.0,
+                    "severity": "info", "note": "Each fires once. Set in a holding's plan."},
 }  # fmt: skip
 
 # A day move is news only while it is the last trading day's: a Friday move
@@ -90,7 +102,7 @@ def _clean_rules(raw) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     for k, r in RULES.items():
         got = raw.get(k) if isinstance(raw.get(k), dict) else {}
-        v = _num(got.get("value"))
+        v = _num(got.get("value")) if r["value"] is not None else None  # a switch has no value
         on = got.get("on")
         out[k] = {"on": on if isinstance(on, bool) else True,
                   "value": min(max(v, r["min"]), r["max"]) if v is not None else r["value"]}  # fmt: skip
@@ -113,7 +125,21 @@ def load_state() -> dict:
         raw = {}
     raw = raw if isinstance(raw, dict) else {}
     return {"rules": _clean_rules(raw.get("rules")), "dismissed": _clean_levels(raw.get("dismissed")),
-            "seen": _clean_levels(raw.get("seen"))}  # fmt: skip
+            "seen": _clean_levels(raw.get("seen")), "snoozed": _clean_snoozed(raw.get("snoozed"))}  # fmt: skip
+
+
+def _clean_snoozed(raw) -> dict[str, str]:
+    """{key: "yyyy-mm-dd"}: the item stays hidden until that day."""
+    if not isinstance(raw, dict):
+        return {}
+    return {k[:200]: v for k, v in raw.items() if isinstance(k, str) and _is_day(v)}
+
+
+def _is_day(v) -> bool:
+    try:
+        return isinstance(v, str) and len(v) == 10 and bool(date.fromisoformat(v))
+    except ValueError:
+        return False
 
 
 def _save_state(st: dict) -> None:
@@ -138,7 +164,7 @@ def set_rules(changes) -> dict:
     for k, c in changes.items():
         if k not in RULES or not isinstance(c, dict):
             raise ValueError(f"unknown rule {str(k)[:40]}")
-        if "value" in c and _num(c["value"]) is None:
+        if "value" in c and (RULES[k]["value"] is None or _num(c["value"]) is None):
             raise ValueError(f"{k}: value must be a number")
         if "on" in c and not isinstance(c["on"], bool):
             raise ValueError(f"{k}: on must be true or false")
@@ -168,6 +194,29 @@ def dismiss(key, level) -> None:
         st["dismissed"].pop(key, None)
         st["dismissed"][key] = lvl
         st["dismissed"] = _cap(st["dismissed"])
+
+    _update(change)
+
+
+SNOOZE_MAX_DAYS = 400
+
+
+def snooze(key, until, today: date | None = None) -> None:
+    """Hide an item until the day ``until`` (Phase 8: a day, a week, or the
+    next earnings date; the page works the day out). Past snoozes go."""
+    key, today = _check_key(key), today or date.today()
+    if not _is_day(until):
+        raise ValueError("until must be a date (yyyy-mm-dd)")
+    days = (date.fromisoformat(until) - today).days
+    if not 0 < days <= SNOOZE_MAX_DAYS:
+        raise ValueError(f"until must be within {SNOOZE_MAX_DAYS} days from today")
+
+    def change(st):
+        st["snoozed"] = {
+            k: v for k, v in st["snoozed"].items() if v > today.isoformat() and k != key
+        }
+        st["snoozed"][key] = until
+        st["snoozed"] = _cap(st["snoozed"])
 
     _update(change)
 
@@ -233,13 +282,398 @@ def prune(firing: set[str], checked: set[str]) -> None:
             return False
         return k in firing or scope(k) not in checked
 
+    today = date.today().isoformat()
     with _LOCK:
         st = load_state()
-        if all(keep(k) for k in (*st["dismissed"], *st["seen"])):
+        live = {
+            k: v for k, v in st["snoozed"].items() if v > today
+        }  # a snooze past its day is gone
+        if all(keep(k) for k in (*st["dismissed"], *st["seen"])) and len(live) == len(
+            st["snoozed"]
+        ):
             return
         st["dismissed"] = {k: v for k, v in st["dismissed"].items() if keep(k)}
         st["seen"] = {k: v for k, v in st["seen"].items() if keep(k)}
+        st["snoozed"] = live
         _save_state(st)
+
+
+# ------------------------------------------------------------------ plans
+#
+# The owner's plan per holding (roadmap Phase 8): a target, a review level,
+# a maximum weight, one line on why they hold it, and plain price alerts.
+# ``state/plans.json`` is the owner's own input, so unlike ``attention.json``
+# a malformed file is never read as "no plans" and never overwritten (the
+# book's rule). It is not in the book file: a plan edit would bump the book's
+# rev, which throws away the cached page and recomputes the book.
+#
+# Levels are in the share's quote unit (pence for LSE), like the page's
+# Price column, and compared with the page's own last price: no fetch.
+
+PLANS_VERSION = 1
+WHY_MAX = 140
+ALERTS_MAX = 10
+_PLANS_LOCK = threading.Lock()
+_PLAN_FIELDS = ("target", "review", "max_weight", "why")
+
+
+class PlansUnreadable(ValueError):
+    """``plans.json`` exists but can't be read: nothing is written over it."""
+
+
+def _plans_path():
+    return paths.state_file("plans")
+
+
+def _clean_alert(a) -> dict | None:
+    if (
+        not isinstance(a, dict)
+        or not isinstance(a.get("id"), str)
+        or a.get("side") not in ("above", "below")
+    ):
+        return None
+    lvl = _num(a.get("level"))
+    if lvl is None or lvl <= 0:
+        return None
+    out = {"id": a["id"][:16], "level": lvl, "side": a["side"],
+           "set_on": a["set_on"] if _is_day(a.get("set_on")) else None}  # fmt: skip
+    if _is_day(a.get("levels_on")):
+        out["levels_on"] = a["levels_on"]
+    if _is_day(a.get("fired_on")) and _num(a.get("fired_price")) is not None:
+        out.update(fired_on=a["fired_on"], fired_price=_num(a["fired_price"]))
+    return out
+
+
+def _clean_plan(v: dict) -> dict:
+    out: dict = {}
+    for k in ("target", "review", "set_price"):
+        x = _num(v.get(k))
+        if x is not None and x > 0:
+            out[k] = x
+    mw = _num(v.get("max_weight"))
+    if mw is not None and 0 < mw <= 100:
+        out["max_weight"] = mw
+    if isinstance(v.get("why"), str) and v["why"].strip():
+        out["why"] = v["why"].strip()[:WHY_MAX]
+    for k in ("set_on", "levels_on"):
+        if _is_day(v.get(k)):
+            out[k] = v[k]
+    alerts = (
+        [a for a in map(_clean_alert, v.get("alerts") or []) if a]
+        if isinstance(v.get("alerts"), list)
+        else []
+    )
+    if alerts:
+        out["alerts"] = alerts[:ALERTS_MAX]
+    return out
+
+
+def _has_plan(p: dict) -> bool:
+    return any(k in p for k in (*_PLAN_FIELDS, "alerts"))
+
+
+def load_plans() -> dict[str, dict]:
+    """{symbol: plan}; no file is no plans. Raises ``PlansUnreadable`` on a
+    file that isn't a plans file."""
+    return _clean_plans(_read_plans())
+
+
+def _clean_plans(raw: dict) -> dict[str, dict]:
+    out = {}
+    for sym, v in raw["plans"].items():
+        if isinstance(sym, str) and isinstance(v, dict):
+            plan = _clean_plan(v)
+            if _has_plan(plan):
+                out[sym[:32]] = plan
+    return out
+
+
+def _read_plans() -> dict:
+    """The file as written, checked: a plans file of this version or older.
+    A newer one (written by a later app) is refused, never rewritten."""
+    try:
+        text = _plans_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"version": PLANS_VERSION, "plans": {}}
+    except OSError as exc:
+        raise PlansUnreadable(f"plans.json can't be read ({type(exc).__name__})") from exc
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise PlansUnreadable("plans.json is damaged: it was left as it is") from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("plans"), dict):
+        raise PlansUnreadable("plans.json is not a plans file: it was left as it is")
+    v = raw.get("version", PLANS_VERSION)
+    if not isinstance(v, int) or v > PLANS_VERSION:
+        raise PlansUnreadable("plans.json was written by a newer Convexity: it was left as it is")
+    return raw
+
+
+def _change_plans(change) -> dict:
+    """Read, change and write ``plans.json`` under the lock; returns the plans."""
+    from convexity.persistence import _atomic_write
+
+    with _PLANS_LOCK:
+        raw = _read_plans()  # raises on a damaged file: never overwritten
+        before = _clean_plans(raw)
+        plans = json.loads(json.dumps(before))  # change() edits a copy
+        change(plans)
+        plans = {s: p for s, p in plans.items() if _has_plan(p)}
+        # The owner's own words: a holding this change didn't touch is
+        # written back exactly as it was, fields this version doesn't know
+        # included (adversarial review, 2026-10-14: a fired alert used to
+        # rewrite the whole file through the cleaner).
+        kept = {s: v for s, v in raw["plans"].items()
+                if isinstance(s, str) and s in plans and before.get(s) == plans[s]}  # fmt: skip
+        body = {**raw, "version": raw.get("version", PLANS_VERSION),
+                "plans": {s: kept.get(s, p) for s, p in plans.items()}}  # fmt: skip
+        _atomic_write(_plans_path(), json.dumps(body, ensure_ascii=False, indent=1))
+        return plans
+
+
+def _check_symbol(symbol) -> str:
+    if not isinstance(symbol, str) or not symbol or len(symbol) > 32:
+        raise ValueError("symbol required")
+    return symbol
+
+
+def _price_arg(price) -> float:
+    v = _num(price)
+    if v is None or v <= 0:
+        raise ValueError("price must be a positive number")
+    return v
+
+
+def set_plan(symbol, fields, price, today: date | None = None) -> dict:
+    """Merge {target?, review?, max_weight?, why?} into a holding's plan
+    (``None`` clears one). A new target or review level records the day and
+    today's price, for "set 3 Mar at 180". Raises ValueError on bad input."""
+    symbol, today = _check_symbol(symbol), today or date.today()
+    if not isinstance(fields, dict) or not fields or set(fields) - set(_PLAN_FIELDS):
+        raise ValueError(f"plan fields are {', '.join(_PLAN_FIELDS)}")
+    new: dict = {}
+    for k in ("target", "review"):
+        if k in fields and fields[k] is not None:
+            v = _num(fields[k])
+            if v is None or v <= 0:
+                raise ValueError(f"{k} must be a positive price")
+            new[k] = v
+    if fields.get("max_weight") is not None:
+        mw = _num(fields["max_weight"])
+        if mw is None or not 0 < mw <= 100:
+            raise ValueError("max weight must be between 0 and 100%")
+        new["max_weight"] = mw
+    if fields.get("why") is not None:
+        if not isinstance(fields["why"], str):
+            raise ValueError("why must be text")
+        if fields["why"].strip():
+            new["why"] = fields["why"].strip()[:WHY_MAX]
+    levels_changed = False
+
+    def change(plans):
+        nonlocal levels_changed
+        plan = dict(plans.get(symbol) or {})
+        for k in _PLAN_FIELDS:
+            if k in fields:
+                if plan.get(k) != new.get(k) and k in ("target", "review"):
+                    levels_changed = True
+                plan.pop(k, None)
+                if k in new:
+                    plan[k] = new[k]
+        t, r = plan.get("target"), plan.get("review")
+        if t is not None and r is not None and r >= t:
+            raise ValueError("the review level must be below the target")
+        if levels_changed:
+            plan.update(set_on=today.isoformat(), set_price=_price_arg(price))
+            plan.pop("levels_on", None)  # typed today: in today's share terms
+        if "target" not in plan and "review" not in plan:
+            plan.pop("set_on", None)
+            plan.pop("set_price", None)
+        plans[symbol] = plan
+
+    return _change_plans(change).get(symbol, {})
+
+
+def clear_plan(symbol) -> None:
+    """Clear target, review level, max weight and why; price alerts stay
+    (each has its own ✕)."""
+    symbol = _check_symbol(symbol)
+
+    def change(plans):
+        plan = plans.get(symbol) or {}
+        plans[symbol] = {"alerts": plan["alerts"]} if plan.get("alerts") else {}
+
+    _change_plans(change)
+
+
+def add_alert(symbol, level, price, today: date | None = None) -> dict:
+    """A one-shot alert at ``level``. Its side is fixed now, against today's
+    price, so a crossing can't be read both ways."""
+    symbol, today = _check_symbol(symbol), today or date.today()
+    lvl, now = _num(level), _price_arg(price)
+    if lvl is None or lvl <= 0:
+        raise ValueError("the alert price must be a positive number")
+    if abs(lvl / now - 1) < 1e-6:
+        raise ValueError("that is today's price: pick a level above or below it")
+    alert = {"id": secrets.token_hex(4), "level": lvl, "side": "above" if lvl > now else "below",
+             "set_on": today.isoformat()}  # fmt: skip
+
+    def change(plans):
+        plan = plans.setdefault(symbol, {})
+        if len(plan.get("alerts") or []) >= ALERTS_MAX:
+            raise ValueError(f"at most {ALERTS_MAX} price alerts per holding")
+        plan["alerts"] = [*(plan.get("alerts") or []), alert]
+
+    _change_plans(change)
+    return alert
+
+
+def remove_alert(symbol, alert_id) -> None:
+    symbol = _check_symbol(symbol)
+    if not isinstance(alert_id, str) or not alert_id:
+        raise ValueError("alert id required")
+
+    def change(plans):
+        plan = plans.get(symbol) or {}
+        plan["alerts"] = [a for a in plan.get("alerts") or [] if a["id"] != alert_id]
+        if not plan["alerts"]:
+            plan.pop("alerts")
+
+    _change_plans(change)
+
+
+def record_fired(fired) -> None:
+    """[[symbol, id, price, day], ...]: alerts that crossed, kept as fired
+    so each shows once, even if the price goes back (owner's pick)."""
+    fired = [f for f in fired or [] if isinstance(f, list | tuple) and len(f) == 4]
+    if not fired:
+        return
+
+    def change(plans):
+        for sym, aid, price, day in fired:
+            for a in (plans.get(sym) or {}).get("alerts") or []:
+                if a["id"] == aid and "fired_on" not in a:
+                    a.update(fired_on=day, fired_price=round(price, 6))
+
+    with contextlib.suppress(
+        PlansUnreadable
+    ):  # shown again next time; the damaged file is left alone
+        _change_plans(change)
+
+
+def split_adjusted(plans: dict, splits: dict) -> tuple[dict, bool]:
+    """The plans with every level in today's share terms: a 10:1 split after
+    a level was set divides it by 10, as it divides the price (a review
+    level at 160 would otherwise read "fell below" the morning after).
+    ``splits`` is ``investments.market_splits``: {symbol: [(day, ratio)]}.
+    A split on the day a level was set is taken as already in it. Pure;
+    returns (plans, whether anything moved)."""
+    moved = False
+    out = {}
+    for sym, plan in plans.items():
+        sp = [(d, r) for d, r in splits.get(sym) or () if r and r > 0 and r != 1]
+        if not sp:
+            out[sym] = plan
+            continue
+
+        def factor(since):
+            f = 1.0
+            for d, r in sp:
+                if since and d > since:
+                    f *= r
+            return f
+
+        plan = dict(plan)
+        f = factor(plan.get("levels_on") or plan.get("set_on"))
+        if f != 1.0:
+            moved = True
+            for k in ("target", "review", "set_price"):
+                if k in plan:
+                    plan[k] = plan[k] / f
+            plan["levels_on"] = max(d for d, _ in sp)
+        alerts = []
+        for a in plan.get("alerts") or []:
+            fa = factor(a.get("levels_on") or a.get("set_on"))
+            if fa != 1.0:
+                moved = True
+                a = {**a, "level": a["level"] / fa, "levels_on": max(d for d, _ in sp)}
+                if "fired_price" in a:
+                    a["fired_price"] = a["fired_price"] / fa
+            alerts.append(a)
+        if alerts:
+            plan["alerts"] = alerts
+        out[sym] = plan
+    return out, moved
+
+
+def apply_splits(splits: dict) -> None:
+    """Save ``split_adjusted`` once (on a fresh page), so a level is never
+    divided twice; a damaged file is left alone."""
+
+    def change(plans):
+        adj, _ = split_adjusted(plans, splits)
+        plans.clear()
+        plans.update(adj)
+
+    with contextlib.suppress(PlansUnreadable):
+        if split_adjusted(load_plans(), splits)[1]:
+            _change_plans(change)
+
+
+def _lvl(v: float) -> str:
+    """A level inside a key: exact to 1e-6, so a changed target is a new key
+    (``:g`` kept six digits: 12345.67 and 12345.71 were one key)."""
+    return f"{round(v, 6):.15g}"
+
+
+def _quote(v: float, qccy: str | None) -> str:
+    """A level in the share's quote unit: "2,450p", "210", "212.40"."""
+    if qccy == "GBp":
+        return f"{v:,.0f}p"
+    return f"{v:,.0f}" if abs(v - round(v)) < 0.005 else f"{v:,.2f}"
+
+
+def _plan_items(held: list[dict], plans: dict, on, today: date, checked: set[str], add) -> list:
+    """Target, review level and price-alert items; returns the alerts that
+    crossed for the first time ([symbol, id, price, day])."""
+    fired = []
+    for p in held:
+        plan, sym = plans.get(p["symbol"]), p["symbol"]
+        price = _num(p.get("price"))
+        if not plan or price is None or p.get("note"):  # no Yahoo price: can't say
+            continue
+        q, name = p.get("quote_ccy"), p["name"]
+        day = (p.get("xray") or {}).get("day_date") or today.isoformat()
+        set_at = (f"Set {_day(plan['set_on'])} at {_quote(plan['set_price'], q)} · "
+                  if plan.get("set_on") and plan.get("set_price") else "")  # fmt: skip
+        why = f"\u201c{plan['why']}\u201d" if plan.get("why") else None
+        t, r = plan.get("target"), plan.get("review")
+        if on("target") and t:
+            checked.add(f"target|{sym}")
+            if price >= t:
+                add("target", f"target|{sym}|{_lvl(t)}", 0.0, f"{name} reached your {_quote(t, q)} target",
+                    f"{set_at}now {_quote(price, q)}", [sym], value=(price / t - 1) * 100, plan=True)  # fmt: skip
+        if on("review") and r:
+            checked.add(f"review|{sym}")
+            if price <= r:
+                add("review", f"review|{sym}|{_lvl(r)}", round((1 - price / r) * 100, 2),
+                    f"{name} fell below your {_quote(r, q)} review level",
+                    why or f"{set_at}now {_quote(price, q)}", [sym], value=-(1 - price / r) * 100,
+                    plan=True)  # fmt: skip
+        if on("price_alert") and plan.get("alerts"):
+            checked.add(f"price|{sym}")
+            for a in plan["alerts"]:
+                up = a["side"] == "above"
+                crossed = price >= a["level"] if up else price <= a["level"]
+                if not crossed and "fired_on" not in a:
+                    continue
+                if "fired_on" not in a:
+                    fired.append([sym, a["id"], price, day])
+                on_day = a.get("fired_on") or day
+                add("price_alert", f"price|{sym}|{a['id']}", 0.0, f"{name} crossed {_quote(a['level'], q)}",
+                    f"Price alert · {'rose' if up else 'fell'} through it on {_day(on_day)}", [sym],
+                    alert_id=a["id"], plan=True)  # fmt: skip
+    return fired
 
 
 # ---------------------------------------------------------------- evaluate
@@ -279,7 +713,8 @@ def _names(xs: list[dict], most: int = 3, extra: str | None = None) -> str:
     return ", ".join(parts[:-1]) + f" and {parts[-1]}" if len(parts) > 1 else "".join(parts)
 
 
-def _items(page: dict, rules: dict, today: date, checked: set[str]) -> list[dict]:
+def _items(page: dict, rules: dict, today: date, checked: set[str], plans: dict | None = None,
+           fired: list | None = None) -> list[dict]:  # fmt: skip
     held = [
         p for p in page.get("positions") or [] if not p.get("pending") and _num(p.get("weight"))
     ]
@@ -295,14 +730,26 @@ def _items(page: dict, rules: dict, today: date, checked: set[str]) -> list[dict
         return rules[rule]["on"]
 
     lim = {k: r["value"] for k, r in rules.items()}
-    if on("holding"):
-        checked.update(f"holding|{p['symbol']}" for p in held)
-        for p in held:
-            # A fund is diversified already: 30% in a world ETF isn't one bet.
-            if p["weight"] > lim["holding"] and not p.get("fund"):
-                add("holding", f"holding|{p['symbol']}", round(p["weight"] - lim["holding"], 2),
-                    f"{p['name']} is {_pct(p['weight'], lim['holding'])} of your book",
-                    f"Above your {lim['holding']:g}% limit", [p["symbol"]], value=p["weight"])  # fmt: skip
+    plans = plans or {}
+    checked.update(f"holding|{p['symbol']}" for p in held if on("holding") or
+                   (plans.get(p["symbol"]) or {}).get("max_weight") is not None)  # fmt: skip
+    for p in held:
+        # A holding's own max weight (its plan) replaces the book's limit,
+        # funds included: the owner set it for that one (Phase 8). It is part
+        # of the plan, so it holds with the book rule switched off, and its
+        # key carries the cap: a tighter cap is a new item, never hidden by a
+        # dismissal made under the old one (adversarial review, 2026-10-14).
+        own = (plans.get(p["symbol"]) or {}).get("max_weight")
+        if own is None and not on("holding"):
+            continue
+        cap = own if own is not None else lim["holding"]
+        key = f"holding|{p['symbol']}" + (f"|max{_lvl(own)}" if own is not None else "")
+        # A fund is diversified already: 30% in a world ETF isn't one bet.
+        if p["weight"] > cap and (own is not None or not p.get("fund")):
+            add("holding", key, round(p["weight"] - cap, 2),
+                f"{p['name']} is {_pct(p['weight'], cap)} of your book",
+                f"Above your {cap:g}% {'plan ' if own is not None else ''}limit", [p["symbol"]],
+                value=p["weight"], plan=own is not None)  # fmt: skip
     if on("sector"):
         groups: dict[str, list[dict]] = {}
         for p in held:
@@ -363,6 +810,9 @@ def _items(page: dict, rules: dict, today: date, checked: set[str]) -> list[dict
                 value=z)  # fmt: skip
         if on("divergence") and _divergence(p, x, lim["divergence"], today, add):
             checked.add(f"divergence|{p['symbol']}")
+    got = _plan_items(held, plans, on, today, checked, add)
+    if fired is not None:
+        fired.extend(got)
     return out
 
 
@@ -430,21 +880,41 @@ def _upcoming(page: dict, rules: dict, events: dict, today: date, checked: set[s
 
 
 def evaluate(page: dict, state: dict | None = None, events: dict | None = None,
-             today: date | None = None) -> dict:  # fmt: skip
+             today: date | None = None, plans: dict | None = None) -> dict:  # fmt: skip
     """The rail for one page payload: {high, info, upcoming, unread,
-    unread_high, hidden, firing, checked, rules}. Pure: no I/O when ``state``
-    and ``events`` are given. ``firing`` is every item's key before
-    dismissals and ``checked`` what the page could check (for ``prune``)."""
+    unread_high, hidden, firing, checked, rules, plans, fired}. Pure: no I/O
+    when ``state``, ``events`` and ``plans`` are given. ``firing`` is every
+    item's key before dismissals and ``checked`` what the page could check
+    (for ``prune``); ``fired`` the price alerts that crossed for the first
+    time (for ``record_fired``)."""
     state = state if state is not None else load_state()
     events = events if events is not None else load_events()
     today = today or date.today()
+    plans_error = None
+    if plans is None:
+        try:
+            plans = load_plans()
+        except PlansUnreadable as exc:
+            plans, plans_error = {}, str(exc)
     rules, dismissed, seen = state["rules"], state["dismissed"], state["seen"]
+    snoozed = {k for k, until in state.get("snoozed", {}).items() if until > today.isoformat()}
     checked: set[str] = set()
-    items = _items(page, rules, today, checked) if page.get("positions") else []
+    fired: list = []
+    items = _items(page, rules, today, checked, plans, fired) if page.get("positions") else []
     upcoming = _upcoming(page, rules, events, today, checked)
-    shown = lambda it: _over(it, dismissed)  # noqa: E731
+    for it in items:  # "Snooze until next earnings" needs the date (events cache)
+        e = (
+            (events.get(it["symbols"][0]) or {}).get("earnings")
+            if it.get("plan") and it["symbols"]
+            else None
+        )
+        if _is_day(e) and e > today.isoformat():
+            it["earnings"] = e
+    shown = lambda it: it["key"] not in snoozed and _over(it, dismissed)  # noqa: E731
     visible = [it for it in items if shown(it)]
     order = {
+        "review": -2,
+        "target": -1,
         "move": 0,
         "holding": 1,
         "from_cost": 2,
@@ -452,6 +922,7 @@ def evaluate(page: dict, state: dict | None = None, events: dict | None = None,
         "currency": 4,
         "from_peak": 5,
         "divergence": 6,
+        "price_alert": 7,
     }
     visible.sort(key=lambda it: (order[it["rule"]], -abs(it.get("value") or 0)))
     unread = [it for it in visible if _over(it, seen)]
@@ -464,8 +935,13 @@ def evaluate(page: dict, state: dict | None = None, events: dict | None = None,
         "hidden": len(items) - len(visible),
         "firing": sorted({it["key"] for it in items} | {u["key"] for u in upcoming}),
         "checked": sorted(checked),
-        "rules": [{"key": k, **{f: r[f] for f in ("label", "unit", "min", "max", "severity")},
+        "rules": [{"key": k, **{f: r.get(f) for f in ("label", "unit", "min", "max", "severity")},
                    "note": r.get("note"), "default": r["value"], **rules[k]} for k, r in RULES.items()],
+        # The held holdings' plans, for the row popover and the Price track.
+        "plans": {p["symbol"]: plans[p["symbol"]] for p in page.get("positions") or [] if p.get("symbol") in plans},
+        "plans_error": plans_error,
+        "snoozed": sum(1 for it in items if it["key"] in snoozed),
+        "fired": fired,
     }  # fmt: skip
 
 

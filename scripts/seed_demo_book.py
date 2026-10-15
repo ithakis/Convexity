@@ -16,7 +16,11 @@ value. Most payouts are left unrecorded, so Yahoo's dividends get estimated.
 ``--crafted`` adds rows that trip the Attention rail's X-ray rules (roadmap
 Phase 7): a quick-added Pfizer at an average price far above today's (down
 from cost) on top of the demo's tech-heavy, NVIDIA-heavy mix (single name,
-sector) and its pound and euro lines (currency, viewed in USD).
+sector) and its pound and euro lines (currency, viewed in USD). It also
+writes plans (roadmap Phase 8, ``state/plans.json``) whose levels are far
+enough from any recent price to fire: Apple past its target, Microsoft
+below its review level, the world ETF above its own max weight, and an
+NVIDIA price alert that has crossed; Alphabet has a plan that stays quiet.
 
 Refuses to run without CONVEXITY_HOME, so it can never write into the real
 data folder, and refuses to overwrite an existing book without --force.
@@ -66,6 +70,17 @@ LEDGER = [
 CRAFTED = [
     {"date": "2025-06-02", "type": "buy", "symbol": "PFE", "qty": 200, "price": 60.00, "fee": 0.0, "opening": True},
 ]  # fmt: skip
+# Levels far from any recent price, so each fires (or stays quiet) whatever
+# the day's prices are; "set_price" is made up, like the trades.
+CRAFTED_PLANS = {
+    "AAPL": {"target": 120.0, "review": 60.0, "set_on": "2026-03-03", "set_price": 110.0,
+             "why": "Services keep growing faster than hardware"},
+    "MSFT": {"target": 2000.0, "review": 1000.0, "set_on": "2026-06-12", "set_price": 1100.0,
+             "why": "Sell if cloud growth stalls"},
+    "VWCE.DE": {"max_weight": 5.0},
+    "NVDA": {"alerts": [{"id": "demo0001", "level": 20.0, "side": "above", "set_on": "2026-09-01"}]},
+    "GOOGL": {"target": 5000.0, "review": 5.0, "set_on": "2026-05-04", "set_price": 160.0},
+}  # fmt: skip
 BLANK = dict.fromkeys(("symbol", "qty", "price", "fee", "amount", "tax", "ratio", "fx_rate"))
 BLANK |= {"ccy": "USD", "qty_basis": None, "source": "demo", "batch": "b_demo", "note": ""}
 
@@ -109,6 +124,12 @@ def main() -> int:
     book = build_book(args.crafted)
     target.write_text(json.dumps(book, indent=2) + "\n", encoding="utf-8")
     print(f"Seeded {len(book['entries'])} demo entries into {target}")
+    if args.crafted:
+        plans = target.parent / "plans.json"
+        plans.write_text(
+            json.dumps({"version": 1, "plans": CRAFTED_PLANS}, indent=1) + "\n", encoding="utf-8"
+        )
+        print(f"Seeded {len(CRAFTED_PLANS)} demo plans into {plans}")
     return 0
 
 

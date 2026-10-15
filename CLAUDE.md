@@ -160,6 +160,11 @@ Each of these has cost real debugging time; the link goes to the full story.
   dates come from `state/events.json` filled in the background. A dismissed
   item returns only a full step worse; `prune` runs on fresh, healthy pages
   only. [backend.md → Attention rail](docs/architecture/backend.md#my-investments-attention-rail-phase-7-attentionpy)
+- **Plans are the owner's words, kept beside the book** (Phase 8,
+  `state/plans.json`): never overwritten when malformed, untouched holdings
+  written back verbatim; levels are quote-unit prices rescaled by later
+  splits; an alert's side comes from the server's page, never the request.
+  [backend.md → plans](docs/architecture/backend.md#my-investments-plans-and-price-alerts-phase-8-attentionpy)
 - **Holding contributions add up to the TWR exactly** (Phase 4): a new
   entry type that moves money into or out of a holding must land in
   `ledger.Day.flows`, or "Cash and fees" silently absorbs it.
@@ -315,6 +320,7 @@ overrides it):
 │   ├── proxies.json            ← found stand-in listings per young listing, a week (market data only; analytics._proxy_candidates)
 │   ├── attention.json          ← the Attention rail's thresholds, dismissed and seen items (preferences; malformed = defaults)
 │   ├── events.json             ← held shares' next earnings / ex-dividend dates from Yahoo (a cache, market data only)
+│   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
 │   └── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)
 ├── models/mlsent-v1.1/         ← The Market read artifact (was ~/.convexity/ml_model/)
 ├── reference/                  ← The downloaded reference pack (a cache; reference_pack.py)

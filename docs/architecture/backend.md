@@ -730,6 +730,28 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
   `/api/investments/attention/{dismiss,seen,rules}`; each answers the rail as
   it now reads and never touches the book file.
 
+### My Investments plans and price alerts (Phase 8: `attention.py`)
+- **`state/plans.json`** `{version, plans: {symbol: {target, review,
+  max_weight, why, set_on, set_price, levels_on, alerts: [{id, level, side,
+  set_on, fired_on, fired_price}]}}}` is the owner's input: a damaged file
+  is never overwritten (`PlansUnreadable`, 409), a newer `version` is
+  refused, and a write puts back untouched holdings verbatim. It is not in
+  the book file: a plan edit would bump the rev and recompute the book.
+- **Levels are in the quote unit** (pence for LSE), compared with the page
+  position's `price`; no fetch. A split since a level was set rescales it
+  (`split_adjusted` in memory on every answer, `apply_splits` saved once on
+  a fresh page, from `market_splits(fetch=False)`).
+- **Items**: `target|SYM|level` and `review|SYM|level` (high; review steps
+  10 pts), `holding|SYM|maxN` for a plan's own max weight (it replaces the
+  book limit, funds included, switch or not), `price|SYM|id` (info, one
+  shot: `record_fired` on a fresh page keeps it until removed). The side of
+  an alert and "set at" come from the server's page (`investments.price_now`),
+  never the request.
+- **Snooze** (`state/attention.json` `snoozed: {key: day}`) hides an item
+  until that day; `prune` drops past ones. Routes: JSON POSTs
+  `/api/investments/attention/{snooze,plan,plan/clear,alert,alert/remove}`;
+  set and add need a held symbol, clear and remove work on any plan.
+
 ### My Investments import (`importer.py`)
 Roadmap Phases 5–6 (run together, ahead of Performance, at the owner's
 request): the composer is the way into the page.
