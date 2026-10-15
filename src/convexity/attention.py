@@ -19,8 +19,9 @@ How it stays off the page's cold-open path (Phase 4):
   the topbar Refresh; the page only reads it.
 
 State (``state/attention.json``) holds preferences only (thresholds, what
-was dismissed or seen at which level), never the book: a malformed file is
-read as the defaults.
+was dismissed, seen or notified at which level), never the book: a malformed
+file is read as the defaults. ``notified`` is Phase 9's: an item reaches a
+macOS notification once, under the same "a full step worse" rule as seen.
 """
 
 from __future__ import annotations
@@ -125,7 +126,8 @@ def load_state() -> dict:
         raw = {}
     raw = raw if isinstance(raw, dict) else {}
     return {"rules": _clean_rules(raw.get("rules")), "dismissed": _clean_levels(raw.get("dismissed")),
-            "seen": _clean_levels(raw.get("seen")), "snoozed": _clean_snoozed(raw.get("snoozed"))}  # fmt: skip
+            "seen": _clean_levels(raw.get("seen")), "snoozed": _clean_snoozed(raw.get("snoozed")),
+            "notified": _clean_levels(raw.get("notified")), "armed": raw.get("armed") is True}  # fmt: skip
 
 
 def _clean_snoozed(raw) -> dict[str, str]:
@@ -249,6 +251,37 @@ def mark_seen(items) -> None:
         _update(change)
 
 
+def mark_notified(items) -> None:
+    """[[key, level], ...]: the items a notification has now gone out for
+    (Phase 9). Same cap and pruning as seen: one that clears and fires
+    again is new, one a full step worse notifies again."""
+    pairs = [(_check_key(k), lvl) for k, lvl in items if _num(lvl) is not None]
+
+    def change(st):
+        for k, lvl in pairs:
+            st["notified"].pop(k, None)
+            st["notified"][k] = float(lvl)
+        st["notified"] = _cap(st["notified"])
+        st["armed"] = True
+
+    _update(change)
+
+
+def disarm() -> None:
+    """Notifications switched off: the next switch-on takes what is in the
+    rail then as its baseline, rather than sending all of it at once."""
+    _update(lambda st: st.update(armed=False))
+
+
+def should_notify(att: dict, state: dict | None = None) -> list[dict]:
+    """The Needs-a-look items a notification is due for: shown in the rail
+    (so not dismissed or snoozed), unread, and not notified at this level
+    (or a full step worse since). Plain price alerts are information, so
+    never here (Appendix D)."""
+    state = state if state is not None else load_state()
+    return [it for it in att.get("high") or [] if it.get("unread") and _over(it, state["notified"])]
+
+
 def scope(key: str) -> str:
     """What a page must have checked to say an item no longer fires: the
     rule and the holding (``from_peak|NVDA``), the rule alone for sectors,
@@ -288,12 +321,13 @@ def prune(firing: set[str], checked: set[str]) -> None:
         live = {
             k: v for k, v in st["snoozed"].items() if v > today
         }  # a snooze past its day is gone
-        if all(keep(k) for k in (*st["dismissed"], *st["seen"])) and len(live) == len(
-            st["snoozed"]
-        ):
+        if all(keep(k) for k in (*st["dismissed"], *st["seen"], *st["notified"])) and len(
+            live
+        ) == len(st["snoozed"]):
             return
         st["dismissed"] = {k: v for k, v in st["dismissed"].items() if keep(k)}
         st["seen"] = {k: v for k, v in st["seen"].items() if keep(k)}
+        st["notified"] = {k: v for k, v in st["notified"].items() if keep(k)}
         st["snoozed"] = live
         _save_state(st)
 
@@ -926,12 +960,15 @@ def evaluate(page: dict, state: dict | None = None, events: dict | None = None,
     }
     visible.sort(key=lambda it: (order[it["rule"]], -abs(it.get("value") or 0)))
     unread = [it for it in visible if _over(it, seen)]
+    for it in unread:  # Phase 9: only an unread item is notified
+        it["unread"] = True
     return {
         "high": [it for it in visible if it["severity"] == "high"],
         "info": [it for it in visible if it["severity"] == "info"],
         "upcoming": [u for u in upcoming if shown(u)],
         "unread": len(unread),
         "unread_high": any(it["severity"] == "high" for it in unread),
+        "unread_high_n": sum(1 for it in unread if it["severity"] == "high"),
         "hidden": len(items) - len(visible),
         "firing": sorted({it["key"] for it in items} | {u["key"] for u in upcoming}),
         "checked": sorted(checked),

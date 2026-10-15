@@ -165,6 +165,18 @@ Each of these has cost real debugging time; the link goes to the full story.
   written back verbatim; levels are quote-unit prices rescaled by later
   splits; an alert's side comes from the server's page, never the request.
   [backend.md → plans](docs/architecture/backend.md#my-investments-plans-and-price-alerts-phase-8-attentionpy)
+- **Notifications are the rail's answer, sent by a background job**
+  (Phase 9, `notify.py`): an item is sent once, only if the rail shows it
+  unread and it isn't `notified` at that level (the same full-step rule);
+  price alerts stay in-app; the first pass after switching on is a
+  baseline. A pass is a `watch` job (single-flight, superseded by the
+  owner's Refresh, hidden from the chip), fetches held shares only
+  (`cache.prefer_cached`) and a degraded page sends nothing. Desktop: macOS
+  drops notifications from a process with no bundle id, so
+  `desktop._bundle_identity()` sets one; `showMessage` timeout 0. The
+  weekly recap is built from a computed page only, never a fetch.
+  [backend.md → notifications](docs/architecture/backend.md#my-investments-notifications-and-the-weekly-recap-phase-9-notifypy) ·
+  [desktop.md → Gotchas](docs/architecture/desktop.md#gotchas-discovered-during-implementation)
 - **Holding contributions add up to the TWR exactly** (Phase 4): a new
   entry type that moves money into or out of a holding must land in
   `ledger.Day.flows`, or "Cash and fees" silently absorbs it.
@@ -265,6 +277,7 @@ sub-decision.
 │   ├── investments.py           ← My Investments (the real book): the book file, undo/redo, prices/FX, page payload — docs/plans/my-investments-roadmap.md
 │   ├── ledger.py                ← My Investments ledger engine: pure replay (average cost, implied deposits, splits), TWR/MWR
 │   ├── attention.py             ← My Investments' Attention rail: X-ray rules, events cache, dismiss/unread (roadmap Phase 7)
+│   ├── notify.py                ← My Investments notifications (Phase 9): scheduler (a background job), dedup via attention.py, quiet hours, outbox, weekly recap
 │   ├── importer.py              ← My Investments import: text, screenshots, PDFs, CSV/Excel → rows to review (NIM vision + text, symbol-pack checks)
 │   ├── desktop.py               ← Desktop app entry point (PySide6 + QtWebEngine) — §14
 │   └── static/
@@ -321,6 +334,7 @@ overrides it):
 │   ├── attention.json          ← the Attention rail's thresholds, dismissed and seen items (preferences; malformed = defaults)
 │   ├── events.json             ← held shares' next earnings / ex-dividend dates from Yahoo (a cache, market data only)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
+│   ├── recaps.json             ← My Investments' weekly recaps, last 12 (derived from the computed page: a cache)
 │   └── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)
 ├── models/mlsent-v1.1/         ← The Market read artifact (was ~/.convexity/ml_model/)
 ├── reference/                  ← The downloaded reference pack (a cache; reference_pack.py)

@@ -106,6 +106,11 @@ class Job:
         self.entries = dict(entries)  # view -> entries string, snapshotted
         self.days = days
         self.context = context
+        # Phase 9: the notification scheduler's pass (notify.py). The topbar
+        # chip ignores it, and a refresh the owner asks for supersedes it.
+        self.background = (
+            bool((context or {}).get("background")) if isinstance(context, dict) else False
+        )
         self.created_at = time.time()
         self.started_at = None
         self.ended_at = None
@@ -184,6 +189,7 @@ class Job:
             return {
                 "id": self.id,
                 "scope": self.scope,
+                "background": self.background,
                 "state": self.state,
                 "phases": list(self.phases),
                 "phase": self.phase,
@@ -289,7 +295,9 @@ def submit(
         if running is not None and running.is_terminal():
             running = None
         if running is not None:
-            if on_conflict != "supersede":
+            # A background pass gives way to the owner's refresh; the
+            # scheduler itself never supersedes anything (it tries again).
+            if on_conflict != "supersede" and not (running.background and not job.background):
                 return running, "rejected"
             superseded = running
         else:
@@ -380,6 +388,10 @@ def _run(job: Job) -> None:
     job.state = "running"
     job.emit("job", state="running")
     try:
+        if job.phases == ("watch",):
+            _run_watch_phase(job)
+            _finish(job, "cancelled" if job.cancel.is_set() else "done")
+            return
         if job.phases == ("book",):
             _run_book_phase(job)
             _finish(job, "cancelled" if job.cancel.is_set() else "done")
@@ -545,6 +557,18 @@ def _run_book_phase(job: Job) -> None:
     investments.refresh_market(syms, progress=progress, cancel=job.cancel)
     job.emit("phase", phase="book", state="end", view=BOOK_VIEW,
              reason="cancelled" if job.cancel.is_set() else None)  # fmt: skip
+
+
+def _run_watch_phase(job: Job) -> None:
+    """The notification scheduler's pass (notify.watch): held shares only,
+    cache-first, then the page and what is due. A job so that it is
+    single-flight with every refresh: they share Yahoo and the page."""
+    from convexity import notify
+
+    job.phase = "watch"
+    job.emit("phase", phase="watch", state="start", view=BOOK_VIEW)
+    outcome = notify.watch(job.cancel)
+    job.emit("phase", phase="watch", state="end", view=BOOK_VIEW, outcome=outcome)
 
 
 def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:

@@ -22,6 +22,7 @@ leaves those keys empty (``None`` / no ``series``) and the page shows calm
 gaps: a real book is never shown made-up numbers.
 """
 
+import contextvars
 import json
 import math
 import re
@@ -1458,6 +1459,10 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
         "invested": rnd(np.cumsum(d_in - w_out), 2),
         "bench_value": {p: rnd(v, 2) for p, v in bench_value.items()} if bench_value else None,
         "twr_index": rnd(idx, 8),
+        # Money in less estimated dividends paid out, cumulative: a span's
+        # gain is its value change less this one's (the month figure's
+        # formula), which the weekly recap reads (notify.py, Phase 9).
+        "flows": rnd(np.cumsum(perf_in - paid), 2),
         "bench_index": rnd(bench_index, 8) if bench_index is not None else None,
         "period_start": starts,
     }
@@ -1911,6 +1916,9 @@ def page(ccy: str | None = None, *, fresh: bool = False) -> dict:
             return with_attention(hit[1])
         t0 = time.monotonic()
         out = book(ccy)
+        # When: the weekly recap keeps only a page computed after Friday's
+        # close (notify.maybe_recap); the disk copy carries the same stamp.
+        out["computed_at"] = _now()
         took = time.monotonic() - t0
         _LAST_PAGE["v"] = (key, out)
         if out.get("positions"):
@@ -1976,6 +1984,30 @@ def price_now(symbol: str, ccy: str | None = None) -> float | None:
                 if isinstance(v, int | float) and v > 0:
                     return float(v)
     return None
+
+
+def computed_page(ccy: str | None = None) -> dict | None:
+    """The page as already computed, with its rail (the memo, the last page
+    computed, else the last good page on disk); never computes. The weekly
+    recap and the notification passes read this (notify.py)."""
+    key = _page_key(ccy)
+    hit = _PAGE_MEMO.get(key) if key else None
+    lk, lp = _LAST_PAGE["v"]
+    last = lp if key and lk == key else None
+    if hit:
+        return with_attention(hit[1])
+    if last:
+        return with_attention(last)
+    return cached_page(ccy)
+
+
+def held_symbols() -> list[str]:
+    """Shares held now, from the ledger alone (no network)."""
+    try:
+        raw = _load()
+    except BookUnreadable:
+        return []
+    return sorted((_held_now(raw) or {}) if raw else {})
 
 
 def attention_now(ccy: str | None = None) -> dict:
@@ -2072,7 +2104,12 @@ def _prefetch(raw: dict, entries: list[dict], base: str, disp: str) -> None:
 
     try:
         with ThreadPoolExecutor(max_workers=2) as ex:
-            jobs = [ex.submit(closes), ex.submit(fx.prefetch_usd_series, sorted(ccys))]
+            # The notification pass's ``cache.prefer_cached`` is a context
+            # variable, which a pool's worker doesn't inherit: without the
+            # copy every sold share was downloaded again on each pass
+            # (adversarial review, 2026-10-15).
+            jobs = [ex.submit(contextvars.copy_context().run, closes),
+                    ex.submit(fx.prefetch_usd_series, sorted(ccys))]  # fmt: skip
             for j in jobs:
                 j.result()
     except Exception as exc:

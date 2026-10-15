@@ -24,6 +24,8 @@ Startup is staged so the splash appears as fast as possible:
 Run via: python -m convexity.desktop
 """
 
+import contextlib
+import json
 import logging
 import os
 import sys
@@ -36,7 +38,17 @@ from pathlib import Path
 # QtWebEngineWidgets must be imported before QApplication is constructed —
 # keep every PySide6 import at module top even though the splash would appear
 # marginally sooner without them.
-from PySide6.QtCore import QElapsedTimer, QRect, QRectF, Qt, QTimer, QUrl, QStandardPaths
+from PySide6.QtCore import (
+    QElapsedTimer,
+    QObject,
+    QRect,
+    QRectF,
+    QStandardPaths,
+    Qt,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -46,10 +58,18 @@ from PySide6.QtGui import (
     QPainter,
     QPixmap,
     QShortcut,
+    QAction,
 )
 from PySide6.QtWebEngineCore import QWebEngineDownloadRequest, QWebEnginePage, QWebEngineProfile
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QSplashScreen
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QSplashScreen,
+    QSystemTrayIcon,
+)
 
 from convexity import __version_display__
 
@@ -367,6 +387,151 @@ class _MainWindow(QMainWindow):
         self.view.load(QUrl(self._url))
 
 
+def _bundle_identity() -> None:
+    """Give the process the app's bundle identifier, so macOS accepts its
+    notifications (roadmap Phase 9).
+
+    Qt's tray (QSystemTrayIcon.showMessage) posts through macOS's
+    NSUserNotificationCenter, which drops every notification from a process
+    whose main bundle has no identifier. Convexity.app's executable is a
+    script that execs the uv tool's Python, which lives outside the bundle,
+    so the main bundle is Python's and has none (spike, 2026-10-15: Qt said
+    "sent" and nothing reached usernoted). Setting CFBundleIdentifier in the
+    main bundle's info dictionary before the first notification is the
+    standard fix; macOS then files them under Convexity (its icon, its row
+    in System Settings -> Notifications). ctypes, so no new dependency."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        ctypes.cdll.LoadLibrary(ctypes.util.find_library("Foundation"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.restype = ctypes.c_void_p
+
+        def send(restype, *argtypes):
+            fn = ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes)
+            return fn(("objc_msgSend", objc))
+
+        cls, sel = (
+            (lambda n: objc.objc_getClass(n.encode())),
+            (lambda n: objc.sel_registerName(n.encode())),
+        )
+
+        def nsstring(text: str):
+            new = send(ctypes.c_void_p, ctypes.c_char_p)
+            return new(cls("NSString"), sel("stringWithUTF8String:"), text.encode())
+
+        bundle = send(ctypes.c_void_p)(cls("NSBundle"), sel("mainBundle"))
+        if send(ctypes.c_void_p)(bundle, sel("bundleIdentifier")):
+            return  # a real bundle already says who it is
+        info = send(ctypes.c_void_p)(bundle, sel("infoDictionary"))
+        # An Objective-C exception (setObject: on an immutable dictionary)
+        # aborts the process past any Python except: check first.
+        if not send(ctypes.c_bool, ctypes.c_void_p)(
+            info, sel("isKindOfClass:"), cls("NSMutableDictionary")
+        ):
+            log.warning("bundle identifier not set (read-only info): no macOS notifications")
+            return
+        put = send(None, ctypes.c_void_p, ctypes.c_void_p)
+        put(info, sel("setObject:forKey:"), nsstring(_BUNDLE_ID), nsstring("CFBundleIdentifier"))
+        log.info("bundle identifier set for notifications")
+    except Exception as exc:  # notifications are extra: never block the launch
+        log.warning("bundle identifier not set (%s): no macOS notifications", type(exc).__name__)
+
+
+class _Notifications(QObject):
+    """Phase 9's desktop side: notify.py's messages as macOS notifications
+    through a menu bar icon (shown while notifications are on), the Dock
+    badge (unread Needs-a-look items), and a click that opens My
+    Investments on the item.
+
+    The scheduler sends from its own thread; ``arrived`` is a Qt signal, so
+    the message is handled on the GUI thread. Qt gives a notification no id
+    back, so a click opens the last one sent (a known limitation)."""
+
+    arrived = Signal(dict)
+    counted = Signal(int, bool)
+
+    def __init__(self, app: QApplication, window: "_MainWindow", icon: QIcon):
+        super().__init__()
+        from convexity import notify
+
+        self._notify, self._app, self._window, self._icon = notify, app, window, icon
+        self._last_key: str | None = None
+        self._tray = QSystemTrayIcon(icon, self)
+        self._tray.setToolTip("Convexity")
+        menu = QMenu()
+        menu.addAction("Open My Investments", lambda: self._open("__rail__"))
+        menu.addSeparator()
+        self._toggle = QAction("Notifications on", menu, checkable=True)
+        self._toggle.toggled.connect(self._set_on)
+        menu.addAction(self._toggle)
+        self._menu = menu  # kept: QSystemTrayIcon doesn't own its menu
+        self._tray.setContextMenu(menu)
+        self._tray.messageClicked.connect(lambda: self._open(self._last_key or "__rail__"))
+        self.arrived.connect(self._show)
+        self.counted.connect(self._apply)
+        notify.add_sink(self.arrived.emit)
+        self._timer = QTimer(self)
+        self._timer.setInterval(60_000)
+        self._timer.timeout.connect(self.refresh)
+        self._timer.start()
+        self.refresh()
+
+    def _show(self, msg: dict) -> None:
+        if not self._tray.isVisible():
+            self._tray.show()  # a test from Settings while off still shows
+        self._last_key = msg.get("key")
+        # Timeout 0: Qt otherwise withdraws the notification from the
+        # Notification Center when the timeout ends (spike, 2026-10-15).
+        self._tray.showMessage(
+            msg.get("title") or "Convexity", msg.get("body") or "", self._icon, 0
+        )
+        self.refresh()
+
+    def _open(self, key: str) -> None:
+        w = self._window
+        if w.isMinimized():
+            w.showNormal()
+        w.raise_()
+        w.activateWindow()
+        w.page.runJavaScript(f"window.invFocusItem && window.invFocusItem({json.dumps(key)})")
+
+    def _set_on(self, on: bool) -> None:
+        from convexity.persistence import load_prefs, save_prefs
+
+        if load_prefs().get("notify_on", True) != on:
+            self._notify.on_prefs(save_prefs({"notify_on": on}))
+        self.refresh()
+
+    def refresh(self) -> None:
+        """The badge and the menu bar icon, off the GUI thread (a file read
+        and the rail's arithmetic, never a compute)."""
+
+        def work() -> None:
+            try:
+                from convexity import investments
+
+                on = self._notify.settings()["notify_on"]
+                att = investments.attention_now(self._notify._ccy())  # the page's own view
+                self.counted.emit(int(att.get("unread_high_n") or 0), bool(on))
+            except Exception as exc:
+                log.warning("notification badge failed: %s", type(exc).__name__)
+
+        threading.Thread(target=work, name="notify-badge", daemon=True).start()
+
+    def _apply(self, n: int, on: bool) -> None:
+        self._toggle.blockSignals(True)
+        self._toggle.setChecked(on)
+        self._toggle.blockSignals(False)
+        self._tray.setVisible(on)
+        with contextlib.suppress(AttributeError):  # Qt < 6.5: no Dock badge
+            self._app.setBadgeNumber(n)
+
+
 def _configure_chromium() -> None:
     """Force QtWebEngine into single-process mode.
 
@@ -400,6 +565,7 @@ def main() -> None:
     t0 = time.monotonic()
     log_path = _setup_logging()
     _configure_chromium()
+    _bundle_identity()
 
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QApplication([])
@@ -591,6 +757,10 @@ def main() -> None:
             window.view.loadFinished.connect(on_load_finished)
             state["window"] = window
             window.load()  # start loading only after the signals are wired
+            try:
+                state["notifications"] = _Notifications(app, window, icon)
+            except Exception:
+                log.error("notifications unavailable:\n%s", traceback.format_exc())
             log.info("window created, page loading (+%.2fs)", time.monotonic() - t0)
 
     anim = QTimer()

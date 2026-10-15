@@ -813,11 +813,27 @@ def _prefs_allowed() -> dict:
     return {"default_ccy": set(SUPPORTED_FX), "inv_benchmark": set(INV_BENCHMARKS)}
 
 
+# Phase 9 (notifications): a switch and quiet hours, typed rather than
+# picked from a set. A time is "HH:MM", 24-hour.
+_PREF_BOOLS = ("notify_on", "quiet_on")
+_PREF_TIMES = ("quiet_from", "quiet_to")
+
+
+def _is_hhmm(v) -> bool:
+    # ASCII digits only: str.isdigit() takes "²" (int() then raises, a 500
+    # on save and every later read) and "２" (adversarial review, 2026-10-15).
+    return (isinstance(v, str) and len(v) == 5 and v.isascii() and v[2] == ":" and v[:2].isdigit()
+            and v[3:].isdigit() and int(v[:2]) < 24 and int(v[3:]) < 60)  # fmt: skip
+
+
 def _clean_prefs(raw) -> dict:
     allowed = _prefs_allowed()
     if not isinstance(raw, dict):
         return {}
-    return {k: v for k, v in raw.items() if k in allowed and isinstance(v, str) and v in allowed[k]}
+    out = {k: v for k, v in raw.items() if k in allowed and isinstance(v, str) and v in allowed[k]}
+    out.update({k: raw[k] for k in _PREF_BOOLS if isinstance(raw.get(k), bool)})
+    out.update({k: raw[k] for k in _PREF_TIMES if _is_hhmm(raw.get(k))})
+    return out
 
 
 def load_prefs() -> dict:

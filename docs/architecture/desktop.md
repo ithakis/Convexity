@@ -320,6 +320,25 @@ install): `CONVEXITY_SOURCE` (local checkout or archive URL; `-Source`),
   boot keeps the splash up longer, and a 20s safety timer + boot-still-running
   re-arm guarantees the splash never traps the user.
 
+- **macOS drops notifications from a process with no bundle identifier**
+  (Phase 9 spike, 2026-10-15). Qt 6.11's `QSystemTrayIcon.showMessage`
+  posts through the legacy `NSUserNotificationCenter`; `Convexity.app` is a
+  script that execs the uv tool's Python (outside the bundle), so the main
+  bundle was Python's: Qt said "sent" and nothing reached `usernoted`.
+  `_bundle_identity()` sets `CFBundleIdentifier` (`com.ithakis.convexity`)
+  in the main bundle's info dictionary through ctypes before the first
+  message (no new dependency); macOS then asks for permission once and
+  files them under Convexity. **Pass a timeout of 0** to `showMessage`: Qt
+  withdraws the notification from the Notification Center when its timeout
+  ends. A Focus mode holds banners (`usernoted` logs "Delivering", the
+  Focus resolver "suppressed"): that is macOS, not a failure. Qt gives no
+  id back, so a click (`messageClicked`) opens the last message sent.
+  `_Notifications` also shows the menu bar icon while notifications are on
+  (Open My Investments, a Notifications on/off toggle that writes
+  `prefs.json`) and sets the Dock badge (`QApplication.setBadgeNumber`, an
+  instance method) to the unread Needs-a-look count every minute, read off
+  the GUI thread from `investments.attention_now` (never a compute).
+
 ### Windows verification status
 
 This repo is developed on macOS; `install.ps1` has never run on a real

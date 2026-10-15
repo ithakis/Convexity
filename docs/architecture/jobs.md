@@ -115,6 +115,17 @@ research reload (`rfFinish` checks `touchedViews` for the book view).
    painted percentage monotonically (`REFRESH.pct`, reset in `rfStart`/
    `rfReset`) so a late upward correction can't walk it backwards.
 
+### Background jobs (Phase 9, `notify.py`)
+
+The notification scheduler's pass is a job too (`phases=["watch"]`,
+`context={"background": True}` → `Job.background`), so it is single-flight
+with every refresh: they share Yahoo and the page. Three rules: the
+scheduler never supersedes anything (a 409 means "try next minute"); **a
+refresh the owner asks for supersedes a background pass** automatically in
+`submit()`; and `GET /api/refresh-job/current` hides a background job, so
+the topbar chip never attaches to it. It saves nothing: the page saves its
+own last good page as on any request, and a degraded page sends nothing.
+
 ### Event stream
 
 `GET /api/refresh-job/<id>/stream?since=<seq>`. Job events carry monotonic

@@ -222,6 +222,20 @@ dependency (loaded from CDN, used only for column-guide formulas).
   focus). The same card edits an entry in Activity. Other types sit in the
   quiet "Something else" menu.
 
+### Notifications and the weekly recap (Phase 9)
+- `notifyPoll()` reads `/api/notifications?since=` every minute while the
+  page is visible (the first read only takes the cursor: no backlog). On
+  new items it reloads the book on My Investments (or refreshes the badge
+  elsewhere); in browser mode only (`native: false`) it shows a toast
+  (`#notify-toasts`, max three, 20 s). `window.invFocusItem(key)` is the
+  click-through (the desktop app calls it through `runJavaScript`):
+  `showPage` via `#inv-btn`, wait for `INV.loading`, unfold "n more" when
+  the item is folded, scroll to `[data-att-key]` and flash it; `__rail__`
+  is the rail's top, `__recap__` opens the recap (`#inv-recap-bg`, through
+  `showOverlay`). The rail shows "Your week to …" until it is opened
+  (`recapSeen`, localStorage: a per-viewer convenience) or a week passes.
+  Settings → Notifications reads and writes `/api/prefs`, never localStorage.
+
 ### The book in the Portfolio tab (`BOOK_KEY = "__book__"`)
 - When the book holds anything, `renderTabs()` pins a red pill "My
   Investments" first (`.pf-tab-book`, colour `--book`, the theme's red). It is
