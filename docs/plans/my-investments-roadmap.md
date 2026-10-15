@@ -24,7 +24,7 @@ owner says so.
 | 3 | Performance | Done (merged) | `feature/my-investments-p3` · [ithakis/Convexity#37](https://github.com/ithakis/Convexity/pull/37) | 2026-10-11 |
 | 4 | Holdings depth | Done (merged) | `feature/my-investments-p4` · [ithakis/Convexity#38](https://github.com/ithakis/Convexity/pull/38) | 2026-10-12 |
 | 7 | Attention rail I: risk and events | Done (merged) | `feature/my-investments-p7` | 2026-10-13 |
-| 8 | Attention rail II: plans and price alerts | In prototype | `feature/my-investments-p8` | |
+| 8 | Attention rail II: plans and price alerts | Done (merged) | `feature/my-investments-p8` · [ithakis/Convexity#41](https://github.com/ithakis/Convexity/pull/41) | 2026-10-15 |
 | 9 | Notifications | Not started | | |
 | → | Thesis and AI advisor (new issue) | Not started | | |
 
@@ -42,22 +42,19 @@ Paste this into a new Claude Code session to carry on:
 ```
 ```
 Read docs/plans/my-investments-roadmap.md. Continue the My Investments roadmap:
-take the first phase in the progress table (run order) that is not Done. That is Phase 8,
-Attention rail II: plans and price alerts. First fix the Excel export, which hangs on
-"exporting" (found by the owner 2026-10-13, after Phase 4 added the Positions and Ledger
-sheets; check `/api/export-xlsx` and `investments.page` in the export path). Then read
-Phase 8's section, Phase 7's feedback log and Findings (`attention.py` owns the rail:
-rules, dismiss-until-worse, seen/unread, the events cache) and Appendix D (plan-based
-alerts beat price alerts: Alert for Alerts), and run it with the phase loop
-(suggest → prototype → build → verify → review → sign-off). Reuse the Phase 7 item
-shape (`key`, `level`, `severity`) and Settings → Attention for new rules. Locked decisions:
-Total profit is lifetime; Return, vs S&P and Your money follow the period pill; the
-benchmark is the owner's pick (a fund); the book is valued with as-traded closes;
-estimated dividends are paid out, never in Value or Cash. Follow CLAUDE.md. Never use my
-real data; run live checks with my API keys as env vars. Ask before any version bump.
-My Investments computes through `investments.page` and opens on `state/book_cache.json`:
-keep new rail data off the cold-open path, or cache it. Docs and the changelog name no real
-holdings or returns (CLAUDE.md §18). Optimize on My Investments stays parked.
+take the first phase in the progress table (run order) that is not Done. That is Phase 9,
+Notifications. Read Phase 9's section, Phases 7 and 8's feedback logs and Findings
+(`attention.py` owns the rail: rules, dismiss-until-worse, snooze, seen/unread, the events
+cache, and the plans store `state/plans.json`) and Appendix D, and run it with the phase loop
+(suggest → prototype → build → verify → review → sign-off). Notify high severity only
+(Needs a look, plan targets and review levels included); price alerts stay in-app. The
+background scheduler must respect the jobs single-flight rule and never fetch on the page's
+path. Locked decisions: Total profit is lifetime; Return, vs S&P and Your money follow the
+period pill; the benchmark is the owner's pick (a fund); the book is valued with as-traded
+closes; estimated dividends are paid out, never in Value or Cash. Follow CLAUDE.md. Never use
+my real data; run live checks with my API keys as env vars. Ask before any version bump.
+Docs and the changelog name no real holdings or returns (CLAUDE.md §18). Optimize on My
+Investments stays parked.
 ```
 
 ## The phase loop (every phase)
