@@ -488,3 +488,202 @@ def test_old_dated_keys_are_cleaned_up():
 def test_no_page_answers_say_so():
     att = inv.attention_now("USD")  # no book, no page
     assert att["page"] is False and att["rules"] and att["unread"] == 0
+
+
+# ------------------------------------------------- Phase 8: plans and alerts
+
+
+def _px(sym, weight, price, **kw):
+    return _pos(sym, weight, price=price, xray={"day_date": "2026-10-12"}, **kw)
+
+
+def test_target_and_review_fire_and_stay_quiet_between():
+    attention.set_plan("AAPL", {"target": 210, "review": 160, "why": "Services margin"}, 180,
+                       today=date(2026, 3, 3))  # fmt: skip
+    quiet = _ev(_page([_px("AAPL", 10.0, 190.0)]))
+    assert quiet["high"] == [] and quiet["plans"]["AAPL"]["target"] == 210
+    hit = _ev(_page([_px("AAPL", 10.0, 212.4)]))
+    assert _keys(hit) == ["target|AAPL|210"]
+    assert hit["high"][0]["text"] == "Aapl reached your 210 target"
+    assert hit["high"][0]["sub"] == "Set Tue 3 Mar at 180 · now 212.40" and hit["high"][0]["plan"]
+    low = _ev(_page([_px("AAPL", 10.0, 150.0)]))
+    assert _keys(low) == ["review|AAPL|160"]
+    assert low["high"][0]["sub"] == "“Services margin”"  # the owner's why, quoted
+    assert _ev(_page([_px("AAPL", 10.0, 150.0)]), state=_state())["unread_high"] is True
+    st = _state()
+    st["rules"]["review"]["on"] = False
+    assert _ev(_page([_px("AAPL", 10.0, 150.0)]), state=st)["high"] == []
+
+
+def test_levels_are_in_the_quote_unit():
+    attention.set_plan("SHEL.L", {"review": 2500}, 2600)
+    att = _ev(_page([_px("SHEL.L", 8.0, 2450.0, quote_ccy="GBp")]))
+    assert att["high"][0]["text"] == "Shel.L fell below your 2,500p review level"
+
+
+def test_max_weight_overrides_the_book_limit_funds_included():
+    attention.set_plan("VWCE.DE", {"max_weight": 10}, 130)
+    attention.set_plan("NVDA", {"max_weight": 25}, 100)
+    att = _ev(_page([_px("VWCE.DE", 17.0, 130.0, fund=True), _px("NVDA", 20.0, 100.0)]))
+    assert _keys(att) == ["holding|VWCE.DE|max10"]  # NVDA's own 25% allows its 20%
+    assert att["high"][0]["sub"] == "Above your 10% plan limit"
+
+
+def test_price_alert_fires_once_and_stays_until_removed():
+    a = attention.add_alert("MSFT", 420, 400, today=TODAY)
+    assert a["side"] == "above"
+    assert _ev(_page([_px("MSFT", 9.0, 410.0)]))["info"] == []
+    att = _ev(_page([_px("MSFT", 9.0, 421.1)]))
+    assert _keys(att) == [f"price|MSFT|{a['id']}"] and att["fired"] == [
+        ["MSFT", a["id"], 421.1, "2026-10-12"]
+    ]
+    assert att["info"][0]["sub"] == "Price alert · rose through it on Mon 12 Oct"
+    attention.record_fired(att["fired"])
+    back = _ev(_page([_px("MSFT", 9.0, 400.0)]))  # the price went back: it still shows, once
+    assert _keys(back) == [f"price|MSFT|{a['id']}"] and back["fired"] == []
+    attention.record_fired([["MSFT", a["id"], 1.0, "2026-10-13"]])  # never re-dated
+    assert attention.load_plans()["MSFT"]["alerts"][0]["fired_on"] == "2026-10-12"
+    attention.remove_alert("MSFT", a["id"])
+    assert (
+        _ev(_page([_px("MSFT", 9.0, 430.0)]))["info"] == [] and "MSFT" not in attention.load_plans()
+    )
+
+
+def test_snooze_hides_until_the_day_then_returns():
+    attention.set_plan("AAPL", {"review": 160}, 180)
+    page = _page([_px("AAPL", 10.0, 150.0)])
+    key = _keys(_ev(page))[0]
+    attention.snooze(key, "2026-10-20", today=TODAY)
+    att = _ev(page)
+    assert att["high"] == [] and att["snoozed"] == 1 and att["unread"] == 0
+    back = attention.evaluate(page, attention.load_state(), {}, date(2026, 10, 20))
+    assert _keys(back) == [key]
+    for bad in ("2026-10-13", "2026-13-01", "soon", "2028-01-01"):
+        with pytest.raises(ValueError):
+            attention.snooze(key, bad, today=TODAY)
+
+
+def test_plan_items_carry_the_next_earnings_for_snooze():
+    attention.set_plan("AAPL", {"target": 100}, 90)
+    att = _ev(_page([_px("AAPL", 10.0, 120.0)]), events={"AAPL": {"earnings": "2026-10-30"}})
+    assert att["high"][0]["earnings"] == "2026-10-30"
+    past = _ev(_page([_px("AAPL", 10.0, 120.0)]), events={"AAPL": {"earnings": "2026-10-01"}})
+    assert "earnings" not in past["high"][0]
+
+
+def test_set_plan_validates_and_records_when_levels_change():
+    p = attention.set_plan("AAPL", {"target": 210}, 180, today=date(2026, 3, 3))
+    assert p["set_on"] == "2026-03-03" and p["set_price"] == 180
+    p = attention.set_plan("AAPL", {"why": "  a reason  "}, 999, today=TODAY)
+    assert p["set_on"] == "2026-03-03" and p["why"] == "a reason"  # why alone keeps the date
+    for fields in ({"review": 220}, {"target": -1}, {"max_weight": 0}, {"max_weight": 101},
+                   {"why": 5}, {"nope": 1}, {}, {"target": 10**400}):  # fmt: skip
+        with pytest.raises(ValueError):
+            attention.set_plan("AAPL", fields, 180)
+    with pytest.raises(ValueError):
+        attention.set_plan("AAPL", {"target": 300}, None)  # a new level needs today's price
+    with pytest.raises(ValueError):
+        attention.add_alert("AAPL", 180, 180)  # today's price: no side
+    assert len(attention.set_plan("AAPL", {"why": "x" * 500}, 1)["why"]) == attention.WHY_MAX
+    attention.add_alert("AAPL", 250, 180)
+    attention.clear_plan("AAPL")
+    assert set(attention.load_plans()["AAPL"]) == {"alerts"}  # alerts have their own ✕
+
+
+def test_a_damaged_plans_file_is_never_overwritten():
+    path = paths.state_file("plans")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(attention.PlansUnreadable):
+        attention.set_plan("AAPL", {"target": 1}, 1)
+    attention.record_fired([["AAPL", "x", 1.0, "2026-10-13"]])  # quietly skipped
+    att = _ev(_page([_px("AAPL", 10.0, 150.0)]))
+    assert att["plans_error"] and att["plans"] == {}
+    assert path.read_text(encoding="utf-8") == "{not json"
+    path.write_text(json.dumps({"plans": []}), encoding="utf-8")
+    with pytest.raises(attention.PlansUnreadable):
+        attention.load_plans()
+
+
+def test_plan_rules_are_switches_in_settings():
+    rules = {r["key"]: r for r in _ev(CALM)["rules"]}
+    assert rules["target"]["value"] is None and rules["target"]["on"] is True
+    with pytest.raises(ValueError):
+        attention.set_rules({"target": {"value": 5}})
+    assert attention.set_rules({"price_alert": {"on": False}})["price_alert"] == {
+        "on": False,
+        "value": None,
+    }
+
+
+def test_a_split_after_a_plan_rescales_its_levels_once():
+    attention.set_plan("NVDA", {"target": 1500, "review": 900}, 1000, today=date(2024, 5, 1))
+    attention.add_alert("NVDA", 1200, 1000, today=date(2024, 5, 1))
+    splits = {"NVDA": [("2024-06-10", 10.0)]}
+    page = _page([_px("NVDA", 10.0, 95.0)])  # 950 before the split: above review
+    assert _ev(page)["high"][0]["rule"] == "review"  # unadjusted: a false alarm
+    adj, moved = attention.split_adjusted(attention.load_plans(), splits)
+    assert moved and adj["NVDA"]["review"] == 90 and adj["NVDA"]["alerts"][0]["level"] == 120
+    assert attention.evaluate(page, attention.load_state(), {}, TODAY, plans=adj)["high"] == []
+    attention.apply_splits(splits)
+    attention.apply_splits(splits)  # never divided twice
+    saved = attention.load_plans()["NVDA"]
+    assert saved["review"] == 90 and saved["target"] == 150 and saved["alerts"][0]["level"] == 120
+    assert not attention.split_adjusted({"NVDA": saved}, splits)[1]
+    # A level typed after the split is already in today's terms.
+    attention.set_plan("NVDA", {"review": 80}, 95, today=TODAY)
+    assert not attention.split_adjusted(attention.load_plans(), splits)[1]
+
+
+# ---------------------------------- adversarial review (2026-10-14), each proven
+
+
+def test_a_tighter_plan_cap_is_never_hidden_by_an_old_dismissal():
+    page = _page([_px("AAPL", 35.0, 100.0)])
+    it = _ev(page)["high"][0]
+    attention.dismiss(it["key"], it["level"])  # dismissed under the book's 15%
+    attention.set_plan("AAPL", {"max_weight": 30}, 100)
+    assert _keys(_ev(page)) == ["holding|AAPL|max30"]
+
+
+def test_a_plan_cap_holds_with_the_book_rule_switched_off():
+    attention.set_plan("AAPL", {"max_weight": 10}, 100)
+    st = _state()
+    st["rules"]["holding"]["on"] = False
+    att = _ev(_page([_px("AAPL", 40.0, 100.0), _px("MSFT", 40.0, 100.0)]), state=st)
+    assert _keys(att) == ["holding|AAPL|max10"]  # MSFT has no plan: the switch rules it
+
+
+def test_level_keys_are_exact():
+    attention.set_plan("SAM", {"target": 12345.67}, 1)
+    k1 = _keys(_ev(_page([_px("SAM", 5.0, 20000.0)])))
+    attention.set_plan("SAM", {"target": 12345.71}, 1)
+    k2 = _keys(_ev(_page([_px("SAM", 5.0, 20000.0)])))
+    assert k1 != k2 and k1 == ["target|SAM|12345.67"]
+
+
+def test_writes_keep_what_this_version_does_not_know():
+    path = paths.state_file("plans")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = {"version": 1, "future": 1, "plans": {"MSFT": {"target": "450", "stop": 90, "review": 300},
+                                                 "AAPL": {"target": 210}}}  # fmt: skip
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    attention.set_plan("AAPL", {"why": "x"}, 200)
+    got = json.loads(path.read_text(encoding="utf-8"))
+    assert (
+        got["future"] == 1 and got["plans"]["MSFT"] == raw["plans"]["MSFT"]
+    )  # untouched, verbatim
+    assert got["plans"]["AAPL"] == {"target": 210, "why": "x"}
+    path.write_text(json.dumps({**raw, "version": 2}), encoding="utf-8")
+    with pytest.raises(attention.PlansUnreadable):
+        attention.set_plan("AAPL", {"why": "y"}, 200)
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
+
+
+def test_prune_drops_snoozes_past_their_day():
+    attention.snooze("review|AAPL|160", (date.today() + timedelta(days=1)).isoformat())
+    st = attention.load_state()
+    st["snoozed"]["old|KEY"] = "2020-01-01"
+    attention._save_state(st)
+    attention.prune(set(), set())
+    assert list(attention.load_state()["snoozed"]) == ["review|AAPL|160"]

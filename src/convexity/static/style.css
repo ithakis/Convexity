@@ -3556,6 +3556,35 @@
   .inv-att-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; opacity: .45; flex: none; }
   .inv-att:hover .inv-att-x, .inv-att-x:focus-visible { opacity: 1; }
   .inv-att-x:hover { color: var(--text); }
+  /* A holding's plan (Phase 8): a thin review-to-target track under the
+     price, ticks red at the review level and green at the target. */
+  #inv-tbl tbody tr[data-inv-sym]:not(.inv-pending) { cursor: pointer; }
+  .inv-plan-price { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+  .inv-plan-price.pos { color: var(--pos); }
+  .inv-plan-price.neg { color: var(--neg); }
+  .inv-plan-track { position: relative; display: block; width: 100%; min-width: 44px; height: 2px; background: var(--border); border-radius: 1px; }
+  .inv-plan-track.has-r::before, .inv-plan-track.has-t::after { content: ""; position: absolute; top: -2px; width: 1.5px; height: 6px; }
+  .inv-plan-track.has-r::before { left: 0; background: var(--neg); }
+  .inv-plan-track.has-t::after { right: 0; background: var(--pos); }
+  .inv-plan-track b { position: absolute; top: -2px; width: 6px; height: 6px; margin-left: -3px; border-radius: 50%; background: var(--text); }
+  .inv-plan-track.big { height: 3px; margin: 14px 0 6px; }
+  .inv-plan-track.big::before, .inv-plan-track.big::after { top: -4px; width: 2px; height: 11px; }
+  .inv-plan-track.big b { top: -4px; width: 11px; height: 11px; margin-left: -5.5px; }
+  .inv-plan { display: flex; flex-direction: column; gap: 11px; font-size: 12.5px; }
+  .inv-plan-now { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .inv-plan-ends { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .inv-plan .inv-f input { height: 32px; padding: 0 10px; border-radius: var(--r-md); font-size: 13px; }
+  .inv-plan .inv-f em { min-height: 13px; }
+  .inv-plan-sub { margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted); }
+  .inv-plan-sub em, .inv-plan-alert em { font-style: normal; color: var(--muted); }
+  .inv-plan-alert { display: flex; justify-content: space-between; align-items: center; font-variant-numeric: tabular-nums; }
+  .inv-plan-alert .inv-att-x { opacity: .6; }
+  .inv-plan-alert-add { display: flex; gap: 8px; align-items: center; }
+  .inv-plan-alert-add input { flex: 1; height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-canvas); color: var(--text); font: inherit; font-size: 12.5px; }
+  .inv-plan-msg { color: var(--neg); font-size: 11.5px; min-height: 0; }
+  .inv-plan-msg:empty { display: none; }
+  .inv-plan-btns { display: flex; justify-content: space-between; align-items: center; padding-top: 10px; border-top: 1px solid var(--border); }
+  .inv-plan .inv-plan-clear { color: var(--neg); }
   .inv-att-limit { font-size: 11px; margin-left: 4px; visibility: hidden; }
   .inv-att:hover .inv-att-limit, .inv-att-limit:focus-visible { visibility: visible; }
   .inv-att-ai { color: var(--ai); }

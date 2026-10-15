@@ -712,6 +712,9 @@ class Handler(BaseHTTPRequestHandler):
                 qs = parse_qs(parsed.query)
                 ccy = (qs.get("ccy") or ["USD"])[0].upper()
                 ccy = ccy if ccy in SUPPORTED_FX else "USD"
+                # At launch the page may still be computing (~20 s cold);
+                # page() then waits for it: say so, not a bare "exporting".
+                xlsx_export.PROGRESS.update(step="reading your book", done=0, total=0)
                 try:
                     book = _investments.page(ccy)
                 except Exception as exc:  # the research sheets still export
@@ -745,6 +748,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(blob)
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
+            finally:  # an early answer must not leave a step for the next export's poll
+                if "convexity.xlsx_export" in sys.modules:
+                    sys.modules["convexity.xlsx_export"].PROGRESS.update(step="", done=0, total=0)
             return
         self.send_response(404)
         self.end_headers()
@@ -917,20 +923,43 @@ class Handler(BaseHTTPRequestHandler):
                              aliases=ctx["aliases"], held=ctx["held"])  # fmt: skip
 
     def _investments_attention(self, path: str, p: dict, ccy) -> dict:
-        """The Attention rail's preferences (attention.py): dismiss an item,
-        mark items seen, change a rule. Never touches the book file; answers
+        """The Attention rail's preferences (attention.py): dismiss, snooze,
+        mark items seen, change a rule, and a holding's plan and price alerts
+        (Phase 8, ``state/plans.json``). Never touches the book file; answers
         the rail as it now reads."""
         from convexity import attention
 
+        a = "/api/investments/attention/"
+        sym = p.get("symbol")
         try:
-            if path == "/api/investments/attention/dismiss":
+            # A plan is set for what the book holds (no network: the replay);
+            # clearing works on any plan, a sold-out holding's included.
+            if path in (a + "plan", a + "alert") and sym not in _investments.book_symbols():
+                raise ValueError("that holding isn't in your book")
+            # Today's price from the server's own page, the page's only when
+            # the server has none yet.
+            price = _investments.price_now(sym, ccy) if isinstance(sym, str) else None
+            price = price if price is not None else p.get("price")
+            if path == a + "dismiss":
                 attention.dismiss(p.get("key"), p.get("level"))
-            elif path == "/api/investments/attention/seen":
+            elif path == a + "snooze":
+                attention.snooze(p.get("key"), p.get("until"))
+            elif path == a + "seen":
                 attention.mark_seen(p.get("items"))
-            elif path == "/api/investments/attention/rules":
+            elif path == a + "rules":
                 attention.set_rules(p.get("rules"))
+            elif path == a + "plan":
+                attention.set_plan(sym, p.get("plan"), price)
+            elif path == a + "plan/clear":
+                attention.clear_plan(sym)
+            elif path == a + "alert":
+                attention.add_alert(sym, p.get("level"), price)
+            elif path == a + "alert/remove":
+                attention.remove_alert(sym, p.get("id"))
             else:
                 raise _investments.BookError("not found")
+        except attention.PlansUnreadable as exc:
+            raise _investments.BookUnreadable(str(exc)) from exc
         except ValueError as exc:
             raise _investments.BookError(str(exc)) from exc
         return _investments.attention_now(ccy)

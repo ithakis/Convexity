@@ -1937,9 +1937,20 @@ def with_attention(out: dict, *, fresh: bool = False) -> dict:
         # page was computed: a first launch computes before the pack has
         # downloaded, and that page is the one saved to disk.
         held = [{**p, **_pack_kind(p["symbol"], p.get("name"))} for p in out["positions"]]
-        att = attention.evaluate({**out, "positions": held})
+        # Plan levels in today's share terms (a split since they were set),
+        # from the split lists already kept: no fetch on the page's path.
+        splits = market_splits([p["symbol"] for p in held], fetch=False)
+        try:
+            plans = attention.split_adjusted(attention.load_plans(), splits)[0]
+        except attention.PlansUnreadable:
+            plans = None  # evaluate reports it
+        att = attention.evaluate({**out, "positions": held}, plans=plans)
         if fresh and not out.get("stale"):
+            attention.apply_splits(splits)
             attention.prune(set(att["firing"]), set(att["checked"]))
+            # A price alert fires once (Phase 8): kept as fired from the first
+            # fresh page that saw it cross, so it stays if the price goes back.
+            attention.record_fired(att["fired"])
             attention.refresh_events_soon(
                 p["symbol"] for p in out["positions"] if not p.get("pending")
             )
@@ -1947,6 +1958,24 @@ def with_attention(out: dict, *, fresh: bool = False) -> dict:
         print(f"[attention] evaluate failed: {type(exc).__name__}")
         return out
     return {**out, "attention": att}
+
+
+def price_now(symbol: str, ccy: str | None = None) -> float | None:
+    """A holding's last price in its quote unit, from what is already
+    computed (the memo, the last page, the last good page on disk); never
+    computes. A plan's "set at" and a price alert's side are fixed against
+    this, not a price the page sends (adversarial review, 2026-10-14: a
+    stale page's price made an alert fire the moment it was set)."""
+    key = _page_key(ccy)
+    hit = _PAGE_MEMO.get(key) if key else None
+    lk, lp = _LAST_PAGE["v"]
+    for out in (hit[1] if hit else None, lp if key and lk == key else None, cached_page(ccy)):
+        for p in (out or {}).get("positions") or []:
+            if p.get("symbol") == symbol and not p.get("pending") and not p.get("note"):
+                v = p.get("price")
+                if isinstance(v, int | float) and v > 0:
+                    return float(v)
+    return None
 
 
 def attention_now(ccy: str | None = None) -> dict:

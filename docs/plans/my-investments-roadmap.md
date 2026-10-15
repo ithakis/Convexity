@@ -24,7 +24,7 @@ owner says so.
 | 3 | Performance | Done (merged) | `feature/my-investments-p3` · [ithakis/Convexity#37](https://github.com/ithakis/Convexity/pull/37) | 2026-10-11 |
 | 4 | Holdings depth | Done (merged) | `feature/my-investments-p4` · [ithakis/Convexity#38](https://github.com/ithakis/Convexity/pull/38) | 2026-10-12 |
 | 7 | Attention rail I: risk and events | Done (merged) | `feature/my-investments-p7` | 2026-10-13 |
-| 8 | Attention rail II: plans and price alerts | Not started | | |
+| 8 | Attention rail II: plans and price alerts | In prototype | `feature/my-investments-p8` | |
 | 9 | Notifications | Not started | | |
 | → | Thesis and AI advisor (new issue) | Not started | | |
 
@@ -1106,8 +1106,66 @@ should read those, never recompute them or fetch on the page's path.
 - [ ] Crossing, snooze and dedup on the demo book.
 
 **Feedback log:**
+- 2026-10-14: Suggest round (chat mockups, two rounds). The owner chose:
+  - **The plan is edited in a popover from the holding's row** (a click;
+    drag still reorders): "Your plan for …" with target, review level, max
+    weight, one line on why, "Set 3 Mar at 180", then its price alerts.
+  - **Levels are prices** in the share's quote unit, with the distance from
+    today and from the average price beside each.
+  - **The table shows the plan in the price cell**: a thin review-to-target
+    track under it, the price green past a target and red under a review
+    level. The table had no price column, so a Price column (on by default)
+    was added to carry it.
+  - **A holding's max weight replaces the book's limit** for that holding
+    (one item, funds included: the owner set it).
+  - **Target reached and below review level both need a look**; plain price
+    alerts are information (Appendix D).
+  - **✕ on a plan item is a menu**: Dismiss (a review level returns a full
+    step worse, a target when it clears and fires again), Snooze 1 day,
+    1 week, or until the next earnings (from the events cache), Edit the plan.
+  - **A price alert fires once**: it shows until ✕, which removes it.
+  - Taken as defaults (not asked): plans live in `state/plans.json`, not the
+    book file (a plan edit would bump the rev and recompute the book); a
+    damaged plans file is never overwritten; Clear plan keeps the price
+    alerts; the "why" line is quoted as a review item's sub-line.
+- 2026-10-14: The Excel export no longer hangs: v1.25.0 (PR #40) had
+  already fixed it (3.5 s cold, 0.06 s warm, on the demo book with two
+  portfolios, in a currency not warmed at launch). One gap left: an export
+  asked while the book still computes at launch now shows "reading your
+  book" instead of a bare "exporting".
 
 **Findings:**
+- **Adversarial review and /verify (owner's request, 2026-10-14)** on an
+  installed clean copy of the tree, plus a reviewer agent proving each issue
+  with a reproduction. Fixed, each with a test:
+  - a split after a plan was set made every level fire (a 10:1 split divides
+    the price, not the levels): levels, alerts and "set at" are rescaled by
+    the splits since they were set, from the split lists already kept (no
+    fetch), saved once on a fresh page so never divided twice;
+  - a dismissal made under the book's 15% hid a tighter plan cap until a
+    full step past the old one: a plan cap has its own key (`|max30`);
+  - a plan cap was ignored with the book's holding rule switched off: it is
+    the plan's, so it holds;
+  - any write ran the whole file through the cleaner, dropping what this
+    version doesn't know (a field, a string level, `version: 2`): untouched
+    holdings are written back verbatim and a newer file is refused;
+  - target and review keys kept six digits (12345.67 and 12345.71 were one
+    key): exact to 1e-6 now;
+  - a why-only save sent the rounded levels back, which reset "Set 3 Mar at
+    180": the popover sends only what was edited;
+  - an alert's side and the "set at" price came from the page's request (a
+    stale cached page made an alert fire at once): the server's own page
+    decides;
+  - a sold-out holding's plan could not be cleared; "212,40" read as 21,240;
+    expired snoozes were never cleaned; the popover's state survived closing;
+    a half-failed save left the rail stale.
+  Checked clean: NaN, Infinity and 400-digit numbers (400), HTML in "why"
+  stays text in the rail and the popover, a damaged or directory plans file
+  (409, untouched), the origin guard (403 for text/plain), the export (1.1 s,
+  step cleared), the desktop window boots (`loadFinished ok=True`).
+  Left as is: two exports at once share one progress line; a price alert that
+  crosses and recrosses between fresh pages (only a cached page saw it) is
+  not recorded.
 
 ---
 

@@ -9,6 +9,11 @@ Versions 1.15.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## Unreleased
+
+- **My Investments: your plan per holding, and price alerts** (issue #1, roadmap Phase 8). Click a holding's row for "Your plan": a target, a review level, a maximum weight and one line on why you hold it, with each level's distance from today and from your average price. A new **Price** column shows the plan as a thin track under the price, green past the target, red under the review level. Reaching a target or falling below a review level goes under **Needs a look** (quoting your why); a holding's own maximum weight replaces the 15% limit for it. **Price alerts** fire once, under For your information. ✕ on a plan item can dismiss it, snooze it for a day, a week or until the next earnings, or open the plan. Settings → Attention can switch each off. A split after you set a level rescales it. Plans are kept in their own file beside your book and never overwritten if damaged.
+- **Excel export** says "reading your book" while My Investments is still computing at launch, instead of a bare "exporting".
+
 ## 1.25.0 — 2026-10-13
 
 - **Excel export: minutes to seconds warm, readable by anyone.** The export used to run each portfolio and period one after another, each downloading its own prices, currency rates and analyst targets (366 s cold for 10 portfolios, button stuck on "exporting"). Now one shared price download feeds every run (cold is Yahoo's one 10-year download, ~100 s; warm under 1 s), currency rates are cached, dead tickers are retried in parallel, and `fetch_one` keeps the analyst target range so no per-holding call is needed. The button shows its step (downloading prices, analysing n/N, writing), the analytics loop is bounded, and the page gives up after five minutes. New workbook: Read me, Overview, one story-first sheet per portfolio (headline, 1Y and 5Y against the S&P 500 and Nasdaq-100, valuation, analysts, sectors, what drove the return, notes, holdings table), a long Data sheet with units, and Definitions.
