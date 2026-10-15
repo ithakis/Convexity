@@ -3556,6 +3556,34 @@
   .inv-att-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; opacity: .45; flex: none; }
   .inv-att:hover .inv-att-x, .inv-att-x:focus-visible { opacity: 1; }
   .inv-att-x:hover { color: var(--text); }
+  /* Notifications (Phase 9): a click lands on the item and flashes it once. */
+  @keyframes inv-att-flash { 0%, 40% { background: rgba(var(--accent-rgb), 0.16); } 100% { background: transparent; } }
+  .inv-att-flash { animation: inv-att-flash 1.8s ease-out; }
+  .inv-recap-line { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .inv-recap-line .pos { color: var(--pos); } .inv-recap-line .neg { color: var(--neg); }
+  /* The weekly recap: one sheet, kicker and hairlines, no inner boxes. */
+  .inv-recap { width: min(460px, 94vw); margin-top: 8vh; padding: 18px 22px 16px; }
+  .inv-recap-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .inv-recap-title { font-size: 17px; font-weight: 600; margin-top: 2px; }
+  .inv-recap-sub { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; font-weight: 400; }
+  .inv-recap-grid { display: grid; grid-template-columns: 112px 1fr; font-size: 13px; }
+  .inv-recap-k, .inv-recap-v { padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .inv-recap-k { color: var(--muted); }
+  .inv-recap-v { font-variant-numeric: tabular-nums; }
+  .inv-recap-v .pos { color: var(--pos); } .inv-recap-v .neg { color: var(--neg); }
+  .inv-recap-foot { color: var(--muted); font-size: 11px; margin-top: 10px; }
+  /* Browser mode only (the desktop app uses macOS): a quiet toast, top right. */
+  #notify-toasts { position: fixed; top: 56px; right: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px; width: min(340px, calc(100vw - 32px)); }
+  .notify-toast { position: relative; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: 0 10px 30px rgba(0,0,0,0.22); padding: 10px 30px 10px 14px; font-size: 12.5px; }
+  .notify-kicker { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--neg); }
+  .notify-toast:not([data-kind="item"]):not([data-kind="more"]):not([data-kind="summary"]) .notify-kicker { color: var(--muted); }
+  .notify-title { font-weight: 600; margin-top: 2px; }
+  .notify-body { color: var(--muted); font-size: 11.5px; margin-top: 1px; }
+  .notify-actions { margin-top: 6px; }
+  .notify-x { position: absolute; top: 8px; right: 8px; border: none; background: none; color: var(--muted); cursor: pointer; font-size: 11px; }
+  .notify-x:hover { color: var(--text); }
+  .att-rule button + button { margin-left: 6px; }
+  .notify-time { height: 26px; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-canvas); color: var(--text); font: inherit; font-size: 12px; }
   /* A holding's plan (Phase 8): a thin review-to-target track under the
      price, ticks red at the review level and green at the target. */
   #inv-tbl tbody tr[data-inv-sym]:not(.inv-pending) { cursor: pointer; }

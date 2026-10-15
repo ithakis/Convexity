@@ -25,7 +25,7 @@ owner says so.
 | 4 | Holdings depth | Done (merged) | `feature/my-investments-p4` · [ithakis/Convexity#38](https://github.com/ithakis/Convexity/pull/38) | 2026-10-12 |
 | 7 | Attention rail I: risk and events | Done (merged) | `feature/my-investments-p7` | 2026-10-13 |
 | 8 | Attention rail II: plans and price alerts | Done (merged) | `feature/my-investments-p8` · [ithakis/Convexity#41](https://github.com/ithakis/Convexity/pull/41) | 2026-10-15 |
-| 9 | Notifications | Not started | | |
+| 9 | Notifications | Done (merged) | `feature/my-investments-p9` | 2026-10-15 |
 | → | Thesis and AI advisor (new issue) | Not started | | |
 
 Status values: Not started · In prototype · Building · In review · Done.
@@ -40,20 +40,18 @@ taken, and its feedback log keeps them.
 Paste this into a new Claude Code session to carry on:
 
 ```
-```
-Read docs/plans/my-investments-roadmap.md. Continue the My Investments roadmap:
-take the first phase in the progress table (run order) that is not Done. That is Phase 9,
-Notifications. Read Phase 9's section, Phases 7 and 8's feedback logs and Findings
-(`attention.py` owns the rail: rules, dismiss-until-worse, snooze, seen/unread, the events
-cache, and the plans store `state/plans.json`) and Appendix D, and run it with the phase loop
-(suggest → prototype → build → verify → review → sign-off). Notify high severity only
-(Needs a look, plan targets and review levels included); price alerts stay in-app. The
-background scheduler must respect the jobs single-flight rule and never fetch on the page's
-path. Locked decisions: Total profit is lifetime; Return, vs S&P and Your money follow the
-period pill; the benchmark is the owner's pick (a fund); the book is valued with as-traded
-closes; estimated dividends are paid out, never in Value or Cash. Follow CLAUDE.md. Never use
-my real data; run live checks with my API keys as env vars. Ask before any version bump.
-Docs and the changelog name no real holdings or returns (CLAUDE.md §18). Optimize on My
+Read docs/plans/my-investments-roadmap.md and CLAUDE.md. Phases 1-9 of the My Investments
+roadmap are Done. Next is the thesis and AI advisor (its own issue and roadmap): read
+Appendix C (the agreed shape), Appendix D, and Phases 7-9's feedback logs and Findings
+(attention.py owns the rail, notify.py the notifications and the weekly recap). First open
+the GitHub issue from Appendix C and draft its roadmap file (docs/plans/), phase by phase,
+then run its first phase with the phase loop (suggest → prototype → build → verify → review
+→ sign-off). Locked decisions: Total profit is lifetime; Return, vs S&P and Your money follow
+the period pill; the benchmark is the owner's pick (a fund); the book is valued with
+as-traded closes; estimated dividends are paid out, never in Value or Cash; NVIDIA NIM is the
+only AI provider; outputs are typed JSON and any claim without cited evidence is dropped.
+Never use my real data; run live checks with my API keys as env vars. Ask before any version
+bump. Docs and the changelog name no real holdings or returns (CLAUDE.md §18). Optimize on My
 Investments stays parked.
 ```
 
@@ -1179,21 +1177,116 @@ runs.
 - Quiet hours.
 
 **Build:**
-- [ ] A background scheduler that runs while the app is open:
+- [x] A background scheduler that runs while the app is open:
       - held tickers only, cache-first
       - respects the jobs single-flight rule and the shared rate limiters
-- [ ] macOS notifications from the desktop app (`QSystemTrayIcon`, or the
+- [x] macOS notifications from the desktop app (`QSystemTrayIcon`, or the
       QtWebEngine notification permission), for high severity only.
-- [ ] A weekly recap after the Friday close.
-- [ ] A Settings switch.
+- [x] A weekly recap after the Friday close.
+- [x] A Settings switch.
 
 **Verify:**
-- [ ] A notification fires in the desktop app on a crafted alert.
-- [ ] The recap renders.
+- [x] A notification fires in the desktop app on a crafted alert.
+- [x] The recap renders.
 
 **Feedback log:**
+- 2026-10-15: Suggest round (chat mockups, two rounds). The owner chose:
+  - **Copy: one notification per item, at most three a pass**; the rest
+    fold into one "+n more need a look". Title is the rail's text, body its
+    sub-line.
+  - **Recap: the compact card**: return against the benchmark (pp), gain
+    with money in and out left out, best and worst holding, dividends
+    received, how many need a look, next week's earnings and ex-dividend
+    dates; a dash for anything the page can't support.
+  - **Quiet hours 22:00-08:00, held**: what came up waits and goes out as
+    one summary when they end, if still unread.
+  - **Every 30 minutes in market hours** (not the suggested 15: the close
+    cache is 30 minutes), plus one pass after each close; nothing at night
+    or weekends.
+  - **Click lands on the rail item, flashed once**; "+n more" on the rail's
+    top; the recap opens "Your week".
+  - **Browser mode: in-app only** (same scheduler and dedup, a toast in the
+    page, the recap renders; no OS notifications).
+  - **Desktop extras: the Dock badge and a menu bar icon** (Open My
+    Investments, Notifications on/off), shown while notifications are on.
+  - Taken as defaults (not asked): the switch is on by default; the first
+    pass after switching on takes the rail as a baseline (no burst); a
+    recap notification goes out only until Monday's US close (a later
+    launch still builds and shows it).
 
 **Findings:**
+- **Spike first paid off.** Qt 6.11's `QSystemTrayIcon.showMessage` uses
+  the legacy `NSUserNotificationCenter`, which drops notifications from a
+  process with no bundle identifier: Qt reported "sent" and nothing reached
+  `usernoted`. `Convexity.app` execs the uv tool's Python from outside the
+  bundle, so the fix (`desktop._bundle_identity`, ctypes, no dependency)
+  sets `CFBundleIdentifier` at launch; macOS then asked for permission once
+  and delivered under Convexity. Qt also withdraws a delivered notification
+  when its timeout ends: the app passes 0. A Focus mode holds banners
+  (logged as suppressed), which is macOS's call, not a failure.
+- **Live run** (temp `CONVEXITY_HOME`, `seed_demo_book.py --crafted`, the
+  desktop app from the checkout): the first pass armed with the 8 crafted
+  items as a baseline and sent nothing; a crafted Alphabet target below the
+  price produced exactly one notification ("Alphabet reached your 338.81
+  target"), delivered by macOS; quiet hours ending three minutes later
+  sent one "2 items came up overnight" for two targets set during them,
+  with nothing sent or recorded before; the switch off answered "Check
+  now" with 409 and disarmed, and switching back on re-baselined (0 sent).
+- **The first tick caught up last week's recap** on a Thursday launch and
+  sent it: correct by the catch-up rule, stale as news. The recap is now
+  sent only until Monday's US close; later it is still built and shown.
+- A page computed on a later day can't give a holding's week to Friday
+  (`xray.week_pct` is the last five trading days): best and worst are a
+  dash then, never another week's figure.
+- **/verify** (an installed copy of the working tree, temp home, crafted
+  book): the origin guard answers 403 to text/plain and a foreign origin on
+  the new routes; hostile prefs (`"no"`, `9:00`, `24:00`, unknown keys) are
+  dropped; baseline, one-time send and no repeat on a second pass; the
+  owner's book Refresh supersedes a background pass and `/current` shows
+  only the owner's job; the desktop app boots (`loadFinished ok=True`,
+  `native: true`). It found one gap, fixed: a browser tab hidden at load
+  never took its cursor, so what arrived while it was away never toasted;
+  the cursor is now taken at load and the tab catches up when it returns
+  (the toast's Open lands on the item, flashed).
+- **Second /verify and an adversarial reviewer agent (owner's request,
+  2026-10-15)**, each issue proven with a reproduction and fixed with a test:
+  - a cold start's first tick kept the week's recap from a page with two
+    holdings waiting for Yahoo's split history (+0.69% against +1.36% for
+    the same week, found live): a recap is built only from a page that
+    passes the degraded guard, computed after Friday's 16:30 New York
+    close (a busy after-close pass left the intraday page in the memo), and
+    a stale disk copy only when its dates reach that Friday; the
+    end-of-quiet-hours summary has the same guard;
+  - the book's prefetch pool didn't inherit `prefer_cached` (a pool worker
+    starts with an empty context), so every pass downloaded sold shares
+    again: the pool runs each task in a copy of the context;
+  - the overnight flag outlived items read before quiet hours ended and
+    labelled an afternoon pass "came up overnight": quiet-hours end always
+    clears it, and only that call says "overnight";
+  - a pass and the quiet-hours end at once sent one item twice, and a pass
+    finishing after the switch went off re-armed it: one lock around
+    sending and disarming;
+  - "²²:00" passed `str.isdigit` and then failed every prefs read: times
+    must be ASCII;
+  - the recap added dividends in different currencies and labelled the sum
+    in one: each is converted at its own rate, else a dash;
+  - with no default currency set, passes ran in the base currency while the
+    page opens in USD, so view-keyed items looked unread: passes and the
+    Dock badge use the page's currency;
+  - a page could mark its own refresh `background` (hidden from the chip,
+    supersedable): the server drops it;
+  - a server restart reset the outbox count while an open page kept its
+    cursor; the recap notification opened before the recap was fetched;
+    `_bundle_identity` now checks the info dictionary is mutable (an
+    Objective-C exception would abort the launch).
+  Left as is: a restart inside quiet hours loses what was held (the items
+  go out at the next market pass; a held recap is not sent); a launch that
+  opens on My Investments builds the recap without notifying (it is in
+  view). The live run also showed the degraded guard doing its job: Yahoo's
+  split history failed at a cold start, and that pass sent nothing.
+- `nohup … > file` block-buffers stdout, so `[notify]` lines didn't show in
+  the file while the app ran: read them through `/api/logs` (Settings →
+  Logs), which the tee fills at once.
 
 ---
 

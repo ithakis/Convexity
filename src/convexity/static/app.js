@@ -11081,6 +11081,22 @@ const SETTINGS_SECTIONS = [
     render: renderSettingsAttention,
   },
   {
+    id: "notifications",
+    group: "Settings",
+    label: "Notifications",
+    description: "While the app is open it checks your holdings every 30 minutes in market hours "
+               + "and tells you when something needs a look, plus a recap of your week after the "
+               + "Friday US close. Kept with your data, on this machine only.",
+    keywords: ["notifications", "notify", "alerts", "macos", "quiet hours", "do not disturb",
+               "weekly", "recap", "summary", "badge", "menu bar", "test"],
+    items: [
+      { id: "notify-on", label: "Send notifications", keywords: ["on", "off", "switch", "pause"] },
+      { id: "notify-quiet", label: "Quiet hours", keywords: ["night", "sleep", "quiet", "hold"] },
+      { id: "notify-test", label: "Try it", keywords: ["test", "check now", "permission"] },
+    ],
+    render: renderSettingsNotifications,
+  },
+  {
     id: "keys",
     group: "Data & models",
     label: "API keys",
@@ -11925,6 +11941,58 @@ async function renderSettingsAttention(el) {
   el.querySelectorAll("[data-att-on]").forEach(i => i.addEventListener("change", () => save(i.dataset.attOn, { on: i.checked })));
 }
 
+/* Settings → Notifications (roadmap Phase 9). The switch and quiet hours
+ * are kept in prefs.json (they must outlive the page, like the default
+ * currency); off means nothing is scheduled and nothing sent. */
+async function renderSettingsNotifications(el) {
+  let p = {};
+  try { p = await (await fetch("/api/prefs")).json(); } catch (e) { /* the defaults */ }
+  const on = p.notify_on !== false, qon = p.quiet_on !== false;
+  const from = p.quiet_from || "22:00", to = p.quiet_to || "08:00";
+  const where = NOTIFY.native
+    ? "macOS shows them; the Dock icon counts what needs a look, and the menu bar icon can switch them off."
+    : "In this browser tab they show inside the page. The desktop app sends them to macOS.";
+  el.innerHTML =
+    settingsRow({ id: "notify-on", label: "Send notifications",
+      help: `Holdings that need a look (your limits, plan targets and review levels) and the weekly recap. Each item once; a dismissed one only if it gets a full step worse. Price alerts stay in the rail. ${where}`,
+      control: `<label class="settings-check"><input type="checkbox" data-notify-pref="notify_on"${on ? " checked" : ""} aria-label="Send notifications"></label>` }) +
+    settingsRow({ id: "notify-quiet", label: "Quiet hours",
+      help: "Nothing is sent in these hours. What came up waits and arrives as one summary when they end, if you haven't read it already.",
+      control: `<span class="att-rule"><input type="time" class="notify-time" data-notify-time="quiet_from" value="${escapeHtml(from)}" aria-label="Quiet from"${qon && on ? "" : " disabled"}>
+        <span class="att-unit">to</span><input type="time" class="notify-time" data-notify-time="quiet_to" value="${escapeHtml(to)}" aria-label="Quiet until"${qon && on ? "" : " disabled"}>
+        <label class="settings-check"><input type="checkbox" data-notify-pref="quiet_on"${qon ? " checked" : ""}${on ? "" : " disabled"} aria-label="Quiet hours on"></label></span>` }) +
+    settingsRow({ id: "notify-test", label: "Try it",
+      help: "Send a test notification, or check your holdings now (a background refresh of the shares you hold).",
+      control: `<span class="att-rule"><button type="button" data-notify-test>Send a test</button><button type="button" data-notify-check${on ? "" : " disabled"}>Check now</button></span>` }) +
+    `<div class="settings-row-help" id="notify-msg" role="status"></div>`;
+  const msg = (t) => { const m = el.querySelector("#notify-msg"); if (m) m.textContent = t; };
+  const save = async (change) => {
+    try {
+      const r = await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change) });
+      if (!r.ok) throw new Error();
+      renderSettingsNotifications(el);
+    } catch (e) { msg("Couldn't save that. Try again in a moment."); }
+  };
+  el.querySelectorAll("[data-notify-pref]").forEach(i => i.addEventListener("change", () => save({ [i.dataset.notifyPref]: i.checked })));
+  el.querySelectorAll("[data-notify-time]").forEach(i => i.addEventListener("change", () => { if (/^\d\d:\d\d$/.test(i.value)) save({ [i.dataset.notifyTime]: i.value }); }));
+  el.querySelector("[data-notify-test]").addEventListener("click", async () => {
+    try {
+      await fetch("/api/notifications/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      msg(NOTIFY.native ? "Sent. If nothing showed, allow Convexity in System Settings → Notifications, and check Focus." : "Sent.");
+      notifyPoll();
+    } catch (e) { msg("Couldn't send it."); }
+  });
+  el.querySelector("[data-notify-check]").addEventListener("click", async () => {
+    try {
+      const r = await fetch("/api/notifications/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const d = await r.json();
+      msg(d.outcome === "created" ? "Checking your holdings in the background. Anything new arrives in a minute or so."
+        : d.outcome === "off" ? "Notifications are off." : "A refresh is running. Try again when it finishes.");
+    } catch (e) { msg("Couldn't start a check."); }
+  });
+  highlightSettingsMatches(el);
+}
+
 function renderSettingsAbout(el) {
   // APP_VERSION stays null until /api/health resolves, so guard it.
   const v = (APP_VERSION && APP_VERSION.version)
@@ -12218,6 +12286,7 @@ async function invLoad() {
     invRender();
     if (!INV.book.error) bookTabSync();
     invAttSeen();
+    invRecapLoad();
   })();
   INV.loading = run;
   try { await run; } finally { if (INV.loading === run) INV.loading = null; }
@@ -12549,7 +12618,7 @@ function invAttentionHtml(b) {
   const link = (it) => it.plan
     ? ` <button type="button" class="inv-link inv-att-limit" data-inv-plan-open="${escapeHtml(it.symbols[0])}">Your plan</button>`
     : it.rule ? ` <button type="button" class="inv-link inv-att-limit" data-inv-att-rules="${it.rule}">Change limit</button>` : "";
-  const item = (it) => `<div class="inv-rail-item inv-att" data-sev="${it.severity}">
+  const item = (it) => `<div class="inv-rail-item inv-att" data-sev="${it.severity}" data-att-key="${escapeHtml(it.key)}">
       <div class="inv-att-main"><span>${it.ai ? '<span class="inv-att-ai" aria-label="AI">✦</span> ' : ""}${escapeHtml(it.text)}</span>${x(it)}</div>
       <div class="inv-rail-sub">${escapeHtml(it.sub)}${link(it)}</div></div>`;
   if (a.plans_error) html0 = `<div class="inv-rail-item">${escapeHtml(a.plans_error)}. Your plans are paused until it is fixed or removed.</div>`;
@@ -12558,7 +12627,7 @@ function invAttentionHtml(b) {
   const divs = invDivsHtml(b);
   const fyi = [...info.map(item), ...warn];
   const more = fyi.length - INV_ATT_FOLD;
-  let html = kicker("Attention", gear) + html0;
+  let html = kicker("Attention", gear) + invRecapLineHtml() + html0;
   if (!high.length && !fyi.length && !divs) html += `<div class="inv-calm">Nothing needs you today.</div>`;
   if (high.length) html += `<div class="inv-att-group high">Needs a look</div>` + high.map(item).join("");
   if (fyi.length || divs) {
@@ -12630,6 +12699,147 @@ async function invBadgeLoad(tries = 12) {
   invBadge(a);
   if (a?.pending && tries > 1) setTimeout(() => invBadgeLoad(tries - 1), 10000);
 }
+
+/* Notifications (roadmap Phase 9). The server's scheduler decides what is
+ * sent (notify.py, the rail's own rules); the page polls its outbox once a
+ * minute while visible, refreshes the badge and the rail when something
+ * new went out, and in browser mode only (no native sink) shows a quiet
+ * toast. A click on a desktop notification calls invFocusItem. */
+const NOTIFY = { seq: null, native: false };
+async function notifyPoll() {
+  // Hidden, it waits (one call on return), but the cursor is always taken
+  // at load: what arrives while the tab is away shows when it comes back.
+  if (document.hidden && NOTIFY.seq !== null) return;
+  let d;
+  try { d = await (await fetch("/api/notifications?since=" + (NOTIFY.seq ?? 0))).json(); } catch (e) { return; }
+  NOTIFY.native = !!d.native;
+  const first = NOTIFY.seq === null;
+  NOTIFY.seq = d.seq;
+  if (first || !d.items?.length) return;  // no backlog of toasts on opening the page
+  if (d.items.some(m => m.kind !== "test")) {
+    if (document.body.dataset.page === "investments") invLoad();
+    else {
+      try { invAttApply(await (await fetch("/api/investments/attention?ccy=" + encodeURIComponent(FX_QUOTE))).json()); } catch (e) { /* badge stays */ }
+    }
+    if (d.items.some(m => m.kind === "recap")) invRecapLoad();
+  }
+  if (!NOTIFY.native) d.items.slice(-3).forEach(notifyToast);
+}
+function notifyToast(m) {
+  let box = $("#notify-toasts");
+  if (!box) { box = document.createElement("div"); box.id = "notify-toasts"; box.setAttribute("aria-live", "polite"); document.body.appendChild(box); }
+  const t = document.createElement("div");
+  t.className = "notify-toast";
+  t.dataset.kind = m.kind;
+  t.innerHTML = `<div class="notify-kicker">${escapeHtml(m.subtitle || "Convexity")}</div>
+    <div class="notify-title">${escapeHtml(m.title)}</div>
+    ${m.body ? `<div class="notify-body">${escapeHtml(m.body)}</div>` : ""}
+    <div class="notify-actions"><button type="button" class="inv-link" data-open>Open</button></div>
+    <button type="button" class="notify-x" aria-label="Close">✕</button>`;
+  const close = () => t.remove();
+  t.querySelector(".notify-x").onclick = close;
+  t.querySelector("[data-open]").onclick = () => { close(); invFocusItem(m.key); };
+  box.appendChild(t);
+  while (box.children.length > 3) box.firstChild.remove();
+  setTimeout(close, 20000);
+}
+/* Land on an item: My Investments, the Attention rail, unfold "n more" when
+ * it is folded there, scroll it into view and flash it once. "__rail__"
+ * is the rail's top, "__recap__" the weekly recap. */
+async function invFocusItem(key) {
+  if (document.body.dataset.page !== "investments") $("#inv-btn").click();
+  if (INV.loading) { try { await INV.loading; } catch (e) { /* the page shows its own error */ } }
+  // The recap is fetched first: a click before the next poll found none yet
+  // ("No recap yet") or last week's.
+  if (key === "__recap__") { await invRecapLoad(); invRecapOpen(); return; }
+  const a = INV.book?.attention;
+  if (!a) return;
+  INV.rail = "attention";
+  const info = a.info || [];
+  if (info.findIndex(it => it.key === key) >= INV_ATT_FOLD) INV.attMore = true;
+  const aside = $("#inv-page .inv-rail");
+  if (!aside) return;
+  aside.innerHTML = invRailHtml(INV.book);
+  const el = key && key !== "__rail__" ? aside.querySelector(`[data-att-key="${CSS.escape(key)}"]`) : null;
+  (el || aside).scrollIntoView({ block: el ? "center" : "start", behavior: "smooth" });
+  if (el) { el.classList.add("inv-att-flash"); setTimeout(() => el.classList.remove("inv-att-flash"), 1800); }
+  invAttSeen();
+}
+
+/* The weekly recap (owner's pick, 2026-10-15: the compact card), from the
+ * server's computed page only (notify.build_recap): a dash wherever the
+ * page can't say. A line at the top of the rail until it is opened (that
+ * part is this viewer's, in localStorage) or the next one replaces it. */
+async function invRecapLoad() {
+  try { INV.recap = (await (await fetch("/api/investments/recap")).json()).recap || null; } catch (e) { return; }
+  const aside = $("#inv-page .inv-rail");
+  if (aside && INV.book && INV.rail === "attention") aside.innerHTML = invRailHtml(INV.book);
+}
+function invRecapLineHtml() {
+  const r = INV.recap;
+  if (!r) return "";
+  let seen = null;
+  try { seen = localStorage.getItem("recapSeen"); } catch (e) { /* show it */ }
+  const age = (Date.now() - new Date(r.week_end + "T12:00:00").getTime()) / 864e5;
+  if (seen === r.week_end || age > 7) return "";
+  const ret = invOk(r.return_pct) ? ` · <span class="${invCls(r.return_pct)}">${invPct(r.return_pct)}</span>` : "";
+  return `<div class="inv-rail-item inv-recap-line"><span>Your week to ${escapeHtml(invDay(r.week_end))}${ret}</span>
+    <button type="button" class="inv-link" data-inv-recap>Open</button></div>`;
+}
+const invDay = (iso) => { const d = new Date(iso + "T12:00:00"); return d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }); };
+function invRecapHtml(r) {
+  const dash = '<span class="na">—</span>';
+  const row = (k, v, sub = "") => `<div class="inv-recap-k">${k}</div><div class="inv-recap-v">${v}${sub ? `<span class="inv-recap-sub">${sub}</span>` : ""}</div>`;
+  const pct = (v) => invOk(v) ? `<span class="${invCls(v)}">${invPct(v)}</span>` : dash;
+  const pp = invOk(r.return_pct) && invOk(r.bench_pct) ? r.return_pct - r.bench_pct : null;
+  const money = (v, ccy) => invOk(v) ? (invSign(v) + (FX_SYMBOL[ccy] || ccy + " ") + Math.round(Math.abs(v)).toLocaleString(NUM_LOCALE)) : dash;
+  const mover = (m) => m ? `${escapeHtml(m.name)} ${pct(m.pct)}` : dash;
+  const nl = r.needs_look == null ? dash : r.needs_look === 0 ? "Nothing" : `${r.needs_look} item${r.needs_look === 1 ? "" : "s"}`;
+  const nxt = (r.next_week || []).length ? r.next_week.slice(0, 4).map(e => `${escapeHtml(e.name)} ${e.what} ${escapeHtml(invDay(e.date))}`).join("<br>")
+    + (r.next_week.length > 4 ? `<br><span class="inv-recap-sub">and ${r.next_week.length - 4} more</span>` : "") : "No earnings or ex-dividend dates";
+  const dv = r.dividends || {};
+  return `<div class="inv-recap-head"><div><div class="sa-kicker">Weekly recap</div>
+      <div class="inv-recap-title">Your week to ${escapeHtml(invDay(r.week_end))}</div>
+      <div class="inv-recap-sub">${r.partial ? `Since you started, ${escapeHtml(invDay(r.from))}` : `${escapeHtml(invDay(r.from))} close to ${escapeHtml(invDay(r.to))} close`}${r.demo ? " · demo book" : ""}</div></div>
+      <button type="button" class="co-full-x" data-inv-recap-close aria-label="Close">✕</button></div>
+    <div class="inv-recap-grid">
+      ${row("Return", pct(r.return_pct), invOk(r.bench_pct) ? `${escapeHtml(r.bench_label || "Benchmark")} ${invPct(r.bench_pct)}${pp != null ? ` · ${invPct(pp, 1, " pp")}` : ""}` : "")}
+      ${row("Gain", invOk(r.gain) ? `<span class="${invCls(r.gain)}">${money(r.gain, r.ccy)}</span>` : dash, "money in and out left out")}
+      ${row("Best", mover(r.best))}
+      ${row("Worst", mover(r.worst))}
+      ${row("Dividends", dv.count ? money(dv.amount, dv.ccy).replace(/^\+/, "") : "None", dv.count ? `${dv.count} received` : "")}
+      ${row("Needs a look", nl)}
+      ${row("Next week", nxt)}
+    </div>
+    <div class="inv-recap-foot">From your book's prices as last computed. A dash means the figure wasn't available for that Friday.</div>`;
+}
+function invRecapOpen() {
+  const r = INV.recap;
+  let bg = $("#inv-recap-bg");
+  if (!bg) {
+    bg = document.createElement("div");
+    bg.className = "modal-bg"; bg.id = "inv-recap-bg"; bg.hidden = true;
+    bg.innerHTML = `<div class="modal inv-recap" role="dialog" aria-modal="true" aria-label="Your week"></div>`;
+    bg.addEventListener("click", (e) => { if (e.target === bg || e.target.closest("[data-inv-recap-close]")) invRecapClose(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && bg.classList.contains("show")) invRecapClose(); });
+    document.body.appendChild(bg);
+  }
+  bg.querySelector(".inv-recap").innerHTML = r ? invRecapHtml(r)
+    : `<div class="inv-recap-head"><div class="inv-recap-title">No recap yet</div><button type="button" class="co-full-x" data-inv-recap-close aria-label="Close">✕</button></div><div class="inv-recap-foot">The first one comes after this Friday's US close.</div>`;
+  showOverlay(bg);
+  if (r) { try { localStorage.setItem("recapSeen", r.week_end); } catch (e) { /* the line stays */ } }
+}
+function invRecapClose() {
+  if (hideOverlay("#inv-recap-bg")) {
+    const aside = $("#inv-page .inv-rail");
+    if (aside && INV.book && INV.rail === "attention") aside.innerHTML = invRailHtml(INV.book);
+  }
+}
+window.invFocusItem = invFocusItem;
+document.addEventListener("click", (e) => { if (e.target.closest("[data-inv-recap]")) invRecapOpen(); });
+setInterval(notifyPoll, 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) notifyPoll(); });
+notifyPoll();
 
 /* Suggested dividends (owner, 2026-10-11): payouts Yahoo knows about that
  * the ledger lacks, as ONE calm Attention item; Review lists them, newest

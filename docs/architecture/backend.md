@@ -752,6 +752,52 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
   `/api/investments/attention/{snooze,plan,plan/clear,alert,alert/remove}`;
   set and add need a held symbol, clear and remove work on any plan.
 
+### My Investments notifications and the weekly recap (Phase 9: `notify.py`)
+- **What is sent is the rail's answer**, never a second rule set:
+  `attention.should_notify(att)` = a `high` item (so not dismissed or
+  snoozed) marked `unread` by `evaluate` and past `notified` (a map in
+  `state/attention.json`, same `_over` step, cap and `prune` as `seen`).
+  Plain price alerts are `info`: in-app only (Appendix D). `armed: false`
+  (first run, or after the switch was off) makes the next pass a baseline:
+  what is in the rail then is recorded, not sent.
+- **The scheduler** (`notify.start()` from `start_server`, both modes; off
+  with `CONVEXITY_NOTIFY=0`, which the tests set) ticks every minute:
+  quiet-hours end, the recap, then `due()`: every 30 min while a held
+  listing's market is open (suffix table `_MARKETS`, US hours otherwise),
+  and once 20 min after each close; nothing at night or weekends. A pass is
+  a **background job** (`phases=["watch"]`, jobs.md): `notify.watch` runs
+  `investments.page(fresh=True)` inside `cache.prefer_cached(held +
+  benchmark + ^IRX)`, so only held shares' expired closes are fetched (a
+  sold share's stale entry is served; a context variable, so the page's own
+  requests are untouched). **A degraded page** (not `_healthy`, no rail, or
+  >20% of holdings without a price) sends and records nothing.
+- **Quiet hours** (default 22:00-08:00, local): nothing sent or recorded,
+  the items stay unread; at their end a no-fetch pass from
+  `investments.computed_page` sends one "n items came up overnight". The
+  recap waits too. **Cap**: three items per pass, the rest one "+n more".
+- **Delivery**: `send()` puts each message in an in-memory outbox (`seq`,
+  `GET /api/notifications?since=`, `native` true when the desktop sink is
+  registered) and calls the sinks (desktop.md). Logs name rule and ticker,
+  never an amount.
+- **The weekly recap** (`build_recap`) is for the last Friday whose 16:30
+  New York time has passed, from a page already computed (memo, last page,
+  `book_cache.json`), never a fetch. Return from `series.twr_index`, the
+  benchmark from `bench_index`, gain = value change less `series.flows`
+  (cumulative money in less estimated dividends paid out: the month
+  figure's formula), best and worst from `xray.week_pct` only when the
+  holding's `day_date` is that Friday (else a dash), dividends from the
+  ledger's `cash`, next week from `state/events.json`. Built once per week, only from a page that passes `degraded()`
+  and was computed after that Friday's 16:30 New York close (`computed_at`,
+  stamped by `investments.page`), into `state/recaps.json` (derived, last 12, malformed = {}); a launch
+  after a missed Friday catches it up, but the notification goes out only
+  until Monday's US close (`RECAP_NOTIFY_DAYS`). `GET
+  /api/investments/recap` builds it without notifying.
+- **Settings** (`prefs.json`, typed keys `notify_on`, `quiet_on`,
+  `quiet_from`, `quiet_to` "HH:MM"): `POST /api/prefs` calls
+  `notify.on_prefs` (off cancels a running pass and disarms).
+  `POST /api/notifications/test` sends a test; `/check` runs a pass now
+  (202, or 409 while a refresh runs or when off).
+
 ### My Investments import (`importer.py`)
 Roadmap Phases 5–6 (run together, ahead of Performance, at the owner's
 request): the composer is the way into the page.

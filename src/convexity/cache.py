@@ -5,6 +5,8 @@ object (Python module singletons guarantee identity). Never reassign a
 cache dict — only mutate via [] / .pop / .get.
 """
 
+import contextlib
+import contextvars
 import time
 
 # ----------------------------- Generic TTL cache ----------------------------
@@ -36,6 +38,29 @@ _BULK_CLOSE_TTL = 1800.0
 _BULK_CLOSE_NEG_TTL = 60.0
 _BULK_CLOSE_MISS = object()
 
+# Phase 9's background pass (notify.py) fetches held shares only: inside
+# ``prefer_cached(live)`` an expired close or dividend entry of any symbol
+# NOT in ``live`` (a share sold long ago) is served as it is instead of
+# refetched. A context variable, so only the thread that set it (the job's)
+# sees it: the page's own requests keep the normal TTLs.
+_PREFER_CACHED: contextvars.ContextVar[frozenset | None] = contextvars.ContextVar(
+    "prefer_cached", default=None
+)
+
+
+@contextlib.contextmanager
+def prefer_cached(live):
+    token = _PREFER_CACHED.set(frozenset(live))
+    try:
+        yield
+    finally:
+        _PREFER_CACHED.reset(token)
+
+
+def _stale_ok(sym: str) -> bool:
+    live = _PREFER_CACHED.get()
+    return live is not None and sym not in live
+
 
 def _bulk_close_get_cached(sym: str, period_yf: str):
     hit = _BULK_CLOSE_CACHE.get((sym, period_yf))
@@ -44,7 +69,7 @@ def _bulk_close_get_cached(sym: str, period_yf: str):
     ts, ser = hit
     is_empty = ser is None or getattr(ser, "empty", True)
     ttl = _BULK_CLOSE_NEG_TTL if is_empty else _BULK_CLOSE_TTL
-    if time.time() - ts > ttl:
+    if time.time() - ts > ttl and not (_stale_ok(sym) and not is_empty):
         return _BULK_CLOSE_MISS
     return ser
 
@@ -68,7 +93,7 @@ def _dividends_get(sym: str):
     # failed download caches empty closes on the short TTL, and their refetch
     # rewrites this entry.
     ts, ser = hit
-    return ser if time.time() - ts <= _BULK_CLOSE_TTL else None
+    return ser if time.time() - ts <= _BULK_CLOSE_TTL or _stale_ok(sym) else None
 
 
 def _dividends_put(sym: str, ser) -> None:

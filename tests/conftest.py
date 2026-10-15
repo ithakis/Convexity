@@ -31,6 +31,9 @@ os.environ.pop("CONVEXITY_MODEL_URL", None)
 # against a local stub.
 os.environ["CONVEXITY_REFERENCE_PACK"] = "0"
 os.environ.pop("CONVEXITY_REFERENCE_URL", None)
+# Nor the notification scheduler (notify.py): its passes are jobs, and a
+# stray one would race test_jobs.py's single-flight assertions.
+os.environ["CONVEXITY_NOTIFY"] = "0"
 
 
 @pytest.fixture(autouse=True)

@@ -205,6 +205,11 @@ class Handler(BaseHTTPRequestHandler):
         days = _ns._clamp_lookback(payload.get("days"))
         on_conflict = "supersede" if payload.get("on_conflict") == "supersede" else "reject"
         context = payload.get("context") if isinstance(payload.get("context"), dict) else None
+        # ``background`` is the notification scheduler's alone (jobs.Job): a
+        # page that set it would hide its job from the chip and let the next
+        # refresh supersede it.
+        if context is not None:
+            context = {k: v for k, v in context.items() if k != "background"}
 
         if scope == "all":
             # load_watchlists() IS the set of saved portfolios. Ordered
@@ -507,7 +512,19 @@ class Handler(BaseHTTPRequestHandler):
             # should reattach to?" — which is what lets a job survive a full
             # browser reload, not just a tab switch.
             j = jobs.current()
-            self._send_json(200, {"job": j.snapshot() if j else None})
+            # A background pass (notifications, Phase 9) is not the owner's:
+            # nothing to reattach the chip to.
+            self._send_json(200, {"job": j.snapshot() if j and not j.background else None})
+            return
+        if parsed.path == "/api/notifications":
+            # Phase 9: what the page polls (a toast in browser mode, the badge).
+            from convexity import notify
+
+            try:
+                since = int((parse_qs(parsed.query).get("since") or ["0"])[0])
+            except ValueError:
+                since = 0
+            self._send_json(200, notify.outbox(since))
             return
         if parsed.path.startswith("/api/refresh-job/") and parsed.path.endswith("/stream"):
             job_id = parsed.path[len("/api/refresh-job/") : -len("/stream")]
@@ -891,6 +908,11 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/investments/attention":
                 # The topbar badge: from the computed page only, never a compute.
                 self._send_json(200, _investments.attention_now((q.get("ccy") or [None])[0]))
+            elif parsed.path == "/api/investments/recap":
+                # The weekly recap (Phase 9), from a computed page only.
+                from convexity import notify
+
+                self._send_json(200, {"recap": notify.latest_recap()})
             elif parsed.path == "/api/investments/symbols":
                 self._send_json(200, {"symbols": _investments.book_symbols()})
             elif parsed.path == "/api/investments/lookup":
@@ -1056,9 +1078,24 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return
         if parsed.path == "/api/prefs":
+            from convexity import notify
             from convexity.persistence import save_prefs
 
-            self._send_json(200, save_prefs(self._read_json()))
+            saved = save_prefs(self._read_json())
+            notify.on_prefs(saved)
+            self._send_json(200, saved)
+            return
+        if parsed.path in ("/api/notifications/test", "/api/notifications/check"):
+            # Settings -> Notifications: a test message, or a pass now (a
+            # background job: single-flight, so 409 while a refresh runs).
+            from convexity import notify
+
+            if parsed.path.endswith("/test"):
+                self._send_json(200, {"sent": notify.test_message()})
+                return
+            job, outcome = notify.run_now()
+            code = {"created": 202, "off": 409}.get(outcome, 409)
+            self._send_json(code, {"outcome": outcome, "job": job.id if job else None})
             return
         if parsed.path.startswith("/api/investments/"):
             self._handle_investments_post(parsed.path)
@@ -1689,6 +1726,11 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
 
     threading.Thread(target=_warm_optimizer, name="pt-warm-mpt", daemon=True).start()
     threading.Thread(target=_warm_book, name="pt-warm-book", daemon=True).start()
+    # Phase 9: the notification scheduler (a minute tick; its passes are
+    # background jobs, so single-flight with every refresh).
+    from convexity import notify
+
+    notify.start()
     return server, port
 
 
