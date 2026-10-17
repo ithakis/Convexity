@@ -19,8 +19,8 @@ import numpy as np
 from convexity import mpt
 from convexity.analytics import _analyst_for, _bulk_close, _market_cap_usd
 from convexity.cache import _cache_get, _cache_put
-from convexity.fx import _apply_fx_to_closes, _norm_ccy_for_fx
-from convexity.helpers import _dedupe_rows_by_symbol
+from convexity.fx import _apply_fx_to_closes
+from convexity.helpers import _dedupe_rows_by_symbol, major_ccy
 
 _MPT_LOOKBACK_YF = {"1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}
 _COV_MODELS = ("sample", "ledoit", "ewma")
@@ -268,7 +268,7 @@ def compute_efficient_frontier_stream(
     if cov_model not in _COV_MODELS:
         cov_model = "ledoit"
     haircut = float(min(max(haircut, 0.0), 1.0))
-    display_ccy = _norm_ccy_for_fx(display_ccy or "USD")
+    display_ccy = major_ccy(display_ccy or "USD")
 
     # Deduped before the 2-symbol gate: two rows for one ticker would pass it
     # and then fail later with a misleading "1 assets" data error (see

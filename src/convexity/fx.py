@@ -21,13 +21,6 @@ from convexity.helpers import SUPPORTED_FX, major_ccy
 _FX_BASKET_MAJORS: list[str] = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD"]
 
 
-def _norm_ccy_for_fx(ccy: str) -> str:
-    """Major-unit code for FX lookups (GBp/GBX -> GBP, ZAc -> ZAR, ILA -> ILS).
-    Returns only need the currency, not the unit: a pence series and a pound
-    series have the same daily returns."""
-    return major_ccy(ccy)
-
-
 # Spot "USD per one unit of ccy", for converting single amounts (market caps,
 # statement figures) rather than whole close series. Checked against the shared
 # fx_rates("USD") cache first — the frontend loads it on every page open — and
@@ -38,7 +31,7 @@ _SPOT_MISS_TTL = 600.0
 
 
 def usd_per_unit(ccy: str | None, *, allow_fetch: bool = True) -> float | None:
-    c = _norm_ccy_for_fx(ccy or "USD")
+    c = major_ccy(ccy or "USD")
     if c == "USD":
         return 1.0
     now = time.time()
@@ -70,7 +63,7 @@ def convert_amount(amount, from_ccy: str | None, to_ccy: str | None) -> float | 
     """A major-unit amount from one currency to another, or None without a rate."""
     if amount is None:
         return None
-    a, b = _norm_ccy_for_fx(from_ccy or "USD"), _norm_ccy_for_fx(to_ccy or "USD")
+    a, b = major_ccy(from_ccy or "USD"), major_ccy(to_ccy or "USD")
     if a == b:
         return float(amount)
     ua, ub = usd_per_unit(a), usd_per_unit(b)
@@ -80,7 +73,7 @@ def convert_amount(amount, from_ccy: str | None, to_ccy: str | None) -> float | 
 
 
 def _fx_usd_series(ccy: str, period_yf: str) -> pd.Series | None:
-    ccy = _norm_ccy_for_fx(ccy)
+    ccy = major_ccy(ccy)
     if ccy == "USD":
         return None
     key = f"{ccy}|{period_yf}"
@@ -116,7 +109,7 @@ def prefetch_usd_series(ccys, period_yf: str = "max") -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     todo = []
-    for c in dict.fromkeys(_norm_ccy_for_fx(c) for c in ccys if c):
+    for c in dict.fromkeys(major_ccy(c) for c in ccys if c):
         hit = _FX_CCY_HIST_CACHE.get(f"{c}|{period_yf}")
         if c != "USD" and not (
             hit and (time.time() - hit[0]) < _FX_CCY_HIST_TTL and not hit[1].empty
@@ -151,7 +144,7 @@ def fx_multipliers(ccys, base: str, dates: list[str]) -> dict[str, np.ndarray | 
     their major currency. A currency with no history maps to None, so the
     caller can fall back to today's rate and say so.
     """
-    base = _norm_ccy_for_fx(base or "USD")
+    base = major_ccy(base or "USD")
     keys = np.array(dates, dtype="datetime64[D]")
 
     def usd_per(ccy: str) -> np.ndarray | None:
@@ -173,7 +166,7 @@ def fx_multipliers(ccys, base: str, dates: list[str]) -> dict[str, np.ndarray | 
     out: dict[str, np.ndarray | None] = {}
     base_usd = usd_per(base)
     for c in dict.fromkeys(ccys):
-        m = _norm_ccy_for_fx(c or "USD")
+        m = major_ccy(c or "USD")
         if m == base:
             out[c] = np.ones(len(dates))
             continue
@@ -188,9 +181,9 @@ def _apply_fx_to_closes(
     display_ccy: str,
     period_yf: str,
 ) -> pd.DataFrame:
-    display_ccy = _norm_ccy_for_fx(display_ccy)
+    display_ccy = major_ccy(display_ccy)
     syms = list(sym_closes.columns)
-    sym_ccy = {s: _norm_ccy_for_fx(by_sym.get(s, {}).get("currency") or "USD") for s in syms}
+    sym_ccy = {s: major_ccy(by_sym.get(s, {}).get("currency") or "USD") for s in syms}
 
     need: set[str] = set()
     for c in sym_ccy.values():

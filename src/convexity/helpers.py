@@ -277,12 +277,25 @@ def _safe_num(v) -> float | None:
         return None
 
 
+def finite_num(v) -> float | None:
+    """``float(v)`` for a real, finite int/float; None for anything else (bool,
+    str, NaN, inf, or an int too large for a float — a 400-digit JSON integer
+    must be a 400, never a 500)."""
+    if not isinstance(v, int | float) or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except OverflowError:
+        return None
+    return f if math.isfinite(f) else None
+
+
 # Yahoo quotes some exchanges in the currency's minor unit: LSE prices in pence
 # (GBp / GBX), JSE in cents (ZAc), Tel Aviv in agorot (ILA). Per-share prices
 # and price targets come in that minor unit, but marketCap, dividendRate and the
 # statements are in the MAJOR unit — verified on SHEL.L: price 3654.5 GBp,
 # marketCap 208e9 (GBP), dividendRate 1.16 (GBP).
-MINOR_UNIT_CCY = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ILA": "ILS"}
+MINOR_UNIT_CCY = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ZAC": "ZAR", "ILA": "ILS"}
 
 
 def major_ccy(ccy: str | None) -> str:

@@ -54,9 +54,9 @@ from convexity.helpers import (
 )
 from convexity.relevance import DEDUP_SIMILARITY, norm_title, relevance_score, window_sample
 
-# API key loading (env var, then a strictly-local file found by walking
-# upward from this module's directory) lives in helpers._load_local_secret —
-# shared with finnhub_adapter.py so both modules resolve secrets identically.
+# API key loading (env var, then config.json in the data folder) lives in
+# helpers._load_local_secret — shared with finnhub_adapter.py so both modules
+# resolve secrets identically.
 FINNHUB_API_KEY = _load_local_secret("FINNHUB_API_KEY")
 NVIDIA_API_KEY = _load_local_secret("NVIDIA_API_KEY")
 _FINNHUB_BASE = "https://finnhub.io/api/v1/"

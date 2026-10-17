@@ -23,7 +23,7 @@ from convexity.cache import (
     _cache_put,
 )
 from convexity.fetcher import _SECTOR_ETF
-from convexity.fx import _apply_fx_to_closes, _norm_ccy_for_fx, convert_amount
+from convexity.fx import _apply_fx_to_closes, convert_amount
 from convexity.helpers import (
     _dedupe_rows_by_symbol,
     _safe_num,
@@ -980,7 +980,7 @@ def analyze_portfolios_multi(
     if period_u not in _PERIOD_YF:
         period_u = "1Y"
 
-    display_ccy = _norm_ccy_for_fx(display_ccy or "USD")
+    display_ccy = major_ccy(display_ccy or "USD")
 
     # Deduped here even though save_view/load_view already do it: rows reach
     # this function straight from the client's DATA array, and one repeated

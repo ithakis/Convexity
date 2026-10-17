@@ -52,6 +52,7 @@ from scipy.signal import fftconvolve
 from scipy.stats import norm
 
 from convexity import cache
+from convexity.helpers import major_ccy
 
 ERP_DEFAULT = 0.05
 KAPPA_DEFAULT = {"index": 0.80, "stock": 0.92}  # physical / implied vol: placeholders (Phase 2)
@@ -900,7 +901,6 @@ _FX_FUT = {"EUR": "6E", "GBP": "6B", "CHF": "6S", "JPY": "6J", "CAD": "6C", "AUD
 _FX_ETF = {"EUR": "FXE", "GBP": "FXB", "CHF": "FXF", "JPY": "FXY", "CAD": "FXC", "AUD": "FXA"}
 # European currencies without a futures quote: the euro's rate stands in.
 _EUROPE = {"DKK", "SEK", "NOK", "PLN", "CZK", "HUF", "ISK", "RON"}
-_MINOR = {"GBP": "GBP", "GBX": "GBP", "GBp": "GBP", "ILA": "ILS", "ZAc": "ZAR", "ZAC": "ZAR"}
 # The market proxy for the history estimate: an index ETF with long options,
 # by listing suffix (FEZ: Euro Stoxx 50; VGK lists nothing past 5 months).
 _PROXY = {
@@ -943,7 +943,7 @@ VAR_HALF_LIFE = 0.25  # years: how fast today's variance reverts to the 3-year l
 
 
 def _norm_ccy(c: str | None) -> str:
-    return _MINOR.get(c or "", (c or "").upper())
+    return major_ccy(c) if c else ""
 
 
 def _next_quarters(n: int = 2) -> list[tuple[str, dt.date]]:

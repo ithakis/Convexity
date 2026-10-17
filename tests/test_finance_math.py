@@ -14,7 +14,7 @@ import pytest
 from convexity import analytics as A
 from convexity import fetcher, fx, mpt
 from convexity import news_diagnostics as nd
-from convexity.helpers import _rsi, _ytd_change, major_ccy, price_in_major
+from convexity.helpers import _rsi, _ytd_change, finite_num, major_ccy, price_in_major
 
 
 # ----------------------------------------------------------------- returns
@@ -124,7 +124,7 @@ def test_market_cap_usd_converts_and_uses_major_units(monkeypatch):
     monkeypatch.setattr(
         fx,
         "usd_per_unit",
-        lambda c, **k: {"USD": 1.0, "JPY": 1 / 150, "GBP": 1.35}.get(fx._norm_ccy_for_fx(c)),
+        lambda c, **k: {"USD": 1.0, "JPY": 1 / 150, "GBP": 1.35}.get(major_ccy(c)),
     )
     assert A._market_cap_usd({"market_cap_usd": 5e9}) == 5e9
     assert abs(A._market_cap_usd({"market_cap": 34e12, "currency": "JPY"}) - 34e12 / 150) < 1
@@ -243,6 +243,13 @@ def test_ytd_analytics_includes_the_first_session(monkeypatch):
 def test_minor_units():
     assert major_ccy("GBp") == "GBP" and major_ccy("ZAc") == "ZAR" and major_ccy("ILA") == "ILS"
     assert major_ccy("usd") == "USD"
+    assert major_ccy("ZAC") == "ZAR" and price_in_major(1000.0, "ZAC") == 10.0
+
+
+def test_finite_num_is_strict_and_never_raises():
+    assert finite_num(3) == 3.0 and finite_num(2.5) == 2.5
+    for bad in (None, True, "3", float("nan"), float("inf"), 10**400, [1]):
+        assert finite_num(bad) is None
     assert price_in_major(3654.5, "GBp") == 36.545 and price_in_major(10.0, "USD") == 10.0
 
 
@@ -251,7 +258,7 @@ def test_adr_multiples_are_rebuilt_in_the_statement_currency(monkeypatch):
     # EV/EBITDA 6.27 and P/B 15.3 against 11.9 / 0.91 on the Tokyo line.
     monkeypatch.setattr(fetcher, "usd_per_unit", lambda c, **k: {"USD": 1.0, "JPY": 1 / 150}.get(c))
     monkeypatch.setattr(
-        fx, "usd_per_unit", lambda c, **k: {"USD": 1.0, "JPY": 1 / 150}.get(fx._norm_ccy_for_fx(c))
+        fx, "usd_per_unit", lambda c, **k: {"USD": 1.0, "JPY": 1 / 150}.get(major_ccy(c))
     )
     info = {
         "financialCurrency": "JPY",
@@ -288,9 +295,7 @@ def test_same_currency_keeps_yahoo_multiples(monkeypatch):
 
 def test_adr_without_an_fx_rate_shows_nothing_rather_than_wrong(monkeypatch):
     monkeypatch.setattr(fetcher, "usd_per_unit", lambda c, **k: 1.0 if c == "USD" else None)
-    monkeypatch.setattr(
-        fx, "usd_per_unit", lambda c, **k: 1.0 if fx._norm_ccy_for_fx(c) == "USD" else None
-    )
+    monkeypatch.setattr(fx, "usd_per_unit", lambda c, **k: 1.0 if major_ccy(c) == "USD" else None)
     out = {"ev_ebitda": 5.17, "price_book": 93.0}
     fetcher._currency_consistent(
         {
