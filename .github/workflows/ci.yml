@@ -129,9 +129,14 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run pytest
-        # timeout -s INT: pytest stops itself before the job limit, so the log
-        # (and the faulthandler dump of a hung test) is kept.
-        run: timeout -s INT 20m uv run pytest tests/ -v --tb=short -o faulthandler_timeout=300
+        # Since 6 Oct this step froze the whole runner (no log line at all,
+        # signals ignored) on Linux only. The caps turn a runaway into a
+        # MemoryError / failed fork with a traceback; timeout -s INT stops
+        # pytest before the job limit so the log is kept.
+        run: |
+          ulimit -v 8000000   # 8 GB of address space (the suite peaks ~0.5 GB)
+          ulimit -u 2000
+          timeout -s INT 20m uv run pytest tests/ -v --tb=short -o faulthandler_timeout=300
 
   server-smoke:
     name: Server smoke test (real HTTP requests, not just imports)
