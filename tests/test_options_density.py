@@ -160,3 +160,29 @@ def test_settings_and_horizon_snap():
     assert st["erp"] == 0.04 and st["measure"] == "Q" and st["haircut"] is True
     assert od._settings({"dist_measure": "X"})["measure"] == "P"
     assert od._settings(None)["kappa_stock"] == od.KAPPA_DEFAULT["stock"]
+
+
+def test_a_nan_fit_fails_the_gate(rn):
+    # NaN passes every comparison: the gate must say no, not let it through.
+    for k in ("martingale_err", "svi_rmse_volpts"):
+        ok, why = od.quality({**rn, k: float("nan")})
+        assert not ok and why == "fit failed"
+
+
+def test_targets_scale_to_the_expiry():
+    # A 12-month target sets a 6-month mean at half its log return, and past a
+    # year the market's return carries it on (AAPL's "12M" is 335 days, ARKK's 461).
+    for t, expect in ((0.5, lambda lr, cp: 0.5 * lr), (1.5, lambda lr, cp: lr + 0.5 * cp)):
+        calls, puts = bs_chain(np.arange(40.0, 251.0, 2.5), t=t)
+        r = od.fit_density(S0, t, R, calls, puts)
+        mx = od.analysts_mixture(r, [130.0, float("nan"), float("inf")], 1.0, 0.05, 0.92)
+        got = math.log(od.curve_stats(r, mx["p"])["mean_ratio"])
+        assert got == pytest.approx(expect(math.log(1.3), R + 0.05), rel=2e-3)
+
+
+def test_no_expiry_near_the_horizon(monkeypatch):
+    # A small cap listing nothing past 153 days has no 12M, and says why.
+    exps = [("2026-12-18", 62), ("2027-03-19", 153)]
+    monkeypatch.setattr(od, "_resolve_chain", lambda s: ("OPRX", None, exps))
+    out = od.density("OPRX", 365, 1.0, {})
+    assert out["reason"] == "no_expiry" and "153" in out["detail"]

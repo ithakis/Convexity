@@ -976,7 +976,9 @@ reference recipe: `scripts/density_prototype.py`, which the module reproduces
 within rounding — AAPL checked 2026-10-17).
 
 - **Pipeline** per horizon (the listed expiry nearest 91 or 365 days, never
-  interpolated): chain → forward from parity with the rate from **^IRX**
+  interpolated, and only inside 45–182 or 270–550 days: small caps list
+  nothing past 5–7 months, so their "12M" is `no_expiry` and the page opens
+  on 3M): chain → forward from parity with the rate from **^IRX**
   (never backed out of parity: Yahoo's US chains are American-style and gave
   −4.8%) → two-sided **OTM-only** quotes → raw SVI with **Lee's wing cap**
   → Breeden–Litzenberger on a 4001-point log-strike grid → the
@@ -986,7 +988,12 @@ within rounding — AAPL checked 2026-10-17).
   yfinance `upgrades_downgrades`; Finnhub's targets are 403 on the free plan),
   blended equally, the common variance shrunk by the between-firm variance so
   the blend's total is still (κσ_Q)²T. Optional haircut (prefs) halves each
-  target's excess log return over CAPM. 12M only.
+  target's excess log return over CAPM. 12M only. The expiry is rarely a
+  year out (AAPL 335 days, ARKK 461): a target's log return is scaled by T up
+  to a year and carried on at CAPM after it.
+- **No NaN reaches the page**: `json.dumps` writes NaN, which `JSON.parse`
+  rejects. The gate fails a non-finite fit (NaN passes every `<` test), a
+  missing last price is `error`, and `downsample` refuses a non-finite curve.
 - **Gate**: quotes ≥ 30, SVI RMSE < 1 vol pt, |E_Q/F − 1| < 1%. A failure is
   `{"ok": false, "reason": "thin"}` and is never drawn. Long chains fail often
   (SPY and DELL 12M on 2026-10-17: tails off by 2–9%); the page then opens on

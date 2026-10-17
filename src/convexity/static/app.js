@@ -3651,6 +3651,7 @@ function fcDraw() {
   if (!d) { note("Pricing the options…"); return; }
   if (!d.ok) {
     note(d.reason === "no_options" ? "No listed options"
+      : d.reason === "no_expiry" ? `No options expiry near ${d.horizon === 365 ? "12" : "3"} months`
       : d.reason === "thin" ? `Thin options data${d.quality ? ` (${d.quality.quotes} quotes${d.quality.why ? ", " + d.quality.why : ""})` : ""}`
       : "Couldn't price the options. Try again later.");
     return;
@@ -3845,6 +3846,7 @@ function renderFcReadouts() {
   if (!d) { el.innerHTML = `<div class="m-fc-grid"><div class="m-fc-wait">Pricing ${escapeHtml(DETAIL.row.symbol)}’s options…</div></div>`; return; }
   if (!d.ok) {
     const why = d.reason === "no_options" ? `No listed options for ${escapeHtml(d.symbol)} or a US line of the same company.`
+      : d.reason === "no_expiry" ? `No options expiry near ${d.horizon === 365 ? "12" : "3"} months for ${escapeHtml(d.symbol)} (${escapeHtml(d.detail || "")}).`
       : d.reason === "thin" ? `The ${escapeHtml(d.chain_symbol || d.symbol)} chain for ${escapeHtml(d.expiry || "this horizon")} is too thin to trust its tails: ${escapeHtml(d.quality?.why || "")}.`
       : "Couldn't reach the options data. Try again in a minute.";
     el.innerHTML = `<div class="m-fc-foot">${why}${link}</div>`;
@@ -3887,8 +3889,10 @@ function renderFcReadouts() {
     : mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
     : `μ from the market (CAPM: β ${(+d.beta).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium).`;
   const d12 = DETAIL.fc[365];
-  const auto = d.horizon === 91 && d12 && !d12.ok && d12.reason === "thin"
-    ? ` The 12-month chain is too thin to trust its tails (${escapeHtml(d12.quality?.why || "")}), so this shows 3 months.` : "";
+  const auto = d.horizon === 91 && d12 && !d12.ok
+    ? d12.reason === "thin" ? ` The 12-month chain is too thin to trust its tails (${escapeHtml(d12.quality?.why || "")}), so this shows 3 months.`
+      : d12.reason === "no_expiry" ? ` No options expiry near 12 months (${escapeHtml(d12.detail || "")}), so this shows 3 months.` : ""
+    : "";
   const fell = auto + (mode.fellBack ? (d.horizon === 365 ? " No analyst targets, so the market’s μ." : " Analyst targets are 12-month, so 3M uses the market’s μ.") : "");
   el.innerHTML = `<div class="m-fc-grid">
     ${cell("Chance up", pct(fcCurveAbove(sim, d.s0)), "pos")}

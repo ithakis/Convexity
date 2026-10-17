@@ -62,6 +62,11 @@ RATE_TTL = 3600.0
 TARGET_MAX_AGE = 365  # days: a firm's target older than this is dropped
 TARGET_STALE = 182  # days: older than this is drawn faded
 HORIZONS = (91, 365)
+# The expiry a horizon may use. Small caps list nothing past 5-7 months
+# (OPRX's longest is 153 days): drawn as "12M", its analysts' 12-month
+# targets would set a 5-month mean. Outside the window the horizon is
+# "no_expiry", and the window falls back to the other one.
+EXPIRY_WINDOW = {91: (45, 182), 365: (270, 550)}
 _INDEX_TYPES = {"ETF", "INDEX", "MUTUALFUND"}
 
 
@@ -193,6 +198,8 @@ def fit_density(S0: float, T: float, rf: float, calls, puts) -> dict:
 def quality(rn: dict) -> tuple[bool, str]:
     """The gate: enough quotes, a tight smile fit, and a density whose mean is
     the forward. A failure is shown as "Thin options data", never drawn."""
+    if not all(math.isfinite(rn[k]) for k in ("F", "sigma_q", "svi_rmse_volpts", "martingale_err")):
+        return False, "fit failed"  # a NaN passes every comparison below
     if rn["quotes"] < MIN_QUOTES:
         return False, f"{rn['quotes']} quotes"
     if rn["svi_rmse_volpts"] >= MAX_SVI_RMSE:
@@ -262,17 +269,21 @@ def analysts_mixture(
 ) -> dict:
     """The analysts' curve: one options-shaped tilt per firm, blended equally.
 
-    ``targets`` are prices in the chain's currency. Each firm's curve has its
-    target as the mean and a common variance V_w shrunk by the between-firm
-    variance of ln(target), floored at 30% of V, so the blend's total
-    variance stays at V = (kappa sigma_Q)^2 T.
+    ``targets`` are 12-month prices in the chain's currency. Each firm's
+    curve has its target as the mean and a common variance V_w shrunk by the
+    between-firm variance of ln(target), floored at 30% of V, so the blend's
+    total variance stays at V = (kappa sigma_Q)^2 T.
+
+    The listed expiry is rarely exactly a year out (AAPL 335 days, ARKK 461):
+    a target's log return is scaled to T geometrically up to a year, and the
+    market's (CAPM) return carries it on after that.
     """
-    t = np.array([float(v) for v in targets if v and v > 0])
+    t = np.array([float(v) for v in targets if v and math.isfinite(v) and v > 0])
     if not len(t):
         raise DensityError("no_targets")
     T = rn["T"]
     V = (kappa * rn["sigma_q"]) ** 2 * T
-    lr = np.log(t / rn["S0"])
+    lr = np.log(t / rn["S0"]) * min(T, 1.0) + max(T - 1.0, 0.0) * (rn["rf"] + beta * erp)
     if haircut:
         lc = math.log(capm_ratio(rn, beta, erp))
         lr = lc + (1 - HAIRCUT) * (lr - lc)
@@ -296,6 +307,8 @@ def downsample(x: np.ndarray, p: np.ndarray, n: int = OUT_POINTS) -> dict:
     hi = x[min(np.searchsorted(cdf, 1 - 1e-4), len(x) - 1)]
     xs = np.linspace(lo, hi, n)
     ps = np.interp(xs, x, p)
+    if not (np.all(np.isfinite(ps)) and math.isfinite(lo) and math.isfinite(hi) and hi > lo):
+        raise DensityError("error", "non-finite curve")  # json.dumps would write NaN
     return {"x": [round(float(v), 6) for v in xs], "p": [round(float(v), 6) for v in ps]}
 
 
@@ -418,7 +431,7 @@ def _analysts(tk) -> dict | None:
     if ud is not None and not ud.empty and "currentPriceTarget" in ud.columns:
         df = ud.reset_index()
         datecol = "GradeDate" if "GradeDate" in df.columns else df.columns[0]
-        df = df[df["currentPriceTarget"].fillna(0) > 0]
+        df = df[df["currentPriceTarget"].fillna(0).between(1e-9, 1e12)]
         df = df.sort_values(datecol).groupby("Firm").tail(1)
         for _, r in df.iterrows():
             when = r[datecol].to_pydatetime().replace(tzinfo=None)
@@ -440,16 +453,18 @@ def _analysts(tk) -> dict | None:
             s = tk.analyst_price_targets or {}
         except Exception:
             s = {}
-        med = s.get("median") or s.get("mean")
+
+        def num(k):
+            try:
+                v = float(s.get(k))
+            except (TypeError, ValueError):
+                return None
+            return v if math.isfinite(v) and v > 0 else None
+
+        med = num("median") or num("mean")
         if not med:
             return None
-        return {
-            "firms": [],
-            "consensus": float(med),
-            "low": s.get("low"),
-            "high": s.get("high"),
-            "n": None,
-        }
+        return {"firms": [], "consensus": med, "low": num("low"), "high": num("high"), "n": None}
     t = sorted(f["target"] for f in firms)
     return {
         "firms": sorted(firms, key=lambda f: f["target"]),
@@ -517,7 +532,7 @@ def density(
     symbol: str, horizon: int = 365, beta: float | None = None, prefs: dict | None = None
 ) -> dict:
     """The `/api/density` payload. Never raises: an unusable chain is
-    ``{"ok": False, "reason": "no_options" | "thin" | "error"}``.
+    ``{"ok": False, "reason": "no_options" | "no_expiry" | "thin" | "error"}``.
 
     Cached per (symbol, horizon, beta, settings) for 15 minutes, successes
     only; one computation per key at a time (a double-click must not fetch
@@ -565,13 +580,19 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     import yfinance as yf
 
     chain_sym, tk, exps = _resolve_chain(symbol)
-    expiry, days = min(exps, key=lambda e: abs(e[1] - horizon))
+    lo, hi = EXPIRY_WINDOW[horizon]
+    usable = [e for e in exps if lo <= e[1] <= hi]
+    if not usable:
+        raise DensityError("no_expiry", f"longest expiry {max(e[1] for e in exps)} days")
+    expiry, days = min(usable, key=lambda e: abs(e[1] - horizon))
     S0, chain_ccy = _last(tk)
     if chain_sym == symbol:
         ratio, ccy = 1.0, chain_ccy
     else:
         local, ccy = _last(yf.Ticker(symbol))
         ratio = local / S0
+    if not (math.isfinite(S0) and S0 > 0 and math.isfinite(ratio) and ratio > 0):
+        raise DensityError("error", "no last price")
     rf = _rate()
     ch = tk.option_chain(expiry)
     rn = fit_density(S0, days / 365, rf, _quotes(ch.calls), _quotes(ch.puts))

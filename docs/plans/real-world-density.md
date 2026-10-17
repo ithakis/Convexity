@@ -132,8 +132,9 @@ Expected effect (prototype, 17 Oct 2026):
   date and implied move; σ (κ × implied). The footnote gives the assumptions and an
   "Assumptions ⚙" link to Settings → Price distribution: ERP, analyst haircut, measure,
   and κ under Advanced.
-- **Empty states**: "No listed options"; "Thin options data (n quotes, why)". When 12M
-  fails the gate and 3M passes, the window opens on 3M and says why.
+- **Empty states**: "No listed options"; "No options expiry near 12 months" (small caps
+  list nothing past 5–7 months); "Thin options data (n quotes, why)". When 12M fails and
+  3M passes, the window opens on 3M and says why.
 
 ## Phase 2 — follow-up (not built)
 
