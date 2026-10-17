@@ -208,6 +208,17 @@ Each of these has cost real debugging time; the link goes to the full story.
   so a foreign company never has one. **yfinance `get_news` returns `[]` for
   every ticker** (Yahoo 404, 2026-10-11); search news backs it up for US lines.
   [backend.md → Finnhub supplemental columns](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
+- **σ/μ (the price distribution) is a detail path, never `fetch_one`**:
+  the rate is ^IRX (never parity: American chains), quotes are OTM only, the
+  SVI wing is Lee-capped and trusted only inside the quoted strikes (GEV tails
+  past them, the attachment cdf from the call slope, never from integrating the
+  density), and a chain that fails the gate is "Thin", never drawn: a sparse
+  chain gets an SSVI surface over all its expiries, and a name with no usable
+  options a labelled history estimate (`source: "history"`). Weekly returns
+  only for betas (European and US closes are hours apart). The paths are bridges to the drawn curve, not GBM, so the end marginal
+  is exact. `/api/density` caches successes only.
+  [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·
+  [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -273,6 +284,7 @@ sub-decision.
 │   ├── reference_pack.py        ← Reference pack: format + allow-list validators, daily download, anchor/Track record readers — §4
 │   ├── reference_build.py       ← `convexity build-reference-pack` (run by CI): S&P 500 Market read → the pack — §4, §13
 │   ├── data/                    ← Package data: lm_lexicon.json, sp500.json (the pack's universe, source + date inside), indices.json
+│   ├── options_density.py       ← The stock window's σ/μ: option-implied real-world price distribution, GET /api/density — §4
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
 │   ├── investments.py           ← My Investments (the real book): the book file, undo/redo, prices/FX, page payload — docs/plans/my-investments-roadmap.md
 │   ├── ledger.py                ← My Investments ledger engine: pure replay (average cost, implied deposits, splits), TWR/MWR

@@ -488,6 +488,29 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return
+        if parsed.path == "/api/density":
+            # The stock window's σ/μ: a real-world price distribution from the
+            # listed options (options_density.py). A network-heavy detail path,
+            # asked for after the window has opened, never from fetch_one.
+            # Always 200: an unusable chain is {"ok": false, "reason": ...}.
+            from convexity import options_density
+            from convexity.persistence import load_prefs
+
+            q = parse_qs(parsed.query)
+            sym = (q.get("symbol") or [""])[0].strip().upper()
+            if not sym:
+                self._send_json(400, {"error": "symbol required"})
+                return
+            try:
+                h = int((q.get("h") or ["365"])[0])
+            except ValueError:
+                h = 365
+            try:
+                beta = float((q.get("beta") or [""])[0])
+            except ValueError:
+                beta = None
+            self._send_json(200, options_density.density(sym, h, beta, load_prefs()))
+            return
         if parsed.path == "/api/history":
             # Intraday half of the chart granularity ladder (1M/3M/6M). Kept off
             # /api/detail on purpose: the modal must open instantly on the daily

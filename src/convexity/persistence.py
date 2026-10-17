@@ -815,8 +815,16 @@ def _prefs_allowed() -> dict:
 
 # Phase 9 (notifications): a switch and quiet hours, typed rather than
 # picked from a set. A time is "HH:MM", 24-hour.
-_PREF_BOOLS = ("notify_on", "quiet_on")
+_PREF_BOOLS = ("notify_on", "quiet_on", "dist_haircut")
 _PREF_TIMES = ("quiet_from", "quiet_to")
+# The stock window's σ/μ (options_density.py): numbers with bounds, so a typo
+# can't make the curve nonsense. Missing = the module's default.
+_PREF_NUMS = {
+    "dist_erp": (0.0, 0.15),
+    "dist_kappa_stock": (0.5, 1.2),
+    "dist_kappa_index": (0.5, 1.2),
+}
+_PREF_CHOICES = {"dist_measure": {"P", "Q"}}
 
 
 def _is_hhmm(v) -> bool:
@@ -832,6 +840,11 @@ def _clean_prefs(raw) -> dict:
         return {}
     out = {k: v for k, v in raw.items() if k in allowed and isinstance(v, str) and v in allowed[k]}
     out.update({k: raw[k] for k in _PREF_BOOLS if isinstance(raw.get(k), bool)})
+    for k, (lo, hi) in _PREF_NUMS.items():
+        v = raw.get(k)
+        if isinstance(v, int | float) and not isinstance(v, bool) and lo <= v <= hi:
+            out[k] = float(v)
+    out.update({k: raw[k] for k, ok in _PREF_CHOICES.items() if raw.get(k) in ok})
     out.update({k: raw[k] for k in _PREF_TIMES if _is_hhmm(raw.get(k))})
     return out
 

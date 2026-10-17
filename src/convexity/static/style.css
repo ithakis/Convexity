@@ -36,6 +36,9 @@
     --book-rgb: 207, 34, 46;
     --warn: #9a6700;
     --warn-rgb: 191, 135, 0;
+    --amber: #a86a00;         /* analysts' targets on the σ/μ chart */
+    --amber-rgb: 168, 106, 0;
+    --on-amber: #ffffff;
     --bg-rgb: 255, 255, 255;
     --row-alt: #f6f9fc;
     --rev-head-bg: #eaf1f8;  /* the import review's header band */
@@ -73,6 +76,9 @@
     --book-rgb: 248, 81, 73;
     --warn: #d29922;
     --warn-rgb: 210, 153, 34;
+    --amber: #e9b955;
+    --amber-rgb: 233, 185, 85;
+    --on-amber: #1a1306;
     --bg-rgb: 10, 14, 20;
     --row-alt: #0f151e;
     --rev-head-bg: #13202e;
@@ -121,6 +127,9 @@
     --book-rgb: 255, 67, 61;
     --warn: #f5b301;
     --warn-rgb: 245, 179, 1;
+    --amber: #ffb000;
+    --amber-rgb: 255, 176, 0;
+    --on-amber: #000000;
     --bg-rgb: 0, 0, 0;
     --row-alt: #0e0e0e;
     --rev-head-bg: #1a1208;
@@ -2425,14 +2434,14 @@
 
   /* ===== Detail modal ===== */
   .modal-bg {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: none;
+    position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none;
     align-items: flex-start; justify-content: center; z-index: 50;
     padding: 24px 16px; overflow-y: auto;
   }
   .modal-bg.show { display: flex; }
   .modal {
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-lg);
-    width: min(1120px, 96vw); color: var(--text);
+    width: min(1440px, 96vw); color: var(--text);
     box-shadow: 0 18px 60px rgba(0,0,0,0.35);
     overflow: hidden;
   }
@@ -2549,7 +2558,7 @@
 
   .m-chart {
     position: relative; width: 100%; height: 320px;
-    border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden;
+    border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
     background: var(--bg-canvas);
   }
   .m-chart svg { display: block; width: 100%; height: 100%; }
@@ -2566,6 +2575,46 @@
     display: flex; gap: 18px; flex-wrap: wrap;
   }
   .m-range-info b { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* σ/μ: the real-world price distribution drawn into the chart (owner,
+     mockup v7). The canvas paints the future zone; the hit layer above it
+     takes the hover (the history keeps its own crosshair underneath). */
+  .m-greek { font-family: "Times New Roman", Georgia, serif; font-style: italic; font-size: 16px;
+    padding: 1px 12px; min-width: 38px; justify-content: center; }
+  .m-fc-cv { position: absolute; top: 0; pointer-events: none; }
+  .m-fc-hit { position: absolute; cursor: crosshair; }
+  .m-fc-ctl { position: absolute; top: 8px; right: 10px; display: flex; gap: 6px; z-index: 2; }
+  .m-fc-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-soft);
+    background: var(--bg-canvas); padding: 2px; }
+  .m-fc-seg button, .m-fc-replay { border: 0; background: transparent; color: var(--muted); font: inherit;
+    font-size: 13px; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+  .m-fc-seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .m-fc-replay { border: 1px solid var(--border); background: var(--bg-canvas); border-radius: var(--r-soft); font-size: 15px; }
+  .m-fc-seg button:hover, .m-fc-replay:hover { color: var(--accent); }
+  .m-fc-tt { position: absolute; pointer-events: none; z-index: 3; display: none; min-width: 230px;
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; font-size: 13px; line-height: 1.6; color: var(--text);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.25); font-variant-numeric: tabular-nums; }
+  .m-fc-tt.show { display: block; }
+  .m-fc-tt .r { display: flex; justify-content: space-between; gap: 16px; }
+  .m-fc-tt .p { font-size: 16px; font-weight: 700; }
+  .m-fc-tt .m { color: var(--muted); }
+  .m-fc-tt b { font-weight: 700; }
+  .m-fc-tt .pos { color: var(--pos); } .m-fc-tt .neg { color: var(--neg); }
+  .m-fc-tt .amb { color: var(--amber); }
+  .m-fc-tt hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
+  .m-fc-ro { margin-top: 10px; }
+  .m-fc-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 24px;
+    padding: 14px 18px; border: 1px solid var(--border); border-radius: 12px; }
+  .m-fc-grid span { display: block; color: var(--muted); font-size: 12.5px; margin-bottom: 2px; }
+  .m-fc-grid b { font-size: 17px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+  .m-fc-grid b small { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .m-fc-grid b.pos { color: var(--pos); } .m-fc-grid b.neg { color: var(--neg); } .m-fc-grid b.amb { color: var(--amber); }
+  .m-fc-wait { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
+  .m-fc-foot { color: var(--muted); font-size: 12.5px; line-height: 1.6; margin: 8px 4px 0; }
+  .m-fc-foot a { color: var(--accent); text-decoration: none; }
+  .m-fc-foot a:hover { text-decoration: underline; }
+  @media (max-width: 900px) { .m-fc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .m-range-info .pos { color: var(--pos); }
   .m-range-info .neg { color: var(--neg); }
 

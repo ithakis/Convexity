@@ -2469,6 +2469,11 @@ const DETAIL = {
   showSP: false,        // overlay S&P 500
   showSector: false,    // overlay sector ETF
   showVol: true,        // volume bars
+  // σ/μ (the real-world price distribution): both on when a window opens.
+  showSigma: true, showMu: true,
+  fcH: 365,             // horizon in days: 365 (12M, the default) or 91 (3M)
+  fc: {}, fcPending: {}, // /api/density payloads by horizon, and in-flight fetches
+  fcSim: null, fcAnimKey: null, fcT: 2, fcHov: null, fcRaf: 0,
   // Sub-daily payloads from /api/history, keyed by range. Fetched lazily the
   // first time an intraday range is picked, so opening the modal stays instant.
   intraday: {},
@@ -2486,6 +2491,8 @@ function openModal(r) {
   if (r.error) return;
   DETAIL.data = null; DETAIL.row = r;
   DETAIL.range = "1Y"; DETAIL.showSP = false; DETAIL.showSector = false; DETAIL.showVol = true;
+  DETAIL.showSigma = DETAIL.showMu = true; DETAIL.fcH = 365; DETAIL.fcAuto = true;
+  DETAIL.fc = {}; DETAIL.fcPending = {}; DETAIL.fcSim = null; DETAIL.fcAnimKey = null; DETAIL.fcHov = null;
   DETAIL.intraday = {}; DETAIL.intraPending = {};  // per-symbol; server caches the fetches
   DETAIL.sma = CHART_SMA;       // shared reference — see CHART_SMA
   renderModalSkeleton();
@@ -2496,6 +2503,7 @@ function openModal(r) {
       if (d && !d.error) {
         DETAIL.data = d;
         renderModalFull();
+        ensureDensity();
         // The user can pick 1M/3M/6M while this fetch is still in flight;
         // ensureIntraday bails on !DETAIL.data, and the range-tab handler's
         // same-range guard means re-clicking that tab does nothing — so the
@@ -2610,11 +2618,15 @@ function renderModalSkeleton() {
         <button class="m-toolbar-btn" id="m-toggle-sp" title="Compare to S&P 500"><span class="dot sp"></span>S&amp;P 500</button>
         <button class="m-toolbar-btn" id="m-toggle-sec" title="Compare to sector ETF"><span class="dot sec"></span>Sector</button>
         <button class="m-toolbar-btn active" id="m-toggle-vol" title="Toggle volume bars">Volume</button>
+        <span class="m-toolbar-sep"></span>
+        <button class="m-toolbar-btn m-greek active" id="m-toggle-sigma" title="σ — the spread of prices in 3 or 12 months, from the listed options">σ</button>
+        <button class="m-toolbar-btn m-greek active" id="m-toggle-mu" title="μ — where analysts expect the price, from their 12-month targets">μ</button>
       </div>
       <div class="m-chart" id="m-chart">
         <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">${lcHtml("fetching detail", {bar: true})}</div>
       </div>
       <div class="m-range-info" id="m-range-info" style="display:none;"></div>
+      <div class="m-fc-ro" id="m-fc-ro" style="display:none;"></div>
     </div>
     <div class="m-sections" id="m-sections"></div>
   `;
@@ -2628,6 +2640,12 @@ function renderModalSkeleton() {
   $("#m-toggle-sp").onclick = () => { DETAIL.showSP = !DETAIL.showSP; renderModalFull(); ensureIntraday(DETAIL.range); };
   $("#m-toggle-sec").onclick = () => { DETAIL.showSector = !DETAIL.showSector; renderModalFull(); ensureIntraday(DETAIL.range); };
   $("#m-toggle-vol").onclick = () => { DETAIL.showVol = !DETAIL.showVol; renderModalFull(); };
+  $("#m-toggle-sigma").onclick = () => { DETAIL.showSigma = !DETAIL.showSigma; ensureDensity(); renderModalFull(); };
+  $("#m-toggle-mu").onclick = () => { DETAIL.showMu = !DETAIL.showMu; ensureDensity(); renderModalFull(); };
+  $("#m-fc-ro").addEventListener("click", (e) => {
+    if (!e.target.closest("[data-fc-settings]")) return;
+    e.preventDefault(); openSettings(); selectSettingsSection("distribution");
+  });
   wireChartTypeDd($("#m-chart-type"), () => {
     renderModalFull();
     // The portfolio chart shares the setting; repaint just that chart.
@@ -2702,6 +2720,8 @@ function renderModalFull() {
   $("#m-toggle-sp")?.classList.toggle("active", DETAIL.showSP);
   $("#m-toggle-sec")?.classList.toggle("active", DETAIL.showSector);
   $("#m-toggle-vol")?.classList.toggle("active", DETAIL.showVol);
+  $("#m-toggle-sigma")?.classList.toggle("active", DETAIL.showSigma);
+  $("#m-toggle-mu")?.classList.toggle("active", DETAIL.showMu);
   for (const n of SMA_PERIODS) $(`#m-toggle-sma${n}`)?.classList.toggle("active", !!DETAIL.sma[n]);
   // Hide sector toggle if no sector ETF data
   if (!DETAIL.data.benchmark_sector || !DETAIL.data.benchmark_sector.length) {
@@ -3157,7 +3177,12 @@ function renderChart() {
   const t0 = stock[0][0], t1 = stock[stock.length - 1][0];
   const type = CHART_TYPE, usesRange = chartTypeUsesRange(type);
   const W = wrap.clientWidth || 800;
-  const padL = 48, padR = 10, padT = 12;
+  // σ/μ on: the history ends at Today, ~58% across; the future zone, the
+  // sideways density and the right-axis price tags take the rest.
+  const FC = fcOn();
+  const fcPlotR = W - FC_ZONE.tagW;
+  const padL = 48, padT = 12;
+  const padR = FC ? Math.round(W - (padL + (fcPlotR - padL) * FC_ZONE.hist)) : 10;
   const plotW = W - padL - padR;
   // Bars for the window. Candles need room to read, so they are bucketed to
   // ~5px each (daily → weekly on 5Y, like TradingView); the HLC band keeps
@@ -3188,7 +3213,7 @@ function renderChart() {
   }
 
   // Geometry: price pane, then (if on) a separate volume pane, then the dates.
-  const chartH = 280, volGap = volOn ? 10 : 0, volH = volOn ? 64 : 0, xLabH = 22;
+  const chartH = FC ? 380 : 280, volGap = volOn ? 10 : 0, volH = volOn ? 64 : 0, xLabH = 22;
   const H = padT + chartH + volGap + volH + xLabH;
   const padB = H - padT - chartH;
   wrap.style.height = H + "px";
@@ -3219,8 +3244,18 @@ function renderChart() {
   if (usesRange) for (const b of drawBars) { if (b.l < lo) lo = b.l; if (b.h > hi) hi = b.h; }
   const rng = (hi - lo) || 1;
   const padPct = 0.05;
-  lo -= rng * padPct; hi += rng * padPct;
-  const yScale = (v) => padT + (1 - (v - lo) / (hi - lo)) * chartH;
+  // With σ/μ the axis is log (a cone of returns is symmetric in log price)
+  // and also spans the end distribution's 3%..97%.
+  let logY = false;
+  if (FC && lo > 0) {
+    [lo, hi] = fcYRange(lo, hi);
+    lo /= 1.04; hi *= 1.04; logY = true;
+  } else {
+    lo -= rng * padPct; hi += rng * padPct;
+  }
+  const yScale = logY
+    ? (v) => padT + (1 - (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo))) * chartH
+    : (v) => padT + (1 - (v - lo) / (hi - lo)) * chartH;
 
   // Main path
   const buildPath = (pts) => {
@@ -3247,7 +3282,7 @@ function renderChart() {
   // Y-axis ticks (4)
   const ticks = [];
   for (let i = 0; i <= 4; i++) {
-    const v = lo + (hi - lo) * (i / 4);
+    const v = logY ? Math.exp(Math.log(lo) + (Math.log(hi) - Math.log(lo)) * (i / 4)) : lo + (hi - lo) * (i / 4);
     ticks.push({ v, y: yScale(v) });
   }
   // X-axis ticks (4-6 evenly spaced)
@@ -3292,9 +3327,9 @@ function renderChart() {
           <stop offset="100%" stop-color="rgba(${fillRgb},0.02)"/>
         </linearGradient>
       </defs>
-      ${ticks.map(t => `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>`).join("")}
+      ${ticks.map(t => `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${FC ? fcPlotR : W-padR}" y2="${t.y.toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>`).join("")}
       ${ticks.map(t => `<text x="${padL-6}" y="${t.y+3}" font-size="10" fill="var(--muted)" text-anchor="end">${fmtTickVal(t.v)}</text>`).join("")}
-      ${xTicks.map((t, i) => `<text x="${t.x}" y="${H - 7}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtTickDate(t.t)}</text>`).join("")}
+      ${xTicks.filter((t, i) => !FC || i < xTicks.length - 1).map((t, i) => `<text x="${t.x}" y="${H - 7}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtTickDate(t.t)}</text>`).join("")}
       ${volSvg}
       ${priceSvg}
       ${spyPath ? `<path d="${spyPath}" fill="none" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
@@ -3314,10 +3349,582 @@ function renderChart() {
 
   // Save geometry + data for interaction
   DETAIL.geom = { W, H, padL, padR, padT, padB, chartH, xScale, xInv, yScale, stock, spy, sec,
-                  t0, t1, fillRgb, interval: src.interval, bars: drawBars, volBars, type };
+                  t0, t1, fillRgb, interval: src.interval, bars: drawBars, volBars, type,
+                  fc: FC ? { xT: W - padR, xH: padL + (fcPlotR - padL) * FC_ZONE.pdf, xR: fcPlotR, lo, hi, ox: 40 } : null };
+  if (FC) mountForecast(wrap, DETAIL.geom);
 
   renderChartInfoDefault();
   attachChartInteraction();
+}
+
+/* ---- σ/μ: the real-world price distribution (options_density.py) ----
+ * Two toolbar toggles, both on when a window opens (owner, mockup v7):
+ *   σ+μ  σ from the listed options, μ from the analysts (12M; 3M and no-target
+ *        names fall back to the market's μ, and the footnote says so)
+ *   σ    σ from the options, μ from the market (CAPM)
+ *   μ    the analysts alone: a line per firm to its target, no randomness
+ * The chart keeps its history on the left; a fixed-width future zone (its own
+ * linear time) runs from Today to the real expiry, then the sideways density.
+ * The paths are not GBM: each path's end is a stratified draw from the curve
+ * drawn beside it (inverse CDF), and a Gaussian bridge in log price carries it
+ * there on a cumulative-variance clock with a jump on each earnings date — so
+ * the paths' end points ARE the density, by construction. Anything between
+ * today and the expiry (the cone, touch chances) is that bridge model's, and
+ * the footnote says the curve is a chance, never a prediction. */
+const FC_ZONE = { hist: 0.58, pdf: 0.82, tagW: 82, steps: 96, paths: 1000, draw: 140 };
+const FC_ANIM = { paths: 750, pdf: 300 };
+
+function fcOn() { return DETAIL.showSigma || DETAIL.showMu; }
+
+/* The payload for the window's symbol and horizon; fetches it (12M first, then
+ * 3M in the background so switching is instant). Successes re-render. */
+function ensureDensity(h) {
+  if (!DETAIL.data || !fcOn()) return;
+  const sym = DETAIL.row.symbol;
+  const want = h || DETAIL.fcH;
+  if (DETAIL.fc[want] || DETAIL.fcPending[want]) return;
+  DETAIL.fcPending[want] = true;
+  const beta = DETAIL.data.beta ?? DETAIL.row.beta;
+  const q = `symbol=${encodeURIComponent(sym)}&h=${want}` + (beta != null && isFinite(beta) ? `&beta=${beta}` : "");
+  fetch("/api/density?" + q).then(r => r.json()).then(d => {
+    if (!DETAIL.data || DETAIL.row.symbol !== sym) return;   // the window moved on
+    DETAIL.fc[want] = d;
+    DETAIL.fcPending[want] = false;
+    // 12M is the default, but long chains are often too thin to trust their
+    // tails (SPY, DELL today); then the window opens on 3M and says why.
+    if (want === 91 && DETAIL.fcAuto && d.ok && DETAIL.fc[365] && !DETAIL.fc[365].ok) DETAIL.fcH = 91;
+    if (want === DETAIL.fcH) renderChart();
+    else fcChipLabels();
+    if (want === 365) ensureDensity(91);
+  }).catch(() => {
+    DETAIL.fcPending[want] = false;
+    if (DETAIL.data && DETAIL.row.symbol === sym) { DETAIL.fc[want] = { ok: false, reason: "error" }; if (want === DETAIL.fcH) renderChart(); }
+  });
+}
+
+/* Which picture the toggles ask for, given what the payload has. */
+function fcMode(d) {
+  const S = DETAIL.showSigma, M = DETAIL.showMu;
+  if (!S && !M) return null;
+  if (!S) return { kind: "mu" };
+  if (d.measure === "Q" && d.curves.rn) return { kind: "sigma", curve: "rn", mu: "options" };
+  if (M && d.horizon === 365 && d.curves.analysts) return { kind: "sigma", curve: "analysts", mu: "analysts" };
+  return { kind: "sigma", curve: "market", mu: "market", fellBack: M };
+}
+
+function fcRng(seedStr) {
+  let s = 2166136261;
+  for (const ch of seedStr) s = Math.imul(s ^ ch.charCodeAt(0), 16777619);
+  return () => {   // mulberry32
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* The simulation for one (symbol, horizon, curve). Seeded, so a redraw is the
+ * same picture; cached on DETAIL until the payload or the mode changes. */
+function fcSimulate(d, mode) {
+  const key = `${d.symbol}|${d.horizon}|${mode.kind}|${mode.curve || ""}|${d.measure}|${d.erp}|${d.kappa}|${d.haircut}`;
+  if (DETAIL.fcSim && DETAIL.fcSim.key === key) return DETAIL.fcSim;
+  const sim = { key, d, mode, s0: d.s0, days: d.days, steps: FC_ZONE.steps };
+  if (mode.kind === "mu") {
+    DETAIL.fcSim = sim;
+    return sim;
+  }
+  const c = d.curves[mode.curve];
+  const x = c.x, n = x.length, dx = x[1] - x[0];
+  const px = x.map(v => d.forward * Math.exp(v));
+  let tot = 0; for (const v of c.p) tot += v * dx;
+  const p = c.p.map(v => v / tot);
+  const cdf = new Float64Array(n); let acc = 0;
+  for (let i = 0; i < n; i++) { acc += p[i] * dx; cdf[i] = acc; }
+  let m1 = 0, m2 = 0; for (let i = 0; i < n; i++) { m1 += p[i] * x[i] * dx; m2 += p[i] * x[i] * x[i] * dx; }
+  const V = Math.max(m2 - m1 * m1, 1e-8);
+  // Variance clock: diffusion plus the options' earnings jumps (capped so the
+  // diffusion keeps at least a quarter of the variance).
+  const ev = (d.earnings || []).filter(e => e.days > 0 && e.days < d.days);
+  let jumps = ev.reduce((s, e) => s + e.var, 0);
+  const jscale = jumps > 0.75 * V ? 0.75 * V / jumps : 1;
+  jumps *= jscale;
+  const sd = (V - jumps) / d.days, S = sim.steps;
+  const v = new Float64Array(S + 1);
+  for (let j = 1; j <= S; j++) {
+    const a = d.days * (j - 1) / S, b = d.days * j / S;
+    let dv = sd * (b - a);
+    for (const e of ev) if (e.days > a && e.days <= b) dv += e.var * jscale;
+    v[j] = v[j - 1] + dv;
+  }
+  const inv = (u) => {
+    let lo = 0, hi = n - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (cdf[m] < u * acc) lo = m + 1; else hi = m; }
+    return px[lo];
+  };
+  const rnd = fcRng(key), gauss = () => Math.sqrt(-2 * Math.log(rnd() || 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const NP = FC_ZONE.paths, l0 = Math.log(d.s0), VT = v[S];
+  const P = new Float64Array(NP * (S + 1)), X = new Float64Array(S + 1);
+  // Stratified ends, then shuffled so the first `draw` paths are a fair sample.
+  const order = Array.from({ length: NP }, (_, k) => k);
+  for (let i = NP - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  for (let r = 0; r < NP; r++) {
+    const end = Math.log(inv((order[r] + 0.5) / NP));
+    X[0] = 0;
+    for (let j = 1; j <= S; j++) X[j] = X[j - 1] + gauss() * Math.sqrt(v[j] - v[j - 1]);
+    for (let j = 0; j <= S; j++) P[r * (S + 1) + j] = l0 + X[j] - v[j] / VT * X[S] + v[j] / VT * (end - l0);
+  }
+  const cols = [];
+  for (let j = 0; j <= S; j++) {
+    const col = new Float64Array(NP);
+    for (let r = 0; r < NP; r++) col[r] = P[r * (S + 1) + j];
+    col.sort();
+    cols.push(col);
+  }
+  let mean = 0; for (let i = 0; i < n; i++) mean += p[i] * px[i] * dx;
+  Object.assign(sim, { x, px, p, cdf, total: acc, dx, V, v, P, cols, ev, mean, method: c.method });
+  DETAIL.fcSim = sim;
+  return sim;
+}
+
+const fcQ = (col, q) => col[Math.min(col.length - 1, Math.max(0, Math.floor(q * col.length)))];
+/* The curve's own quantile (the end date reads the curve, not the paths). */
+function fcCurveQ(sim, q) {
+  const t = q * sim.total;
+  for (let i = 0; i < sim.cdf.length; i++) if (sim.cdf[i] >= t) return sim.px[i];
+  return sim.px[sim.px.length - 1];
+}
+function fcCurveAbove(sim, K) {
+  let s = 0; for (let i = 0; i < sim.px.length; i++) if (sim.px[i] >= K) s += sim.p[i] * sim.dx;
+  return s / sim.total;
+}
+/* Chance of ending beyond K at step j, and of touching K first: the paths,
+ * plus the Brownian-bridge crossing chance between steps (without it the
+ * touches between steps are missed and the chance comes out too low). */
+function fcStats(sim, K, j) {
+  const S = sim.steps, NP = FC_ZONE.paths, lk = Math.log(K), up = K >= sim.s0, P = sim.P, v = sim.v;
+  let beyond = 0, touch = 0;
+  for (let r = 0; r < NP; r++) {
+    const o = r * (S + 1);
+    if (up ? P[o + j] >= lk : P[o + j] <= lk) beyond++;
+    let surv = 1, hit = false;
+    for (let i = 1; i <= j; i++) {
+      const a = P[o + i - 1], b = P[o + i];
+      if (up ? b >= lk : b <= lk) { hit = true; break; }
+      surv *= 1 - Math.exp(-2 * (lk - a) * (lk - b) / Math.max(v[i] - v[i - 1], 1e-12));
+    }
+    touch += hit ? 1 : 1 - surv;
+  }
+  return { up, beyond: beyond / NP, touch: touch / NP };
+}
+
+function fcRatingKind(r) {
+  if (/sell|underperform|underweight|negative|reduce/i.test(r)) return "sell";
+  if (/buy|outperform|overweight|positive|accumulate|add\b/i.test(r)) return "buy";
+  return "hold";
+}
+
+/* Analysts' marks in the window's currency (targets are in the chain's). */
+function fcMarks(d) {
+  const a = d.analysts;
+  if (!a || d.horizon !== 365) return null;
+  const k = d.ratio;
+  return {
+    low: a.low != null ? a.low * k : null, cons: a.consensus * k, high: a.high != null ? a.high * k : null,
+    firms: (a.firms || []).map(f => ({ ...f, px: f.target * k })),
+  };
+}
+
+/* The y range the forecast needs: history ∪ the end curve's 3%..97%. */
+function fcYRange(lo, hi) {
+  const d = DETAIL.fc[DETAIL.fcH];
+  if (!d || !d.ok) return [lo, hi];
+  const mode = fcMode(d);
+  if (!mode) return [lo, hi];
+  if (mode.kind === "mu") {
+    const mk = fcMarks(d);
+    if (mk) { lo = Math.min(lo, mk.low ?? mk.cons, d.s0); hi = Math.max(hi, mk.high ?? mk.cons, d.s0); }
+    return [lo, hi];
+  }
+  const sim = fcSimulate(d, mode);
+  return [Math.min(lo, fcCurveQ(sim, 0.03)), Math.max(hi, fcCurveQ(sim, 0.97))];
+}
+
+function fcDateAt(days) {
+  const t = new Date(); t.setHours(12, 0, 0, 0); t.setDate(t.getDate() + Math.round(days));
+  return t;
+}
+const FC_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const fcFmtDate = (t) => `${t.getDate()} ${FC_MON[t.getMonth()]} ${t.getFullYear()}`;
+
+/* A horizon chip names its real expiry once that chain has been read. */
+function fcChipLabel(h) {
+  const d = DETAIL.fc[h];
+  return (h === 365 ? "12M" : "3M") + (d && d.expiry ? " · " + fcFmtDate(new Date(d.expiry + "T12:00:00")) : "");
+}
+function fcChipLabels() {
+  document.querySelectorAll("#m-fc-h [data-fc-h]").forEach(b => { b.textContent = fcChipLabel(+b.dataset.fcH); });
+}
+
+/* Mounts the forecast layer over the chart (called by renderChart). */
+function mountForecast(wrap, g) {
+  const d = DETAIL.fc[DETAIL.fcH];
+  const f = g.fc;
+  const mk = (h) => `<button data-fc-h="${h}" class="${DETAIL.fcH === h ? "on" : ""}">${fcChipLabel(h)}</button>`;
+  wrap.insertAdjacentHTML("beforeend", `
+    <canvas class="m-fc-cv" id="m-fc-cv" style="left:${f.xT - f.ox}px;width:${g.W - f.xT + f.ox}px;height:${g.H}px"></canvas>
+    <div class="m-fc-hit" id="m-fc-hit" style="left:${f.xT}px;top:${g.padT}px;width:${g.W - f.xT}px;height:${g.chartH}px"></div>
+    <div class="m-fc-ctl"><span class="m-fc-seg" id="m-fc-h">${mk(365)}${mk(91)}</span>
+      <button class="m-fc-replay" id="m-fc-replay" title="Replay" aria-label="Replay the paths">↻</button></div>
+    <div class="m-fc-tt" id="m-fc-tt"></div>`);
+  const cv = $("#m-fc-cv"), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round((g.W - f.xT + f.ox) * dpr); cv.height = Math.round(g.H * dpr);
+  $("#m-fc-h").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-fc-h]"); if (!b) return;
+    const h = +b.dataset.fcH; if (h === DETAIL.fcH) return;
+    DETAIL.fcH = h; DETAIL.fcAuto = false; ensureDensity(h); renderChart();
+  });
+  $("#m-fc-replay").onclick = () => { DETAIL.fcAnimKey = null; fcPlay(); };
+  const hit = $("#m-fc-hit");
+  hit.addEventListener("mousemove", (e) => {
+    const r = hit.getBoundingClientRect();
+    fcHover(f.xT + (e.clientX - r.left) * ((g.W - f.xT) / r.width), g.padT + (e.clientY - r.top));
+  });
+  hit.addEventListener("mouseleave", () => { DETAIL.fcHov = null; $("#m-fc-tt").classList.remove("show"); fcDraw(); });
+  DETAIL.fcHov = null;
+  if (d && d.ok && fcMode(d)) fcPlay(); else fcDraw();
+}
+
+/* Animate when the picture is new (open, horizon, toggles, settings);
+ * otherwise (a resize, a range tab) draw the finished state at once. */
+function fcPlay() {
+  const d = DETAIL.fc[DETAIL.fcH];
+  const mode = d && d.ok ? fcMode(d) : null;
+  const key = mode ? `${d.symbol}|${d.horizon}|${mode.kind}|${mode.curve || ""}|${d.measure}|${d.erp}|${d.kappa}|${d.haircut}` : null;
+  cancelAnimationFrame(DETAIL.fcRaf || 0);
+  const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!key || key === DETAIL.fcAnimKey || reduce) { DETAIL.fcAnimKey = key; DETAIL.fcT = 2; fcDraw(); return; }
+  DETAIL.fcAnimKey = key;
+  const t0 = performance.now();
+  const step = (now) => {
+    const dt = now - t0;
+    DETAIL.fcT = dt < FC_ANIM.paths ? dt / FC_ANIM.paths : 1 + Math.min(1, (dt - FC_ANIM.paths) / FC_ANIM.pdf);
+    fcDraw();
+    if (DETAIL.fcT < 2 && $("#m-fc-cv")) DETAIL.fcRaf = requestAnimationFrame(step);
+  };
+  DETAIL.fcRaf = requestAnimationFrame(step);
+}
+
+function fcRoundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+function fcDraw() {
+  const cv = $("#m-fc-cv"), g = DETAIL.geom;
+  if (!cv || !g || !g.fc) return;
+  const f = g.fc, ctx = cv.getContext("2d"), dpr = cv.width / (g.W - f.xT + f.ox);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.translate(f.ox - f.xT, 0);         // draw in chart coordinates
+  ctx.clearRect(f.xT - f.ox, 0, g.W, g.H);
+  const css = getComputedStyle(document.documentElement), cvar = (k) => css.getPropertyValue(k).trim();
+  const col = { text: cvar("--text"), muted: cvar("--muted"), border: cvar("--border"), bg: cvar("--bg-canvas"),
+    acc: cvar("--accent-rgb"), pos: cvar("--pos"), neg: cvar("--neg"), posRgb: cvar("--pos-rgb"), negRgb: cvar("--neg-rgb"),
+    amber: cvar("--amber"), amberRgb: cvar("--amber-rgb"), onAmber: cvar("--on-amber") };
+  const font = (w, s) => `${w} ${s}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  const top = g.padT, bot = g.padT + g.chartH, y = g.yScale, { xT, xH, xR } = f;
+  const d = DETAIL.fc[DETAIL.fcH];
+  const mode = d && d.ok ? fcMode(d) : null;
+
+  // The zone, Today's rule, the axis labels.
+  ctx.fillStyle = `rgba(${col.acc},0.04)`; ctx.fillRect(xT, top, xR - xT, bot - top);
+  ctx.strokeStyle = col.border; ctx.lineWidth = 1; ctx.setLineDash([3, 4]);
+  ctx.beginPath(); ctx.moveTo(xT, top); ctx.lineTo(xT, bot); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = col.text; ctx.font = font(600, 12); ctx.textAlign = "center";
+  ctx.fillText("Today", xT, g.H - 7);
+  if (d && d.expiry) ctx.fillText(fcFmtDate(new Date(d.expiry + "T12:00:00")), Math.min(xH, xR - 46), g.H - 7);
+  ctx.textAlign = "left";
+
+  const note = (msg) => {
+    ctx.fillStyle = col.muted; ctx.font = font(500, 14); ctx.textAlign = "center";
+    ctx.fillText(msg, (xT + xR) / 2, (top + bot) / 2); ctx.textAlign = "left";
+  };
+  if (!d) { note("Pricing the options…"); return; }
+  if (!d.ok) {
+    note(d.reason === "no_options" ? "No listed options"
+      : d.reason === "no_expiry" ? `No options expiry near ${d.horizon === 365 ? "12" : "3"} months`
+      : d.reason === "thin" ? `Thin options data${d.quality ? ` (${d.quality.quotes} quotes${d.quality.why ? ", " + d.quality.why : ""})` : ""}`
+      : "Couldn't price the options. Try again later.");
+    return;
+  }
+  if (!mode) return;
+
+  const t = DETAIL.fcT ?? 2, S = FC_ZONE.steps, n = Math.floor(Math.min(1, t) * S);
+  const X = (j) => xT + (xH - xT) * j / S;
+  const grow = t >= 1 ? 1 - Math.pow(1 - Math.min(1, t - 1), 3) : 0;
+  const mk = DETAIL.showMu ? fcMarks(d) : null;
+  ctx.save(); ctx.beginPath(); ctx.rect(xT, top - 1, g.W - xT, bot - top + 2); ctx.clip();
+
+  if (mode.kind === "mu") {
+    if (!mk) { ctx.restore(); note(d.horizon === 365 ? "No analyst targets" : "Analyst targets are 12-month only"); return; }
+    for (const fm of mk.firms) {
+      ctx.strokeStyle = `rgba(${col.amberRgb},${fm.stale ? 0.25 : 0.6})`; ctx.lineWidth = 1.2; ctx.beginPath();
+      for (let j = 0; j <= n; j++) { const yy = y(d.s0 * Math.pow(fm.px / d.s0, j / S)); j ? ctx.lineTo(X(j), yy) : ctx.moveTo(X(j), yy); }
+      ctx.stroke();
+    }
+    // Where the targets sit: a Gaussian KDE in log price (Silverman's bandwidth).
+    if (grow > 0 && mk.firms.length > 1) {
+      const lt = mk.firms.map(fm => Math.log(fm.px)), m = lt.reduce((a, b) => a + b, 0) / lt.length;
+      const sd = Math.sqrt(lt.reduce((a, b) => a + (b - m) ** 2, 0) / lt.length) || 0.05;
+      const bw = 1.06 * sd * Math.pow(lt.length, -0.2), ys = [], N = 160;
+      const ylo = Math.min(...lt) - 3 * bw, yhi = Math.max(...lt) + 3 * bw;
+      for (let i = 0; i <= N; i++) { const l = ylo + (yhi - ylo) * i / N; ys.push([Math.exp(l), lt.reduce((s, tt) => s + Math.exp(-0.5 * ((l - tt) / bw) ** 2), 0)]); }
+      const mx = Math.max(...ys.map(q => q[1])), Wd = (xR - xH - 6) * grow;
+      ctx.beginPath(); ctx.moveTo(xH, y(ys[0][0]));
+      for (const [pv, dv] of ys) ctx.lineTo(xH + dv / mx * Wd, y(pv));
+      ctx.lineTo(xH, y(ys[N][0])); ctx.closePath();
+      ctx.fillStyle = `rgba(${col.amberRgb},0.22)`; ctx.fill(); ctx.strokeStyle = col.amber; ctx.lineWidth = 1.6; ctx.stroke();
+    }
+  } else {
+    const sim = fcSimulate(d, mode);
+    (sim.ev || []).forEach((e, i) => {
+      const xe = xT + (xH - xT) * e.days / d.days;
+      ctx.strokeStyle = col.border; ctx.setLineDash([2, 4]); ctx.beginPath(); ctx.moveTo(xe, top + 18); ctx.lineTo(xe, bot); ctx.stroke(); ctx.setLineDash([]);
+      ctx.font = font(700, 11); ctx.fillStyle = e.estimated ? col.muted : col.text; ctx.globalAlpha = e.estimated ? 0.6 : 1;
+      ctx.fillText("E", xe - 3.5, top + 13); ctx.globalAlpha = 1;
+    });
+    if (n > 0) {
+      const band = (a, b, al) => {
+        ctx.fillStyle = `rgba(${col.acc},${al})`; ctx.beginPath();
+        for (let j = 0; j <= n; j++) ctx.lineTo(X(j), y(Math.exp(fcQ(sim.cols[j], a))));
+        for (let j = n; j >= 0; j--) ctx.lineTo(X(j), y(Math.exp(fcQ(sim.cols[j], b))));
+        ctx.fill();
+      };
+      band(0.05, 0.95, 0.06); band(0.25, 0.75, 0.09);
+      ctx.lineWidth = 0.8; ctx.strokeStyle = `rgba(${col.acc},0.16)`;
+      for (let r = 0; r < FC_ZONE.draw; r++) {
+        const o = r * (S + 1); ctx.beginPath();
+        for (let j = 0; j <= n; j++) { const yy = y(Math.exp(sim.P[o + j])); j ? ctx.lineTo(X(j), yy) : ctx.moveTo(X(j), yy); }
+        ctx.stroke();
+      }
+      ctx.strokeStyle = col.text; ctx.globalAlpha = 0.8; ctx.lineWidth = 1.4; ctx.setLineDash([6, 4]); ctx.beginPath();
+      for (let j = 0; j <= n; j++) ctx.lineTo(X(j), y(Math.exp(fcQ(sim.cols[j], 0.5))));
+      ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+    }
+    if (grow > 0) {
+      const Wd = xR - xH - 6;
+      let mx = 0; for (const v of sim.p) if (v > mx) mx = v;
+      // Density per unit log price: the shape a log axis shows honestly.
+      const curve = (fill, stroke) => {
+        ctx.beginPath(); ctx.moveTo(xH, bot);
+        for (let i = 0; i < sim.px.length; i++) ctx.lineTo(xH + sim.p[i] / mx * Wd * grow, y(sim.px[i]));
+        ctx.lineTo(xH, top); ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = stroke; ctx.lineWidth = 1.8;
+        ctx.setLineDash(mode.curve === "rn" ? [5, 4] : []); ctx.stroke(); ctx.setLineDash([]);
+      };
+      const ys0 = y(d.s0);
+      ctx.save(); ctx.beginPath(); ctx.rect(xH, top, Wd + 8, ys0 - top); ctx.clip(); curve(`rgba(${col.posRgb},0.2)`, col.pos); ctx.restore();
+      ctx.save(); ctx.beginPath(); ctx.rect(xH, ys0, Wd + 8, bot - ys0); ctx.clip(); curve(`rgba(${col.negRgb},0.2)`, col.neg); ctx.restore();
+    }
+  }
+  ctx.strokeStyle = col.border; ctx.beginPath(); ctx.moveTo(xH, top); ctx.lineTo(xH, bot); ctx.stroke();
+
+  // Analysts' marks: a range bar on the density's spine, labels to its left.
+  if (mk && grow > 0 && mk.low != null && mk.high != null) {
+    const bx = xH - 7, yh = y(mk.high), yc = y(mk.cons), yl = y(mk.low);
+    ctx.globalAlpha = grow;
+    ctx.strokeStyle = `rgba(${col.amberRgb},0.55)`; ctx.lineWidth = 4; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(bx, yh); ctx.lineTo(bx, yl); ctx.stroke(); ctx.lineCap = "butt";
+    ctx.strokeStyle = col.amber; ctx.lineWidth = 2;
+    for (const yy of [yh, yl]) { ctx.beginPath(); ctx.moveTo(bx - 6, yy); ctx.lineTo(bx + 6, yy); ctx.stroke(); }
+    ctx.fillStyle = col.amber; ctx.strokeStyle = col.bg; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(bx, yc - 8); ctx.lineTo(bx + 8, yc); ctx.lineTo(bx, yc + 8); ctx.lineTo(bx - 8, yc); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.setLineDash([3, 4]); ctx.lineWidth = 1.2; ctx.strokeStyle = `rgba(${col.amberRgb},0.55)`;
+    ctx.beginPath(); ctx.moveTo(xH, yc); ctx.lineTo(xR, yc); ctx.stroke(); ctx.setLineDash([]);
+    const ccy = DETAIL.data.currency, labs = [[yh, "High", mk.high, false], [yc, "Consensus", mk.cons, true], [yl, "Low", mk.low, false]];
+    let prev = -1e9;
+    for (const [y0, k, v, main] of labs) {
+      const yy = Math.max(y0, prev + 26); prev = yy;
+      const val = fmtMoney(v, ccy);
+      ctx.font = font(main ? 700 : 600, 13); const vw = ctx.measureText(val).width;
+      ctx.font = font(500, 12); const kw = ctx.measureText(k).width;
+      const w = vw + kw + 22, x0 = bx - 14 - w;
+      fcRoundRect(ctx, x0, yy - 11, w, 22, 6);
+      ctx.fillStyle = main ? col.amber : col.bg; ctx.fill(); ctx.strokeStyle = `rgba(${col.amberRgb},0.75)`; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = main ? col.onAmber : col.amber; ctx.globalAlpha = grow * (main ? 0.8 : 0.85); ctx.fillText(k, x0 + 8, yy + 4);
+      ctx.globalAlpha = grow; ctx.font = font(main ? 700 : 600, 13); ctx.fillStyle = main ? col.onAmber : col.amber; ctx.fillText(val, x0 + 14 + kw, yy + 5);
+      ctx.strokeStyle = `rgba(${col.amberRgb},0.6)`; ctx.beginPath(); ctx.moveTo(x0 + w, yy); ctx.lineTo(bx - 6, y0); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Today's level and dot.
+  ctx.strokeStyle = col.text; ctx.globalAlpha = 0.35; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(xT, y(d.s0)); ctx.lineTo(xR, y(d.s0)); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+  ctx.fillStyle = col.text; ctx.beginPath(); ctx.arc(xT, y(d.s0), 4, 0, 7); ctx.fill();
+
+  const hov = DETAIL.fcHov;
+  if (hov) {
+    const yy = y(hov.K);
+    ctx.strokeStyle = col.text; ctx.globalAlpha = 0.6; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(xT, yy); ctx.lineTo(xR, yy); ctx.moveTo(hov.x, top); ctx.lineTo(hov.x, bot); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    ctx.fillStyle = col.text; ctx.beginPath(); ctx.arc(hov.x, yy, 4.5, 0, 7); ctx.fill();
+    if (hov.snap) { ctx.strokeStyle = col.amber; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(hov.x, yy, 8, 0, 7); ctx.stroke(); }
+  }
+  ctx.restore();
+
+  // Price tags on the right axis: today's, and the hover level.
+  const tag = (yc, text, fill, color) => {
+    ctx.font = font(600, 12); const w = ctx.measureText(text).width + 14;
+    const yy = Math.min(Math.max(yc, top + 10), bot - 10);
+    fcRoundRect(ctx, g.W - 4 - w, yy - 10, w, 20, 5); ctx.fillStyle = fill; ctx.fill();
+    ctx.fillStyle = color; ctx.fillText(text, g.W - 4 - w + 7, yy + 4);
+  };
+  tag(y(d.s0), fmtMoney(d.s0, DETAIL.data.currency), col.text, col.bg);
+  if (hov) tag(y(hov.K), fmtMoney(hov.K, DETAIL.data.currency), `rgb(${col.acc})`, col.bg);
+}
+
+/* Hover in the future zone: a date × price crosshair. On the density the date
+ * locks to the expiry and snaps to the analysts' marks. The box sits LEFT of
+ * the density (and of the marks' labels), so it never covers the curve. */
+function fcHover(cx, cy) {
+  const g = DETAIL.geom, f = g && g.fc, d = DETAIL.fc[DETAIL.fcH], tt = $("#m-fc-tt");
+  if (!f || !d || !d.ok || (DETAIL.fcT ?? 2) < 2) return;
+  const mode = fcMode(d);
+  if (!mode || cy < g.padT || cy > g.padT + g.chartH) { DETAIL.fcHov = null; tt.classList.remove("show"); fcDraw(); return; }
+  const S = FC_ZONE.steps, inPdf = cx >= f.xH - 14;
+  const x = inPdf ? f.xH : Math.max(f.xT, Math.min(cx, f.xH));
+  const j = inPdf ? S : Math.round((x - f.xT) / (f.xH - f.xT) * S);
+  let K = Math.exp(Math.log(f.lo) + (g.padT + g.chartH - cy) / g.chartH * (Math.log(f.hi) - Math.log(f.lo)));
+  const mk = DETAIL.showMu ? fcMarks(d) : null;
+  let snap = null;
+  if (inPdf && mk) {
+    for (const [k, v, who] of [["high", mk.high, "highest"], ["consensus", mk.cons, `median of ${d.analysts.n || 1} firms`], ["low", mk.low, "lowest"]]) {
+      if (v != null && Math.abs(g.yScale(v) - cy) < 8) { K = v; snap = { k, who }; break; }
+    }
+  }
+  DETAIL.fcHov = { K, x, snap };
+  const ccy = DETAIL.data.currency, ret = (K / d.s0 - 1) * 100, date = fcDateAt(d.days * j / S);
+  let h = `<div class="r"><span class="p">${fmtMoney(K, ccy)}</span><span class="m">${ret >= 0 ? "+" : ""}${ret.toFixed(1)}%</span></div>
+    <div class="m">${j === S ? "At expiry · " : ""}${fcFmtDate(date)}</div><hr>`;
+  if (mode.kind === "mu") {
+    const firms = mk ? mk.firms : [];
+    h += `<div class="r"><span>Firms at or above</span><b>${firms.filter(fm => fm.px >= K).length} of ${firms.length}</b></div>`;
+    const near = inPdf ? firms.filter(fm => Math.abs(fm.px / K - 1) < 0.03) : [];
+    if (near.length) h += "<hr>" + near.map(fm => `<div class="r"><span>${escapeHtml(fm.firm)}</span><span class="m">${fmtMoney(fm.target, d.chain_currency)} · ${escapeHtml(fm.rating)}</span></div>`).join("");
+  } else {
+    const sim = fcSimulate(d, mode), s = fcStats(sim, K, j), col = sim.cols[j];
+    let below = 0; const lk = Math.log(K); for (const v of col) if (v <= lk) below++;
+    const side = j === S ? (s.up ? fcCurveAbove(sim, K) : 1 - fcCurveAbove(sim, K)) : s.beyond;
+    h += `<div class="r"><span>Chance ${s.up ? "above" : "below"}</span><b class="${s.up ? "pos" : "neg"}">${(side * 100).toFixed(0)}%</b></div>
+      <div class="r"><span>Chance of touching first</span><b>${(s.touch * 100).toFixed(0)}%</b></div>
+      <div class="r m"><span>Percentile</span><span>${Math.round(below / col.length * 100)}th</span></div>`;
+    if (snap) h += `<hr><div class="amb"><b>Analysts’ ${snap.k}</b> <span class="m">· ${escapeHtml(snap.who)}</span></div>`;
+  }
+  tt.innerHTML = h;
+  tt.classList.add("show");
+  const host = tt.parentElement, w = tt.offsetWidth, hh = tt.offsetHeight;
+  const anchor = inPdf && mk ? f.xH - 170 : Math.min(x, f.xH) - 18;
+  const scale = host.clientWidth / g.W;
+  tt.style.left = Math.max(8, anchor * scale - w) + "px";
+  tt.style.top = Math.min(Math.max(8, g.yScale(K) - hh / 2), host.clientHeight - hh - 8) + "px";
+  fcDraw();
+}
+
+/* The readouts box under the chart (it replaces the range strip while σ or μ
+ * is on) and the assumptions footnote. */
+function renderFcReadouts() {
+  const el = $("#m-fc-ro");
+  if (!el) return;
+  if (!fcOn()) { el.style.display = "none"; return; }
+  el.style.display = "";
+  const d = DETAIL.fc[DETAIL.fcH], ccy = DETAIL.data.currency;
+  const cell = (k, v, cls) => `<div><span>${k}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
+  const pct = (v) => (v * 100).toFixed(0) + "%";
+  const sgn = (v) => (v >= 0 ? "+" : "") + v.toFixed(0) + "%";
+  const money = (v) => fmtMoney(v, ccy);
+  const link = ` · <a href="#" data-fc-settings>Assumptions ⚙</a>`;
+  if (!d) { el.innerHTML = `<div class="m-fc-grid"><div class="m-fc-wait">Pricing ${escapeHtml(DETAIL.row.symbol)}’s options…</div></div>`; return; }
+  if (!d.ok) {
+    const why = d.reason === "no_options" ? `No listed options for ${escapeHtml(d.symbol)} or a US line of the same company.`
+      : d.reason === "no_expiry" ? `No options expiry near ${d.horizon === 365 ? "12" : "3"} months for ${escapeHtml(d.symbol)} (${escapeHtml(d.detail || "")}).`
+      : d.reason === "thin" ? `The ${escapeHtml(d.chain_symbol || d.symbol)} chain for ${escapeHtml(d.expiry || "this horizon")} is too thin to trust its tails: ${escapeHtml(d.quality?.why || "")}.`
+      : "Couldn't reach the options data. Try again in a minute.";
+    el.innerHTML = `<div class="m-fc-foot">${why}${link}</div>`;
+    return;
+  }
+  const mode = fcMode(d);
+  const hist = d.source === "history";
+  const fx = d.fx;
+  const via = d.chain_symbol !== d.symbol
+    ? ` Priced on ${escapeHtml(d.chain_symbol)} (US), shown in ${escapeHtml(ccy || "")}${fx
+      ? `: ${escapeHtml(fx.pair)} risk added (σ ${(fx.sigma * 100).toFixed(1)}% from ${escapeHtml(fx.source)}, ρ ${fx.rho.toFixed(2)}, no expected FX move).`
+      : " at today’s ratio; FX risk not modelled."}` : "";
+  const q = d.quality;
+  const qual = hist ? ""
+    : q.smile === "ssvi" ? ` ✓ ${q.quotes} quotes at this expiry, ${q.surface_quotes} over ${q.surface_slices} expiries · surface fit ${q.surface_rmse_volpts.toFixed(2)} vol pts.`
+    : ` ✓ ${q.quotes} quotes · smile fit ${q.svi_rmse_volpts.toFixed(2)} vol pts.`;
+  const fb = d.fallback;
+  const fbWhy = !fb ? "" : fb.reason === "no_options" ? "No listed options"
+    : fb.reason === "no_expiry" ? `No options expiry near ${d.horizon === 365 ? "12" : "3"} months`
+    : `The ${escapeHtml(fb.chain_symbol || d.symbol)} options are too thin${fb.why ? ` (${escapeHtml(fb.why)})` : ""}`;
+  const srcTxt = hist
+    ? `${fbWhy}, so this is estimated from history: β ${q.beta_market.toFixed(2)} × the market (${escapeHtml(q.proxy)}, ${escapeHtml(q.market_source)}) plus its own ${(q.own_vol * 100).toFixed(0)}% volatility, from ${q.weeks} weeks of ${escapeHtml(q.series || d.symbol)}, reverting from the last quarter to the 3-year level. Rate ${(d.rf * 100).toFixed(1)}% (${escapeHtml(d.rate_source)}).`
+    : `σ from ${escapeHtml(d.chain_symbol)} options, expiring ${fcFmtDate(new Date(d.expiry + "T12:00:00"))}${q.smile === "ssvi" ? " (a surface fitted across all its expiries: too few strikes for one)" : ""};`;
+  const an = d.analysts;
+  if (mode.kind === "mu") {
+    const mk = fcMarks(d);
+    if (!mk) { el.innerHTML = `<div class="m-fc-foot">${d.horizon === 365 ? "No analyst targets for this company." : "Analyst targets are 12-month: switch to 12M."}${link}</div>`; return; }
+    const firms = mk.firms, kinds = { buy: 0, hold: 0, sell: 0 };
+    for (const fm of firms) kinds[fcRatingKind(fm.rating)]++;
+    const lt = firms.map(fm => Math.log(fm.px)), m = lt.reduce((a, b) => a + b, 0) / (lt.length || 1);
+    const spread = lt.length > 1 ? Math.sqrt(lt.reduce((a, b) => a + (b - m) ** 2, 0) / lt.length) : 0;
+    const latest = firms.slice().sort((a, b) => b.date.localeCompare(a.date))[0];
+    const sigP = hist ? d.sigma_q : d.kappa * d.sigma_q;
+    const msim = fcSimulate(d, { kind: "sigma", curve: "market", mu: "market" });
+    el.innerHTML = `<div class="m-fc-grid">
+      ${cell(`Consensus · median of ${an.n || 1}`, `${money(mk.cons)} <small>${sgn((mk.cons / d.s0 - 1) * 100)}</small>`, "amb")}
+      ${cell("Range of targets", mk.low != null ? `${money(mk.low)} – ${money(mk.high)}` : "—")}
+      ${cell("Ratings", firms.length ? `${kinds.buy} buy · ${kinds.hold} hold · ${kinds.sell} sell` : "—")}
+      ${cell("Target spread vs σ", firms.length > 1 ? `${(spread * 100).toFixed(0)}% vs ${(sigP * 100).toFixed(0)}%` : "—")}
+      ${cell("Raised in the last 90 days", firms.length ? `${firms.filter(fm => fm.raised_90d).length} of ${firms.length}` : "—")}
+      ${cell("Latest", latest ? `${escapeHtml(latest.firm)} · ${fcFmtDate(new Date(latest.date + "T12:00:00"))}` : "—")}
+      ${cell(hist ? "History: chance ≥ consensus" : "Options: chance ≥ consensus", pct(fcCurveAbove(msim, mk.cons)))}
+      ${cell("Older than 6 months", firms.length ? `${firms.filter(fm => fm.stale).length} (faded)` : "—")}
+    </div><div class="m-fc-foot">μ only: a line from today to each firm’s 12-month target. It shows how much analysts disagree, not how uncertain the price is: that is σ. Targets run optimistic on average.${hist ? " " + srcTxt : ""}${via}${link}</div>`;
+    return;
+  }
+  const sim = fcSimulate(d, mode);
+  const s20 = fcStats(sim, d.s0 * 0.8, FC_ZONE.steps);
+  const mk = DETAIL.showMu ? fcMarks(d) : null;
+  const e0 = (d.earnings || [])[0];
+  // The drawn curve's own width: κ × implied, plus FX when it is added.
+  const cv = d.curves[mode.curve];
+  const sig = Math.sqrt(cv.var_x / d.T);
+  const sigLabel = hist ? "σ · from history"
+    : mode.curve === "rn" ? `σ · implied${fx ? " + FX" : ""}`
+    : `σ · κ ${d.kappa.toFixed(2)} × implied ${(d.sigma_q * 100).toFixed(0)}%${fx ? " + FX" : ""}`;
+  const muTxt = mode.mu === "analysts" ? (an.n ? `μ from ${an.n} analysts (one ${hist ? "" : "options-"}shaped curve per firm, blended${d.haircut ? ", excess return halved" : ""}).`
+      : `μ from the analysts’ consensus target${d.haircut ? ", excess return halved" : ""}.`)
+    : mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
+    : hist && d.measure === "Q" ? `μ from the market (CAPM: β ${(+d.beta).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium); no risk-neutral curve without options.`
+    : `μ from the market (CAPM: β ${(+d.beta).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium).`;
+  const d12 = DETAIL.fc[365];
+  const auto = d.horizon === 91 && d12 && !d12.ok
+    ? d12.reason === "thin" ? ` The 12-month chain is too thin to trust its tails (${escapeHtml(d12.quality?.why || "")}), so this shows 3 months.`
+      : d12.reason === "no_expiry" ? ` No options expiry near 12 months (${escapeHtml(d12.detail || "")}), so this shows 3 months.` : ""
+    : "";
+  const fell = auto + (mode.fellBack ? (d.horizon === 365 ? " No analyst targets, so the market’s μ." : " Analyst targets are 12-month, so 3M uses the market’s μ.") : "");
+  el.innerHTML = `<div class="m-fc-grid">
+    ${cell("Chance up", pct(fcCurveAbove(sim, d.s0)), "pos")}
+    ${cell("Expected price", `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`)}
+    ${cell("Median · 50% range", `${money(fcCurveQ(sim, 0.5))} · ${money(fcCurveQ(sim, 0.25))} – ${money(fcCurveQ(sim, 0.75))}`)}
+    ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`)}
+    ${cell("Chance ≤ −20% · touch it", `${((1 - fcCurveAbove(sim, d.s0 * 0.8)) * 100).toFixed(1)}% · ${pct(s20.touch)}`, "neg")}
+    ${mk ? cell(`Chance ≥ consensus ${money(mk.cons)}`, pct(fcCurveAbove(sim, mk.cons)), "amb") : cell("Chance ≥ +20%", pct(fcCurveAbove(sim, d.s0 * 1.2)))}
+    ${cell(e0 ? `Earnings ${fcFmtDate(new Date(e0.date + "T12:00:00"))}${hist ? "" : " · implied move"}` : "Earnings", e0 ? (e0.var > 0 ? `±${(Math.sqrt(e0.var) * 100).toFixed(1)}%` : hist ? "in window" : "—") : "none in window")}
+    ${cell(sigLabel, `${(sig * 100).toFixed(0)}%`)}
+  </div><div class="m-fc-foot">${srcTxt} ${muTxt}${fell}
+    Paths: bridges to this curve${hist ? "" : " with earnings jumps"}.${via} A chance, not a prediction.${qual}${link}</div>`;
 }
 
 /* The chart's own summary line: range return, benchmark returns, bar frequency,
@@ -3325,6 +3932,8 @@ function renderChart() {
 function renderChartInfoDefault() {
   const g = DETAIL.geom;
   if (!g) return;
+  renderFcReadouts();
+  if (fcOn()) { $("#m-range-info").style.display = "none"; return; }
   const { stock, spy, sec, t0, t1, interval } = g;
   const range = DETAIL.range;
   const sPct = ((stock[stock.length - 1][1] / stock[0][1] - 1) * 100);
@@ -11097,6 +11706,23 @@ const SETTINGS_SECTIONS = [
     render: renderSettingsNotifications,
   },
   {
+    id: "distribution",
+    group: "Settings",
+    label: "Price distribution",
+    description: "The σ and μ on a stock's chart: where its price may be in 3 or 12 months, "
+               + "from its listed options (σ) and a mean (μ) from the market or the analysts. "
+               + "Kept with your data.",
+    keywords: ["sigma", "mu", "σ", "μ", "distribution", "options", "implied volatility", "forecast",
+               "equity premium", "erp", "kappa", "risk-neutral", "real-world", "analysts", "haircut"],
+    items: [
+      { id: "dist-erp", label: "Equity premium", keywords: ["erp", "capm", "beta", "expected return"] },
+      { id: "dist-haircut", label: "Analyst haircut", keywords: ["optimism", "targets", "shrink"] },
+      { id: "dist-measure", label: "Measure", keywords: ["risk-neutral", "real-world", "q", "p"] },
+      { id: "dist-kappa", label: "Volatility ratio κ (advanced)", keywords: ["kappa", "variance risk premium", "vrp"] },
+    ],
+    render: renderSettingsDistribution,
+  },
+  {
     id: "keys",
     group: "Data & models",
     label: "API keys",
@@ -11993,6 +12619,54 @@ async function renderSettingsNotifications(el) {
   highlightSettingsMatches(el);
 }
 
+/* Settings → Price distribution: the assumptions behind the stock window's
+ * σ/μ (options_density.py). Kept in prefs.json; a change drops the window's
+ * cached curves so the next look is priced with it. */
+async function renderSettingsDistribution(el) {
+  let p = {};
+  try { p = await (await fetch("/api/prefs")).json(); } catch (e) { /* the defaults */ }
+  const erp = p.dist_erp ?? 0.05, ks = p.dist_kappa_stock ?? 0.92, ki = p.dist_kappa_index ?? 0.80;
+  const measure = p.dist_measure || "P", haircut = !!p.dist_haircut;
+  const num = (key, v, step, min, max, unit, label) => `<span class="att-rule"><input type="number" data-dist-num="${key}" value="${v}"
+      step="${step}" min="${min}" max="${max}" aria-label="${label}" style="width:84px">${unit ? `<span class="att-unit">${unit}</span>` : ""}</span>`;
+  el.innerHTML =
+    settingsRow({ id: "dist-erp", label: "Equity premium",
+      help: "The market's expected return over cash, per year. With σ alone, a stock's mean is the rate plus its beta times this (CAPM). Default 5%.",
+      control: num("dist_erp", +(erp * 100).toFixed(2), 0.5, 0, 15, "%", "Equity premium, percent") }) +
+    settingsRow({ id: "dist-haircut", label: "Analyst haircut",
+      help: "Analysts' 12-month targets run optimistic on average. On, each target's excess return over the market's is halved before it sets μ. Off by default.",
+      control: `<label class="settings-check"><input type="checkbox" data-dist-bool="dist_haircut"${haircut ? " checked" : ""} aria-label="Analyst haircut"></label>` }) +
+    settingsRow({ id: "dist-measure", label: "Measure",
+      help: "Real-world: the options' curve tilted to the chosen μ, with σ scaled by κ (default). Risk-neutral: the options' own curve, mean = forward. It includes the risk premium, so it is what the options price, not a forecast.",
+      control: `<span class="att-rule"><select data-dist-choice="dist_measure" aria-label="Measure">
+        <option value="P"${measure === "P" ? " selected" : ""}>Real-world</option>
+        <option value="Q"${measure === "Q" ? " selected" : ""}>Risk-neutral</option></select></span>` }) +
+    settingsRow({ id: "dist-kappa", label: "Volatility ratio κ (advanced)",
+      help: "Real-world σ = κ × implied σ: options carry a variance risk premium, so realised volatility runs below implied. Placeholders until Convexity has its own snapshots to estimate them.",
+      control: `<span class="att-rule"><span class="att-unit">Stocks</span>${num("dist_kappa_stock", ks, 0.01, 0.5, 1.2, "", "κ for stocks")}
+        <span class="att-unit">Indices and ETFs</span>${num("dist_kappa_index", ki, 0.01, 0.5, 1.2, "", "κ for indices")}</span>` }) +
+    `<div class="settings-row-help" id="dist-msg" role="status"></div>`;
+  const msg = (t) => { const m = el.querySelector("#dist-msg"); if (m) m.textContent = t; };
+  const save = async (change) => {
+    try {
+      const r = await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change) });
+      if (!r.ok) throw new Error();
+      APP_PREFS = await r.json();
+      DETAIL.fc = {}; DETAIL.fcPending = {}; DETAIL.fcSim = null; DETAIL.fcAnimKey = null;
+      if (DETAIL.data) { ensureDensity(); renderChart(); }
+      msg("Saved. Charts use it from the next look.");
+    } catch (e) { msg("Couldn't save that. Try again in a moment."); }
+  };
+  el.querySelectorAll("[data-dist-num]").forEach(i => i.addEventListener("change", () => {
+    const v = +i.value, k = i.dataset.distNum;
+    if (i.value === "" || !isFinite(v) || v < +i.min || v > +i.max) { msg(`Enter a value from ${i.min} to ${i.max}.`); return; }
+    save({ [k]: k === "dist_erp" ? v / 100 : v });
+  }));
+  el.querySelectorAll("[data-dist-bool]").forEach(i => i.addEventListener("change", () => save({ [i.dataset.distBool]: i.checked })));
+  el.querySelectorAll("[data-dist-choice]").forEach(i => i.addEventListener("change", () => save({ [i.dataset.distChoice]: i.value })));
+  highlightSettingsMatches(el);
+}
+
 function renderSettingsAbout(el) {
   // APP_VERSION stays null until /api/health resolves, so guard it.
   const v = (APP_VERSION && APP_VERSION.version)
@@ -12051,6 +12725,25 @@ function renderSettingsAbout(el) {
         currency. The close line, every return and every risk statistic use the
         exact closes and are not approximate. Single-stock charts show the real
         bars.`,
+    }) +
+    settingsRow({
+      id: "chart-distribution",
+      label: "How σ/μ, the price distribution, is built",
+      help: `Option prices give the <em>risk-neutral</em> distribution of a price at
+        each expiry ("priced by options"): Convexity fits the listed chain's smile
+        (SVI, with Lee's bound on the wings) and reads the curve off it
+        (Breeden–Litzenberger), with the rate from the 3-month T-bill. That curve
+        carries the market's risk premium, so it is not a forecast. Getting a
+        <em>real-world estimate</em> needs an assumption, and every method is one:
+        a preference tilt (robust, but leaves the variance premium in), a tilt
+        fitted to data (used here), or Ross recovery (rejected in the literature,
+        not used). Convexity tilts the options' curve as little as possible
+        (minimum entropy) so its mean is the market's (CAPM: rate + β × equity
+        premium) or the analysts' targets, and its volatility is κ × implied.
+        The paths to the expiry are bridges to that curve with jumps on earnings
+        dates, so the touch chances are a model's. Every number is a chance,
+        not a prediction; chains too thin to trust are not drawn. Non-US listings
+        use the company's US line at today's price ratio, without FX risk.`,
     });
   highlightSettingsMatches(el);
 }

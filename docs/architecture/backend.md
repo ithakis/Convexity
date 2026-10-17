@@ -969,6 +969,108 @@ on 2026-10-09 (Yahoo then answers only "1d"/"5d" for it).
   a warning, shown folded under the Portfolio chart ("About these prices")
   and in My Investments' rail.
 
+### Real-world price distribution (`options_density.py`, `GET /api/density`)
+
+The stock window's σ/μ (spec and research: `docs/plans/real-world-density.md`;
+reference recipe: `scripts/density_prototype.py`, which the module reproduces
+within rounding — AAPL checked 2026-10-17).
+
+- **Pipeline** per horizon (the listed expiry nearest 91 or 365 days, never
+  interpolated, and only inside 45–182 or 270–550 days: small caps list
+  nothing past 5–7 months, so their "12M" is `no_expiry` and the page opens
+  on 3M): chain → forward from parity with the rate from **^IRX**
+  (never backed out of parity: Yahoo's US chains are American-style and gave
+  −4.8%) → two-sided **OTM-only** quotes, minus any that break static
+  no-arbitrage by more than the spread (`_monotone`) → raw SVI with **Lee's
+  wing cap** → Breeden–Litzenberger on a 4001-point log-strike grid
+  (±10 ATM sd) with **GEV tails** → the minimum-entropy two-moment tilt
+  (Approach B; mean r + β·ERP, variance (κσ_Q)²T), with the power tilt (A)
+  as the fallback.
+- **GEV tails** (Figlewski 2009, `_tails`): the SVI is trusted only where it
+  was fitted. Past the 5% / 95% points, or the last quoted strike when the
+  quotes stop short of them, a GEV takes over: its cdf and density equal the
+  body's at the attachment point, and its shape ξ matches the density 3 cdf
+  points further in. The cdf there comes from the call slope,
+  1 + e^{rT}·∂C/∂K, which reads the smile at that strike only. Integrating
+  the density from the left instead counts the extrapolated wing: SPY 12M's
+  SVI bent up past K = 995 into a false hump with negative density after it,
+  and the mean came out 2.1% above F. The right tail's ξ is capped at 0.45 so
+  E[S] and Var[S] stay finite. The payload's `quality.tails` gives where each
+  tail attaches and its ξ; it is `null` when the quotes are too narrow to place
+  them, and the gate then judges the SVI's own wings.
+- **Stale quotes**: walking out from the forward, a put or call further OTM
+  can't bid above the previous one's ask. DELL 12M had a K=165 put bid 12.15
+  next to a K=170 ask of 4.40. The SVI bent into a Lee-slope kink to chase it,
+  giving a smile fit of 1.5 vol pts and a mean 9% below F.
+- **Analysts' μ**: one B-tilt per firm (latest target ≤ 12 months old, from
+  yfinance `upgrades_downgrades`; Finnhub's targets are 403 on the free plan),
+  blended equally, the common variance shrunk by the between-firm variance so
+  the blend's total is still (κσ_Q)²T. Optional haircut (prefs) halves each
+  target's excess log return over CAPM. 12M only. The expiry is rarely a
+  year out (AAPL 335 days, ARKK 461): a target's log return is scaled by T up
+  to a year and carried on at CAPM after it.
+- **No NaN reaches the page**: `json.dumps` writes NaN, which `JSON.parse`
+  rejects. The gate fails a non-finite fit (NaN passes every `<` test), a
+  missing last price is `error`, and `downsample` refuses a non-finite curve.
+- **Gate**: quotes ≥ 30, SVI RMSE < 1 vol pt, |E_Q/F − 1| < 1%. A failure is
+  `{"ok": false, "reason": "thin"}` and is never drawn. It runs after the
+  tails. Before them, long chains failed often: on 2026-10-17 SPY was +2.1%,
+  QQQ +3.1% and DELL had a 1.5 vol-pt smile fit and −9.1%. With the tails and
+  the stale-quote filter, all three pass (+0.2%, −0.1% and +0.1%). When a
+  12M chain still fails, the page opens on 3M and says why.
+- **Non-US listings** have no chains: the company's US line stands in
+  (`symbol_db.us_line`, then `discover_us_line`), every price scaled by
+  local/US last price (`ratio`). Analyst targets stay in the chain's currency
+  in the payload; the page multiplies by `ratio`.
+- **Expiry choice and sparse chains** (`_options_rn`): every expiry from 20
+  days to 3 years is fetched once in parallel and cached (`_chains`, 15 min,
+  shared by both horizons). Up to 4 expiries in the window are tried, nearest
+  the horizon first. Each tries SVI when the slice has ≥ 30 quotes, then an
+  **SSVI surface** (Gatheral–Jacquier 2014, power-law φ, `fit_surface`) over
+  all expiries; the first fit that passes the gate wins. PG, PEP, JNJ, MCD,
+  VZ and XOM list 7–29 usable strikes per long expiry: per-slice SVI
+  overfits them (PEP 12M missed its forward by 2.8% on 14 quotes) while
+  their surfaces hold 90–280 quotes; all pass on the surface.
+  The SSVI has no static arbitrage by construction (η(1+|ρ|) ≤ 2, γ ≤ ½, θ
+  non-decreasing). Its gate: ≥ 60 quotes over ≥ 3 expiries, surface fit
+  < 1.5 vol pts, ≥ 8 quotes at the expiry, and quotes reaching the 15% / 85%
+  points; then the usual smile fit and martingale checks.
+- **FX** (`_fx`, `affine_mix`): a US line shown in another currency carries
+  that currency's risk. ln S_shown = (1 + b)·x + e, with ρ and b from two
+  years of weekly returns, the FX vol from the currency ETF's options (FXE,
+  FXB, …; the longest expiry when none reaches the horizon) else history,
+  and no expected FX move. Applied to every curve before downsampling; the
+  payload's `fx` says pair, σ, ρ and source.
+- **History estimate** (`_history`, `source: "history"`): when options fail
+  (no chain, no expiry, thin) the stock's own record stands in, the options'
+  reason kept in `fallback`. x = β_m·y + e: y the market proxy's options
+  curve (`_PROXY` by listing suffix: SPY in the US; FEZ for Europe, EEM for
+  EM funds, whose chains are too thin today, so their market part is
+  history too), scaled to κ_index × its vol in the stock's currency; β_m and
+  e from 3 years of weekly returns (weekly: European and US closes are hours
+  apart), winsorised at 8 robust sd, e's variance reverting from the last 13
+  weeks to the 3-year level with a 3-month half-life. A listing with under
+  130 weeks or gaps uses the company's US line in its currency (a Xetra
+  secondary listing had 76 weeks and a phantom +19% week). Mean: CAPM in the stock's currency.
+  No risk-neutral curve; earnings dates without a jump.
+- **Local rates** (`_local_rate`): USD from ^IRX; EUR, GBP, CHF, JPY, CAD,
+  AUD from two quarterly CME futures (ln F_far/F_near over their gap is
+  r_USD − r_local: both settle together, unlike Yahoo's spot, which implied a
+  euro rate above the dollar's); other European currencies take the euro's.
+- **Earnings**: next date from `attention.fetch_events`; jump variance
+  σ_e² = w_after − w_before·T_after/T_before from the ATM total variance either
+  side; later reports estimated every 91 days.
+- **Payload**: curves (`rn`, `market`, `analysts`) as ~400 points of the
+  density of x = ln(K/F); the page maps them by `forward` (already in the
+  listing's currency) and runs the Monte Carlo bridges itself (seeded), since
+  hover needs the paths.
+- **Cache**: `cache._cache_put`, 15 min, successes only, keyed by symbol,
+  horizon, β and the settings (a settings change is a new key). One
+  computation per key at a time. Never called from `fetch_one`.
+- **Settings** (prefs.json, bounded in `persistence._clean_prefs`):
+  `dist_erp`, `dist_kappa_stock`, `dist_kappa_index`, `dist_measure` (P|Q),
+  `dist_haircut`.
+
 ## 6. Symbol pack + company search (`symbol_db.py`, `symbol_build.py`, `search.py`)
 
 ### Why
