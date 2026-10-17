@@ -997,6 +997,7 @@
     text-underline-offset: 3px;
   }
   .pf-mpt-rf-info[data-rich-tip], .pf-contrib-table [data-rich-tip], #inv-page [data-rich-tip] { text-decoration: none; }  /* the tip stays, the underline goes */
+  #m-sections .metric-tip-host[data-info] .k { text-decoration: none; }  /* stock window: the tip stays, the underline goes */
   [data-rich-tip]:focus-visible, .pf-contrib-table th[data-contrib-sort]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .pf-metric-tip .mt-table {
     width: 100%; border-collapse: collapse; margin: 6px 0 8px;
@@ -2586,11 +2587,48 @@
   .m-fc-ctl { position: absolute; top: 8px; right: 10px; display: flex; gap: 6px; z-index: 2; }
   .m-fc-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-soft);
     background: var(--bg-canvas); padding: 2px; }
-  .m-fc-seg button, .m-fc-replay { border: 0; background: transparent; color: var(--muted); font: inherit;
-    font-size: 13px; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
-  .m-fc-seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-  .m-fc-replay { border: 1px solid var(--border); background: var(--bg-canvas); border-radius: var(--r-soft); font-size: 15px; }
-  .m-fc-seg button:hover, .m-fc-replay:hover { color: var(--accent); }
+  .m-fc-seg button { border: 0; background: transparent; color: var(--muted); font: inherit;
+    font-size: 13px; font-weight: 600; padding: 4px 12px; border-radius: 6px; cursor: pointer; }
+  .m-fc-seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+  .m-fc-seg button:hover { color: var(--accent); }
+  /* Today's price as a gauge: a dashed level across the plot, its tag on the
+     left axis among the ticks; the hover level (accent) moves the same way. */
+  .m-gauge-line { stroke: var(--text); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.4; }
+  .m-gauge-hov { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 4 3; opacity: 0.7; }
+  .m-ytag rect { fill: var(--text); }
+  .m-ytag text { fill: var(--bg-canvas); font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .m-ytag.hov rect { fill: var(--accent); }
+  /* E and D flags on the history (renderEventMarkers) and their card. */
+  .m-ev-rule { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.35; }
+  .m-ev-rule.d { stroke: var(--accent); opacity: 0.3; }
+  .m-ev { position: absolute; z-index: 2; transform: translateX(-50%); width: 17px; height: 17px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+    font: 700 10.5px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--muted); background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 5px;
+    transition: transform 0.1s ease, border-color 0.1s ease; }
+  .m-ev.e.beat { color: var(--pos); border-color: rgba(var(--pos-rgb), 0.55); }
+  .m-ev.e.miss { color: var(--neg); border-color: rgba(var(--neg-rgb), 0.55); }
+  .m-ev.d { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.5); }
+  .m-ev:hover, .m-ev.open { transform: translateX(-50%) scale(1.15); background: var(--bg-subtle); }
+  .m-ev:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .m-ev-card { position: absolute; z-index: 4; width: 268px; padding: 12px 14px 10px;
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.28); font-size: 12.5px; line-height: 1.5; color: var(--text);
+    font-variant-numeric: tabular-nums; }
+  .m-ev-card .hd { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; padding-right: 18px; }
+  .m-ev-card .hd .m-ev { position: static; transform: none; cursor: default; width: 22px; height: 22px; font-size: 12px; }
+  .m-ev-card .hd b { display: block; font-size: 14px; }
+  .m-ev-card .hd span:not(.m-ev) { color: var(--muted); font-size: 12px; }
+  .m-ev-card .r { display: grid; grid-template-columns: 1fr auto; column-gap: 12px; align-items: baseline; padding: 1px 0; }
+  .m-ev-card .r span { color: var(--muted); }
+  .m-ev-card .r b { font-weight: 700; text-align: right; }
+  .m-ev-card .r b.pos { color: var(--pos); } .m-ev-card .r b.neg { color: var(--neg); }
+  .m-ev-card .r i { grid-column: 1 / -1; font-style: normal; color: var(--muted); font-size: 11.5px; text-align: right; margin-top: -2px; }
+  .m-ev-card hr { border: 0; border-top: 1px solid var(--border); margin: 7px 0; }
+  .m-ev-card .nt { color: var(--muted); font-size: 11.5px; margin-top: 6px; }
+  .m-ev-card .x { position: absolute; top: 6px; right: 8px; border: 0; background: transparent; color: var(--muted);
+    font-size: 17px; line-height: 1; cursor: pointer; padding: 2px 4px; }
+  .m-ev-card .x:hover { color: var(--text); }
   .m-fc-tt { position: absolute; pointer-events: none; z-index: 3; display: none; min-width: 230px;
     background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 10px;
     padding: 10px 12px; font-size: 13px; line-height: 1.6; color: var(--text);
@@ -2606,7 +2644,8 @@
   .m-fc-ro { margin-top: 10px; }
   .m-fc-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 24px;
     padding: 14px 18px; border: 1px solid var(--border); border-radius: 12px; }
-  .m-fc-grid span { display: block; color: var(--muted); font-size: 12.5px; margin-bottom: 2px; }
+  .m-fc-grid > div > span { display: block; color: var(--muted); font-size: 12.5px; margin-bottom: 2px; }
+  .m-fc-grid > div > span .katex { font-size: 1.12em; color: var(--text); }  /* KaTeX's own spans keep their layout */
   .m-fc-grid b { font-size: 17px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
   .m-fc-grid b small { font-size: 13px; font-weight: 500; color: var(--muted); }
   .m-fc-grid b.pos { color: var(--pos); } .m-fc-grid b.neg { color: var(--neg); } .m-fc-grid b.amb { color: var(--amber); }

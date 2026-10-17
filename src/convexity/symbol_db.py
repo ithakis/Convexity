@@ -813,11 +813,31 @@ def _us_line(s: str, sig) -> str | None:
         return s if _looks_us(s) else None
     if me.region == "us":
         return s
-    if me.group == YAHOO_GROUP or me.type != "stock":
-        return None
+    lines = _us_lines(s, sig)
+    return lines[0] if lines else None
+
+
+def us_lines(symbol: str) -> list[str]:
+    """Every US line of the company in the pack, best first (`us_line`'s
+    order), plus what `discover_us_line` learned. For callers that judge
+    the lines themselves: the σ/μ chain search ranks them by option open
+    interest (an ADR's chain, never its pink sheet's empty one)."""
+    s = (symbol or "").upper()
+    out = list(_us_lines(s, _sig())) if s else []
+    learned = _US_LEARNED.get(s)
+    if learned and learned not in out:
+        out.append(learned)
+    return out
+
+
+@lru_cache(maxsize=2048)
+def _us_lines(s: str, sig) -> tuple[str, ...]:
+    me = get(s) if s else None
+    if me is None or me.group == YAHOO_GROUP or me.type != "stock":
+        return ()
     con = _connect()
     if con is None:
-        return None
+        return ()
     with closing(con):
         rows = con.execute(
             "SELECT ticker, exchange, home, COALESCE(adv_usd, 0) FROM symbols"
@@ -825,10 +845,8 @@ def _us_line(s: str, sig) -> str | None:
             (me.group,),
         ).fetchall()
     rows = [r for r in rows if _looks_us(r[0])]
-    if not rows:
-        return None
     rows.sort(key=lambda r: (-r[2], r[1] not in _US_EXCHANGES, -r[3]))
-    return rows[0][0]
+    return tuple(r[0] for r in rows)
 
 
 def category(

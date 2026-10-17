@@ -2,7 +2,8 @@
 
 docs/plans/real-world-density.md is the spec and scripts/density_prototype.py
 the reference recipe this module ports. The pipeline per horizon (the listed
-expiry nearest 91 or 365 days, never an interpolated maturity):
+expiry nearest 91 or 365 days; only when none is near does the SSVI surface
+give the horizon itself, `surface_at`):
 
     Yahoo chain -> forward from put-call parity, with the rate fixed from ^IRX
     (Yahoo's US chains are American-style; parity backs out nonsense rates)
@@ -92,6 +93,12 @@ MAX_SURFACE_RMSE = 1.5
 COVERAGE = 0.15
 SURFACE_DAYS = (20, 1100)  # expiries the surface is fitted on
 EXPIRY_TRIES = 4  # expiries in the window tried, nearest the horizon first
+# With no expiry in the window, the horizon is read off the SSVI surface when
+# the chain reaches at least this share of it (a European ADR listing to 7
+# months): the shape is the surface's, the ATM variance interpolated in
+# maturity, or grown at the last expiry's average rate past it (flat vol).
+EXTRAP_MIN = 0.5
+LINE_TTL = 86400.0  # the chosen chain listing, a day
 
 
 class DensityError(Exception):
@@ -322,6 +329,7 @@ def _density(sl: dict, smile) -> dict:
         "quotes": len(K),
         "svi_rmse_volpts": float(np.sqrt(np.mean((np.sqrt(np.maximum(smile(k), 0) / T) - np.sqrt(w / T)) ** 2)) * 100),
         "martingale_err": float(np.trapezoid(qx * np.exp(x), x) - 1),
+        "atm_iv": float(np.sqrt(max(float(np.atleast_1d(smile(np.array([0.0])))[0]), 0.0) / T)),
         "tails": tails,
         "smile": "svi",
     }  # fmt: skip
@@ -356,19 +364,9 @@ def ssvi(theta, k, rho: float, eta: float, gamma: float):
     return theta / 2 * (1 + rho * phi * k + np.sqrt((phi * k + rho) ** 2 + 1 - rho**2))
 
 
-def fit_surface(slices: list[dict], target: dict) -> dict:
-    """The density at the ``target`` slice (one of ``slices``, from `_slice`)
-    from an SSVI fitted to every slice.
-
-    For chains that list ~20 strikes per expiry (PG, PEP, JNJ at 12M): one
-    slice is too few points for SVI's five parameters (a 0.3 vol-pt fit
-    missed PEP's forward by 2.8% on 14 quotes), but the whole
-    surface has 100-200 quotes and SSVI only three shared parameters plus
-    one ATM variance per expiry. No arbitrage by construction: eta(1+|rho|)
-    <= 2 with gamma <= 1/2 (no butterfly, G&J Remark 4.4) and theta
-    non-decreasing in T (no calendar spread)."""
-    slices = sorted(slices, key=lambda s: s["T"])
-    tgt = next(i for i, s in enumerate(slices) if s is target)
+def _fit_ssvi(slices: list[dict]):
+    """SSVI on every slice (sorted by T): (theta per slice, rho, eta, gamma,
+    RMSE in vol points, quote count)."""
     n = len(slices)
     th0 = []
     for s in slices:
@@ -398,20 +396,72 @@ def fit_surface(slices: list[dict], target: dict) -> dict:
         warnings.simplefilter("ignore")
         fit = least_squares(res, np.clip(p0, lo, hi), bounds=(lo, hi))
     th, rho, eta, gamma = unpack(fit.x)
-    allk = sum(len(s["k"]) for s in slices)
     err = [
         np.sqrt(np.maximum(ssvi(t, s["k"], rho, eta, gamma), 0) / s["T"]) - np.sqrt(s["w"] / s["T"])
         for s, t in zip(slices, th, strict=True)
     ]
-    sl, t = slices[tgt], float(th[tgt])
-    rn = _density(sl, lambda kk: ssvi(t, kk, rho, eta, gamma))
+    rmse = float(np.sqrt(np.mean(np.concatenate(err) ** 2)) * 100)
+    return th, float(rho), float(eta), float(gamma), rmse, sum(len(s["k"]) for s in slices)
+
+
+def _surface_rn(rn: dict, fit) -> dict:
+    th, rho, eta, gamma, rmse, allk = fit
     rn.update({
         "smile": "ssvi",
         "surface_quotes": allk,
-        "surface_slices": n,
-        "surface_rmse_volpts": float(np.sqrt(np.mean(np.concatenate(err) ** 2)) * 100),
-        "ssvi": {"rho": float(rho), "eta": float(eta), "gamma": float(gamma)},
+        "surface_slices": len(th),
+        "surface_rmse_volpts": rmse,
+        "ssvi": {"rho": rho, "eta": eta, "gamma": gamma},
     })  # fmt: skip
+    return rn
+
+
+def fit_surface(slices: list[dict], target: dict) -> dict:
+    """The density at the ``target`` slice (one of ``slices``, from `_slice`)
+    from an SSVI fitted to every slice.
+
+    For chains that list ~20 strikes per expiry (PG, PEP, JNJ at 12M): one
+    slice is too few points for SVI's five parameters (a 0.3 vol-pt fit
+    missed PEP's forward by 2.8% on 14 quotes), but the whole
+    surface has 100-200 quotes and SSVI only three shared parameters plus
+    one ATM variance per expiry. No arbitrage by construction: eta(1+|rho|)
+    <= 2 with gamma <= 1/2 (no butterfly, G&J Remark 4.4) and theta
+    non-decreasing in T (no calendar spread)."""
+    slices = sorted(slices, key=lambda s: s["T"])
+    tgt = next(i for i, s in enumerate(slices) if s is target)
+    fit = _fit_ssvi(slices)
+    th, rho, eta, gamma = fit[:4]
+    t = float(th[tgt])
+    return _surface_rn(_density(slices[tgt], lambda kk: ssvi(t, kk, rho, eta, gamma)), fit)
+
+
+def surface_at(slices: list[dict], T: float) -> dict:
+    """The density at a maturity no expiry has, off the SSVI surface.
+
+    Total ATM variance theta is linear in T between the fitted expiries
+    (non-decreasing, so still no calendar arbitrage) and grows at the last
+    expiry's average rate past it: flat implied vol beyond the chain, the
+    standard extrapolation. The carry (r - q) is the nearest expiry's,
+    held constant. The nearest slice's quotes, rescaled to the same ATM
+    standard deviations, place the GEV tails; ``extrapolated`` says from
+    which maturity."""
+    slices = sorted(slices, key=lambda s: s["T"])
+    fit = _fit_ssvi(slices)
+    th, rho, eta, gamma = fit[:4]
+    Ts = np.array([s["T"] for s in slices])
+    if T <= Ts[-1]:
+        t = float(np.interp(T, np.concatenate([[0.0], Ts]), np.concatenate([[0.0], th])))
+    else:
+        t = float(th[-1] * T / Ts[-1])
+    i = int(np.argmin(np.abs(Ts - T)))
+    near = slices[i]
+    carry = math.log(near["F"] / near["S0"]) / near["T"]
+    F = near["S0"] * math.exp(carry * T)
+    k = near["k"] * math.sqrt(t / float(th[i]))
+    sl = {"T": T, "S0": near["S0"], "rf": near["rf"], "F": F, "K": F * np.exp(k), "k": k,
+          "w": ssvi(t, k, rho, eta, gamma)}  # fmt: skip
+    rn = _surface_rn(_density(sl, lambda kk: ssvi(t, kk, rho, eta, gamma)), fit)
+    rn["extrapolated"] = {"from_days": round(float(Ts[-1]) * 365), "beyond": bool(T > Ts[-1])}
     return rn
 
 
@@ -731,30 +781,88 @@ def _analysts(tk) -> dict | None:
 
 
 def _resolve_chain(symbol: str):
-    """(chain ticker, its yfinance Ticker, expiries). Non-US listings have no
-    chains on Yahoo: their company's US line (or ADR) stands in."""
+    """(chain ticker, its yfinance Ticker, expiries).
+
+    A listing with its own chain is used as is. Otherwise (Yahoo has no
+    Eurex or Euronext chains) every US line of the company stands in: the
+    pack's, plus Yahoo's Lookup by name. When more than one lists options
+    (an ADR and a pink-sheet line), the one with the most open interest
+    wins, judged on the expiry nearest 3 months: the deepest chain prices
+    the tails best. The choice is kept for a day."""
     import yfinance as yf
 
     from convexity import symbol_db
 
-    tried = []
-    for cand in (symbol, symbol_db.us_line(symbol), None):
-        if cand is None:
-            try:
-                cand = symbol_db.discover_us_line(symbol)
-            except Exception:
-                cand = None
-        if not cand or cand in tried:
-            continue
-        tried.append(cand)
+    key = f"density-line|{symbol}"
+    hit = cache._cache_get(key)
+    if hit:
+        tk = yf.Ticker(hit)
+        with contextlib.suppress(Exception):
+            exps = _expiries(tk)
+            if exps:
+                return hit, tk, exps
+
+    def probe(cand):
         tk = yf.Ticker(cand)
         try:
-            exps = _expiries(tk)
+            return cand, tk, _expiries(tk)
         except Exception:
-            exps = []
-        if exps:
-            return cand, tk, exps
-    raise DensityError("no_options")
+            return cand, tk, []
+
+    own = probe(symbol)
+    if own[2]:
+        return own
+    cands = []
+    with contextlib.suppress(Exception):
+        cands += symbol_db.us_lines(symbol)
+    with contextlib.suppress(Exception):
+        found = symbol_db.discover_us_line(symbol)
+        if found:
+            cands.append(found)
+    cands = [c for i, c in enumerate(cands) if c and c != symbol and c not in cands[:i]]
+    if not cands:
+        raise DensityError("no_options")
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(4) as ex:
+        live = [p for p in ex.map(probe, cands) if p[2]]
+    if not live:
+        raise DensityError("no_options")
+    if len(live) > 1:
+        with ThreadPoolExecutor(4) as ex:
+            oi = list(ex.map(lambda p: _open_interest(p[1], p[2]), live))
+        live = [p for _, p in sorted(zip(oi, live, strict=True), key=lambda z: -z[0])]
+        print(
+            f"[density] {symbol}: chains on {', '.join(p[0] for p in live)}; open interest {sorted(oi, reverse=True)}"
+        )
+    cache._cache_put(key, live[0][0], LINE_TTL)
+    return live[0]
+
+
+def _open_interest(tk, exps) -> float:
+    """Calls + puts open interest at the expiry nearest 3 months."""
+    e = min(exps, key=lambda e: abs(e[1] - 91))
+    try:
+        ch = tk.option_chain(e[0])
+    except Exception:
+        return 0.0
+    return float(ch.calls["openInterest"].fillna(0).sum() + ch.puts["openInterest"].fillna(0).sum())
+
+
+def _hist_vol(sym: str) -> float | None:
+    """Annualised volatility of the last year's daily log returns
+    (sample sd x sqrt(252)): per year, like an implied vol, so the two
+    compare directly. Measured on the chain's own listing, in its currency,
+    the same instrument the implied vol is quoted on."""
+    try:
+        h = _close(sym, "1y")
+    except Exception:
+        return None
+    if h is None or len(h) < 120:
+        return None
+    r = np.diff(np.log(h.to_numpy(dtype=float)))
+    r = r[np.isfinite(r)]
+    return round(float(np.std(r, ddof=1) * math.sqrt(252)), 6) if len(r) >= 100 else None
 
 
 def _last(tk) -> tuple[float, str | None]:
@@ -925,7 +1033,7 @@ def _options_rn(tk, sym: str, exps, horizon: int, S0: float, rf: float):
     expiry's first fit comes back with why it failed."""
     lo, hi = EXPIRY_WINDOW[horizon]
     usable = sorted((e for e in exps if lo <= e[1] <= hi), key=lambda e: abs(e[1] - horizon))
-    if not usable:
+    if not usable and not _can_extrapolate(exps, horizon):
         raise DensityError("no_expiry", f"longest expiry {max(e[1] for e in exps)} days")
     slices = {}
     for e, d, calls, puts in _chains(tk, sym):
@@ -953,7 +1061,20 @@ def _options_rn(tk, sym: str, exps, horizon: int, S0: float, rf: float):
                 first = (rn, e, d, False, why)
     if first:
         return first
+    if not usable:
+        # No listed expiry near the horizon: read it off the surface.
+        if not surface:
+            raise DensityError("thin", "every expiry's quotes too wide or one-sided")
+        if len(surface) < SURFACE_MIN_SLICES:
+            raise DensityError("thin", f"{len(surface)} usable expiries for a surface")
+        rn = surface_at(surface, horizon / 365)
+        ok, why = quality(rn)
+        return rn, (dt.date.today() + dt.timedelta(days=horizon)).isoformat(), horizon, ok, why
     raise DensityError("thin", f"no usable quotes in the {lo}–{hi} day window")
+
+
+def _can_extrapolate(exps, horizon: int) -> bool:
+    return bool(exps) and max(e[1] for e in exps) >= EXTRAP_MIN * horizon
 
 
 def _weekly(series):
@@ -1082,6 +1203,8 @@ def density(
             out = _compute(symbol, horizon, beta, st)
         except DensityError as e:
             fail.update(reason=e.reason, detail=e.detail)
+            if getattr(e, "chain", None):
+                fail["chain_symbol"] = e.chain
         except Exception as e:  # a Yahoo hiccup: say so, try again next open
             print(f"[density] {symbol} {horizon}d failed: {type(e).__name__}: {e}")
             fail["detail"] = type(e).__name__
@@ -1095,8 +1218,16 @@ def density(
                         "reason": fail["reason"],
                         "detail": fail.get("detail", ""),
                         "chain_symbol": fail.get("chain_symbol"),
-                        "why": (fail.get("quality") or {}).get("why", ""),
+                        "why": (fail.get("quality") or {}).get("why", "")
+                        or (fail.get("detail", "") if fail["reason"] == "thin" else ""),
                     }
+                    # A chain too thin for tails still quotes a fair ATM vol.
+                    fv = fail.get("vol") or {}
+                    if fv.get("implied"):
+                        out["vol"].update(
+                            implied=fv["implied"], implied_days=fv.get("implied_days")
+                        )
+                        out["vol"]["implied_symbol"] = fv.get("symbol")
                 except DensityError as e:
                     print(f"[density] {symbol} {horizon}d history: {e.reason} {e.detail}")
                     out = None
@@ -1143,7 +1274,7 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
 
     chain_sym, tk, exps = _resolve_chain(symbol)
     lo, hi = EXPIRY_WINDOW[horizon]
-    if not any(lo <= e[1] <= hi for e in exps):
+    if not any(lo <= e[1] <= hi for e in exps) and not _can_extrapolate(exps, horizon):
         raise DensityError("no_expiry", f"longest expiry {max(e[1] for e in exps)} days")
     S0, chain_ccy = _last(tk)
     if chain_sym == symbol:
@@ -1154,7 +1285,11 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     if not (math.isfinite(S0) and S0 > 0 and math.isfinite(ratio) and ratio > 0):
         raise DensityError("error", "no last price")
     rf = _rate()
-    rn, expiry, days, ok, why = _options_rn(tk, chain_sym, exps, horizon, S0, rf)
+    try:
+        rn, expiry, days, ok, why = _options_rn(tk, chain_sym, exps, horizon, S0, rf)
+    except DensityError as e:
+        e.chain = chain_sym  # the fallback names the listing that was too thin
+        raise
 
     try:
         qtype = (tk.info or {}).get("quoteType") or ""
@@ -1202,8 +1337,17 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
             "tails": {side: {k: round(v, 4) for k, v in t.items()} for side, t in tails.items()}
             if tails
             else None,
+            "extrapolated": rn.get("extrapolated"),
             "ok": ok,
             "why": why,
+        },
+        "vol": {
+            "implied": round(rn["atm_iv"], 6)
+            if math.isfinite(rn.get("atm_iv", math.nan))
+            else None,
+            "implied_days": days,
+            "hist": _hist_vol(chain_sym),
+            "symbol": chain_sym,
         },
     }
     if not ok:
@@ -1419,6 +1563,7 @@ def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
             "ok": True,
             "why": "",
         },
+        "vol": {"implied": None, "implied_days": None, "hist": _hist_vol(symbol), "symbol": symbol},
         "curves": curves,
         "analysts": an,
         "earnings": earnings,

@@ -49,7 +49,7 @@ from convexity.analytics import (
 )
 from convexity import jobs
 from convexity import investments as _investments
-from convexity.fetcher import fetch_detail, range_history
+from convexity.fetcher import fetch_detail, fetch_events, range_history
 from convexity.fetcher import stream_quotes as fetcher_stream_quotes
 
 # NB: convexity.frontier (and its numba/mpt dependency, ~1.7s to
@@ -485,6 +485,18 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = fetch_detail(sym)
                 self._send_json(200, payload)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/events":
+            # The stock window's E and D chart markers (fetcher.fetch_events).
+            q = parse_qs(parsed.query)
+            sym = (q.get("symbol") or [""])[0].strip().upper()
+            if not sym:
+                self._send_json(400, {"error": "symbol required"})
+                return
+            try:
+                self._send_json(200, fetch_events(sym))
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
             return

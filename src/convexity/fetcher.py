@@ -1028,3 +1028,90 @@ def fetch_detail(symbol: str) -> dict:
 
     _cache_put(cache_key, out)
     return out
+
+
+def fetch_events(symbol: str) -> dict:
+    """Earnings reports and dividends for the stock window's chart markers
+    (the E and D flags), plus the trailing-year dividend yield.
+
+    A detail path like `fetch_detail`, never `fetch_one`. Earnings come from
+    Yahoo's earnings calendar (EPS estimate, reported, surprise), their
+    timestamps read in the exchange's time zone: a report at or after 16:00
+    there moves the next session, anything earlier the same one, so `react`
+    is the first session whose close can carry it. The price reactions are
+    measured by the page on the chart's own closes. Dividends are per share
+    in the quote's unit (pence on LSE), by ex-date. Cached for 6 hours,
+    and only when Yahoo answered something.
+    """
+    cache_key = f"events|{symbol}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    tk = yf.Ticker(symbol)
+    out: dict = {
+        "symbol": symbol,
+        "earnings": [],
+        "dividends": [],
+        "div_ttm": None,
+        "div_yield_ttm": None,
+    }
+    tz = None
+    with contextlib.suppress(Exception):
+        tz = tk.fast_info.timezone
+    try:
+        df = tk.get_earnings_dates(limit=60)
+    except Exception:
+        df = None
+    if df is not None and not getattr(df, "empty", True):
+        for ts, row in df.iterrows():
+            try:
+                local = ts.tz_convert(tz) if tz and getattr(ts, "tzinfo", None) else ts
+            except Exception:
+                local = ts
+            day = local.date()
+            # Yahoo marks an unknown time as midnight New York.
+            known = not (ts.hour == 0 and ts.minute == 0)
+            after = known and local.hour >= 16
+            react = day + pd.Timedelta(days=1) if after else day
+            est, act = _safe_num(row.get("EPS Estimate")), _safe_num(row.get("Reported EPS"))
+            sur = _safe_num(row.get("Surprise(%)"))
+            if sur is None and act is not None and est not in (None, 0):
+                sur = (act - est) / abs(est) * 100.0
+            out["earnings"].append(
+                {
+                    "date": day.isoformat(),
+                    "react": react.isoformat(),
+                    "timing": ("after" if after else "before") if known else "",
+                    "estimate": est,
+                    "actual": act,
+                    "surprise_pct": sur,
+                }
+            )
+        # Yahoo repeats some reports (a row per source); keep the one with
+        # the reported figure.
+        by_day: dict = {}
+        for e in out["earnings"]:
+            if e["date"] not in by_day or (
+                by_day[e["date"]]["actual"] is None and e["actual"] is not None
+            ):
+                by_day[e["date"]] = e
+        out["earnings"] = sorted(by_day.values(), key=lambda e: e["date"])
+    try:
+        divs = tk.dividends
+    except Exception:
+        divs = None
+    if divs is not None and len(divs):
+        for ts, amt in divs.items():
+            a = _safe_num(amt)
+            if a and a > 0:
+                out["dividends"].append({"date": ts.date().isoformat(), "amount": a})
+        cut = (datetime.now(UTC) - pd.Timedelta(days=365)).date().isoformat()
+        ttm = sum(d["amount"] for d in out["dividends"] if d["date"] > cut)
+        last = None
+        with contextlib.suppress(Exception):
+            last = float(tk.fast_info.last_price)
+        out["div_ttm"] = ttm
+        out["div_yield_ttm"] = ttm / last if last and last > 0 else None
+    if out["earnings"] or out["dividends"]:
+        _cache_put(cache_key, out, 6 * 3600.0)
+    return out

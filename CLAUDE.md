@@ -213,8 +213,12 @@ Each of these has cost real debugging time; the link goes to the full story.
   SVI wing is Lee-capped and trusted only inside the quoted strikes (GEV tails
   past them, the attachment cdf from the call slope, never from integrating the
   density), and a chain that fails the gate is "Thin", never drawn: a sparse
-  chain gets an SSVI surface over all its expiries, and a name with no usable
-  options a labelled history estimate (`source: "history"`). Weekly returns
+  chain gets an SSVI surface over all its expiries (which also gives a horizon
+  past the longest expiry, flat vol, when the chain reaches half of it), a
+  non-US name the US line with the most open interest (Yahoo has no Eurex or
+  Euronext chains), and a name with no usable options a labelled history
+  estimate (`source: "history"`). The chart's E/D flags come from
+  `/api/events` and are a layer drawn over the finished chart. Weekly returns
   only for betas (European and US closes are hours apart). The paths are bridges to the drawn curve, not GBM, so the end marginal
   is exact. `/api/density` caches successes only.
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·

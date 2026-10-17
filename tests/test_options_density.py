@@ -319,6 +319,64 @@ def test_the_surface_gate_wants_coverage_and_enough_quotes(sparse_surface):
     assert not ok and "expiries" in why
 
 
+def test_the_surface_reads_a_maturity_no_expiry_has(sparse_surface):
+    # An ADR listing to 7 months: 12M comes off the surface, flat vol
+    # past the last expiry. The surface's ATM vol is sqrt(0.06) at every T.
+    short = sparse_surface[:4]  # 62..243 days
+    rn = od.surface_at(short, 1.0)
+    assert rn["extrapolated"] == {"from_days": 243, "beyond": True}
+    assert rn["atm_iv"] == pytest.approx(math.sqrt(0.06), abs=0.005)
+    assert rn["F"] == pytest.approx(S0 * math.exp(R * 1.0), rel=2e-3)
+    assert abs(rn["martingale_err"]) < 0.003 and od.quality(rn) == (True, "")
+    # Between expiries, theta is interpolated: same vol, not extrapolated.
+    mid = od.surface_at(sparse_surface[:3] + sparse_surface[4:], 243 / 365)
+    assert mid["extrapolated"]["beyond"] is False
+    assert mid["atm_iv"] == pytest.approx(math.sqrt(0.06), abs=0.005)
+
+
+def test_extrapolation_needs_half_the_horizon():
+    assert od._can_extrapolate([("a", 62), ("b", 216)], 365)
+    assert not od._can_extrapolate([("a", 62), ("b", 153)], 365)
+    assert not od._can_extrapolate([], 365)
+
+
+def test_the_chain_with_the_most_open_interest_wins(monkeypatch):
+    # A European listing has no options; its ADR does, its pink sheet barely.
+    import yfinance
+
+    from convexity import symbol_db
+
+    class Tk:
+        def __init__(self, sym):
+            self.sym = sym
+
+    exps = {"ZZADR": [("2027-01-15", 90)], "ZZPINK": [("2027-01-15", 90)], "ZZ.AS": []}
+    monkeypatch.setattr(yfinance, "Ticker", Tk)
+    monkeypatch.setattr(od, "_expiries", lambda tk: exps.get(tk.sym, []))
+    monkeypatch.setattr(
+        od, "_open_interest", lambda tk, e: {"ZZADR": 9071.0, "ZZPINK": 3.0}[tk.sym]
+    )
+    monkeypatch.setattr(symbol_db, "us_lines", lambda s: ["ZZPINK", "ZZADR"])
+    monkeypatch.setattr(symbol_db, "discover_us_line", lambda s: None)
+    sym, tk, got = od._resolve_chain("ZZ.AS")
+    assert sym == "ZZADR" and got == exps["ZZADR"]
+    monkeypatch.setattr(symbol_db, "us_lines", lambda s: [])
+    with pytest.raises(od.DensityError) as e:
+        od._resolve_chain("ZZ2.AS")
+    assert e.value.reason == "no_options"
+
+
+def test_hist_vol_is_annualised_like_an_implied_vol(monkeypatch):
+    import pandas as pd
+
+    rng = np.random.default_rng(7)
+    r = rng.normal(0, 0.02, 252)
+    monkeypatch.setattr(od, "_close", lambda sym, period: pd.Series(100 * np.exp(np.cumsum(r))))
+    assert od._hist_vol("X") == pytest.approx(np.std(r[1:], ddof=1) * math.sqrt(252), rel=1e-6)
+    monkeypatch.setattr(od, "_close", lambda sym, period: pd.Series(np.ones(50)))
+    assert od._hist_vol("X") is None  # too short to say
+
+
 # ------------------------------ FX and the history path ------------------------------
 
 

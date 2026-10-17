@@ -2493,6 +2493,7 @@ function openModal(r) {
   DETAIL.range = "1Y"; DETAIL.showSP = false; DETAIL.showSector = false; DETAIL.showVol = true;
   DETAIL.showSigma = DETAIL.showMu = true; DETAIL.fcH = 365; DETAIL.fcAuto = true;
   DETAIL.fc = {}; DETAIL.fcPending = {}; DETAIL.fcSim = null; DETAIL.fcAnimKey = null; DETAIL.fcHov = null;
+  DETAIL.events = null; DETAIL.evOpen = null;
   DETAIL.intraday = {}; DETAIL.intraPending = {};  // per-symbol; server caches the fetches
   DETAIL.sma = CHART_SMA;       // shared reference — see CHART_SMA
   renderModalSkeleton();
@@ -2515,6 +2516,16 @@ function openModal(r) {
       }
     })
     .catch(e => { $("#m-loading").textContent = "Network error: " + e.message; });
+  // Earnings and dividends for the chart's E/D flags and the dividend yield:
+  // a layer drawn over the finished chart, so it never restarts the paths.
+  fetch("/api/events?symbol=" + encodeURIComponent(r.symbol))
+    .then(res => res.json())
+    .then(ev => {
+      if (DETAIL.row !== r || !ev || ev.error) return;
+      DETAIL.events = ev;
+      if (DETAIL.geom) { renderEventMarkers(); renderFcReadouts(); }
+    })
+    .catch(() => {});
 }
 function closeModal() {
   if (hideOverlay("#modal-bg")) DETAIL.data = null;
@@ -2591,6 +2602,41 @@ function renderModalPriceBlock(sel) {
   if (el) el.innerHTML = modalPriceBlockHtml(sel);
 }
 
+/* Where a listing trades, by Yahoo's exchange code: [city, exchange]. The
+ * header reads "Banks - Diversified · Amsterdam (Euronext Amsterdam) · EUR";
+ * an unknown code is shown as it is. */
+const EXCHANGE_PLACES = {
+  NMS: ["New York", "Nasdaq"], NGM: ["New York", "Nasdaq"], NCM: ["New York", "Nasdaq"], NAS: ["New York", "Nasdaq"],
+  NYQ: ["New York", "NYSE"], ASE: ["New York", "NYSE American"], PCX: ["New York", "NYSE Arca"],
+  BTS: ["Chicago", "Cboe BZX"], PNK: ["New York", "OTC Markets"],
+  AMS: ["Amsterdam", "Euronext Amsterdam"], PAR: ["Paris", "Euronext Paris"], BRU: ["Brussels", "Euronext Brussels"],
+  LIS: ["Lisbon", "Euronext Lisbon"], ISE: ["Dublin", "Euronext Dublin"], OSL: ["Oslo", "Oslo Børs"],
+  MIL: ["Milan", "Borsa Italiana"], GER: ["Frankfurt", "Xetra"], FRA: ["Frankfurt", "Börse Frankfurt"],
+  STU: ["Stuttgart", "Börse Stuttgart"], MUN: ["Munich", "Börse München"], DUS: ["Düsseldorf", "Börse Düsseldorf"],
+  BER: ["Berlin", "Börse Berlin"], HAM: ["Hamburg", "Börse Hamburg"], LSE: ["London", "London Stock Exchange"],
+  IOB: ["London", "LSE International Order Book"], MCE: ["Madrid", "Bolsa de Madrid"], EBS: ["Zurich", "SIX Swiss Exchange"],
+  VIE: ["Vienna", "Wiener Börse"], CPH: ["Copenhagen", "Nasdaq Copenhagen"], STO: ["Stockholm", "Nasdaq Stockholm"],
+  HEL: ["Helsinki", "Nasdaq Helsinki"], ICE: ["Reykjavik", "Nasdaq Iceland"], WSE: ["Warsaw", "Warsaw Stock Exchange"],
+  PRA: ["Prague", "Prague Stock Exchange"], BUD: ["Budapest", "Budapest Stock Exchange"], ATH: ["Athens", "Athens Exchange"],
+  IST: ["Istanbul", "Borsa Istanbul"], TOR: ["Toronto", "Toronto Stock Exchange"], VAN: ["Toronto", "TSX Venture"],
+  CNQ: ["Toronto", "Canadian Securities Exchange"], JPX: ["Tokyo", "Tokyo Stock Exchange"], HKG: ["Hong Kong", "HKEX"],
+  SHH: ["Shanghai", "Shanghai Stock Exchange"], SHZ: ["Shenzhen", "Shenzhen Stock Exchange"],
+  TAI: ["Taipei", "Taiwan Stock Exchange"], TWO: ["Taipei", "Taipei Exchange"], KSC: ["Seoul", "Korea Exchange"],
+  KOE: ["Seoul", "KOSDAQ"], NSI: ["Mumbai", "NSE India"], BSE: ["Mumbai", "BSE"], ASX: ["Sydney", "ASX"],
+  NZE: ["Wellington", "NZX"], SES: ["Singapore", "SGX"], SAO: ["São Paulo", "B3"], BUE: ["Buenos Aires", "BYMA"],
+  MEX: ["Mexico City", "BMV"], JNB: ["Johannesburg", "JSE"], TLV: ["Tel Aviv", "TASE"], SAU: ["Riyadh", "Tadawul"],
+  KLS: ["Kuala Lumpur", "Bursa Malaysia"], SET: ["Bangkok", "SET"], JKT: ["Jakarta", "IDX"],
+};
+function modalMetaHtml(r) {
+  const pl = EXCHANGE_PLACES[(r.exchange || "").toUpperCase()];
+  const where = pl ? `${pl[0]} (${pl[1]})` : r.exchange;
+  // One description: the industry (the narrower of Yahoo's two); the
+  // sector is its hover.
+  const what = r.industry || r.sector;
+  const whatHtml = what ? `<span${r.industry && r.sector ? ` data-tip="Sector: ${escapeHtml(r.sector)}"` : ""}>${escapeHtml(what)}</span>` : "";
+  return [whatHtml, where && escapeHtml(where), r.currency && escapeHtml(r.currency)].filter(Boolean).join(" · ");
+}
+
 function renderModalSkeleton() {
   const r = DETAIL.row;
   $("#modal").innerHTML = `
@@ -2599,7 +2645,7 @@ function renderModalSkeleton() {
       <div class="m-title">
         <h2><span class="ticker">${r.symbol}</span> — ${escapeHtml(r.name || "")}</h2>
         <div class="meta">
-          ${[r.exchange, r.sector, r.industry, r.currency].filter(Boolean).map(escapeHtml).join(" · ")}
+          ${modalMetaHtml(r)}
           ${r.website ? ` · <a href="${escapeHtml(r.website)}" target="_blank" rel="noopener">website ↗</a>` : ""}
         </div>
       </div>
@@ -3177,8 +3223,8 @@ function renderChart() {
   const t0 = stock[0][0], t1 = stock[stock.length - 1][0];
   const type = CHART_TYPE, usesRange = chartTypeUsesRange(type);
   const W = wrap.clientWidth || 800;
-  // σ/μ on: the history ends at Today, ~58% across; the future zone, the
-  // sideways density and the right-axis price tags take the rest.
+  // σ/μ on: the history ends at Today, ~58% across; the future zone and the
+  // sideways density take the rest (today's price is a tag on the left axis).
   const FC = fcOn();
   const fcPlotR = W - FC_ZONE.tagW;
   const padL = 48, padT = 12;
@@ -3306,6 +3352,20 @@ function renderChart() {
     return v.toFixed(2);
   };
 
+  // σ/μ: today's price as a gauge, a dashed level across the whole plot with
+  // its tag on the left axis among the ticks (the tick it would cover hides).
+  // The future zone's hover level gets the same tag (fcDraw moves it).
+  let gaugeSvg = "";
+  if (FC && logY) {
+    const fd = DETAIL.fc[DETAIL.fcH];
+    const lvl = fd && fd.ok ? fd.s0 : stock[stock.length - 1][1];
+    const gy = yScale(lvl);
+    for (const t of ticks) if (Math.abs(t.y - gy) < 13) t.hide = true;
+    gaugeSvg = `<line x1="${padL}" x2="${fcPlotR}" y1="${gy.toFixed(1)}" y2="${gy.toFixed(1)}" class="m-gauge-line"/>
+      ${yTagSvg("m-ytag", gy, fmtTickVal(lvl), padL)}
+      <g id="m-ytag-hov" style="display:none"><line class="m-gauge-hov" x1="${padL}" x2="${fcPlotR}" y1="0" y2="0"/>${yTagSvg("", 0, "", padL, true)}</g>`;
+  }
+
   // Volume pane — its own band under the price pane, a hairline above it.
   const volSvg = volOn
     ? `<line x1="${padL}" x2="${W - padR}" y1="${(volTop - volGap / 2).toFixed(1)}" y2="${(volTop - volGap / 2).toFixed(1)}" stroke="var(--border)" stroke-width="0.6"/>
@@ -3328,9 +3388,10 @@ function renderChart() {
         </linearGradient>
       </defs>
       ${ticks.map(t => `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${FC ? fcPlotR : W-padR}" y2="${t.y.toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>`).join("")}
-      ${ticks.map(t => `<text x="${padL-6}" y="${t.y+3}" font-size="10" fill="var(--muted)" text-anchor="end">${fmtTickVal(t.v)}</text>`).join("")}
+      ${ticks.filter(t => !t.hide).map(t => `<text x="${padL-6}" y="${t.y+3}" font-size="10" fill="var(--muted)" text-anchor="end">${fmtTickVal(t.v)}</text>`).join("")}
       ${xTicks.filter((t, i) => !FC || i < xTicks.length - 1).map((t, i) => `<text x="${t.x}" y="${H - 7}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtTickDate(t.t)}</text>`).join("")}
       ${volSvg}
+      ${gaugeSvg}
       ${priceSvg}
       ${spyPath ? `<path d="${spyPath}" fill="none" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
       ${secPath ? `<path d="${secPath}" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
@@ -3350,11 +3411,150 @@ function renderChart() {
   // Save geometry + data for interaction
   DETAIL.geom = { W, H, padL, padR, padT, padB, chartH, xScale, xInv, yScale, stock, spy, sec,
                   t0, t1, fillRgb, interval: src.interval, bars: drawBars, volBars, type,
-                  fc: FC ? { xT: W - padR, xH: padL + (fcPlotR - padL) * FC_ZONE.pdf, xR: fcPlotR, lo, hi, ox: 40 } : null };
+                  fmtTickVal, fc: FC ? { xT: W - padR, xH: padL + (fcPlotR - padL) * FC_ZONE.pdf, xR: fcPlotR, lo, hi, ox: 40 } : null };
   if (FC) mountForecast(wrap, DETAIL.geom);
+  renderEventMarkers();
 
   renderChartInfoDefault();
   attachChartInteraction();
+}
+
+/* ---- E and D: earnings and dividends on the history (fetcher.fetch_events) ----
+ * A faint dashed rule per event and a small flag on the plot's top edge, E in
+ * the first lane and D in the second, so a report and an ex-date in the same
+ * week never sit on each other. E is green for a beat and red for a miss.
+ * A click opens a card: what was expected, what came, and how the price took
+ * it, measured on the chart's own daily closes (dividend-adjusted, so a
+ * D's "price" move adds the dividend back out). Flags closer than 16 px to
+ * the previous one in their lane are skipped: 5Y fits, MAX thins out. */
+const EV_LANE = { E: 3, D: 22 };
+const evDay = (t) => new Date(t + 12 * 3600e3).toISOString().slice(0, 10);   // a bar's trading date
+function evIdx(pts, day) {   // first daily close on or after `day`
+  let lo = 0, hi = pts.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (evDay(pts[m][0]) < day) lo = m + 1; else hi = m; }
+  return lo;
+}
+
+function renderEventMarkers() {
+  const g = DETAIL.geom, wrap = $("#m-chart"), svg = $("#m-svg"), ev = DETAIL.events;
+  if (!wrap || !svg) return;
+  wrap.querySelectorAll(".m-ev, .m-ev-card").forEach(n => n.remove());
+  svg.querySelector("#m-ev-rules")?.remove();
+  DETAIL.evOpen = null;
+  if (!g || !ev) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const xMax = g.W - g.padR;
+  const items = [
+    ...(ev.earnings || []).filter(e => e.date <= today).map(e => ({ kind: "E", e, day: e.date })),
+    ...(ev.dividends || []).map(e => ({ kind: "D", e, day: e.date })),
+  ];
+  const last = { E: -1e9, D: -1e9 }, shown = [];
+  for (const it of items.sort((a, b) => a.day.localeCompare(b.day))) {
+    const t = Date.parse(it.day + "T12:00:00Z");
+    if (t < g.t0 || t > g.t1 + 864e5) continue;
+    const x = g.xScale(Math.min(t, g.t1));
+    if (x < g.padL + 4 || x > xMax - 2 || x - last[it.kind] < 16) continue;
+    last[it.kind] = x;
+    shown.push({ ...it, x });
+  }
+  if (!shown.length) return;
+  const bot = g.padT + g.chartH;
+  const rules = shown.map(it => `<line x1="${it.x.toFixed(1)}" x2="${it.x.toFixed(1)}" y1="${g.padT + EV_LANE[it.kind] + 17}" y2="${bot}" class="m-ev-rule ${it.kind === "E" ? "e" : "d"}"/>`).join("");
+  svg.insertAdjacentHTML("afterbegin", `<g id="m-ev-rules">${rules}</g>`);
+  wrap.insertAdjacentHTML("beforeend", shown.map((it, i) => {
+    const sur = it.e.surprise_pct;
+    const cls = it.kind === "D" ? "d" : sur == null ? "e" : sur >= 0 ? "e beat" : "e miss";
+    const what = it.kind === "E" ? `Earnings ${fcFmtDate(new Date(it.day + "T12:00:00"))}` : `Dividend, ex-date ${fcFmtDate(new Date(it.day + "T12:00:00"))}`;
+    return `<button class="m-ev ${cls}" data-ev="${i}" style="left:${it.x.toFixed(1)}px;top:${g.padT + EV_LANE[it.kind]}px" aria-label="${escapeHtml(what)}">${it.kind}</button>`;
+  }).join(""));
+  DETAIL.evShown = shown;
+  wrap.querySelectorAll(".m-ev").forEach(b => b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const i = +b.dataset.ev;
+    if (DETAIL.evOpen === i) closeEventCard(); else openEventCard(i, b);
+  }));
+}
+
+function closeEventCard() {
+  document.querySelectorAll("#m-chart .m-ev-card").forEach(n => n.remove());
+  document.querySelectorAll("#m-chart .m-ev.open").forEach(n => n.classList.remove("open"));
+  DETAIL.evOpen = null;
+}
+document.addEventListener("mousedown", (e) => {
+  if (DETAIL.evOpen != null && !e.target.closest(".m-ev-card, .m-ev")) closeEventCard();
+}, true);
+
+function openEventCard(i, btn) {
+  closeEventCard();
+  const it = DETAIL.evShown[i], wrap = $("#m-chart"), d = DETAIL.data;
+  if (!it || !wrap || !d) return;
+  const pts = d.history || [], ccy = d.currency;
+  const money = (v) => fmtMoney(v, ccy);
+  const pctS = (v, dp = 1) => (v == null || !isFinite(v) ? "—" : `${v >= 0 ? "+" : "−"}${Math.abs(v * 100).toFixed(dp)}%`);
+  const cls = (v) => (v == null || !isFinite(v) ? "" : v >= 0 ? "pos" : "neg");
+  const row = (k, v, c, sub) => `<div class="r"><span>${k}</span><b class="${c || ""}">${v}</b>${sub ? `<i>${sub}</i>` : ""}</div>`;
+  const date = (day) => fcFmtDate(new Date(day + "T12:00:00"));
+  let h;
+  if (it.kind === "E") {
+    const e = it.e, sur = e.surprise_pct;
+    const timing = e.timing === "after" ? "after the close" : e.timing === "before" ? "before the close" : "time not given";
+    h = `<div class="hd"><span class="m-ev e${sur == null ? "" : sur >= 0 ? " beat" : " miss"}">E</span><div><b>Earnings</b><span>${date(e.date)} · ${timing}</span></div></div>`;
+    if (e.actual != null) {
+      h += row("Reported EPS", e.actual.toFixed(2));
+      h += row("Expected EPS", e.estimate != null ? e.estimate.toFixed(2) : "—", "", "analysts’ consensus");
+      h += row("Surprise", sur != null ? `${sur >= 0 ? "+" : "−"}${Math.abs(sur).toFixed(1)}%` : "—", cls(sur == null ? null : sur), sur == null ? "" : sur >= 0 ? "beat" : "missed");
+    } else h += `<div class="nt">The reported figures aren’t in Yahoo’s calendar yet.</div>`;
+    const j = evIdx(pts, e.react || e.date);
+    if (j > 0 && j < pts.length) {
+      const r1 = pts[j][1] / pts[j - 1][1] - 1;
+      const r5 = j + 4 < pts.length ? pts[j + 4][1] / pts[j - 1][1] - 1 : null;
+      h += `<hr>` + row("Price, first session", pctS(r1), cls(r1), date(evDay(pts[j][0])));
+      if (r5 != null) h += row("Over 5 sessions", pctS(r5), cls(r5));
+      const spy = d.benchmark_spy;
+      if (spy && spy.length > 2) {
+        const a = evIdx(spy, evDay(pts[j - 1][0])), b = evIdx(spy, evDay(pts[j][0]));
+        if (a < spy.length && b < spy.length && b > 0 && evDay(spy[a][0]) === evDay(pts[j - 1][0])) {
+          const m1 = spy[b][1] / spy[a][1] - 1;
+          h += row("S&amp;P 500, same session", pctS(m1), cls(m1), `excess ${pctS(r1 - m1)}`);
+        }
+      }
+      h += `<div class="nt">From the close before the report to the first close after it.</div>`;
+    }
+  } else {
+    const e = it.e, divs = (DETAIL.events.dividends || []);
+    const k = divs.indexOf(e), prev = k > 0 ? divs[k - 1] : null;
+    // The same payment a year earlier: interim vs interim, final vs final.
+    const yr = divs.slice(0, Math.max(k, 0)).filter(x => {
+      const dd = (Date.parse(e.date) - Date.parse(x.date)) / 864e5; return dd > 300 && dd < 430;
+    }).pop();
+    h = `<div class="hd"><span class="m-ev d">D</span><div><b>Dividend</b><span>ex-date ${date(e.date)}</span></div></div>`;
+    h += row("Amount", `${money(e.amount)}`, "", "a share");
+    if (yr) h += row("A year earlier", money(yr.amount), "", `${pctS(e.amount / yr.amount - 1, 0)}, ${date(yr.date)}`);
+    if (prev && prev !== yr) h += row("Previous", money(prev.amount), "", date(prev.date));
+    const j = evIdx(pts, e.date);
+    if (j > 0 && j < pts.length && evDay(pts[j][0]) === e.date) {
+      const yld = e.amount / pts[j - 1][1];
+      const tr = pts[j][1] / pts[j - 1][1] - 1;
+      h += row("Of the price", `${(yld * 100).toFixed(2)}%`, "", "the day before");
+      h += `<hr>` + row("Price on the ex-date", pctS(tr - yld), cls(tr - yld), `≈ ${pctS(-yld)} from the dividend`);
+      h += row("With the dividend", pctS(tr), cls(tr), "total return");
+    }
+  }
+  wrap.insertAdjacentHTML("beforeend", `<div class="m-ev-card" role="dialog">${h}<button class="x" aria-label="Close">×</button></div>`);
+  const card = wrap.querySelector(".m-ev-card");
+  card.querySelector(".x").onclick = closeEventCard;
+  const x = parseFloat(btn.style.left), w = card.offsetWidth;
+  card.style.left = Math.max(4, Math.min(x - 24, wrap.clientWidth - w - 4)) + "px";
+  card.style.top = (parseFloat(btn.style.top) + 22) + "px";
+  btn.classList.add("open");
+  DETAIL.evOpen = i;
+}
+
+/* A price tag on the left axis (the σ/μ gauge and its hover level): a filled
+ * pill under the tick labels' column, the value in the axis' own format. */
+function yTagSvg(id, y, text, padL, hover) {
+  return `<g${id ? ` id="${id}"` : ""} class="m-ytag${hover ? " hov" : ""}" transform="translate(0,${y.toFixed(1)})">
+    <rect x="1" y="-9" width="${padL - 3}" height="18" rx="4"/><text x="${padL - 6}" y="3.5" text-anchor="end">${text}</text></g>`;
 }
 
 /* ---- σ/μ: the real-world price distribution (options_density.py) ----
@@ -3371,7 +3571,7 @@ function renderChart() {
  * the paths' end points ARE the density, by construction. Anything between
  * today and the expiry (the cone, touch chances) is that bridge model's, and
  * the footnote says the curve is a chance, never a prediction. */
-const FC_ZONE = { hist: 0.58, pdf: 0.82, tagW: 82, steps: 96, paths: 1000, draw: 140 };
+const FC_ZONE = { hist: 0.58, pdf: 0.8, tagW: 12, steps: 96, paths: 1000, draw: 140 };
 const FC_ANIM = { paths: 750, pdf: 300 };
 
 function fcOn() { return DETAIL.showSigma || DETAIL.showMu; }
@@ -3394,7 +3594,6 @@ function ensureDensity(h) {
     // tails (SPY, DELL today); then the window opens on 3M and says why.
     if (want === 91 && DETAIL.fcAuto && d.ok && DETAIL.fc[365] && !DETAIL.fc[365].ok) DETAIL.fcH = 91;
     if (want === DETAIL.fcH) renderChart();
-    else fcChipLabels();
     if (want === 365) ensureDensity(91);
   }).catch(() => {
     DETAIL.fcPending[want] = false;
@@ -3556,25 +3755,19 @@ function fcDateAt(days) {
 const FC_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fcFmtDate = (t) => `${t.getDate()} ${FC_MON[t.getMonth()]} ${t.getFullYear()}`;
 
-/* A horizon chip names its real expiry once that chain has been read. */
-function fcChipLabel(h) {
-  const d = DETAIL.fc[h];
-  return (h === 365 ? "12M" : "3M") + (d && d.expiry ? " · " + fcFmtDate(new Date(d.expiry + "T12:00:00")) : "");
-}
-function fcChipLabels() {
-  document.querySelectorAll("#m-fc-h [data-fc-h]").forEach(b => { b.textContent = fcChipLabel(+b.dataset.fcH); });
-}
+const fcHLabel = (h) => (h === 365 ? "12M" : "3M");
+/* "17 Oct 27": the date under the density, after the bold horizon. */
+const fcFmtShort = (t) => `${t.getDate()} ${FC_MON[t.getMonth()]} ${String(t.getFullYear()).slice(2)}`;
 
 /* Mounts the forecast layer over the chart (called by renderChart). */
 function mountForecast(wrap, g) {
   const d = DETAIL.fc[DETAIL.fcH];
   const f = g.fc;
-  const mk = (h) => `<button data-fc-h="${h}" class="${DETAIL.fcH === h ? "on" : ""}">${fcChipLabel(h)}</button>`;
+  const mk = (h) => `<button data-fc-h="${h}" class="${DETAIL.fcH === h ? "on" : ""}">${fcHLabel(h)}</button>`;
   wrap.insertAdjacentHTML("beforeend", `
     <canvas class="m-fc-cv" id="m-fc-cv" style="left:${f.xT - f.ox}px;width:${g.W - f.xT + f.ox}px;height:${g.H}px"></canvas>
     <div class="m-fc-hit" id="m-fc-hit" style="left:${f.xT}px;top:${g.padT}px;width:${g.W - f.xT}px;height:${g.chartH}px"></div>
-    <div class="m-fc-ctl"><span class="m-fc-seg" id="m-fc-h">${mk(365)}${mk(91)}</span>
-      <button class="m-fc-replay" id="m-fc-replay" title="Replay" aria-label="Replay the paths">↻</button></div>
+    <div class="m-fc-ctl"><span class="m-fc-seg" id="m-fc-h">${mk(91)}${mk(365)}</span></div>
     <div class="m-fc-tt" id="m-fc-tt"></div>`);
   const cv = $("#m-fc-cv"), dpr = window.devicePixelRatio || 1;
   cv.width = Math.round((g.W - f.xT + f.ox) * dpr); cv.height = Math.round(g.H * dpr);
@@ -3583,7 +3776,6 @@ function mountForecast(wrap, g) {
     const h = +b.dataset.fcH; if (h === DETAIL.fcH) return;
     DETAIL.fcH = h; DETAIL.fcAuto = false; ensureDensity(h); renderChart();
   });
-  $("#m-fc-replay").onclick = () => { DETAIL.fcAnimKey = null; fcPlay(); };
   const hit = $("#m-fc-hit");
   hit.addEventListener("mousemove", (e) => {
     const r = hit.getBoundingClientRect();
@@ -3641,8 +3833,15 @@ function fcDraw() {
   ctx.beginPath(); ctx.moveTo(xT, top); ctx.lineTo(xT, bot); ctx.stroke(); ctx.setLineDash([]);
   ctx.fillStyle = col.text; ctx.font = font(600, 12); ctx.textAlign = "center";
   ctx.fillText("Today", xT, g.H - 7);
-  if (d && d.expiry) ctx.fillText(fcFmtDate(new Date(d.expiry + "T12:00:00")), Math.min(xH, xR - 46), g.H - 7);
   ctx.textAlign = "left";
+  if (d && d.expiry) {
+    const hl = fcHLabel(d.horizon), rest = `  ·  ${fcFmtShort(new Date(d.expiry + "T12:00:00"))}`;
+    ctx.font = font(700, 12); const w1 = ctx.measureText(hl).width;
+    ctx.font = font(400, 12); const w2 = ctx.measureText(rest).width;
+    const x0 = Math.min(xH - (w1 + w2) / 2, xR - w1 - w2 - 4);
+    ctx.font = font(700, 12); ctx.fillText(hl, x0, g.H - 7);
+    ctx.font = font(400, 12); ctx.fillStyle = col.muted; ctx.fillText(rest, x0 + w1, g.H - 7);
+  }
 
   const note = (msg) => {
     ctx.fillStyle = col.muted; ctx.font = font(500, 14); ctx.textAlign = "center";
@@ -3756,31 +3955,32 @@ function fcDraw() {
     ctx.globalAlpha = 1;
   }
 
-  // Today's level and dot.
-  ctx.strokeStyle = col.text; ctx.globalAlpha = 0.35; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(xT, y(d.s0)); ctx.lineTo(xR, y(d.s0)); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+  // Today's dot (its level is the SVG gauge line, across the whole plot).
   ctx.fillStyle = col.text; ctx.beginPath(); ctx.arc(xT, y(d.s0), 4, 0, 7); ctx.fill();
 
   const hov = DETAIL.fcHov;
   if (hov) {
     const yy = y(hov.K);
     ctx.strokeStyle = col.text; ctx.globalAlpha = 0.6; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(xT, yy); ctx.lineTo(xR, yy); ctx.moveTo(hov.x, top); ctx.lineTo(hov.x, bot); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hov.x, top); ctx.lineTo(hov.x, bot); ctx.stroke();
     ctx.setLineDash([]); ctx.globalAlpha = 1;
     ctx.fillStyle = col.text; ctx.beginPath(); ctx.arc(hov.x, yy, 4.5, 0, 7); ctx.fill();
     if (hov.snap) { ctx.strokeStyle = col.amber; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(hov.x, yy, 8, 0, 7); ctx.stroke(); }
   }
   ctx.restore();
 
-  // Price tags on the right axis: today's, and the hover level.
-  const tag = (yc, text, fill, color) => {
-    ctx.font = font(600, 12); const w = ctx.measureText(text).width + 14;
-    const yy = Math.min(Math.max(yc, top + 10), bot - 10);
-    fcRoundRect(ctx, g.W - 4 - w, yy - 10, w, 20, 5); ctx.fillStyle = fill; ctx.fill();
-    ctx.fillStyle = color; ctx.fillText(text, g.W - 4 - w + 7, yy + 4);
-  };
-  tag(y(d.s0), fmtMoney(d.s0, DETAIL.data.currency), col.text, col.bg);
-  if (hov) tag(y(hov.K), fmtMoney(hov.K, DETAIL.data.currency), `rgb(${col.acc})`, col.bg);
+  // The hover level: a line across the plot and a tag on the left axis.
+  const ht = document.getElementById("m-ytag-hov");
+  if (ht) {
+    ht.style.display = hov ? "" : "none";
+    if (hov) {
+      const yy = y(hov.K);
+      ht.querySelector("line").setAttribute("y1", yy); ht.querySelector("line").setAttribute("y2", yy);
+      const tg = ht.querySelector(".m-ytag");
+      tg.setAttribute("transform", `translate(0,${yy.toFixed(1)})`);
+      tg.querySelector("text").textContent = g.fmtTickVal(hov.K);
+    }
+  }
 }
 
 /* Hover in the future zone: a date × price crosshair. On the density the date
@@ -3838,11 +4038,11 @@ function renderFcReadouts() {
   if (!fcOn()) { el.style.display = "none"; return; }
   el.style.display = "";
   const d = DETAIL.fc[DETAIL.fcH], ccy = DETAIL.data.currency;
-  const cell = (k, v, cls) => `<div><span>${k}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
+  const cell = (k, v, cls, tip) => `<div${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}><span>${k}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
   const pct = (v) => (v * 100).toFixed(0) + "%";
   const sgn = (v) => (v >= 0 ? "+" : "") + v.toFixed(0) + "%";
   const money = (v) => fmtMoney(v, ccy);
-  const link = ` · <a href="#" data-fc-settings>Assumptions ⚙</a>`;
+  const link = ` · <a href="#" data-fc-settings>Assumptions</a>`;
   if (!d) { el.innerHTML = `<div class="m-fc-grid"><div class="m-fc-wait">Pricing ${escapeHtml(DETAIL.row.symbol)}’s options…</div></div>`; return; }
   if (!d.ok) {
     const why = d.reason === "no_options" ? `No listed options for ${escapeHtml(d.symbol)} or a US line of the same company.`
@@ -3896,13 +4096,25 @@ function renderFcReadouts() {
   const sim = fcSimulate(d, mode);
   const s20 = fcStats(sim, d.s0 * 0.8, FC_ZONE.steps);
   const mk = DETAIL.showMu ? fcMarks(d) : null;
-  const e0 = (d.earnings || [])[0];
-  // The drawn curve's own width: κ × implied, plus FX when it is added.
-  const cv = d.curves[mode.curve];
-  const sig = Math.sqrt(cv.var_x / d.T);
-  const sigLabel = hist ? "σ · from history"
-    : mode.curve === "rn" ? `σ · implied${fx ? " + FX" : ""}`
-    : `σ · κ ${d.kappa.toFixed(2)} × implied ${(d.sigma_q * 100).toFixed(0)}%${fx ? " + FX" : ""}`;
+  const hz = d.horizon === 365 ? "12 months" : "3 months";
+  // What the curve's mean is, named for where it comes from: "expected"
+  // would claim more than a model's mean.
+  const meanLabel = mode.mu === "analysts" ? (an.n ? "Analysts’ mean target" : "Analysts’ target")
+    : mode.mu === "options" ? "Forward · risk-neutral mean" : "CAPM mean";
+  const meanTip = mode.mu === "analysts" ? `The mean of the drawn curve: ${an.n ? `the average of ${an.n} firms’ 12-month targets` : "the analysts’ consensus target"}${d.haircut ? ", with half the excess return over CAPM removed" : ""}.`
+    : mode.mu === "options" ? "The mean under the options’ own (risk-neutral) measure: the forward price."
+    : `The mean of the drawn curve: today’s price grown at the CAPM return, the rate plus β × the equity premium.`;
+  // Hist./Imp.: both annualised vols of log returns, on the same listing
+  // (the chain's, in its currency), so they compare directly.
+  const vo = d.vol || {};
+  const vpct = (v) => (v != null && isFinite(v) ? (v * 100).toFixed(0) + "%" : "—");
+  const ev = DETAIL.events;
+  const dy = !ev ? "…" : ev.div_yield_ttm == null ? "—" : ev.div_yield_ttm > 0 ? (ev.div_yield_ttm * 100).toFixed(1) + "%" : "None";
+  const dyTip = ev && ev.div_ttm ? `${fmtMoney(ev.div_ttm, ccy)} a share paid in the last 12 months (by ex-date), over today’s price.` : "Dividends paid in the last 12 months (by ex-date), over today’s price.";
+  const volTip = `Hist.: the last year’s daily log returns of ${vo.symbol || d.symbol}, annualised (sample sd × √252). `
+    + (vo.implied != null ? `Imp.: the at-the-money implied vol of the ${vo.implied_symbol || d.chain_symbol} options${vo.implied_days ? ` ${Math.round(vo.implied_days)} days out` : ""}, per year. Both on the same listing and currency, so they compare directly: Imp. above Hist. means the options price more movement than the last year had.`
+      : "Imp.: no usable options, so none.");
+  const tex = (src, txt) => window.katex ? katex.renderToString(src, { throwOnError: false }) : txt;
   const muTxt = mode.mu === "analysts" ? (an.n ? `μ from ${an.n} analysts (one ${hist ? "" : "options-"}shaped curve per firm, blended${d.haircut ? ", excess return halved" : ""}).`
       : `μ from the analysts’ consensus target${d.haircut ? ", excess return halved" : ""}.`)
     : mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
@@ -3914,16 +4126,24 @@ function renderFcReadouts() {
       : d12.reason === "no_expiry" ? ` No options expiry near 12 months (${escapeHtml(d12.detail || "")}), so this shows 3 months.` : ""
     : "";
   const fell = auto + (mode.fellBack ? (d.horizon === 365 ? " No analyst targets, so the market’s μ." : " Analyst targets are 12-month, so 3M uses the market’s μ.") : "");
+  // The σ that drew the curve: kappa x implied (plus FX), or history's.
+  const cvq = d.curves[mode.curve];
+  const sigNow = Math.sqrt(cvq.var_x / d.T);
+  const sigTxt = hist ? "" : ` Curve σ ${(sigNow * 100).toFixed(0)}%${mode.curve === "rn" ? " (implied" : ` (κ ${d.kappa.toFixed(2)} × implied ${(d.sigma_q * 100).toFixed(0)}%`}${fx ? " + FX" : ""}).`;
+  const consCell = mk
+    ? cell(tex(String.raw`\Pr[S_T \ge \text{consensus}]`, "Pr[S_T ≥ consensus]"), `${pct(fcCurveAbove(sim, mk.cons))} <small>${money(mk.cons)}</small>`, "amb", `The chance the price ends at or above the analysts’ consensus (the median firm’s target) in ${hz}.`)
+    : cell(tex(String.raw`\Pr[S_T \ge 1.2\,S_0]`, "Pr[S_T ≥ 1.2 S_0]"), pct(fcCurveAbove(sim, d.s0 * 1.2)), "", `The chance the price ends 20% or more above today’s in ${hz}.`);
   el.innerHTML = `<div class="m-fc-grid">
-    ${cell("Chance up", pct(fcCurveAbove(sim, d.s0)), "pos")}
-    ${cell("Expected price", `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`)}
-    ${cell("Median · 50% range", `${money(fcCurveQ(sim, 0.5))} · ${money(fcCurveQ(sim, 0.25))} – ${money(fcCurveQ(sim, 0.75))}`)}
-    ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`)}
-    ${cell("Chance ≤ −20% · touch it", `${((1 - fcCurveAbove(sim, d.s0 * 0.8)) * 100).toFixed(1)}% · ${pct(s20.touch)}`, "neg")}
-    ${mk ? cell(`Chance ≥ consensus ${money(mk.cons)}`, pct(fcCurveAbove(sim, mk.cons)), "amb") : cell("Chance ≥ +20%", pct(fcCurveAbove(sim, d.s0 * 1.2)))}
-    ${cell(e0 ? `Earnings ${fcFmtDate(new Date(e0.date + "T12:00:00"))}${hist ? "" : " · implied move"}` : "Earnings", e0 ? (e0.var > 0 ? `±${(Math.sqrt(e0.var) * 100).toFixed(1)}%` : hist ? "in window" : "—") : "none in window")}
-    ${cell(sigLabel, `${(sig * 100).toFixed(0)}%`)}
-  </div><div class="m-fc-foot">${srcTxt} ${muTxt}${fell}
+    ${cell(tex(String.raw`\Pr[S_T > S_0]`, "Pr[S_T > S_0]"), pct(fcCurveAbove(sim, d.s0)), "pos", `The chance the price is above today’s (S₀) in ${hz} (S_T).`)}
+    ${cell(meanLabel, `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`, "", meanTip)}
+    ${cell("Median · 50% range", `${money(fcCurveQ(sim, 0.5))} · ${money(fcCurveQ(sim, 0.25))} – ${money(fcCurveQ(sim, 0.75))}`, "", "Half the outcomes end inside the range, a quarter below it and a quarter above.")}
+    ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`, "", "Nine outcomes in ten end inside this range.")}
+    ${cell("Falls 20% or more", `${((1 - fcCurveAbove(sim, d.s0 * 0.8)) * 100).toFixed(1)}% <small>by the end · ${pct(s20.touch)} at some point</small>`, "neg",
+      `The chance of ending ${hz} at least 20% below today (${money(d.s0 * 0.8)} or less), and the chance of trading there at any time before, even if it recovers.`)}
+    ${consCell}
+    ${cell("Dividend Yield", dy, "", dyTip)}
+    ${cell("Hist. / Imp. Volatility", `${vpct(vo.hist)} / ${vpct(vo.implied)}`, "", volTip)}
+  </div><div class="m-fc-foot">${srcTxt}${sigTxt} ${muTxt}${fell}
     Paths: bridges to this curve${hist ? "" : " with earnings jumps"}.${via} A chance, not a prediction.${qual}${link}</div>`;
 }
 
