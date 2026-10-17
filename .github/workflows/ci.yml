@@ -18,6 +18,8 @@ jobs:
   secrets:
     name: Secret scan (gitleaks, full history)
     runs-on: ubuntu-latest
+    # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -41,6 +43,8 @@ jobs:
   lint:
     name: Syntax & static checks
     runs-on: ubuntu-latest
+    # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -109,6 +113,8 @@ jobs:
   test:
     name: Metrics unit tests
     runs-on: ubuntu-latest
+    # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -123,11 +129,13 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run pytest
-        run: uv run pytest tests/ -v --tb=short
+        run: uv run pytest tests/ -v --tb=short -o faulthandler_timeout=300
 
   server-smoke:
     name: Server smoke test (real HTTP requests, not just imports)
     runs-on: ubuntu-latest
+    # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
+    timeout-minutes: 30
     needs: [lint, test]
 
     steps:
@@ -150,6 +158,8 @@ jobs:
   desktop-import-smoke:
     name: Desktop app import (PySide6 + QtWebEngine, headless)
     runs-on: ubuntu-latest
+    # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
+    timeout-minutes: 30
     needs: [lint, test]
 
     steps:
@@ -214,6 +224,8 @@ jobs:
   tool-install-smoke:
     name: "uv tool install . + boot and /api/health (what the installers do)"
     runs-on: ubuntu-latest
+    # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
+    timeout-minutes: 30
     needs: [lint, test]
 
     # The installers do `uv tool install`, which resolves from pyproject.toml's
@@ -264,6 +276,8 @@ jobs:
   macos-install-smoke:
     name: "macOS: install.sh end to end (uv tool install, sips/iconutil, .app)"
     runs-on: macos-latest
+    # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
+    timeout-minutes: 30
     needs: [lint, test]
 
     # The whole installer against this checkout (CONVEXITY_SOURCE), into
@@ -302,6 +316,8 @@ jobs:
   windows-install-smoke:
     name: "Windows: packaging/install.ps1 end to end (uv tool install, Pillow icon, WScript.Shell shortcuts)"
     runs-on: windows-latest
+    # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
+    timeout-minutes: 30
     needs: [lint, test]
 
     # The whole installer against this checkout on a disposable runner,
