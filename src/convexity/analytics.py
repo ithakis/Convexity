@@ -970,17 +970,6 @@ def _when(iso: str) -> str:
     return f"{d:%b} {d.day}, {d.year}"
 
 
-def analyze_portfolio(
-    rows: list[dict], weights_in: dict, period: str, display_ccy: str = "USD"
-) -> dict:
-    out = analyze_portfolios_multi(
-        rows, {"__single__": weights_in or {}}, period, display_ccy=display_ccy
-    )
-    if isinstance(out, dict) and "error" in out:
-        return out
-    return (out or {}).get("__single__", {"error": "no result"})
-
-
 def analyze_portfolios_multi(
     rows: list[dict],
     weight_sets: dict[str, dict],

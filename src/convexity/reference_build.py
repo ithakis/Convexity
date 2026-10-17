@@ -18,7 +18,7 @@ window and the model are the app's own by construction. Per run:
    validators: reference_pack.py). No headline, summary or URL is written.
 
 The Finnhub key comes from the FINNHUB_API_KEY environment variable ONLY —
-never config.json or a legacy key file — so running this from a checkout that
+never config.json — so running this from a checkout that
 holds the owner's key files cannot spend their quota by accident; in CI it is
 the Actions secret. `--returns-only` fetches just the universe's prices (and
 probes yfinance news on a few names) to check that Yahoo answers from the

@@ -76,7 +76,7 @@ jobs:
       # were never compared, so lightgbm/scikit-learn lived only in the one CI
       # used and every installed copy ran with a dead ML model.
       # envcheck.REQUIRED is the single list; this asserts pyproject.toml covers
-      # it (plus the deprecated requirements.txt/environment.yml while they exist).
+      # it.
       - name: Dependency manifests match envcheck.REQUIRED
         run: uv run --no-project python scripts/check_dependency_manifests.py
 

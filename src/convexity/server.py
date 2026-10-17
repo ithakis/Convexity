@@ -43,7 +43,6 @@ from convexity import paths as _paths
 from convexity import __version__, __version_date__, __version_display__
 from convexity import envcheck, keys as _keys, logbuf
 from convexity.analytics import (
-    analyze_portfolio,
     analyze_portfolios_multi,
     prefetch_closes,
 )
@@ -1276,24 +1275,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": str(exc)})
             return
 
-        if parsed.path == "/api/portfolio-analytics":
-            rows, period = [], None
-            try:
-                payload = self._read_json()
-                rows = payload.get("rows") or []
-                weights = payload.get("weights") or {}
-                period = str(payload.get("period") or "1Y")
-                display_ccy = str(payload.get("display_ccy") or "USD").strip().upper()
-                if not isinstance(rows, list) or not isinstance(weights, dict):
-                    self._send_json(400, {"error": "rows[] and weights{} required"})
-                    return
-                result = analyze_portfolio(rows, weights, period, display_ccy=display_ccy)
-                self._send_json(200, result)
-            except Exception as exc:
-                self._log_exception("/api/portfolio-analytics", _rows_summary(rows, period))
-                self._send_json(500, {"error": str(exc)})
-            return
-
         if parsed.path == "/api/portfolio-analytics-multi":
             rows, period = [], None
             try:
@@ -1349,7 +1330,7 @@ class Handler(BaseHTTPRequestHandler):
             fully_invested = str(_fi).strip().lower() not in ("false", "0", "no", "")
             _bounds = payload.get("bounds")
             bounds = _bounds if isinstance(_bounds, dict) else None
-            budget = str(payload.get("budget") or payload.get("cloud_budget") or "standard")
+            budget = str(payload.get("budget") or "standard")
 
             from convexity.frontier import compute_efficient_frontier_stream
 
@@ -1366,8 +1347,6 @@ class Handler(BaseHTTPRequestHandler):
                 alpha=_fnum("alpha", 0.95),
                 fully_invested=fully_invested,
                 bounds=bounds,
-                w_min=_fnum("w_min", 0.0),
-                w_max=_fnum("w_max", 1.0),
                 cov_model=str(payload.get("cov_model") or "ledoit"),
                 haircut=_fnum("haircut", 0.25),
                 budget=budget,
@@ -1455,8 +1434,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._begin_ndjson()
-            # Body extracted to fetcher.stream_quotes so this route, the legacy
-            # blocking path and the refresh job all run one implementation.
+            # Body extracted to fetcher.stream_quotes so this route and the refresh
+            # job run one implementation.
             # gen.close() on disconnect is the pattern /api/efficient-frontier
             # already uses: it raises GeneratorExit inside stream_quotes, whose
             # finally de-queues every pending symbol. The old inline version's

@@ -33,7 +33,6 @@ POST_PATHS = [
     "/api/views/Book",
     "/api/portfolio/rename",
     "/api/last-view",
-    "/api/portfolio-analytics",
     "/api/portfolio-analytics-multi",
     "/api/efficient-frontier",
     "/api/mpt-runs",

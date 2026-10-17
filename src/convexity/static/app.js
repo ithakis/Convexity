@@ -357,7 +357,7 @@ function factoryHeatFor(name) {
   return Object.assign({}, BUILTIN_VIEW_HEAT[name] || {});
 }
 function getViewColumns(name) {
-  const S = (typeof STATE !== "undefined" && STATE) || {};
+  const S = STATE;
   if (BUILTIN_VIEWS[name]) {
     const ov = (S.builtinOverrides || {})[name];
     if (ov && Array.isArray(ov.columns) && ov.columns.length) return ov.columns.slice();
@@ -372,7 +372,7 @@ function getViewColumns(name) {
  * (never the factory values) so a future factory change still reaches views
  * the user hasn't overridden for that column. */
 function getViewHeat(name) {
-  const S = (typeof STATE !== "undefined" && STATE) || {};
+  const S = STATE;
   if (BUILTIN_VIEWS[name]) {
     const ov = (S.builtinOverrides || {})[name];
     return Object.assign(factoryHeatFor(name), (ov && ov.heat) || {});
@@ -381,7 +381,7 @@ function getViewHeat(name) {
   return Object.assign({}, (cv && cv.heat) || {});
 }
 function getActiveViewKeys() {
-  return getViewColumns((typeof STATE !== "undefined" && STATE && STATE.activeViewName) || "Default");
+  return getViewColumns(STATE.activeViewName || "Default");
 }
 function getActiveColumns() {
   return getActiveViewKeys().map(k => COLS_BY_KEY[k]).filter(Boolean);
@@ -420,16 +420,16 @@ function setTheme(name) {
   // rebuilds the main grid — so without this the consensus table keeps the old
   // theme's tints until the next analytics response. Same one-line repaint the
   // column-sort handler uses.
-  if (STATE.analytics && typeof renderAnalystDashboard === "function") {
+  if (STATE.analytics) {
     renderAnalystDashboard(STATE.analytics);
   }
   // The charts write literal theme colours into their SVG (chartColors), so a
   // theme switch must repaint them or dark mode keeps white candle bodies.
   const pfHost = document.getElementById("pf-chart-host");
-  if (pfHost && STATE.analytics && !STATE.analytics.error && typeof drawPortfolioChart === "function") {
+  if (pfHost && STATE.analytics && !STATE.analytics.error) {
     drawPortfolioChart(STATE.analytics, pfHost, document.getElementById("pf-chart-legend"));
   }
-  if (typeof DETAIL !== "undefined" && DETAIL.data && document.getElementById("m-svg")) renderChart();
+  if (DETAIL.data && document.getElementById("m-svg")) renderChart();
 }
 
 /* Paint every control that DISPLAYS the current theme, from the one place that
@@ -2334,7 +2334,7 @@ function renderHeader(scale = 1) {
     }
     tr.appendChild(th);
   }
-  if (typeof wireHeaderDnD === "function") wireHeaderDnD(tr);
+  wireHeaderDnD(tr);
 }
 
 function render() {
@@ -2342,7 +2342,7 @@ function render() {
   const cols = getActiveColumns();
   const scale = applyTableFitMode(cols);
   renderHeader(scale);
-  if (typeof renderColumnViewBar === "function") renderColumnViewBar();
+  renderColumnViewBar();
   const tbody = $("#tbody"); tbody.innerHTML = "";
   if (!DATA.length) {
     tbody.innerHTML = `<tr><td colspan="${cols.length}" style="padding:30px; text-align:center; color:var(--muted);">Add companies above, then press <b>Refresh</b>.</td></tr>`;
@@ -10762,13 +10762,8 @@ function mptShowFrontierTip(ev, idx) {
   `;
   tip.classList.add("show");
   // Anchor on the cursor and let placeTip pick a side / clamp to viewport.
-  if (typeof placeTip === "function") {
-    placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
-                   width: 0, height: 0}, {preferred: "above", offset: 14, gap: 8});
-  } else {
-    tip.style.left = (ev.clientX + 14) + "px";
-    tip.style.top = (ev.clientY + 14) + "px";
-  }
+  placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
+                 width: 0, height: 0}, {preferred: "above", offset: 14, gap: 8});
 }
 function mptHideFrontierTip() {
   const tip = document.getElementById("pf-mpt-frontier-tip");
@@ -10889,13 +10884,8 @@ function mptShowAssetTip(ev, sym) {
   const tip = mptAssetTipEl();
   tip.innerHTML = mptAssetTip(sym);
   tip.classList.add("show");
-  if (typeof placeTip === "function") {
-    placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
-                   width: 0, height: 0}, {preferred: "left", offset: 14, gap: 8});
-  } else {
-    tip.style.left = (ev.clientX + 14) + "px";
-    tip.style.top = (ev.clientY + 14) + "px";
-  }
+  placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
+                 width: 0, height: 0}, {preferred: "left", offset: 14, gap: 8});
 }
 function mptHideAssetTip() {
   const tip = document.getElementById("pf-mpt-asset-tip");

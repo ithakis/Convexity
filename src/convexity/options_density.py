@@ -1,9 +1,8 @@
 """Real-world price distribution from listed options (the stock window's σ/μ).
 
-docs/plans/real-world-density.md is the spec and scripts/density_prototype.py
-the reference recipe this module ports. The pipeline per horizon (the listed
-expiry nearest 91 or 365 days; only when none is near does the SSVI surface
-give the horizon itself, `surface_at`):
+docs/architecture/backend.md (the σ/μ density section) is the spec. The
+pipeline per horizon (the listed expiry nearest 91 or 365 days; only when none
+is near does the SSVI surface give the horizon itself, `surface_at`):
 
     Yahoo chain -> forward from put-call parity, with the rate fixed from ^IRX
     (Yahoo's US chains are American-style; parity backs out nonsense rates)

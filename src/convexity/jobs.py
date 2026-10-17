@@ -112,7 +112,6 @@ class Job:
             bool((context or {}).get("background")) if isinstance(context, dict) else False
         )
         self.created_at = time.time()
-        self.started_at = None
         self.ended_at = None
         self.state = "queued"
         self.error = None
@@ -136,7 +135,6 @@ class Job:
         self._actual_quotes: dict[str, int] = {}
         self.phase = None
         self.cancel = threading.Event()
-        self.cancel_reason = None
         self._cv = threading.Condition()
         self._events: deque = deque(maxlen=_EVENT_MAXLEN)
         self._seq = 0
@@ -220,7 +218,6 @@ class Job:
     def request_cancel(self, reason: str = "user") -> bool:
         if self.is_terminal():
             return False
-        self.cancel_reason = reason
         self.cancel.set()
         # Emitted synchronously so the UI reflects the cancel in <100 ms rather
         # than whenever a worker next notices. `drained: false` says the
@@ -384,7 +381,6 @@ def _plan_totals(job: Job) -> None:
 
 
 def _run(job: Job) -> None:
-    job.started_at = time.time()
     job.state = "running"
     job.emit("job", state="running")
     try:

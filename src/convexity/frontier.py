@@ -505,12 +505,8 @@ def compute_efficient_frontier(rows: list[dict], **kwargs) -> dict:
     """Blocking wrapper — drains the stream and returns the final payload.
 
     Kept for the test-suite and any non-streaming caller. Accepts the same kwargs
-    as :func:`compute_efficient_frontier_stream` (plus the legacy ``cloud_budget``
-    alias for ``budget``).
+    as :func:`compute_efficient_frontier_stream`.
     """
-    if "cloud_budget" in kwargs and "budget" not in kwargs:
-        kwargs["budget"] = kwargs.pop("cloud_budget")
-    kwargs.pop("cloud_budget", None)
     result: dict | None = None
     cloud_acc: list = []
     for msg in compute_efficient_frontier_stream(rows, **kwargs):

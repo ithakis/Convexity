@@ -117,12 +117,6 @@ def test_analytics_multi_survives_duplicate_rows(fake_market):
     assert all(len(c) == len(set(c)) for c in fake_market)
 
 
-def test_single_weight_analytics_survives_duplicate_rows(fake_market):
-    out = analytics.analyze_portfolio(_rows(["IRM", "EQIX", "IRM"]), {}, "1Y")
-    assert "error" not in out, out
-    assert out["active_symbols"] == ["IRM", "EQIX"]
-
-
 # ------------------------------ frontier ------------------------------------
 
 
