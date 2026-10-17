@@ -399,6 +399,36 @@ edit, because the server keeps no empty watchlists; removing the last chip is
 refused. The Build / Update Portfolio / Save as new buttons, the textarea and
 the analytics stale banner were removed in this change.
 
+### σ/μ in the stock window (app.js "σ/μ: the real-world price distribution")
+
+Owner-approved design (mockup v7, 2026-10-17). Two toolbar toggles after
+Volume, `DETAIL.showSigma` / `DETAIL.showMu`, both on at every open: σ+μ =
+options σ with the analysts' μ; σ = the market's (CAPM) μ; μ = a line per firm
+to its target plus a KDE of targets; neither = the old chart. While either is
+on, `renderChart` ends the history at ~58% of the plot (`padR`), switches the
+y axis to **log** and widens it to the end curve's 3%..97%, and
+`mountForecast` lays a canvas (`#m-fc-cv`, `pointer-events: none`) and a hit
+layer (`#m-fc-hit`) over the future zone, density and price-tag gutter; the
+history keeps its own crosshair. Rules that matter:
+
+- **Paths are bridges, not GBM** (`fcSimulate`): ends are stratified inverse-CDF
+  draws from the drawn curve, so the end marginal is exact; the clock includes
+  the options' earnings jumps. Seeded by symbol/horizon/settings, so a redraw
+  is the same picture. Touch chances use the Brownian-bridge crossing
+  correction between steps.
+- **Animate only a new picture** (`fcPlay` keys on symbol, horizon, mode and
+  settings): 750 ms paths then 300 ms ease-out density, no histogram stage;
+  a resize or range tab redraws the final state; reduced motion skips it.
+- **The hover box sits left of the density** (and left of the analyst chips
+  on the curve) and snaps to Low/Consensus/High.
+- 12M is the default; when the 12M chain fails the gate and 3M passes, the
+  window switches to 3M once (`DETAIL.fcAuto`) and the footnote says why.
+- Readouts replace `#m-range-info` in `#m-fc-ro`; its "Assumptions ⚙" link
+  opens Settings → Price distribution (`renderSettingsDistribution`), whose
+  saves clear `DETAIL.fc` so the window re-prices.
+- Colours: data stay `--pos`/`--neg`/accent; analysts use `--amber`
+  (`--amber-rgb`, `--on-amber`) defined in all three themes.
+
 ### Company search (`#co-search`, app.js "Company search")
 One box above the constituents posts to `/api/search` (backend.md §6). An
 "✦ AI" badge (`#co-ai`) sits left of the text when the model read the query;

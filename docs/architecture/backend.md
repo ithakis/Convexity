@@ -969,6 +969,46 @@ on 2026-10-09 (Yahoo then answers only "1d"/"5d" for it).
   a warning, shown folded under the Portfolio chart ("About these prices")
   and in My Investments' rail.
 
+### Real-world price distribution (`options_density.py`, `GET /api/density`)
+
+The stock window's σ/μ (spec and research: `docs/plans/real-world-density.md`;
+reference recipe: `scripts/density_prototype.py`, which the module reproduces
+within rounding — AAPL checked 2026-10-17).
+
+- **Pipeline** per horizon (the listed expiry nearest 91 or 365 days, never
+  interpolated): chain → forward from parity with the rate from **^IRX**
+  (never backed out of parity: Yahoo's US chains are American-style and gave
+  −4.8%) → two-sided **OTM-only** quotes → raw SVI with **Lee's wing cap**
+  → Breeden–Litzenberger on a 4001-point log-strike grid → the
+  minimum-entropy two-moment tilt (Approach B; mean r + β·ERP, variance
+  (κσ_Q)²T), with the power tilt (A) as the fallback.
+- **Analysts' μ**: one B-tilt per firm (latest target ≤ 12 months old, from
+  yfinance `upgrades_downgrades`; Finnhub's targets are 403 on the free plan),
+  blended equally, the common variance shrunk by the between-firm variance so
+  the blend's total is still (κσ_Q)²T. Optional haircut (prefs) halves each
+  target's excess log return over CAPM. 12M only.
+- **Gate**: quotes ≥ 30, SVI RMSE < 1 vol pt, |E_Q/F − 1| < 1%. A failure is
+  `{"ok": false, "reason": "thin"}` and is never drawn. Long chains fail often
+  (SPY and DELL 12M on 2026-10-17: tails off by 2–9%); the page then opens on
+  3M and says why. GEV tails (Figlewski 2009) are the planned fix.
+- **Non-US listings** have no chains: the company's US line stands in
+  (`symbol_db.us_line`, then `discover_us_line`), every price scaled by
+  local/US last price (`ratio`). Analyst targets stay in the chain's currency
+  in the payload; the page multiplies by `ratio`.
+- **Earnings**: next date from `attention.fetch_events`; jump variance
+  σ_e² = w_after − w_before·T_after/T_before from the ATM total variance either
+  side; later reports estimated every 91 days.
+- **Payload**: curves (`rn`, `market`, `analysts`) as ~400 points of the
+  density of x = ln(K/F); the page maps them by `forward` (already in the
+  listing's currency) and runs the Monte Carlo bridges itself (seeded), since
+  hover needs the paths.
+- **Cache**: `cache._cache_put`, 15 min, successes only, keyed by symbol,
+  horizon, β and the settings (a settings change is a new key). One
+  computation per key at a time. Never called from `fetch_one`.
+- **Settings** (prefs.json, bounded in `persistence._clean_prefs`):
+  `dist_erp`, `dist_kappa_stock`, `dist_kappa_index`, `dist_measure` (P|Q),
+  `dist_haircut`.
+
 ## 6. Symbol pack + company search (`symbol_db.py`, `symbol_build.py`, `search.py`)
 
 ### Why

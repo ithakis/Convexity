@@ -31,3 +31,21 @@ def test_a_malformed_prefs_file_reads_as_empty():
     assert persistence.load_prefs() == {}
     path.write_text(json.dumps({"default_ccy": "GBP", "x": 1}), encoding="utf-8")
     assert persistence.load_prefs() == {"default_ccy": "GBP"}
+
+
+def test_distribution_prefs_are_bounded():
+    saved = persistence.save_prefs(
+        {"dist_erp": 0.06, "dist_kappa_stock": 0.9, "dist_kappa_index": 3.0, "dist_measure": "Q",
+         "dist_haircut": True}
+    )  # fmt: skip
+    assert saved == {
+        "dist_erp": 0.06,
+        "dist_kappa_stock": 0.9,
+        "dist_measure": "Q",
+        "dist_haircut": True,
+    }
+    assert (
+        persistence.save_prefs({"dist_erp": "0.05", "dist_measure": "R", "dist_haircut": 1})
+        == saved
+    )
+    assert persistence.save_prefs({"dist_erp": True})["dist_erp"] == 0.06
