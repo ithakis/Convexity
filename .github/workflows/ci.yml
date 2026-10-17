@@ -136,7 +136,7 @@ jobs:
         run: |
           ulimit -v 8000000   # 8 GB of address space (the suite peaks ~0.5 GB)
           ulimit -u 2000
-          timeout -s INT -k 60s 20m uv run pytest tests/ -v --tb=short -o faulthandler_timeout=300
+          timeout -k 60 -s INT 15m uv run pytest tests/ -v --tb=short -o faulthandler_timeout=300
 
   server-smoke:
     name: Server smoke test (real HTTP requests, not just imports)
