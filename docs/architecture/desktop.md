@@ -150,15 +150,7 @@ One command on a clean account, and safe to re-run (that is the update):
    uv downloads a managed 3.14 when the machine has none.
 5. **Verify** with the tool's own interpreter: `python -m convexity.envcheck`
    (fails the install on a critical miss) and `import lightgbm` (warning).
-6. **Keys from an old checkout** — when the script runs from a checkout that
-   has `.finnhub_key` / `.nvidia_key`, they are copied into the data folder's
-   `config.json` (0600, never overwriting a key already there, values never
-   printed). An installed package cannot find them by walking up from
-   `site-packages`, so without this an upgrading user's News read went dark.
-   Piped from curl there is no checkout and nothing to copy. `install.sh`
-   looks beside itself (the repo root); `packaging/install.ps1` looks beside
-   itself and in its parent, the repo root.
-7. **Launcher** — macOS: `Convexity.app` (bundle ID `com.ithakis.convexity`,
+6. **Launcher** — macOS: `Convexity.app` (bundle ID `com.ithakis.convexity`,
    `CFBundleShortVersionString` = the installed version) whose executable is
    `exec "<uv tool dir>/convexity/bin/convexity-app"` — an absolute path,
    because LaunchServices starts bundles with a minimal PATH. The bundle and

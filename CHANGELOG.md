@@ -5,9 +5,16 @@ smaller polish/fixes/infra in between. Inferred retroactively from merged PR
 history; going forward, bump `__version__` in `src/convexity/__init__.py`
 when merging a PR and add a line here.
 
-Versions 1.15.1 onward were developed on the `distribution` branch and are
+Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
+
+## 1.27.2 — 2026-10-18
+
+- **Cleanup, no new features.** Removed code kept for upgrades nobody will make: the data-folder migration (`migrate.py`), the legacy key-file and `~/.convexity/ml_model` fallbacks, the `session.json` conversion, the pre-1.4.5 `IB View` / `Trader View` names, the `heat_prefs` fallback, the single-dict MPT run format, and the installers' copy-keys-from-an-old-checkout step. Keys now come from the environment or `config.json`. A stored `"percentile"` colour mode is rewritten to `"quantile"` by the server.
+- Also removed: the unused single-portfolio analytics route, the `cloud_budget` / `w_min` / `w_max` request fallbacks, the unused `requests` dependency, `scripts/density_prototype.py`, and always-true `typeof` guards in `app.js`. `finite_num` and the minor-unit currency map replace second copies (the notifications scheduler no longer raises on a 400-digit number).
+- **Fix: the Customize heat-mode control** (Off / 2C-Quantile / Quantile / Min-Max) shared a class with the column-view bar and lost its own styling; it now shows the accent-filled active mode it was designed to.
+- Tests: 12 thin files merged into their neighbours (same 1448 tests). Docs: the finished plan files in `docs/plans/` are gone, with their decisions and rules moved into `docs/architecture/backend.md` and CLAUDE.md §10; the stale line-number tables, the vendor-API survey and the pre-package metrics audit are removed; README, SECURITY.md and the architecture notes match the code.
 
 ## 1.27.1 — 2026-10-17
 
@@ -41,7 +48,6 @@ launch); until then they have no tags or GitHub Releases of their own.
 - **My Investments opens fast.** The window now opens on the last figures it computed (marked "Updated 22:41 · refreshing…") while today's prices load, and the fresh page lands in seconds: a cold compute fell from about 30 s to about 9 s on a book of 20+ holdings (one request instead of two racing, no retry sleeps for stand-in listings, stand-ins remembered for a week, prices and currencies downloaded in parallel, and the server computes the page while the window starts).
 - **Holdings headers line up with their numbers** and read better: small caps, a little brighter, the sort arrow no longer pushing the label. "Weight · Risk" is now "Weight & Risk".
 - **The My Investments chart** gets SMA 20/50/200 (the same switches as the Portfolio chart), more room around the plot, and "Money you put in" as a solid stepped line labelled at its end, in place of the dashed line that looked like a reference level.
-
 
 ## 1.22.0 — 2026-10-11
 

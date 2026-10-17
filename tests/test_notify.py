@@ -1,4 +1,4 @@
-"""My Investments notifications (notify.py, roadmap Phase 9): the schedule,
+"""My Investments notifications (notify.py, Phase 9): the schedule,
 the rail's own dedup (once, seen, dismissed, snoozed), the cap, quiet hours,
 the switch, the degraded guard, cache-first fetching, and the weekly recap.
 Public tickers, synthetic numbers, no network."""

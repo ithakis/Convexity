@@ -310,7 +310,7 @@ def submit(
         "job", state="queued", scope=scope, views=job.views, days=days, phases=list(job.phases)
     )
     job._thread = threading.Thread(
-        target=_run, args=(job,), name=f"pt-refresh-{job.id}", daemon=True
+        target=_run, args=(job,), name=f"cx-refresh-{job.id}", daemon=True
     )
     job._thread.start()
     return job, "created"

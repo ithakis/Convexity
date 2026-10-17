@@ -156,13 +156,12 @@ dense-only ridge; SAR label ≥ raw-label model on SAR IC) · 6 slices
 ≥0.65 · 9 live evidence: the app's Track record (date-clustered daily IC,
 long-short, hit rates — `src/convexity/news_diagnostics.py`).
 
-Results (fill after run): see `ml/data/reports/validation_report.json`.
+Results: `ml/data/reports/validation_report.json` (written by `08_validate.py`).
 
 ## 9. Production (mlsent-v1.1)
 
 `src/convexity/ml_sentiment.py` loads `<data>/models/mlsent-v1.1/` (the user data
-folder, `src/convexity/paths.py`; env `MLSENT_MODEL_DIR`; pre-1.14 location
-`~/.convexity/ml_model/` as a one-release fallback) behind a schema gate. Per refresh, per
+folder, `src/convexity/paths.py`; env `MLSENT_MODEL_DIR`) behind a schema gate. Per refresh, per
 ticker: the 7-day window's articles, capped with `relevance.window_sample(60,
 15)`, go through the v1 encoder (one batched predict); the score is
 `ml_features.weighted_sar` — the recency (τ=3d) × source-tier × novelty ×
@@ -191,10 +190,10 @@ Missing artifact / dependency / schema ⇒ `available()` False, every call
 - Python's builtin `hash()` is process-salted — artifact schema hashes must
   use hashlib.
 - Training dependencies are not app dependencies and stay out of `envcheck`
-  and the manifests: DuckDB (all v2 parquet IO; present in `pt`), pyarrow
-  (stages A–C only — deliberately not in `pt`, because installing it switches
-  pandas 3's string backing), FLAML. `tests/test_ml_labels.py` skips without
-  pyarrow for that reason.
+  and the manifests: DuckDB (all v2 parquet IO) and FLAML are the `train` extra; pyarrow
+  (stages A–C only) is deliberately in no extra, because installing it switches
+  pandas 3's string backing. `tests/test_ml_labels.py` skips without both; run
+  it with `uv run --extra train --with pyarrow pytest tests/test_ml_labels.py`.
 - DuckDB's `greatest`/`least` ignore NULLs: stage D's winsorisation turned
   every missing label into +5 until it became `CASE WHEN isfinite(raw) …`.
 

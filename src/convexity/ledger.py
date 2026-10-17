@@ -3,7 +3,7 @@
 Everything the page shows about the real book is derived here by replaying
 the ledger from the first entry, every time. Nothing derived is ever stored,
 so an edit to a 2023 trade can never leave a stale number behind
-(docs/plans/my-investments-roadmap.md, Appendix B):
+(docs/architecture/backend.md, "My Investments: engine rules"):
 
 - **Average cost** (what brokers show). Trade fees are part of the cost;
   a sell realises (proceeds - fee) - average cost x shares.
@@ -21,8 +21,8 @@ so an edit to a 2023 trade can never leave a stale number behind
 - **No shorts.** Selling more than is held raises ``OversellError``.
 
 TWR (``twr_index``) and MWR (``period_mwr``) are pure functions over
-valuation points; the Appendix B acceptance test checks them, and
-``investments.book`` feeds them daily closes (roadmap Phase 3). Two performance-only rules live here too:
+valuation points; the engine-rules acceptance test checks them, and
+``investments.book`` feeds them daily closes (Phase 3). Two performance-only rules live here too:
 
 - **An opening holding** (a quick-add, or a holding read from a statement's
   list of current holdings) starts its performance at that day's market
@@ -316,7 +316,7 @@ def mark(pos: Position, price: float, price_ccy: str, fx_now: float) -> Mark:
     """Value one position at ``price`` (major unit of ``price_ccy``, per
     current share) with ``fx_now`` base units per one ``price_ccy``.
 
-    The price/FX split (Appendix B) only exists when the position was bought
+    The price/FX split (engine rules) only exists when the position was bought
     in the currency it is quoted in; otherwise both parts are None.
     """
     value = price * pos.qty * fx_now
@@ -377,8 +377,8 @@ def period_mwr(
     are the investor-side flows after it (put in negative, taken out
     positive). The root is solved per period length rather than per year, so
     a three-day period can't overflow the annualising, and the yearly rate is
-    derived from it. Under a year the page shows the period rate (roadmap
-    Phase 3: compare period figures, not annualised ones)."""
+    derived from it. Under a year the page shows the period rate (engine rules:
+    compare period figures, not annualised ones)."""
     d0 = date.fromisoformat(start)
     span = (date.fromisoformat(end) - d0).days
     if span <= 0:

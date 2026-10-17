@@ -17,10 +17,12 @@ rather than a public issue. You will get a reply as soon as possible.
   and never uploaded anywhere.
 - **Outbound network calls** go only to: Yahoo Finance (prices, via
   `yfinance`), Finnhub (company news, optional), NVIDIA NIM (the News read,
-  optional), and the KaTeX CDN (formula rendering in the help text).
+  optional), the KaTeX CDN (formula rendering in the help text), and this
+  repository's GitHub Releases (the one-time model download, the daily
+  reference pack and the weekly symbol pack; both packs can be switched off
+  in Settings). None of them receives anything about your holdings.
 - **API keys** are read from environment variables or `config.json` in the
-  data folder (legacy git-ignored `.finnhub_key` / `.nvidia_key` files in the
-  checkout still work for one release). They are sent only to
+  data folder. They are sent only to
   their own provider and are never logged or exposed by the app's API.
 
 ## Supported versions

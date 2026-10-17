@@ -12661,7 +12661,7 @@ async function renderSettingsInvestments(el) {
   paint(false);
 }
 
-/* Settings → Attention (roadmap Phase 7): one row per rule, on/off and its
+/* Settings → Attention (Phase 7): one row per rule, on/off and its
  * limit, saved on change (attention.py validates and clamps). */
 async function renderSettingsAttention(el) {
   let a = INV.book?.attention;
@@ -12699,7 +12699,7 @@ async function renderSettingsAttention(el) {
   el.querySelectorAll("[data-att-on]").forEach(i => i.addEventListener("change", () => save(i.dataset.attOn, { on: i.checked })));
 }
 
-/* Settings → Notifications (roadmap Phase 9). The switch and quiet hours
+/* Settings → Notifications (Phase 9). The switch and quiet hours
  * are kept in prefs.json (they must outlive the page, like the default
  * currency); off means nothing is scheduled and nothing sent. */
 async function renderSettingsNotifications(el) {
@@ -13045,7 +13045,7 @@ function showPage(name) {
 }
 
 /* ===========================================================================
- * My Investments (docs/plans/my-investments-roadmap.md). Renders
+ * My Investments (docs/architecture/backend.md, "My Investments"). Renders
  * GET /api/investments into INV.book; the owner's UI rules for this page
  * are in docs/architecture/frontend.md ("Pages and My Investments").
  * Amounts arrive in INV.book.ccy and are converted to FX_QUOTE for display.
@@ -13424,7 +13424,7 @@ function invRailHtml(b) {
   return head + invAttentionHtml(b);
 }
 
-/* The Attention rail (roadmap Phase 7; attention.py computes it). Owner's
+/* The Attention rail (Phase 7; attention.py computes it). Owner's
  * picks, 2026-10-13: grouped by severity ("Needs a look" always shown, "For
  * your information" collapsed after INV_ATT_FOLD), a ✕ per item that holds
  * until the item gets worse, thresholds in Settings → Attention (the gear,
@@ -13524,7 +13524,7 @@ async function invBadgeLoad(tries = 12) {
   if (a?.pending && tries > 1) setTimeout(() => invBadgeLoad(tries - 1), 10000);
 }
 
-/* Notifications (roadmap Phase 9). The server's scheduler decides what is
+/* Notifications (Phase 9). The server's scheduler decides what is
  * sent (notify.py, the rail's own rules); the page polls its outbox once a
  * minute while visible, refreshes the badge and the rail when something
  * new went out, and in browser mode only (no native sink) shows a quiet
@@ -13693,7 +13693,7 @@ async function invAddDividends(which) {
   await invCommit("dividends", { entries });
 }
 
-/* A holding's plan (roadmap Phase 8, owner's picks 2026-10-14): click its
+/* A holding's plan (Phase 8, owner's picks 2026-10-14): click its
  * row for "Your plan for …" (target, review level, max weight, why, and
  * one-shot price alerts); attention.py keeps it in state/plans.json and the
  * rail raises the items. Levels are in the share's quote unit (pence for
@@ -13898,7 +13898,7 @@ const invTipFor = (fn) => (host) => INV.book?.headline ? fn(INV.book.headline, h
 const invPos = (host) => (INV.book?.positions || []).find(x => x.symbol === host.dataset.sym);
 const invWords = () => INV_PERIOD_WORDS[INV.period];
 /* Your money: per year from a one-year span up, the period's own figure under
- * a year (roadmap Phase 3: never annualise a short period). */
+ * a year (Phase 3: never annualise a short period). */
 const invLong = (h, p = INV.period) => (h.years?.[p] ?? 0) >= 1 - 1e-9;
 const invMwr = (h, p = INV.period) => invLong(h, p) ? h.mwr_ann?.[p] : h.mwr?.[p];
 const invTwrComparable = (h, p = INV.period) => invLong(h, p) ? h.twr_ann?.[p] : h.twr?.[p];
@@ -14384,7 +14384,7 @@ function invFormRerender(form, patch) {
   return host.querySelector(".inv-form");
 }
 
-/* --- the composer and the review (roadmap Phases 5-6) -------------------
+/* --- the composer and the review (Phases 5-6) -------------------
  * The way in (owner's choice W1): one box that takes typed or pasted text,
  * screenshots (dropped, attached or pasted), PDFs and CSV/Excel files. "Read it"
  * sends them to /api/investments/import, which returns rows to review;

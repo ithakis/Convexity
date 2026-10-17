@@ -1695,7 +1695,7 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
         except Exception as exc:
             print(f"[ml_sentiment] warm-up failed: {type(exc).__name__}: {exc}")
 
-    threading.Thread(target=_warm_ml, name="pt-warm-ml", daemon=True).start()
+    threading.Thread(target=_warm_ml, name="cx-warm-ml", daemon=True).start()
     port = _pick_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     # Per-connection handler threads (socketserver.ThreadingMixIn) default to
@@ -1703,7 +1703,7 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
     # (e.g. an open NDJSON stream) even after shutdown()+server_close(). Mark
     # them daemon so a graceful quit can never hang the process.
     server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, name="pt-httpd", daemon=True).start()
+    threading.Thread(target=server.serve_forever, name="cx-httpd", daemon=True).start()
 
     def _warm_book() -> None:
         # Compute My Investments once while the window loads (the app opens
@@ -1725,8 +1725,8 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
         except Exception:
             pass
 
-    threading.Thread(target=_warm_optimizer, name="pt-warm-mpt", daemon=True).start()
-    threading.Thread(target=_warm_book, name="pt-warm-book", daemon=True).start()
+    threading.Thread(target=_warm_optimizer, name="cx-warm-mpt", daemon=True).start()
+    threading.Thread(target=_warm_book, name="cx-warm-book", daemon=True).start()
     # Phase 9: the notification scheduler (a minute tick; its passes are
     # background jobs, so single-flight with every refresh).
     from convexity import notify

@@ -44,7 +44,7 @@ From §4 "News & Sentiment", *Fetch and cache*.
   inner-whitespace / control chars (400, fixed text). A `config.json` that exists
   but isn't a JSON object is **never overwritten** (409, logged once). The
   explicit `action` means an empty submit can never clear a key. `GET /api/keys`
-  = `{set, source: env|config|legacy|null, in_config, env_overrides}` per
+  = `{set, source: env|config|null, in_config, env_overrides}` per
   provider — never a value. `POST /api/keys/test` makes one cheap call through
   the shared limiters (Finnhub `quote?symbol=AAPL` with `X-Finnhub-Token`; NIM a
   `max_tokens: 1` completion with Bearer) and returns a fixed status word

@@ -5,7 +5,7 @@ Every My Investments prototype, screenshot and manual test runs on this book,
 never on the owner's real one (CLAUDE.md §3, §18). It uses public tickers and
 made-up quantities only, so screenshots of it are safe to publish.
 
-The book is shaped to exercise the engine's hard cases (roadmap Appendix B):
+The book is shaped to exercise the engine's hard cases (backend.md, engine rules):
 a pre-split NVDA buy on the contract-note basis (10:1 split on 2024-06-10),
 an LSE line quoted in pence, a EUR ETF, a partial sell, dividends with
 withholding tax, a later top-up, a standalone fee and a withdrawal. A
@@ -13,11 +13,10 @@ quick-added holding (GOOGL, ``opening``) at an average price far below its
 Since-day close shows the Phase 3 rule: its performance starts at that day's
 value. Most payouts are left unrecorded, so Yahoo's dividends get estimated.
 
-``--crafted`` adds rows that trip the Attention rail's X-ray rules (roadmap
-Phase 7): a quick-added Pfizer at an average price far above today's (down
+``--crafted`` adds rows that trip the Attention rail's X-ray rules: a quick-added Pfizer at an average price far above today's (down
 from cost) on top of the demo's tech-heavy, NVIDIA-heavy mix (single name,
 sector) and its pound and euro lines (currency, viewed in USD). It also
-writes plans (roadmap Phase 8, ``state/plans.json``) whose levels are far
+writes plans (``state/plans.json``) whose levels are far
 enough from any recent price to fire: Apple past its target, Microsoft
 below its review level, the world ETF above its own max weight, and an
 NVIDIA price alert that has crossed; Alphabet has a plan that stays quiet.
@@ -86,7 +85,7 @@ BLANK |= {"ccy": "USD", "qty_basis": None, "source": "demo", "batch": "b_demo", 
 
 
 def build_book(crafted: bool = False) -> dict:
-    """The demo book in the agreed schema (roadmap Appendix B). Trades carry
+    """The demo book in the agreed schema (backend.md, engine rules). Trades carry
     qty_basis "trade" (contract-note shares), so the pre-split NVDA buy
     exercises the split logic."""
     entries = [

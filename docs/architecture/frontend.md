@@ -278,7 +278,7 @@ dependency (loaded from CDN, used only for column-guide formulas).
 - `SORT` — `{key, dir}` for the row table
 
 ### Column registry (`COLS` + `BUILTIN_VIEWS`)
-`COLS` (≈line 3714) is the single source of truth for every available
+`COLS` is the single source of truth for every available
 column — `key`, `label`, `w`, `align`, `sortable`, `render(r)`, optional
 `heat`, `bg`, `sortValue`, `td_cls`. A `heat.kind === "yo_dyn"` column exposes
 a per-view background mode in Customize: **Off / 2C-Quantile / Quantile /
@@ -286,8 +286,8 @@ Min-Max** (`getHeatMode`/`cellStyleHeat`). "Quantile" = single-blue quintile
 buckets, "2C-Quantile" = orange↔blue diverging quintiles, "Min-Max" =
 continuous 10th/90th-clipped blue. `favor:"low"` flips which end is best (e.g.
 `analyst_rating`: 1 = Strong Buy reads blue). The old `"percentile"` mode +
-`kind:"yo"` fixed-orange ramp were removed; a stored `"percentile"` migrates to
-`"quantile"` on read. New modes must also be whitelisted in
+`kind:"yo"` fixed-orange ramp were removed; a stored `"percentile"` is rewritten to
+`"quantile"` by `persistence._sanitize_heat`. New modes must also be whitelisted in
 `persistence._HEAT_MODES`. `BUILTIN_VIEWS` (just below COLS)
 maps each preset (`Default`, `Fundamentals`, `Momentum`) to an ordered
 list of column keys.
@@ -314,9 +314,7 @@ empty-override-disappears invariant. Reset/Revert is still
 `DELETE /api/column-views/<name>`; `resetViewOverride(name)` takes an optional
 name so Settings can revert a preset without switching to it.
 **Wire these through arrow functions** — `onclick = resetViewOverride` passes
-the MouseEvent as the `name` argument. Legacy names (`IB View`, `Trader View`) are still
-accepted and normalised through the alias helpers so saved state migrates
-without user intervention. `COLS_BY_KEY` is the lookup table; rendering goes
+the MouseEvent as the `name` argument. The pre-1.4.5 names `IB View` / `Trader View` are no longer mapped. `COLS_BY_KEY` is the lookup table; rendering goes
 through `getActiveColumns()` which resolves the active view from
 `STATE.activeViewName` / `STATE.customViews` / `STATE.activeColumnOverride`
 (set when the user drags headers on a built-in preset — kept
@@ -330,7 +328,7 @@ tooltip, and (if it belongs in a preset) include its key in
 `HOLDINGS_SKIP_EXTRAS` if it's duplicated elsewhere, e.g. analyst
 columns). An exported column also needs a `COLUMN_DEFS` entry (and an
 `EXTRA_LABELS` header if it is an extra) for its Excel header comment and the
-Definitions sheet; `tests/test_xlsx_definitions.py` fails until it has one.
+Definitions sheet; `tests/test_xlsx_export.py` fails until it has one.
 
 ### Metric explanations (hover tips) — one registry per surface
 Every number the app shows explains itself on hover; the registries are:
@@ -500,8 +498,8 @@ picked.
   ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ via CSS keyframes on `content`. Optional shimmer bar +
   tabular-numerics counter (e.g. `21·47`). Used in: streaming status,
   startup, analytics empty state, modal detail load, FX hover load,
-  Excel export button. CSS in `style.css` (~line 313), JS helpers
-  (`lcHtml`/`lcShow`/`lcHide`) in `app.js` (~line 591).
+  Excel export button. CSS (`.lc-*`) in `style.css`, JS helpers
+  (`lcHtml`/`lcShow`/`lcHide`) in `app.js`.
 - **Export → Excel** (`exportXlsx`): client just hits
   `/api/export-xlsx`; server handles everything. Button shows the
   loading chip during the ~40s cold-cache export. The maintenance
@@ -548,7 +546,7 @@ picked.
   4. **Nav clicks are delegated** on `#settings-nav-list` — per-node handlers
      would be bound to detached elements after the first search.
   5. **Esc**: the search field clears a non-empty query and stops there; on an
-     empty query it must **bubble** to the global handler (`app.js` ~line 1999)
+     empty query it must **bubble** to the global handler (the Escape handler in `app.js`)
      which closes seven overlays in one pass. Never `preventDefault` it.
   Mirrored controls (theme, Fit to screen) follow a strict
   **single-mutator / single-painter** rule: `setTheme()` and
@@ -624,7 +622,7 @@ picked.
   inventory in that test matches every `id="*-bg"` in `index.html`, so a new
   backdrop can't skip the contract.
   Why a counter: overlays nest (About-MPT over MPT, the inline prompt over the
-  weights popup) and the global Escape handler (`app.js` ~line 2087) closes
+  weights popup) and the global Escape handler closes
   seven of them in one **unconditional** pass. The old design had three
   overlays each stashing `dataset.<name>PrevOverflow` and the other nine
   locking nothing at all — so the detail modal scroll-chained to the page, and
@@ -961,35 +959,20 @@ picked.
 - Hover-tooltip cursor is `cursor: default` — explicitly NOT `cursor:
   help`. The user dislikes the question-mark cursor.
 
-## 11. Quick reference — current line landmarks
+## 11. Finding things
 
-The frontend (HTML/CSS/JS) lives in `src/convexity/static/` (it was once
-embedded in the monolithic `dashboard.py`, since removed — see §1/§2). Landmarks below are within `src/convexity/static/app.js` unless
-noted otherwise. (Approximate. Use `grep -n` to confirm before editing.)
+There is no line-number table on purpose: it went stale within a release. Search
+for the symbol instead:
 
-| What | File | Where |
-|---|---|---|
-| Process-global cache dicts | `cache.py` | ~14–16 |
-| Views/weight-presets persistence | `persistence.py` | `save_view` ~109, `save_mpt_run` ~501 |
-| Watchlists persistence | `persistence.py` | `load_watchlists` ~379 |
-| Google-colon normaliser | `resolver.py` | `_normalize_google_colon` ~153 |
-| `resolve_symbol` pipeline | `resolver.py` | ~164 |
-| `fetch_one` (per-symbol row) | `fetcher.py` | ~117 |
-| `fetch_detail` (modal payload) | `fetcher.py` | ~398 |
-| FX layer (spot rates, basket index) | `fx.py` | `fx_rates` ~139, `fx_index_history` ~198 |
-| Analytics (`analyze_portfolios_multi`) | `analytics.py` | ~214 |
-| `compute_efficient_frontier` | `frontier.py` | ~72 |
-| HTTP `Handler` (GET/POST/DELETE) | `server.py` | ~92 |
-| `_pick_port` | `server.py` | ~689 |
-| `main()` (browser-mode entry) | `server.py` | ~739 |
-| Topbar HTML | `static/index.html` | ~13 |
-| Loading-chip CSS (`.lc-*`, spinner keyframes) | `static/style.css` | ~313–332 |
-| Tab rendering + rename | `static/app.js` | `renderTabs` ~2768, `beginTabRename` ~2814 |
-| `exportXlsx` | `static/app.js` | ~3032 |
-| Analytics request / render | `static/app.js` | `requestAnalytics` ~3108 |
-| Mode pill bar (`renderModeBar`) | `static/app.js` | ~4454 |
-| `runPrimary` (Build/Update button router) | `static/app.js` | ~4571 |
+```bash
+grep -n "<symbol>" src/convexity/*.py src/convexity/static/*.{js,html,css}
+```
 
-Use `grep -n "<symbol>" src/convexity/*.py src/convexity/static/*.{js,html,css}`
-to relocate anything not listed above — the package is small enough that
-this is faster than trusting a stale line table.
+Anchors worth knowing (all greppable): `COLS` / `BUILTIN_VIEWS` (column registry,
+top of `app.js`); `renderTabs`, `beginTabRename` (tabs); `requestAnalytics`,
+`renderModeBar` (analytics); `exportXlsx`; `lcHtml` / `lcShow` / `lcHide` (loading
+chip, CSS `.lc-*`); `showOverlay` / `hideOverlay` and the global Escape handler;
+`Handler` and `_pick_port` in `server.py`; `fetch_one`, `fetch_detail` in
+`fetcher.py`; `resolve_symbol` in `resolver.py`; `analyze_portfolios_multi` in
+`analytics.py`; `compute_efficient_frontier_stream` in `frontier.py`; `fx_rates`,
+`fx_index_history` in `fx.py`; `save_view`, `save_mpt_run` in `persistence.py`.

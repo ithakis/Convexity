@@ -324,7 +324,7 @@ def start(force: bool = False) -> dict:
             _STATUS.update(state="disabled" if not on else "up_to_date", error="")
             return dict(_STATUS)
         _STATUS.update(state="checking", error="")
-        _THREAD = threading.Thread(target=_run, name="pt-symbol-pack", daemon=True)
+        _THREAD = threading.Thread(target=_run, name="cx-symbol-pack", daemon=True)
         _THREAD.start()
         return dict(_STATUS)
 

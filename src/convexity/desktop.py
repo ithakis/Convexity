@@ -389,7 +389,7 @@ class _MainWindow(QMainWindow):
 
 def _bundle_identity() -> None:
     """Give the process the app's bundle identifier, so macOS accepts its
-    notifications (roadmap Phase 9).
+    notifications (Phase 9).
 
     Qt's tray (QSystemTrayIcon.showMessage) posts through macOS's
     NSUserNotificationCenter, which drops every notification from a process
@@ -652,7 +652,7 @@ def main() -> None:
     elapsed = QElapsedTimer()
     elapsed.start()
     splash.set_stage("Loading market data engine", 0.55)
-    threading.Thread(target=_boot_worker, name="pt-boot", daemon=True).start()
+    threading.Thread(target=_boot_worker, name="cx-boot", daemon=True).start()
 
     state = {
         "window": None,

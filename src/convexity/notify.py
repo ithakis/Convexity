@@ -1,4 +1,4 @@
-"""My Investments notifications (roadmap Phase 9): a background pass while
+"""My Investments notifications (Phase 9): a background pass while
 the app runs, macOS notifications for new "Needs a look" items, and a weekly
 recap after the Friday US close.
 
@@ -7,7 +7,7 @@ What it reuses, so the rail and the notifications never disagree:
 - **What to send** is the rail's own answer (``attention.evaluate``): an item
   shown (so not dismissed or snoozed), unread, and not notified at this level
   or a full step better (``attention.should_notify``). Plain price alerts are
-  information, so they stay in-app (Appendix D, *Alert for Alerts*).
+  information, so they stay in-app (alert research, *Alert for Alerts*).
 - **The pass is a job** (``jobs.submit``, phase ``watch``): single-flight
   with every refresh, cancellable, and marked ``background`` so the topbar
   chip doesn't show it and a Refresh by the owner supersedes it. It fetches
@@ -21,7 +21,7 @@ What it reuses, so the rail and the notifications never disagree:
 Delivery: the desktop app registers a sink in-process (``add_sink``) and
 shows each message through Qt; the page polls ``outbox`` and, in browser
 mode only, shows a quiet toast. Logs name the rule and the ticker, never an
-amount (Appendix B: users paste logs into public issues).
+amount (engine rules: users paste logs into public issues).
 """
 
 from __future__ import annotations

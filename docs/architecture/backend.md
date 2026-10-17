@@ -18,51 +18,24 @@ Sections: §4 (caching, data folder, persistence, symbol resolution, the streami
 - **`_VIEWS_LOCK`, `_WATCHLISTS_LOCK`** — threading locks around the
   persistence JSON files. Always acquire before read-modify-write.
 
-### Where user data lives (`paths.py`, v1.14)
-Nothing is ever written next to the code. Before 1.14 every path came from
-a repo-root search (walk up to `.git`, else the package dir), so an
-installed wheel wrote the user's watchlists into `site-packages/convexity/`,
-where the next upgrade deletes them. Now `src/convexity/paths.py` is the only place
+### Where user data lives (`paths.py`)
+Nothing is ever written next to the code (an installed wheel once wrote the
+user's watchlists into `site-packages/convexity/`, where the next upgrade
+deletes them). `src/convexity/paths.py` is the only place
 a data path is built: `data_dir()`, `state_file(name)`, `models_dir()`,
 `logs_dir()`, `config_file()`, `symbol_db_file()`. Stdlib only, no import-time
 side effects, never creates a directory — writers `mkdir` their own parent.
-That search survives only as `paths.legacy_root()` for migration/fallbacks.
 
 - **`CONVEXITY_HOME` is mandatory for every test and manual/dev run.**
-  `tests/conftest.py` sets it at import time (modules bind paths at import,
-  and `__init__` runs the migration) plus per test. A dev run is
+  `tests/conftest.py` sets it at import time (modules bind paths at import)
+  plus per test. A dev run is
   `CONVEXITY_HOME=$(mktemp -d) uv run convexity`.
-- **Migration** (`migrate.migrate_to_data_dir`, from `__init__`, **only when
-  the process is the app** — `convexity._launched_as_app()`: the `convexity` /
-  `convexity-app` scripts, `-m convexity[.server|.desktop]`).
-  A bare `import convexity` never migrates: during Phase 3 a dev script
-  (`scripts/check_dependency_manifests.py`) run without `CONVEXITY_HOME`
-  migrated the user's real data out from under two running old-code apps; it
-  was restored byte-identical within minutes. Per file: copy
-  to a temp beside the destination → fsync → size + SHA-256 check → `os.link`
-  into place (no clobber) → re-check → re-hash the source → unlink it. Model
-  dirs are staged whole and renamed in one step. An existing destination is
-  **never overwritten** (identical ⇒ source removed; different ⇒ both kept,
-  logged CONFLICT — and shown: `migrate.conflicts()` → `/api/health`
-  `migration_conflicts` → a banner plus a list in Settings → About with what to
-  do; it repeats every launch until the old file is moved over or deleted).
-  Two instances launched at once race for each destination:
-  the loser re-judges it (identical ⇒ dedup, not CONFLICT) and tolerates the
-  winner having already removed the source. Temps of dead runs are swept —
-  verified by `kill -9` at 20 points during a real launch. A `symbol_db.sqlite` with a
-  non-empty `-wal` (live writer) is skipped. Key files are never moved.
-  **Gate:** with `CONVEXITY_HOME` set it migrates nothing unless
-  `CONVEXITY_LEGACY_ROOT` / `CONVEXITY_LEGACY_HOME` name the source — each
-  separately, so pointing at a test checkout can't drag the real
-  `~/.convexity` along. `python -m convexity.migrate --dry-run` prints the plan
-  (running it that way skips the automatic run in `__init__` via
-  `sys.orig_argv`).
-- **One-release fallbacks, each logged once via `paths.note_legacy`:** keys
-  (env → `config.json` → walk-up `.finnhub_key` / `.nvidia_key`), the model
-  (`MLSENT_MODEL_DIR` → `models/<ver>` → `~/.convexity/ml_model/<ver>`).
-  Remove them after 1.14. (The symbol DB's fallback went with the old DB in
-  2.0: the file is the downloaded symbol pack, §6.) A malformed `config.json` is logged once (`[config] ignoring …`),
-  never silently treated as "no key".
+- **No migration code.** The v1.13 → v1.14 move into the data folder (and the
+  key-file / `~/.convexity/ml_model` fallbacks that came with it) was removed in
+  1.27.2: only the owner ever had the old layout, and it was already migrated.
+  Keys resolve env → `config.json`; the model is `MLSENT_MODEL_DIR` →
+  `models/<ver>`. A malformed `config.json` is logged once
+  (`[config] ignoring …`), never silently treated as "no key".
 - `/api/health` carries `data_dir` (Settings → About shows it).
 
 ### Persistence
@@ -104,7 +77,7 @@ by `resolver._ordered_resolve` at build time; row-level dedupe covers any that
 slip through. Any new consumer that indexes a price frame by `symbol` should
 go through the same helper.
 
-### Symbol resolution pipeline (`resolver.resolve_symbol`, ~line 164)
+### Symbol resolution pipeline (`resolver.resolve_symbol`)
 Tries each layer in order, short-circuiting on first hit:
 
 1. **`_RESOLVED_CACHE`** — instant (already resolved this session).
@@ -153,7 +126,7 @@ error  (only on failure)
 
 Adding a new field: extend `fetch_one` (`src/convexity/fetcher.py`), add
 it to the column registry (`COLS` in `src/convexity/static/app.js`,
-line ~6), and `xlsx_export.py`'s `HOLDINGS_PRIMARY_COLS` auto-picks up
+top of the file), and `xlsx_export.py`'s `HOLDINGS_PRIMARY_COLS` auto-picks up
 extras through the "extras pass" mechanism.
 
 **Yahoo's units and currencies — the contract (audit of 2026-09-29).**
@@ -214,28 +187,20 @@ adds two optional row fields — `insider_mspr` (Form-4 Monthly Share
 Purchase Ratio) and `rec_trend_fh` (6-month analyst recommendation
 trend). They come from the Finnhub free API via
 `from convexity import finnhub_adapter as _fh` in `fetcher.py`
-(line ~32). The key is resolved by
-`_load_api_key()`:
-`FINNHUB_API_KEY` env var first, then a `.finnhub_key` file found by
-**walking up** from the module directory (one line, the raw key). Walking
-up matters: the key lives at the repo root, not inside `src/convexity/`,
-and in a worktree run the package sits several levels below the checkout —
-this mirrors `news_sentiment._load_key`. (Previously `_load_api_key` only
-checked the module's own directory, so it never found the repo-root key and
-the `Rec Δ6M` / `MSPR` columns silently rendered `—` even with a valid key
-present.) When neither env var nor file is
-present, `_fh` returns `None` for every call and the three fields are
-written as `None`, so the columns render `—` and the server log stays
-clean.
+(import at the top). The key is resolved by `helpers._load_local_secret`, shared
+with `news_sentiment`: the `FINNHUB_API_KEY` env var first, then
+`finnhub_api_key` in the data folder's `config.json` (Settings → API keys).
+When neither is present, `_fh` returns `None` for every call and the three
+fields are written as `None`, so the columns render `—` and the server log
+stays clean.
 
-**Key stays local — never commit it.** `.finnhub_key` (plus `.env.local`
-and `*.secret`) is gitignored, and a pre-commit guard at
+**Key stays local — never commit it.** `.env.local`, `*.secret` and the old
+`.finnhub_key` / `.nvidia_key` names are gitignored, and a pre-commit guard at
 `.claude/hooks/check-secrets.sh` (wired as the first PreToolUse hook in
 `.claude/settings.json`) blocks any `git commit` that either stages one
-of those files or leaks the key value into the staged diff. The file is
-gitignored, so it does NOT travel between checkouts/worktrees via git —
-if you run the app from a different directory, put it in the data folder's
-`config.json` (`finnhub_api_key`, v1.14) or export `FINNHUB_API_KEY`. The adapter is stdlib-only (`urllib.request`), self-caches with
+of those files or leaks the key value into the staged diff. The key lives in
+`config.json` in the data folder (outside the repo), so it never travels
+between checkouts; export `FINNHUB_API_KEY` to override it. The adapter is stdlib-only (`urllib.request`), self-caches with
 TTLs (3600/1800/3600s), and each call is individually try/excepted so a
 failing endpoint never breaks a row. Cold build = up to 2 calls/symbol
 (within Finnhub's 60/min free budget at 5 workers); warm build = zero.
@@ -379,7 +344,7 @@ before that (and never for a row with no mean target: no coverage, a fund).
   results (`length >= 2`). Empty arrays are NEVER cached — fixes the
   old "no data sticks forever" bug.
 
-### HTTP routes (`Handler` in `server.py`, ~line 92)
+### HTTP routes (`Handler` in `server.py`)
 
 *(The request-origin guard that runs before every route below is in [security.md](security.md#request-origin-guard).)*
 
@@ -412,7 +377,6 @@ before that (and never for a row with no mean target: no coverage, a fund).
 - `/api/views/<name>`              — save view body `{entries, rows, set_last?}`
 - `/api/last-view`                 — set the restore-on-launch target
 - `/api/portfolio/rename`          — `{old, new}` — atomic rename of both files
-- `/api/portfolio-analytics`       — single weight vector
 - `/api/portfolio-analytics-multi` — multiple weight vectors (e.g. equal+cap+custom)
 - `/api/column-views`              — upsert custom column view `{name, columns}`
 - `/api/column-views/active`       — set active column view `{name}`
@@ -459,7 +423,85 @@ before that (and never for a row with no mean target: no coverage, a fund).
 - `/api/refresh-job/<id>/stream?since=<seq>` — replayable NDJSON progress (§17)
 
 ### My Investments: the ledger and the book file (`ledger.py`, `investments.py`)
-Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
+Built in nine phases (issue #1); what is left of the roadmap is the decisions and
+the rules below, which code comments cite as "engine rules" and "alert research".
+
+**Decisions agreed with the owner (2026-10-05)**
+
+| Topic | Decision |
+|---|---|
+| Placement | Its own page, the first topbar button, left of Portfolio. Self-contained: no links into the research tabs, and hypothetical weightings are untouched. |
+| Layout | Split: performance and holdings on the left (~70%), the attention rail on the right (~30%). |
+| Book | One book, no accounts. A future "race against friends" would compare TWR %, so the TWR index is stored cleanly. |
+| Headline | Value · Today $ and % · P&L (unrealised · realised · dividends) · TWR against the S&P 500 in pp · MWR p.a. with the timing effect (MWR − TWR). |
+| Ledger | Buy, sell, dividend, deposit, withdrawal, fee, split. A quick-added holding is one synthetic buy. Every change can be undone. |
+| Cost basis | Average cost, which matches what brokers show. |
+| Import UX | A composer that takes text and any file, then a review step with confidence marks and inline questions, then Apply as one batch. |
+| Alerts | X-ray rules, events, plan levels and plain price alerts. In-app, plus macOS notifications for high-severity items and a weekly recap. No email until accounts exist. |
+| Providers | NVIDIA NIM only. |
+
+**Engine rules ("engine rules" in code comments)**
+- **Value the book with closes that are not dividend-adjusted.** `_bulk_close`
+  uses `auto_adjust=True`; valuing with it while also booking dividends as cash
+  counts every dividend twice. Use `adjusted=False` with Yahoo's dividend and
+  split actions. The SPY benchmark stays total return.
+- **Cash** is one pool in `base_ccy`. A trade settles at the trade-date FX rate,
+  or at the entry's own `fx_rate`. A buy or fee that would push cash below 0
+  becomes an *implied deposit*, derived on every replay and never stored; that
+  is what makes a book of quick-adds work.
+- **Splits:** quantities are kept in today's share count. Each entry records
+  `qty_basis`: `trade` (as on the contract note) or `current` (what the broker
+  shows today).
+- **TWR:** r_t = (V_t + W_t)/(V_{t−1} + D_t) − 1. Inflows count at the start of
+  the day, outflows at the end.
+- **MWR:** XIRR (`scipy.optimize.brentq`), or None when the cash flows never
+  change sign. Under one year, compare period figures, not annualised ones.
+- **Contribution:** daily P&L over the start-of-day capital, linked with Carino
+  (`analytics._linked_contribution`), plus a "Cash and fees" bucket; it adds up
+  exactly to the TWR.
+- **Risk share:** RC_i = w_i(Σw)_i / σ², with Σ from `mpt.annualized_cov(…, "ledoit")`.
+- **FX split:** the price part is (P·q − C_loc)·FX_now; the FX part is
+  C_loc·FX_now − C_disp. Prices go through `helpers.price_in_major` (LSE quotes
+  are in pence).
+- **Out of scope:** shorts (an oversell is refused), spin-offs, mergers and
+  ticker changes. A holding with no price history is valued at its last trade
+  price, with a warning.
+- **Logs** record the operation, the entry id and the symbol only, never
+  amounts: users paste logs into public issues.
+
+*Acceptance test* (synthetic AAA in USD, numbers checked independently; it lives
+in `tests/test_ledger.py`):
+
+| Date | Entries | AAA close |
+|---|---|---|
+| 2025-01-02 | deposit 10,000; buy 40 @ 100, fee 10 | 100 |
+| 2025-04-01 | deposit 5,000; buy 40 @ 125, fee 10 | 125 |
+| 2025-07-01 | sell 30 @ 130, fee 10 | 130 |
+| 2025-10-01 | dividend 50; fee 20 | 120 |
+| 2026-01-02 | withdrawal 1,000 | 140 |
+
+Expected: average cost **112.75**, realised **507.50**, quantity **50**,
+unrealised **1,362.50**; dividends 50, fees 20, total P&L **1,900** (= value
+15,900 − net deposits 14,000); **TWR 12.629086%**, **MWR 13.848000%**, timing
+effect **+1.2189 pp**; contributions add up to the TWR (1e-9) and risk shares to 1.
+Companions: trade basis vs current basis across a 2:1 split agree; GBp with FX
+splits 975 USD into 650 price + 325 FX; quick-adds only gives TWR = price
+return; an oversell is refused; an edit that breaks a later sell is refused.
+
+**Alert research ("alert research" in code comments)**
+- *Alert for Alerts* (Chen, Liu & Wen, SSRN 4466498): price-tracking alerts cut
+  retail returns by about 1% over 6 months, through extra trading. Hence
+  plan-based alerts, a calm rail, plain price alerts as `info` only, and only
+  high-severity macOS notifications.
+- Feedback on their own behaviour measurably reduces the disposition effect (the
+  basis of the planned behavioural coach).
+- Trading 212 reversed a card-based redesign within 10 days because power users
+  wanted dense lists, and users complained when numbers did not match a hand
+  calculation. Capitally separates FX from capital gains; Ghostfolio's X-ray has
+  editable static rules; Kubera's import lets you review and correct, and
+  remembers the corrections.
+- Import review follows the agentic-UX rules: show what will happen before
+  acting, signal confidence, keep an audit trail with undo, and ask when unsure.
 - **`ledger.py` is pure** (no I/O): `replay(entries, base_ccy, fx_at, splits)`
   returns the whole book from the first entry, every time. Nothing derived is
   stored, so editing a 2023 trade can never leave a stale number. Average
@@ -531,7 +573,7 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
   share). FX is `fx.fx_multipliers` (Yahoo's `ccyUSD=X` history crossed
   through USD, first rate before the history starts; today's spot with a
   warning when there is none). It is the only FX path: the replays' `fx_at`
-  (`_make_fx_at`) reads it once per currency over the ledger's own dates. TWR follows Appendix B, r = (V + W)/(V₋₁ + D)
+  (`_make_fx_at`) reads it once per currency over the ledger's own dates. TWR follows the engine rules, r = (V + W)/(V₋₁ + D)
   − 1, as a running index (`ledger.twr_index`). Every period figure is a
   ratio of two of its points, at the server's `period_starts` base.
 - **Two replays, one currency.** The page asks for its display currency
@@ -757,7 +799,7 @@ Roadmap: `docs/plans/my-investments-roadmap.md` (rules in its Appendix B).
   `attention.should_notify(att)` = a `high` item (so not dismissed or
   snoozed) marked `unread` by `evaluate` and past `notified` (a map in
   `state/attention.json`, same `_over` step, cap and `prune` as `seen`).
-  Plain price alerts are `info`: in-app only (Appendix D). `armed: false`
+  Plain price alerts are `info`: in-app only (alert research). `armed: false`
   (first run, or after the switch was off) makes the next pass a baseline:
   what is in the rail then is recorded, not sent.
 - **The scheduler** (`notify.start()` from `start_server`, both modes; off
@@ -971,9 +1013,27 @@ on 2026-10-09 (Yahoo then answers only "1d"/"5d" for it).
 
 ### Real-world price distribution (`options_density.py`, `GET /api/density`)
 
-The stock window's σ/μ (spec and research: `docs/plans/real-world-density.md`;
-reference recipe: `scripts/density_prototype.py`, which the module reproduces
-within rounding — AAPL checked 2026-10-17).
+The stock window's σ/μ. For each stock, the probability distribution of its
+price in about 3 and 12 months from its listed options: readable in five seconds
+by a non-quant (a price axis, a curve, ranges, "chance of" numbers), and
+defensible to a derivatives quant (every identifying assumption on screen, no
+method the literature has rejected, a quality gate that hides bad chains).
+
+**Why a two-moment tilt.** Options give only the risk-neutral density q; the
+real-world density is p = q/(M·R_f), and options cannot identify the pricing
+kernel M, so every method is an identifying assumption. A preference tilt
+p ∝ q·S^γ is a robust benchmark (Bliss & Panigirtzoglou 2004) but leaves the
+variance risk premium in, so the curve stays too wide. Ross recovery is not used:
+it is misspecified (Borovička, Hansen & Scheinkman 2016) and fails empirically
+(Jackwerth & Menner 2020). Chosen: p(x) ∝ q(x)·exp(θ₁x + θ₂x²), x = ln(S_T/F),
+with E_P[S_T] = S₀·exp((r + β·ERP)·T) and Var_P[x] = (κσ_Q)²T. θ₂ = 0 is the
+power tilt, the fallback when the solve fails. κ (physical/implied vol) is
+anchored to implied vol on purpose: a historical-vol forecast made NVDA's 12M
+curve *wider* than the options (10y vol includes 2022), and trailing vol in a
+calm market made SPY's crash risk vanish. κ is a placeholder (0.92 stocks, 0.80
+indices) until Phase 2 estimates it. Non-US listings have no chains: the US line
+or ADR is used (`symbol_db.us_line`) or the answer is "No listed options". Yahoo
+has no option history, so anything needing history is built forward.
 
 - **Pipeline** per horizon (the listed expiry nearest 91 or 365 days, inside
   45–182 or 270–550 days; with none there, the SSVI surface gives the horizon
@@ -1086,6 +1146,18 @@ within rounding — AAPL checked 2026-10-17).
 - **Settings** (prefs.json, bounded in `persistence._clean_prefs`):
   `dist_erp`, `dist_kappa_stock`, `dist_kappa_index`, `dist_measure` (P|Q),
   `dist_haircut`.
+- **Phase 2 (not built):** a snapshot collector (the reference-pack workflow
+  appends daily 3M/12M density snapshots for the S&P 500: tickers, dates and
+  numbers only, under the pack's allow-list rules); a Track-record-style page
+  with PIT histograms of realised prices against the stored curves; κ estimated
+  from those snapshots, then a Beta calibration map; and paths pinned to both
+  expiries on the 12M view with a Gaussian copula ρ = √(T₁/T₂).
+- **Sources:** Bliss & Panigirtzoglou (2004); Liu, Shackleton, Taylor & Xu (2007);
+  Shackleton, Taylor & Yu (2010); Christoffersen, Heston & Jacobs (2013);
+  Metaxoglou & Smith (2016); Martin (2017); Martin & Wagner (2019); Ross (2015);
+  Borovička, Hansen & Scheinkman (2016); Jackwerth & Menner (2020); Cuesdeanu &
+  Jackwerth (2018); Gatheral & Jacquier (2014); Figlewski (2009);
+  Vincent-Humphreys & Noss (2012).
 
 ### Earnings and dividends for the chart (`fetcher.fetch_events`, `GET /api/events`)
 

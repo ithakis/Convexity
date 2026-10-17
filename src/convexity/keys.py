@@ -1,4 +1,4 @@
-"""API keys: Settings -> API keys (roadmap Phase 6).
+"""API keys: Settings -> API keys (Phase 6).
 
 Stores the Finnhub and NVIDIA NIM keys in the data folder's ``config.json``
 (the same file and field names ``helpers._load_local_secret`` reads), reloads

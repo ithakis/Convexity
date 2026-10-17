@@ -1,7 +1,7 @@
-"""My Investments' Attention rail (roadmap Phase 7): X-ray rules, events,
+"""My Investments' Attention rail (Phase 7): X-ray rules, events,
 severity, dismiss and the unread badge.
 
-The rail tells the owner what needs a look, calmly (roadmap Appendix D:
+The rail tells the owner what needs a look, calmly (backend.md, alert research:
 price-tracking alerts make retail investors trade more and earn less). So the
 rules are few, static and the owner's own: every threshold is editable in
 Settings -> Attention, and a dismissed item stays away until it gets worse.
@@ -64,7 +64,7 @@ RULES: dict[str, dict] = {
     # Phase 8: the owner's own plan (set per holding, from its row). Switches
     # only: the levels are the plan's. A target or review level reached is
     # the plan asking for a decision, so it needs a look; a plain price
-    # alert stays information (Appendix D, *Alert for Alerts*).
+    # alert stays information (alert research, *Alert for Alerts*).
     "review": {"label": "A holding falls below your review level", "unit": None, "value": None,
                "step": 10.0, "severity": "high", "note": "Set in a holding's plan: click its row."},
     "target": {"label": "A holding reaches your target", "unit": None, "value": None,
@@ -268,7 +268,7 @@ def should_notify(att: dict, state: dict | None = None) -> list[dict]:
     """The Needs-a-look items a notification is due for: shown in the rail
     (so not dismissed or snoozed), unread, and not notified at this level
     (or a full step worse since). Plain price alerts are information, so
-    never here (Appendix D)."""
+    never here (alert research)."""
     state = state if state is not None else load_state()
     return [it for it in att.get("high") or [] if it.get("unread") and _over(it, state["notified"])]
 
@@ -325,7 +325,7 @@ def prune(firing: set[str], checked: set[str]) -> None:
 
 # ------------------------------------------------------------------ plans
 #
-# The owner's plan per holding (roadmap Phase 8): a target, a review level,
+# The owner's plan per holding (Phase 8): a target, a review level,
 # a maximum weight, one line on why they hold it, and plain price alerts.
 # ``state/plans.json`` is the owner's own input, so unlike ``attention.json``
 # a malformed file is never read as "no plans" and never overwritten (the

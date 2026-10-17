@@ -1,4 +1,4 @@
-"""First-run download of the Market read model (roadmap Phase 5).
+"""First-run download of the Market read model (Phase 5).
 
 A fresh install has no ``<data>/models/mlsent-v1.1/`` — the artifact is ~4 MB
 of trained weights that are not in the package — so without this the Market
@@ -188,7 +188,7 @@ def start(force: bool = False) -> dict:
             finished_at=None,
             source="",
         )
-        _THREAD = threading.Thread(target=_run, name="pt-model-fetch", daemon=True)
+        _THREAD = threading.Thread(target=_run, name="cx-model-fetch", daemon=True)
         _THREAD.start()
         return dict(_STATUS)
 

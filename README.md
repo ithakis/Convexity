@@ -39,6 +39,17 @@ on any exchange, shown in the currency you choose.
 
 ![Holdings table: thirteen well-known stocks, heat-mapped](docs/screenshots/table.png)
 
+### Your real book, not just a watch list
+
+**My Investments** keeps the actual book: a ledger of buys, sells, dividends,
+deposits and fees, with cost, P&L and time-weighted and money-weighted returns
+against the S&P 500. Paste a note, drop a screenshot, a PDF statement or a
+spreadsheet and the AI reads it, then shows what it found for you to correct
+before anything is applied; every change can be undone. A calm side rail flags
+what needs a look (concentration, risk, earnings and ex-dividend dates, your
+own price plans), with macOS notifications for the serious items and a weekly
+recap. It is a separate page: your hypothetical portfolios are untouched.
+
 ### Find your next idea in plain English
 
 Type a theme like *AI chip makers* or criteria like *tech with D/E < 0.8, best
@@ -76,6 +87,7 @@ market-risk line tell you what changed before you open a single article.
 ### Also inside
 
 - **Stock detail:** click any row for its full price history (candles, OHLC, HLC area), moving averages, S&P 500 and sector overlays, and its valuation
+- **What the options imply:** in a stock's window, the price distribution in about 3 and 12 months, built from its listed options (US listings and their ADRs)
 - **Analyst consensus:** weighted rating, rating distribution and the full range of price targets per holding
 - **Criteria screens:** `tech with D/E < 0.8 and current ratio > 1` runs over every Yahoo listing, with or without an AI key
 - **Track record:** how both news reads have actually predicted returns, so you know how far to trust them
@@ -184,7 +196,7 @@ heat-mapped against the other rows on screen.
 
 The **Fundamentals** and **Momentum** views add P/S $`= \mathrm{MC} / \mathrm{Revenue}_{\mathrm{TTM}}`$,
 forward P/E, PEG, EV/EBITDA, margins, leverage, RSI, MACD, Bollinger %B, beta and
-shorter-horizon returns. The ⓘ column guide in the app has every formula.
+shorter-horizon returns. Settings → Guide in the app has every formula.
 
 ---
 
@@ -297,6 +309,13 @@ src/convexity/
 ├── symbol_db.py        the weekly symbol pack: every Yahoo listing, fuzzy lookup
 ├── search.py           company search: names, themes, criteria (rules + optional AI)
 ├── jobs.py             background refresh jobs (cancellable, survive a reload)
+├── investments.py      My Investments: the real book, prices/FX, the page payload
+├── ledger.py           the ledger engine: average cost, splits, TWR/MWR (pure)
+├── importer.py         AI import of text, screenshots, PDFs and spreadsheets
+├── attention.py        the Attention rail: risk rules, events, plans, price alerts
+├── notify.py           macOS notifications and the weekly recap
+├── options_density.py  option-implied price distribution for a stock's window
+├── keys.py             Settings → API keys: `config.json`, live reload, test calls
 ├── persistence.py      portfolios and settings as JSON in the data folder
 └── static/             index.html, app.js, style.css
 ```

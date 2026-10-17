@@ -6,7 +6,7 @@ description: Run Convexity for real (installed package, temp data folder, the us
 # Verifying Convexity at runtime
 
 Never touch the user's real data folder, and never print a key. Drive the app
-from an install of a clean tree (no legacy key files, no state). When the change
+from an install of a clean tree (no key files, no state). When the change
 calls Finnhub or NVIDIA NIM, validate it live with the user's keys passed as
 env vars (CLAUDE.md §3 "Use and validate the user's real API keys"):
 
@@ -18,8 +18,8 @@ cd $S/run && CONVEXITY_HOME=$S/home PYTHONUNBUFFERED=1 $S/bin/convexity > server
 lsof -nP -iTCP -sTCP:LISTEN | grep python       # 8765 is usually the user's own app; yours lands on 8766+
 ```
 
-Always set `CONVEXITY_HOME` — even `convexity --help` is an app launch and runs
-the data migration. Kill the server by its python PID (not the bash wrapper);
+Always set `CONVEXITY_HOME`: without it a run reads and writes the real data
+folder. Kill the server by its python PID (not the bash wrapper);
 never `pkill -f convexity`.
 
 Flows worth driving (browser pane on the printed URL):
@@ -53,7 +53,12 @@ Flows worth driving (browser pane on the printed URL):
   `FINNHUB_API_KEY` and `CONVEXITY_FINNHUB_BASE=http://127.0.0.1:<port>/api/v1/`
   pointing at a small stub that returns synthetic `/company-news` JSON — never
   a real key without asking.
-- Migration: `CONVEXITY_LEGACY_ROOT=<dir with a synthetic .convexity_watchlists.json>`.
+- My Investments: `CONVEXITY_HOME=<tmp> uv run python scripts/seed_demo_book.py [--crafted]`
+  seeds a synthetic book (`--crafted` adds rows and plans that fire the Attention
+  rail), then open the first topbar button: headline, performance chart,
+  holdings, the rail. The import composer needs the NIM key; drive it with
+  `scripts/eval_import.py` or paste a few lines of text and read the review step
+  before pressing Apply.
 - Desktop: `QT_QPA_PLATFORM=offscreen CONVEXITY_HOME=... $S/bin/convexity-app`,
   then read `$CONVEXITY_HOME/logs/desktop.log` for `loadFinished ok=True`.
 - Installers: `CONVEXITY_SOURCE=$S/tree INSTALL_APPS_DIR=... INSTALL_DESKTOP_DIR=...

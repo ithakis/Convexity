@@ -1,6 +1,6 @@
 """My Investments import: text, spreadsheets and screenshots -> entries to review.
 
-The owner's way into the book (roadmap Phases 5 and 6, run together): drop
+The owner's way into the book (Phases 5 and 6, run together): drop
 broker screenshots or statements, paste what the broker app shows, or just
 describe it. Nothing is written here. ``read()`` returns a *proposal* that
 the page shows as a review table, and only the owner's Apply writes it, as
