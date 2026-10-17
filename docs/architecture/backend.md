@@ -975,10 +975,10 @@ The stock window's σ/μ (spec and research: `docs/plans/real-world-density.md`;
 reference recipe: `scripts/density_prototype.py`, which the module reproduces
 within rounding — AAPL checked 2026-10-17).
 
-- **Pipeline** per horizon (the listed expiry nearest 91 or 365 days, never
-  interpolated, and only inside 45–182 or 270–550 days: small caps list
-  nothing past 5–7 months, so their "12M" is `no_expiry` and the page opens
-  on 3M): chain → forward from parity with the rate from **^IRX**
+- **Pipeline** per horizon (the listed expiry nearest 91 or 365 days, inside
+  45–182 or 270–550 days; with none there, the SSVI surface gives the horizon
+  itself when the chain reaches half of it, else `no_expiry`: small caps
+  listing nothing past 5 months open on 3M): chain → forward from parity with the rate from **^IRX**
   (never backed out of parity: Yahoo's US chains are American-style and gave
   −4.8%) → two-sided **OTM-only** quotes, minus any that break static
   no-arbitrage by more than the spread (`_monotone`) → raw SVI with **Lee's
@@ -1018,9 +1018,25 @@ within rounding — AAPL checked 2026-10-17).
   QQQ +3.1% and DELL had a 1.5 vol-pt smile fit and −9.1%. With the tails and
   the stale-quote filter, all three pass (+0.2%, −0.1% and +0.1%). When a
   12M chain still fails, the page opens on 3M and says why.
-- **Non-US listings** have no chains: the company's US line stands in
-  (`symbol_db.us_line`, then `discover_us_line`), every price scaled by
-  local/US last price (`ratio`). Analyst targets stay in the chain's currency
+- **Non-US listings** have no chains (Yahoo carries no Eurex or Euronext
+  derivatives): every US line of the company is probed (`symbol_db.us_lines`
+  plus `discover_us_line`), and when several list options the one with the
+  most open interest at the ~3M expiry wins (an ADR over its pink sheet); the
+  choice is cached a day (`density-line|SYM`). Every price is scaled by
+  local/US last price (`ratio`). A chain that exists but fails (a European bank's ADR:
+  quotes 50–150% of mid wide on 2026-10-17) falls back to history, the
+  fallback naming that chain (`DensityError.chain`).
+- **Maturities no expiry has** (`surface_at`, `EXTRAP_MIN` 0.5): the SSVI's
+  θ is linear in T between fitted expiries and grows at the last expiry's
+  average rate past it (flat vol), the carry is the nearest expiry's, and that
+  slice's quotes, rescaled to the same ATM sd, place the GEV tails. Same
+  surface gate; `quality.extrapolated = {from_days, beyond}` and a synthetic
+  expiry of today + horizon.
+- **Vols for the readouts** (`vol`): `implied` is the ATM (k = 0) implied vol
+  of the fitted smile at the horizon's expiry; `hist` is the last year's daily
+  log returns, sample sd × √252, of the same listing (`_hist_vol`), so both
+  are per-year vols of one instrument in one currency. A history fallback
+  keeps the thin chain's implied (`implied_symbol`) when it had one. Analyst targets stay in the chain's currency
   in the payload; the page multiplies by `ratio`.
 - **Expiry choice and sparse chains** (`_options_rn`): every expiry from 20
   days to 3 years is fetched once in parallel and cached (`_chains`, 15 min,
@@ -1070,6 +1086,18 @@ within rounding — AAPL checked 2026-10-17).
 - **Settings** (prefs.json, bounded in `persistence._clean_prefs`):
   `dist_erp`, `dist_kappa_stock`, `dist_kappa_index`, `dist_measure` (P|Q),
   `dist_haircut`.
+
+### Earnings and dividends for the chart (`fetcher.fetch_events`, `GET /api/events`)
+
+The stock window's E/D flags and its dividend yield. Earnings from
+`get_earnings_dates(limit=60)` (EPS estimate, reported, surprise), one row per
+date (Yahoo repeats some). Timestamps come in New York time and are read in
+the exchange's zone (`fast_info.timezone`): at or after 16:00 local the
+reaction is the next session (`react`), earlier the same one; midnight New
+York means no time given (`timing: ""`). Dividends per share by ex-date in
+the quote's unit; `div_ttm` / `div_yield_ttm` = the last 365 days over the last
+price. Cached 6 h, only when something came back. Reactions are computed by
+the page on the detail's daily (adjusted) closes.
 
 ## 6. Symbol pack + company search (`symbol_db.py`, `symbol_build.py`, `search.py`)
 

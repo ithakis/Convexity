@@ -175,6 +175,26 @@ Remaining limits:
 - History misses forward events and underrates illiquid small caps, whose stale
   prices look calm.
 
+## Owner feedback, 17 Oct 2026 (built, v1.27.1)
+
+- Replay removed; today's price is a gauge (dashed level across the plot, tag
+  on the left axis); the right tag gutter is gone, so the density reaches the
+  edge. Pill `3M | 12M`, the date under the density as **12M** · 17 Oct 27.
+- Readouts: Pr[S_T > S_0]; the mean named by its source ("expected" claimed
+  too much); "Falls 20% or more: x% by the end · y% at some point" (the old
+  "Chance ≤ −20% · touch it" read as noise); Dividend Yield (trailing 12
+  months) in place of the earnings cell; Hist. / Imp. Volatility, both
+  annualised vols of log returns on the same listing and currency.
+- European chains: Yahoo carries none. Every US line is now probed and the
+  one with the most open interest used; a horizon past the longest expiry is
+  read off the SSVI surface when the chain reaches half of it. a European bank's ADR
+  chain exists but was 50–150% wide on 17 Oct (a Saturday), so it stays on
+  history. Euronext's own delayed option prices would need a new outbound
+  host: not added without the owner's OK.
+- E/D flags on the history with a card per event (EPS vs estimate, the
+  price's reaction and the S&P 500's; a dividend against a year earlier and
+  its ex-date move).
+
 ## Phase 2 — follow-up (not built)
 
 - **Snapshot collector**: the reference-pack workflow appends daily 3M/12M density

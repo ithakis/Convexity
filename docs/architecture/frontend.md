@@ -408,8 +408,24 @@ to its target plus a KDE of targets; neither = the old chart. While either is
 on, `renderChart` ends the history at ~58% of the plot (`padR`), switches the
 y axis to **log** and widens it to the end curve's 3%..97%, and
 `mountForecast` lays a canvas (`#m-fc-cv`, `pointer-events: none`) and a hit
-layer (`#m-fc-hit`) over the future zone, density and price-tag gutter; the
-history keeps its own crosshair. Rules that matter:
+layer (`#m-fc-hit`) over the future zone and density; the history keeps its
+own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
+
+- **Today's price is a gauge**: an SVG dashed level across the whole plot and
+  a filled tag on the left axis (`yTagSvg`, the tick under it hidden); the
+  future-zone hover moves a second, accent tag and level (`#m-ytag-hov`). There
+  is no right-hand tag gutter (`FC_ZONE.tagW` 12) and no Replay button.
+- The horizon pill reads `3M | 12M`; the expiry is the axis label under the
+  density, **12M** · 17 Oct 27 (`fcFmtShort`).
+- **E/D flags** (`renderEventMarkers`, `openEventCard`): a layer over the
+  finished chart from `/api/events`, so its late arrival never restarts the
+  animation. E lane at the top, D just under; faint dashed rules; E green for
+  a beat, red for a miss, D accent. Flags under 16 px from the previous one in
+  their lane are skipped. The card measures reactions on `DETAIL.data.history`
+  (daily, dividend-adjusted, dates via `evDay`: +12 h, UTC date, so a
+  European midnight bar keeps its day): first session, 5 sessions, S&P 500 the
+  same session and the excess; a D's price move is the total return minus
+  amount / previous close (≈, the closes are adjusted).
 
 - **Paths are bridges, not GBM** (`fcSimulate`): ends are stratified inverse-CDF
   draws from the drawn curve, so the end marginal is exact; the clock includes
@@ -423,16 +439,26 @@ history keeps its own crosshair. Rules that matter:
   on the curve) and snaps to Low/Consensus/High.
 - 12M is the default; when the 12M chain fails the gate and 3M passes, the
   window switches to 3M once (`DETAIL.fcAuto`) and the footnote says why.
-- Readouts replace `#m-range-info` in `#m-fc-ro`; its "Assumptions ⚙" link
+- Readouts replace `#m-range-info` in `#m-fc-ro`: Pr[S_T > S_0] (KaTeX
+  labels: style only `.m-fc-grid > div > span`, never every span, or KaTeX's
+  own spans stack), the mean named by its source (analysts' mean target,
+  CAPM mean, forward), median and ranges, "Falls 20% or more" (by the end ·
+  at some point), Pr[S_T ≥ consensus] (or ≥ 1.2 S_0), Dividend Yield and
+  Hist. / Imp. Volatility (payload `vol`); each cell's `data-tip` explains it.
+  The curve's own σ moved to the footnote. Its "Assumptions" link
   opens Settings → Price distribution (`renderSettingsDistribution`), whose
   saves clear `DETAIL.fc` so the window re-prices.
 - **Every source says what it is** (`renderFcReadouts`, keyed on the payload's
   `source`, `quality.smile` and `fx`): a surface fit names its quotes over
   all expiries; an FX layer is "+ FX" in the σ label and the pair, vol and ρ
   in the footnote; the history estimate says why options were not used
-  (`fallback`), "σ · from history", its β, proxy, weeks and rate, and has no
-  risk-neutral curve (`fcMode` falls back to the market's μ under Q). σ is the
-  drawn curve's own width (`var_x / T`), so it includes FX.
+  (`fallback`), its β, proxy, weeks and rate, and has no
+  risk-neutral curve (`fcMode` falls back to the market's μ under Q). The
+  footnote's curve σ is the drawn curve's own width (`var_x / T`), so it
+  includes FX.
+- The header line is `modalMetaHtml`: industry (sector on hover) · City
+  (Exchange) from `EXCHANGE_PLACES` by Yahoo code · currency. The detail
+  sections keep their metric tips without the dotted underline.
 - Colours: data stay `--pos`/`--neg`/accent; analysts use `--amber`
   (`--amber-rgb`, `--on-amber`) defined in all three themes.
 
