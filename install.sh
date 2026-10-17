@@ -158,52 +158,7 @@ VERSION="$("$TOOL_PY" -c 'import convexity; print(convexity.__version__)')"
 ICON_PNG="$("$TOOL_PY" -c 'import convexity, pathlib; print(pathlib.Path(convexity.__file__).parent / "assets" / "icon.png")')"
 
 # ---------------------------------------------------------------------------
-# 5. API keys from an old checkout. Before 1.14 the keys lived in .finnhub_key /
-#    .nvidia_key next to the code, found by walking up from the package — which
-#    an installed package can never reach. When this script runs from such a
-#    checkout, copy them into the data folder's config.json (mode 0600). Never
-#    overwrites a key already there; values are never printed.
-# ---------------------------------------------------------------------------
-SCRIPT_DIR=""
-if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-if [ -n "$SCRIPT_DIR" ] && { [ -f "$SCRIPT_DIR/.finnhub_key" ] || [ -f "$SCRIPT_DIR/.nvidia_key" ]; }; then
-    "$TOOL_PY" - "$SCRIPT_DIR" <<'PY'
-import json, os, sys
-from pathlib import Path
-from convexity import paths
-src = Path(sys.argv[1])
-cfg = paths.config_file()
-try:
-    data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
-except (OSError, ValueError):
-    print(f"==> {cfg} is not valid JSON; leaving it alone (keys not copied).")
-    sys.exit(0)
-if not isinstance(data, dict):
-    sys.exit(0)
-added = []
-for fname, key in ((".finnhub_key", "finnhub_api_key"), (".nvidia_key", "nvidia_api_key")):
-    f = src / fname
-    if f.is_file() and not data.get(key):
-        value = f.read_text(encoding="utf-8").strip()
-        if value:
-            data[key] = value
-            added.append(key)
-if added:
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cfg.with_name(cfg.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
-    os.replace(tmp, cfg)
-    os.chmod(cfg, 0o600)
-    print(f"==> Copied {', '.join(added)} into {cfg}")
-PY
-fi
-
-# ---------------------------------------------------------------------------
-# 6. macOS: Convexity.app
+# 5. macOS: Convexity.app
 # ---------------------------------------------------------------------------
 if [ "$OS" != "Darwin" ]; then
     echo ""

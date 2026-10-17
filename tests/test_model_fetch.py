@@ -28,8 +28,7 @@ VER = mfetch.MODEL_VERSION
 # ------------------------------------------------------------------ fixtures
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    # No legacy ~/.convexity lookup, no auto-disable, fast retries, clean state.
-    monkeypatch.setenv("CONVEXITY_LEGACY_HOME", str(tmp_path / "legacy-home"))
+    # No auto-disable, fast retries, clean state.
     monkeypatch.delenv("MLSENT_MODEL_DIR", raising=False)
     monkeypatch.delenv("CONVEXITY_MODEL_DOWNLOAD", raising=False)
     monkeypatch.delenv("CONVEXITY_MODEL_URL", raising=False)

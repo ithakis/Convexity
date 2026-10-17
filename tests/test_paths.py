@@ -51,24 +51,15 @@ def test_watchlist_save_lands_in_the_data_dir(tmp_path, monkeypatch):
     assert json.loads(target.read_text())["Demo"] == "AAPL, MSFT"
 
 
-def test_secret_order_env_then_config_then_legacy(tmp_path, monkeypatch, capsys):
+def test_secret_order_env_then_config(monkeypatch):
     monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
-    # legacy walk-up file: point the walk at a fake package dir
-    pkg = tmp_path / "repo" / "convexity"
-    pkg.mkdir(parents=True)
-    (tmp_path / "repo" / ".finnhub_key").write_text("legacy-value\n")
-    monkeypatch.setattr(helpers, "__file__", str(pkg / "helpers.py"))
-    paths._WARNED.clear()
-    assert helpers._load_local_secret("FINNHUB_API_KEY", ".finnhub_key") == "legacy-value"
-    err = capsys.readouterr().err
-    assert "legacy key file .finnhub_key" in err and "legacy-value" not in err
-
+    assert helpers._load_local_secret("FINNHUB_API_KEY") == ""
     paths.config_file().parent.mkdir(parents=True)
     paths.config_file().write_text(json.dumps({"finnhub_api_key": " cfg-value "}))
-    assert helpers._load_local_secret("FINNHUB_API_KEY", ".finnhub_key") == "cfg-value"
+    assert helpers._load_local_secret("FINNHUB_API_KEY") == "cfg-value"
 
     monkeypatch.setenv("FINNHUB_API_KEY", "env-value")
-    assert helpers._load_local_secret("FINNHUB_API_KEY", ".finnhub_key") == "env-value"
+    assert helpers._load_local_secret("FINNHUB_API_KEY") == "env-value"
 
 
 def test_bad_config_is_ignored(monkeypatch):
@@ -78,19 +69,9 @@ def test_bad_config_is_ignored(monkeypatch):
     assert helpers._config_secret("NVIDIA_API_KEY") == ""
 
 
-def test_model_dir_prefers_data_dir_then_logged_legacy(tmp_path, monkeypatch, capsys):
+def test_model_dir_is_the_data_dir_unless_overridden(tmp_path, monkeypatch):
     monkeypatch.delenv("MLSENT_MODEL_DIR", raising=False)
-    monkeypatch.setenv("CONVEXITY_LEGACY_HOME", str(tmp_path / "oldhome"))
-    ver = ml_sentiment.ARTIFACT_VERSION
-    new = paths.models_dir() / ver
-    assert ml_sentiment.model_dir() == new  # neither exists: name the new place
-    legacy = tmp_path / "oldhome" / ".convexity" / "ml_model" / ver
-    legacy.mkdir(parents=True)
-    paths._WARNED.clear()
-    assert ml_sentiment.model_dir() == legacy
-    assert "legacy ML model dir" in capsys.readouterr().err
-    new.mkdir(parents=True)
-    assert ml_sentiment.model_dir() == new
+    assert ml_sentiment.model_dir() == paths.models_dir() / ml_sentiment.ARTIFACT_VERSION
     monkeypatch.setenv("MLSENT_MODEL_DIR", str(tmp_path / "x"))
     assert ml_sentiment.model_dir() == tmp_path / "x"
 

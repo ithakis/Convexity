@@ -974,10 +974,6 @@ def test_mpt_run_history_last_three(tmp_path, monkeypatch):
     assert len(runs) == 3 and runs[0]["symbols"] == ["A", "B", "C"]
     assert [r["params"]["alpha"] for r in runs] == [0.99, 0.975, 0.95]
     assert P.get_mpt_runs("Missing") == [] and P.get_mpt_runs("Missing") == []
-    # legacy single-dict format → tolerated as a one-element history
-    P._write_mpt_raw({"runs": {"Old": {"id": "r1", "params": {"alpha": 0.95}}}})
-    assert P.get_mpt_runs("Old")[0]["id"] == "r1"
-    assert len(P.get_mpt_runs("Old")) == 1
-    # legacy multi-run list format → newest entry is index 0
-    P._write_mpt_raw({"runs": {"Leg": [{"id": "r2"}, {"id": "r1"}]}})
-    assert P.get_mpt_runs("Leg")[0]["id"] == "r2"
+    # a stored list is returned as-is, newest entry first; stray entries dropped
+    P._write_mpt_raw({"runs": {"Leg": [{"id": "r2"}, "junk", {"id": "r1"}]}})
+    assert [r["id"] for r in P.get_mpt_runs("Leg")] == ["r2", "r1"]

@@ -57,8 +57,8 @@ from convexity.relevance import DEDUP_SIMILARITY, norm_title, relevance_score, w
 # API key loading (env var, then a strictly-local file found by walking
 # upward from this module's directory) lives in helpers._load_local_secret —
 # shared with finnhub_adapter.py so both modules resolve secrets identically.
-FINNHUB_API_KEY = _load_local_secret("FINNHUB_API_KEY", ".finnhub_key")
-NVIDIA_API_KEY = _load_local_secret("NVIDIA_API_KEY", ".nvidia_key")
+FINNHUB_API_KEY = _load_local_secret("FINNHUB_API_KEY")
+NVIDIA_API_KEY = _load_local_secret("NVIDIA_API_KEY")
 _FINNHUB_BASE = "https://finnhub.io/api/v1/"
 
 # ---------------------------------------------------------------------------
@@ -1060,8 +1060,8 @@ def reload_keys() -> None:
     otherwise keep short-circuiting every call (and the banner) until the next
     refresh. A retired model simply re-records itself on the next call."""
     global FINNHUB_API_KEY, NVIDIA_API_KEY, _nvidia_client
-    fh = _load_local_secret("FINNHUB_API_KEY", ".finnhub_key")
-    nv = _load_local_secret("NVIDIA_API_KEY", ".nvidia_key")
+    fh = _load_local_secret("FINNHUB_API_KEY")
+    nv = _load_local_secret("NVIDIA_API_KEY")
     FINNHUB_API_KEY = fh
     with _client_lock:
         changed = nv != NVIDIA_API_KEY

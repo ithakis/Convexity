@@ -327,10 +327,6 @@ let SORT = { key: "pct_ytd", dir: -1 };
  * here. The registry is the single source of truth; no other code path
  * should hardcode column keys outside that table.
  * --------------------------------------------------------------------------- */
-const BUILTIN_VIEW_ALIASES = {
-  "IB View": "Fundamentals",
-  "Trader View": "Momentum",
-};
 const BUILTIN_VIEWS = {
   "Default":      ["logo","symbol","name","price","market_cap","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200","earnings_surprise","rec_trend_fh","insider_mspr","news_sentiment"],
   "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield","earnings_surprise","rec_trend_fh","insider_mspr"],
@@ -348,10 +344,6 @@ const BUILTIN_VIEW_HEAT = {
 const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
 const DESC_DEFAULT_KEYS = new Set(["pct_ytd","pct_1y","pct_1w","pct_1m","pct_3m","pct_6m","delta_ath","market_cap","price","target_upside_pct"]);
 
-function normalizeBuiltinViewName(name) {
-  return BUILTIN_VIEW_ALIASES[name] || name;
-}
-
 /* ---- Effective view resolution ----------------------------------------
  * A view (built-in or custom) resolves to an effective {columns, heat}.
  * Built-in views layer a persisted override (STATE.builtinOverrides) on top
@@ -359,13 +351,12 @@ function normalizeBuiltinViewName(name) {
  * All rendering + the customize modal read through these so no consumer needs
  * to know which flavour of view is active. */
 function factoryColumnsFor(name) {
-  return (BUILTIN_VIEWS[normalizeBuiltinViewName(name)] || BUILTIN_VIEWS["Default"]).slice();
+  return (BUILTIN_VIEWS[name] || BUILTIN_VIEWS["Default"]).slice();
 }
 function factoryHeatFor(name) {
-  return Object.assign({}, BUILTIN_VIEW_HEAT[normalizeBuiltinViewName(name)] || {});
+  return Object.assign({}, BUILTIN_VIEW_HEAT[name] || {});
 }
 function getViewColumns(name) {
-  name = normalizeBuiltinViewName(name);
   const S = (typeof STATE !== "undefined" && STATE) || {};
   if (BUILTIN_VIEWS[name]) {
     const ov = (S.builtinOverrides || {})[name];
@@ -381,7 +372,6 @@ function getViewColumns(name) {
  * (never the factory values) so a future factory change still reaches views
  * the user hasn't overridden for that column. */
 function getViewHeat(name) {
-  name = normalizeBuiltinViewName(name);
   const S = (typeof STATE !== "undefined" && STATE) || {};
   if (BUILTIN_VIEWS[name]) {
     const ov = (S.builtinOverrides || {})[name];
@@ -497,31 +487,20 @@ function persistFitColumnsPreference(on) {
 
 /* Color-coding ("heat") mode is now a property of the active view (see
    getViewHeat) — EV/EBITDA can be quantile in Fundamentals but min-max in
-   Default. The legacy global localStorage map is retained only as a fallback
-   default for any (view, column) with no explicit per-view mode, so a user's
-   pre-existing global tweaks still apply as a baseline; new toggles write to
-   the view, not the global. */
-function readHeatPrefs() {
-  try {
-    const raw = localStorage.getItem("heat_prefs");
-    return raw ? JSON.parse(raw) : {};
-  } catch (e) { return {}; }
-}
+   Default. */
 function getHeatMode(key) {
   const col = COLS_BY_KEY[key];
   if (!col || !col.heat) return null;
   const viewHeat = getViewHeat(STATE.activeViewName);
   let mode = viewHeat[key];
-  if (mode == null) mode = (STATE.heatPrefs || {})[key]; // legacy global fallback
   if (col.heat.kind === "yo_dyn") {
-    if (mode === "percentile") mode = "quantile"; // migrate the old continuous-rank mode
     return (mode === "off" || mode === "2c" || mode === "quantile" || mode === "minmax") ? mode : "minmax";
   }
   if (col.heat.kind === "div") return mode === "off" ? "off" : "on";
   return null; // no controllable heat mode
 }
 function setHeatMode(key, mode) {
-  const name = normalizeBuiltinViewName(STATE.activeViewName);
+  const name = STATE.activeViewName;
   if (isBuiltinView(name)) {
     const ov = STATE.builtinOverrides[name] || {};
     ov.heat = Object.assign({}, ov.heat || {});
@@ -1819,7 +1798,7 @@ function cellStyleHeat(col, value, theme, ctx) {
  * whenever the active built-in differs from its factory definition.
  * --------------------------------------------------------------------------- */
 
-function isBuiltinView(name) { return Object.prototype.hasOwnProperty.call(BUILTIN_VIEWS, normalizeBuiltinViewName(name)); }
+function isBuiltinView(name) { return Object.prototype.hasOwnProperty.call(BUILTIN_VIEWS, name); }
 
 /* Custom presets in bar order: creation order, so a newly saved preset always
    lands at the END of the row rather than jumping into the middle of a list the
@@ -1848,7 +1827,6 @@ function sameColumnKeys(left, right) {
    color override)? Drives the Settings > Column Presets "Revert" buttons, which
    must stay available for as long as an override exists. */
 function builtinIsModified(name) {
-  name = normalizeBuiltinViewName(name);
   if (!isBuiltinView(name)) return false;
   const ov = (STATE.builtinOverrides || {})[name];
   if (!ov) return false;
@@ -1861,7 +1839,6 @@ function builtinIsModified(name) {
    saved the moment it was made — acking only silences the flag, so the two
    predicates deliberately diverge and Settings keeps offering the revert. */
 function builtinShowsDirtyPill(name) {
-  name = normalizeBuiltinViewName(name);
   if (!builtinIsModified(name)) return false;
   return !((STATE.builtinOverrides || {})[name] || {}).acked;
 }
@@ -1878,7 +1855,7 @@ async function loadColumnViews() {
     const j = await r.json();
     STATE.customViews = j.custom || {};
     STATE.builtinOverrides = j.builtin_overrides || {};
-    const desired = normalizeBuiltinViewName(j.active || "Default");
+    const desired = (j.active || "Default");
     if (isBuiltinView(desired) || STATE.customViews[desired]) {
       STATE.activeViewName = desired;
     } else {
@@ -1923,7 +1900,7 @@ async function persistBuiltinHeat(name, key, mode) {
     const r = await fetch("/api/column-views/builtin-heat", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({name: normalizeBuiltinViewName(name), key, mode}),
+      body: JSON.stringify({name: name, key, mode}),
     });
     if (r.ok) {
       const j = await r.json();
@@ -1939,7 +1916,6 @@ function debouncedSaveCustom(name, columns, heat) {
 }
 
 function setActiveView(name, {persist = true} = {}) {
-  name = normalizeBuiltinViewName(name);
   if (!isBuiltinView(name) && !STATE.customViews[name]) return;
   STATE.activeViewName = name;
   render();
@@ -1957,7 +1933,7 @@ function renderColumnViewBar() {
   const seg = document.getElementById("cv-builtins");
   if (!seg) return;
   seg.innerHTML = "";
-  const activeName = normalizeBuiltinViewName(STATE.activeViewName || "Default");
+  const activeName = (STATE.activeViewName || "Default");
   const addChip = (name, isCustom) => {
     const b = document.createElement("button");
     b.type = "button";
@@ -1994,7 +1970,7 @@ function renderColumnViewBar() {
    active view for the column bar's Reset button; Settings passes a name so any
    preset can be reverted without switching to it first. */
 async function resetViewOverride(name) {
-  name = normalizeBuiltinViewName(name || STATE.activeViewName);
+  name = (name || STATE.activeViewName);
   if (!isBuiltinView(name) || !builtinIsModified(name)) return;
   try {
     const r = await fetch(`/api/column-views/${encodeURIComponent(name)}`, {method: "DELETE"});
@@ -2013,7 +1989,7 @@ async function resetViewOverride(name) {
    the view again (columns or colors) clears the flag server-side and the pill
    comes back. */
 async function ackViewOverride(name) {
-  name = normalizeBuiltinViewName(name || STATE.activeViewName);
+  name = (name || STATE.activeViewName);
   if (!isBuiltinView(name) || !builtinIsModified(name)) return;
   try {
     const r = await fetch("/api/column-views/builtin-ack", {
@@ -2081,7 +2057,7 @@ function openColumnPicker() {
      <active>" (the primary action) saves the edits straight back onto the
      current view, no naming, no forced fork. "Save as new" is the secondary
      escape hatch for deliberately branching a copy. */
-  const activeName = normalizeBuiltinViewName(STATE.activeViewName);
+  const activeName = STATE.activeViewName;
   const isBuiltinActive = isBuiltinView(activeName);
   modal.innerHTML = `
     <h2>Customize Columns</h2>
@@ -2227,7 +2203,7 @@ async function saveColumnPicker({asNew}) {
        factory to inherit from). */
     heat = getViewHeat(STATE.activeViewName);
   } else {
-    name = normalizeBuiltinViewName(STATE.activeViewName);
+    name = STATE.activeViewName;
     /* Updating an existing view persists the column change while preserving
        the view's already-saved explicit color overrides (color controls apply
        immediately, so they're saved before this runs). */
@@ -2303,7 +2279,7 @@ function reorderActiveColumns(fromKey, toKey) {
   if (fromIdx < 0 || toIdx < 0) return;
   cur.splice(fromIdx, 1);
   cur.splice(toIdx, 0, fromKey);
-  const name = normalizeBuiltinViewName(STATE.activeViewName);
+  const name = STATE.activeViewName;
   if (isBuiltinView(name)) {
     /* Built-in views are now editable in place: persist the new order as a
        per-view override immediately (preserving any explicit color overrides). */
@@ -4727,7 +4703,6 @@ let STATE = {
   fitColumns: readFitColumnsPreference(),
   // Legacy global color-mode map — now only a fallback default under any
   // per-view color setting (see getHeatMode); new toggles write to the view.
-  heatPrefs: readHeatPrefs(),
 };
 
 /* ===========================================================================
@@ -11623,7 +11598,6 @@ function fxInit() {
 // fixed-position overlay). Any `.an-version` element already in the DOM when
 // this resolves is patched directly so a slow /api/health response still lands.
 let APP_VERSION = null; // {version, date, dataDir} — date is a raw ISO "yyyy-mm-dd"
-let MIGRATION_CONFLICTS = []; // [{old, used}] from /api/health — see syncMigrationBanner
 
 function versionLabel() {
   return APP_VERSION ? `v${APP_VERSION.version} (${fmtDateDMY(APP_VERSION.date)})` : "";
@@ -11639,8 +11613,6 @@ function loadAppVersion() {
     // the one panel that would have explained it.
     if (d.env_ok === false) showEnvBanner();
     syncLlmBanner(d);
-    MIGRATION_CONFLICTS = Array.isArray(d.migration_conflicts) ? d.migration_conflicts : [];
-    syncMigrationBanner();
     if (!d.version) return;
     APP_VERSION = { version: d.version, date: d.version_date, dataDir: d.data_dir || "" };
     document.querySelectorAll(".an-version").forEach(el => { el.textContent = versionLabel(); });
@@ -11705,47 +11677,6 @@ function syncLlmBanner(health) {
     openSettings();
   };
 }
-/* The move into the data folder never overwrites: when an old file and a
-   different copy in the data folder both exist, the app uses the data-folder
-   copy and leaves the old one untouched. That used to be one log line, so a
-   user whose newer edits sat in the old file saw them "vanish". The conflict
-   repeats on every launch until the old file is dealt with, so the banner does
-   too; Settings -> About lists the files. */
-function syncMigrationBanner() {
-  const old = document.getElementById("migrate-banner");
-  const n = MIGRATION_CONFLICTS.length;
-  if (!n) { if (old) old.remove(); return; }
-  if (old) return;
-  const bar = document.createElement("div");
-  bar.id = "migrate-banner";
-  bar.className = "env-banner";
-  bar.innerHTML = `<span>${n === 1 ? "One older data file was" : `${n} older data files were`}
-    not moved into the data folder because a different copy was already there.
-    The app is using the data-folder copy; the old ${n === 1 ? "file is" : "files are"} untouched.</span>
-    <button class="env-banner-link" id="migrate-banner-open">Details</button>
-    <button class="env-banner-x" id="migrate-banner-x" aria-label="Dismiss">&times;</button>`;
-  const topbar = document.getElementById("topbar");
-  if (topbar && topbar.parentNode) topbar.parentNode.insertBefore(bar, topbar.nextSibling);
-  else document.body.insertBefore(bar, document.body.firstChild);
-  document.getElementById("migrate-banner-x").onclick = () => bar.remove();
-  document.getElementById("migrate-banner-open").onclick = () => {
-    bar.remove();
-    selectSettingsSection("about");
-    openSettings();
-  };
-}
-
-function migrationConflictsHtml() {
-  if (!MIGRATION_CONFLICTS.length) return "";
-  const rows = MIGRATION_CONFLICTS.map(c => `<li><div><span class="settings-bad-text">Not moved:</span>
-      <code>${escapeHtml(c.old)}</code></div><div>In use: <code>${escapeHtml(c.used)}</code></div></li>`).join("");
-  return `<div class="settings-row-help"><b>Older files left in place.</b> A different copy
-      was already in the data folder, so these were not moved (nothing is ever
-      overwritten). If the old file holds changes you want, quit the app, move it over
-      the file in use, and relaunch. If not, delete the old file and this notice goes away.</div>
-    <ul class="settings-migrate-list">${rows}</ul>`;
-}
-
 /* First run: no keys, so no News read and no Finnhub news. Same shape as the
    other banners; Details opens Settings -> API keys. It disappears as soon as
    /api/health reports both keys set (Settings re-runs the health check after a
@@ -12215,7 +12146,7 @@ function renderSettingsColumnPresets(el) {
               : `Modified &middot; not yet saved`;
     return settingsRow({
       id: "builtins",
-      label: escapeHtml(name) + (name === normalizeBuiltinViewName(STATE.activeViewName)
+      label: escapeHtml(name) + (name === STATE.activeViewName
         ? ` <span class="settings-status-pill ok">Active</span>` : ""),
       help: `${state} &middot; ${counted(getViewColumns(name).length)}`,
       control: `<button class="settings-btn" data-revert="${escapeHtml(name)}"${modified ? "" : " disabled"}>Revert to default</button>`,
@@ -12562,7 +12493,6 @@ const KEY_TEST_TEXT = {
 function keySourceText(p) {
   if (!p || !p.set) return `<span class="settings-status-pill bad">Not set</span>`;
   const src = p.source === "env" ? `environment variable <code>${escapeHtml(p.env_var || "")}</code>`
-            : p.source === "legacy" ? "legacy key file beside the app"
             : "config.json";
   return `<span class="settings-status-pill ok">Set</span> <span class="settings-key-src">from ${src}</span>`;
 }
@@ -12583,15 +12513,12 @@ function paintSettingsKeys(el, st, notes = {}) {
     const envNote = s.source === "env"
       ? `<div class="settings-row-help">The environment variable wins over config.json while it is
           set${s.in_config ? " — the key saved here is used once it is unset" : ""}.</div>` : "";
-    const legacyNote = s.source === "legacy"
-      ? `<div class="settings-row-help">Save the key here to move it into config.json; the old
-          file is read for this release only.</div>` : "";
     const note = notes[p.id];
     const noteHtml = note ? `<div class="settings-row-help settings-key-note ${note.cls || ""}">${escapeHtml(note.text)}</div>` : "";
     const help = `<div>${keySourceText(s)}</div>
       <div class="settings-row-help">${escapeHtml(p.what)} Free key:
         <a href="${p.link}" target="_blank" rel="noopener noreferrer">${escapeHtml(p.linkText)}</a></div>
-      ${envNote}${legacyNote}
+      ${envNote}
       <form class="settings-key-form" data-provider="${p.id}" autocomplete="off">
         <input type="password" class="settings-key-input" id="key-input-${p.id}"
           autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"
@@ -12917,8 +12844,7 @@ function renderSettingsAbout(el) {
         </div>
         <div class="settings-row-help">One folder per user, outside the app's own
           folder, so updating or reinstalling never touches it. It stays on this
-          machine.</div>
-        ${migrationConflictsHtml()}`,
+          machine.</div>`,
     }) +
     settingsRow({
       id: "update",

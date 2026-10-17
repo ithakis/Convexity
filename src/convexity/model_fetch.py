@@ -148,15 +148,11 @@ def complete(d: Path) -> bool:
 
 def needed() -> bool:
     """True when the Market read has no complete artifact to load. An explicit
-    MLSENT_MODEL_DIR is the user's choice and is never downloaded into; a
-    complete copy in the one-release legacy location still counts as present
-    (ml_sentiment only falls back to it while the data-folder one is absent)."""
+    MLSENT_MODEL_DIR is the user's choice and is never downloaded into."""
     if os.environ.get("MLSENT_MODEL_DIR"):
         return False
     t = target_dir()
     if complete(t):
-        return False
-    if not t.exists() and complete(paths.legacy_model_root() / MODEL_VERSION):
         return False
     return True
 

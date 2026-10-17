@@ -54,7 +54,6 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(persistence, "_VIEWS_FILE", tmp_path / "views.json")
     monkeypatch.setattr(persistence, "_WATCHLISTS_FILE", tmp_path / "watch.json")
     monkeypatch.setattr(persistence, "_MPT_FILE", tmp_path / "mpt.json")
-    monkeypatch.setattr(persistence, "_LEGACY_SESSION_FILE", tmp_path / "legacy.json")
     return tmp_path
 
 

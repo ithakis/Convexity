@@ -28,11 +28,11 @@ def test_empty_store_defaults(cv):
 
 def test_custom_view_roundtrip_with_heat(cv):
     raw = cv.upsert_column_view(
-        "MyVal", ["symbol", "price", "ev_ebitda"], heat={"ev_ebitda": "percentile"}
+        "MyVal", ["symbol", "price", "ev_ebitda"], heat={"ev_ebitda": "quantile"}
     )
     entry = raw["custom_views"]["MyVal"]
     assert entry["columns"] == ["symbol", "price", "ev_ebitda"]
-    assert entry["heat"] == {"ev_ebitda": "percentile"}
+    assert entry["heat"] == {"ev_ebitda": "quantile"}
     assert entry["created_at"]  # stamped
     # Not routed into the built-in override store.
     assert raw["builtin_overrides"] == {}
@@ -50,11 +50,9 @@ def test_builtin_name_routes_to_override_not_custom(cv):
     assert ov["heat"] == {"ev_ebitda": "minmax"}
 
 
-def test_builtin_alias_normalizes(cv):
-    """Legacy alias names collapse onto their canonical built-in."""
-    raw = cv.upsert_column_view("IB View", ["symbol", "price"])
-    assert "Fundamentals" in raw["builtin_overrides"]
-    assert "IB View" not in raw["builtin_overrides"]
+def test_removed_percentile_mode_reads_as_quantile(cv):
+    raw = cv.upsert_column_view("MyVal", ["symbol", "pe_ratio"], heat={"pe_ratio": "percentile"})
+    assert raw["custom_views"]["MyVal"]["heat"] == {"pe_ratio": "quantile"}
 
 
 def test_set_builtin_view_heat_preserves_columns(cv):
@@ -94,9 +92,9 @@ def test_delete_custom_view_and_active_fallback(cv):
 
 def test_invalid_heat_modes_are_dropped(cv):
     raw = cv.upsert_column_view(
-        "MyVal", ["symbol", "ev_ebitda"], heat={"ev_ebitda": "bogus", "pe_ratio": "percentile"}
+        "MyVal", ["symbol", "ev_ebitda"], heat={"ev_ebitda": "bogus", "pe_ratio": "quantile"}
     )
-    assert raw["custom_views"]["MyVal"]["heat"] == {"pe_ratio": "percentile"}
+    assert raw["custom_views"]["MyVal"]["heat"] == {"pe_ratio": "quantile"}
 
 
 def test_set_builtin_view_heat_rejects_non_builtin(cv):
@@ -117,10 +115,10 @@ def test_upsert_requires_nonempty_columns(cv):
 def test_overrides_persist_to_disk(cv, tmp_path):
     """State must round-trip through the on-disk JSON — verify the raw file, so
     a fresh process (which reads from disk on every call) sees the overrides."""
-    cv.upsert_column_view("Fundamentals", ["symbol", "ev_ebitda"], heat={"ev_ebitda": "percentile"})
+    cv.upsert_column_view("Fundamentals", ["symbol", "ev_ebitda"], heat={"ev_ebitda": "quantile"})
     cv.upsert_column_view("MyVal", ["symbol", "price"], heat={"pe_ratio": "off"})
     on_disk = json.loads((tmp_path / "cv.json").read_text())
-    assert on_disk["builtin_overrides"]["Fundamentals"]["heat"] == {"ev_ebitda": "percentile"}
+    assert on_disk["builtin_overrides"]["Fundamentals"]["heat"] == {"ev_ebitda": "quantile"}
     assert on_disk["custom_views"]["MyVal"]["heat"] == {"pe_ratio": "off"}
     # And a fresh read reconstructs the same structure.
     raw = cv.load_column_views()

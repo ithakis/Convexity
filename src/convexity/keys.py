@@ -30,11 +30,11 @@ import urllib.request
 
 from convexity import helpers, paths
 
-# provider -> (env var, legacy key file). Field names in config.json come from
+# provider -> env var. Field names in config.json come from
 # helpers._CONFIG_KEYS so reader and writer can never disagree.
-PROVIDERS: dict[str, tuple[str, str]] = {
-    "finnhub": ("FINNHUB_API_KEY", ".finnhub_key"),
-    "nvidia": ("NVIDIA_API_KEY", ".nvidia_key"),
+PROVIDERS: dict[str, str] = {
+    "finnhub": "FINNHUB_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
 }
 _LABELS = {"finnhub": "Finnhub", "nvidia": "NVIDIA NIM"}
 
@@ -59,7 +59,7 @@ class InvalidKey(ValueError):
 
 
 def _field(provider: str) -> str:
-    return helpers._CONFIG_KEYS[PROVIDERS[provider][0]]
+    return helpers._CONFIG_KEYS[PROVIDERS[provider]]
 
 
 def _check_provider(provider) -> str:
@@ -111,8 +111,8 @@ def status() -> dict:
         except (OSError, ValueError):
             pass
     out: dict = {"config_ok": ok, "config_path": str(paths.config_file())}
-    for p, (env_var, fname) in PROVIDERS.items():
-        src = helpers.secret_source(env_var, fname)
+    for p, env_var in PROVIDERS.items():
+        src = helpers.secret_source(env_var)
         out[p] = {
             **src,
             "in_config": bool(in_cfg.get(p)),
@@ -234,8 +234,8 @@ def check(provider) -> dict:
     travels in a header, never in the URL (urllib error text and proxies can
     echo URLs)."""
     provider = _check_provider(provider)
-    env_var, fname = PROVIDERS[provider]
-    key = helpers._load_local_secret(env_var, fname)
+    env_var = PROVIDERS[provider]
+    key = helpers._load_local_secret(env_var)
     if not key:
         return {"provider": provider, "status": "no_key", "http": None, "ms": 0}
     t0 = time.monotonic()

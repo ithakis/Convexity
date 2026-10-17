@@ -381,10 +381,6 @@ class Handler(BaseHTTPRequestHandler):
                     # Where the user's data lives (Settings -> About). A local path
                     # on a 127.0.0.1-only server, shown to the one local user.
                     "data_dir": str(_paths.data_dir()),
-                    # Old files the data-folder migration left alone because a
-                    # different copy was already in the data folder (banner +
-                    # Settings -> About). Empty on a normal launch.
-                    "migration_conflicts": _migration_conflicts(),
                     # Drives the first-run "Add your free API keys" banner. Module
                     # globals, so still cheap; booleans only.
                     "finnhub_key_set": bool(_ns.FINNHUB_API_KEY),
@@ -1593,15 +1589,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"watchlists": watchlists})
         except Exception as exc:
             self._send_json(500, {"error": str(exc)})
-
-
-def _migration_conflicts() -> list[dict]:
-    try:
-        from convexity import migrate as _migrate
-
-        return _migrate.conflicts()
-    except Exception:
-        return []
 
 
 def _pick_port(preferred: int = 8765) -> int:
