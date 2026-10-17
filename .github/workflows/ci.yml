@@ -111,32 +111,21 @@ jobs:
           for f in install.sh packaging/update.sh "packaging/Launch Dashboard.command"; do bash -n "$f" && echo "$f OK"; done
 
   test:
-    name: Metrics unit tests
+    name: bisect ${{ matrix.file }}
     runs-on: ubuntu-latest
-    # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
-    timeout-minutes: 30
-
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        file: ["tests/test_analytics_benchmarks.py", "tests/test_attention.py", "tests/test_chart_bars.py", "tests/test_chart_history.py", "tests/test_cli.py", "tests/test_column_views.py", "tests/test_duplicate_symbols.py", "tests/test_events.py", "tests/test_finance_math.py", "tests/test_frontend_overlays.py", "tests/test_frontend_tips.py", "tests/test_history_proxy.py", "tests/test_icon.py", "tests/test_importer.py", "tests/test_investments_perf.py", "tests/test_investments_store.py", "tests/test_jobs.py", "tests/test_keys.py", "tests/test_last_view.py", "tests/test_ledger.py", "tests/test_metrics.py", "tests/test_migrate.py", "tests/test_ml_features.py", "tests/test_ml_labels.py", "tests/test_ml_sentiment.py", "tests/test_model_fetch.py", "tests/test_news_diagnostics.py", "tests/test_news_sentiment.py", "tests/test_notify.py", "tests/test_options_density.py", "tests/test_origin_guard.py", "tests/test_paths.py", "tests/test_pick_port.py", "tests/test_prefs.py", "tests/test_raw_close_and_fx.py", "tests/test_reference_build.py", "tests/test_reference_pack.py", "tests/test_reference_universe.py", "tests/test_relevance.py", "tests/test_rescore_window.py", "tests/test_resolver_broker_codes.py", "tests/test_search.py", "tests/test_symbol_build.py", "tests/test_symbol_db.py", "tests/test_us_line.py", "tests/test_workflows.py", "tests/test_xlsx_definitions.py", "tests/test_xlsx_sentiment.py"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
       - name: Set up uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
-
-      # --locked: install exactly uv.lock; fail if it is stale vs pyproject.toml.
-      - name: Install dependencies (locked)
-        run: uv sync --locked --extra dev
-
-      - name: Run pytest
-        # Since 6 Oct this step froze the whole runner (no log line at all,
-        # signals ignored) on Linux only. The caps turn a runaway into a
-        # MemoryError / failed fork with a traceback; timeout -s INT stops
-        # pytest before the job limit so the log is kept.
-        run: |
-          ulimit -v 8000000   # 8 GB of address space (the suite peaks ~0.5 GB)
-          ulimit -u 2000
-          timeout -k 60 -s INT 15m uv run pytest tests/ -v --tb=short -o faulthandler_timeout=300
+      - run: uv sync --locked --extra dev
+      - run: uv run pytest ${{ matrix.file }} -v --tb=short -o faulthandler_timeout=120
 
   server-smoke:
     name: Server smoke test (real HTTP requests, not just imports)
