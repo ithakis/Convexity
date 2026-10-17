@@ -1189,16 +1189,20 @@ function fmt2(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed
 /* A value that is already in percent (Yahoo's debtToEquity: 78.4 = 78.4%). */
 function fmtPctNum(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed(1) + "%"; }
 
+/* A Date, epoch ms or ISO string as a Date; bare YYYY-MM-DD is a local-calendar day. */
+function parseLocalDay(d) {
+  if (d instanceof Date) return d;
+  if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    const [y, m, dd] = d.split("-").map(Number);
+    return new Date(y, m - 1, dd);
+  }
+  return new Date(d);
+}
 /* Canonical user-visible date format across the app: "Jul 7, 2026".
    Accepts a Date, epoch ms, or ISO string; bare YYYY-MM-DD strings are
    parsed as local-calendar dates (not UTC) so they never shift a day. */
 function fmtDateMDY(d) {
-  let dt;
-  if (d instanceof Date) dt = d;
-  else if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
-    const [y, m, dd] = d.split("-").map(Number);
-    dt = new Date(y, m - 1, dd);
-  } else dt = new Date(d);
+  const dt = parseLocalDay(d);
   if (isNaN(dt)) return d == null ? "—" : String(d);
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
@@ -1211,12 +1215,7 @@ function fmtDateMD(d) {
 /* Day-Month-Year, e.g. "09 Jul 2026" — used for the app version tag only
    (conventional release-note date format, distinct from fmtDateMDY above). */
 function fmtDateDMY(d) {
-  let dt;
-  if (d instanceof Date) dt = d;
-  else if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
-    const [y, m, dd] = d.split("-").map(Number);
-    dt = new Date(y, m - 1, dd);
-  } else dt = new Date(d);
+  const dt = parseLocalDay(d);
   if (isNaN(dt)) return d == null ? "—" : String(d);
   const day = String(dt.getDate()).padStart(2, "0");
   const month = dt.toLocaleDateString("en-US", { month: "short" });
@@ -2105,7 +2104,7 @@ function buildHeatControl(key) {
     return sw;
   }
   if (c.heat.kind === "yo_dyn") {
-    const seg = document.createElement("span"); seg.className = "cv-seg";
+    const seg = document.createElement("span"); seg.className = "cv-heat-seg";
     const current = getHeatMode(key);
     for (const [val, label] of [["off", "Off"], ["2c", "2C-Quantile"], ["quantile", "Quantile"], ["minmax", "Min-Max"]]) {
       const btn = document.createElement("button");
@@ -4627,8 +4626,7 @@ function fmtCompactNum(v) {
   return v.toFixed(0);
 }
 function fmtPctFrac(v) {
-  if (v == null || !isFinite(v)) return "—";
-  return (Number(v) * 100).toFixed(2) + "%";
+  return (v == null || !isFinite(v)) ? "—" : fmtPctDirect(v);
 }
 function relTime(iso) {
   try {
@@ -8482,9 +8480,6 @@ function nsLensTag(a) {
 /* ===== Shared inline-SVG chart helpers (Track record + Methodology) =====
  * Self-contained (no chart lib — house rule), theme-aware (colors via CSS vars
  * in style=), interactive via native <title> hover + CSS :hover highlight. */
-function svgEsc(s) {
-  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
 const SVG_POS = "var(--pos)", SVG_NEG = "var(--neg)", SVG_ACC = "var(--accent)", SVG_MUT = "var(--muted)", SVG_BRD = "var(--border)";
 
 /* Signed single-series bar chart. data: [{label, value, color?, tip?, lo?, hi?}]
@@ -8508,13 +8503,13 @@ function svgBars(data, opts) {
     const v = (d.value != null && isFinite(d.value)) ? d.value : base;
     const yv = yOf(v), top = Math.min(yv, y0), hgt = Math.max(0.6, Math.abs(yv - y0));
     const col = d.color || (v >= base ? SVG_POS : SVG_NEG);
-    bars += `<rect class="svg-bar" x="${(cx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" rx="1.5" style="fill:${col}"><title>${svgEsc(d.tip || (d.label + ": " + (opts.fmt ? opts.fmt(v) : v)))}</title></rect>`;
+    bars += `<rect class="svg-bar" x="${(cx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" rx="1.5" style="fill:${col}"><title>${escapeHtml(d.tip || (d.label + ": " + (opts.fmt ? opts.fmt(v) : v)))}</title></rect>`;
     if (d.lo != null && d.hi != null) {
       bars += `<line x1="${cx.toFixed(1)}" y1="${yOf(d.lo).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yOf(d.hi).toFixed(1)}" style="stroke:var(--text)" stroke-width="1.2"/>`
         + `<line x1="${(cx - 4).toFixed(1)}" y1="${yOf(d.lo).toFixed(1)}" x2="${(cx + 4).toFixed(1)}" y2="${yOf(d.lo).toFixed(1)}" style="stroke:var(--text)" stroke-width="1.2"/>`
         + `<line x1="${(cx - 4).toFixed(1)}" y1="${yOf(d.hi).toFixed(1)}" x2="${(cx + 4).toFixed(1)}" y2="${yOf(d.hi).toFixed(1)}" style="stroke:var(--text)" stroke-width="1.2"/>`;
     }
-    labels += `<text x="${cx.toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${svgEsc(d.label)}</text>`;
+    labels += `<text x="${cx.toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${escapeHtml(d.label)}</text>`;
   });
   const zero = `<line x1="${padL}" y1="${y0.toFixed(1)}" x2="${W - padR}" y2="${y0.toFixed(1)}" style="stroke:${SVG_BRD}" stroke-width="1"/>`;
   return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${zero}${bars}${labels}</svg>`;
@@ -8546,13 +8541,13 @@ function svgLine(series, opts) {
     if (!pts.length) return;
     const dpath = pts.map((p, i) => `${i ? "L" : "M"}${xOf(p.x).toFixed(1)} ${yOf(p.y).toFixed(1)}`).join(" ");
     out += `<path d="${dpath}" fill="none" style="stroke:${s.color}" stroke-width="2" stroke-linejoin="round"/>`;
-    pts.forEach(p => { out += `<circle class="svg-dot" cx="${xOf(p.x).toFixed(1)}" cy="${yOf(p.y).toFixed(1)}" r="2.6" style="fill:${s.color}"><title>${svgEsc(p.tip || (s.name + ": " + p.y))}</title></circle>`; });
+    pts.forEach(p => { out += `<circle class="svg-dot" cx="${xOf(p.x).toFixed(1)}" cy="${yOf(p.y).toFixed(1)}" r="2.6" style="fill:${s.color}"><title>${escapeHtml(p.tip || (s.name + ": " + p.y))}</title></circle>`; });
   });
   if (opts.xLabels) {
-    opts.xLabels.forEach(l => { out += `<text x="${xOf(l.x).toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="8">${svgEsc(l.label)}</text>`; });
+    opts.xLabels.forEach(l => { out += `<text x="${xOf(l.x).toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="8">${escapeHtml(l.label)}</text>`; });
   }
   const leg = series.map((s, j) =>
-    `<g transform="translate(${padL + j * 120},${padT})"><rect width="9" height="9" rx="2" style="fill:${s.color}"/><text x="13" y="8" style="fill:var(--text)" font-size="9">${svgEsc(s.name)}</text></g>`).join("");
+    `<g transform="translate(${padL + j * 120},${padT})"><rect width="9" height="9" rx="2" style="fill:${s.color}"/><text x="13" y="8" style="fill:var(--text)" font-size="9">${escapeHtml(s.name)}</text></g>`).join("");
   return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${out}${leg}</svg>`;
 }
 
@@ -9423,8 +9418,8 @@ function mthPipelineSvg(stages) {
   stages.forEach((s, i) => {
     const x = i * (bw + gap), y = (H - bh) / 2;
     out += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="6" style="fill:var(--bg-subtle);stroke:${SVG_ACC}" stroke-width="1.2"/>`;
-    out += `<text x="${x + bw / 2}" y="${y + 21}" text-anchor="middle" style="fill:var(--text)" font-size="12.5" font-weight="700">${svgEsc(s[0])}</text>`;
-    out += `<text x="${x + bw / 2}" y="${y + 37}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${svgEsc(s[1])}</text>`;
+    out += `<text x="${x + bw / 2}" y="${y + 21}" text-anchor="middle" style="fill:var(--text)" font-size="12.5" font-weight="700">${escapeHtml(s[0])}</text>`;
+    out += `<text x="${x + bw / 2}" y="${y + 37}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${escapeHtml(s[1])}</text>`;
     if (i < stages.length - 1) {
       const a2 = x + bw + gap;
       out += `<line x1="${x + bw + 2}" y1="${H / 2}" x2="${a2 - 6}" y2="${H / 2}" style="stroke:${SVG_MUT}" stroke-width="1.4"/>`;

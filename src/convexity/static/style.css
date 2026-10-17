@@ -2032,8 +2032,10 @@
   .cv-switch.on::after { background: white; transform: translateX(16px); }
 
   /* 4-way segmented control for "yo_dyn" (ratio) columns
-     (Off / 2C-Quantile / Quantile / Min-Max) */
-  .cv-seg {
+     (Off / 2C-Quantile / Quantile / Min-Max). Not `.cv-seg`: that is the
+     column-view bar above, whose `.cv-seg button` rules outrank `.cv-seg-btn`
+     and used to override every style here. */
+  .cv-heat-seg {
     display: flex; border: 1px solid var(--border); border-radius: var(--r-sm);
     overflow: hidden; flex: 0 0 auto;
   }
