@@ -129,7 +129,9 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run pytest
-        run: uv run pytest tests/ -v --tb=short -o faulthandler_timeout=300
+        # timeout -s INT: pytest stops itself before the job limit, so the log
+        # (and the faulthandler dump of a hung test) is kept.
+        run: timeout -s INT 20m uv run pytest tests/ -v --tb=short -o faulthandler_timeout=300
 
   server-smoke:
     name: Server smoke test (real HTTP requests, not just imports)
