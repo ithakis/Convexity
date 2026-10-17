@@ -4,6 +4,7 @@ window's σ/μ, checked on a synthetic Black-Scholes chain (no network).
 A flat-vol chain has a known answer: the risk-neutral density is lognormal
 with that vol, so every tilt can be checked against its targets."""
 
+import datetime as dt
 import math
 
 import numpy as np
@@ -124,7 +125,11 @@ def test_density_never_raises_and_caches_successes_only(monkeypatch):
         calls["n"] += 1
         raise od.DensityError("no_options")
 
+    def no_history(*a):
+        raise od.DensityError("no_history")
+
     monkeypatch.setattr(od, "_compute", fail)
+    monkeypatch.setattr(od, "_history", no_history)
     for _ in range(2):
         out = od.density("ZZZZ.XX", 365, 1.0, {})
         assert out == {
@@ -256,5 +261,124 @@ def test_no_expiry_near_the_horizon(monkeypatch):
     # A small cap listing nothing past 153 days has no 12M, and says why.
     exps = [("2026-12-18", 62), ("2027-03-19", 153)]
     monkeypatch.setattr(od, "_resolve_chain", lambda s: ("OPRX", None, exps))
+    monkeypatch.setattr(od, "_history", lambda *a: (_ for _ in ()).throw(od.DensityError("x")))
     out = od.density("OPRX", 365, 1.0, {})
     assert out["reason"] == "no_expiry" and "153" in out["detail"]
+
+
+# ------------------------- Sparse chains: the SSVI surface -------------------------
+
+
+def ssvi_chain(t, strikes, rho=-0.4, eta=0.8, gamma=0.4, theta_per_year=0.06):
+    """Quotes priced off a known SSVI surface: the fit must recover them."""
+    F, DF = S0 * math.exp(R * t), math.exp(-R * t)
+    calls, puts = [], []
+    for K in strikes:
+        w = float(od.ssvi(theta_per_year * t, math.log(K / F), rho, eta, gamma))
+        c = float(od.black_call(F, K, w, DF))
+        p = c - DF * (F - K)
+        for out, px in ((calls, c), (puts, p)):
+            if px > 0.01:
+                out.append({"strike": K, "bid": px * 0.99, "ask": px * 1.01})
+    return calls, puts
+
+
+@pytest.fixture(scope="module")
+def sparse_surface():
+    # ~20 strikes per expiry, $5-10 apart, as PG's and PEP's chains list them.
+    out = []
+    for days in (62, 90, 153, 243, 335, 461, 790):
+        t = days / 365
+        sd = 0.25 * math.sqrt(t)
+        ks = np.unique(np.round(S0 * np.exp(np.linspace(-2.2 * sd, 1.8 * sd, 22)) / 2.5) * 2.5)
+        out.append(od._slice(S0, t, R, *ssvi_chain(t, ks)))
+    return out
+
+
+def test_a_sparse_slice_fails_alone_and_passes_on_the_surface(sparse_surface):
+    tgt = next(s for s in sparse_surface if abs(s["T"] - 335 / 365) < 1e-9)
+    alone = od._svi_density(tgt)
+    ok, why = od.quality(alone)
+    assert not ok and why.endswith("quotes")  # fewer than MIN_QUOTES
+    rn = od.fit_surface(sparse_surface, tgt)
+    assert rn["smile"] == "ssvi" and od.quality(rn) == (True, "")
+    assert rn["surface_rmse_volpts"] < 0.2 and abs(rn["martingale_err"]) < 0.002
+    assert rn["ssvi"]["rho"] == pytest.approx(-0.4, abs=0.05)
+    # No butterfly arbitrage by construction: eta (1 + |rho|) <= 2.
+    assert rn["ssvi"]["eta"] * (1 + abs(rn["ssvi"]["rho"])) <= 2 + 1e-9
+
+
+def test_the_surface_gate_wants_coverage_and_enough_quotes(sparse_surface):
+    tgt = sparse_surface[4]
+    rn = od.fit_surface(sparse_surface, tgt)
+    narrow = {**rn, "tails": {**rn["tails"], "left": {**rn["tails"]["left"], "cdf": 0.25}}}
+    ok, why = od.quality(narrow)
+    assert not ok and why.startswith("quotes cover only")
+    few = od.fit_surface(sparse_surface[3:5], tgt)
+    ok, why = od.quality(few)
+    assert not ok and "expiries" in why
+
+
+# ------------------------------ FX and the history path ------------------------------
+
+
+def test_affine_mix_adds_variance_and_keeps_the_mean():
+    x = np.linspace(-2, 2, 4001)
+    s = 0.2
+    p = np.exp(-0.5 * ((x + s * s / 2) / s) ** 2)
+    p /= np.trapezoid(p, x)
+    y = od.affine_mix(x, p, x, 1.1, 0.05**2)
+    mean = lambda q: float(np.trapezoid(q * np.exp(x), x))  # noqa: E731
+    var = lambda q: float(np.trapezoid(q * x * x, x) - np.trapezoid(q * x, x) ** 2)  # noqa: E731
+    assert mean(y) == pytest.approx(mean(p), rel=1e-4)
+    assert var(y) == pytest.approx(1.1**2 * s * s + 0.05**2, rel=1e-3)
+
+
+def test_quarterly_futures_codes():
+    q = od._next_quarters()
+    assert len(q) == 2 and q[0][1] < q[1][1]
+    for code, wed in q:
+        assert code[0] in "HMUZ" and wed.weekday() == 2 and 15 <= wed.day <= 21
+        assert (wed - dt.date.today()).days > 7
+
+
+def test_variance_forecast_reverts_to_the_long_run():
+    import pandas as pd
+
+    calm, wild = np.full(143, 0.01), np.full(13, 0.04)
+    r = pd.Series(np.concatenate([calm, wild]))
+    lr, st = float(np.mean(r**2)) * 52, 0.04**2 * 52
+    assert od._forecast_var(r, 1e-6) == pytest.approx(st, rel=1e-3)
+    assert lr < od._forecast_var(r, 1.0) < st
+    assert od._forecast_var(r, 200.0) == pytest.approx(lr, rel=0.02)
+
+
+def test_winsor_clips_a_glitch_week_only():
+    import pandas as pd
+
+    rng = np.random.default_rng(1)
+    r = pd.Series(rng.normal(0, 0.02, 156))
+    r.iloc[50] = 0.19  # a secondary listing's phantom +19% week
+    w = od._winsor(r)
+    assert w.iloc[50] < 0.15 and (w.drop(50) == r.drop(50)).all()
+
+
+def test_history_stands_in_when_options_fail(monkeypatch):
+    thin = {
+        "ok": False,
+        "reason": "thin",
+        "chain_symbol": "ASML",
+        "quality": {"why": "smile fit 1.7"},
+    }
+    monkeypatch.setattr(od, "_compute", lambda *a: dict(thin))
+    monkeypatch.setattr(
+        od, "_history", lambda *a: {"ok": True, "source": "history", "chain_symbol": "ASML.AS"}
+    )
+    out = od.density("ASML.AS", 365, 0.5, {"dist_erp": 0.051})
+    assert out["source"] == "history"
+    assert out["fallback"] == {
+        "reason": "thin",
+        "detail": "",
+        "chain_symbol": "ASML",
+        "why": "smile fit 1.7",
+    }

@@ -39,6 +39,7 @@ can feed them a synthetic Black-Scholes chain without the network.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import math
 import threading
@@ -47,6 +48,7 @@ import warnings
 
 import numpy as np
 from scipy.optimize import brentq, least_squares, root
+from scipy.signal import fftconvolve
 from scipy.stats import norm
 
 from convexity import cache
@@ -79,6 +81,17 @@ _INDEX_TYPES = {"ETF", "INDEX", "MUTUALFUND"}
 TAIL_ALPHA = 0.05
 TAIL_GAP = 0.03
 TAIL_XI = (-0.95, 0.45)
+# The surface (SSVI) gate, for chains too sparse for a per-expiry SVI: enough
+# quotes over enough expiries, a surface that fits them, a slice with some
+# quotes of its own, and quotes that reach the 15% / 85% points (the GEV
+# tails carry at most 15% each side).
+SURFACE_MIN_QUOTES = 60
+SURFACE_MIN_SLICES = 3
+SLICE_MIN_QUOTES = 8
+MAX_SURFACE_RMSE = 1.5
+COVERAGE = 0.15
+SURFACE_DAYS = (20, 1100)  # expiries the surface is fitted on
+EXPIRY_TRIES = 4  # expiries in the window tried, nearest the horizon first
 
 
 class DensityError(Exception):
@@ -236,20 +249,14 @@ def _tails(Kg: np.ndarray, fK: np.ndarray, cdf: np.ndarray, kmin: float, kmax: f
 # ------------------------------ Risk-neutral fit -----------------------------
 
 
-def fit_density(S0: float, T: float, rf: float, calls, puts) -> dict:
-    """The risk-neutral density of x = ln(S_T/F) from one expiry's quotes.
+def _slice(S0: float, T: float, rf: float, calls, puts) -> dict:
+    """One expiry's usable quotes as implied total variance on k = ln(K/F).
 
-    ``calls``/``puts`` are iterables of {strike, bid, ask}. The rate is an
+    The forward is the median of K + (C - P)/DF near spot, with the rate an
     input (from ^IRX), never backed out of parity: American-style chains
-    gave -4.8% at 3M. Raises DensityError("thin") when too few usable OTM
-    quotes remain to fit a smile at all; the softer gate is `quality`.
-
-    The SVI is trusted only where it was fitted: past the quoted strikes its
-    wing is a guess (SPY 12M's bent up into a false hump and the mean came
-    out 2.1% above F), so GEV tails take over there. ``tails`` says where
-    they attach and their shapes, or is None when the quotes are too
-    narrow to place them (the gate then judges the SVI's own wings).
-    """
+    gave -4.8% at 3M. Quotes: two-sided, OTM only, spread < 60% of mid,
+    0.3 < K/F < 2.5, minus any that break static no-arbitrage (`_monotone`).
+    Raises DensityError("thin") when fewer than 6 remain."""
     if not (S0 > 0 and T > 0):
         raise DensityError("thin", "bad spot or maturity")
     DF = math.exp(-rf * T)
@@ -272,24 +279,30 @@ def fit_density(S0: float, T: float, rf: float, calls, puts) -> dict:
     rows = _monotone(rows, F)
     if len(rows) < 6:
         raise DensityError("thin", f"{len(rows)} usable quotes")
+    rows.sort()
     K = np.array([r[0] for r in rows])
-    w = np.array([r[1] for r in rows])
-    k = np.log(K / F)
+    return {"T": T, "S0": float(S0), "rf": float(rf), "F": F, "K": K, "k": np.log(K / F),
+            "w": np.array([r[1] for r in rows])}  # fmt: skip
 
+
+def _density(sl: dict, smile) -> dict:
+    """Breeden-Litzenberger on a smile ``smile(k) -> total variance``, with
+    GEV tails past the quoted strikes, and the numbers the gate reads.
+
+    The smile is trusted only where it was fitted: past the quoted strikes
+    its wing is a guess (SPY 12M's SVI bent up into a false hump and the mean
+    came out 2.1% above F), so GEV tails take over there. ``tails`` says
+    where they attach and their shapes, or is None when the quotes are too
+    narrow to place them (the gate then judges the smile's own wings)."""
+    T, F, K, k, w = sl["T"], sl["F"], sl["K"], sl["k"], sl["w"]
+    DF = math.exp(-sl["rf"] * T)
     w_atm = float(np.median(w))
-    weight = np.exp(-0.5 * (k / (2 * np.sqrt(w_atm))) ** 2)  # the body matters more than far wings
-    fit = least_squares(
-        lambda p: (svi(p, k) - w) * weight,
-        [float(np.min(w)), 0.1, -0.3, 0.0, 0.1],
-        bounds=([-1, 1e-4, -0.999, -2, 1e-3], [5, 1.0, 0.999, 2, 5]),
-    )
-
     # +-10 ATM sd (S from 1% to 20x F at most): the GEV tails are analytic, and a
     # stressed chain's left tail runs well past 5 sd of its ATM vol.
     span = GRID_SD * np.sqrt(w_atm)
     x = np.linspace(max(-span, math.log(0.01)), min(span, math.log(20.0)), GRID)
     Kg = F * np.exp(x)
-    C = black_call(F, Kg, np.maximum(svi(fit.x, x), 1e-8), DF)
+    C = black_call(F, Kg, np.maximum(smile(x), 1e-8), DF)
     dC = np.gradient(C, Kg)
     qK = np.clip(np.gradient(dC, Kg) / DF, 0, None)
     qK, tails = _tails(Kg, qK, 1 + dC / DF, float(K.min()), float(K.max()))
@@ -299,18 +312,107 @@ def fit_density(S0: float, T: float, rf: float, calls, puts) -> dict:
     sigma_q = float(np.sqrt(max(np.trapezoid(qx * x**2, x) - m1**2, 1e-12)) / np.sqrt(T))
     return {
         "T": T,
-        "S0": float(S0),
+        "S0": sl["S0"],
         "F": F,
-        "rf": float(rf),
+        "rf": sl["rf"],
         "x": x,
         "q": qx,
         "sigma_q": sigma_q,
         "w_atm": w_atm,
         "quotes": len(K),
-        "svi_rmse_volpts": float(np.sqrt(np.mean((np.sqrt(np.maximum(svi(fit.x, k), 0) / T) - np.sqrt(w / T)) ** 2)) * 100),
+        "svi_rmse_volpts": float(np.sqrt(np.mean((np.sqrt(np.maximum(smile(k), 0) / T) - np.sqrt(w / T)) ** 2)) * 100),
         "martingale_err": float(np.trapezoid(qx * np.exp(x), x) - 1),
         "tails": tails,
+        "smile": "svi",
     }  # fmt: skip
+
+
+def fit_density(S0: float, T: float, rf: float, calls, puts) -> dict:
+    """The risk-neutral density of x = ln(S_T/F) from one expiry's quotes:
+    raw SVI (Lee-capped) on the slice, then `_density`.
+
+    ``calls``/``puts`` are iterables of {strike, bid, ask}. Raises
+    DensityError("thin") when too few usable OTM quotes remain to fit a
+    smile at all; the softer gate is `quality`."""
+    return _svi_density(_slice(S0, T, rf, calls, puts))
+
+
+def _svi_density(sl: dict) -> dict:
+    k, w = sl["k"], sl["w"]
+    w_atm = float(np.median(w))
+    weight = np.exp(-0.5 * (k / (2 * np.sqrt(w_atm))) ** 2)  # the body matters more than far wings
+    fit = least_squares(
+        lambda p: (svi(p, k) - w) * weight,
+        [float(np.min(w)), 0.1, -0.3, 0.0, 0.1],
+        bounds=([-1, 1e-4, -0.999, -2, 1e-3], [5, 1.0, 0.999, 2, 5]),
+    )
+    return _density(sl, lambda kk: svi(fit.x, kk))
+
+
+def ssvi(theta, k, rho: float, eta: float, gamma: float):
+    """SSVI total variance (Gatheral & Jacquier 2014) with the power-law
+    phi(theta) = eta / (theta^gamma (1 + theta)^(1 - gamma))."""
+    phi = eta / (theta**gamma * (1 + theta) ** (1 - gamma))
+    return theta / 2 * (1 + rho * phi * k + np.sqrt((phi * k + rho) ** 2 + 1 - rho**2))
+
+
+def fit_surface(slices: list[dict], target: dict) -> dict:
+    """The density at the ``target`` slice (one of ``slices``, from `_slice`)
+    from an SSVI fitted to every slice.
+
+    For chains that list ~20 strikes per expiry (PG, PEP, JNJ at 12M): one
+    slice is too few points for SVI's five parameters (a 0.3 vol-pt fit
+    missed PEP's forward by 2.8% on 14 quotes), but the whole
+    surface has 100-200 quotes and SSVI only three shared parameters plus
+    one ATM variance per expiry. No arbitrage by construction: eta(1+|rho|)
+    <= 2 with gamma <= 1/2 (no butterfly, G&J Remark 4.4) and theta
+    non-decreasing in T (no calendar spread)."""
+    slices = sorted(slices, key=lambda s: s["T"])
+    tgt = next(i for i, s in enumerate(slices) if s is target)
+    n = len(slices)
+    th0 = []
+    for s in slices:
+        th0.append(max(float(np.interp(0.0, s["k"], s["w"])), 1e-4))
+    th0 = np.maximum.accumulate(np.array(th0))
+    d0 = np.diff(np.concatenate([[0.0], th0]))
+    d0[0] = max(d0[0], 1e-4)
+
+    def unpack(p):
+        th = np.cumsum(np.maximum(p[:n], 0.0)) + 1e-6
+        rho, u, gamma = p[n], p[n + 1], p[n + 2]
+        return th, rho, u * 2 / (1 + abs(rho)), gamma
+
+    def res(p):
+        th, rho, eta, gamma = unpack(p)
+        out = []
+        for s, t in zip(slices, th, strict=True):
+            wm = np.maximum(ssvi(t, s["k"], rho, eta, gamma), 1e-10)
+            wt = np.exp(-0.5 * (s["k"] / (2 * np.sqrt(t))) ** 2)
+            out.append((np.sqrt(wm / s["T"]) - np.sqrt(s["w"] / s["T"])) * wt)
+        return np.concatenate(out)
+
+    p0 = np.concatenate([np.maximum(d0, 1e-6), [-0.5, 0.5, 0.3]])
+    lo = np.concatenate([np.zeros(n), [-0.999, 1e-3, 0.01]])
+    hi = np.concatenate([np.full(n, 5.0), [0.999, 1.0, 0.5]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fit = least_squares(res, np.clip(p0, lo, hi), bounds=(lo, hi))
+    th, rho, eta, gamma = unpack(fit.x)
+    allk = sum(len(s["k"]) for s in slices)
+    err = [
+        np.sqrt(np.maximum(ssvi(t, s["k"], rho, eta, gamma), 0) / s["T"]) - np.sqrt(s["w"] / s["T"])
+        for s, t in zip(slices, th, strict=True)
+    ]
+    sl, t = slices[tgt], float(th[tgt])
+    rn = _density(sl, lambda kk: ssvi(t, kk, rho, eta, gamma))
+    rn.update({
+        "smile": "ssvi",
+        "surface_quotes": allk,
+        "surface_slices": n,
+        "surface_rmse_volpts": float(np.sqrt(np.mean(np.concatenate(err) ** 2)) * 100),
+        "ssvi": {"rho": float(rho), "eta": float(eta), "gamma": float(gamma)},
+    })  # fmt: skip
+    return rn
 
 
 def quality(rn: dict) -> tuple[bool, str]:
@@ -318,7 +420,18 @@ def quality(rn: dict) -> tuple[bool, str]:
     the forward. A failure is shown as "Thin options data", never drawn."""
     if not all(math.isfinite(rn[k]) for k in ("F", "sigma_q", "svi_rmse_volpts", "martingale_err")):
         return False, "fit failed"  # a NaN passes every comparison below
-    if rn["quotes"] < MIN_QUOTES:
+    if rn.get("smile") == "ssvi":
+        if rn["surface_slices"] < SURFACE_MIN_SLICES or rn["surface_quotes"] < SURFACE_MIN_QUOTES:
+            return False, f"{rn['surface_quotes']} quotes over {rn['surface_slices']} expiries"
+        if rn["quotes"] < SLICE_MIN_QUOTES:
+            return False, f"{rn['quotes']} quotes"
+        if not rn["surface_rmse_volpts"] < MAX_SURFACE_RMSE:
+            return False, f"surface fit {rn['surface_rmse_volpts']:.1f} vol pts"
+        t = rn.get("tails")
+        if not t or t["left"]["cdf"] > COVERAGE or t["right"]["cdf"] < 1 - COVERAGE:
+            span = f" {t['left']['cdf']:.0%}–{t['right']['cdf']:.0%}" if t else ""
+            return False, f"quotes cover only{span or ' the middle'}"
+    elif rn["quotes"] < MIN_QUOTES:
         return False, f"{rn['quotes']} quotes"
     if rn["svi_rmse_volpts"] >= MAX_SVI_RMSE:
         return False, f"smile fit {rn['svi_rmse_volpts']:.1f} vol pts"
@@ -439,10 +552,32 @@ def curve_stats(rn: dict, p: np.ndarray) -> dict:
     return {"mean_ratio": round(mean_ratio, 6), "var_x": round(v, 6), "mean_x": round(m, 6)}
 
 
+def affine_mix(xs: np.ndarray, ps: np.ndarray, x: np.ndarray, scale: float, var: float):
+    """Density on grid ``x`` of scale * X + Z, X ~ ps on grid xs, Z ~ N(0, var),
+    shifted so that E[e^.] stays E_ps[e^X] (no drift added).
+
+    Two uses: FX (a US line held in euros: ln S_EUR = (1 + b) ln S_USD + e,
+    b and e from the joint FX / stock moves) and the history estimate (a
+    stock as beta x the market's options-implied curve plus its own
+    residual)."""
+    dx = x[1] - x[0]
+    y = np.interp(x / scale, xs, ps, left=0.0, right=0.0) / scale
+    if var > 0:
+        sd = math.sqrt(var)
+        half = int(min(8 * sd / dx, len(x) - 1))
+        ker = np.exp(-0.5 * (np.arange(-half, half + 1) * dx / sd) ** 2)
+        y = fftconvolve(y, ker / ker.sum(), mode="same")
+    y = np.clip(y, 0, None)
+    y /= np.trapezoid(y, x)
+    shift = math.log(np.trapezoid(ps * np.exp(xs), xs) / np.trapezoid(y * np.exp(x), x))
+    y = np.interp(x - shift, x, y, left=0.0, right=0.0)
+    return y / np.trapezoid(y, x)
+
+
 # ------------------------------ Network layer -------------------------------
 
 
-_RATE: dict[str, tuple[float, float]] = {}
+_RATE: dict[str, tuple] = {}  # "irx" -> (t, r); a currency -> (t, r, source)
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -648,10 +783,281 @@ def _lock(key: str) -> threading.Lock:
         return _LOCKS.setdefault(key, threading.Lock())
 
 
+# ------------------------------ Chains and rates ------------------------------
+
+# Currency -> CME futures root (quoted in USD per unit): two quarterly
+# contracts settle together, so ln(F_far / F_near) / dT is r_USD - r_local
+# without the spot-vs-futures timing gap that made Yahoo's spot unusable.
+_FX_FUT = {"EUR": "6E", "GBP": "6B", "CHF": "6S", "JPY": "6J", "CAD": "6C", "AUD": "6A"}
+# Currency -> US-listed currency ETF with options (its implied vol is the pair's).
+_FX_ETF = {"EUR": "FXE", "GBP": "FXB", "CHF": "FXF", "JPY": "FXY", "CAD": "FXC", "AUD": "FXA"}
+# European currencies without a futures quote: the euro's rate stands in.
+_EUROPE = {"DKK", "SEK", "NOK", "PLN", "CZK", "HUF", "ISK", "RON"}
+_MINOR = {"GBP": "GBP", "GBX": "GBP", "GBp": "GBP", "ILA": "ILS", "ZAc": "ZAR", "ZAC": "ZAR"}
+# The market proxy for the history estimate: an index ETF with long options,
+# by listing suffix (FEZ: Euro Stoxx 50; VGK lists nothing past 5 months).
+_PROXY = {
+    **dict.fromkeys(
+        (
+            "PA",
+            "DE",
+            "F",
+            "MC",
+            "MI",
+            "AS",
+            "BR",
+            "LS",
+            "VI",
+            "SW",
+            "L",
+            "ST",
+            "CO",
+            "HE",
+            "OL",
+            "IR",
+            "WA",
+            "PR",
+            "BD",
+            "AT",
+        ),
+        "FEZ",
+    ),  # fmt: skip
+    **dict.fromkeys(("T",), "EWJ"),
+    **dict.fromkeys(("HK", "SS", "SZ"), "FXI"),
+    **dict.fromkeys(("AX",), "EWA"),
+    **dict.fromkeys(("TO", "V"), "EWC"),
+    **dict.fromkeys(("KS", "KQ"), "EWY"),
+    **dict.fromkeys(("NS", "BO"), "INDA"),
+    **dict.fromkeys(("SA",), "EWZ"),
+}
+HISTORY_YEARS = "3y"
+MIN_WEEKS = 130  # 2.5 years of weekly returns before a listing's own record is enough
+VAR_HALF_LIFE = 0.25  # years: how fast today's variance reverts to the 3-year level
+
+
+def _norm_ccy(c: str | None) -> str:
+    return _MINOR.get(c or "", (c or "").upper())
+
+
+def _next_quarters(n: int = 2) -> list[tuple[str, dt.date]]:
+    """The next ``n`` CME quarterly codes (e.g. "Z26") and their third Wednesdays,
+    skipping one that expires within a week."""
+    out, today = [], dt.date.today()
+    y, m = today.year, today.month
+    while len(out) < n:
+        if m in (3, 6, 9, 12):
+            first = dt.date(y, m, 1)
+            wed = first + dt.timedelta(days=(2 - first.weekday()) % 7 + 14)
+            if (wed - today).days > 7:
+                out.append(("HMUZ"[(m // 3) - 1] + f"{y % 100:02d}", wed))
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    return out
+
+
+def _close(sym: str, period: str = "5d"):
+    import yfinance as yf
+
+    h = yf.Ticker(sym).history(period=period, auto_adjust=True)
+    return h["Close"].dropna() if h is not None and len(h) else None
+
+
+def _local_rate(ccy: str) -> tuple[float, str]:
+    """(rate, source) for a currency: ^IRX for USD, the CME futures spread
+    for majors, the euro's for other European currencies, else the US bill
+    (said so). Cached an hour."""
+    ccy = _norm_ccy(ccy)
+    if ccy in ("", "USD"):
+        return _rate(), "US 3-month bill"
+    if ccy in _EUROPE:
+        r, _ = _local_rate("EUR")
+        return r, "euro rate (no local quote)"
+    hit = _RATE.get(ccy)
+    if hit and time.time() - hit[0] < RATE_TTL:
+        return hit[1], hit[2]
+    r_usd = _rate()
+    root = _FX_FUT.get(ccy)
+    if root:
+        try:
+            (c1, d1), (c2, d2) = _next_quarters()
+            f1, f2 = _close(f"{root}{c1}.CME"), _close(f"{root}{c2}.CME")
+            r = r_usd - math.log(float(f2.iloc[-1]) / float(f1.iloc[-1])) / ((d2 - d1).days / 365)
+            if -0.02 < r < 0.2:
+                _RATE[ccy] = (time.time(), r, "CME futures")
+                return r, "CME futures"
+        except Exception as e:
+            print(f"[density] {ccy} rate: {type(e).__name__}")
+    return r_usd, "US 3-month bill (no local rate)"
+
+
+def _chains(tk, sym: str) -> list[tuple[str, int, list, list]]:
+    """Every expiry's quotes within SURFACE_DAYS, fetched in parallel and
+    cached for TTL: both horizons and the surface share them."""
+    key = f"density-chains|{sym}"
+    hit = cache._cache_get(key)
+    if hit is not None:
+        return hit
+    from concurrent.futures import ThreadPoolExecutor
+
+    exps = [e for e in _expiries(tk) if SURFACE_DAYS[0] <= e[1] <= SURFACE_DAYS[1]]
+
+    def get(e):
+        try:
+            ch = tk.option_chain(e[0])
+            return (e[0], e[1], _quotes(ch.calls), _quotes(ch.puts))
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(6) as ex:
+        out = [c for c in ex.map(get, exps) if c]
+    if out:
+        cache._cache_put(key, out, TTL)
+    return out
+
+
+def _options_rn(tk, sym: str, exps, horizon: int, S0: float, rf: float):
+    """The risk-neutral fit for a horizon: (rn, expiry, days, ok, why).
+
+    Tries the EXPIRY_TRIES expiries in the window nearest the horizon. On
+    each, SVI when the slice has MIN_QUOTES, then the SSVI surface over all
+    expiries; the first fit that passes the gate wins. Otherwise the nearest
+    expiry's first fit comes back with why it failed."""
+    lo, hi = EXPIRY_WINDOW[horizon]
+    usable = sorted((e for e in exps if lo <= e[1] <= hi), key=lambda e: abs(e[1] - horizon))
+    if not usable:
+        raise DensityError("no_expiry", f"longest expiry {max(e[1] for e in exps)} days")
+    slices = {}
+    for e, d, calls, puts in _chains(tk, sym):
+        with contextlib.suppress(DensityError):
+            slices[e] = _slice(S0, d / 365, rf, calls, puts)
+    surface = list(slices.values())
+    first = None
+    for e, d in usable[:EXPIRY_TRIES]:
+        sl = slices.get(e)
+        if sl is None:
+            continue
+        fits = []
+        if len(sl["K"]) >= MIN_QUOTES or len(surface) < SURFACE_MIN_SLICES:
+            fits.append(lambda sl=sl: _svi_density(sl))
+        if len(surface) >= SURFACE_MIN_SLICES:
+            fits.append(lambda sl=sl: fit_surface(surface, sl))
+        for fit in fits:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                rn = fit()
+            ok, why = quality(rn)
+            if ok:
+                return rn, e, d, True, ""
+            if first is None:
+                first = (rn, e, d, False, why)
+    if first:
+        return first
+    raise DensityError("thin", f"no usable quotes in the {lo}–{hi} day window")
+
+
+def _weekly(series):
+    """Weekly log returns (Friday closes): European and US closes are hours
+    apart, and daily returns across them understate beta."""
+    if getattr(series.index, "tz", None) is not None:
+        series = series.tz_localize(None)  # Paris, London and New York closes share one calendar
+    w = series.resample("W-FRI").last().dropna()
+    return np.log(w).diff().dropna()
+
+
+def _winsor(r, k: float = 8.0):
+    """Clip weekly returns to the median +- k robust sd: Yahoo's secondary
+    listings carry glitch weeks (one Xetra line showed +19% in a week its
+    company never
+    had), and one of them is enough to swamp a 3-year beta."""
+    med = float(np.median(r))
+    mad = float(np.median(np.abs(r - med))) * 1.4826
+    return r.clip(med - k * mad, med + k * mad) if mad > 0 else r
+
+
+def _patchy(r) -> bool:
+    """Fewer than 85% of the weeks between the series' first and last week."""
+    if len(r) < 2:
+        return True
+    return len(r) < 0.85 * ((r.index[-1] - r.index[0]).days / 7 + 1)
+
+
+def _forecast_var(r, T: float) -> float:
+    """Annual variance over the next T years from weekly returns: the last
+    13 weeks' level reverting to the full sample's with a VAR_HALF_LIFE
+    half-life, averaged over the horizon."""
+    lr = float(np.mean(r**2)) * 52
+    st = float(np.mean(r[-13:] ** 2)) * 52 if len(r) >= 13 else lr
+    a = math.log(2) / VAR_HALF_LIFE
+    return lr + (st - lr) * (1 - math.exp(-a * T)) / (a * T)
+
+
+def _fx(chain_ccy: str, ccy: str, chain_sym: str, T: float) -> dict | None:
+    """The FX layer for a chain priced in one currency and shown in another.
+
+    ln S_shown = ln S_chain + ln X, X the chain->shown rate. With b the
+    regression of ln X on the stock's return and e the rest, S_shown's log
+    return is (1 + b) x + e. b and corr come from 2 years of weekly returns;
+    the FX vol from the currency ETF's options (FXE for EUR) when it has any,
+    else from history. No expected FX move is assumed."""
+    a, z = _norm_ccy(chain_ccy), _norm_ccy(ccy)
+    if not a or not z or a == z:
+        return None
+    key = f"density-fx|{a}|{z}|{chain_sym}|{round(T, 2)}"
+    hit = cache._cache_get(key)
+    if hit is not None:
+        return hit
+    import yfinance as yf
+
+    fx = _close(f"{a}{z}=X", "2y")
+    st = _close(chain_sym, "2y")
+    if fx is None or st is None or len(fx) < 200:
+        return None
+    rx, rs = _weekly(fx), _weekly(st)
+    j = rx.index.intersection(rs.index)
+    rx, rs = rx.loc[j].to_numpy(), rs.loc[j].to_numpy()
+    if len(j) < 40:
+        return None
+    sx, ss = float(np.std(rx) * math.sqrt(52)), float(np.std(rs) * math.sqrt(52))
+    rho = float(np.corrcoef(rx, rs)[0, 1])
+    sigma, source = sx, "history"
+    other = z if a == "USD" else a if z == "USD" else None
+    etf = _FX_ETF.get(other or "")
+    if etf:
+        try:
+            tk = yf.Ticker(etf)
+            exps = _expiries(tk)
+            e = min(exps, key=lambda e: abs(e[1] / 365 - T))
+            px, _ = _last(tk)
+            w = _atm_w(tk, e[0], e[1], px, _rate())
+            if w:
+                sigma, source = math.sqrt(w / (e[1] / 365)), f"{etf} options"
+        except Exception as e:
+            print(f"[density] fx {etf}: {type(e).__name__}")
+    out = {
+        "pair": f"{a}/{z}",
+        "sigma": round(sigma, 4),
+        "rho": round(rho, 3),
+        "b": round(rho * sigma / ss, 4) if ss > 0 else 0.0,
+        "var": round(sigma**2 * (1 - rho**2) * T, 6),
+        "source": source,
+    }
+    cache._cache_put(key, out, RATE_TTL)
+    return out
+
+
+# ------------------------------------ API ------------------------------------
+
+
 def density(
     symbol: str, horizon: int = 365, beta: float | None = None, prefs: dict | None = None
 ) -> dict:
-    """The `/api/density` payload. Never raises: an unusable chain is
+    """The `/api/density` payload. Never raises.
+
+    Options first (``source: "options"``). When they can't be used (no chain,
+    no expiry near the horizon, or a chain that fails the gate) the history
+    estimate stands in (``source: "history"``, the options' reason kept in
+    ``fallback``); when that fails too it is
     ``{"ok": False, "reason": "no_options" | "no_expiry" | "thin" | "error"}``.
 
     Cached per (symbol, horizon, beta, settings) for 15 minutes, successes
@@ -670,30 +1076,66 @@ def density(
         if hit is not None:
             return hit
         t0 = time.time()
+        fail = {"ok": False, "reason": "error", "detail": "", "symbol": symbol, "horizon": horizon}
+        out = None
         try:
             out = _compute(symbol, horizon, beta, st)
         except DensityError as e:
-            print(f"[density] {symbol} {horizon}d: {e.reason} {e.detail}")
-            return {
-                "ok": False,
-                "reason": e.reason,
-                "detail": e.detail,
-                "symbol": symbol,
-                "horizon": horizon,
-            }
+            fail.update(reason=e.reason, detail=e.detail)
         except Exception as e:  # a Yahoo hiccup: say so, try again next open
             print(f"[density] {symbol} {horizon}d failed: {type(e).__name__}: {e}")
-            return {
-                "ok": False,
-                "reason": "error",
-                "detail": type(e).__name__,
-                "symbol": symbol,
-                "horizon": horizon,
-            }
-        print(f"[density] {symbol} {horizon}d via {out['chain_symbol']} in {time.time() - t0:.1f}s")
-        if out["ok"]:
-            cache._cache_put(key, out, TTL)
+            fail["detail"] = type(e).__name__
+        if out is not None and not out["ok"]:
+            fail = out
+        if out is None or not out["ok"]:
+            if fail["reason"] != "error":
+                try:
+                    out = _history(symbol, horizon, beta, st)
+                    out["fallback"] = {
+                        "reason": fail["reason"],
+                        "detail": fail.get("detail", ""),
+                        "chain_symbol": fail.get("chain_symbol"),
+                        "why": (fail.get("quality") or {}).get("why", ""),
+                    }
+                except DensityError as e:
+                    print(f"[density] {symbol} {horizon}d history: {e.reason} {e.detail}")
+                    out = None
+                except Exception as e:
+                    print(f"[density] {symbol} {horizon}d history failed: {type(e).__name__}: {e}")
+                    out = None
+            if out is None:
+                print(f"[density] {symbol} {horizon}d: {fail['reason']} {fail.get('detail', '')}")
+                return fail
+        print(
+            f"[density] {symbol} {horizon}d {out.get('source', 'options')} via {out.get('chain_symbol')}"
+            f" in {time.time() - t0:.1f}s"
+        )
+        cache._cache_put(key, out, TTL)
         return out
+
+
+def _payload_curves(rn: dict, curves: dict, fx: dict | None) -> dict:
+    """{name: downsampled curve + stats}, each pushed through the FX layer."""
+    out = {}
+    for name, (p, method) in curves.items():
+        if p is None:
+            out[name] = None
+            continue
+        if fx:
+            p = affine_mix(rn["x"], p, rn["x"], 1 + fx["b"], fx["var"])
+        out[name] = {**downsample(rn["x"], p), **curve_stats(rn, p), "method": method}
+    return out
+
+
+def _analysts_curve(rn, an, horizon, beta, st, kappa):
+    if not an or horizon != 365:
+        return None
+    targets = [f["target"] for f in an["firms"]] or [an["consensus"]]
+    try:
+        mx = analysts_mixture(rn, targets, beta, st["erp"], kappa, st["haircut"])
+    except DensityError:
+        return None
+    return mx["p"], mx["method"]
 
 
 def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
@@ -701,10 +1143,8 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
 
     chain_sym, tk, exps = _resolve_chain(symbol)
     lo, hi = EXPIRY_WINDOW[horizon]
-    usable = [e for e in exps if lo <= e[1] <= hi]
-    if not usable:
+    if not any(lo <= e[1] <= hi for e in exps):
         raise DensityError("no_expiry", f"longest expiry {max(e[1] for e in exps)} days")
-    expiry, days = min(usable, key=lambda e: abs(e[1] - horizon))
     S0, chain_ccy = _last(tk)
     if chain_sym == symbol:
         ratio, ccy = 1.0, chain_ccy
@@ -714,9 +1154,7 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     if not (math.isfinite(S0) and S0 > 0 and math.isfinite(ratio) and ratio > 0):
         raise DensityError("error", "no last price")
     rf = _rate()
-    ch = tk.option_chain(expiry)
-    rn = fit_density(S0, days / 365, rf, _quotes(ch.calls), _quotes(ch.puts))
-    ok, why = quality(rn)
+    rn, expiry, days, ok, why = _options_rn(tk, chain_sym, exps, horizon, S0, rf)
 
     try:
         qtype = (tk.info or {}).get("quoteType") or ""
@@ -724,10 +1162,11 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         qtype = ""
     is_index = qtype.upper() in _INDEX_TYPES
     kappa = st["kappa_index"] if is_index else st["kappa_stock"]
-
+    tails = rn.get("tails")
     base = {
         "ok": ok,
         "reason": "" if ok else "thin",
+        "source": "options",
         "symbol": symbol,
         "chain_symbol": chain_sym,
         "ratio": round(ratio, 8),
@@ -740,6 +1179,7 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         "days": days,
         "T": round(rn["T"], 6),
         "rf": round(rf, 6),
+        "rate_source": "US 3-month bill",
         "sigma_q": round(rn["sigma_q"], 6),
         "kappa": kappa,
         "is_index": is_index,
@@ -748,14 +1188,19 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         "measure": st["measure"],
         "haircut": st["haircut"],
         "horizon": horizon,
+        "fx": None,
         "quality": {
+            "smile": rn.get("smile", "svi"),
             "quotes": rn["quotes"],
             "svi_rmse_volpts": round(rn["svi_rmse_volpts"], 3),
             "martingale_err": round(rn["martingale_err"], 5),
-            "tails": {
-                side: {k: round(v, 4) for k, v in t.items()} for side, t in rn["tails"].items()
-            }
-            if rn["tails"]
+            "surface_quotes": rn.get("surface_quotes"),
+            "surface_slices": rn.get("surface_slices"),
+            "surface_rmse_volpts": round(rn["surface_rmse_volpts"], 3)
+            if rn.get("surface_rmse_volpts") is not None
+            else None,
+            "tails": {side: {k: round(v, 4) for k, v in t.items()} for side, t in tails.items()}
+            if tails
             else None,
             "ok": ok,
             "why": why,
@@ -764,37 +1209,217 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     if not ok:
         return base
 
+    fx = None
+    try:
+        fx = _fx(chain_ccy, ccy, chain_sym, rn["T"])
+    except Exception as e:
+        print(f"[density] fx {chain_sym}: {type(e).__name__}")
     mk = market_curve(rn, beta, st["erp"], kappa)
-    curves = {
-        "rn": {**downsample(rn["x"], rn["q"]), **curve_stats(rn, rn["q"]), "method": "Q"},
-        "market": {
-            **downsample(rn["x"], mk["p"]),
-            **curve_stats(rn, mk["p"]),
-            "method": mk["method"],
-        },
-        "analysts": None,
-    }
     an = None
     try:
         an = _analysts(tk)
     except Exception as e:
         print(f"[density] analysts {chain_sym}: {type(e).__name__}")
-    if an:
-        an = {**an, "consensus": an["consensus"]}
-        if horizon == 365:
-            targets = [f["target"] for f in an["firms"]] or [an["consensus"]]
-            try:
-                mx = analysts_mixture(rn, targets, beta, st["erp"], kappa, st["haircut"])
-                curves["analysts"] = {
-                    **downsample(rn["x"], mx["p"]),
-                    **curve_stats(rn, mx["p"]),
-                    "method": mx["method"],
-                }
-            except DensityError:
-                pass
+    curves = _payload_curves(
+        rn,
+        {
+            "rn": (rn["q"], "Q"),
+            "market": (mk["p"], mk["method"]),
+            "analysts": _analysts_curve(rn, an, horizon, beta, st, kappa) or (None, None),
+        },
+        fx,
+    )
     try:
         earnings = _earnings(tk, chain_sym, exps, S0, rf, days)
     except Exception as e:
         print(f"[density] earnings {chain_sym}: {type(e).__name__}")
         earnings = []
-    return {**base, "curves": curves, "analysts": an, "earnings": earnings}
+    return {**base, "fx": fx, "curves": curves, "analysts": an, "earnings": earnings}
+
+
+def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
+    """The estimate for a stock with no usable options, from its own history
+    and its market's options.
+
+        x = beta_m * y + e
+
+    y is the market proxy's options-implied curve (an index ETF by listing:
+    FEZ for Europe), re-centred and scaled to the market's real-world vol in
+    the stock's currency (kappa_index x implied, the FX share taken out);
+    beta_m and the residual e come from 3 years of weekly returns against
+    that proxy, e's variance reverting from its last quarter to its 3-year
+    level. Without the proxy's options y is a normal with the proxy's own
+    forecast vol. The mean is CAPM in the stock's currency, with that
+    currency's rate. It is a real-world curve only: there is no
+    risk-neutral one without options."""
+    import yfinance as yf
+
+    tk = yf.Ticker(symbol)
+    S0, ccy = _last(tk)
+    if not (math.isfinite(S0) and S0 > 0):
+        raise DensityError("error", "no last price")
+    hist = _close(symbol, HISTORY_YEARS)
+    if hist is None or len(hist) < 250:
+        raise DensityError("no_history", f"{0 if hist is None else len(hist)} days of prices")
+    T = horizon / 365
+    lc = _norm_ccy(ccy)
+    try:
+        info = tk.info or {}
+    except Exception:
+        info = {}
+    name = info.get("longName") or info.get("shortName") or ""
+    suffix = symbol.rsplit(".", 1)[1] if "." in symbol else ""
+    proxy = (
+        "EEM" if "emerging" in name.lower() or " EM " in f" {name} " else _PROXY.get(suffix, "SPY")
+    )
+
+    ph = _close(proxy, HISTORY_YEARS)
+    if ph is None:
+        raise DensityError("no_history", f"no {proxy} history")
+    rpx = _weekly(ph)
+    fxw = None
+    if lc not in ("", "USD"):
+        fxh = _close(f"USD{lc}=X", HISTORY_YEARS)
+        if fxh is None:
+            raise DensityError("no_history", f"no USD/{lc} history")
+        fxw = _weekly(fxh)
+    rs, series = _weekly(hist), symbol
+    if _patchy(rs) or len(rs) < MIN_WEEKS:
+        # A thin or young secondary listing (76 weeks, with a +19% week the
+        # company never had): the company's US line in this currency
+        # is the same exposure with a longer, cleaner record.
+        from convexity import symbol_db
+
+        us = None
+        with contextlib.suppress(Exception):
+            us = symbol_db.us_line(symbol)
+        uh = _close(us, HISTORY_YEARS) if us and us != symbol else None
+        ru = _weekly(uh) if uh is not None else None
+        if ru is not None and len(ru) > len(rs) and not _patchy(ru):
+            rs = (ru + fxw).dropna() if fxw is not None else ru
+            series = f"{us} in {lc or 'USD'}"
+    rs, rpx = _winsor(rs), _winsor(rpx)
+    j = rs.index.intersection(rpx.index)
+    if fxw is not None:
+        j = j.intersection(fxw.index)
+    if len(j) < 52:
+        raise DensityError("no_history", f"{len(j)} weeks")
+    s = rs.loc[j].to_numpy()
+    m = rpx.loc[j].to_numpy() + (fxw.loc[j].to_numpy() if fxw is not None else 0.0)
+    beta_m = float(np.cov(s, m)[0, 1] / np.var(m, ddof=1))
+    resid = s - beta_m * m
+    var_e = _forecast_var(resid, T)
+    var_m_hist = _forecast_var(m, T)
+
+    # The market factor in the stock's currency, real-world.
+    mkt_src, xs, ps, sd_m = "history", None, None, math.sqrt(var_m_hist)
+    try:
+        ptk = yf.Ticker(proxy)
+        pS0, _ = _last(ptk)
+        prn, pexp, _, pok, _ = _options_rn(ptk, proxy, _expiries(ptk), horizon, pS0, _rate())
+        if pok:
+            sd_usd = prn["sigma_q"]
+            if fxw is not None:
+                rx = fxw.loc[j].to_numpy()
+                sx = float(np.std(rx) * math.sqrt(52))
+                rho = float(np.corrcoef(m, rx)[0, 1])
+                disc = sd_usd**2 - sx**2 * (1 - rho**2)
+                sd_loc = rho * sx + math.sqrt(disc) if disc > 0 else sd_usd
+            else:
+                sd_loc = sd_usd
+            sd_m = st["kappa_index"] * sd_loc
+            xs, ps = prn["x"], prn["q"]
+            xs = xs - float(np.trapezoid(ps * xs, xs))  # centred: CAPM sets the mean below
+            ps_scale = sd_m / sd_usd
+            mkt_src = f"{proxy} options to {pexp}"
+    except DensityError:
+        pass
+    except Exception as e:
+        print(f"[density] proxy {proxy}: {type(e).__name__}")
+
+    sd_tot = math.sqrt(beta_m**2 * sd_m**2 + var_e) * math.sqrt(T)
+    span = GRID_SD * sd_tot
+    x = np.linspace(max(-span, math.log(0.01)), min(span, math.log(20.0)), GRID)
+    if xs is None:
+        xs = x
+        ps = np.exp(-0.5 * (x / (sd_m * math.sqrt(T))) ** 2)
+        ps /= np.trapezoid(ps, x)
+        ps_scale = 1.0
+    q = affine_mix(xs, ps, x, max(beta_m * ps_scale, 1e-3), var_e * T)
+    r_loc, r_src = _local_rate(lc)
+    F = S0 * math.exp(r_loc * T)
+    m1 = float(np.trapezoid(q * x, x))
+    sig = float(math.sqrt(max(np.trapezoid(q * (x - m1) ** 2, x), 1e-12)) / math.sqrt(T))
+    rn = {"T": T, "S0": S0, "F": F, "rf": r_loc, "x": x, "q": q, "sigma_q": sig}
+
+    mk = market_curve(rn, beta, st["erp"], 1.0)
+    an = None
+    try:
+        an = _analysts(tk)
+    except Exception as e:
+        print(f"[density] analysts {symbol}: {type(e).__name__}")
+    curves = _payload_curves(
+        rn,
+        {
+            "rn": (None, None),
+            "market": (mk["p"], mk["method"]),
+            "analysts": _analysts_curve(rn, an, horizon, beta, st, 1.0) or (None, None),
+        },
+        None,
+    )
+    earnings = []
+    try:
+        from convexity import attention
+
+        e = (attention.fetch_events(symbol) or {}).get("earnings")
+        if e:
+            d = (dt.date.fromisoformat(e) - dt.date.today()).days
+            first = True
+            while 0 <= d <= horizon:
+                day = (dt.date.today() + dt.timedelta(days=d)).isoformat()
+                earnings.append({"date": day, "days": d, "var": 0.0, "estimated": not first})
+                first, d = False, d + 91
+    except Exception as e:
+        print(f"[density] earnings {symbol}: {type(e).__name__}")
+    return {
+        "ok": True,
+        "reason": "",
+        "source": "history",
+        "symbol": symbol,
+        "chain_symbol": symbol,
+        "ratio": 1.0,
+        "currency": ccy,
+        "chain_currency": ccy,
+        "s0": round(S0, 6),
+        "chain_s0": round(S0, 6),
+        "forward": round(F, 6),
+        "expiry": (dt.date.today() + dt.timedelta(days=horizon)).isoformat(),
+        "days": horizon,
+        "T": round(T, 6),
+        "rf": round(r_loc, 6),
+        "rate_source": r_src,
+        "sigma_q": round(sig, 6),
+        "kappa": 1.0,
+        "is_index": False,
+        "beta": beta,
+        "erp": st["erp"],
+        "measure": "P",
+        "haircut": st["haircut"],
+        "horizon": horizon,
+        "fx": None,
+        "quality": {
+            "smile": "history",
+            "proxy": proxy,
+            "market_source": mkt_src,
+            "beta_market": round(beta_m, 3),
+            "market_vol": round(sd_m, 4),
+            "own_vol": round(math.sqrt(var_e), 4),
+            "weeks": len(j),
+            "series": series,
+            "ok": True,
+            "why": "",
+        },
+        "curves": curves,
+        "analysts": an,
+        "earnings": earnings,
+    }

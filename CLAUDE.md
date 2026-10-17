@@ -212,7 +212,10 @@ Each of these has cost real debugging time; the link goes to the full story.
   the rate is ^IRX (never parity: American chains), quotes are OTM only, the
   SVI wing is Lee-capped and trusted only inside the quoted strikes (GEV tails
   past them, the attachment cdf from the call slope, never from integrating the
-  density), and a chain that fails the gate is "Thin", never drawn. The paths are bridges to the drawn curve, not GBM, so the end marginal
+  density), and a chain that fails the gate is "Thin", never drawn: a sparse
+  chain gets an SSVI surface over all its expiries, and a name with no usable
+  options a labelled history estimate (`source: "history"`). Weekly returns
+  only for betas (European and US closes are hours apart). The paths are bridges to the drawn curve, not GBM, so the end marginal
   is exact. `/api/density` caches successes only.
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·
   [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)

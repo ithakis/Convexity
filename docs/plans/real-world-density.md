@@ -136,6 +136,45 @@ Expected effect (prototype, 17 Oct 2026):
   list nothing past 5–7 months); "Thin options data (n quotes, why)". When 12M fails and
   3M passes, the window opens on 3M and says why.
 
+## Coverage beyond dense US chains (built 17 Oct 2026)
+
+A test over 27 European and US listings (large caps, UCITS ETFs, a small cap)
+found 4 that drew. 13 had a US chain too sparse for the gate, and 10 had no chain
+on Yahoo. Three changes, each labelled on the page:
+
+1. **Sparse chains: an SSVI surface.** Long expiries of many large caps list 7–29
+   usable strikes, and a 5-parameter SVI overfits them: a low smile-fit error, yet
+   PEP 12M missed its forward by 2.8%. The surface (Gatheral–Jacquier 2014,
+   power-law φ, arbitrage-free by construction) fits all expiries at once with 3
+   shared parameters. It has its own gate: ≥ 60 quotes over ≥ 3 expiries, a fit
+   < 1.5 vol pts, ≥ 8 quotes at the expiry, and quotes reaching the 15% / 85%
+   points. Up to 4 expiries in the window are tried, nearest first. PG, PEP, JNJ,
+   MCD, T, VZ and XOM now pass at 12M.
+2. **FX.** A US line shown in euros carries EUR/USD risk:
+   ln S_EUR = (1 + b)·x + e. ρ and b come from 2 years of weekly returns, the FX
+   vol from FXE options (5.8% today, correlations near 0 to ±0.25), and no
+   expected FX move is assumed. The 12M σ rises by 0–1 vol pt.
+3. **History estimate where options fail.** x = β·(market) + own: β and the
+   residual come from 3 years of weekly returns against an index ETF (SPY in the
+   US, FEZ for Europe, EEM for EM funds). The residual variance reverts from the
+   last quarter to the 3-year level. The market part uses the ETF's options when
+   they pass the gate (κ_index × implied, in local currency). Today only SPY's do:
+   FEZ, EZU, VGK, IEUR, EWG and EWU are too thin or stop at 5–7 months, so
+   Europe's market part is history too. The mean is CAPM at the local rate, read
+   from two quarterly CME futures (EUR 2.5%, GBP 4.0%, CHF −0.4%). It is a
+   real-world curve only, with no risk-neutral one.
+
+After the change, all 27 drew at both horizons. At 12M, 8 came from options (3 of
+them on the surface) and 19 from history; at 3M, 11 from options (7 on the
+surface) and 16 from history. Each says which, and why.
+
+Remaining limits:
+- No European options source on Yahoo. Eurex end-of-day settlements would fix
+  it, but they need a new outbound host and a terms-of-use check.
+- κ is still a placeholder.
+- History misses forward events and underrates illiquid small caps, whose stale
+  prices look calm.
+
 ## Phase 2 — follow-up (not built)
 
 - **Snapshot collector**: the reference-pack workflow appends daily 3M/12M density

@@ -3407,7 +3407,7 @@ function fcMode(d) {
   const S = DETAIL.showSigma, M = DETAIL.showMu;
   if (!S && !M) return null;
   if (!S) return { kind: "mu" };
-  if (d.measure === "Q") return { kind: "sigma", curve: "rn", mu: "options" };
+  if (d.measure === "Q" && d.curves.rn) return { kind: "sigma", curve: "rn", mu: "options" };
   if (M && d.horizon === 365 && d.curves.analysts) return { kind: "sigma", curve: "analysts", mu: "analysts" };
   return { kind: "sigma", curve: "market", mu: "market", fellBack: M };
 }
@@ -3853,10 +3853,23 @@ function renderFcReadouts() {
     return;
   }
   const mode = fcMode(d);
+  const hist = d.source === "history";
+  const fx = d.fx;
   const via = d.chain_symbol !== d.symbol
-    ? ` Priced on ${escapeHtml(d.chain_symbol)} (US), shown in ${escapeHtml(ccy || "")} at today’s ratio; FX risk not modelled.` : "";
+    ? ` Priced on ${escapeHtml(d.chain_symbol)} (US), shown in ${escapeHtml(ccy || "")}${fx
+      ? `: ${escapeHtml(fx.pair)} risk added (σ ${(fx.sigma * 100).toFixed(1)}% from ${escapeHtml(fx.source)}, ρ ${fx.rho.toFixed(2)}, no expected FX move).`
+      : " at today’s ratio; FX risk not modelled."}` : "";
   const q = d.quality;
-  const qual = ` ✓ ${q.quotes} quotes · smile fit ${q.svi_rmse_volpts.toFixed(2)} vol pts.`;
+  const qual = hist ? ""
+    : q.smile === "ssvi" ? ` ✓ ${q.quotes} quotes at this expiry, ${q.surface_quotes} over ${q.surface_slices} expiries · surface fit ${q.surface_rmse_volpts.toFixed(2)} vol pts.`
+    : ` ✓ ${q.quotes} quotes · smile fit ${q.svi_rmse_volpts.toFixed(2)} vol pts.`;
+  const fb = d.fallback;
+  const fbWhy = !fb ? "" : fb.reason === "no_options" ? "No listed options"
+    : fb.reason === "no_expiry" ? `No options expiry near ${d.horizon === 365 ? "12" : "3"} months`
+    : `The ${escapeHtml(fb.chain_symbol || d.symbol)} options are too thin${fb.why ? ` (${escapeHtml(fb.why)})` : ""}`;
+  const srcTxt = hist
+    ? `${fbWhy}, so this is estimated from history: β ${q.beta_market.toFixed(2)} × the market (${escapeHtml(q.proxy)}, ${escapeHtml(q.market_source)}) plus its own ${(q.own_vol * 100).toFixed(0)}% volatility, from ${q.weeks} weeks of ${escapeHtml(q.series || d.symbol)}, reverting from the last quarter to the 3-year level. Rate ${(d.rf * 100).toFixed(1)}% (${escapeHtml(d.rate_source)}).`
+    : `σ from ${escapeHtml(d.chain_symbol)} options, expiring ${fcFmtDate(new Date(d.expiry + "T12:00:00"))}${q.smile === "ssvi" ? " (a surface fitted across all its expiries: too few strikes for one)" : ""};`;
   const an = d.analysts;
   if (mode.kind === "mu") {
     const mk = fcMarks(d);
@@ -3866,7 +3879,7 @@ function renderFcReadouts() {
     const lt = firms.map(fm => Math.log(fm.px)), m = lt.reduce((a, b) => a + b, 0) / (lt.length || 1);
     const spread = lt.length > 1 ? Math.sqrt(lt.reduce((a, b) => a + (b - m) ** 2, 0) / lt.length) : 0;
     const latest = firms.slice().sort((a, b) => b.date.localeCompare(a.date))[0];
-    const sigP = d.kappa * d.sigma_q;
+    const sigP = hist ? d.sigma_q : d.kappa * d.sigma_q;
     const msim = fcSimulate(d, { kind: "sigma", curve: "market", mu: "market" });
     el.innerHTML = `<div class="m-fc-grid">
       ${cell(`Consensus · median of ${an.n || 1}`, `${money(mk.cons)} <small>${sgn((mk.cons / d.s0 - 1) * 100)}</small>`, "amb")}
@@ -3875,18 +3888,25 @@ function renderFcReadouts() {
       ${cell("Target spread vs σ", firms.length > 1 ? `${(spread * 100).toFixed(0)}% vs ${(sigP * 100).toFixed(0)}%` : "—")}
       ${cell("Raised in the last 90 days", firms.length ? `${firms.filter(fm => fm.raised_90d).length} of ${firms.length}` : "—")}
       ${cell("Latest", latest ? `${escapeHtml(latest.firm)} · ${fcFmtDate(new Date(latest.date + "T12:00:00"))}` : "—")}
-      ${cell("Options: chance ≥ consensus", pct(fcCurveAbove(msim, mk.cons)))}
+      ${cell(hist ? "History: chance ≥ consensus" : "Options: chance ≥ consensus", pct(fcCurveAbove(msim, mk.cons)))}
       ${cell("Older than 6 months", firms.length ? `${firms.filter(fm => fm.stale).length} (faded)` : "—")}
-    </div><div class="m-fc-foot">μ only: a line from today to each firm’s 12-month target. It shows how much analysts disagree, not how uncertain the price is: that is σ. Targets run optimistic on average.${via}${link}</div>`;
+    </div><div class="m-fc-foot">μ only: a line from today to each firm’s 12-month target. It shows how much analysts disagree, not how uncertain the price is: that is σ. Targets run optimistic on average.${hist ? " " + srcTxt : ""}${via}${link}</div>`;
     return;
   }
   const sim = fcSimulate(d, mode);
   const s20 = fcStats(sim, d.s0 * 0.8, FC_ZONE.steps);
   const mk = DETAIL.showMu ? fcMarks(d) : null;
   const e0 = (d.earnings || [])[0];
-  const sig = mode.curve === "rn" ? d.sigma_q : d.kappa * d.sigma_q;
-  const muTxt = mode.mu === "analysts" ? `μ from ${an.n || 1} analysts (one options-shaped curve per firm, blended${d.haircut ? ", excess return halved" : ""}).`
+  // The drawn curve's own width: κ × implied, plus FX when it is added.
+  const cv = d.curves[mode.curve];
+  const sig = Math.sqrt(cv.var_x / d.T);
+  const sigLabel = hist ? "σ · from history"
+    : mode.curve === "rn" ? `σ · implied${fx ? " + FX" : ""}`
+    : `σ · κ ${d.kappa.toFixed(2)} × implied ${(d.sigma_q * 100).toFixed(0)}%${fx ? " + FX" : ""}`;
+  const muTxt = mode.mu === "analysts" ? (an.n ? `μ from ${an.n} analysts (one ${hist ? "" : "options-"}shaped curve per firm, blended${d.haircut ? ", excess return halved" : ""}).`
+      : `μ from the analysts’ consensus target${d.haircut ? ", excess return halved" : ""}.`)
     : mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
+    : hist && d.measure === "Q" ? `μ from the market (CAPM: β ${(+d.beta).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium); no risk-neutral curve without options.`
     : `μ from the market (CAPM: β ${(+d.beta).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium).`;
   const d12 = DETAIL.fc[365];
   const auto = d.horizon === 91 && d12 && !d12.ok
@@ -3901,10 +3921,10 @@ function renderFcReadouts() {
     ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`)}
     ${cell("Chance ≤ −20% · touch it", `${((1 - fcCurveAbove(sim, d.s0 * 0.8)) * 100).toFixed(1)}% · ${pct(s20.touch)}`, "neg")}
     ${mk ? cell(`Chance ≥ consensus ${money(mk.cons)}`, pct(fcCurveAbove(sim, mk.cons)), "amb") : cell("Chance ≥ +20%", pct(fcCurveAbove(sim, d.s0 * 1.2)))}
-    ${cell(e0 ? `Earnings ${fcFmtDate(new Date(e0.date + "T12:00:00"))} · implied move` : "Earnings", e0 ? (e0.var > 0 ? `±${(Math.sqrt(e0.var) * 100).toFixed(1)}%` : "—") : "none in window")}
-    ${cell(mode.curve === "rn" ? "σ · implied" : `σ · κ ${d.kappa.toFixed(2)} × implied ${(d.sigma_q * 100).toFixed(0)}%`, `${(sig * 100).toFixed(0)}%`)}
-  </div><div class="m-fc-foot">σ from ${escapeHtml(d.chain_symbol)} options, expiring ${fcFmtDate(new Date(d.expiry + "T12:00:00"))}; ${muTxt}${fell}
-    Paths: bridges to this curve with earnings jumps.${via} A chance, not a prediction.${qual}${link}</div>`;
+    ${cell(e0 ? `Earnings ${fcFmtDate(new Date(e0.date + "T12:00:00"))}${hist ? "" : " · implied move"}` : "Earnings", e0 ? (e0.var > 0 ? `±${(Math.sqrt(e0.var) * 100).toFixed(1)}%` : hist ? "in window" : "—") : "none in window")}
+    ${cell(sigLabel, `${(sig * 100).toFixed(0)}%`)}
+  </div><div class="m-fc-foot">${srcTxt} ${muTxt}${fell}
+    Paths: bridges to this curve${hist ? "" : " with earnings jumps"}.${via} A chance, not a prediction.${qual}${link}</div>`;
 }
 
 /* The chart's own summary line: range return, benchmark returns, bar frequency,

@@ -426,6 +426,13 @@ history keeps its own crosshair. Rules that matter:
 - Readouts replace `#m-range-info` in `#m-fc-ro`; its "Assumptions ⚙" link
   opens Settings → Price distribution (`renderSettingsDistribution`), whose
   saves clear `DETAIL.fc` so the window re-prices.
+- **Every source says what it is** (`renderFcReadouts`, keyed on the payload's
+  `source`, `quality.smile` and `fx`): a surface fit names its quotes over
+  all expiries; an FX layer is "+ FX" in the σ label and the pair, vol and ρ
+  in the footnote; the history estimate says why options were not used
+  (`fallback`), "σ · from history", its β, proxy, weeks and rate, and has no
+  risk-neutral curve (`fcMode` falls back to the market's μ under Q). σ is the
+  drawn curve's own width (`var_x / T`), so it includes FX.
 - Colours: data stay `--pos`/`--neg`/accent; analysts use `--amber`
   (`--amber-rgb`, `--on-amber`) defined in all three themes.
 

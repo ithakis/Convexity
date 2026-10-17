@@ -1022,6 +1022,41 @@ within rounding — AAPL checked 2026-10-17).
   (`symbol_db.us_line`, then `discover_us_line`), every price scaled by
   local/US last price (`ratio`). Analyst targets stay in the chain's currency
   in the payload; the page multiplies by `ratio`.
+- **Expiry choice and sparse chains** (`_options_rn`): every expiry from 20
+  days to 3 years is fetched once in parallel and cached (`_chains`, 15 min,
+  shared by both horizons). Up to 4 expiries in the window are tried, nearest
+  the horizon first. Each tries SVI when the slice has ≥ 30 quotes, then an
+  **SSVI surface** (Gatheral–Jacquier 2014, power-law φ, `fit_surface`) over
+  all expiries; the first fit that passes the gate wins. PG, PEP, JNJ, MCD,
+  VZ and XOM list 7–29 usable strikes per long expiry: per-slice SVI
+  overfits them (PEP 12M missed its forward by 2.8% on 14 quotes) while
+  their surfaces hold 90–280 quotes; all pass on the surface.
+  The SSVI has no static arbitrage by construction (η(1+|ρ|) ≤ 2, γ ≤ ½, θ
+  non-decreasing). Its gate: ≥ 60 quotes over ≥ 3 expiries, surface fit
+  < 1.5 vol pts, ≥ 8 quotes at the expiry, and quotes reaching the 15% / 85%
+  points; then the usual smile fit and martingale checks.
+- **FX** (`_fx`, `affine_mix`): a US line shown in another currency carries
+  that currency's risk. ln S_shown = (1 + b)·x + e, with ρ and b from two
+  years of weekly returns, the FX vol from the currency ETF's options (FXE,
+  FXB, …; the longest expiry when none reaches the horizon) else history,
+  and no expected FX move. Applied to every curve before downsampling; the
+  payload's `fx` says pair, σ, ρ and source.
+- **History estimate** (`_history`, `source: "history"`): when options fail
+  (no chain, no expiry, thin) the stock's own record stands in, the options'
+  reason kept in `fallback`. x = β_m·y + e: y the market proxy's options
+  curve (`_PROXY` by listing suffix: SPY in the US; FEZ for Europe, EEM for
+  EM funds, whose chains are too thin today, so their market part is
+  history too), scaled to κ_index × its vol in the stock's currency; β_m and
+  e from 3 years of weekly returns (weekly: European and US closes are hours
+  apart), winsorised at 8 robust sd, e's variance reverting from the last 13
+  weeks to the 3-year level with a 3-month half-life. A listing with under
+  130 weeks or gaps uses the company's US line in its currency (a Xetra
+  secondary listing had 76 weeks and a phantom +19% week). Mean: CAPM in the stock's currency.
+  No risk-neutral curve; earnings dates without a jump.
+- **Local rates** (`_local_rate`): USD from ^IRX; EUR, GBP, CHF, JPY, CAD,
+  AUD from two quarterly CME futures (ln F_far/F_near over their gap is
+  r_USD − r_local: both settle together, unlike Yahoo's spot, which implied a
+  euro rate above the dollar's); other European currencies take the euro's.
 - **Earnings**: next date from `attention.fetch_events`; jump variance
   σ_e² = w_after − w_before·T_after/T_before from the ATM total variance either
   side; later reports estimated every 91 days.
