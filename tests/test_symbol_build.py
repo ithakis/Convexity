@@ -4,7 +4,9 @@ import json
 
 import pytest
 
-from convexity import cli, symbol_build as sb, symbol_db as sdb
+from convexity import cli
+from convexity import symbol_build as sb
+from convexity import symbol_db as sdb
 
 
 def L(ticker, name, exchange, ccy, fin, traded=0.0, typ="stock", industry="Industry"):

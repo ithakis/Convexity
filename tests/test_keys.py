@@ -20,7 +20,8 @@ import urllib.request
 import pytest
 
 from convexity import finnhub_adapter as fh
-from convexity import helpers, keys, logbuf, news_sentiment as ns, paths, server
+from convexity import helpers, keys, logbuf, paths, server
+from convexity import news_sentiment as ns
 
 SENTINEL = "SENTINELkey0123456789abcdefXYZ"
 

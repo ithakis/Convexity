@@ -3,7 +3,8 @@ the symbol pack is the synthetic one from test_symbol_db."""
 
 import pytest
 
-from convexity import news_sentiment as ns, search as s
+from convexity import news_sentiment as ns
+from convexity import search as s
 from tests.test_news_sentiment import _HTTPError, _install
 from tests.test_symbol_db import install
 
@@ -355,7 +356,8 @@ def test_a_two_word_description_goes_to_the_llm(monkeypatch, yahoo):
 # ------------------------------------------------------------------ screener session
 def test_the_own_session_remints_a_stale_crumb(monkeypatch):
     """A 401 on the search's own session mints a new cookie + crumb and retries."""
-    from yfinance import EquityQuery as Q, _http
+    from yfinance import EquityQuery as Q
+    from yfinance import _http
 
     class Resp:
         def __init__(self, code, text="", data=None):

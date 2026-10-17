@@ -233,7 +233,7 @@ not reintroduce one; the engines answer different questions.
   `curl | bash`), and after installing tries `import lightgbm` with the tool's
   interpreter — a warning, never a failed install.
   `tests/test_ml_sentiment.py` fails (not skips) on missing deps unless
-  `PT_ALLOW_MISSING_ML=1`.
+  `CONVEXITY_ALLOW_MISSING_ML=1`.
 - Training-only dependencies stay out of `envcheck` and the runtime
   dependencies: DuckDB (all v2 parquet IO) and FLAML are the `train` extra;
   pyarrow (stages A–C only) is deliberately in neither — it switches pandas 3's

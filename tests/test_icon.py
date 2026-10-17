@@ -37,7 +37,7 @@ def test_only_one_logo_is_tracked():
         if Path(f).suffix.lower() in IMAGE_SUFFIXES
         # tests/data holds synthetic fixtures (the import eval's broker
         # screenshots), never an app icon.
-        and not f.startswith(("docs/screenshots/", "docs/", "tests/data/"))
+        and not f.startswith(("docs/", "tests/data/"))
         and f not in ALLOWED
     ]
     assert extra == [], f"second image/icon files tracked (one logo rule): {extra}"

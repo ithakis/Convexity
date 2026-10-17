@@ -1,17 +1,20 @@
-"""Column-view persistence: custom views, built-in overrides, per-view color.
+"""persistence.py: column views, app prefs and the last-opened tab.
 
-Covers the v1.4.5 "editable default views" change — built-in presets
-(Default/Fundamentals/Momentum) are now editable in place via a per-view
-override store, and every view (built-in override or custom) carries its own
-per-column color-coding ("heat") map. These are pure-JSON CRUD functions, so
-they're cheap to pin down here without a running server.
-"""
+Column views: the v1.4.5 editable-default-views change. Built-in presets are edited in
+place through a per-view override store, and every view carries its own per-column
+colour-coding (heat) map.
+
+Prefs (state/prefs.json): the default display currency, My Investments benchmark and the
+distribution settings; allow-listed, never a crash on a bad file.
+
+Last view: since 1.18.1 a new tab exists as soon as its constituents are saved, so
+set_last_view must accept it."""
 
 import json
 
 import pytest
 
-from convexity import persistence
+from convexity import paths, persistence
 
 
 @pytest.fixture
@@ -199,3 +202,67 @@ def test_ack_rejects_non_builtin(cv):
     cv.upsert_column_view("MyVal", ["symbol", "price"])
     with pytest.raises(ValueError):
         cv.set_builtin_view_acked("MyVal")
+
+
+def test_prefs_round_trip_and_null_removes():
+    assert persistence.load_prefs() == {}
+    assert persistence.save_prefs({"default_ccy": "EUR"}) == {"default_ccy": "EUR"}
+    persistence.save_prefs({"inv_benchmark": "WORLD"})
+    assert persistence.load_prefs() == {"default_ccy": "EUR", "inv_benchmark": "WORLD"}
+    persistence.save_prefs({"default_ccy": None})
+    assert persistence.load_prefs() == {"inv_benchmark": "WORLD"}
+
+
+def test_prefs_drop_unknown_keys_and_values():
+    saved = persistence.save_prefs(
+        {"default_ccy": "XYZ", "inv_benchmark": "^GSPC", "evil": "x", "theme": 3}
+    )
+    assert saved == {}
+
+
+def test_a_malformed_prefs_file_reads_as_empty():
+    path = paths.state_file("prefs")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    assert persistence.load_prefs() == {}
+    path.write_text(json.dumps(["EUR"]), encoding="utf-8")
+    assert persistence.load_prefs() == {}
+    path.write_text(json.dumps({"default_ccy": "GBP", "x": 1}), encoding="utf-8")
+    assert persistence.load_prefs() == {"default_ccy": "GBP"}
+
+
+def test_distribution_prefs_are_bounded():
+    saved = persistence.save_prefs(
+        {"dist_erp": 0.06, "dist_kappa_stock": 0.9, "dist_kappa_index": 3.0, "dist_measure": "Q",
+         "dist_haircut": True}
+    )  # fmt: skip
+    assert saved == {
+        "dist_erp": 0.06,
+        "dist_kappa_stock": 0.9,
+        "dist_measure": "Q",
+        "dist_haircut": True,
+    }
+    assert (
+        persistence.save_prefs({"dist_erp": "0.05", "dist_measure": "R", "dist_haircut": 1})
+        == saved
+    )
+    assert persistence.save_prefs({"dist_erp": True})["dist_erp"] == 0.06
+
+
+def _last():
+    return persistence.list_views()["last_view"]
+
+
+def test_last_view_accepts_a_tab_that_only_has_constituents():
+    persistence.upsert_watchlist("Untitled 1", "AAPL, MSFT")
+    persistence.set_last_view("Untitled 1")
+    assert _last() == "Untitled 1"
+
+
+def test_last_view_still_ignores_unknown_names():
+    persistence.upsert_watchlist("Kept", "AAPL")
+    persistence.set_last_view("Kept")
+    persistence.set_last_view("Nope")
+    assert _last() == "Kept"
+    persistence.set_last_view("")
+    assert _last() is None

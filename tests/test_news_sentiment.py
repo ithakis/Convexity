@@ -3,16 +3,10 @@ failure handling. The model itself is mocked; the prompt is certified on the
 gold set by scripts/benchmark_news_read.py, not here."""
 
 import json
-import os
-import sys
 import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
-_REPO = os.path.dirname(os.path.dirname(__file__))
-if _REPO not in sys.path:
-    sys.path.insert(0, _REPO)
 
 from convexity import news_sentiment as ns
 

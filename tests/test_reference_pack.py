@@ -126,9 +126,9 @@ import socket  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 import urllib.request  # noqa: E402
+from datetime import UTC
 
 from convexity import paths  # noqa: E402
-from datetime import UTC
 
 
 class _Stub:

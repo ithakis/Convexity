@@ -401,9 +401,10 @@ def test_stale_leftovers_swept(server, monkeypatch):
 
 def test_retry_route(server, monkeypatch):
     """POST /api/model-download (the Settings Retry button) -> 202 + status."""
-    from convexity import server as srv
     import json
     import urllib.request
+
+    from convexity import server as srv
 
     _serve(server, monkeypatch, _good_tar())
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)

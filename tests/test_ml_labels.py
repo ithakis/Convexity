@@ -7,7 +7,6 @@ the SAR label depends on).
 """
 
 import importlib.util
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -15,8 +14,11 @@ import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
+# Training-pipeline guard, so it only runs when you retrain: stage A needs
+# duckdb (the `train` extra) and pyarrow, which stays out of every environment
+# on purpose (it switches pandas 3's string backing). Run it with
+#   uv run --extra train --with pyarrow pytest tests/test_ml_labels.py
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 

@@ -2,17 +2,11 @@
 train/serve parity the deployed model depends on."""
 
 import math
-import sys
-from pathlib import Path
 
+import numpy as np  # noqa: E402
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from convexity import ml_features as mf
-
-pytest.importorskip("sklearn", reason="featurizer text side needs sklearn")
-import numpy as np  # noqa: E402
 
 
 def test_dense_vector_matches_schema_length():
