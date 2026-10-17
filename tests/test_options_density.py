@@ -180,6 +180,78 @@ def test_targets_scale_to_the_expiry():
         assert got == pytest.approx(expect(math.log(1.3), R + 0.05), rel=2e-3)
 
 
+def mixture_chain(strikes, comps, s0=S0, r=R, t=T):
+    """Prices from a mix of lognormals [(weight, mean/F, vol)]: arbitrage-free,
+    skewed like an index, and E[S_T] = F exactly when the means average to 1."""
+    F, DF = s0 * math.exp(r * t), math.exp(-r * t)
+    calls, puts = [], []
+    for K in strikes:
+        c = sum(wt * float(od.black_call(F * m, K, v * v * t, DF)) for wt, m, v in comps)
+        p = c - DF * (F - K)
+        for out, px in ((calls, c), (puts, p)):
+            if px > 0.01:
+                out.append({"strike": K, "bid": px * 0.99, "ask": px * 1.01})
+    return calls, puts
+
+
+# 90% calm (15% vol), 10% crash regime (80% vol, centred 10% lower). Fitted to
+# strikes within +-15% only, the SVI bends up past them, as SPY's 12M wing did.
+STRESS = [(0.9, (1 - 0.1 * 0.9) / 0.9, 0.15), (0.1, 0.9, 0.80)]
+
+
+@pytest.fixture(scope="module")
+def truncated():
+    return mixture_chain(np.arange(85.0, 115.01, 0.5), STRESS)
+
+
+def test_gev_tails_rescue_a_chain_truncated_at_15pct(truncated, monkeypatch):
+    rn = od.fit_density(S0, T, R, *truncated)
+    assert od.quality(rn) == (True, "")
+    assert abs(rn["martingale_err"]) < od.MARTINGALE_GATE
+    t = rn["tails"]
+    assert 85.0 <= t["left"]["strike"] < t["right"]["strike"] <= 115.0
+    # The same chain with the SVI's own wings, as before the tails: the gate trips.
+    monkeypatch.setattr(od, "_tails", lambda Kg, f, *a: (f, None))
+    raw = od.fit_density(S0, T, R, *truncated)
+    ok, why = od.quality(raw)
+    assert not ok and why.startswith("tails off")
+    assert raw["quotes"] == rn["quotes"] and raw["svi_rmse_volpts"] == rn["svi_rmse_volpts"]
+
+
+def test_the_tails_moments_are_finite(truncated, rn):
+    for r in (od.fit_density(S0, T, R, *truncated), rn):
+        x, q = r["x"], r["q"]
+        assert r["tails"]["right"]["xi"] < 0.5  # E[S] and Var[S] finite
+        for n in (1, 2):
+            assert math.isfinite(float(np.trapezoid(q * np.exp(n * x), x)))
+        assert np.all(np.isfinite(q)) and np.all(q >= 0)
+        assert max(q[0], q[-1]) < 1e-4 * q.max()  # no mass piled at the grid's ends
+        st = od.curve_stats(r, q)
+        assert math.isfinite(st["var_x"]) and st["var_x"] > 0
+
+
+def test_tails_keep_a_flat_vol_chain_lognormal(rn):
+    # Strikes 40..250 reach the 5% / 95% points: the tails start there and
+    # must continue the lognormal, not reshape it.
+    t = rn["tails"]
+    assert t["left"]["cdf"] == pytest.approx(0.05, abs=0.005)
+    assert t["right"]["cdf"] == pytest.approx(0.95, abs=0.005)
+    assert abs(rn["martingale_err"]) < 0.002
+
+
+def test_a_stale_quote_breaking_monotonicity_is_dropped():
+    # DELL 12M: one stale far put (bid above the next strike's ask) bent the
+    # smile into a Lee-slope kink and the mean 9% below F.
+    calls, puts = bs_chain(np.arange(40.0, 251.0, 2.5))
+    clean = od.fit_density(S0, T, R, calls, puts)
+    bad = [dict(p) for p in puts]
+    i = next(j for j, p in enumerate(bad) if p["strike"] == 55.0)
+    bad[i].update(bid=bad[i + 1]["ask"] * 3, ask=bad[i + 1]["ask"] * 4)
+    rn = od.fit_density(S0, T, R, calls, bad)
+    assert rn["quotes"] == clean["quotes"] - 1
+    assert rn["svi_rmse_volpts"] < 0.1 and od.quality(rn) == (True, "")
+
+
 def test_no_expiry_near_the_horizon(monkeypatch):
     # A small cap listing nothing past 153 days has no 12M, and says why.
     exps = [("2026-12-18", 62), ("2027-03-19", 153)]

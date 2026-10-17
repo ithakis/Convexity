@@ -210,8 +210,9 @@ Each of these has cost real debugging time; the link goes to the full story.
   [backend.md → Finnhub supplemental columns](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
 - **σ/μ (the price distribution) is a detail path, never `fetch_one`**:
   the rate is ^IRX (never parity: American chains), quotes are OTM only, the
-  SVI wing is Lee-capped, and a chain that fails the gate is "Thin", never
-  drawn. The paths are bridges to the drawn curve, not GBM, so the end marginal
+  SVI wing is Lee-capped and trusted only inside the quoted strikes (GEV tails
+  past them, the attachment cdf from the call slope, never from integrating the
+  density), and a chain that fails the gate is "Thin", never drawn. The paths are bridges to the drawn curve, not GBM, so the end marginal
   is exact. `/api/density` caches successes only.
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·
   [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)

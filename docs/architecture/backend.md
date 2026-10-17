@@ -980,10 +980,28 @@ within rounding — AAPL checked 2026-10-17).
   nothing past 5–7 months, so their "12M" is `no_expiry` and the page opens
   on 3M): chain → forward from parity with the rate from **^IRX**
   (never backed out of parity: Yahoo's US chains are American-style and gave
-  −4.8%) → two-sided **OTM-only** quotes → raw SVI with **Lee's wing cap**
-  → Breeden–Litzenberger on a 4001-point log-strike grid → the
-  minimum-entropy two-moment tilt (Approach B; mean r + β·ERP, variance
-  (κσ_Q)²T), with the power tilt (A) as the fallback.
+  −4.8%) → two-sided **OTM-only** quotes, minus any that break static
+  no-arbitrage by more than the spread (`_monotone`) → raw SVI with **Lee's
+  wing cap** → Breeden–Litzenberger on a 4001-point log-strike grid
+  (±10 ATM sd) with **GEV tails** → the minimum-entropy two-moment tilt
+  (Approach B; mean r + β·ERP, variance (κσ_Q)²T), with the power tilt (A)
+  as the fallback.
+- **GEV tails** (Figlewski 2009, `_tails`): the SVI is trusted only where it
+  was fitted. Past the 5% / 95% points, or the last quoted strike when the
+  quotes stop short of them, a GEV takes over: its cdf and density equal the
+  body's at the attachment point, and its shape ξ matches the density 3 cdf
+  points further in. The cdf there comes from the call slope,
+  1 + e^{rT}·∂C/∂K, which reads the smile at that strike only. Integrating
+  the density from the left instead counts the extrapolated wing: SPY 12M's
+  SVI bent up past K = 995 into a false hump with negative density after it,
+  and the mean came out 2.1% above F. The right tail's ξ is capped at 0.45 so
+  E[S] and Var[S] stay finite. The payload's `quality.tails` gives where each
+  tail attaches and its ξ; it is `null` when the quotes are too narrow to place
+  them, and the gate then judges the SVI's own wings.
+- **Stale quotes**: walking out from the forward, a put or call further OTM
+  can't bid above the previous one's ask. DELL 12M had a K=165 put bid 12.15
+  next to a K=170 ask of 4.40. The SVI bent into a Lee-slope kink to chase it,
+  giving a smile fit of 1.5 vol pts and a mean 9% below F.
 - **Analysts' μ**: one B-tilt per firm (latest target ≤ 12 months old, from
   yfinance `upgrades_downgrades`; Finnhub's targets are 403 on the free plan),
   blended equally, the common variance shrunk by the between-firm variance so
@@ -995,9 +1013,11 @@ within rounding — AAPL checked 2026-10-17).
   rejects. The gate fails a non-finite fit (NaN passes every `<` test), a
   missing last price is `error`, and `downsample` refuses a non-finite curve.
 - **Gate**: quotes ≥ 30, SVI RMSE < 1 vol pt, |E_Q/F − 1| < 1%. A failure is
-  `{"ok": false, "reason": "thin"}` and is never drawn. Long chains fail often
-  (SPY and DELL 12M on 2026-10-17: tails off by 2–9%); the page then opens on
-  3M and says why. GEV tails (Figlewski 2009) are the planned fix.
+  `{"ok": false, "reason": "thin"}` and is never drawn. It runs after the
+  tails. Before them, long chains failed often: on 2026-10-17 SPY was +2.1%,
+  QQQ +3.1% and DELL had a 1.5 vol-pt smile fit and −9.1%. With the tails and
+  the stale-quote filter, all three pass (+0.2%, −0.1% and +0.1%). When a
+  12M chain still fails, the page opens on 3M and says why.
 - **Non-US listings** have no chains: the company's US line stands in
   (`symbol_db.us_line`, then `discover_us_line`), every price scaled by
   local/US last price (`ratio`). Analyst targets stay in the chain's currency

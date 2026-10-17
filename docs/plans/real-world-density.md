@@ -71,13 +71,13 @@ Expected effect (prototype, 17 Oct 2026):
 5. **Smile**: raw SVI on implied total variance, vega-like weights on the body,
    wing slope capped by Lee's bound `b(1+|ρ|) ≤ 2`. Uncapped, SPY 12M's mean came out
    11% above the forward.
-6. **Density**: Breeden–Litzenberger on a 4001-point log-strike grid (±5 ATM sd),
-   clip negatives, renormalise.
+6. **Density**: Breeden–Litzenberger on a 4001-point log-strike grid (±10 ATM sd;
+   ±5 before the tails), clip negatives, **GEV tails** past the 5% / 95% points or
+   the last quoted strike, renormalise. See "Explicit tails" below.
 7. **Tilt**: solve the two equations above, fall back to A.
 8. **Quality gate**: quotes ≥ 30, SVI RMSE < ~1 vol pt, |E_Q[S_T]/F − 1| < 1%.
-   Fail → show "Thin data" or hide the horizon. SPY 12M fails today (2.1%: strikes
-   stop at 540–995). Production should add explicit tails (GEV, Figlewski 2009)
-   so more chains pass.
+   Fail → show "Thin data" or hide the horizon. It runs after the tails. SPY 12M
+   failed without them (+2.1%: strikes stop at 540–995).
 
 ## Data realities (tested)
 
@@ -144,10 +144,43 @@ Expected effect (prototype, 17 Oct 2026):
   against the stored curves.
 - **κ estimated** from those snapshots, replacing the 0.92 / 0.80 placeholders; later a
   Beta calibration map (Approach C).
-- **Explicit tails** (GEV, Figlewski 2009), so more long chains pass the gate. SPY and
-  DELL 12M fail today on their tails.
 - **Paths**: pin them to both expiries on the 12M view, with a Gaussian copula
   ρ = √(T₁/T₂), so the cone at 3M also matches the 3M chain.
+
+## Explicit tails (built 17 Oct 2026)
+
+Long chains often failed the martingale gate. Two causes, both fixed in
+`fit_density` without loosening the gate:
+
+- **The SVI's wing past the last strike.** It is extrapolation, and SPY 12M's bent
+  up past K = 995 into a false hump with negative density beyond it. GEV tails
+  (Figlewski 2009) now replace the density past the 5% / 95% points, or past the last
+  quoted strike when the quotes stop short of them. Each tail matches the body's cdf
+  and density at the attachment point and its decay 3 cdf points further in. The
+  attachment cdf comes from the call slope 1 + e^{rT}·∂C/∂K, never from integrating
+  the contaminated density. The right ξ is capped at 0.45, so E[S] and Var[S] stay
+  finite. The grid widened from ±5 to ±10 ATM sd: a stressed chain's left tail runs
+  well past 5 sd of its ATM vol.
+- **A stale quote.** DELL's K=165 put bid 12.15 while the K=170 put asked 4.40. Quotes
+  that break static no-arbitrage by more than the spread are dropped.
+
+Before and after, live with a temp `CONVEXITY_HOME`, 17 Oct 2026, 12M:
+
+| | expiry | quotes | smile fit | E_Q/F − 1 before | after | gate |
+|---|---|---|---|---|---|---|
+| SPY | 30 Sep 2027 | 142 | 0.10 vol pt | +2.10% | +0.20% | thin → ok |
+| DELL | 17 Sep 2027 | 70 → 69 | 1.50 → 0.26 | −9.07% | +0.09% | thin → ok |
+| QQQ | 30 Sep 2027 | 87 | 0.14 | +3.09% | −0.09% | thin → ok |
+| ARKK | 21 Jan 2028 | 37 → 35 | 3.38 → 0.92 | +0.21% | +0.16% | thin → ok |
+| AAPL | 17 Sep 2027 | 60 | 0.32 | +0.24% | −0.06% | ok → ok |
+| NVDA | 17 Sep 2027 | 62 | 0.33 | +0.47% | +0.04% | ok → ok |
+
+DELL and ARKK passed thanks to the stale-quote filter; SPY and QQQ thanks to the
+tails. 3M still passes (SPY +0.10%, DELL 0.00%, AAPL −0.03%). σ_Q rises where the
+old grid cut the left tail: SPY 19.8% → 21.7% and NVDA 41.1% → 43.1%. That is
+the left-skewed mass beyond 5 ATM sd now being counted.
+In the tests, a lognormal-mixture chain (a 10% crash regime) quoted only within ±15%
+reads +1.7% with the SVI's own wings and +0.4% with the tails.
 
 ## Acceptance for the prototype
 

@@ -6,8 +6,11 @@ expiry nearest 91 or 365 days, never an interpolated maturity):
 
     Yahoo chain -> forward from put-call parity, with the rate fixed from ^IRX
     (Yahoo's US chains are American-style; parity backs out nonsense rates)
-    -> OTM implied total variance -> raw SVI with Roger Lee's wing bound
-    -> Breeden-Litzenberger risk-neutral density q on a log-strike grid
+    -> OTM implied total variance (quotes that break no-arbitrage dropped)
+    -> raw SVI with Roger Lee's wing bound
+    -> Breeden-Litzenberger risk-neutral density q on a log-strike grid,
+       with GEV tails (Figlewski 2009) past the 5% / 95% points or the last
+       quoted strike, whichever is nearer the money
     -> real-world density p by the minimum-entropy two-moment tilt:
 
         p(x) ∝ q(x) exp(t1 x + t2 x^2),  x = ln(S_T / F)
@@ -56,6 +59,7 @@ MIN_QUOTES = 30
 MAX_SVI_RMSE = 1.0  # vol points
 MARTINGALE_GATE = 0.01  # |E_Q[S_T]/F - 1| above this = tails not trustworthy
 GRID = 4001
+GRID_SD = 10  # the log-strike grid spans +-GRID_SD ATM standard deviations
 OUT_POINTS = 401
 TTL = 900.0
 RATE_TTL = 3600.0
@@ -68,6 +72,13 @@ HORIZONS = (91, 365)
 # "no_expiry", and the window falls back to the other one.
 EXPIRY_WINDOW = {91: (45, 182), 365: (270, 550)}
 _INDEX_TYPES = {"ETF", "INDEX", "MUTUALFUND"}
+# GEV tails (Figlewski 2009): attach at the 5% / 95% points, or at the last
+# quoted strike when the quotes stop short of them, and match the density's
+# decay 3 cdf points inside. The right tail's shape is capped below 1/2 so
+# E[S] and Var[S] stay finite.
+TAIL_ALPHA = 0.05
+TAIL_GAP = 0.03
+TAIL_XI = (-0.95, 0.45)
 
 
 class DensityError(Exception):
@@ -128,6 +139,100 @@ def _mid_map(quotes) -> dict[float, tuple[float, float]]:
     return out
 
 
+def _monotone(rows, F: float) -> list:
+    """Drop quotes that break static no-arbitrage by more than the spread.
+
+    Walking out from the forward, an OTM put (call) further from the money
+    can't bid above the ask of the one before it. DELL's 12M chain had one
+    stale put (K=165 bid 12.15 while K=170 asked 4.40): the SVI bent into a
+    Lee-slope kink to chase it, and the density's mean fell 9% below F."""
+    keep = []
+    for side in (
+        sorted((r for r in rows if r[0] < F), key=lambda r: -r[0]),
+        sorted((r for r in rows if r[0] >= F), key=lambda r: r[0]),
+    ):
+        ask = math.inf
+        for r in side:
+            _, _, spr, px = r
+            if px - spr / 2 > ask:
+                continue
+            keep.append(r)
+            ask = px + spr / 2
+    return keep
+
+
+def _gev(s: np.ndarray, mu: float, sig: float, xi: float) -> np.ndarray:
+    """GEV density of the variable s (its right tail); 0 outside the support."""
+    z = 1 + xi * (s - mu) / sig
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        t = np.maximum(z, 1e-300) ** (-1 / xi)
+        g = t ** (1 + xi) * np.exp(-t) / sig
+    return np.where((z > 0) & np.isfinite(g), g, 0.0)
+
+
+def _gev_tail(s1: float, a1: float, f1: float, s0: float, f0: float) -> tuple:
+    """(mu, sig, xi) of the GEV with G(s1) = a1 and g(s1) = f1 exactly, its
+    shape xi chosen so g(s0) = f0 at the inner point (s0 < s1).
+
+    Given xi, the first two conditions fix sig and mu in closed form, so the
+    splice is continuous in both cdf and density whatever xi comes out. With
+    no root inside TAIL_XI the nearest end is kept."""
+    t1 = -math.log(a1)
+
+    def par(xi):
+        sig = t1 ** (1 + xi) * a1 / f1
+        return s1 - sig * (t1 ** (-xi) - 1) / xi, sig
+
+    def err(xi):
+        mu, sig = par(xi)
+        g0 = float(_gev(np.array([s0]), mu, sig, xi)[0])
+        return math.log(g0 / f0) if g0 > 0 else -50.0
+
+    grid = np.linspace(*TAIL_XI, 57)
+    grid[np.abs(grid) < 1e-6] = 1e-6  # xi = 0 (Gumbel) is the limit, not a value
+    e = [err(v) for v in grid]
+    xi = float(grid[int(np.argmin(np.abs(e)))])
+    for a, b, ea, eb in zip(grid[:-1], grid[1:], e[:-1], e[1:], strict=True):
+        if ea * eb < 0:
+            xi = brentq(err, a, b)
+            break
+    return (*par(xi), xi)
+
+
+def _tails(Kg: np.ndarray, fK: np.ndarray, cdf: np.ndarray, kmin: float, kmax: float):
+    """Replace the density beyond the quoted range with GEV tails.
+
+    ``fK`` is the Breeden-Litzenberger density in price and ``cdf`` the
+    cumulative from the call slope, 1 + e^(rT) dC/dK: it reads the smile at K
+    only. Integrating fK from the left instead would count the SVI's
+    extrapolated wing, whose false hump past SPY's last strike (and the
+    negative density after it) pushed the mean 2.1% above F. The left tail is
+    the right tail of -S. Returns (density, info) or (fK, None) when the
+    quotes leave no room between the two attachment points."""
+    mono = np.maximum.accumulate(np.clip(cdf, 0, 1))
+    aR = min(1 - TAIL_ALPHA, float(np.interp(kmax, Kg, mono)))
+    aL = max(TAIL_ALPHA, float(np.interp(kmin, Kg, mono)))
+    if aR - aL < 2 * TAIL_GAP + 0.05:
+        return fK, None
+    # Attach on the grid inside the quoted range, never a step past it.
+    iR1 = min(int(np.searchsorted(mono, aR)), int(np.searchsorted(Kg, kmax, "right")) - 1)
+    iL1 = max(int(np.searchsorted(mono, aL)), int(np.searchsorted(Kg, kmin)))
+    iR0 = int(np.searchsorted(mono, mono[iR1] - TAIL_GAP))
+    iL0 = int(np.searchsorted(mono, mono[iL1] + TAIL_GAP))
+    if not (0 < iL1 < iL0 < iR0 < iR1 < len(Kg) - 1) or min(fK[[iL1, iL0, iR0, iR1]]) <= 0:
+        return fK, None
+    out = fK.copy()
+    muR, sR, xiR = _gev_tail(Kg[iR1], mono[iR1], fK[iR1], Kg[iR0], fK[iR0])
+    out[iR1:] = _gev(Kg[iR1:], muR, sR, xiR)
+    muL, sL, xiL = _gev_tail(-Kg[iL1], 1 - mono[iL1], fK[iL1], -Kg[iL0], fK[iL0])
+    out[:iL1] = _gev(-Kg[:iL1], muL, sL, xiL)
+    info = {
+        "left": {"strike": float(Kg[iL1]), "cdf": float(mono[iL1]), "xi": float(xiL)},
+        "right": {"strike": float(Kg[iR1]), "cdf": float(mono[iR1]), "xi": float(xiR)},
+    }
+    return out, info
+
+
 # ------------------------------ Risk-neutral fit -----------------------------
 
 
@@ -138,6 +243,12 @@ def fit_density(S0: float, T: float, rf: float, calls, puts) -> dict:
     input (from ^IRX), never backed out of parity: American-style chains
     gave -4.8% at 3M. Raises DensityError("thin") when too few usable OTM
     quotes remain to fit a smile at all; the softer gate is `quality`.
+
+    The SVI is trusted only where it was fitted: past the quoted strikes its
+    wing is a guess (SPY 12M's bent up into a false hump and the mean came
+    out 2.1% above F), so GEV tails take over there. ``tails`` says where
+    they attach and their shapes, or is None when the quotes are too
+    narrow to place them (the gate then judges the SVI's own wings).
     """
     if not (S0 > 0 and T > 0):
         raise DensityError("thin", "bad spot or maturity")
@@ -158,6 +269,7 @@ def fit_density(S0: float, T: float, rf: float, calls, puts) -> dict:
     rows = [
         r for r in rows if np.isfinite(r[1]) and r[2] / r[3] < MAX_SPREAD and 0.3 < r[0] / F < 2.5
     ]
+    rows = _monotone(rows, F)
     if len(rows) < 6:
         raise DensityError("thin", f"{len(rows)} usable quotes")
     K = np.array([r[0] for r in rows])
@@ -172,10 +284,15 @@ def fit_density(S0: float, T: float, rf: float, calls, puts) -> dict:
         bounds=([-1, 1e-4, -0.999, -2, 1e-3], [5, 1.0, 0.999, 2, 5]),
     )
 
-    x = np.linspace(-5 * np.sqrt(w_atm), 5 * np.sqrt(w_atm), GRID)
+    # +-10 ATM sd (S from 1% to 20x F at most): the GEV tails are analytic, and a
+    # stressed chain's left tail runs well past 5 sd of its ATM vol.
+    span = GRID_SD * np.sqrt(w_atm)
+    x = np.linspace(max(-span, math.log(0.01)), min(span, math.log(20.0)), GRID)
     Kg = F * np.exp(x)
     C = black_call(F, Kg, np.maximum(svi(fit.x, x), 1e-8), DF)
-    qK = np.clip(np.gradient(np.gradient(C, Kg), Kg) / DF, 0, None)
+    dC = np.gradient(C, Kg)
+    qK = np.clip(np.gradient(dC, Kg) / DF, 0, None)
+    qK, tails = _tails(Kg, qK, 1 + dC / DF, float(K.min()), float(K.max()))
     qx = qK * Kg
     qx /= np.trapezoid(qx, x)
     m1 = np.trapezoid(qx * x, x)
@@ -192,6 +309,7 @@ def fit_density(S0: float, T: float, rf: float, calls, puts) -> dict:
         "quotes": len(K),
         "svi_rmse_volpts": float(np.sqrt(np.mean((np.sqrt(np.maximum(svi(fit.x, k), 0) / T) - np.sqrt(w / T)) ** 2)) * 100),
         "martingale_err": float(np.trapezoid(qx * np.exp(x), x) - 1),
+        "tails": tails,
     }  # fmt: skip
 
 
@@ -248,7 +366,9 @@ def tilt(rn: dict, mean_ratio: float, var_target: float) -> tuple[np.ndarray, st
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         sol = root(eqs, [g, 0.0])
-    if sol.success and abs(sol.x[1]) < 50 and max(abs(v) for v in eqs(sol.x)) < 1e-4:
+    # The residuals are the test, not sol.success: hybr reports "not making
+    # good progress" when it starts on the answer (kappa 1, no premium).
+    if np.all(np.isfinite(sol.x)) and abs(sol.x[1]) < 50 and max(abs(v) for v in eqs(sol.x)) < 1e-4:
         return dens(*sol.x), "B", [float(v) for v in sol.x]
     return dens(g, 0), "A", [float(g), 0.0]
 
@@ -632,6 +752,11 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
             "quotes": rn["quotes"],
             "svi_rmse_volpts": round(rn["svi_rmse_volpts"], 3),
             "martingale_err": round(rn["martingale_err"], 5),
+            "tails": {
+                side: {k: round(v, 4) for k, v in t.items()} for side, t in rn["tails"].items()
+            }
+            if rn["tails"]
+            else None,
             "ok": ok,
             "why": why,
         },
