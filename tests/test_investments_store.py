@@ -745,9 +745,12 @@ def test_suggested_dividends_are_added_as_one_undoable_batch(monkeypatch):
     assert len(inv.undo(b["rev"])["entries"]) == 1
 
 
-def test_the_export_has_positions_and_ledger_sheets(srv):
+def test_the_export_has_positions_and_ledger_sheets(srv, monkeypatch):
     from openpyxl import load_workbook
 
+    # persistence binds views.json at import, so earlier tests' portfolios
+    # are still listed: exporting them ran live analytics on real Yahoo.
+    monkeypatch.setattr(server, "list_views", lambda: {"views": {}})
     _seed()
     with urllib.request.urlopen(srv + "/api/export-xlsx?ccy=USD") as r:
         wb = load_workbook(io.BytesIO(r.read()))
@@ -809,9 +812,10 @@ def test_suggested_dividends_may_exceed_one_imports_limit():
     )
 
 
-def test_the_export_never_writes_a_formula(srv):
+def test_the_export_never_writes_a_formula(srv, monkeypatch):
     from openpyxl import load_workbook
 
+    monkeypatch.setattr(server, "list_views", lambda: {"views": {}})  # see above
     rev = inv.add(BUY, 0)["rev"]
     inv.add({"type": "deposit", "date": "2025-01-02", "amount": 5, "ccy": "USD",
              "note": '=HYPERLINK("http://example.com","x")'}, rev)  # fmt: skip
