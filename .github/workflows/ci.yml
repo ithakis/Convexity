@@ -111,19 +111,28 @@ jobs:
           for f in install.sh packaging/update.sh "packaging/Launch Dashboard.command"; do bash -n "$f" && echo "$f OK"; done
 
   test:
-    name: Metrics unit tests (shard ${{ matrix.shard }}/8)
+    name: Metrics unit tests (${{ matrix.part }})
     runs-on: ubuntu-latest
     # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
     timeout-minutes: 30
     # Since 6 Oct this job kills the runner VM itself: no log survives, and
     # neither timeout nor the job limit ends the step. A dead runner still
-    # shows which job and step were running, so the suite is split into
-    # shards (test files round-robin) with import and collection as their
-    # own steps: the shard and step that die name the culprit.
+    # shows which job was running. An 8-way shard run put the hang in
+    # column_views / importer / migrate / options_density /
+    # reference_universe / workflows; each runs alone here (the importer's
+    # PDF tests apart), the rest of the suite in one job.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        part:
+          - rest
+          - test_column_views.py
+          - test_importer.py -k pdf
+          - test_importer.py -k 'not pdf'
+          - test_migrate.py
+          - test_options_density.py
+          - test_reference_universe.py
+          - test_workflows.py
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -137,18 +146,6 @@ jobs:
       - name: Install dependencies (locked)
         run: uv sync --locked --extra dev
 
-      - name: Import every module
-        run: |
-          for f in src/convexity/*.py; do
-            m="convexity.$(basename "$f" .py)"
-            [ "$m" = convexity.desktop ] && continue   # needs the desktop extra
-            echo "import $m"
-            timeout -k 10 120 uv run python -X faulthandler -c "import $m" || echo "FAILED: $m"
-          done
-
-      - name: Collect tests
-        run: timeout -k 10 5m uv run pytest tests/ --collect-only -q | tail -3
-
       - name: Run pytest
         # The caps turn a runaway into a MemoryError / failed fork with a
         # traceback; timeout -s INT stops pytest before the job limit so the
@@ -156,9 +153,16 @@ jobs:
         run: |
           ulimit -v 8000000   # 8 GB of address space (the suite peaks ~0.5 GB)
           ulimit -u 2000
-          files=$(ls tests/test_*.py | awk -v s=${{ matrix.shard }} 'NR % 8 == s')
-          echo "$files"
-          timeout -k 60 -s INT 15m uv run pytest $files -v --tb=short -o faulthandler_timeout=300
+          suspects="column_views importer migrate options_density reference_universe workflows"
+          if [ "$PART" = rest ]; then
+            set -- $(ls tests/test_*.py | grep -vE "test_($(echo $suspects | tr ' ' '|'))\.py")
+          else
+            eval "set -- tests/$PART"   # keeps the quoted -k expression whole
+          fi
+          echo "$@"
+          timeout -k 60 -s INT 15m uv run pytest "$@" -v --tb=short -o faulthandler_timeout=300
+        env:
+          PART: ${{ matrix.part }}
 
   server-smoke:
     name: Server smoke test (real HTTP requests, not just imports)
