@@ -111,10 +111,19 @@ jobs:
           for f in install.sh packaging/update.sh "packaging/Launch Dashboard.command"; do bash -n "$f" && echo "$f OK"; done
 
   test:
-    name: Metrics unit tests
+    name: Metrics unit tests (shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     # A hung step otherwise burns GitHub\'s 6 h limit and shows as "cancelled".
     timeout-minutes: 30
+    # Since 6 Oct this job kills the runner VM itself: no log survives, and
+    # neither timeout nor the job limit ends the step. A dead runner still
+    # shows which job and step were running, so the suite is split into
+    # shards (test files round-robin) with import and collection as their
+    # own steps: the shard and step that die name the culprit.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -128,15 +137,28 @@ jobs:
       - name: Install dependencies (locked)
         run: uv sync --locked --extra dev
 
+      - name: Import every module
+        run: |
+          for f in src/convexity/*.py; do
+            m="convexity.$(basename "$f" .py)"
+            [ "$m" = convexity.desktop ] && continue   # needs the desktop extra
+            echo "import $m"
+            timeout -k 10 120 uv run python -X faulthandler -c "import $m" || echo "FAILED: $m"
+          done
+
+      - name: Collect tests
+        run: timeout -k 10 5m uv run pytest tests/ --collect-only -q | tail -3
+
       - name: Run pytest
-        # Since 6 Oct this step froze the whole runner (no log line at all,
-        # signals ignored) on Linux only. The caps turn a runaway into a
-        # MemoryError / failed fork with a traceback; timeout -s INT stops
-        # pytest before the job limit so the log is kept.
+        # The caps turn a runaway into a MemoryError / failed fork with a
+        # traceback; timeout -s INT stops pytest before the job limit so the
+        # log is kept, and -k kills it if INT is ignored.
         run: |
           ulimit -v 8000000   # 8 GB of address space (the suite peaks ~0.5 GB)
           ulimit -u 2000
-          timeout -k 60 -s INT 15m uv run pytest tests/ -v --tb=short -o faulthandler_timeout=300
+          files=$(ls tests/test_*.py | awk -v s=${{ matrix.shard }} 'NR % 8 == s')
+          echo "$files"
+          timeout -k 60 -s INT 15m uv run pytest $files -v --tb=short -o faulthandler_timeout=300
 
   server-smoke:
     name: Server smoke test (real HTTP requests, not just imports)
