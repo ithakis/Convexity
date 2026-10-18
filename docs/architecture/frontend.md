@@ -397,6 +397,20 @@ edit, because the server keeps no empty watchlists; removing the last chip is
 refused. The Build / Update Portfolio / Save as new buttons, the textarea and
 the analytics stale banner were removed in this change.
 
+**Field + tags, and the fold (owner, 2026-10-18).**
+- **Search box.** `#co-form` is a filled field at rest (`--field-bg`, no
+  accent outline) and draws its accent ring on focus only.
+- **Chips.** They are borderless fills (`--chip-bg`) with the ticker as a
+  recessed badge, so they read apart from the canvas.
+- **Tokens.** Both are tokens in all three themes; Bloomberg's are neutral,
+  not its selection blue.
+- **The fold.** The "Portfolio Constituents" kicker is a button
+  (`#pf-chips-toggle`) that folds the chips away.
+  - Folded, it keeps the count and shows one mono line of tickers
+    (`#pf-chips-sum`).
+  - One global choice, `pf_chips_collapsed` in `prefs.json`, so the desktop
+    app keeps it. An empty list never folds.
+
 ### σ/μ in the stock window (app.js "σ/μ: the real-world price distribution")
 
 Owner-approved design (mockup v7, 2026-10-17). Two toolbar toggles after
@@ -404,7 +418,13 @@ Volume, `DETAIL.showSigma` / `DETAIL.showMu`, both on at every open: σ+μ =
 options σ with the analysts' μ; σ = the market's (CAPM) μ; μ = a line per firm
 to its target plus a KDE of targets; neither = the old chart. While either is
 on, `renderChart` ends the history at ~58% of the plot (`padR`), switches the
-y axis to **log** and widens it to the end curve's 3%..97%, and
+y axis to **log** and spans it over the window's history ∪ the end curve's
+5%..95% (`fcYRange`, rule "B · Balanced", owner 2026-10-18: it was 3–97%,
+which on 12M set both limits so 1Y and 5Y looked identical). There is 5% log
+padding plus `FC_LANE` px of headroom for the E/D flags. A change of domain
+eases over ~280 ms (`fcTweenDomain`, final-state redraws, a slow frame snaps).
+The density's mass beyond the frame is labelled ("▲ 4% above",
+`fcDraw`). And
 `mountForecast` lays a canvas (`#m-fc-cv`, `pointer-events: none`) and a hit
 layer (`#m-fc-hit`) over the future zone and density; the history keeps its
 own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
@@ -437,6 +457,11 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   on the curve) and snaps to Low/Consensus/High.
 - 12M is the default; when the 12M chain fails the gate and 3M passes, the
   window switches to 3M once (`DETAIL.fcAuto`) and the footnote says why.
+- Readout labels name the horizon and the threshold (owner, 2026-10-18):
+  `Pr[S_12M > €35]` (S0), `Pr[S_12M ≥ €40]` with "consensus" or "+20%" in
+  the value. The threshold is in the display currency, from
+  `fmtMoneyThreshold`: whole units from 10 up, two significant figures
+  below.
 - Readouts replace `#m-range-info` in `#m-fc-ro`: Pr[S_T > S_0] (KaTeX
   labels: style only `.m-fc-grid > div > span`, never every span, or KaTeX's
   own spans stack), the mean named by its source (analysts' mean target,

@@ -134,7 +134,7 @@ const COLS = [
      — the favorable (low) end reads blue, the sell side (high) reads orange. */
   { key: "analyst_rating",label: "Rating",  w: 64,  align: "right", sortable: true,
     heat: { kind: "yo_dyn", favor: "low" },
-    render: (r) => fmt2(r.recommendation_mean),
+    render: (r) => viaTip(r, fmt2(r.recommendation_mean), false),
     sortValue: (r) => r.recommendation_mean },
   { key: "rec_trend_fh", label: "Rec Δ6M", w: 72, align: "center", sortable: true,
     sortValue: (r) => recTrendScore(r.rec_trend_fh),
@@ -148,7 +148,7 @@ const COLS = [
     render: (r) => {
       const t = r.target_mean_price, p = r.price;
       if (t == null || p == null || !isFinite(t) || !isFinite(p) || p <= 0) return fmtPctSigned(null);
-      return fmtPctSigned((t / p - 1) * 100);
+      return viaTip(r, fmtPctSigned((t / p - 1) * 100), true);
     },
     sortValue: (r) => {
       const t = r.target_mean_price, p = r.price;
@@ -1172,6 +1172,16 @@ function fmtMoney(v, ccy) {
   const dec = fxDecimals(FX_QUOTE);
   return sym + Number(converted).toLocaleString(NUM_LOCALE, {minimumFractionDigits: dec, maximumFractionDigits: dec});
 }
+/* A price as a threshold in a label ("Pr[S_12M > €35]"): the display
+   currency like fmtMoney, but whole units from 10 up and two significant
+   figures below, so a penny stock reads €0.85, never €1 (owner, 2026-10-18). */
+function fmtMoneyThreshold(v, ccy) {
+  const c = v == null || !isFinite(v) ? null : fxConvert(v, ccy);
+  if (c == null || !isFinite(c)) return na();
+  const sym = FX_SYMBOL[FX_QUOTE] || (FX_QUOTE + " ");
+  const n = Math.abs(c) >= 10 ? Math.round(c) : Number(c.toPrecision(2));
+  return sym + n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: Math.abs(c) >= 10 ? 0 : 6 });
+}
 function fmtCompactMoney(v, ccy) {
   if (v == null || !isFinite(v) || v === 0) return na();
   const converted = fxConvert(v, ccy);
@@ -1309,6 +1319,32 @@ function returnColor(pct, anchor = 6) {
 /* ===========================================================================
  * Visual primitives
  * --------------------------------------------------------------------------- */
+/* A secondary listing (a young Xetra line of a US company) often has no logo
+   of its own; its research line (fetcher._apply_research) does. Learned from
+   the rows as they render and kept per browser, so My Investments knows it
+   too. Used as a fallback only: a listing's own logo still wins. */
+const LOGO_ALIAS = (() => { try { return JSON.parse(localStorage.getItem("logo_alias") || "{}") || {}; } catch (e) { return {}; } })();
+function logoAliasLearn(rows) {
+  let changed = false;
+  for (const r of rows || []) {
+    if (r && r.symbol && r.research_symbol && LOGO_ALIAS[r.symbol] !== r.research_symbol) {
+      LOGO_ALIAS[r.symbol] = r.research_symbol; changed = true;
+    }
+  }
+  if (changed) try { localStorage.setItem("logo_alias", JSON.stringify(LOGO_ALIAS)); } catch (e) {}
+}
+/* Analysts borrowed from the company's research line (fetcher._apply_research):
+   the value is unchanged, the hover says where it came from (owner's choice,
+   2026-10-18: tooltips only, no marker). */
+function viaTipTxt(sym, via, n, scaled) {
+  if (!via) return "";
+  return `${n ? `${Math.round(n)} analysts` : "Analysts"} via ${via}${scaled ? `, targets scaled to ${sym}’s price` : ""}: ${sym} itself has no coverage on Yahoo.`;
+}
+function viaTip(r, html, scaled) {
+  if (!r || !r.research_analysts || !r.research_symbol) return html;
+  return `<span data-tip="${escapeHtml(viaTipTxt(r.symbol, r.research_symbol, r.research_n, scaled))}">${html}</span>`;
+}
+
 function logoImg(ticker) {
   const t = encodeURIComponent(ticker);
   return `<img class="logo" loading="lazy" alt=""
@@ -1316,6 +1352,12 @@ function logoImg(ticker) {
     onerror="logoFallback(this, '${t.replace(/'/g,"\\'")}')">`;
 }
 window.logoFallback = function(img, ticker) {
+  const alias = LOGO_ALIAS[decodeURIComponent(ticker)];
+  if (alias && !img.dataset.tried) {
+    img.dataset.tried = "alias";
+    img.src = `https://financialmodelingprep.com/image-stock/${encodeURIComponent(alias)}.png`;
+    return;
+  }
   if (img.dataset.tried === "parqet") {
     img.onerror = null;
     const span = document.createElement("span");
@@ -2337,6 +2379,7 @@ function renderHeader(scale = 1) {
 }
 
 function render() {
+  logoAliasLearn(DATA);
   ensureSortKey();
   const cols = getActiveColumns();
   const scale = applyTableFitMode(cols);
@@ -2469,6 +2512,8 @@ function openModal(r) {
   DETAIL.showSigma = DETAIL.showMu = true; DETAIL.fcH = 365; DETAIL.fcAuto = true;
   DETAIL.fc = {}; DETAIL.fcPending = {}; DETAIL.fcSim = null; DETAIL.fcAnimKey = null; DETAIL.fcHov = null;
   DETAIL.events = null; DETAIL.evOpen = null;
+  if (DETAIL.yTw) cancelAnimationFrame(DETAIL.yTw.raf);
+  DETAIL.yDom = null; DETAIL.yTw = null;
   DETAIL.intraday = {}; DETAIL.intraPending = {};  // per-symbol; server caches the fetches
   DETAIL.sma = CHART_SMA;       // shared reference — see CHART_SMA
   renderModalSkeleton();
@@ -3266,11 +3311,16 @@ function renderChart() {
   const rng = (hi - lo) || 1;
   const padPct = 0.05;
   // With σ/μ the axis is log (a cone of returns is symmetric in log price)
-  // and also spans the end distribution's 3%..97%.
+  // and spans the window's history plus the fan's 90% band (fcYRange). The
+  // top FC_LANE px are kept free for the E/D flags, and a change of domain
+  // (range tab, horizon, the density landing) eases in (fcTweenDomain).
   let logY = false;
   if (FC && lo > 0) {
     [lo, hi] = fcYRange(lo, hi);
-    lo /= 1.04; hi *= 1.04; logY = true;
+    lo /= 1.05; hi *= 1.05;
+    hi = Math.exp(Math.log(hi) + (Math.log(hi) - Math.log(lo)) * FC_LANE / (chartH - FC_LANE));
+    [lo, hi] = fcTweenDomain(lo, hi);
+    logY = true;
   } else {
     lo -= rng * padPct; hi += rng * padPct;
   }
@@ -3708,7 +3758,11 @@ function fcMarks(d) {
   };
 }
 
-/* The y range the forecast needs: history ∪ the end curve's 3%..97%. */
+/* The y range the forecast needs (owner's rule "B · Balanced", 2026-10-18):
+ * the window's history ∪ the end curve's 5%..95%, i.e. the fan's 90% band.
+ * History drives the axis, so every range tab rescales; the curve's tails past
+ * the frame are clipped and fcDraw labels the mass that lies beyond. (It was
+ * 3%..97%, which on a 12M curve set both limits: 1Y and 5Y looked identical.) */
 function fcYRange(lo, hi) {
   const d = DETAIL.fc[DETAIL.fcH];
   if (!d || !d.ok) return [lo, hi];
@@ -3720,7 +3774,48 @@ function fcYRange(lo, hi) {
     return [lo, hi];
   }
   const sim = fcSimulate(d, mode);
-  return [Math.min(lo, fcCurveQ(sim, 0.03)), Math.max(hi, fcCurveQ(sim, 0.97))];
+  return [Math.min(lo, fcCurveQ(sim, 0.05)), Math.max(hi, fcCurveQ(sim, 0.95))];
+}
+
+const fcPctTxt = (p) => (p < 0.01 ? "<1%" : `${Math.round(p * 100)}%`);
+
+/* Headroom over the price for the E/D flag lanes (EV_LANE: E at +3, D at +22,
+   17 px each), so a flag never sits on the line. */
+const FC_LANE = 42;
+
+/* Eases the log y-domain from the last one drawn to the new one over ~280 ms,
+ * redrawing the finished chart each frame (fcPlay keys on symbol/horizon/
+ * mode, so a frame never restarts the animation). A frame slower than 12 ms
+ * snaps to the end instead; reduced motion and a new window never tween. */
+function fcTweenDomain(lo, hi) {
+  const tw = DETAIL.yTw, sym = DETAIL.row && DETAIL.row.symbol;
+  if (tw && tw.frame) return [tw.cur.lo, tw.cur.hi];
+  const near = (a, b) => Math.abs(Math.log(a.lo / b.lo)) + Math.abs(Math.log(a.hi / b.hi)) < 0.01;
+  if (tw && near(tw.to, { lo, hi })) return [tw.cur.lo, tw.cur.hi];
+  const prev = DETAIL.yDom;
+  DETAIL.yDom = { lo, hi, sym };
+  const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!prev || prev.sym !== sym || reduce || near(prev, { lo, hi })) {
+    if (tw) { cancelAnimationFrame(tw.raf); DETAIL.yTw = null; }
+    return [lo, hi];
+  }
+  if (tw) cancelAnimationFrame(tw.raf);
+  const from = tw ? tw.cur : prev, to = { lo, hi }, t0 = performance.now();
+  const T = { from, to, cur: from, frame: false, raf: 0 };
+  DETAIL.yTw = T;
+  const mix = (a, b, e) => Math.exp(Math.log(a) + (Math.log(b) - Math.log(a)) * e);
+  const step = (now) => {
+    if (DETAIL.yTw !== T || !$("#m-chart")) return;
+    const k = Math.min(1, (now - t0) / 280), e = 1 - Math.pow(1 - k, 3);
+    if (k >= 1) { DETAIL.yTw = null; renderChart(); return; }
+    T.cur = { lo: mix(from.lo, to.lo, e), hi: mix(from.hi, to.hi, e) };
+    const s0 = performance.now();
+    T.frame = true; renderChart(); T.frame = false;
+    if (performance.now() - s0 > 12) { DETAIL.yTw = null; renderChart(); return; }
+    T.raf = requestAnimationFrame(step);
+  };
+  T.raf = requestAnimationFrame(step);
+  return [from.lo, from.hi];
 }
 
 function fcDateAt(days) {
@@ -3897,6 +3992,14 @@ function fcDraw() {
       const ys0 = y(d.s0);
       ctx.save(); ctx.beginPath(); ctx.rect(xH, top, Wd + 8, ys0 - top); ctx.clip(); curve(`rgba(${col.posRgb},0.2)`, col.pos); ctx.restore();
       ctx.save(); ctx.beginPath(); ctx.rect(xH, ys0, Wd + 8, bot - ys0); ctx.clip(); curve(`rgba(${col.negRgb},0.2)`, col.neg); ctx.restore();
+      // The axis shows the fan's 90% band (fcYRange), so the tails run past
+      // the frame: say how much of the curve lies beyond each edge. The left
+      // of the density's top is free (the 3M | 12M pill sits on the right).
+      const above = fcCurveAbove(sim, f.hi), below = 1 - fcCurveAbove(sim, f.lo);
+      ctx.globalAlpha = grow; ctx.font = font(600, 11); ctx.textAlign = "left";
+      if (above > 0.005) { ctx.fillStyle = col.pos; ctx.fillText(`▲ ${fcPctTxt(above)} above`, xH + 6, top + 14); }
+      if (below > 0.005) { ctx.fillStyle = col.neg; ctx.fillText(`▼ ${fcPctTxt(below)} below`, xH + 6, bot - 6); }
+      ctx.globalAlpha = 1;
     }
   }
   ctx.strokeStyle = col.border; ctx.beginPath(); ctx.moveTo(xH, top); ctx.lineTo(xH, bot); ctx.stroke();
@@ -4044,7 +4147,16 @@ function renderFcReadouts() {
     : `The ${escapeHtml(fb.chain_symbol || d.symbol)} options are too thin${fb.why ? ` (${escapeHtml(fb.why)})` : ""}`;
   const srcTxt = hist
     ? `${fbWhy}, so this is estimated from history: β ${q.beta_market.toFixed(2)} × the market (${escapeHtml(q.proxy)}, ${escapeHtml(q.market_source)}) plus its own ${(q.own_vol * 100).toFixed(0)}% volatility, from ${q.weeks} weeks of ${escapeHtml(q.series || d.symbol)}, reverting from the last quarter to the 3-year level. Rate ${(d.rf * 100).toFixed(1)}% (${escapeHtml(d.rate_source)}).`
-    : `σ from ${escapeHtml(d.chain_symbol)} options, expiring ${fcFmtDate(new Date(d.expiry + "T12:00:00"))}${q.smile === "ssvi" ? " (a surface fitted across all its expiries: too few strikes for one)" : ""};`;
+    : q.anchors
+      ? `σ from ${escapeHtml(d.chain_symbol)} options, read at exactly ${d.horizon === 365 ? "12" : "3"} months off a surface fitted across all its expiries, between the most liquid ones either side (${q.anchors[0]} and ${q.anchors[1]} days out);`
+      : `σ from ${escapeHtml(d.chain_symbol)} options, expiring ${fcFmtDate(new Date(d.expiry + "T12:00:00"))}${q.smile === "ssvi" ? " (a surface fitted across all its expiries: too few strikes for one)" : ""};`;
+  // Quotes belong to a session: on a weekend or holiday, Friday's close
+  // (options_density._session). Say so, and when the chain is a stand-in.
+  const asofD = q.asof ? new Date(q.asof + "T12:00:00") : null;
+  const todayIso = (() => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`; })();
+  const asofTxt = !asofD || hist ? ""
+    : q.snapshot ? ` Options as of the ${asofD.toLocaleDateString(undefined, { weekday: "short" })} ${fcFmtDate(asofD)} close: Yahoo's quotes are blank right now, so the last chain that passed is used.`
+    : q.asof !== todayIso ? ` Options as of the ${asofD.toLocaleDateString(undefined, { weekday: "short" })} ${fcFmtDate(asofD)} close.` : "";
   const an = d.analysts;
   if (mode.kind === "mu") {
     const mk = fcMarks(d);
@@ -4089,7 +4201,13 @@ function renderFcReadouts() {
   const volTip = `Hist.: the last year’s daily log returns of ${vo.symbol || d.symbol}, annualised (sample sd × √252). `
     + (vo.implied != null ? `Imp.: the at-the-money implied vol of the ${vo.implied_symbol || d.chain_symbol} options${vo.implied_days ? ` ${Math.round(vo.implied_days)} days out` : ""}, per year. Both on the same listing and currency, so they compare directly: Imp. above Hist. means the options price more movement than the last year had.`
       : "Imp.: no usable options, so none.");
-  const tex = (src, txt) => window.katex ? katex.renderToString(src, { throwOnError: false }) : txt;
+  const tex = (src, txt) => window.katex ? katex.renderToString(src, { throwOnError: false, strict: false }) : txt;
+  // "Pr[S_12M > €35]": the horizon names S_T and the threshold is a price in
+  // the display currency (fmtMoneyThreshold), escaped for KaTeX's text mode.
+  const hl = fcHLabel(d.horizon);
+  const kx = (t) => String(t).replace(/[\\{}$%&#_^~]/g, (c) => (c === "\\" ? "" : c === "~" || c === "^" ? "" : "\\" + c));
+  const prTex = (op, v) => tex(String.raw`\Pr[S_{\text{${hl}}} ${op === ">" ? ">" : "\\ge"} \text{${kx(fmtMoneyThreshold(v, ccy))}}]`,
+    `Pr[S_${hl} ${op === ">" ? ">" : "≥"} ${fmtMoneyThreshold(v, ccy)}]`);
   const muTxt = mode.mu === "analysts" ? (an.n ? `μ from ${an.n} analysts (one ${hist ? "" : "options-"}shaped curve per firm, blended${d.haircut ? ", excess return halved" : ""}).`
       : `μ from the analysts’ consensus target${d.haircut ? ", excess return halved" : ""}.`)
     : mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
@@ -4106,10 +4224,10 @@ function renderFcReadouts() {
   const sigNow = Math.sqrt(cvq.var_x / d.T);
   const sigTxt = hist ? "" : ` Curve σ ${(sigNow * 100).toFixed(0)}%${mode.curve === "rn" ? " (implied" : ` (κ ${d.kappa.toFixed(2)} × implied ${(d.sigma_q * 100).toFixed(0)}%`}${fx ? " + FX" : ""}).`;
   const consCell = mk
-    ? cell(tex(String.raw`\Pr[S_T \ge \text{consensus}]`, "Pr[S_T ≥ consensus]"), `${pct(fcCurveAbove(sim, mk.cons))} <small>${money(mk.cons)}</small>`, "amb", `The chance the price ends at or above the analysts’ consensus (the median firm’s target) in ${hz}.`)
-    : cell(tex(String.raw`\Pr[S_T \ge 1.2\,S_0]`, "Pr[S_T ≥ 1.2 S_0]"), pct(fcCurveAbove(sim, d.s0 * 1.2)), "", `The chance the price ends 20% or more above today’s in ${hz}.`);
+    ? cell(prTex(">=", mk.cons), `${pct(fcCurveAbove(sim, mk.cons))} <small>consensus</small>`, "amb", `The chance the price ends at or above the analysts’ consensus (the median firm’s target, ${money(mk.cons)}) in ${hz}.`)
+    : cell(prTex(">=", d.s0 * 1.2), `${pct(fcCurveAbove(sim, d.s0 * 1.2))} <small>+20%</small>`, "", `The chance the price ends 20% or more above today’s (${money(d.s0 * 1.2)} or more) in ${hz}.`);
   el.innerHTML = `<div class="m-fc-grid">
-    ${cell(tex(String.raw`\Pr[S_T > S_0]`, "Pr[S_T > S_0]"), pct(fcCurveAbove(sim, d.s0)), "pos", `The chance the price is above today’s (S₀) in ${hz} (S_T).`)}
+    ${cell(prTex(">", d.s0), pct(fcCurveAbove(sim, d.s0)), "pos", `The chance the price is above today’s (${money(d.s0)}) in ${hz}.`)}
     ${cell(meanLabel, `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`, "", meanTip)}
     ${cell("Median · 50% range", `${money(fcCurveQ(sim, 0.5))} · ${money(fcCurveQ(sim, 0.25))} – ${money(fcCurveQ(sim, 0.75))}`, "", "Half the outcomes end inside the range, a quarter below it and a quarter above.")}
     ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`, "", "Nine outcomes in ten end inside this range.")}
@@ -4119,7 +4237,7 @@ function renderFcReadouts() {
     ${cell("Dividend Yield", dy, "", dyTip)}
     ${cell("Hist. / Imp. Volatility", `${vpct(vo.hist)} / ${vpct(vo.implied)}`, "", volTip)}
   </div><div class="m-fc-foot">${srcTxt}${sigTxt} ${muTxt}${fell}
-    Paths: bridges to this curve${hist ? "" : " with earnings jumps"}.${via} A chance, not a prediction.${qual}${link}</div>`;
+    Paths: bridges to this curve${hist ? "" : " with earnings jumps"}.${via}${asofTxt} A chance, not a prediction.${qual}${link}</div>`;
 }
 
 /* The chart's own summary line: range return, benchmark returns, bar frequency,
@@ -4502,7 +4620,7 @@ function renderSections() {
             <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
               ${recKey ? `<span class="m-rec-key ${keyCls}">${escapeHtml(recKey)}</span>` : ""}
               ${recMean != null ? `<span style="font-size:12px;color:var(--muted);">Mean rating <b style="color:var(--text)">${recMean.toFixed(2)}</b> / 5</span>` : ""}
-              ${d.num_analysts ? `<span style="font-size:12px;color:var(--muted);">from <b style="color:var(--text)">${d.num_analysts}</b> analysts</span>` : ""}
+              ${d.num_analysts ? `<span style="font-size:12px;color:var(--muted);"${d.research_analysts ? ` data-tip="${escapeHtml(viaTipTxt(d.symbol, d.research_symbol, d.num_analysts, true))}"` : ""}>from <b style="color:var(--text)">${d.num_analysts}</b> analysts</span>` : ""}
             </div>
             ${needlePct != null ? `
               <div class="m-gauge"><div class="needle" style="left:${needlePct.toFixed(1)}%"></div></div>
@@ -5405,7 +5523,26 @@ function renderConstituents() {
     return `<span class="pf-chip"><span class="pf-chip-name" title="${escapeHtml(name || e)}">${escapeHtml(name || e)}</span>${tk}` +
       `<button type="button" class="pf-chip-x" data-entry="${escapeHtml(e)}" title="Remove" aria-label="Remove ${escapeHtml(name || e)}">✕</button></span>`;
   }).join("");
+  const shown = 7, tks = list.map(e => { const r = bySym.get(e.toUpperCase()); return r ? r.symbol : e; });
+  $("#pf-chips-sum").textContent = tks.slice(0, shown).join(" · ") + (tks.length > shown ? `  +${tks.length - shown}` : "");
+  syncChipsFold();
 }
+
+/* The constituents fold (owner, 2026-10-18): one global choice in prefs.json,
+   so the desktop app keeps it. An empty list never folds: the "add companies"
+   hint is the only thing there is to see. */
+function syncChipsFold() {
+  const empty = !entriesArr(ENTRIES).length;
+  const folded = !!APP_PREFS.pf_chips_collapsed && !empty;
+  $(".pf-editor").classList.toggle("collapsed", folded);
+  $("#pf-chips-sum").hidden = !folded;
+  $("#pf-chips-toggle").setAttribute("aria-expanded", folded ? "false" : "true");
+}
+$("#pf-chips-toggle").addEventListener("click", () => {
+  APP_PREFS = { ...APP_PREFS, pf_chips_collapsed: !APP_PREFS.pf_chips_collapsed };
+  syncChipsFold();
+  savePrefs({ pf_chips_collapsed: APP_PREFS.pf_chips_collapsed });
+});
 
 /* Save a new constituents list at once; the rows wait for Refresh. The
    unsaved tab becomes a saved portfolio on its first edit. */
@@ -6337,7 +6474,7 @@ function renderAnalystDashboard(a) {
       <td style="${wStyle}">${(h.weight*100).toFixed(2)}%</td>
       <td><span class="rk ${cls}">${escapeHtml(lbl)}</span></td>
       <td>${h.mean_rating != null ? h.mean_rating.toFixed(2) : "—"}</td>
-      <td>${h.n_analysts != null ? h.n_analysts : "—"}</td>
+      <td${h.via ? ` data-tip="${escapeHtml(viaTipTxt(h.symbol, h.via, h.n_analysts, true))}"` : ""}>${h.n_analysts != null ? h.n_analysts : "—"}</td>
       <td>${h.price != null ? fmtMoney(h.price, h.currency) : "—"}</td>
       <td>${h.target_mean != null ? fmtMoney(h.target_mean, h.currency) : "—"}</td>
       <td class="${upCls}" style="${upStyle}">${fmtUp(h.upside_pct)}</td>
@@ -13341,12 +13478,12 @@ function invHoldingsHtml(b) {
   const td = (c, html) => `<td${c.k === "name" ? ' class="left"' : ""}>${html ?? ""}</td>`;
   const rows = invOrdered(b.positions).map(x => x.pending ? `
     <tr data-inv-sym="${escapeHtml(x.symbol)}" class="inv-pending"${drag ? ' draggable="true"' : ""}>
-      <td class="left">${grip}<span class="inv-tipped">${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span></td>
+      <td class="left">${grip}<span class="inv-tipped">${logoImg(LOGO_ALIAS[x.symbol] ? x.symbol : x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span></td>
       <td colspan="${cols.length - 1}" class="left inv-pending-note">Left out of the totals: waiting for Yahoo's split history</td>
     </tr>` : `
     <tr data-inv-sym="${escapeHtml(x.symbol)}"${drag ? ' draggable="true"' : ""}>
       ${cols.map(c => c.k === "name"
-        ? td(c, grip + invTipped("pos", x.symbol, `${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span>`))
+        ? td(c, grip + invTipped("pos", x.symbol, `${logoImg(LOGO_ALIAS[x.symbol] ? x.symbol : x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span>`))
         : td(c, c.cell(x, { ...ctx, sym: x.symbol }))).join("")}
     </tr>`).join("");
   const head = cols.map(c => {
@@ -13380,7 +13517,7 @@ function invHoldingsHtml(b) {
       profit: `<span class="${invCls(cp)}">${invMoney(cp, true)}</span>`,
       contrib: `<span class="${invPtsCls(cc)}">${invPts(cc)}</span>`,
     }) + (open ? closed.map(x => foot("inv-closed", {
-      name: `<span class="inv-tipped">${logoImg(x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span>`,
+      name: `<span class="inv-tipped">${logoImg(LOGO_ALIAS[x.symbol] ? x.symbol : x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span>`,
       profit: `<span class="${invCls(x.profit)}">${invMoney(x.profit, true)}</span>`,
       contrib: `<span class="${invPtsCls(invContrib(x))}">${invPts(invContrib(x))}</span>`,
       divs: invMoney((x.dividends || 0) + (x.dividends_est || 0)),
@@ -15199,6 +15336,7 @@ setTheme(readTheme());
   // A local request; the cap only guards a server busy importing at launch.
   APP_PREFS = await Promise.race([BOOT_PREFS, new Promise(r => setTimeout(() => r({}), 1500))]);
   fxInit();
+  syncChipsFold();
   renderHeader();
   setupSettings();
   setupTapeFullscreen();

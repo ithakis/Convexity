@@ -636,7 +636,10 @@ def _analyst_for(symbol: str, row: dict | None = None) -> dict:
     # No mean target on a built row = no analyst coverage (a fund): the range
     # comes from the same Yahoo block, so asking would only cost a call.
     uncovered = out["target_mean"] is None and price is not None
-    if not uncovered and any(v is None for v in trio.values()):
+    # A row whose analysts came from its research line (fetcher._apply_research)
+    # already carries everything that line has; its own listing has nothing.
+    borrowed = bool(row.get("research_analysts"))
+    if not uncovered and not borrowed and any(v is None for v in trio.values()):
         cache_key = f"analyst_targets|{symbol}"
         hit = _cache_get(cache_key)
         if hit is not None:
@@ -1267,6 +1270,7 @@ def analyze_portfolios_multi(
                         if (na is not None and math.isfinite(float(na)))
                         else None,
                         "dist": dist,
+                        "via": row.get("research_symbol") if row.get("research_analysts") else None,
                     }
                 )
             else:

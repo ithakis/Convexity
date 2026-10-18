@@ -223,6 +223,16 @@ Each of these has cost real debugging time; the link goes to the full story.
   is exact. `/api/density` caches successes only.
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·
   [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
+- **A secondary listing borrows its research** (2026-10-18): Yahoo has no
+  analysts on NOV.DE or CCC3.DE. `fetcher.research_line` (home or US
+  line, the most analysts, a week in `state/research_lines.json`) fills them,
+  targets × own price / research price, and fills fundamentals' gaps only,
+  never replacing a listing's own. **σ/μ maturities count from the quotes'
+  session, not today**, min-tick wings (< $0.05, > 3.5 ATM sd) are dropped,
+  12M is read off the surface between the liquid expiries either side, and a
+  zeroed chain falls back to `state/chains/<line>.json`.
+  [backend.md → research line](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson) ·
+  [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---

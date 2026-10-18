@@ -103,8 +103,11 @@
   <!-- Constituents: one chip per entry; ✕ removes it. An edit is saved at
        once and turns Refresh red until the next refresh (app.js commitEntries). -->
   <div class="pf-editor">
-    <div class="section-anchor pf-anchor"><span class="sa-kicker">Portfolio Constituents<span id="pf-count"></span></span></div>
+    <!-- The kicker folds the chips away (global, prefs.json pf_chips_collapsed);
+         folded, one muted line of tickers says what is inside. -->
+    <div class="section-anchor pf-anchor"><button type="button" class="sa-kicker pf-fold" id="pf-chips-toggle" aria-expanded="true" aria-controls="pf-chips"><span class="pf-caret" aria-hidden="true">&#9662;</span>Portfolio Constituents<span id="pf-count"></span></button></div>
     <div class="pf-chips" id="pf-chips"></div>
+    <div class="pf-chips-sum" id="pf-chips-sum" hidden></div>
   </div>
 
   <!-- Analytics: ONE sheet (the user's "option B"). Inside it the sections are
