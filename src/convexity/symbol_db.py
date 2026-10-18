@@ -746,6 +746,27 @@ def home(group: int) -> Hit | None:
     return _hit(row, 100.0) if row else None
 
 
+def research_candidates(symbol: str) -> list[str]:
+    """Other listings of the same company that may carry the research a thin
+    listing lacks (analyst targets, ratings, fundamentals): its home line and
+    its US line, home first. Pack only, never the network; empty for a
+    listing that is its own home, or one the pack doesn't group.
+
+    NOV.DE -> [NOVO-B.CO, NVO]; CCC3.DE -> [KO]."""
+    s = (symbol or "").upper()
+    me = get(s) if s else None
+    if me is None or me.group == YAHOO_GROUP or me.type != "stock":
+        return []
+    out = []
+    h = home(me.group)
+    if h and h.ticker != s:
+        out.append(h.ticker)
+    us = us_line(s)
+    if us and us != s and us not in out:
+        out.append(us)
+    return out
+
+
 def get(ticker: str) -> Hit | None:
     con = _connect()
     if con is None:
@@ -830,6 +851,9 @@ def us_lines(symbol: str) -> list[str]:
     return out
 
 
+# Yahoo's screener leaves `region` empty for its OTC "OID" board (1,029
+# lines, 2026-10-11): sponsored ADRs like NSRGY, ISNPY and SCGLY, which a
+# region = 'us' filter alone never saw. They count as US lines.
 @lru_cache(maxsize=2048)
 def _us_lines(s: str, sig) -> tuple[str, ...]:
     me = get(s) if s else None
@@ -841,7 +865,7 @@ def _us_lines(s: str, sig) -> tuple[str, ...]:
     with closing(con):
         rows = con.execute(
             "SELECT ticker, exchange, home, COALESCE(adv_usd, 0) FROM symbols"
-            " WHERE grp = ? AND region = 'us'",
+            " WHERE grp = ? AND (region = 'us' OR (region IS NULL AND exchange = 'OID'))",
             (me.group,),
         ).fetchall()
     rows = [r for r in rows if _looks_us(r[0])]

@@ -1,8 +1,10 @@
 """Data fetching — per-symbol rows, portfolio batches, and detail modal payloads."""
 
 import contextlib
+import json
 import math
 import random
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
@@ -195,6 +197,355 @@ def _earnings_surprise_yf(tk: yf.Ticker, symbol: str) -> list[dict] | None:
     return out
 
 
+def _row_fields(info: dict, last: float, out: dict) -> None:
+    """The row's .info fields: identity, valuation, fundamentals, analysts.
+    Shared by `fetch_one` and the research overlay, so a field read off the
+    research line is computed exactly as the listing's own would be."""
+    out["name"] = info.get("longName") or info.get("shortName") or out.get("symbol", "")
+    out["currency"] = info.get("currency") or "USD"
+    out["market_cap"] = _market_cap(info, out["currency"])
+    out["exchange"] = info.get("exchange") or info.get("fullExchangeName") or ""
+    out["sector"] = info.get("sector") or ""
+    out["industry"] = info.get("industry") or ""
+    out["quote_type"] = (info.get("quoteType") or "").upper()
+    out["website"] = info.get("website") or ""
+
+    out["ps_ratio"] = _positive(info.get("priceToSalesTrailing12Months"))
+    # Trailing only. The old `trailingPE or forwardPE` put a FORWARD
+    # multiple in the trailing column whenever trailing EPS was
+    # negative (Yahoo then omits trailingPE) — exactly the loss-makers
+    # where the two differ most. Loss-makers are n/a here, as P/E is
+    # not meaningful for them; the Fwd P/E column still has theirs.
+    out["pe_ratio"] = _positive(info.get("trailingPE"))
+
+    out["forward_pe"] = _positive(info.get("forwardPE"))
+    out["peg"] = _positive(info.get("pegRatio") or info.get("trailingPegRatio"))
+    out["ev_ebitda"] = _positive(info.get("enterpriseToEbitda"))
+    out["ev_revenue"] = _positive(info.get("enterpriseToRevenue"))
+    out["beta"] = _safe_num(info.get("beta"))
+    out["dividend_yield"] = _normalize_dividend_yield(
+        info.get("dividendYield"),
+        price=last,
+        dividend_rate=info.get("dividendRate"),
+        trailing_yield=info.get("trailingAnnualDividendYield"),
+        trailing_rate=info.get("trailingAnnualDividendRate"),
+        currency=out["currency"],
+        financial_currency=info.get("financialCurrency"),
+    )
+    out["operating_margin"] = _safe_num(info.get("operatingMargins"))
+    # Yahoo reports debtToEquity in PERCENT (AAPL 78.4 = total debt is
+    # 0.78x equity); kept in that unit and shown with a % sign.
+    out["debt_equity"] = _safe_num(info.get("debtToEquity"))
+    out["current_ratio"] = _safe_num(info.get("currentRatio"))
+    # Extended fundamentals (all straight from the same info dict —
+    # zero extra network cost on the streaming path). Margins/growth/
+    # returns come back as fractions (0.42 = 42%); the frontend
+    # formats them, never re-detects units.
+    out["price_book"] = _positive(info.get("priceToBook"))
+    out["roe"] = _safe_num(info.get("returnOnEquity"))
+    out["roa"] = _safe_num(info.get("returnOnAssets"))
+    out["gross_margin"] = _safe_num(info.get("grossMargins"))
+    out["profit_margin"] = _safe_num(info.get("profitMargins"))
+    out["revenue_growth"] = _safe_num(info.get("revenueGrowth"))
+    # Both Yahoo fields are year-over-year growth of the most recent
+    # quarter (earningsGrowth: EPS, earningsQuarterlyGrowth: net
+    # income). The first is preferred; the second only when it is
+    # truly absent — `or` would discard a legitimate 0.0.
+    _eg = info.get("earningsGrowth")
+    if _eg is None:
+        _eg = info.get("earningsQuarterlyGrowth")
+    out["earnings_growth"] = _safe_num(_eg)
+    out["quick_ratio"] = _safe_num(info.get("quickRatio"))
+    out["payout_ratio"] = _safe_num(info.get("payoutRatio"))
+    # FCF yield, USD market cap, and the multiples Yahoo gets wrong
+    # for listings whose statements are in another currency.
+    _currency_consistent(info, out, out["currency"])
+    out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
+    out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
+    # The range too, from the same .info: analytics._analyst_for
+    # otherwise fetches it again per holding (an export's slow part).
+    for k in ("Low", "High", "Median"):
+        out[f"target_{k.lower()}"] = _safe_num(info.get(f"target{k}Price"))
+    out["rec_key"] = (info.get("recommendationKey") or "").strip().lower() or None
+    out["n_analysts"] = _safe_num(info.get("numberOfAnalystOpinions"))
+
+
+def _yf_rec_trend(tk) -> list[dict]:
+    """Yahoo's monthly rating counts, most recent first (empty on failure)."""
+    out: list[dict] = []
+    try:
+        recs = tk.recommendations
+        if recs is None or recs.empty:
+            return out
+        for _, rec_row in recs.iterrows():
+            row_lower = {str(k).lower(): v for k, v in rec_row.items()}
+
+            def _rd_int(key, row_lower=row_lower):
+                v = row_lower.get(key, 0)
+                if v is None or (isinstance(v, float) and math.isnan(v)):
+                    return 0
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return 0
+
+            d = {
+                "strongBuy": _rd_int("strongbuy"),
+                "buy": _rd_int("buy"),
+                "hold": _rd_int("hold"),
+                "sell": _rd_int("sell"),
+                "strongSell": _rd_int("strongsell"),
+            }
+            if not any(d.values()):
+                break
+            out.append({"period": str(row_lower.get("period", "")), **d})
+    except Exception:
+        return []
+    return out
+
+
+# ------------------------------ Research line ------------------------------
+#
+# Yahoo carries a company's analysts, and much of its fundamentals, on its
+# home or US line only: NOV.DE and CCC3.DE (like every Xetra or Vienna line
+# of a foreign company tried) came back with no target, no rating and no
+# analyst count, while NOVO-B.CO had 24 analysts and KO 23 (checked live
+# 2026-10-18). The price, returns and currency stay on the
+# owner's listing; analysts and the fundamentals it lacks come from the same
+# company's best-covered line, its targets scaled by the two prices
+# (target / research price x own price), which absorbs FX, pence and ADR
+# share ratios without a rate. The choice is the candidate with the most
+# analysts (`symbol_db.research_candidates`: home line, US line), kept a week
+# on disk (state/research_lines.json), a miss a day.
+
+_RESEARCH_TTL = 7 * 86400.0
+_RESEARCH_MISS_TTL = 86400.0
+_RESEARCH_INFO_MISS_TTL = 600.0
+_RESEARCH_LOCK = threading.Lock()
+# Unitless (or USD) row fields a thin listing may lack; filled, never replaced.
+_RESEARCH_FILL = (
+    "pe_ratio", "forward_pe", "peg", "ev_ebitda", "ev_revenue", "ps_ratio", "price_book",
+    "roe", "roa", "gross_margin", "profit_margin", "operating_margin", "revenue_growth",
+    "earnings_growth", "debt_equity", "current_ratio", "quick_ratio", "payout_ratio",
+    "fcf_yield", "market_cap_usd", "dividend_yield",
+)  # fmt: skip
+_RESEARCH_TARGETS = ("target_mean_price", "target_low", "target_high", "target_median")
+
+
+def _research_info(line: str) -> dict:
+    """The research line's .info (plus fast_info's last price), cached for
+    the analytics TTL; an empty answer is asked again in 10 minutes."""
+    key = f"research_info|{line}"
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit.get("v") or {}
+    info = _safe_info(yf.Ticker(line))
+    ok = bool(info.get("longName") or info.get("shortName"))
+    _cache_put(
+        key, {"v": info if ok else {}}, _CACHE_TTL_ANALYTICS if ok else _RESEARCH_INFO_MISS_TTL
+    )
+    return info if ok else {}
+
+
+def _research_store_path():
+    from convexity import paths
+
+    return paths.state_file("research_lines")
+
+
+def _research_load() -> dict:
+    try:
+        d = json.loads(_research_store_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def research_line(symbol: str) -> str | None:
+    """The listing of the same company with the most analysts, when it isn't
+    ``symbol`` itself; None when the pack knows no other line, or none of
+    them has analysts. Network only on a cache miss (two .info reads at
+    most), so `fetch_one` may call it."""
+    from convexity import symbol_db
+
+    s = (symbol or "").upper()
+    hit = _research_load().get(s)
+    if isinstance(hit, list) and len(hit) == 2:
+        ttl = _RESEARCH_TTL if hit[1] else _RESEARCH_MISS_TTL
+        if time.time() - float(hit[0]) < ttl:
+            return hit[1] or None
+    try:
+        cands = symbol_db.research_candidates(s)
+    except Exception:
+        cands = []
+    best, n_best, answered = None, 0.0, not cands
+    for c in cands:
+        info = _research_info(c)
+        answered = answered or bool(info)
+        n = _safe_num(info.get("numberOfAnalystOpinions")) or 0.0
+        if n > n_best:
+            best, n_best = c, n
+    if not answered:  # Yahoo didn't answer: ask again next time, don't record a miss
+        return None
+    from convexity.persistence import _atomic_write
+
+    with _RESEARCH_LOCK:
+        store = _research_load()
+        store[s] = [time.time(), best or ""]
+        try:
+            path = _research_store_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(path, json.dumps(store, indent=1, sort_keys=True))
+        except OSError as e:
+            print(f"[research] {s}: {type(e).__name__}")
+    if best:
+        print(f"[research] {s}: analysts and gaps from {best} ({int(n_best)} analysts)")
+    return best
+
+
+def _research_row(symbol: str, own_price: float | None):
+    """(line, row fields of the research line, own price / its price), or
+    None. The row is computed by `_row_fields`, exactly like a listing's own."""
+    line = research_line(symbol)
+    if not line:
+        return None
+    info = _research_info(line)
+    rpx = (
+        _safe_num(info.get("last_price"))
+        or _safe_num(info.get("currentPrice"))
+        or _safe_num(info.get("regularMarketPrice"))
+    )
+    if not info or not rpx or rpx <= 0:
+        return None
+    row: dict = {"symbol": line, "price": rpx}
+    _row_fields(info, rpx, row)
+    ratio = own_price / rpx if own_price and own_price > 0 else None
+    return line, row, ratio
+
+
+def _research_recs(line: str) -> list[dict]:
+    key = f"research_recs|{line}"
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit.get("v") or []
+    trend = _yf_rec_trend(yf.Ticker(line))
+    _cache_put(key, {"v": trend}, _CACHE_TTL_ANALYTICS if trend else _RESEARCH_INFO_MISS_TTL)
+    return trend
+
+
+def _apply_research(out: dict, symbol: str) -> None:
+    """Fill a row's analysts (when it has none) and its fundamental gaps
+    from the research line. Writes ``research_symbol`` / ``research_ratio`` /
+    ``research_n`` so the page can say where they came from. A listing with
+    its own analysts and a sector is left alone (no network)."""
+    needs_an = not (out.get("n_analysts") or out.get("target_mean_price"))
+    needs_fill = not out.get("sector") or out.get("market_cap_usd") is None
+    if not (needs_an or needs_fill) or out.get("quote_type") in ("ETF", "MUTUALFUND", "INDEX"):
+        return
+    try:
+        got = _research_row(symbol, out.get("price"))
+    except Exception as e:
+        print(f"[research] {symbol}: {type(e).__name__}")
+        return
+    if not got:
+        return
+    line, row, ratio = got
+    used = False
+    if needs_an and ratio and row.get("n_analysts"):
+        for k in _RESEARCH_TARGETS:
+            out[k] = row[k] * ratio if row.get(k) is not None else None
+        for k in ("recommendation_mean", "rec_key", "n_analysts"):
+            out[k] = row.get(k)
+        if not out.get("rating_dist") or not out.get("rec_trend_fh"):
+            trend = _research_recs(line)
+            if trend and not out.get("rating_dist"):
+                out["rating_dist"] = {k: v for k, v in trend[0].items() if k != "period"}
+            if len(trend) >= 2 and not out.get("rec_trend_fh"):
+                out["rec_trend_fh"] = trend[:6]
+                out["rec_src"] = {"source": "Yahoo", "via": line}
+        out["research_analysts"] = True
+        used = True
+    for k in ("sector", "industry"):
+        if not out.get(k) and row.get(k):
+            out[k], used = row[k], True
+    for k in _RESEARCH_FILL:
+        if out.get(k) is None and row.get(k) is not None:
+            out[k], used = row[k], True
+    if out.get("market_cap") is None and out.get("market_cap_usd"):
+        usd = usd_per_unit(major_ccy(out.get("currency") or "USD"))
+        out["market_cap"] = out["market_cap_usd"] / usd if usd else None
+    if out.get("earnings_surprise") is None:
+        es = _earnings_surprise_yf(yf.Ticker(line), line)
+        if es:
+            out["earnings_surprise"], used = es, True
+    if used:
+        out["research_symbol"] = line
+        out["research_ratio"] = ratio
+        out["research_n"] = row.get("n_analysts")
+
+
+# Detail-payload keys and the row field each is filled from.
+_DETAIL_FILL = {
+    "pe": "pe_ratio", "forward_pe": "forward_pe", "ps": "ps_ratio", "pb": "price_book",
+    "peg": "peg", "ev_ebitda": "ev_ebitda", "ev_revenue": "ev_revenue",
+    "profit_margin": "profit_margin", "operating_margin": "operating_margin",
+    "gross_margin": "gross_margin", "roe": "roe", "roa": "roa", "debt_equity": "debt_equity",
+    "current_ratio": "current_ratio", "revenue_growth": "revenue_growth",
+    "earnings_growth": "earnings_growth", "market_cap_usd": "market_cap_usd",
+    "fcf_yield": "fcf_yield", "payout_ratio": "payout_ratio", "dividend_yield": "dividend_yield",
+}  # fmt: skip
+
+
+def _apply_research_detail(out: dict, symbol: str) -> None:
+    """`_apply_research` for the stock window's payload (its own key names):
+    the analyst block, the ratings trend, the next report and the gaps.
+    Runs before the sector benchmark is picked, so a filled sector gets its
+    ETF too."""
+    needs_an = not (out.get("num_analysts") or out.get("target_mean"))
+    if not (needs_an or not out.get("sector") or out.get("market_cap_usd") is None):
+        return
+    if out.get("quote_type") in ("ETF", "MUTUALFUND", "INDEX"):
+        return
+    try:
+        got = _research_row(symbol, out.get("price"))
+    except Exception as e:
+        print(f"[research] detail {symbol}: {type(e).__name__}")
+        return
+    if not got:
+        return
+    line, row, ratio = got
+    used = False
+    if needs_an and ratio and row.get("n_analysts"):
+        for dk, rk in (("target_mean", "target_mean_price"), ("target_high", "target_high"),
+                       ("target_low", "target_low"), ("target_median", "target_median")):  # fmt: skip
+            out[dk] = row[rk] * ratio if row.get(rk) is not None else None
+        out["num_analysts"] = row.get("n_analysts")
+        out["recommendation_mean"] = row.get("recommendation_mean")
+        out["recommendation_key"] = row.get("rec_key") or ""
+        if not out.get("recommendations_trend"):
+            out["recommendations_trend"] = _research_recs(line)[:4]
+        out["research_analysts"] = True
+        used = True
+    for k in ("sector", "industry"):
+        if not out.get(k) and row.get(k):
+            out[k], used = row[k], True
+    for dk, rk in _DETAIL_FILL.items():
+        if out.get(dk) is None and row.get(rk) is not None:
+            out[dk], used = row[rk], True
+    if not out.get("next_earnings"):
+        try:
+            cal = yf.Ticker(line).calendar
+            ed = cal.get("Earnings Date") if isinstance(cal, dict) else None
+            if isinstance(ed, list) and ed:
+                out["next_earnings"] = pd.Timestamp(ed[0]).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    if used:
+        out["research_symbol"] = line
+        out["research_ratio"] = ratio
+        out["research_n"] = row.get("n_analysts")
+
+
 def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
     out: dict = {"symbol": symbol}
     last_err: str | None = None
@@ -275,107 +626,14 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             out["rs_rank"] = rs
 
             info = _safe_info(tk)
-            out["name"] = info.get("longName") or info.get("shortName") or symbol
-            out["currency"] = info.get("currency") or "USD"
-            out["market_cap"] = _market_cap(info, out["currency"])
-            out["exchange"] = info.get("exchange") or info.get("fullExchangeName") or ""
-            out["sector"] = info.get("sector") or ""
-            out["industry"] = info.get("industry") or ""
-            out["quote_type"] = (info.get("quoteType") or "").upper()
-            out["website"] = info.get("website") or ""
-
-            out["ps_ratio"] = _positive(info.get("priceToSalesTrailing12Months"))
-            # Trailing only. The old `trailingPE or forwardPE` put a FORWARD
-            # multiple in the trailing column whenever trailing EPS was
-            # negative (Yahoo then omits trailingPE) — exactly the loss-makers
-            # where the two differ most. Loss-makers are n/a here, as P/E is
-            # not meaningful for them; the Fwd P/E column still has theirs.
-            out["pe_ratio"] = _positive(info.get("trailingPE"))
-
-            out["forward_pe"] = _positive(info.get("forwardPE"))
-            out["peg"] = _positive(info.get("pegRatio") or info.get("trailingPegRatio"))
-            out["ev_ebitda"] = _positive(info.get("enterpriseToEbitda"))
-            out["ev_revenue"] = _positive(info.get("enterpriseToRevenue"))
-            out["beta"] = _safe_num(info.get("beta"))
-            out["dividend_yield"] = _normalize_dividend_yield(
-                info.get("dividendYield"),
-                price=last,
-                dividend_rate=info.get("dividendRate"),
-                trailing_yield=info.get("trailingAnnualDividendYield"),
-                trailing_rate=info.get("trailingAnnualDividendRate"),
-                currency=out["currency"],
-                financial_currency=info.get("financialCurrency"),
-            )
-            out["operating_margin"] = _safe_num(info.get("operatingMargins"))
-            # Yahoo reports debtToEquity in PERCENT (AAPL 78.4 = total debt is
-            # 0.78x equity); kept in that unit and shown with a % sign.
-            out["debt_equity"] = _safe_num(info.get("debtToEquity"))
-            out["current_ratio"] = _safe_num(info.get("currentRatio"))
-            # Extended fundamentals (all straight from the same info dict —
-            # zero extra network cost on the streaming path). Margins/growth/
-            # returns come back as fractions (0.42 = 42%); the frontend
-            # formats them, never re-detects units.
-            out["price_book"] = _positive(info.get("priceToBook"))
-            out["roe"] = _safe_num(info.get("returnOnEquity"))
-            out["roa"] = _safe_num(info.get("returnOnAssets"))
-            out["gross_margin"] = _safe_num(info.get("grossMargins"))
-            out["profit_margin"] = _safe_num(info.get("profitMargins"))
-            out["revenue_growth"] = _safe_num(info.get("revenueGrowth"))
-            # Both Yahoo fields are year-over-year growth of the most recent
-            # quarter (earningsGrowth: EPS, earningsQuarterlyGrowth: net
-            # income). The first is preferred; the second only when it is
-            # truly absent — `or` would discard a legitimate 0.0.
-            _eg = info.get("earningsGrowth")
-            if _eg is None:
-                _eg = info.get("earningsQuarterlyGrowth")
-            out["earnings_growth"] = _safe_num(_eg)
-            out["quick_ratio"] = _safe_num(info.get("quickRatio"))
-            out["payout_ratio"] = _safe_num(info.get("payoutRatio"))
-            # FCF yield, USD market cap, and the multiples Yahoo gets wrong
-            # for listings whose statements are in another currency.
-            _currency_consistent(info, out, out["currency"])
-            out["recommendation_mean"] = _safe_num(info.get("recommendationMean"))
-            out["target_mean_price"] = _safe_num(info.get("targetMeanPrice"))
-            # The range too, from the same .info: analytics._analyst_for
-            # otherwise fetches it again per holding (an export's slow part).
-            for k in ("Low", "High", "Median"):
-                out[f"target_{k.lower()}"] = _safe_num(info.get(f"target{k}Price"))
-            out["rec_key"] = (info.get("recommendationKey") or "").strip().lower() or None
-            out["n_analysts"] = _safe_num(info.get("numberOfAnalystOpinions"))
+            _row_fields(info, last, out)
 
             out["earnings_surprise"] = _earnings_surprise_yf(tk, symbol)
 
-            rating_dist = None
-            yf_trend: list[dict] = []
-            try:
-                recs = tk.recommendations
-                if recs is not None and not recs.empty:
-                    for _, rec_row in recs.iterrows():
-                        row_lower = {str(k).lower(): v for k, v in rec_row.items()}
-
-                        def _rd_int(key, row_lower=row_lower):
-                            v = row_lower.get(key, 0)
-                            if v is None or (isinstance(v, float) and math.isnan(v)):
-                                return 0
-                            try:
-                                return int(v)
-                            except (TypeError, ValueError):
-                                return 0
-
-                        d = {
-                            "strongBuy": _rd_int("strongbuy"),
-                            "buy": _rd_int("buy"),
-                            "hold": _rd_int("hold"),
-                            "sell": _rd_int("sell"),
-                            "strongSell": _rd_int("strongsell"),
-                        }
-                        if not any(d.values()):
-                            break
-                        yf_trend.append({"period": str(row_lower.get("period", "")), **d})
-                    if yf_trend:
-                        rating_dist = {k: v for k, v in yf_trend[0].items() if k != "period"}
-            except Exception:
-                pass
+            yf_trend = _yf_rec_trend(tk)
+            rating_dist = (
+                {k: v for k, v in yf_trend[0].items() if k != "period"} if yf_trend else None
+            )
             out["rating_dist"] = rating_dist
 
             # Finnhub answers only US lines, so both are asked of the
@@ -394,6 +652,10 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             else:
                 out["rec_trend_fh"] = None
             out["us_line"] = fsym
+            # A secondary listing (NOV.DE, CCC3.DE) has no analysts
+            # and gaps in its fundamentals: the same company's best-covered
+            # line fills them, its targets scaled to this listing's price.
+            _apply_research(out, symbol)
 
             # Cache-only read — never triggers a fetch from the hot path.
             out["news_sentiment"] = _ns.get_cached_sentiment(symbol)
@@ -948,6 +1210,8 @@ def fetch_detail(symbol: str) -> dict:
     except Exception:
         pass
 
+    _apply_research_detail(out, symbol)
+
     news_out: list[dict] = []
     try:
         news = tk.news or []
@@ -1030,31 +1294,9 @@ def fetch_detail(symbol: str) -> dict:
     return out
 
 
-def fetch_events(symbol: str) -> dict:
-    """Earnings reports and dividends for the stock window's chart markers
-    (the E and D flags), plus the trailing-year dividend yield.
-
-    A detail path like `fetch_detail`, never `fetch_one`. Earnings come from
-    Yahoo's earnings calendar (EPS estimate, reported, surprise), their
-    timestamps read in the exchange's time zone: a report at or after 16:00
-    there moves the next session, anything earlier the same one, so `react`
-    is the first session whose close can carry it. The price reactions are
-    measured by the page on the chart's own closes. Dividends are per share
-    in the quote's unit (pence on LSE), by ex-date. Cached for 6 hours,
-    and only when Yahoo answered something.
-    """
-    cache_key = f"events|{symbol}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-    tk = yf.Ticker(symbol)
-    out: dict = {
-        "symbol": symbol,
-        "earnings": [],
-        "dividends": [],
-        "div_ttm": None,
-        "div_yield_ttm": None,
-    }
+def _earnings_rows(tk) -> list[dict]:
+    """Yahoo's earnings calendar as chart rows (see `fetch_events`)."""
+    out: dict = {"earnings": []}
     tz = None
     with contextlib.suppress(Exception):
         tz = tk.fast_info.timezone
@@ -1096,6 +1338,45 @@ def fetch_events(symbol: str) -> dict:
             ):
                 by_day[e["date"]] = e
         out["earnings"] = sorted(by_day.values(), key=lambda e: e["date"])
+    return out["earnings"]
+
+
+def fetch_events(symbol: str) -> dict:
+    """Earnings reports and dividends for the stock window's chart markers
+    (the E and D flags), plus the trailing-year dividend yield.
+
+    A detail path like `fetch_detail`, never `fetch_one`. Earnings come from
+    Yahoo's earnings calendar (EPS estimate, reported, surprise), their
+    timestamps read in the exchange's time zone: a report at or after 16:00
+    there moves the next session, anything earlier the same one, so `react`
+    is the first session whose close can carry it. The price reactions are
+    measured by the page on the chart's own closes. Dividends are per share
+    in the quote's unit (pence on LSE), by ex-date. Cached for 6 hours,
+    and only when Yahoo answered something.
+    """
+    cache_key = f"events|{symbol}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    tk = yf.Ticker(symbol)
+    out: dict = {
+        "symbol": symbol,
+        "earnings": [],
+        "dividends": [],
+        "div_ttm": None,
+        "div_yield_ttm": None,
+    }
+    out["earnings"] = _earnings_rows(tk)
+    reported = lambda rows: sum(e["actual"] is not None for e in rows)  # noqa: E731
+    if reported(out["earnings"]) < 2:
+        # A secondary listing has no reporting history of its own (NOV.DE
+        # lists only the next date): the company's research line has it.
+        # The dates are the company's, not the venue's.
+        with contextlib.suppress(Exception):
+            line = research_line(symbol)
+            rows = _earnings_rows(yf.Ticker(line)) if line else []
+            if reported(rows) > reported(out["earnings"]):
+                out["earnings"], out["earnings_via"] = rows, line
     try:
         divs = tk.dividends
     except Exception:

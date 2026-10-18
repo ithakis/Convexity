@@ -182,6 +182,12 @@ HOLDINGS_SKIP_EXTRAS = {
     # for the table's tooltips only.
     "rec_src",
     "us_line",
+    # Where a secondary listing's analysts came from (fetcher._apply_research):
+    # bookkeeping, like us_line; the values themselves are in the row.
+    "research_symbol",
+    "research_ratio",
+    "research_n",
+    "research_analysts",
 }
 
 # News read (LLM, five lenses) + Market read (statistical) — the two engines

@@ -787,7 +787,7 @@ def _prefs_allowed() -> dict:
 
 # Phase 9 (notifications): a switch and quiet hours, typed rather than
 # picked from a set. A time is "HH:MM", 24-hour.
-_PREF_BOOLS = ("notify_on", "quiet_on", "dist_haircut")
+_PREF_BOOLS = ("notify_on", "quiet_on", "dist_haircut", "pf_chips_collapsed")
 _PREF_TIMES = ("quiet_from", "quiet_to")
 # The stock window's σ/μ (options_density.py): numbers with bounds, so a typo
 # can't make the curve nonsense. Missing = the module's default.

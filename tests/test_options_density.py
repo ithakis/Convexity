@@ -440,3 +440,140 @@ def test_history_stands_in_when_options_fail(monkeypatch):
         "chain_symbol": "ASML",
         "why": "smile fit 1.7",
     }
+
+
+# ---------------- Robust chains: session clock, hygiene, anchors, snapshots ----------------
+
+
+def _ny_ts(day: str, hh: int = 15) -> float:
+    from zoneinfo import ZoneInfo
+
+    return (
+        dt.datetime.fromisoformat(f"{day}T{hh:02d}:30").replace(tzinfo=ZoneInfo(od._ET)).timestamp()
+    )
+
+
+def test_maturities_count_from_the_quotes_session_not_the_calendar():
+    # Friday 16 Oct 2026's quotes read on Sunday: the session is Friday, so a
+    # weekend read prices the same T as Friday's close did.
+    q = {"strike": 100.0, "bid": 1.0, "ask": 1.1, "ts": _ny_ts("2026-10-16"), "oi": 5.0}
+    old = {**q, "ts": _ny_ts("2026-10-09")}
+    assert od._session([("2027-10-15", 0, [q, old], [])]) == dt.date(2026, 10, 16)
+    # 23:30 New York is still Friday's session, though it is Saturday in UTC.
+    late = {**q, "ts": _ny_ts("2026-10-16", 23)}
+    assert od._session([("2027-10-15", 0, [late], [])]) == dt.date(2026, 10, 16)
+    assert od._session([("2027-10-15", 0, [{**q, "ts": None}], [])]) is None
+
+
+def test_min_tick_wings_and_dead_strikes_are_not_a_market():
+    # NVO's January call at K=90 on a $39 stock, 0.03/0.04: its implied vol is
+    # tick noise (a 14.7 vol-pt outlier that failed the whole surface).
+    asof = _ny_ts("2026-10-16")
+    live = {"strike": 40.0, "bid": 2.41, "ask": 2.5, "ts": asof, "oi": 15258.0}
+    tick = {"strike": 90.0, "bid": 0.03, "ask": 0.04, "ts": asof, "oi": 12593.0}
+    dead = {"strike": 44.0, "bid": 1.0, "ask": 1.2, "ts": asof - 30 * 86400, "oi": 0.0}
+    held = {**dead, "strike": 46.0, "oi": 300.0}  # old trade, but open interest: kept
+    got = od._live([live, tick, dead, held], 38.8, asof)
+    assert [q["strike"] for q in got] == [40.0, 46.0]
+    # Quotes without trade times (tests, snapshots) only meet the floor.
+    assert len(od._live([{"strike": 40.0, "bid": 2.0, "ask": 2.2}], 38.8, asof)) == 1
+
+
+def test_a_far_wing_past_the_sd_cut_is_dropped():
+    calls, puts = bs_chain(np.arange(40.0, 251.0, 2.5), t=0.25)
+    calls.append({"strike": 400.0, "bid": 0.5, "ask": 0.55})  # 0.3 vol, 3M: ~9 sd out
+    sl = od._slice(S0, 0.25, R, calls, puts)
+    assert sl["K"].max() < 400.0
+    assert np.abs(sl["k"]).max() <= od.MAX_K_SD * 0.3 * math.sqrt(0.25) + 1e-9
+
+
+def _surface_chains(days_quotes, session="2026-10-16"):
+    """(expiry, days, calls, puts) off one SSVI surface; oi per expiry."""
+    out = []
+    base = dt.date.fromisoformat(session)
+    for days, n, oi in days_quotes:
+        t = days / 365
+        sd = 0.25 * math.sqrt(t)
+        ks = np.unique(np.round(S0 * np.exp(np.linspace(-2.2 * sd, 1.8 * sd, n)) / 2.5) * 2.5)
+        calls, puts = ssvi_chain(t, ks)
+        for q in (*calls, *puts):
+            q.update(ts=_ny_ts(session), oi=oi)
+        out.append(((base + dt.timedelta(days=days)).isoformat(), days, calls, puts))
+    return out
+
+
+def test_12m_reads_the_surface_between_the_liquid_anchors(monkeypatch):
+    # The nearest expiry to a year is thin (NVO's September: 9 quotes);
+    # June and the January LEAP either side are deep. 12M comes off the
+    # surface at exactly 365 days, anchored on those two.
+    chains = _surface_chains([(62, 22, 50), (90, 22, 400), (153, 22, 90), (243, 22, 130),
+                              (335, 9, 22), (461, 22, 178), (790, 22, 40)])  # fmt: skip
+    res = {"chains": chains, "session": dt.date(2026, 10, 16), "s0": None, "snapshot": None}
+    monkeypatch.setattr(od, "_chains", lambda tk, sym: res)
+    monkeypatch.setattr(od, "SLICE_MIN_QUOTES", 12)  # the thin September can't pass on its own
+    exps = [(e, d) for e, d, *_ in chains]
+    rn, expiry, days, ok, why, meta = od._options_rn(None, "ZZANCH", exps, 365, S0, R)
+    assert ok, why
+    assert days == 365 and expiry == "2027-10-16" and rn["T"] == pytest.approx(1.0)
+    assert rn["anchors"] == [243, 461]
+    assert rn["atm_iv"] == pytest.approx(math.sqrt(0.06), abs=0.005)
+    assert meta == {"session": "2026-10-16", "snapshot": False}
+
+
+def test_a_liquid_expiry_at_the_horizon_keeps_its_own_fit(monkeypatch):
+    chains = _surface_chains([(62, 40, 50), (90, 40, 400), (153, 40, 90), (243, 40, 130),
+                              (350, 40, 220), (461, 40, 178)])  # fmt: skip
+    res = {"chains": chains, "session": dt.date(2026, 10, 16), "s0": None, "snapshot": None}
+    monkeypatch.setattr(od, "_chains", lambda tk, sym: res)
+    rn, expiry, days, ok, why, _ = od._options_rn(None, "ZZAT", [], 365, S0, R)
+    assert ok and days == 350 and "anchors" not in rn
+
+
+class _Tk:
+    """A yfinance Ticker stand-in serving one quote table for every expiry."""
+
+    def __init__(self, exps, bid_scale=1.0):
+        import pandas as pd
+
+        self.options = exps
+        self._pd, self._scale = pd, bid_scale
+
+    def option_chain(self, e):
+        from types import SimpleNamespace
+
+        t = (dt.date.fromisoformat(e) - dt.date(2026, 10, 16)).days / 365
+        calls, puts = bs_chain(np.arange(60.0, 160.0, 5.0), t=t)
+        stamp = self._pd.Timestamp(_ny_ts("2026-10-16"), unit="s", tz="UTC")
+
+        def df(rows):
+            return self._pd.DataFrame([
+                {"strike": r["strike"], "bid": r["bid"] * self._scale, "ask": r["ask"] * self._scale,
+                 "lastTradeDate": stamp, "openInterest": 100.0} for r in rows
+            ])  # fmt: skip
+
+        return SimpleNamespace(calls=df(calls), puts=df(puts))
+
+
+def test_a_zeroed_chain_stands_in_with_the_last_good_snapshot(monkeypatch):
+    exps = ["2027-01-15", "2027-06-17", "2028-01-21"]
+    monkeypatch.setattr(od.dt, "date", _FrozenDate)
+    good = od._chains(_Tk(exps), "ZZSNAP")
+    assert good["session"] == dt.date(2026, 10, 16) and not good["snapshot"]
+    assert good["chains"][0][1] == 91  # days from Friday's session
+    od._snap_save("ZZSNAP", good, 100.0)
+    od.cache._CACHE.pop("density-chains|ZZSNAP", None)
+    zeroed = od._chains(_Tk(exps, bid_scale=0.0), "ZZSNAP")
+    assert zeroed["snapshot"] == dt.date(2026, 10, 16) and zeroed["s0"] == 100.0
+    assert len(zeroed["chains"]) == 3 and zeroed["chains"][0][2][0]["bid"] > 0
+    # Older than SNAP_MAX_AGE days: no stand-in.
+    od.cache._CACHE.pop("density-chains|ZZSNAP", None)
+    monkeypatch.setattr(_FrozenDate, "_today", dt.date(2026, 10, 23))
+    assert not od._chains(_Tk(exps, bid_scale=0.0), "ZZSNAP").get("snapshot")
+
+
+class _FrozenDate(dt.date):
+    _today = dt.date(2026, 10, 18)  # a Sunday
+
+    @classmethod
+    def today(cls):
+        return cls._today

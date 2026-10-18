@@ -43,6 +43,10 @@
     --rev-head-bg: #eaf1f8;  /* the import review's header band */
     --header-bg: #f2f6fa;
     --hover: #e8f2fa;       /* was a yellow #fff8c5 — the most "default" thing on the page */
+    /* Filled controls one step off the canvas: the company search field and
+       the constituent pills ("Field + tags", owner 2026-10-18). */
+    --field-bg: #edf2f7;
+    --chip-bg: #f0f4f8;
     --hlc-hi: #00a8e0;      /* HLC area: the high line + its band (Morgan Stanley cyan) */
     --on-accent: #ffffff;   /* text/thumb color placed on an --accent fill */
     --ai: #8250df;          /* company search: anything the AI chose or wrote */
@@ -82,6 +86,8 @@
     --rev-head-bg: #13202e;
     --header-bg: #111823;
     --hover: #152132;
+    --field-bg: #152132;
+    --chip-bg: #131c29;
     --on-accent: #04121f;   /* white on the lighter dark-mode blue is only ~2.8:1 */
     --hlc-hi: #38c0ee;
     --ai: #a371f7;
@@ -132,6 +138,8 @@
     --rev-head-bg: #1a1208;
     --header-bg: #141414;
     --hover: #14273f;           /* dark blue — Bloomberg's selection-bar blue */
+    --field-bg: #161616;        /* neutral, not the selection blue */
+    --chip-bg: #171717;
     --on-accent: #050505;       /* near-black text on the bright orange accent */
     --hlc-hi: #4dc7f9;          /* Bloomberg cyan */
     --ns-vbull: #33d17a;
@@ -719,33 +727,54 @@
   }
   .pf-tab-add:hover { color: var(--accent); border-color: var(--accent); }
 
-  /* Constituents: one pill per entry (app.js renderConstituents) */
+  /* Constituents: one pill per entry (app.js renderConstituents). "Field +
+     tags" (owner, 2026-10-18): a borderless fill one step off the canvas,
+     the ticker a recessed badge, so the pills read apart from the page. */
   #pf-count { font-weight: 600; color: var(--muted); margin-left: 6px; letter-spacing: 0.04em; }
   .pf-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .pf-chips:empty::before { content: "Add companies with the search box above."; color: var(--muted); font-size: 12px; }
   .pf-chip {
-    display: inline-flex; align-items: center; gap: 6px; max-width: 280px;
-    padding: 4px 6px 4px 12px; border: 1px solid var(--border); border-radius: 999px;
-    background: var(--bg-canvas); color: var(--text); font-size: 12.5px;
+    display: inline-flex; align-items: center; gap: 7px; max-width: 280px;
+    padding: 4px 5px 4px 12px; border: 1px solid transparent; border-radius: 999px;
+    background: var(--chip-bg); color: var(--text); font-size: 12.5px;
+    transition: background .12s;
   }
+  .pf-chip:hover { background: var(--hover); }
   .pf-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pf-chip-tk { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--muted); }
+  .pf-chip-tk {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px; color: var(--muted);
+    background: var(--bg-canvas); padding: 1px 6px; border-radius: var(--r-sm);
+  }
   .pf-chip-x {
     width: 18px; height: 18px; border: 0; border-radius: 50%; padding: 0; flex-shrink: 0;
     background: transparent; color: var(--muted); font-size: 11px; cursor: pointer;
   }
   .pf-chip-x:hover { background: rgba(var(--neg-rgb), 0.16); color: var(--neg); }
+  /* The fold: the kicker is the button; the count stays when folded. */
+  .sa-kicker.pf-fold {
+    display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none;
+    font-family: inherit; cursor: pointer;
+  }
+  .sa-kicker.pf-fold:hover { color: var(--accent); }
+  .sa-kicker.pf-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: var(--r-sm); }
+  .pf-caret { display: inline-block; font-size: 9px; color: var(--muted); transition: transform .15s; }
+  .pf-editor.collapsed .pf-caret { transform: rotate(-90deg); }
+  .pf-editor.collapsed .pf-chips { display: none; }
+  .pf-chips-sum {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-left: 34px;
+  }
 
   /* Company search (index.html #co-search, app.js "Company search"). The
-     chips are the query that ran; purple marks what the AI chose or wrote. */
+     chips are the query that ran; purple marks what the AI chose or wrote.
+     The box is a filled field at rest; the accent ring is for focus only. */
   .co-search { margin: 0 0 14px; }
   .co-bar {
     display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 6px 0 18px;
-    background: var(--bg-canvas); border: 2px solid rgba(var(--accent-rgb), 0.42); border-radius: 999px;
-    box-shadow: 0 1px 2px rgba(var(--accent-rgb), 0.10), inset 0 1px 0 rgba(255,255,255,0.03);
-    transition: border-color .15s, box-shadow .15s;
+    background: var(--field-bg); border: 1px solid transparent; border-radius: 999px;
+    transition: border-color .15s, box-shadow .15s, background .15s;
   }
-  .co-bar:hover { border-color: rgba(var(--accent-rgb), 0.65); }
+  .co-bar:hover { border-color: var(--border); }
   .co-bar:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.16); }
   .co-icon { color: var(--muted); font-size: 15px; }
   /* The native clear (x) of type=search is redundant: Enter on an empty box clears. */

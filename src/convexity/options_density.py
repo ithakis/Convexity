@@ -1,8 +1,9 @@
 """Real-world price distribution from listed options (the stock window's σ/μ).
 
 docs/architecture/backend.md (the σ/μ density section) is the spec. The
-pipeline per horizon (the listed expiry nearest 91 or 365 days; only when none
-is near does the SSVI surface give the horizon itself, `surface_at`):
+pipeline per horizon (a liquid expiry within 10% of 91 or 365 days, else the
+SSVI surface read at the exact horizon between the most liquid expiry either
+side, `_options_rn`; maturities count from the quotes' session, `_session`):
 
     Yahoo chain -> forward from put-call parity, with the rate fixed from ^IRX
     (Yahoo's US chains are American-style; parity backs out nonsense rates)
@@ -99,6 +100,27 @@ EXPIRY_TRIES = 4  # expiries in the window tried, nearest the horizon first
 # maturity, or grown at the last expiry's average rate past it (flat vol).
 EXTRAP_MIN = 0.5
 LINE_TTL = 86400.0  # the chosen chain listing, a day
+# Quote hygiene. A deep OTM option quoted at the minimum tick (NVO's K=90
+# January call at 0.03/0.04 on a $39 stock) has an implied vol that is pure
+# tick noise: two such quotes put a 14.7 vol-pt outlier in NVO's surface and
+# failed it (2.2 vol pts). Below the premium floor, or past MAX_K_SD ATM
+# standard deviations, a quote is dropped; that alone took NVO's surface to
+# 1.1 vol pts and SPY's (all 21 expiries) from 4.7 to 0.6 (2026-10-18).
+MIN_PREMIUM = 0.05  # or 0.5% of spot, whichever is smaller (a $5 stock's ticks)
+MAX_K_SD = 3.5
+# A strike nobody has traded for STALE_DAYS and nobody holds (open interest
+# 0) is a dead quote, not a market.
+STALE_DAYS = 14
+# The liquidity-anchored horizon: an expiry within ANCHOR_BAND of the horizon
+# counts as "at" it; otherwise the surface is read at the exact horizon
+# between the most liquid expiry on each side, within [1/2, 2] x the horizon.
+ANCHOR_BAND = 0.10
+# Yahoo sometimes serves a chain with its bids and asks zeroed (a holiday, the
+# minutes around the open). Then the last chain that passed the gate, up to
+# SNAP_MAX_AGE days old, stands in (state/chains/<line>.json, numbers only).
+SNAP_MAX_AGE = 4
+SNAP_MIN_TWO_SIDED = 0.3  # share of quotes with a bid and an ask below which a chain is "zeroed"
+_ET = "America/New_York"
 
 
 class DensityError(Exception):
@@ -256,18 +278,43 @@ def _tails(Kg: np.ndarray, fK: np.ndarray, cdf: np.ndarray, kmin: float, kmax: f
 # ------------------------------ Risk-neutral fit -----------------------------
 
 
-def _slice(S0: float, T: float, rf: float, calls, puts) -> dict:
+def _live(quotes, S0: float, asof: float | None) -> list:
+    """Quotes that are a market: a mid above the premium floor, and not a
+    dead strike (untraded for STALE_DAYS before ``asof`` with no open
+    interest). Quotes without a trade time or open interest (tests, a
+    snapshot) only meet the floor."""
+    floor = min(MIN_PREMIUM, 0.005 * S0)
+    out = []
+    for q in quotes or ():
+        try:
+            mid = (float(q["bid"]) + float(q["ask"])) / 2
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not mid >= floor:
+            continue
+        ts, oi = q.get("ts"), q.get("oi")
+        if asof and ts and oi is not None and not oi and asof - ts > STALE_DAYS * 86400:
+            continue
+        out.append(q)
+    return out
+
+
+def _slice(S0: float, T: float, rf: float, calls, puts, asof: float | None = None) -> dict:
     """One expiry's usable quotes as implied total variance on k = ln(K/F).
 
     The forward is the median of K + (C - P)/DF near spot, with the rate an
     input (from ^IRX), never backed out of parity: American-style chains
-    gave -4.8% at 3M. Quotes: two-sided, OTM only, spread < 60% of mid,
-    0.3 < K/F < 2.5, minus any that break static no-arbitrage (`_monotone`).
-    Raises DensityError("thin") when fewer than 6 remain."""
+    gave -4.8% at 3M. Quotes: live (`_live`: above the premium floor, not a
+    dead strike), two-sided, OTM only, spread < 60% of mid, 0.3 < K/F < 2.5,
+    within MAX_K_SD ATM sd, minus any that break static no-arbitrage
+    (`_monotone`). Raises DensityError("thin") when fewer than 6 remain.
+    ``oi`` (the expiry's open interest) and ``rs`` (each quote's spread over
+    its mid) are kept for the liquidity weights and anchors."""
     if not (S0 > 0 and T > 0):
         raise DensityError("thin", "bad spot or maturity")
     DF = math.exp(-rf * T)
-    cm, pm = _mid_map(calls), _mid_map(puts)
+    oi = sum(float(q.get("oi") or 0) for q in (*(calls or ()), *(puts or ())))
+    cm, pm = _mid_map(_live(calls, S0, asof)), _mid_map(_live(puts, S0, asof))
     near = [k for k in cm.keys() & pm.keys() if abs(k / S0 - 1) < 0.12]
     if not near:
         raise DensityError("thin", "no two-sided strikes near spot")
@@ -284,12 +331,30 @@ def _slice(S0: float, T: float, rf: float, calls, puts) -> dict:
         r for r in rows if np.isfinite(r[1]) and r[2] / r[3] < MAX_SPREAD and 0.3 < r[0] / F < 2.5
     ]
     rows = _monotone(rows, F)
+    if len(rows) >= 6:
+        rows.sort()
+        kk = np.log(np.array([r[0] for r in rows]) / F)
+        w_atm = float(np.interp(0.0, kk, [r[1] for r in rows]))
+        if w_atm > 0:
+            rows = [
+                r for r, k in zip(rows, kk, strict=True) if abs(k) <= MAX_K_SD * math.sqrt(w_atm)
+            ]
     if len(rows) < 6:
         raise DensityError("thin", f"{len(rows)} usable quotes")
     rows.sort()
     K = np.array([r[0] for r in rows])
     return {"T": T, "S0": float(S0), "rf": float(rf), "F": F, "K": K, "k": np.log(K / F),
-            "w": np.array([r[1] for r in rows])}  # fmt: skip
+            "w": np.array([r[1] for r in rows]), "rs": np.array([r[2] / r[3] for r in rows]),
+            "oi": oi}  # fmt: skip
+
+
+def _liquidity(sl: dict) -> float:
+    """How much an expiry's quotes can be trusted, for picking anchors: open
+    interest x usable quotes / median relative spread (the most liquid of
+    NVO's 12M neighbours is the Jan-28 LEAP, 178k contracts at a 10% spread,
+    not the 22k-contract September nearest the horizon)."""
+    rs = float(np.median(sl["rs"])) if len(sl.get("rs", ())) else 1.0
+    return (sl.get("oi", 0.0) + 1.0) * len(sl["k"]) / max(rs, 1e-3)
 
 
 def _density(sl: dict, smile) -> dict:
@@ -364,6 +429,18 @@ def ssvi(theta, k, rho: float, eta: float, gamma: float):
     return theta / 2 * (1 + rho * phi * k + np.sqrt((phi * k + rho) ** 2 + 1 - rho**2))
 
 
+def _spread_w(s: dict):
+    """Liquidity weights within a slice: a quote at a 5% spread counts about
+    three times one at 40% (1 / (1 + spread/mid / 0.2)), normalised to mean 1
+    so slices keep their weight. The calibration notebook's 1/spread^2
+    favours exactly the min-tick wings it should distrust, so not that."""
+    rs = s.get("rs")
+    if rs is None or len(rs) != len(s["k"]):
+        return 1.0
+    w = 1.0 / (1.0 + np.asarray(rs) / 0.2)
+    return w / w.mean()
+
+
 def _fit_ssvi(slices: list[dict]):
     """SSVI on every slice (sorted by T): (theta per slice, rho, eta, gamma,
     RMSE in vol points, quote count)."""
@@ -385,7 +462,7 @@ def _fit_ssvi(slices: list[dict]):
         out = []
         for s, t in zip(slices, th, strict=True):
             wm = np.maximum(ssvi(t, s["k"], rho, eta, gamma), 1e-10)
-            wt = np.exp(-0.5 * (s["k"] / (2 * np.sqrt(t))) ** 2)
+            wt = np.exp(-0.5 * (s["k"] / (2 * np.sqrt(t))) ** 2) * _spread_w(s)
             out.append((np.sqrt(wm / s["T"]) - np.sqrt(s["w"] / s["T"])) * wt)
         return np.concatenate(out)
 
@@ -435,7 +512,7 @@ def fit_surface(slices: list[dict], target: dict) -> dict:
     return _surface_rn(_density(slices[tgt], lambda kk: ssvi(t, kk, rho, eta, gamma)), fit)
 
 
-def surface_at(slices: list[dict], T: float) -> dict:
+def surface_at(slices: list[dict], T: float, near: list[dict] | None = None) -> dict:
     """The density at a maturity no expiry has, off the SSVI surface.
 
     Total ATM variance theta is linear in T between the fitted expiries
@@ -444,7 +521,8 @@ def surface_at(slices: list[dict], T: float) -> dict:
     standard extrapolation. The carry (r - q) is the nearest expiry's,
     held constant. The nearest slice's quotes, rescaled to the same ATM
     standard deviations, place the GEV tails; ``extrapolated`` says from
-    which maturity."""
+    which maturity. ``near`` (the anchors either side of T) picks, instead,
+    the one whose quotes reach furthest in ATM sd, and its carry."""
     slices = sorted(slices, key=lambda s: s["T"])
     fit = _fit_ssvi(slices)
     th, rho, eta, gamma = fit[:4]
@@ -454,6 +532,10 @@ def surface_at(slices: list[dict], T: float) -> dict:
     else:
         t = float(th[-1] * T / Ts[-1])
     i = int(np.argmin(np.abs(Ts - T)))
+    if near:
+        idx = [j for j, s in enumerate(slices) if any(s is n for n in near)]
+        if idx:
+            i = max(idx, key=lambda j: float(np.ptp(slices[j]["k"])) / math.sqrt(float(th[j])))
     near = slices[i]
     carry = math.log(near["F"] / near["S0"]) / near["T"]
     F = near["S0"] * math.exp(carry * T)
@@ -648,17 +730,46 @@ def _rate() -> float:
 
 
 def _quotes(df) -> list[dict]:
+    """{strike, bid, ask, ts (last trade, epoch s, or None), oi} per row."""
     if df is None or df.empty:
         return []
-    return [
-        {"strike": float(k), "bid": float(b), "ask": float(a)}
-        for k, b, a in zip(df["strike"], df["bid"], df["ask"], strict=False)
-        if b == b and a == a
-    ]
+    n = len(df)
+    ts = df["lastTradeDate"] if "lastTradeDate" in df.columns else [None] * n
+    oi = df["openInterest"] if "openInterest" in df.columns else [None] * n
+    out = []
+    for k, b, a, t, o in zip(df["strike"], df["bid"], df["ask"], ts, oi, strict=False):
+        if not (b == b and a == a):
+            continue
+        try:
+            tsec = float(t.timestamp()) if t is not None and t == t else None
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            tsec = None
+        out.append({"strike": float(k), "bid": float(b), "ask": float(a), "ts": tsec,
+                    "oi": float(o) if o is not None and o == o else 0.0})  # fmt: skip
+    return out
 
 
-def _expiries(tk) -> list[tuple[str, int]]:
-    today = dt.date.today()
+def _session(chains) -> dt.date | None:
+    """The trading session the quotes belong to: the New York date of the
+    latest trade anywhere in the chain. On a Sunday (or Friday evening, or a
+    holiday Monday) it is Friday's, and every maturity counts from that close:
+    measuring T from the calendar's today made a weekend's T two days short
+    of the quotes it priced."""
+    from zoneinfo import ZoneInfo
+
+    best = None
+    for _e, _d, calls, puts in chains or ():
+        for q in (*calls, *puts):
+            t = q.get("ts")
+            if t and (best is None or t > best):
+                best = t
+    if best is None:
+        return None
+    return dt.datetime.fromtimestamp(best, ZoneInfo(_ET)).date()
+
+
+def _expiries(tk, today: dt.date | None = None) -> list[tuple[str, int]]:
+    today = today or dt.date.today()
     out = []
     for e in tk.options or ():
         try:
@@ -687,7 +798,9 @@ def _atm_w(tk, expiry: str, days: int, S0: float, rf: float) -> float | None:
     return w if math.isfinite(w) else None
 
 
-def _earnings(tk, chain_sym: str, exps, S0: float, rf: float, horizon: int) -> list[dict]:
+def _earnings(
+    tk, chain_sym: str, exps, S0: float, rf: float, horizon: int, session: dt.date | None = None
+) -> list[dict]:
     """Earnings dates inside the horizon, with the options' implied jump.
 
     sigma_e^2 = w_after - w_before * T_after / T_before from the ATM total
@@ -701,8 +814,9 @@ def _earnings(tk, chain_sym: str, exps, S0: float, rf: float, horizon: int) -> l
     e = ev.get("earnings")
     if not e:
         return []
+    day0 = session or dt.date.today()
     try:
-        ed = (dt.date.fromisoformat(e) - dt.date.today()).days
+        ed = (dt.date.fromisoformat(e) - day0).days
     except ValueError:
         return []
     if ed < 0 or ed > horizon:
@@ -718,7 +832,7 @@ def _earnings(tk, chain_sym: str, exps, S0: float, rf: float, horizon: int) -> l
             var_e = min(var_e, 0.09)  # a 30% one-day sd is a data error, not a report
     out, d, first = [], ed, True
     while d <= horizon:
-        day = (dt.date.today() + dt.timedelta(days=d)).isoformat()
+        day = (day0 + dt.timedelta(days=d)).isoformat()
         out.append({"date": day, "days": d, "var": round(var_e, 6), "estimated": not first})
         first, d = False, d + 91
     return out
@@ -778,6 +892,33 @@ def _analysts(tk) -> dict | None:
         "high": t[-1],
         "n": len(firms),
     }
+
+
+def _research_analysts(symbol: str, S0: float) -> dict | None:
+    """The firms' targets from the company's research line (fetcher.research_line:
+    NOVO-B.CO for NOV.DE), scaled to this listing by the two last prices so
+    they read in its currency and units, like the options path's ``ratio``."""
+    import yfinance as yf
+
+    from convexity import fetcher
+
+    line = fetcher.research_line(symbol)
+    if not line:
+        return None
+    rtk = yf.Ticker(line)
+    an = _analysts(rtk)
+    px, _ = _last(rtk)
+    if not an or not (math.isfinite(px) and px > 0):
+        return None
+    k = S0 / px
+    sc = lambda v: round(v * k, 4) if v is not None else None  # noqa: E731
+    an["firms"] = [
+        {**f, "target": sc(f["target"]), "prior": sc(f.get("prior"))} for f in an["firms"]
+    ]
+    an.update(
+        consensus=an["consensus"] * k, low=sc(an.get("low")), high=sc(an.get("high")), via=line
+    )
+    return an
 
 
 def _resolve_chain(symbol: str):
@@ -998,9 +1139,14 @@ def _local_rate(ccy: str) -> tuple[float, str]:
     return r_usd, "US 3-month bill (no local rate)"
 
 
-def _chains(tk, sym: str) -> list[tuple[str, int, list, list]]:
+def _chains(tk, sym: str) -> dict:
     """Every expiry's quotes within SURFACE_DAYS, fetched in parallel and
-    cached for TTL: both horizons and the surface share them."""
+    cached for TTL: both horizons and the surface share them.
+
+    ``{"chains": [(expiry, days, calls, puts)], "session", "s0", "snapshot"}``:
+    days count from the quotes' own session (`_session`), not the calendar.
+    When Yahoo serves the chain with its quotes zeroed, the last chain that
+    passed the gate stands in (`_snap_load`, ``snapshot`` its session)."""
     key = f"density-chains|{sym}"
     hit = cache._cache_get(key)
     if hit is not None:
@@ -1018,48 +1164,184 @@ def _chains(tk, sym: str) -> list[tuple[str, int, list, list]]:
 
     with ThreadPoolExecutor(6) as ex:
         out = [c for c in ex.map(get, exps) if c]
-    if out:
-        cache._cache_put(key, out, TTL)
-    return out
+    session = _session(out) or dt.date.today()
+    out = [(e, (dt.date.fromisoformat(e) - session).days, c, p) for e, _d, c, p in out]
+    res = {"chains": [c for c in out if c[1] > 0], "session": session, "s0": None, "snapshot": None}
+    if _two_sided(out) < SNAP_MIN_TWO_SIDED:
+        snap = _snap_load(sym)
+        if snap:
+            print(f"[density] {sym}: quotes zeroed, using the {snap['session']} chain")
+            res = snap
+    if res["chains"]:
+        cache._cache_put(key, res, TTL)
+    return res
+
+
+def _two_sided(chains) -> float:
+    n = two = 0
+    for _e, _d, calls, puts in chains or ():
+        for q in (*calls, *puts):
+            n += 1
+            two += q["bid"] > 0 and q["ask"] > 0
+    return two / n if n else 0.0
+
+
+def _snap_path(sym: str):
+    from convexity import paths
+
+    safe = "".join(c for c in sym.upper() if c.isalnum() or c in ".-^=")[:32]
+    return paths.state_dir() / "chains" / f"{safe}.json"
+
+
+def _snap_save(sym: str, res: dict, S0: float) -> None:
+    """Keep the chain that just passed the gate: strikes, quotes, open
+    interest and its session (numbers only). Written once per session."""
+    import json
+
+    from convexity.persistence import _atomic_write
+
+    if res.get("snapshot"):
+        return
+    path = _snap_path(sym)
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+        if old.get("session") == res["session"].isoformat():
+            return
+    except (OSError, ValueError, AttributeError):
+        pass
+
+    def row(q):
+        return [q["strike"], q["bid"], q["ask"], q.get("oi") or 0.0]
+
+    body = {
+        "v": 1,
+        "symbol": sym,
+        "session": res["session"].isoformat(),
+        "s0": S0,
+        "chains": [[e, [row(q) for q in c], [row(q) for q in p]] for e, _d, c, p in res["chains"]],
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, json.dumps(body, separators=(",", ":")))
+    except OSError as e:
+        print(f"[density] snapshot {sym}: {type(e).__name__}")
+
+
+def _snap_load(sym: str) -> dict | None:
+    """The last good chain, if its session is at most SNAP_MAX_AGE days old;
+    a missing or malformed file is None."""
+    import json
+
+    try:
+        d = json.loads(_snap_path(sym).read_text(encoding="utf-8"))
+        session = dt.date.fromisoformat(d["session"])
+        if (dt.date.today() - session).days > SNAP_MAX_AGE or not d["s0"] > 0:
+            return None
+
+        def q(r):
+            return {"strike": float(r[0]), "bid": float(r[1]), "ask": float(r[2]), "ts": None,
+                    "oi": float(r[3])}  # fmt: skip
+
+        chains = []
+        for e, c, p in d["chains"]:
+            days = (dt.date.fromisoformat(e) - session).days
+            if days > 0:
+                chains.append((e, days, [q(r) for r in c], [q(r) for r in p]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not chains:
+        return None
+    return {"chains": chains, "session": session, "s0": float(d["s0"]), "snapshot": session}
 
 
 def _options_rn(tk, sym: str, exps, horizon: int, S0: float, rf: float):
-    """The risk-neutral fit for a horizon: (rn, expiry, days, ok, why).
+    """The risk-neutral fit for a horizon: (rn, expiry, days, ok, why, meta).
 
-    Tries the EXPIRY_TRIES expiries in the window nearest the horizon. On
-    each, SVI when the slice has MIN_QUOTES, then the SSVI surface over all
-    expiries; the first fit that passes the gate wins. Otherwise the nearest
-    expiry's first fit comes back with why it failed."""
+    1. A liquid expiry at the horizon (within ANCHOR_BAND): its own SVI when
+       it has MIN_QUOTES, then the SSVI surface at it.
+    2. Else the surface read at the exact horizon between the most liquid
+       expiry on each side (`_liquidity`), the tails placed from whichever of
+       the two reaches furthest. NVO's 12M nearest expiry is a thin September;
+       its neighbours June and the Jan-28 LEAP carry 8x the open interest.
+    3. Else the old order: up to EXPIRY_TRIES window expiries, nearest first.
+    4. With no expiry in the window, the surface extrapolated (`surface_at`).
+    The first failure comes back with why. ``meta`` has the session the
+    quotes are from and whether they are a stand-in snapshot."""
     lo, hi = EXPIRY_WINDOW[horizon]
+    ch = _chains(tk, sym)
+    session = ch["session"]
+    meta = {"session": session.isoformat(), "snapshot": bool(ch["snapshot"])}
+    S0_fit = ch["s0"] or S0  # a snapshot's quotes go with its own spot
+    asof = max(
+        (q["ts"] for _e, _d, c, p in ch["chains"] for q in (*c, *p) if q.get("ts")), default=None
+    )
+    exps = [(e, d) for e, d, _c, _p in ch["chains"]] or [
+        (e, (dt.date.fromisoformat(e) - session).days) for e, _ in exps
+    ]
     usable = sorted((e for e in exps if lo <= e[1] <= hi), key=lambda e: abs(e[1] - horizon))
     if not usable and not _can_extrapolate(exps, horizon):
         raise DensityError("no_expiry", f"longest expiry {max(e[1] for e in exps)} days")
     slices = {}
-    for e, d, calls, puts in _chains(tk, sym):
+    for e, d, calls, puts in ch["chains"]:
         with contextlib.suppress(DensityError):
-            slices[e] = _slice(S0, d / 365, rf, calls, puts)
+            slices[e] = _slice(S0_fit, d / 365, rf, calls, puts, asof)
     surface = list(slices.values())
     first = None
-    for e, d in usable[:EXPIRY_TRIES]:
-        sl = slices.get(e)
-        if sl is None:
-            continue
-        fits = []
-        if len(sl["K"]) >= MIN_QUOTES or len(surface) < SURFACE_MIN_SLICES:
-            fits.append(lambda sl=sl: _svi_density(sl))
-        if len(surface) >= SURFACE_MIN_SLICES:
-            fits.append(lambda sl=sl: fit_surface(surface, sl))
+
+    def done(rn, e, d, ok, why):
+        if S0_fit != S0:  # a snapshot: same moneyness, today's spot
+            rn["F"] *= S0 / S0_fit
+            rn["S0"] = S0
+        return rn, e, d, ok, why, meta
+
+    def attempt(fits, e, d):
+        nonlocal first
         for fit in fits:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 rn = fit()
             ok, why = quality(rn)
             if ok:
-                return rn, e, d, True, ""
+                return rn
             if first is None:
                 first = (rn, e, d, False, why)
+        return None
+
+    def fits_at(sl):
+        fits = []
+        if len(sl["K"]) >= MIN_QUOTES or len(surface) < SURFACE_MIN_SLICES:
+            fits.append(lambda sl=sl: _svi_density(sl))
+        if len(surface) >= SURFACE_MIN_SLICES:
+            fits.append(lambda sl=sl: fit_surface(surface, sl))
+        return fits
+
+    at = [(e, d) for e, d in usable if abs(d - horizon) <= ANCHOR_BAND * horizon and e in slices]
+    for e, d in sorted(at, key=lambda ed: -_liquidity(slices[ed[0]])):
+        rn = attempt(fits_at(slices[e]), e, d)
+        if rn:
+            return done(rn, e, d, True, "")
+    if len(surface) >= SURFACE_MIN_SLICES:
+        days = lambda s: s["T"] * 365  # noqa: E731
+        below = [s for s in surface if horizon / 2 <= days(s) < horizon]
+        above = [s for s in surface if horizon <= days(s) <= 2 * horizon]
+        if below and above:
+            anchors = [max(below, key=_liquidity), max(above, key=_liquidity)]
+            rn = attempt([lambda: surface_at(surface, horizon / 365, anchors)], "", horizon)
+            if rn:
+                rn["anchors"] = [round(days(s)) for s in anchors]
+                return done(
+                    rn, (session + dt.timedelta(days=horizon)).isoformat(), horizon, True, ""
+                )
+    for e, d in usable[:EXPIRY_TRIES]:
+        sl = slices.get(e)
+        if sl is None or (e, d) in at:
+            continue
+        rn = attempt(fits_at(sl), e, d)
+        if rn:
+            return done(rn, e, d, True, "")
     if first:
-        return first
+        rn, e, d, ok, why = first
+        return done(rn, e or (session + dt.timedelta(days=horizon)).isoformat(), d, ok, why)
     if not usable:
         # No listed expiry near the horizon: read it off the surface.
         if not surface:
@@ -1068,7 +1350,7 @@ def _options_rn(tk, sym: str, exps, horizon: int, S0: float, rf: float):
             raise DensityError("thin", f"{len(surface)} usable expiries for a surface")
         rn = surface_at(surface, horizon / 365)
         ok, why = quality(rn)
-        return rn, (dt.date.today() + dt.timedelta(days=horizon)).isoformat(), horizon, ok, why
+        return done(rn, (session + dt.timedelta(days=horizon)).isoformat(), horizon, ok, why)
     raise DensityError("thin", f"no usable quotes in the {lo}–{hi} day window")
 
 
@@ -1285,7 +1567,7 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         raise DensityError("error", "no last price")
     rf = _rate()
     try:
-        rn, expiry, days, ok, why = _options_rn(tk, chain_sym, exps, horizon, S0, rf)
+        rn, expiry, days, ok, why, meta = _options_rn(tk, chain_sym, exps, horizon, S0, rf)
     except DensityError as e:
         e.chain = chain_sym  # the fallback names the listing that was too thin
         raise
@@ -1337,6 +1619,9 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
             if tails
             else None,
             "extrapolated": rn.get("extrapolated"),
+            "anchors": rn.get("anchors"),
+            "asof": meta["session"],
+            "snapshot": meta["snapshot"],
             "ok": ok,
             "why": why,
         },
@@ -1351,6 +1636,8 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     }
     if not ok:
         return base
+    with contextlib.suppress(Exception):
+        _snap_save(chain_sym, _chains(tk, chain_sym), S0)
 
     fx = None
     try:
@@ -1373,7 +1660,9 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         fx,
     )
     try:
-        earnings = _earnings(tk, chain_sym, exps, S0, rf, days)
+        earnings = _earnings(
+            tk, chain_sym, exps, S0, rf, days, dt.date.fromisoformat(meta["session"])
+        )
     except Exception as e:
         print(f"[density] earnings {chain_sym}: {type(e).__name__}")
         earnings = []
@@ -1459,7 +1748,7 @@ def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     try:
         ptk = yf.Ticker(proxy)
         pS0, _ = _last(ptk)
-        prn, pexp, _, pok, _ = _options_rn(ptk, proxy, _expiries(ptk), horizon, pS0, _rate())
+        prn, pexp, _, pok, _, _ = _options_rn(ptk, proxy, _expiries(ptk), horizon, pS0, _rate())
         if pok:
             sd_usd = prn["sigma_q"]
             if fxw is not None:
@@ -1498,7 +1787,7 @@ def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     mk = market_curve(rn, beta, st["erp"], 1.0)
     an = None
     try:
-        an = _analysts(tk)
+        an = _analysts(tk) or _research_analysts(symbol, S0)
     except Exception as e:
         print(f"[density] analysts {symbol}: {type(e).__name__}")
     curves = _payload_curves(

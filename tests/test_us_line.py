@@ -199,3 +199,28 @@ def test_a_european_line_searches_the_company_name(db, monkeypatch):
     assert asked == ["REP.MC", "repsol"]
     asked.clear()
     assert ns._fetch_yf_news("IWDA.AS", 7) == [] and asked == ["IWDA.AS"]  # a fund: no name search
+
+
+def test_an_otc_adr_with_no_region_is_a_us_line(db):
+    # Yahoo's screener leaves `region` empty on its OTC "OID" board, where
+    # sponsored ADRs like NSRGY live; they used to be invisible here.
+    install(ROWS + _EXTRA + [
+        ["NESN.SW", "Nestlé S.A.", "stock", "EBS", "ch", "Consumer Defensive", None, 2.4e11, 4e8, 93, 1],
+        ["NSRGY", "Nestlé S.A.", "stock", "OID", None, "Consumer Defensive", None, 2.4e11, 2e7, 93, 0],
+    ])  # fmt: skip
+    assert sdb.us_line("NESN.SW") == "NSRGY"
+
+
+@pytest.mark.parametrize(
+    "symbol, cands",
+    [
+        ("NOV.DE", ["NOVO-B.CO", "NVO"]),  # home first, then the US line
+        ("NOVO-B.CO", ["NVO"]),  # a home line: only its US line
+        ("NVO", ["NOVO-B.CO"]),
+        ("TTE.PA", ["TTE"]),
+        ("IWDA.AS", []),  # a fund: no research line
+        ("ZZZZ", []),  # not in the pack
+    ],
+)
+def test_research_candidates(db, symbol, cands):
+    assert sdb.research_candidates(symbol) == cands

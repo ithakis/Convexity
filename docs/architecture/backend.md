@@ -234,6 +234,45 @@ retried on every build: three wasted calls per European row).
   company never does, ADR or not (EU insider dealings are published regulator
   by regulator; there is no free feed). The n/a cell says why.
 
+**The research line: analysts for a secondary listing (2026-10-18).** Yahoo
+keeps a company's analysts, and much of its fundamentals, on its home or US
+line only. Checked live: NOV.DE and CCC3.DE (and every other Xetra or Vienna
+line of a foreign company tried) had no target, rating or analyst count (and
+no options), while NOVO-B.CO had 24 analysts, NVO 12 and KO 23. `fetcher.research_line(symbol)` picks, among
+`symbol_db.research_candidates` (the pack group's home line, then its US
+line), the one with the most `numberOfAnalystOpinions`. NOV.DE gets NOVO-B.CO
+over NVO.
+- **Caching.** The choice is kept a week in `state/research_lines.json` (a
+  miss a day; written atomically). A probe Yahoo didn't answer is not
+  recorded.
+- **What it fills.** `_apply_research` runs in `fetch_one` only when the row
+  has no analysts, or no sector or USD market cap. Its fields are read by the
+  shared `_row_fields` (exactly as a listing's own), cached
+  `research_info|line` for 30 minutes.
+  - Analysts (only when the row has none): targets × own price / research
+    price, which absorbs FX, pence and ADR share ratios without a rate; the
+    upside is the research line's. Rating, key and count are copied, and the
+    ratings trend comes from the research line's `recommendations`.
+  - Gaps only (never replaced): sector, industry, multiples, margins,
+    `market_cap_usd` / `market_cap`, EPS surprises.
+  - The row carries `research_symbol`, `research_ratio`, `research_n` and
+    `research_analysts` (tooltips only, the owner's choice; skipped in the
+    Excel export).
+- **Cost.** Measured: +1–4 s per secondary listing the first time, warm
+  unchanged (~0.7 s).
+- **Other consumers:**
+  - `fetch_detail` (`_apply_research_detail`, before the sector ETF is
+    picked).
+  - `fetch_events` (earnings dates, `earnings_via`).
+  - `options_density._history` (`_research_analysts`: firms' targets scaled
+    the same way).
+  - `analytics._analyst_for`, which skips the own-symbol trio fetch for a
+    borrowed row; the consensus table's `via`.
+  - The frontend logo falls back to the research line's (`LOGO_ALIAS`:
+    a young Xetra line borrows its US line's).
+- **OID lines.** `_us_lines` also counts OID-board lines whose `region` is
+  empty (1,029 OTC ADRs such as NSRGY, ISNPY and SCGLY were invisible to it).
+
 ### Analytics (`/api/portfolio-analytics-multi`)
 `analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
 Returns either `{set_name: analytics_dict | {"error": ...}}` OR
@@ -1035,10 +1074,19 @@ indices) until Phase 2 estimates it. Non-US listings have no chains: the US line
 or ADR is used (`symbol_db.us_line`) or the answer is "No listed options". Yahoo
 has no option history, so anything needing history is built forward.
 
-- **Pipeline** per horizon (the listed expiry nearest 91 or 365 days, inside
-  45–182 or 270–550 days; with none there, the SSVI surface gives the horizon
-  itself when the chain reaches half of it, else `no_expiry`: small caps
-  listing nothing past 5 months open on 3M): chain → forward from parity with the rate from **^IRX**
+- **Pipeline** per horizon. `_options_rn` tries, in order, and the first fit
+  that passes the gate wins:
+  1. A liquid expiry within 10% of 91 or 365 days (`ANCHOR_BAND`): its own
+     SVI, then the SSVI surface at it.
+  2. Else the SSVI surface read at **exactly** the horizon, between the most
+     liquid expiry on each side within [½, 2]× the horizon (`_liquidity`:
+     open interest × quotes / median relative spread).
+  3. Else the old nearest-expiry tries inside 45–182 or 270–550 days.
+  4. With none there, the surface extrapolated when the chain reaches half the
+     horizon, else `no_expiry` (small caps listing nothing past 5 months open
+     on 3M).
+
+  Each expiry then runs: chain → forward from parity with the rate from **^IRX**
   (never backed out of parity: Yahoo's US chains are American-style and gave
   −4.8%) → two-sided **OTM-only** quotes, minus any that break static
   no-arbitrage by more than the spread (`_monotone`) → raw SVI with **Lee's
@@ -1058,6 +1106,33 @@ has no option history, so anything needing history is built forward.
   E[S] and Var[S] stay finite. The payload's `quality.tails` gives where each
   tail attaches and its ξ; it is `null` when the quotes are too narrow to place
   them, and the gate then judges the SVI's own wings.
+- **Robust chains (2026-10-18)**, checked on a Sunday against Friday's chains:
+  - **The session clock.** Maturities count from the quotes' session
+    (`_session`: the New York date of the chain's latest trade), never the
+    calendar. A weekend read prices the same T as Friday's close; `T` used to
+    run two days short.
+  - **Hygiene** (`_live`, `_slice`). A quote whose mid is under
+    `MIN_PREMIUM` ($0.05, or 0.5% of spot) is dropped, and so is one more
+    than `MAX_K_SD` (3.5) ATM sd from the forward. Two minimum-tick
+    deep-OTM calls (NVO's K=90 January at 0.03/0.04 on a $39 stock) put a
+    14.7 vol-pt outlier in NVO's surface; the rule took it from 2.2 to 1.1
+    vol pts and SPY's from 4.7 to 0.6.
+  - **Dead strikes.** One untraded for 14 days with no open interest is
+    dropped. The trade-recency filter of the owner's Heston notebook alone
+    did not help: the wings were live min-tick quotes, not stale ones.
+  - **Weights.** SSVI residuals are weighted 1 / (1 + spread/mid / 0.2),
+    tight quotes up. Not 1/spread², which favours exactly the min-tick wings.
+  - **The anchored horizon.** NVO 12M now passes at 365 days between
+    June-27 and the Jan-28 LEAP; the thin September nearest the horizon had
+    failed it.
+  - **Snapshots.** A chain that passes is kept as
+    `state/chains/<line>.json` (strikes, quotes, open interest, session,
+    spot; numbers only, once per session). When Yahoo serves one with under
+    30% two-sided quotes, a snapshot up to 4 days old stands in, its forward
+    moved to today's spot (same moneyness).
+  - **The payload** carries `quality.asof`, `quality.snapshot` and
+    `quality.anchors`. The footnote says "Options as of the Fri 16 Oct
+    close", and names the anchors.
 - **Stale quotes**: walking out from the forward, a put or call further OTM
   can't bid above the previous one's ask. DELL 12M had a K=165 put bid 12.15
   next to a K=170 ask of 4.40. The SVI bent into a Lee-slope kink to chase it,
