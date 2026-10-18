@@ -796,7 +796,7 @@ _PREF_NUMS = {
     "dist_kappa_stock": (0.5, 1.2),
     "dist_kappa_index": (0.5, 1.2),
 }
-_PREF_CHOICES = {"dist_measure": {"P", "Q"}}
+_PREF_CHOICES = {"dist_measure": {"P", "Q"}, "pf_contrib_view": {"table", "chart"}}
 
 
 def _is_hhmm(v) -> bool:

@@ -2505,6 +2505,9 @@ const DETAIL = {
 
 const RANGES = ["1M","3M","6M","YTD","1Y","5Y","MAX"];
 
+// The one close mark (.x-close). An SVG, not a × glyph: a glyph's size and baseline vary by font.
+const X_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>';
+
 function openModal(r) {
   if (r.error) return;
   DETAIL.data = null; DETAIL.row = r;
@@ -2670,7 +2673,7 @@ function renderModalSkeleton() {
         </div>
       </div>
       <div class="m-price-block" id="m-price-block">${modalPriceBlockHtml()}</div>
-      <button class="m-close" onclick="closeModal()" title="Close">×</button>
+      <button class="x-close" type="button" onclick="closeModal()" aria-label="Close" data-tip="Close (Esc)">${X_SVG}</button>
     </div>
     <div class="m-chart-wrap">
       <div class="m-chart-toolbar">
@@ -5375,12 +5378,15 @@ function viewLabel(name) {
 /* The unsaved tab is "Untitled N" (lowest free N); its first edit saves it
    under that name (commitEntries) — the server keeps no empty portfolios. */
 function untitledName() {
+  if (STATE.adhocName && !(STATE.adhocName in WATCHLISTS)) return STATE.adhocName;
   let n = 1;
   while (`Untitled ${n}` in WATCHLISTS) n++;
   return `Untitled ${n}`;
 }
 
+let TAB_RENAME = null;   // {pending} while a label is being edited: a redraw then would destroy it mid-edit
 function renderTabs() {
+  if (TAB_RENAME) { TAB_RENAME.pending = true; return; }
   const wrap = $("#pf-tabs"); wrap.innerHTML = "";
   // Tab order: saved watchlists alphabetically, then ad-hoc (if present), then "+ New".
   const wlNames = Object.keys(WATCHLISTS).sort((a, b) => a.localeCompare(b));
@@ -5408,24 +5414,22 @@ function renderTabs() {
     const view = VIEWS[name];
     const staleDot = view && view.stale ? `<span class="pf-tab-stale" title="Constituents changed — refresh to update"></span>` : "";
     const closeBtn = `<span class="pf-tab-close" title="Delete">✕</span>`;
-    tab.innerHTML = `${staleDot}<span class="pf-tab-label" title="Double-click to rename">${escapeHtml(viewLabel(name))}</span>${closeBtn}`;
+    tab.innerHTML = `${staleDot}<span class="pf-tab-label" data-tip="Double-click or right-click to rename">${escapeHtml(viewLabel(name))}</span>${closeBtn}`;
     tab.addEventListener("click", (e) => {
-      if (e.target.closest(".pf-tab-close")) return;
-      if (e.target.closest(".pf-tab-rename-input")) return;
+      // Re-activating the open tab would redraw the row between the two clicks of a double-click.
+      if (e.target.closest(".pf-tab-close") || TAB_RENAME || STATE.activeView === name) return;
       activateTab(name);
     });
+    tab.addEventListener("contextmenu", (e) => { e.preventDefault(); tabMenuOpen(e, tab, name); });
     tab.querySelector(".pf-tab-close").addEventListener("click", async (e) => {
       e.stopPropagation();
       await deletePortfolio(name);
     });
-    // Double-click the label → inline rename (saved portfolios only, not ad-hoc).
-    if (name !== AD_HOC_KEY) {
-      tab.querySelector(".pf-tab-label").addEventListener("dblclick", (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        beginTabRename(tab, name);
-      });
-    }
+    tab.querySelector(".pf-tab-label").addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      beginTabRename(tab, name);
+    });
     wrap.appendChild(tab);
   }
 
@@ -5437,35 +5441,65 @@ function renderTabs() {
   wrap.appendChild(add);
 }
 
-function beginTabRename(tab, oldName) {
-  const labelEl = tab.querySelector(".pf-tab-label");
-  if (!labelEl || tab.querySelector(".pf-tab-rename-input")) return;
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "pf-tab-rename-input";
-  input.value = oldName;
-  input.spellcheck = false;
-  input.size = Math.max(8, oldName.length + 2);
-  labelEl.style.display = "none";
-  labelEl.insertAdjacentElement("afterend", input);
-  input.focus();
-  input.select();
-  let done = false;
-  const finish = async (commit) => {
-    if (done) return; done = true;
-    const next = input.value.trim();
-    input.remove();
-    labelEl.style.display = "";
-    if (!commit || !next || next === oldName) return;
-    await renamePortfolio(oldName, next);
-  };
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); finish(true); }
-    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+function tabMenuOpen(e, tab, name) {
+  const el = invMenuOpen(tab, "pf-tab-menu", (ev) => {
+    if (!ev.target.closest("[data-act=rename]")) return;
+    invMenuClose();
+    beginTabRename(tab, name);
   });
-  input.addEventListener("blur", () => finish(true));
-  input.addEventListener("click", (e) => e.stopPropagation());
-  input.addEventListener("dblclick", (e) => e.stopPropagation());
+  if (!el) return;
+  el.innerHTML = `<div class="inv-menu-list"><button type="button" class="inv-menu-it" data-act="rename" role="menuitem">Rename</button></div>`;
+  el.style.left = Math.min(e.clientX, window.innerWidth - el.offsetWidth - 8) + "px";
+  el.style.top = Math.min(e.clientY, window.innerHeight - el.offsetHeight - 8) + "px";
+  el.querySelector("button").focus();
+}
+
+/* The label itself becomes editable (no input box): Enter or a click away
+   commits, Esc restores. renderTabs() holds off until it is done. */
+function beginTabRename(tab, name) {
+  const label = tab.querySelector(".pf-tab-label");
+  if (!label || TAB_RENAME || viewIsBook(name)) return;
+  const old = label.textContent;
+  TAB_RENAME = {pending: false};
+  tab.classList.add("renaming");
+  label.contentEditable = "plaintext-only";
+  label.spellcheck = false;
+  label.focus();
+  getSelection().selectAllChildren(label);
+  const finish = async (commit) => {
+    if (!TAB_RENAME) return;
+    const next = label.textContent.replace(/\s+/g, " ").trim().slice(0, 60);
+    label.removeEventListener("keydown", onKey);
+    label.removeEventListener("blur", onBlur);
+    label.contentEditable = "false";
+    tab.classList.remove("renaming");
+    label.textContent = old;
+    const pending = TAB_RENAME.pending;
+    TAB_RENAME = null;
+    if (commit && next && next !== old) {
+      const clash = next in WATCHLISTS || next === BOOK_KEY || next === AD_HOC_KEY;
+      if (clash) { toast(`"${next}" is already taken.`); tab.classList.add("shake"); setTimeout(() => tab.classList.remove("shake"), 400); }
+      else if (name === AD_HOC_KEY) await renameAdhoc(next);
+      else await renamePortfolio(name, next);
+      return;
+    }
+    if (pending) renderTabs();
+  };
+  const onKey = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); label.blur(); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
+  };
+  const onBlur = () => finish(true);
+  label.addEventListener("keydown", onKey);
+  label.addEventListener("blur", onBlur);
+}
+
+/* The unsaved tab has no server record: its name is the one the first edit
+   will save it under, or, if it already has companies, saved now. */
+async function renameAdhoc(next) {
+  STATE.adhocName = next;
+  if (entriesArr(ENTRIES).length) await commitEntries(ENTRIES);
+  else renderTabs();
 }
 
 async function renamePortfolio(oldName, newName) {
@@ -5564,6 +5598,7 @@ async function commitEntries(next) {
         delete VIEWS[AD_HOC_KEY];
       }
       STATE.activeView = name;
+      STATE.adhocName = null;
       // The first edit names the tab: make it the one a reload reopens.
       LAST_VIEW = name;
       fetch("/api/last-view", {method: "POST", headers: {"Content-Type": "application/json"},
@@ -5592,6 +5627,7 @@ $("#pf-chips").addEventListener("click", (e) => {
 async function createNewTab() {
   // Open the panel in fresh ad-hoc state.
   STATE.activeView = AD_HOC_KEY;
+  STATE.adhocName = null;
   STATE.customWeights = null;
   DATA = []; render();
   setEntries("");
@@ -6697,11 +6733,11 @@ const CONTRIB_COLS = [
   {k: "contribution", label: "Contribution", tip: "contrib:contribution", sv: (c) => c.contribution},
 ];
 const CONTRIB_UI = (() => {
-  const ui = {sort: {k: "contribution", dir: -1}, view: "table", last: null};
+  // The Table/Chart choice is in prefs.json (it must survive a quick quit of the app); chart by default.
+  const ui = {sort: {k: "contribution", dir: -1}, get view() { return APP_PREFS.pf_contrib_view || "chart"; }, last: null};
   try {
     const s = JSON.parse(localStorage.getItem("pf_contrib_sort") || "null");
     if (s && CONTRIB_COLS.some(c => c.k === s.k) && (s.dir === 1 || s.dir === -1)) ui.sort = s;
-    if (localStorage.getItem("pf_contrib_view") === "chart") ui.view = "chart";
   } catch { /* private mode / bad JSON: defaults */ }
   return ui;
 })();
@@ -6835,8 +6871,8 @@ document.addEventListener("click", (ev) => {
   }
   const btn = ev.target.closest && ev.target.closest(".pf-contrib-toggle button[data-contrib-view]");
   if (btn && btn.dataset.contribView !== CONTRIB_UI.view) {
-    CONTRIB_UI.view = btn.dataset.contribView;
-    try { localStorage.setItem("pf_contrib_view", CONTRIB_UI.view); } catch { /* private mode */ }
+    APP_PREFS = {...APP_PREFS, pf_contrib_view: btn.dataset.contribView};
+    savePrefs({pf_contrib_view: APP_PREFS.pf_contrib_view});
     rerenderContrib();
   }
 });
@@ -7474,7 +7510,8 @@ function coRender() {
   $("#co-out").hidden = false;
   $("#co-ai").hidden = q.engine !== "ai";
   const kind = {name: "Name", screen: "Screen", theme: "Theme", list: "List"}[q.kind] || "";
-  $("#co-chips").innerHTML = `<span class="co-kind">${kind} ·</span>` +
+  $("#co-chips").innerHTML = `<button type="button" class="co-clear">Clear</button>` +
+    `<span class="co-kind">${kind} ·</span>` +
     (CO.chips.length ? "" : `<span class="co-kind">${q.kind === "list" ? `${CO.total} found` : `closest matches to "${escapeHtml(q.text)}"`}</span>`) +
     coChipsHtml(true);
   $("#co-msg").innerHTML = d.warnings.map(w => `<div class="warn">${escapeHtml(w)}</div>`).join("") +
@@ -7685,6 +7722,7 @@ async function coAdd() {
 
 function coClear() {
   CO.picked.clear(); CO.editing = null;
+  $("#co-grid").innerHTML = "";
   $("#co-out").hidden = true;
   $("#co-ai").hidden = true;
 }
@@ -7698,6 +7736,7 @@ $("#co-form").addEventListener("submit", (e) => {
 $("#co-more").onclick = coFullOpen;
 $("#co-add").onclick = coAdd;
 $("#co-chips").addEventListener("click", (e) => {
+  if (e.target.closest(".co-clear")) { coClear(); $("#co-q").value = ""; $("#co-q").focus(); return; }
   const btn = e.target.closest(".co-chip");
   if (!btn || btn.disabled) return;
   const i = Number(btn.dataset.i), c = CO.chips[i];
@@ -9587,7 +9626,7 @@ function methodologyHtml() {
       <h2>How the two reads work</h2>
       <div class="mth-sub">Two independent engines read the same headlines. They answer different questions, so they are shown side by side and never blended.</div>
     </div>
-    <button class="m-close" id="methodology-close" title="Close" aria-label="Close">×</button>
+    <button class="x-close" type="button" id="methodology-close" aria-label="Close" data-tip="Close (Esc)">${X_SVG}</button>
   </div>
   <div class="mth-body">
    <div class="mth-cols">
