@@ -104,7 +104,9 @@ def test_padded_key_is_stripped():
 
 
 @pytest.mark.parametrize(
-    "bad", ["", "   ", "\n\t", "abc def", "abc\ndef", "a\x00b", "x" * 600, None, 42]
+    "bad",
+    ["", "   ", "\n\t", "abc def", "abc\ndef", "a\x00b", "x" * 600, None, 42],
+    ids=["empty", "spaces", "whitespace", "space", "newline", "nul", "too-long", "none", "int"],
 )
 def test_invalid_keys_rejected_without_echo(bad):
     with pytest.raises(keys.InvalidKey) as ei:

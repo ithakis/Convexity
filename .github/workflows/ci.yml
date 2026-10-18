@@ -129,10 +129,11 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run pytest
-        # Since 6 Oct this step froze the whole runner (no log line at all,
-        # signals ignored) on Linux only. The caps turn a runaway into a
-        # MemoryError / failed fork with a traceback; timeout -s INT stops
-        # pytest before the job limit so the log is kept.
+        # From 6 to 18 Oct this step froze the runner (no log, signals
+        # ignored): an 8 MB parametrize id, printed by -v as one log line
+        # (conftest.py now refuses ids over 300 chars). The caps turn a
+        # runaway into a MemoryError / failed fork with a traceback;
+        # timeout -s INT stops pytest before the job limit so the log is kept.
         run: |
           ulimit -v 8000000   # 8 GB of address space (the suite peaks ~0.5 GB)
           ulimit -u 2000
