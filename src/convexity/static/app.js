@@ -2514,20 +2514,27 @@ function openModal(r) {
   DETAIL.range = "1Y"; DETAIL.showSP = false; DETAIL.showSector = false; DETAIL.showVol = true;
   DETAIL.showSigma = DETAIL.showMu = true; DETAIL.fcH = 365; DETAIL.fcAuto = true;
   DETAIL.fc = {}; DETAIL.fcPending = {}; DETAIL.fcSim = null; DETAIL.fcAnimKey = null; DETAIL.fcHov = null;
-  DETAIL.events = null; DETAIL.evOpen = null;
+  DETAIL.events = null; DETAIL.evOpen = null; DETAIL.fcBand = null;
   if (DETAIL.yTw) cancelAnimationFrame(DETAIL.yTw.raf);
   DETAIL.yDom = null; DETAIL.yTw = null;
   DETAIL.intraday = {}; DETAIL.intraPending = {};  // per-symbol; server caches the fetches
   DETAIL.sma = CHART_SMA;       // shared reference — see CHART_SMA
+  const seq = DETAIL.seq = (DETAIL.seq || 0) + 1;
   renderModalSkeleton();
   showOverlay("#modal-bg");
+  // The detail and the options are fetched together and drawn once, behind one
+  // loading chip; options slower than ~8 s from opening arrive later on their own.
+  const cap = new Promise(res => setTimeout(res, 8000));
+  ensureDensity();
   fetch("/api/detail?symbol=" + encodeURIComponent(r.symbol))
     .then(res => res.json())
-    .then(d => {
+    .then(async d => {
+      if (DETAIL.seq !== seq) return;
       if (d && !d.error) {
+        await Promise.race([Promise.allSettled(Object.values(DETAIL.fcPending)), cap]);
+        if (DETAIL.seq !== seq) return;
         DETAIL.data = d;
         renderModalFull();
-        ensureDensity();
         // The user can pick 1M/3M/6M while this fetch is still in flight;
         // ensureIntraday bails on !DETAIL.data, and the range-tab handler's
         // same-range guard means re-clicking that tab does nothing — so the
@@ -2692,7 +2699,7 @@ function renderModalSkeleton() {
         <button class="m-toolbar-btn m-greek active" id="m-toggle-mu" title="μ — where analysts expect the price, from their 12-month targets">μ</button>
       </div>
       <div class="m-chart" id="m-chart">
-        <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">${lcHtml("fetching detail", {bar: true})}</div>
+        <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">${lcHtml("fetching detail and options", {bar: true})}</div>
       </div>
       <div class="m-range-info" id="m-range-info" style="display:none;"></div>
       <div class="m-fc-ro" id="m-fc-ro" style="display:none;"></div>
@@ -2711,6 +2718,12 @@ function renderModalSkeleton() {
   $("#m-toggle-vol").onclick = () => { DETAIL.showVol = !DETAIL.showVol; renderModalFull(); };
   $("#m-toggle-sigma").onclick = () => { DETAIL.showSigma = !DETAIL.showSigma; ensureDensity(); renderModalFull(); };
   $("#m-toggle-mu").onclick = () => { DETAIL.showMu = !DETAIL.showMu; ensureDensity(); renderModalFull(); };
+  const fcBandHover = (e) => {
+    const b = e.type === "mouseout" ? null : e.target.closest("[data-fc-band]")?.dataset.fcBand ?? null;
+    if (b !== DETAIL.fcBand) { DETAIL.fcBand = b; fcDraw(); }
+  };
+  $("#m-fc-ro").addEventListener("mouseover", fcBandHover);
+  $("#m-fc-ro").addEventListener("mouseout", fcBandHover);
   $("#m-fc-ro").addEventListener("click", (e) => {
     if (!e.target.closest("[data-fc-settings]")) return;
     e.preventDefault(); openSettings(); selectSettingsSection("distribution");
@@ -3374,7 +3387,9 @@ function renderChart() {
     if (range === "6M" || range === "YTD" || range === "1Y") return dt.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
     return dt.toLocaleDateString(undefined, { year: "numeric" });
   };
+  // Plotted in the listing's currency; labelled in the display currency like every other price here.
   const fmtTickVal = (v) => {
+    v = fxConvert(v, DETAIL.data.currency);
     if (v >= 1000) return v.toFixed(0);
     if (v >= 100) return v.toFixed(1);
     return v.toFixed(2);
@@ -3529,7 +3544,7 @@ function openEventCard(i, btn) {
     h = `<div class="hd"><span class="m-ev e${sur == null ? "" : sur >= 0 ? " beat" : " miss"}">E</span><div><b>Earnings</b><span>${date(e.date)} · ${timing}</span></div></div>`;
     if (e.actual != null) {
       h += row("Reported EPS", e.actual.toFixed(2));
-      h += row("Expected EPS", e.estimate != null ? e.estimate.toFixed(2) : "—", "", "analysts’ consensus");
+      h += row("Expected EPS <small>(analysts’ consensus)</small>", e.estimate != null ? e.estimate.toFixed(2) : "—");
       h += row("Surprise", sur != null ? `${sur >= 0 ? "+" : "−"}${Math.abs(sur).toFixed(1)}%` : "—", cls(sur == null ? null : sur), sur == null ? "" : sur >= 0 ? "beat" : "missed");
     } else h += `<div class="nt">The reported figures aren’t in Yahoo’s calendar yet.</div>`;
     const j = evIdx(pts, e.react || e.date);
@@ -3556,9 +3571,11 @@ function openEventCard(i, btn) {
       const dd = (Date.parse(e.date) - Date.parse(x.date)) / 864e5; return dd > 300 && dd < 430;
     }).pop();
     h = `<div class="hd"><span class="m-ev d">D</span><div><b>Dividend</b><span>ex-date ${date(e.date)}</span></div></div>`;
-    h += row("Amount", `${money(e.amount)}`, "", "a share");
-    if (yr) h += row("A year earlier", money(yr.amount), "", `${pctS(e.amount / yr.amount - 1, 0)}, ${date(yr.date)}`);
-    if (prev && prev !== yr) h += row("Previous", money(prev.amount), "", date(prev.date));
+    // Newest first: this payment, the one before it, the same payment a year earlier.
+    const vs = (x) => `${date(x.date)} · ${pctS(e.amount / x.amount - 1, 0)} since`;
+    h += row("Dividend amount paid", money(e.amount), "", "a share");
+    if (prev) h += row("Previous dividend", money(prev.amount), "", prev === yr ? vs(prev) : date(prev.date));
+    if (yr && yr !== prev) h += row("One year ago", money(yr.amount), "", vs(yr));
     const j = evIdx(pts, e.date);
     if (j > 0 && j < pts.length && evDay(pts[j][0]) === e.date) {
       const yld = e.amount / pts[j - 1][1];
@@ -3604,28 +3621,24 @@ const FC_ANIM = { paths: 750, pdf: 300 };
 
 function fcOn() { return DETAIL.showSigma || DETAIL.showMu; }
 
-/* The payload for the window's symbol and horizon; fetches it (12M first, then
- * 3M in the background so switching is instant). Successes re-render. */
+/* The payload for the window's symbol and horizon; with no horizon, fetches both
+ * at once so switching is instant. Results for the shown horizon re-render. */
 function ensureDensity(h) {
-  if (!DETAIL.data || !fcOn()) return;
-  const sym = DETAIL.row.symbol;
-  const want = h || DETAIL.fcH;
-  if (DETAIL.fc[want] || DETAIL.fcPending[want]) return;
-  DETAIL.fcPending[want] = true;
-  const beta = DETAIL.data.beta ?? DETAIL.row.beta;
-  const q = `symbol=${encodeURIComponent(sym)}&h=${want}` + (beta != null && isFinite(beta) ? `&beta=${beta}` : "");
-  fetch("/api/density?" + q).then(r => r.json()).then(d => {
-    if (!DETAIL.data || DETAIL.row.symbol !== sym) return;   // the window moved on
-    DETAIL.fc[want] = d;
-    DETAIL.fcPending[want] = false;
+  if (!DETAIL.row || !fcOn()) return;
+  if (!h) { ensureDensity(DETAIL.fcH); ensureDensity(DETAIL.fcH === 365 ? 91 : 365); return; }
+  if (DETAIL.fc[h] || DETAIL.fcPending[h]) return;
+  const seq = DETAIL.seq;
+  const beta = DETAIL.data?.beta ?? DETAIL.row.beta;
+  const q = `symbol=${encodeURIComponent(DETAIL.row.symbol)}&h=${h}` + (beta != null && isFinite(beta) ? `&beta=${beta}` : "");
+  DETAIL.fcPending[h] = fetch("/api/density?" + q).then(r => r.json()).catch(() => ({ ok: false, reason: "error" })).then(d => {
+    if (DETAIL.seq !== seq) return;   // the window moved on
+    DETAIL.fc[h] = d;
+    delete DETAIL.fcPending[h];
     // 12M is the default, but long chains are often too thin to trust their
     // tails (SPY, DELL today); then the window opens on 3M and says why.
-    if (want === 91 && DETAIL.fcAuto && d.ok && DETAIL.fc[365] && !DETAIL.fc[365].ok) DETAIL.fcH = 91;
-    if (want === DETAIL.fcH) renderChart();
-    if (want === 365) ensureDensity(91);
-  }).catch(() => {
-    DETAIL.fcPending[want] = false;
-    if (DETAIL.data && DETAIL.row.symbol === sym) { DETAIL.fc[want] = { ok: false, reason: "error" }; if (want === DETAIL.fcH) renderChart(); }
+    const was = DETAIL.fcH;
+    if (DETAIL.fcAuto && DETAIL.fc[365] && !DETAIL.fc[365].ok && DETAIL.fc[91]?.ok) DETAIL.fcH = 91;
+    if (DETAIL.data && (h === DETAIL.fcH || DETAIL.fcH !== was)) renderChart();
   });
 }
 
@@ -3765,7 +3778,9 @@ function fcMarks(d) {
  * the window's history ∪ the end curve's 5%..95%, i.e. the fan's 90% band.
  * History drives the axis, so every range tab rescales; the curve's tails past
  * the frame are clipped and fcDraw labels the mass that lies beyond. (It was
- * 3%..97%, which on a 12M curve set both limits: 1Y and 5Y looked identical.) */
+ * 3%..97%, which on a 12M curve set both limits: 1Y and 5Y looked identical.)
+ * The analysts' low..high, when shown, is in too: a High past the 95% point
+ * was drawn off the plot. */
 function fcYRange(lo, hi) {
   const d = DETAIL.fc[DETAIL.fcH];
   if (!d || !d.ok) return [lo, hi];
@@ -3776,8 +3791,10 @@ function fcYRange(lo, hi) {
     if (mk) { lo = Math.min(lo, mk.low ?? mk.cons, d.s0); hi = Math.max(hi, mk.high ?? mk.cons, d.s0); }
     return [lo, hi];
   }
-  const sim = fcSimulate(d, mode);
-  return [Math.min(lo, fcCurveQ(sim, 0.05)), Math.max(hi, fcCurveQ(sim, 0.95))];
+  const sim = fcSimulate(d, mode), mk = DETAIL.showMu ? fcMarks(d) : null;
+  lo = Math.min(lo, fcCurveQ(sim, 0.05), mk?.low ?? Infinity);
+  hi = Math.max(hi, fcCurveQ(sim, 0.95), mk?.high ?? -Infinity);
+  return [lo, hi];
 }
 
 const fcPctTxt = (p) => (p < 0.01 ? "<1%" : `${Math.round(p * 100)}%`);
@@ -3995,6 +4012,18 @@ function fcDraw() {
       const ys0 = y(d.s0);
       ctx.save(); ctx.beginPath(); ctx.rect(xH, top, Wd + 8, ys0 - top); ctx.clip(); curve(`rgba(${col.posRgb},0.2)`, col.pos); ctx.restore();
       ctx.save(); ctx.beginPath(); ctx.rect(xH, ys0, Wd + 8, bot - ys0); ctx.clip(); curve(`rgba(${col.negRgb},0.2)`, col.neg); ctx.restore();
+      // The strip's hovered band (renderFcReadouts): a level band across the zone and that slice of the curve.
+      const hb = DETAIL.fcBand;
+      if (hb) {
+        const rgb = hb === "20" ? col.negRgb : col.acc;
+        const yt = y(hb === "20" ? d.s0 * 0.8 : fcCurveQ(sim, hb === "50" ? 0.75 : 0.95));
+        const yb = hb === "20" ? bot : y(fcCurveQ(sim, hb === "50" ? 0.25 : 0.05));
+        ctx.fillStyle = `rgba(${rgb},0.12)`; ctx.fillRect(xT, yt, xR - xT, yb - yt);
+        ctx.save(); ctx.beginPath(); ctx.rect(xH, yt, Wd + 8, yb - yt); ctx.clip(); curve(`rgba(${rgb},0.45)`, `rgb(${rgb})`); ctx.restore();
+        ctx.strokeStyle = `rgb(${rgb})`; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.beginPath();
+        for (const yy of hb === "20" ? [yt] : [yt, yb]) { ctx.moveTo(xT, yy); ctx.lineTo(xR, yy); }
+        ctx.stroke(); ctx.setLineDash([]);
+      }
       // The axis shows the fan's 90% band (fcYRange), so the tails run past
       // the frame: say how much of the curve lies beyond each edge. The left
       // of the density's top is free (the 3M | 12M pill sits on the right).
@@ -4020,9 +4049,12 @@ function fcDraw() {
     ctx.setLineDash([3, 4]); ctx.lineWidth = 1.2; ctx.strokeStyle = `rgba(${col.amberRgb},0.55)`;
     ctx.beginPath(); ctx.moveTo(xH, yc); ctx.lineTo(xR, yc); ctx.stroke(); ctx.setLineDash([]);
     const ccy = DETAIL.data.currency, labs = [[yh, "High", mk.high, false], [yc, "Consensus", mk.cons, true], [yl, "Low", mk.low, false]];
-    let prev = -1e9;
-    for (const [y0, k, v, main] of labs) {
-      const yy = Math.max(y0, prev + 26); prev = yy;
+    // Labels keep 26 px apart and inside the plot: pushed down from the top, then up from the bottom.
+    const pos = labs.map(l => l[0]);
+    for (let i = 0; i < 3; i++) pos[i] = Math.max(pos[i], i ? pos[i - 1] + 26 : top + 12);
+    for (let i = 2; i >= 0; i--) pos[i] = Math.min(pos[i], i < 2 ? pos[i + 1] - 26 : bot - 12);
+    for (const [i, [y0, k, v, main]] of labs.entries()) {
+      const yy = pos[i];
       const val = fmtMoney(v, ccy);
       ctx.font = font(main ? 700 : 600, 13); const vw = ctx.measureText(val).width;
       ctx.font = font(500, 12); const kw = ctx.measureText(k).width;
@@ -4119,7 +4151,9 @@ function renderFcReadouts() {
   if (!fcOn()) { el.style.display = "none"; return; }
   el.style.display = "";
   const d = DETAIL.fc[DETAIL.fcH], ccy = DETAIL.data.currency;
-  const cell = (k, v, cls, tip) => `<div${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}><span>${k}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
+  // A cell with a band ("50", "90", "20") carries an (i): hovering it lights that part of the curve (fcDraw).
+  const cell = (k, v, cls, tip, band) => `<div${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}${band ? ` data-fc-band="${band}"` : ""}>` +
+    `<span>${k}${band ? ' <i class="m-fc-i" aria-hidden="true">i</i>' : ""}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
   const pct = (v) => (v * 100).toFixed(0) + "%";
   const sgn = (v) => (v >= 0 ? "+" : "") + v.toFixed(0) + "%";
   const money = (v) => fmtMoney(v, ccy);
@@ -4232,10 +4266,10 @@ function renderFcReadouts() {
   el.innerHTML = `<div class="m-fc-grid">
     ${cell(prTex(">", d.s0), pct(fcCurveAbove(sim, d.s0)), "pos", `The chance the price is above today’s (${money(d.s0)}) in ${hz}.`)}
     ${cell(meanLabel, `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`, "", meanTip)}
-    ${cell("Median · 50% range", `${money(fcCurveQ(sim, 0.5))} · ${money(fcCurveQ(sim, 0.25))} – ${money(fcCurveQ(sim, 0.75))}`, "", "Half the outcomes end inside the range, a quarter below it and a quarter above.")}
-    ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`, "", "Nine outcomes in ten end inside this range.")}
+    ${cell("Median · 50% range", `${money(fcCurveQ(sim, 0.5))} · ${money(fcCurveQ(sim, 0.25))} – ${money(fcCurveQ(sim, 0.75))}`, "", `The middle half of outcomes: in ${hz} the price ends inside this range half the time, a quarter of the time below it and a quarter above. Highlighted on the chart.`, "50")}
+    ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`, "", `A wide but likely range: in ${hz} the price ends inside it nine times in ten, below it one time in twenty and above it one time in twenty. Highlighted on the chart.`, "90")}
     ${cell("Falls 20% or more", `${((1 - fcCurveAbove(sim, d.s0 * 0.8)) * 100).toFixed(1)}% <small>by the end · ${pct(s20.touch)} at some point</small>`, "neg",
-      `The chance of ending ${hz} at least 20% below today (${money(d.s0 * 0.8)} or less), and the chance of trading there at any time before, even if it recovers.`)}
+      `The chance of ending ${hz} at least 20% below today (${money(d.s0 * 0.8)} or less), and the chance of trading there at any time before, even if it recovers. The zone is highlighted on the chart.`, "20")}
     ${consCell}
     ${cell("Dividend Yield", dy, "", dyTip)}
     ${cell("Hist. / Imp. Volatility", `${vpct(vo.hist)} / ${vpct(vo.implied)}`, "", volTip)}
@@ -7811,8 +7845,13 @@ $("#edit-btn").onclick = () => {
 window.addEventListener("scroll", () => {
   $("#topbar").classList.toggle("scrolled", window.scrollY > 4);
 });
+let _modalResizeT = 0;
 window.addEventListener("resize", () => {
   if (STATE.fitColumns) render();
+  // The stock chart's SVG stretches with the window but its forecast canvas does not: redraw both.
+  // A timer, not rAF: rAF does not run while the window is in the background.
+  clearTimeout(_modalResizeT);
+  _modalResizeT = setTimeout(() => { if (DETAIL.data) renderChart(); }, 120);
 });
 
 /* --- Trackpad discipline ---------------------------------------------------
@@ -12961,7 +13000,7 @@ async function renderSettingsDistribution(el) {
       if (!r.ok) throw new Error();
       APP_PREFS = await r.json();
       DETAIL.fc = {}; DETAIL.fcPending = {}; DETAIL.fcSim = null; DETAIL.fcAnimKey = null;
-      if (DETAIL.data) { ensureDensity(); renderChart(); }
+      if (DETAIL.data) { DETAIL.seq++; ensureDensity(); renderChart(); }   // seq: drop curves priced on the old settings
       msg("Saved. Charts use it from the next look.");
     } catch (e) { msg("Couldn't save that. Try again in a moment."); }
   };

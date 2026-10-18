@@ -577,3 +577,28 @@ class _FrozenDate(dt.date):
     @classmethod
     def today(cls):
         return cls._today
+
+
+def test_analysts_drop_a_firm_target_in_another_lines_units():
+    """AZN.L: the per-firm feed held one target of 198 (a US-line figure)
+    against a 12,446p price; Yahoo's summary was in pence. The odd firm goes
+    and the summary stands in, so the marks stay on the chart."""
+    import pandas as pd
+
+    when = pd.Timestamp(dt.datetime.now() - dt.timedelta(days=10))
+    ud = pd.DataFrame({"Firm": ["X"], "ToGrade": ["Buy"], "currentPriceTarget": [198.0],
+                       "priorPriceTarget": [190.0]}, index=pd.Index([when], name="GradeDate"))  # fmt: skip
+
+    class Tk:
+        upgrades_downgrades = ud
+        analyst_price_targets = {
+            "current": 12446.0,
+            "low": 11617.0,
+            "high": 19731.0,
+            "median": 15995.5,
+        }
+
+    a = od._analysts(Tk())
+    assert a["firms"] == [] and a["consensus"] == 15995.5 and a["low"] == 11617.0
+    Tk.analyst_price_targets = {**Tk.analyst_price_targets, "current": 200.0}
+    assert od._analysts(Tk())["firms"][0]["target"] == 198.0
