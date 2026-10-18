@@ -37,6 +37,15 @@ os.environ.pop("CONVEXITY_REFERENCE_URL", None)
 os.environ["CONVEXITY_NOTIFY"] = "0"
 
 
+def pytest_collection_modifyitems(items):
+    """A parametrized case is named after its values unless given ids, and
+    `pytest -v` prints each name as one log line: an 8 MB payload in a name
+    froze CI's runner for 12 days (test_importer). Refuse long names."""
+    long = [it.nodeid[:120] + "..." for it in items if len(it.nodeid) > 300]
+    if long:
+        raise pytest.UsageError(f"test ids over 300 chars (pass ids=): {long[:3]}")
+
+
 @pytest.fixture(autouse=True)
 def _isolated_data_dir(tmp_path, monkeypatch):
     home = tmp_path / "convexity-home"

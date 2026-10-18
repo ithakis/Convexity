@@ -173,7 +173,10 @@ def test_a_holdings_list_is_reconciled_against_the_book(monkeypatch):
     ("old.xls", "", b"x", "old Excel"),
     ("notes.docx", "", b"x", "use screenshots"),
     ("big.png", "image/png", b"x" * (im.MAX_FILE_BYTES + 1), "larger than"),
-])  # fmt: skip
+], ids=["heic", "xls", "docx", "too-big"])  # fmt: skip
+# Explicit ids: pytest names a case after its values, and the 8 MB payload
+# made an 8 MB test id. `pytest -v` printed it as one log line, which froze
+# GitHub's runner (no log, signals ignored) from 6 Oct to 18 Oct.
 def test_files_are_refused_in_plain_words(name, mime, data, msg):
     with pytest.raises(im.ImportRefused) as ex:
         im.read("", [_file(name, data, mime)])
