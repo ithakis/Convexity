@@ -45,8 +45,7 @@ not reintroduce one; the engines answer different questions.
   `get_cached_sentiment(symbol)` is the O(1) cache-only read `fetch_one` uses —
   the streaming build never triggers a fetch.
 - Keys resolve through `helpers._load_local_secret` (env var, then
-  `config.json` in the data folder, then — 1.14 only, logged — `.finnhub_key` /
-  `.nvidia_key` found by walking up). Read at import, and **re-read without a
+  `config.json` in the data folder). Read at import, and **re-read without a
   restart** whenever Settings → API keys saves or clears one:
   `keys.reload_all()` calls `news_sentiment.reload_keys()` (also drops the
   cached OpenAI client, which captured the old key, and — when the NVIDIA key
@@ -147,11 +146,11 @@ not reintroduce one; the engines answer different questions.
   (must equal `ml_features.feature_schema()`), `tier_cuts.json`, `meta.json`.
   Build: `ml/scripts/09_tier_cuts.py --model v1.1`, then
   `10_export_artifact.py --deploy`.
-- **First-run download (`model_fetch.py`, roadmap Phase 5).** The model is not
+- **First-run download (`model_fetch.py`, Phase 5).** The model is not
   in the package. When `models/<ver>/` is missing **or incomplete** — present
   means all six `ARTIFACT_FILES` (`model_fetch.complete()`), not just the
-  folder; an emptied folder once blocked both the download and Retry — (and neither
-  `MLSENT_MODEL_DIR` nor the legacy folder applies), `start_server()`'s warm-up
+  folder; an emptied folder once blocked both the download and Retry — (and
+  `MLSENT_MODEL_DIR` is not set), `start_server()`'s warm-up
   calls `model_fetch.start()`: a daemon thread downloads the GitHub Release
   asset at `MODEL_URL`, checks it against `MODEL_SHA256` **before opening it**
   (mismatch ⇒ deleted, never retried), extracts member by member (only the six
@@ -233,7 +232,7 @@ not reintroduce one; the engines answer different questions.
   `curl | bash`), and after installing tries `import lightgbm` with the tool's
   interpreter — a warning, never a failed install.
   `tests/test_ml_sentiment.py` fails (not skips) on missing deps unless
-  `PT_ALLOW_MISSING_ML=1`.
+  `CONVEXITY_ALLOW_MISSING_ML=1`.
 - Training-only dependencies stay out of `envcheck` and the runtime
   dependencies: DuckDB (all v2 parquet IO) and FLAML are the `train` extra;
   pyarrow (stages A–C only) is deliberately in neither — it switches pandas 3's
@@ -271,7 +270,7 @@ not reintroduce one; the engines answer different questions.
   Market read, its z, divergence) via `xlsx_export._sentiment_value`; the raw
   payload is in `HOLDINGS_SKIP_EXTRAS`.
 
-*Reference pack (roadmap Phase 8, v2.0.0).* A new install has < 200 Market
+*Reference pack (Phase 8, v2.0.0).* A new install has < 200 Market
 reads of its own, so without help its percentile sits on the 2023 knots and
 its Track record says "too early" for months. The reference pack is the
 same model run daily over the S&P 500, built in CI and downloaded by the app.
@@ -301,7 +300,7 @@ same model run daily over the S&P 500, built in CI and downloaded by the app.
   rerun does not rank against itself); forward returns are joined only once
   the closes exist and are never recomputed.
 - **Key and safety.** The builder reads `FINNHUB_API_KEY` from the
-  environment only — never `config.json` or a legacy key file — so a run
+  environment only — never `config.json` — so a run
   from a checkout cannot spend the owner's key. A run with fewer than half
   the names scored, or Finnhub answering for fewer than half, writes nothing
   (exit 1). A previous pack that fails verification aborts (exit 1), with two

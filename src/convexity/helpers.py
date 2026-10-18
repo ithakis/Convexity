@@ -8,7 +8,6 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -53,54 +52,27 @@ def _config_secret(env_var: str) -> str:
     return val.strip() if isinstance(val, str) else ""
 
 
-def _resolve_secret(env_var: str, filename: str) -> tuple[str, str | None]:
-    """(value, source) — source is "env", "config", "legacy" or None.
-
-    The legacy step finds ``filename`` by walking upward from this module's
-    directory (NOT by searching for the ``.git`` boundary — a worktree run
-    needs the key from the worktree checkout itself, which that search would
-    skip past). It is kept for one release (1.14) and logged when
-    used — by name only, never the value.
-    """
+def _resolve_secret(env_var: str) -> tuple[str, str | None]:
+    """(value, source) — source is "env", "config" or None."""
     env = os.environ.get(env_var, "").strip()
     if env:
         return env, "env"
     cfg = _config_secret(env_var)
     if cfg:
         return cfg, "config"
-    search = Path(__file__).resolve().parent
-    for _ in range(6):
-        try:
-            p = search / filename
-            if p.is_file():
-                val = p.read_text(encoding="utf-8").strip()
-                if val:
-                    from convexity import paths
-
-                    paths.note_legacy(
-                        f"key file {filename}",
-                        p,
-                        f"move it to {paths.config_file().name} "
-                        f'("{_CONFIG_KEYS.get(env_var, "?")}") or set {env_var}',
-                    )
-                    return val, "legacy"
-                return "", None
-        except Exception:
-            pass
-        search = search.parent
     return "", None
 
 
-def _load_local_secret(env_var: str, filename: str) -> str:
-    """Resolve a secret: env var, then ``config.json`` in the data dir, then a
-    legacy key file (see ``_resolve_secret``). Shared by finnhub_adapter.py,
-    news_sentiment.py and keys.py so all resolve secrets identically."""
-    return _resolve_secret(env_var, filename)[0]
+def _load_local_secret(env_var: str) -> str:
+    """Resolve a secret: env var, then ``config.json`` in the data dir. Shared
+    by finnhub_adapter.py, news_sentiment.py and keys.py so all resolve
+    secrets identically."""
+    return _resolve_secret(env_var)[0]
 
 
-def secret_source(env_var: str, filename: str) -> dict:
+def secret_source(env_var: str) -> dict:
     """{"set": bool, "source": ...} — never the value. What /api/keys serves."""
-    val, src = _resolve_secret(env_var, filename)
+    val, src = _resolve_secret(env_var)
     return {"set": bool(val), "source": src if val else None}
 
 
@@ -305,12 +277,25 @@ def _safe_num(v) -> float | None:
         return None
 
 
+def finite_num(v) -> float | None:
+    """``float(v)`` for a real, finite int/float; None for anything else (bool,
+    str, NaN, inf, or an int too large for a float — a 400-digit JSON integer
+    must be a 400, never a 500)."""
+    if not isinstance(v, int | float) or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except OverflowError:
+        return None
+    return f if math.isfinite(f) else None
+
+
 # Yahoo quotes some exchanges in the currency's minor unit: LSE prices in pence
 # (GBp / GBX), JSE in cents (ZAc), Tel Aviv in agorot (ILA). Per-share prices
 # and price targets come in that minor unit, but marketCap, dividendRate and the
 # statements are in the MAJOR unit — verified on SHEL.L: price 3654.5 GBp,
 # marketCap 208e9 (GBP), dividendRate 1.16 (GBP).
-MINOR_UNIT_CCY = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ILA": "ILS"}
+MINOR_UNIT_CCY = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ZAC": "ZAR", "ILA": "ILS"}
 
 
 def major_ccy(ccy: str | None) -> str:

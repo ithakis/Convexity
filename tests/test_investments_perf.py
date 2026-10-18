@@ -1,4 +1,4 @@
-"""My Investments performance (roadmap Phase 3): the daily series, TWR/MWR per
+"""My Investments performance (Phase 3): the daily series, TWR/MWR per
 period, the display currency, the S&P 500 line, estimated dividends and the
 opening-holding rule, through ``investments.book``. Every network call is
 stubbed with deterministic prices; public tickers only."""

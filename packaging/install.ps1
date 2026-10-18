@@ -142,58 +142,7 @@ $IconPng = & $ToolPy -c "import convexity, pathlib; print(pathlib.Path(convexity
 Assert-Success "locate icon"
 
 # ---------------------------------------------------------------------------
-# 4. API keys from an old checkout (.finnhub_key / .nvidia_key at the checkout
-#    root, i.e. the parent of this packaging/ folder) into the data folder's
-#    config.json. An installed package cannot find them by walking up from its
-#    own folder. Never overwrites a key that
-#    is already there; values are never printed.
-# ---------------------------------------------------------------------------
-$KeyDir = $null
-if ($PSScriptRoot) {
-    foreach ($d in @($PSScriptRoot, (Split-Path -Parent $PSScriptRoot))) {
-        if ($d -and ((Test-Path (Join-Path $d ".finnhub_key")) -or (Test-Path (Join-Path $d ".nvidia_key")))) { $KeyDir = $d; break }
-    }
-}
-if ($KeyDir) {
-    $keyScript = @'
-import json, os, sys
-from pathlib import Path
-from convexity import paths
-src = Path(sys.argv[1])
-cfg = paths.config_file()
-try:
-    data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
-except (OSError, ValueError):
-    print(f"==> {cfg} is not valid JSON; leaving it alone (keys not copied).")
-    sys.exit(0)
-if not isinstance(data, dict):
-    sys.exit(0)
-added = []
-for fname, key in ((".finnhub_key", "finnhub_api_key"), (".nvidia_key", "nvidia_api_key")):
-    f = src / fname
-    if f.is_file() and not data.get(key):
-        value = f.read_text(encoding="utf-8").strip()
-        if value:
-            data[key] = value
-            added.append(key)
-if added:
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cfg.with_name(cfg.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, cfg)
-    print(f"==> Copied {', '.join(added)} into {cfg}")
-'@
-    $TmpKeyPy = Join-Path $env:TEMP "convexity_copy_keys.py"
-    Set-Content -Path $TmpKeyPy -Value $keyScript -Encoding UTF8
-    & $ToolPy $TmpKeyPy $KeyDir
-    $rc = $LASTEXITCODE
-    Remove-Item -Force $TmpKeyPy -ErrorAction SilentlyContinue
-    $global:LASTEXITCODE = $rc
-    Assert-Success "copy API keys"
-}
-
-# ---------------------------------------------------------------------------
-# 5. icon.ico from the packaged icon-rounded.png (the one logo, rounded because
+# 4. icon.ico from the packaged icon-rounded.png (the one logo, rounded because
 #    Windows does not mask icons; see scripts/build_icon.py). Pillow is not an app dependency, so
 #    it comes from a throwaway `uv run --with pillow` environment. The icon
 #    lives in %LOCALAPPDATA%\Convexity (app-owned, not user data).
@@ -212,7 +161,7 @@ Assert-Success "icon.ico generation"
 Remove-Item -Force $TmpIconPy -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------------
-# 6. Start Menu + Desktop shortcuts, straight to convexity-app.exe. uv builds
+# 5. Start Menu + Desktop shortcuts, straight to convexity-app.exe. uv builds
 #    it as a windowless GUI launcher ([project.gui-scripts]). The conda-era
 #    `conda run` .vbs wrapper existed only for conda's DLL search path; PyPI
 #    wheels carry their own DLLs.

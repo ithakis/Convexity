@@ -9,13 +9,9 @@ conjure headlines that were never fetched or read, and the result has to SAY so
 rather than presenting a re-weighting of 7 days of evidence as a 30-day read.
 """
 
-import sys
 import time
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from convexity import news_sentiment as ns  # noqa: E402
 

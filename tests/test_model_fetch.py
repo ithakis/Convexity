@@ -28,8 +28,7 @@ VER = mfetch.MODEL_VERSION
 # ------------------------------------------------------------------ fixtures
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    # No legacy ~/.convexity lookup, no auto-disable, fast retries, clean state.
-    monkeypatch.setenv("CONVEXITY_LEGACY_HOME", str(tmp_path / "legacy-home"))
+    # No auto-disable, fast retries, clean state.
     monkeypatch.delenv("MLSENT_MODEL_DIR", raising=False)
     monkeypatch.delenv("CONVEXITY_MODEL_DOWNLOAD", raising=False)
     monkeypatch.delenv("CONVEXITY_MODEL_URL", raising=False)
@@ -402,9 +401,10 @@ def test_stale_leftovers_swept(server, monkeypatch):
 
 def test_retry_route(server, monkeypatch):
     """POST /api/model-download (the Settings Retry button) -> 202 + status."""
-    from convexity import server as srv
     import json
     import urllib.request
+
+    from convexity import server as srv
 
     _serve(server, monkeypatch, _good_tar())
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)

@@ -58,7 +58,6 @@ REQUIRED: tuple[Requirement, ...] = (
     Requirement("pandas", "pandas", "quotes, analytics, and every table in the app"),
     Requirement("numpy", "numpy", "all numeric computation"),
     Requirement("yfinance", "yfinance", "market data — no prices, no rows"),
-    Requirement("requests", "requests", "Finnhub news and symbol-database downloads"),
     Requirement("numba", "numba", "the mean-CVaR optimizer (Optimize tab) JIT kernels"),
     Requirement("scipy", "scipy", "ML feature assembly (scipy.sparse) and the LP reference solver"),
     # The two that were missing for weeks. ml_sentiment._load() imports both,

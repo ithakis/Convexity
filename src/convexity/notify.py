@@ -1,4 +1,4 @@
-"""My Investments notifications (roadmap Phase 9): a background pass while
+"""My Investments notifications (Phase 9): a background pass while
 the app runs, macOS notifications for new "Needs a look" items, and a weekly
 recap after the Friday US close.
 
@@ -7,7 +7,7 @@ What it reuses, so the rail and the notifications never disagree:
 - **What to send** is the rail's own answer (``attention.evaluate``): an item
   shown (so not dismissed or snoozed), unread, and not notified at this level
   or a full step better (``attention.should_notify``). Plain price alerts are
-  information, so they stay in-app (Appendix D, *Alert for Alerts*).
+  information, so they stay in-app (alert research, *Alert for Alerts*).
 - **The pass is a job** (``jobs.submit``, phase ``watch``): single-flight
   with every refresh, cancellable, and marked ``background`` so the topbar
   chip doesn't show it and a Refresh by the owner supersedes it. It fetches
@@ -21,7 +21,7 @@ What it reuses, so the rail and the notifications never disagree:
 Delivery: the desktop app registers a sink in-process (``add_sink``) and
 shows each message through Qt; the page polls ``outbox`` and, in browser
 mode only, shows a quiet toast. Logs name the rule and the ticker, never an
-amount (Appendix B: users paste logs into public issues).
+amount (engine rules: users paste logs into public issues).
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from convexity import paths
+from convexity.helpers import finite_num
 
 DEFAULTS = {"notify_on": True, "quiet_on": True, "quiet_from": "22:00", "quiet_to": "08:00"}
 
@@ -451,14 +452,6 @@ def _save_recap(r: dict) -> None:
     _atomic_write(_recaps_path(), json.dumps({"weeks": keep}, ensure_ascii=False, indent=1))
 
 
-def _num(v) -> float | None:
-    return (
-        float(v)
-        if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
-        else None
-    )
-
-
 def _last_at_or_before(dates: list[str], iso: str) -> int | None:
     i = None
     for k, d in enumerate(dates):
@@ -487,7 +480,11 @@ def build_recap(out: dict, friday: date, today: date, events: dict | None = None
         return None
 
     def ratio(arr):
-        a, b = (_num(arr[start]), _num(arr[end])) if arr and len(arr) > end else (None, None)
+        a, b = (
+            (finite_num(arr[start]), finite_num(arr[end]))
+            if arr and len(arr) > end
+            else (None, None)
+        )
         return (b / a - 1) * 100 if a and b else None
 
     val, fl = ser.get("value") or [], ser.get("flows")
@@ -497,7 +494,7 @@ def build_recap(out: dict, friday: date, today: date, events: dict | None = None
     movers = []
     for p in out.get("positions") or []:
         x = p.get("xray") or {}
-        wk = _num(x.get("week_pct"))
+        wk = finite_num(x.get("week_pct"))
         # A holding's week only when its last close is that Friday: a page
         # computed later would give a different week (a dash then).
         if (
@@ -509,12 +506,12 @@ def build_recap(out: dict, friday: date, today: date, events: dict | None = None
             movers.append({"symbol": p["symbol"], "name": p.get("name") or p["symbol"], "pct": wk})
     movers.sort(key=lambda m: -m["pct"])
     divs = [e for e in out.get("entries") or [] if e.get("type") == "dividend"
-            and dates[start] < (e.get("date") or "") <= dates[end] and _num(e.get("cash")) is not None]  # fmt: skip
+            and dates[start] < (e.get("date") or "") <= dates[end] and finite_num(e.get("cash")) is not None]  # fmt: skip
     # An entry's ``cash`` is in its own currency: in the base currency at
     # its own ``fx_rate`` (base per unit, the ledger's), and one without a
     # rate would need that day's FX (a fetch), so the total is a dash then.
     base = out.get("base_ccy") or out.get("ccy")
-    in_base = [_num(e["cash"]) * (1.0 if (e.get("ccy") or base) == base else _num(e.get("fx_rate")) or math.nan)
+    in_base = [finite_num(e["cash"]) * (1.0 if (e.get("ccy") or base) == base else finite_num(e.get("fx_rate")) or math.nan)
                for e in divs]  # fmt: skip
     att = out.get("attention") or {}
     names = {p["symbol"]: p.get("name") or p["symbol"] for p in out.get("positions") or []}
@@ -542,7 +539,7 @@ def build_recap(out: dict, friday: date, today: date, events: dict | None = None
         "best": movers[0] if movers else None,
         "worst": movers[-1] if len(movers) > 1 else None,
         "dividends": {
-            "amount": _num(sum(in_base)),
+            "amount": finite_num(sum(in_base)),
             "ccy": base,
             "count": len(divs),
         },  # fmt: skip

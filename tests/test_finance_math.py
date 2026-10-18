@@ -1,9 +1,10 @@
 """Finance-math corrections from the 2026-09-29 audit (docs/METRICS_AUDIT.md).
 
-Each test pins a convention the app now follows, against a hand calculation
-or an independent reference implementation — never against the code's own
-output. All offline: the network seams are monkeypatched.
-"""
+Each test pins a convention the app now follows, against a hand calculation or an
+independent reference implementation, never against the code own output. All offline:
+the network seams are monkeypatched.
+
+Also analyze_portfolios_multi: SMA warm-up and the benchmark table."""
 
 import math
 
@@ -14,7 +15,7 @@ import pytest
 from convexity import analytics as A
 from convexity import fetcher, fx, mpt
 from convexity import news_diagnostics as nd
-from convexity.helpers import _rsi, _ytd_change, major_ccy, price_in_major
+from convexity.helpers import _rsi, _ytd_change, finite_num, major_ccy, price_in_major
 
 
 # ----------------------------------------------------------------- returns
@@ -124,7 +125,7 @@ def test_market_cap_usd_converts_and_uses_major_units(monkeypatch):
     monkeypatch.setattr(
         fx,
         "usd_per_unit",
-        lambda c, **k: {"USD": 1.0, "JPY": 1 / 150, "GBP": 1.35}.get(fx._norm_ccy_for_fx(c)),
+        lambda c, **k: {"USD": 1.0, "JPY": 1 / 150, "GBP": 1.35}.get(major_ccy(c)),
     )
     assert A._market_cap_usd({"market_cap_usd": 5e9}) == 5e9
     assert abs(A._market_cap_usd({"market_cap": 34e12, "currency": "JPY"}) - 34e12 / 150) < 1
@@ -243,6 +244,13 @@ def test_ytd_analytics_includes_the_first_session(monkeypatch):
 def test_minor_units():
     assert major_ccy("GBp") == "GBP" and major_ccy("ZAc") == "ZAR" and major_ccy("ILA") == "ILS"
     assert major_ccy("usd") == "USD"
+    assert major_ccy("ZAC") == "ZAR" and price_in_major(1000.0, "ZAC") == 10.0
+
+
+def test_finite_num_is_strict_and_never_raises():
+    assert finite_num(3) == 3.0 and finite_num(2.5) == 2.5
+    for bad in (None, True, "3", float("nan"), float("inf"), 10**400, [1]):
+        assert finite_num(bad) is None
     assert price_in_major(3654.5, "GBp") == 36.545 and price_in_major(10.0, "USD") == 10.0
 
 
@@ -251,7 +259,7 @@ def test_adr_multiples_are_rebuilt_in_the_statement_currency(monkeypatch):
     # EV/EBITDA 6.27 and P/B 15.3 against 11.9 / 0.91 on the Tokyo line.
     monkeypatch.setattr(fetcher, "usd_per_unit", lambda c, **k: {"USD": 1.0, "JPY": 1 / 150}.get(c))
     monkeypatch.setattr(
-        fx, "usd_per_unit", lambda c, **k: {"USD": 1.0, "JPY": 1 / 150}.get(fx._norm_ccy_for_fx(c))
+        fx, "usd_per_unit", lambda c, **k: {"USD": 1.0, "JPY": 1 / 150}.get(major_ccy(c))
     )
     info = {
         "financialCurrency": "JPY",
@@ -288,9 +296,7 @@ def test_same_currency_keeps_yahoo_multiples(monkeypatch):
 
 def test_adr_without_an_fx_rate_shows_nothing_rather_than_wrong(monkeypatch):
     monkeypatch.setattr(fetcher, "usd_per_unit", lambda c, **k: 1.0 if c == "USD" else None)
-    monkeypatch.setattr(
-        fx, "usd_per_unit", lambda c, **k: 1.0 if fx._norm_ccy_for_fx(c) == "USD" else None
-    )
+    monkeypatch.setattr(fx, "usd_per_unit", lambda c, **k: 1.0 if major_ccy(c) == "USD" else None)
     out = {"ev_ebitda": 5.17, "price_book": 93.0}
     fetcher._currency_consistent(
         {
@@ -443,3 +449,51 @@ def test_beta_of_a_foreign_listing_is_estimated_not_missing():
     beta, corr = fetcher._beta_corr(tokyo, spy)
     assert beta == pytest.approx(0.96, abs=0.2) and corr > 0.5
     assert fetcher._beta_corr(tokyo, None) == (None, None)
+
+
+def _random_closes(symbols, periods=520, seed=0):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range(end="2026-09-25", periods=periods)
+    return pd.DataFrame(
+        {s: 100 * np.cumprod(1 + rng.normal(0.0005, 0.01, periods)) for s in symbols}, index=idx
+    )
+
+
+def _run(monkeypatch, period="1Y"):
+    tickers = ["AAA", "BBB"] + [t for t, _, _ in A._BENCHMARKS.values()] + ["XLK"]
+    wide = _random_closes(tickers)
+    monkeypatch.setattr(A, "_bulk_close", lambda syms, period: wide[[s for s in syms if s in wide]])
+    monkeypatch.setattr(A, "_apply_fx_to_closes", lambda df, *a, **k: df)
+    monkeypatch.setattr(A, "_analyst_for", lambda s, row=None: {})
+    rows = [{"symbol": "AAA", "sector": "Technology"}, {"symbol": "BBB", "sector": "Technology"}]
+    out = A.analyze_portfolios_multi(rows, {"eq": {"AAA": 1, "BBB": 1}}, period)
+    return wide, out["eq"]
+
+
+def test_sma_spans_the_whole_period(monkeypatch):
+    wide, a = _run(monkeypatch)
+    port = a["series"]["portfolio"]
+    sma200 = a["series"]["sma"]["200"]
+    # Starts at the period's first bar, not ~200 bars in.
+    assert sma200[0][0] == port[0][0] and len(sma200) == len(port)
+
+    # And equals a plain 200-bar rolling mean of the equal-weight index,
+    # rescaled onto the period's rebased-100 axis.
+    idx = wide[["AAA", "BBB"]].pct_change().fillna(0).mean(axis=1).add(1).cumprod()
+    start = pd.Timestamp(port[0][0], unit="ms")
+    expected = 100 * idx.rolling(200).mean().loc[start] / idx.loc[start]
+    assert abs(sma200[0][1] - expected) < 1e-9
+
+
+def test_benchmarks_shape(monkeypatch):
+    _, a = _run(monkeypatch)
+    b = a["benchmarks"]
+    assert set(b) == set(A._BENCHMARKS) | {"SECTOR"}
+    for blk in b.values():
+        assert abs(blk["series"][0][1] - 100.0) < 1e-9
+        assert {"total_return", "beta"} <= set(blk["stats"])
+        assert {"beta", "r2", "te"} <= set(blk["rel"])
+    assert abs(b["SPY"]["stats"]["beta"] - 1.0) < 1e-12  # SPY vs itself
+    # Stats come from the period slice, not the warm-up window.
+    first = pd.Timestamp(a["series"]["portfolio"][0][0], unit="ms")
+    assert first >= pd.Timestamp("2026-09-25") - pd.DateOffset(years=1)

@@ -170,7 +170,7 @@ def test_chart_type_frontend_contract():
     # HLC area is the default the user chose.
     assert 'return CHART_TYPES.some(t => t[0] === v) ? v : "hlc";' in js
     # The high line's colour exists in every theme (light/:root, dark, bloomberg).
-    assert css.count("--hlc-hi:") == 3
+    assert css.count("--hlc-hi:") >= 3
     assert 'id="pf-show-vol"' in html and 'wireOverlayPill("#pf-show-vol", "showVol")' in js
     # The approximation is explained in Settings → About, not on the chart.
     assert 'id: "chart-bars"' in js

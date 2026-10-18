@@ -1,4 +1,4 @@
-"""The ledger engine (ledger.py): roadmap Appendix B's acceptance test and
+"""The ledger engine (ledger.py): the engine-rules acceptance test (backend.md) and
 its companions. Synthetic tickers only; no network, no files."""
 
 import pytest
@@ -197,7 +197,7 @@ def test_a_sell_with_nothing_held_is_an_oversell_not_a_crash():
 
 def test_acceptance_through_the_daily_index_and_period_mwr():
     """The page's path: a running TWR index from a zero day, and the period
-    MWR solver, give Appendix B's numbers."""
+    MWR solver, give the acceptance-test numbers."""
     b = ledger.replay(ACCEPTANCE, **USD)
     pts = [("2024-12-31", 0.0, 0.0, 0.0), *_points(b, CLOSES)]
     idx = ledger.twr_index(pts)

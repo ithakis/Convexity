@@ -13,14 +13,9 @@ symbol — and each layer is pinned here. No network: every yfinance-touching
 seam is monkeypatched.
 """
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from convexity import analytics, helpers, jobs, persistence  # noqa: E402
 
@@ -115,12 +110,6 @@ def test_analytics_multi_survives_duplicate_rows(fake_market):
     assert sum(out["custom"]["weights_applied"].values()) == pytest.approx(1.0)
     # The price fetch never sees a symbol twice either.
     assert all(len(c) == len(set(c)) for c in fake_market)
-
-
-def test_single_weight_analytics_survives_duplicate_rows(fake_market):
-    out = analytics.analyze_portfolio(_rows(["IRM", "EQIX", "IRM"]), {}, "1Y")
-    assert "error" not in out, out
-    assert out["active_symbols"] == ["IRM", "EQIX"]
 
 
 # ------------------------------ frontier ------------------------------------

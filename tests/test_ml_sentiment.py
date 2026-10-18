@@ -17,26 +17,25 @@ import importlib.util
 import json
 import math
 import os
-import sys
 import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 # A bare importorskip would let this module skip silently in exactly the
 # broken environment (the desktop env once shipped without lightgbm). Skipping
 # is only legitimate when someone deliberately opts into an ML-less env.
-_ALLOW_MISSING = os.environ.get("PT_ALLOW_MISSING_ML") == "1"
+_ALLOW_MISSING = os.environ.get("CONVEXITY_ALLOW_MISSING_ML") == "1"
 for _mod in ("lightgbm", "sklearn"):
     if importlib.util.find_spec(_mod) is None:
         if _ALLOW_MISSING:
-            pytest.skip(f"{_mod} not installed (PT_ALLOW_MISSING_ML=1)", allow_module_level=True)
+            pytest.skip(
+                f"{_mod} not installed (CONVEXITY_ALLOW_MISSING_ML=1)", allow_module_level=True
+            )
         pytest.fail(
             f"{_mod} is not installed — the Market read would be dead at runtime. "
-            f"Run `uv sync --extra dev`. Set PT_ALLOW_MISSING_ML=1 "
+            f"Run `uv sync --extra dev`. Set CONVEXITY_ALLOW_MISSING_ML=1 "
             f"to skip these tests deliberately instead.",
             pytrace=False,
         )

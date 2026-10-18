@@ -7,7 +7,9 @@ import urllib.error
 
 import pytest
 
-from convexity import finnhub_adapter as fh, news_sentiment as ns, symbol_db as sdb
+from convexity import finnhub_adapter as fh
+from convexity import news_sentiment as ns
+from convexity import symbol_db as sdb
 from tests.test_symbol_db import ROWS, install
 
 _FIN = "Financial Services"

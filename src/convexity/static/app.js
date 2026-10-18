@@ -327,10 +327,6 @@ let SORT = { key: "pct_ytd", dir: -1 };
  * here. The registry is the single source of truth; no other code path
  * should hardcode column keys outside that table.
  * --------------------------------------------------------------------------- */
-const BUILTIN_VIEW_ALIASES = {
-  "IB View": "Fundamentals",
-  "Trader View": "Momentum",
-};
 const BUILTIN_VIEWS = {
   "Default":      ["logo","symbol","name","price","market_cap","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200","earnings_surprise","rec_trend_fh","insider_mspr","news_sentiment"],
   "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield","earnings_surprise","rec_trend_fh","insider_mspr"],
@@ -348,10 +344,6 @@ const BUILTIN_VIEW_HEAT = {
 const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
 const DESC_DEFAULT_KEYS = new Set(["pct_ytd","pct_1y","pct_1w","pct_1m","pct_3m","pct_6m","delta_ath","market_cap","price","target_upside_pct"]);
 
-function normalizeBuiltinViewName(name) {
-  return BUILTIN_VIEW_ALIASES[name] || name;
-}
-
 /* ---- Effective view resolution ----------------------------------------
  * A view (built-in or custom) resolves to an effective {columns, heat}.
  * Built-in views layer a persisted override (STATE.builtinOverrides) on top
@@ -359,14 +351,13 @@ function normalizeBuiltinViewName(name) {
  * All rendering + the customize modal read through these so no consumer needs
  * to know which flavour of view is active. */
 function factoryColumnsFor(name) {
-  return (BUILTIN_VIEWS[normalizeBuiltinViewName(name)] || BUILTIN_VIEWS["Default"]).slice();
+  return (BUILTIN_VIEWS[name] || BUILTIN_VIEWS["Default"]).slice();
 }
 function factoryHeatFor(name) {
-  return Object.assign({}, BUILTIN_VIEW_HEAT[normalizeBuiltinViewName(name)] || {});
+  return Object.assign({}, BUILTIN_VIEW_HEAT[name] || {});
 }
 function getViewColumns(name) {
-  name = normalizeBuiltinViewName(name);
-  const S = (typeof STATE !== "undefined" && STATE) || {};
+  const S = STATE;
   if (BUILTIN_VIEWS[name]) {
     const ov = (S.builtinOverrides || {})[name];
     if (ov && Array.isArray(ov.columns) && ov.columns.length) return ov.columns.slice();
@@ -381,8 +372,7 @@ function getViewColumns(name) {
  * (never the factory values) so a future factory change still reaches views
  * the user hasn't overridden for that column. */
 function getViewHeat(name) {
-  name = normalizeBuiltinViewName(name);
-  const S = (typeof STATE !== "undefined" && STATE) || {};
+  const S = STATE;
   if (BUILTIN_VIEWS[name]) {
     const ov = (S.builtinOverrides || {})[name];
     return Object.assign(factoryHeatFor(name), (ov && ov.heat) || {});
@@ -391,7 +381,7 @@ function getViewHeat(name) {
   return Object.assign({}, (cv && cv.heat) || {});
 }
 function getActiveViewKeys() {
-  return getViewColumns((typeof STATE !== "undefined" && STATE && STATE.activeViewName) || "Default");
+  return getViewColumns(STATE.activeViewName || "Default");
 }
 function getActiveColumns() {
   return getActiveViewKeys().map(k => COLS_BY_KEY[k]).filter(Boolean);
@@ -430,16 +420,16 @@ function setTheme(name) {
   // rebuilds the main grid — so without this the consensus table keeps the old
   // theme's tints until the next analytics response. Same one-line repaint the
   // column-sort handler uses.
-  if (STATE.analytics && typeof renderAnalystDashboard === "function") {
+  if (STATE.analytics) {
     renderAnalystDashboard(STATE.analytics);
   }
   // The charts write literal theme colours into their SVG (chartColors), so a
   // theme switch must repaint them or dark mode keeps white candle bodies.
   const pfHost = document.getElementById("pf-chart-host");
-  if (pfHost && STATE.analytics && !STATE.analytics.error && typeof drawPortfolioChart === "function") {
+  if (pfHost && STATE.analytics && !STATE.analytics.error) {
     drawPortfolioChart(STATE.analytics, pfHost, document.getElementById("pf-chart-legend"));
   }
-  if (typeof DETAIL !== "undefined" && DETAIL.data && document.getElementById("m-svg")) renderChart();
+  if (DETAIL.data && document.getElementById("m-svg")) renderChart();
 }
 
 /* Paint every control that DISPLAYS the current theme, from the one place that
@@ -497,31 +487,20 @@ function persistFitColumnsPreference(on) {
 
 /* Color-coding ("heat") mode is now a property of the active view (see
    getViewHeat) — EV/EBITDA can be quantile in Fundamentals but min-max in
-   Default. The legacy global localStorage map is retained only as a fallback
-   default for any (view, column) with no explicit per-view mode, so a user's
-   pre-existing global tweaks still apply as a baseline; new toggles write to
-   the view, not the global. */
-function readHeatPrefs() {
-  try {
-    const raw = localStorage.getItem("heat_prefs");
-    return raw ? JSON.parse(raw) : {};
-  } catch (e) { return {}; }
-}
+   Default. */
 function getHeatMode(key) {
   const col = COLS_BY_KEY[key];
   if (!col || !col.heat) return null;
   const viewHeat = getViewHeat(STATE.activeViewName);
   let mode = viewHeat[key];
-  if (mode == null) mode = (STATE.heatPrefs || {})[key]; // legacy global fallback
   if (col.heat.kind === "yo_dyn") {
-    if (mode === "percentile") mode = "quantile"; // migrate the old continuous-rank mode
     return (mode === "off" || mode === "2c" || mode === "quantile" || mode === "minmax") ? mode : "minmax";
   }
   if (col.heat.kind === "div") return mode === "off" ? "off" : "on";
   return null; // no controllable heat mode
 }
 function setHeatMode(key, mode) {
-  const name = normalizeBuiltinViewName(STATE.activeViewName);
+  const name = STATE.activeViewName;
   if (isBuiltinView(name)) {
     const ov = STATE.builtinOverrides[name] || {};
     ov.heat = Object.assign({}, ov.heat || {});
@@ -1210,16 +1189,20 @@ function fmt2(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed
 /* A value that is already in percent (Yahoo's debtToEquity: 78.4 = 78.4%). */
 function fmtPctNum(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed(1) + "%"; }
 
+/* A Date, epoch ms or ISO string as a Date; bare YYYY-MM-DD is a local-calendar day. */
+function parseLocalDay(d) {
+  if (d instanceof Date) return d;
+  if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    const [y, m, dd] = d.split("-").map(Number);
+    return new Date(y, m - 1, dd);
+  }
+  return new Date(d);
+}
 /* Canonical user-visible date format across the app: "Jul 7, 2026".
    Accepts a Date, epoch ms, or ISO string; bare YYYY-MM-DD strings are
    parsed as local-calendar dates (not UTC) so they never shift a day. */
 function fmtDateMDY(d) {
-  let dt;
-  if (d instanceof Date) dt = d;
-  else if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
-    const [y, m, dd] = d.split("-").map(Number);
-    dt = new Date(y, m - 1, dd);
-  } else dt = new Date(d);
+  const dt = parseLocalDay(d);
   if (isNaN(dt)) return d == null ? "—" : String(d);
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
@@ -1232,12 +1215,7 @@ function fmtDateMD(d) {
 /* Day-Month-Year, e.g. "09 Jul 2026" — used for the app version tag only
    (conventional release-note date format, distinct from fmtDateMDY above). */
 function fmtDateDMY(d) {
-  let dt;
-  if (d instanceof Date) dt = d;
-  else if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
-    const [y, m, dd] = d.split("-").map(Number);
-    dt = new Date(y, m - 1, dd);
-  } else dt = new Date(d);
+  const dt = parseLocalDay(d);
   if (isNaN(dt)) return d == null ? "—" : String(d);
   const day = String(dt.getDate()).padStart(2, "0");
   const month = dt.toLocaleDateString("en-US", { month: "short" });
@@ -1819,7 +1797,7 @@ function cellStyleHeat(col, value, theme, ctx) {
  * whenever the active built-in differs from its factory definition.
  * --------------------------------------------------------------------------- */
 
-function isBuiltinView(name) { return Object.prototype.hasOwnProperty.call(BUILTIN_VIEWS, normalizeBuiltinViewName(name)); }
+function isBuiltinView(name) { return Object.prototype.hasOwnProperty.call(BUILTIN_VIEWS, name); }
 
 /* Custom presets in bar order: creation order, so a newly saved preset always
    lands at the END of the row rather than jumping into the middle of a list the
@@ -1848,7 +1826,6 @@ function sameColumnKeys(left, right) {
    color override)? Drives the Settings > Column Presets "Revert" buttons, which
    must stay available for as long as an override exists. */
 function builtinIsModified(name) {
-  name = normalizeBuiltinViewName(name);
   if (!isBuiltinView(name)) return false;
   const ov = (STATE.builtinOverrides || {})[name];
   if (!ov) return false;
@@ -1861,7 +1838,6 @@ function builtinIsModified(name) {
    saved the moment it was made — acking only silences the flag, so the two
    predicates deliberately diverge and Settings keeps offering the revert. */
 function builtinShowsDirtyPill(name) {
-  name = normalizeBuiltinViewName(name);
   if (!builtinIsModified(name)) return false;
   return !((STATE.builtinOverrides || {})[name] || {}).acked;
 }
@@ -1878,7 +1854,7 @@ async function loadColumnViews() {
     const j = await r.json();
     STATE.customViews = j.custom || {};
     STATE.builtinOverrides = j.builtin_overrides || {};
-    const desired = normalizeBuiltinViewName(j.active || "Default");
+    const desired = (j.active || "Default");
     if (isBuiltinView(desired) || STATE.customViews[desired]) {
       STATE.activeViewName = desired;
     } else {
@@ -1923,7 +1899,7 @@ async function persistBuiltinHeat(name, key, mode) {
     const r = await fetch("/api/column-views/builtin-heat", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({name: normalizeBuiltinViewName(name), key, mode}),
+      body: JSON.stringify({name: name, key, mode}),
     });
     if (r.ok) {
       const j = await r.json();
@@ -1939,7 +1915,6 @@ function debouncedSaveCustom(name, columns, heat) {
 }
 
 function setActiveView(name, {persist = true} = {}) {
-  name = normalizeBuiltinViewName(name);
   if (!isBuiltinView(name) && !STATE.customViews[name]) return;
   STATE.activeViewName = name;
   render();
@@ -1957,7 +1932,7 @@ function renderColumnViewBar() {
   const seg = document.getElementById("cv-builtins");
   if (!seg) return;
   seg.innerHTML = "";
-  const activeName = normalizeBuiltinViewName(STATE.activeViewName || "Default");
+  const activeName = (STATE.activeViewName || "Default");
   const addChip = (name, isCustom) => {
     const b = document.createElement("button");
     b.type = "button";
@@ -1994,7 +1969,7 @@ function renderColumnViewBar() {
    active view for the column bar's Reset button; Settings passes a name so any
    preset can be reverted without switching to it first. */
 async function resetViewOverride(name) {
-  name = normalizeBuiltinViewName(name || STATE.activeViewName);
+  name = (name || STATE.activeViewName);
   if (!isBuiltinView(name) || !builtinIsModified(name)) return;
   try {
     const r = await fetch(`/api/column-views/${encodeURIComponent(name)}`, {method: "DELETE"});
@@ -2013,7 +1988,7 @@ async function resetViewOverride(name) {
    the view again (columns or colors) clears the flag server-side and the pill
    comes back. */
 async function ackViewOverride(name) {
-  name = normalizeBuiltinViewName(name || STATE.activeViewName);
+  name = (name || STATE.activeViewName);
   if (!isBuiltinView(name) || !builtinIsModified(name)) return;
   try {
     const r = await fetch("/api/column-views/builtin-ack", {
@@ -2081,7 +2056,7 @@ function openColumnPicker() {
      <active>" (the primary action) saves the edits straight back onto the
      current view, no naming, no forced fork. "Save as new" is the secondary
      escape hatch for deliberately branching a copy. */
-  const activeName = normalizeBuiltinViewName(STATE.activeViewName);
+  const activeName = STATE.activeViewName;
   const isBuiltinActive = isBuiltinView(activeName);
   modal.innerHTML = `
     <h2>Customize Columns</h2>
@@ -2129,7 +2104,7 @@ function buildHeatControl(key) {
     return sw;
   }
   if (c.heat.kind === "yo_dyn") {
-    const seg = document.createElement("span"); seg.className = "cv-seg";
+    const seg = document.createElement("span"); seg.className = "cv-heat-seg";
     const current = getHeatMode(key);
     for (const [val, label] of [["off", "Off"], ["2c", "2C-Quantile"], ["quantile", "Quantile"], ["minmax", "Min-Max"]]) {
       const btn = document.createElement("button");
@@ -2227,7 +2202,7 @@ async function saveColumnPicker({asNew}) {
        factory to inherit from). */
     heat = getViewHeat(STATE.activeViewName);
   } else {
-    name = normalizeBuiltinViewName(STATE.activeViewName);
+    name = STATE.activeViewName;
     /* Updating an existing view persists the column change while preserving
        the view's already-saved explicit color overrides (color controls apply
        immediately, so they're saved before this runs). */
@@ -2303,7 +2278,7 @@ function reorderActiveColumns(fromKey, toKey) {
   if (fromIdx < 0 || toIdx < 0) return;
   cur.splice(fromIdx, 1);
   cur.splice(toIdx, 0, fromKey);
-  const name = normalizeBuiltinViewName(STATE.activeViewName);
+  const name = STATE.activeViewName;
   if (isBuiltinView(name)) {
     /* Built-in views are now editable in place: persist the new order as a
        per-view override immediately (preserving any explicit color overrides). */
@@ -2358,7 +2333,7 @@ function renderHeader(scale = 1) {
     }
     tr.appendChild(th);
   }
-  if (typeof wireHeaderDnD === "function") wireHeaderDnD(tr);
+  wireHeaderDnD(tr);
 }
 
 function render() {
@@ -2366,7 +2341,7 @@ function render() {
   const cols = getActiveColumns();
   const scale = applyTableFitMode(cols);
   renderHeader(scale);
-  if (typeof renderColumnViewBar === "function") renderColumnViewBar();
+  renderColumnViewBar();
   const tbody = $("#tbody"); tbody.innerHTML = "";
   if (!DATA.length) {
     tbody.innerHTML = `<tr><td colspan="${cols.length}" style="padding:30px; text-align:center; color:var(--muted);">Add companies above, then press <b>Refresh</b>.</td></tr>`;
@@ -4651,8 +4626,7 @@ function fmtCompactNum(v) {
   return v.toFixed(0);
 }
 function fmtPctFrac(v) {
-  if (v == null || !isFinite(v)) return "—";
-  return (Number(v) * 100).toFixed(2) + "%";
+  return (v == null || !isFinite(v)) ? "—" : fmtPctDirect(v);
 }
 function relTime(iso) {
   try {
@@ -4727,7 +4701,6 @@ let STATE = {
   fitColumns: readFitColumnsPreference(),
   // Legacy global color-mode map — now only a fallback default under any
   // per-view color setting (see getHeatMode); new toggles write to the view.
-  heatPrefs: readHeatPrefs(),
 };
 
 /* ===========================================================================
@@ -8507,9 +8480,6 @@ function nsLensTag(a) {
 /* ===== Shared inline-SVG chart helpers (Track record + Methodology) =====
  * Self-contained (no chart lib — house rule), theme-aware (colors via CSS vars
  * in style=), interactive via native <title> hover + CSS :hover highlight. */
-function svgEsc(s) {
-  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
 const SVG_POS = "var(--pos)", SVG_NEG = "var(--neg)", SVG_ACC = "var(--accent)", SVG_MUT = "var(--muted)", SVG_BRD = "var(--border)";
 
 /* Signed single-series bar chart. data: [{label, value, color?, tip?, lo?, hi?}]
@@ -8533,13 +8503,13 @@ function svgBars(data, opts) {
     const v = (d.value != null && isFinite(d.value)) ? d.value : base;
     const yv = yOf(v), top = Math.min(yv, y0), hgt = Math.max(0.6, Math.abs(yv - y0));
     const col = d.color || (v >= base ? SVG_POS : SVG_NEG);
-    bars += `<rect class="svg-bar" x="${(cx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" rx="1.5" style="fill:${col}"><title>${svgEsc(d.tip || (d.label + ": " + (opts.fmt ? opts.fmt(v) : v)))}</title></rect>`;
+    bars += `<rect class="svg-bar" x="${(cx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" rx="1.5" style="fill:${col}"><title>${escapeHtml(d.tip || (d.label + ": " + (opts.fmt ? opts.fmt(v) : v)))}</title></rect>`;
     if (d.lo != null && d.hi != null) {
       bars += `<line x1="${cx.toFixed(1)}" y1="${yOf(d.lo).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yOf(d.hi).toFixed(1)}" style="stroke:var(--text)" stroke-width="1.2"/>`
         + `<line x1="${(cx - 4).toFixed(1)}" y1="${yOf(d.lo).toFixed(1)}" x2="${(cx + 4).toFixed(1)}" y2="${yOf(d.lo).toFixed(1)}" style="stroke:var(--text)" stroke-width="1.2"/>`
         + `<line x1="${(cx - 4).toFixed(1)}" y1="${yOf(d.hi).toFixed(1)}" x2="${(cx + 4).toFixed(1)}" y2="${yOf(d.hi).toFixed(1)}" style="stroke:var(--text)" stroke-width="1.2"/>`;
     }
-    labels += `<text x="${cx.toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${svgEsc(d.label)}</text>`;
+    labels += `<text x="${cx.toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${escapeHtml(d.label)}</text>`;
   });
   const zero = `<line x1="${padL}" y1="${y0.toFixed(1)}" x2="${W - padR}" y2="${y0.toFixed(1)}" style="stroke:${SVG_BRD}" stroke-width="1"/>`;
   return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${zero}${bars}${labels}</svg>`;
@@ -8571,13 +8541,13 @@ function svgLine(series, opts) {
     if (!pts.length) return;
     const dpath = pts.map((p, i) => `${i ? "L" : "M"}${xOf(p.x).toFixed(1)} ${yOf(p.y).toFixed(1)}`).join(" ");
     out += `<path d="${dpath}" fill="none" style="stroke:${s.color}" stroke-width="2" stroke-linejoin="round"/>`;
-    pts.forEach(p => { out += `<circle class="svg-dot" cx="${xOf(p.x).toFixed(1)}" cy="${yOf(p.y).toFixed(1)}" r="2.6" style="fill:${s.color}"><title>${svgEsc(p.tip || (s.name + ": " + p.y))}</title></circle>`; });
+    pts.forEach(p => { out += `<circle class="svg-dot" cx="${xOf(p.x).toFixed(1)}" cy="${yOf(p.y).toFixed(1)}" r="2.6" style="fill:${s.color}"><title>${escapeHtml(p.tip || (s.name + ": " + p.y))}</title></circle>`; });
   });
   if (opts.xLabels) {
-    opts.xLabels.forEach(l => { out += `<text x="${xOf(l.x).toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="8">${svgEsc(l.label)}</text>`; });
+    opts.xLabels.forEach(l => { out += `<text x="${xOf(l.x).toFixed(1)}" y="${(H - padB + 12).toFixed(1)}" text-anchor="middle" style="fill:var(--muted)" font-size="8">${escapeHtml(l.label)}</text>`; });
   }
   const leg = series.map((s, j) =>
-    `<g transform="translate(${padL + j * 120},${padT})"><rect width="9" height="9" rx="2" style="fill:${s.color}"/><text x="13" y="8" style="fill:var(--text)" font-size="9">${svgEsc(s.name)}</text></g>`).join("");
+    `<g transform="translate(${padL + j * 120},${padT})"><rect width="9" height="9" rx="2" style="fill:${s.color}"/><text x="13" y="8" style="fill:var(--text)" font-size="9">${escapeHtml(s.name)}</text></g>`).join("");
   return `<svg viewBox="0 0 ${W} ${H}" class="svg-chart" preserveAspectRatio="xMidYMid meet" role="img">${out}${leg}</svg>`;
 }
 
@@ -9448,8 +9418,8 @@ function mthPipelineSvg(stages) {
   stages.forEach((s, i) => {
     const x = i * (bw + gap), y = (H - bh) / 2;
     out += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="6" style="fill:var(--bg-subtle);stroke:${SVG_ACC}" stroke-width="1.2"/>`;
-    out += `<text x="${x + bw / 2}" y="${y + 21}" text-anchor="middle" style="fill:var(--text)" font-size="12.5" font-weight="700">${svgEsc(s[0])}</text>`;
-    out += `<text x="${x + bw / 2}" y="${y + 37}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${svgEsc(s[1])}</text>`;
+    out += `<text x="${x + bw / 2}" y="${y + 21}" text-anchor="middle" style="fill:var(--text)" font-size="12.5" font-weight="700">${escapeHtml(s[0])}</text>`;
+    out += `<text x="${x + bw / 2}" y="${y + 37}" text-anchor="middle" style="fill:var(--muted)" font-size="9">${escapeHtml(s[1])}</text>`;
     if (i < stages.length - 1) {
       const a2 = x + bw + gap;
       out += `<line x1="${x + bw + 2}" y1="${H / 2}" x2="${a2 - 6}" y2="${H / 2}" style="stroke:${SVG_MUT}" stroke-width="1.4"/>`;
@@ -10787,13 +10757,8 @@ function mptShowFrontierTip(ev, idx) {
   `;
   tip.classList.add("show");
   // Anchor on the cursor and let placeTip pick a side / clamp to viewport.
-  if (typeof placeTip === "function") {
-    placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
-                   width: 0, height: 0}, {preferred: "above", offset: 14, gap: 8});
-  } else {
-    tip.style.left = (ev.clientX + 14) + "px";
-    tip.style.top = (ev.clientY + 14) + "px";
-  }
+  placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
+                 width: 0, height: 0}, {preferred: "above", offset: 14, gap: 8});
 }
 function mptHideFrontierTip() {
   const tip = document.getElementById("pf-mpt-frontier-tip");
@@ -10914,13 +10879,8 @@ function mptShowAssetTip(ev, sym) {
   const tip = mptAssetTipEl();
   tip.innerHTML = mptAssetTip(sym);
   tip.classList.add("show");
-  if (typeof placeTip === "function") {
-    placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
-                   width: 0, height: 0}, {preferred: "left", offset: 14, gap: 8});
-  } else {
-    tip.style.left = (ev.clientX + 14) + "px";
-    tip.style.top = (ev.clientY + 14) + "px";
-  }
+  placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY,
+                 width: 0, height: 0}, {preferred: "left", offset: 14, gap: 8});
 }
 function mptHideAssetTip() {
   const tip = document.getElementById("pf-mpt-asset-tip");
@@ -11623,7 +11583,6 @@ function fxInit() {
 // fixed-position overlay). Any `.an-version` element already in the DOM when
 // this resolves is patched directly so a slow /api/health response still lands.
 let APP_VERSION = null; // {version, date, dataDir} — date is a raw ISO "yyyy-mm-dd"
-let MIGRATION_CONFLICTS = []; // [{old, used}] from /api/health — see syncMigrationBanner
 
 function versionLabel() {
   return APP_VERSION ? `v${APP_VERSION.version} (${fmtDateDMY(APP_VERSION.date)})` : "";
@@ -11639,8 +11598,6 @@ function loadAppVersion() {
     // the one panel that would have explained it.
     if (d.env_ok === false) showEnvBanner();
     syncLlmBanner(d);
-    MIGRATION_CONFLICTS = Array.isArray(d.migration_conflicts) ? d.migration_conflicts : [];
-    syncMigrationBanner();
     if (!d.version) return;
     APP_VERSION = { version: d.version, date: d.version_date, dataDir: d.data_dir || "" };
     document.querySelectorAll(".an-version").forEach(el => { el.textContent = versionLabel(); });
@@ -11705,47 +11662,6 @@ function syncLlmBanner(health) {
     openSettings();
   };
 }
-/* The move into the data folder never overwrites: when an old file and a
-   different copy in the data folder both exist, the app uses the data-folder
-   copy and leaves the old one untouched. That used to be one log line, so a
-   user whose newer edits sat in the old file saw them "vanish". The conflict
-   repeats on every launch until the old file is dealt with, so the banner does
-   too; Settings -> About lists the files. */
-function syncMigrationBanner() {
-  const old = document.getElementById("migrate-banner");
-  const n = MIGRATION_CONFLICTS.length;
-  if (!n) { if (old) old.remove(); return; }
-  if (old) return;
-  const bar = document.createElement("div");
-  bar.id = "migrate-banner";
-  bar.className = "env-banner";
-  bar.innerHTML = `<span>${n === 1 ? "One older data file was" : `${n} older data files were`}
-    not moved into the data folder because a different copy was already there.
-    The app is using the data-folder copy; the old ${n === 1 ? "file is" : "files are"} untouched.</span>
-    <button class="env-banner-link" id="migrate-banner-open">Details</button>
-    <button class="env-banner-x" id="migrate-banner-x" aria-label="Dismiss">&times;</button>`;
-  const topbar = document.getElementById("topbar");
-  if (topbar && topbar.parentNode) topbar.parentNode.insertBefore(bar, topbar.nextSibling);
-  else document.body.insertBefore(bar, document.body.firstChild);
-  document.getElementById("migrate-banner-x").onclick = () => bar.remove();
-  document.getElementById("migrate-banner-open").onclick = () => {
-    bar.remove();
-    selectSettingsSection("about");
-    openSettings();
-  };
-}
-
-function migrationConflictsHtml() {
-  if (!MIGRATION_CONFLICTS.length) return "";
-  const rows = MIGRATION_CONFLICTS.map(c => `<li><div><span class="settings-bad-text">Not moved:</span>
-      <code>${escapeHtml(c.old)}</code></div><div>In use: <code>${escapeHtml(c.used)}</code></div></li>`).join("");
-  return `<div class="settings-row-help"><b>Older files left in place.</b> A different copy
-      was already in the data folder, so these were not moved (nothing is ever
-      overwritten). If the old file holds changes you want, quit the app, move it over
-      the file in use, and relaunch. If not, delete the old file and this notice goes away.</div>
-    <ul class="settings-migrate-list">${rows}</ul>`;
-}
-
 /* First run: no keys, so no News read and no Finnhub news. Same shape as the
    other banners; Details opens Settings -> API keys. It disappears as soon as
    /api/health reports both keys set (Settings re-runs the health check after a
@@ -12215,7 +12131,7 @@ function renderSettingsColumnPresets(el) {
               : `Modified &middot; not yet saved`;
     return settingsRow({
       id: "builtins",
-      label: escapeHtml(name) + (name === normalizeBuiltinViewName(STATE.activeViewName)
+      label: escapeHtml(name) + (name === STATE.activeViewName
         ? ` <span class="settings-status-pill ok">Active</span>` : ""),
       help: `${state} &middot; ${counted(getViewColumns(name).length)}`,
       control: `<button class="settings-btn" data-revert="${escapeHtml(name)}"${modified ? "" : " disabled"}>Revert to default</button>`,
@@ -12562,7 +12478,6 @@ const KEY_TEST_TEXT = {
 function keySourceText(p) {
   if (!p || !p.set) return `<span class="settings-status-pill bad">Not set</span>`;
   const src = p.source === "env" ? `environment variable <code>${escapeHtml(p.env_var || "")}</code>`
-            : p.source === "legacy" ? "legacy key file beside the app"
             : "config.json";
   return `<span class="settings-status-pill ok">Set</span> <span class="settings-key-src">from ${src}</span>`;
 }
@@ -12583,15 +12498,12 @@ function paintSettingsKeys(el, st, notes = {}) {
     const envNote = s.source === "env"
       ? `<div class="settings-row-help">The environment variable wins over config.json while it is
           set${s.in_config ? " — the key saved here is used once it is unset" : ""}.</div>` : "";
-    const legacyNote = s.source === "legacy"
-      ? `<div class="settings-row-help">Save the key here to move it into config.json; the old
-          file is read for this release only.</div>` : "";
     const note = notes[p.id];
     const noteHtml = note ? `<div class="settings-row-help settings-key-note ${note.cls || ""}">${escapeHtml(note.text)}</div>` : "";
     const help = `<div>${keySourceText(s)}</div>
       <div class="settings-row-help">${escapeHtml(p.what)} Free key:
         <a href="${p.link}" target="_blank" rel="noopener noreferrer">${escapeHtml(p.linkText)}</a></div>
-      ${envNote}${legacyNote}
+      ${envNote}
       <form class="settings-key-form" data-provider="${p.id}" autocomplete="off">
         <input type="password" class="settings-key-input" id="key-input-${p.id}"
           autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"
@@ -12749,7 +12661,7 @@ async function renderSettingsInvestments(el) {
   paint(false);
 }
 
-/* Settings → Attention (roadmap Phase 7): one row per rule, on/off and its
+/* Settings → Attention (Phase 7): one row per rule, on/off and its
  * limit, saved on change (attention.py validates and clamps). */
 async function renderSettingsAttention(el) {
   let a = INV.book?.attention;
@@ -12787,7 +12699,7 @@ async function renderSettingsAttention(el) {
   el.querySelectorAll("[data-att-on]").forEach(i => i.addEventListener("change", () => save(i.dataset.attOn, { on: i.checked })));
 }
 
-/* Settings → Notifications (roadmap Phase 9). The switch and quiet hours
+/* Settings → Notifications (Phase 9). The switch and quiet hours
  * are kept in prefs.json (they must outlive the page, like the default
  * currency); off means nothing is scheduled and nothing sent. */
 async function renderSettingsNotifications(el) {
@@ -12917,8 +12829,7 @@ function renderSettingsAbout(el) {
         </div>
         <div class="settings-row-help">One folder per user, outside the app's own
           folder, so updating or reinstalling never touches it. It stays on this
-          machine.</div>
-        ${migrationConflictsHtml()}`,
+          machine.</div>`,
     }) +
     settingsRow({
       id: "update",
@@ -13134,7 +13045,7 @@ function showPage(name) {
 }
 
 /* ===========================================================================
- * My Investments (docs/plans/my-investments-roadmap.md). Renders
+ * My Investments (docs/architecture/backend.md, "My Investments"). Renders
  * GET /api/investments into INV.book; the owner's UI rules for this page
  * are in docs/architecture/frontend.md ("Pages and My Investments").
  * Amounts arrive in INV.book.ccy and are converted to FX_QUOTE for display.
@@ -13513,7 +13424,7 @@ function invRailHtml(b) {
   return head + invAttentionHtml(b);
 }
 
-/* The Attention rail (roadmap Phase 7; attention.py computes it). Owner's
+/* The Attention rail (Phase 7; attention.py computes it). Owner's
  * picks, 2026-10-13: grouped by severity ("Needs a look" always shown, "For
  * your information" collapsed after INV_ATT_FOLD), a ✕ per item that holds
  * until the item gets worse, thresholds in Settings → Attention (the gear,
@@ -13613,7 +13524,7 @@ async function invBadgeLoad(tries = 12) {
   if (a?.pending && tries > 1) setTimeout(() => invBadgeLoad(tries - 1), 10000);
 }
 
-/* Notifications (roadmap Phase 9). The server's scheduler decides what is
+/* Notifications (Phase 9). The server's scheduler decides what is
  * sent (notify.py, the rail's own rules); the page polls its outbox once a
  * minute while visible, refreshes the badge and the rail when something
  * new went out, and in browser mode only (no native sink) shows a quiet
@@ -13782,7 +13693,7 @@ async function invAddDividends(which) {
   await invCommit("dividends", { entries });
 }
 
-/* A holding's plan (roadmap Phase 8, owner's picks 2026-10-14): click its
+/* A holding's plan (Phase 8, owner's picks 2026-10-14): click its
  * row for "Your plan for …" (target, review level, max weight, why, and
  * one-shot price alerts); attention.py keeps it in state/plans.json and the
  * rail raises the items. Levels are in the share's quote unit (pence for
@@ -13987,7 +13898,7 @@ const invTipFor = (fn) => (host) => INV.book?.headline ? fn(INV.book.headline, h
 const invPos = (host) => (INV.book?.positions || []).find(x => x.symbol === host.dataset.sym);
 const invWords = () => INV_PERIOD_WORDS[INV.period];
 /* Your money: per year from a one-year span up, the period's own figure under
- * a year (roadmap Phase 3: never annualise a short period). */
+ * a year (Phase 3: never annualise a short period). */
 const invLong = (h, p = INV.period) => (h.years?.[p] ?? 0) >= 1 - 1e-9;
 const invMwr = (h, p = INV.period) => invLong(h, p) ? h.mwr_ann?.[p] : h.mwr?.[p];
 const invTwrComparable = (h, p = INV.period) => invLong(h, p) ? h.twr_ann?.[p] : h.twr?.[p];
@@ -14473,7 +14384,7 @@ function invFormRerender(form, patch) {
   return host.querySelector(".inv-form");
 }
 
-/* --- the composer and the review (roadmap Phases 5-6) -------------------
+/* --- the composer and the review (Phases 5-6) -------------------
  * The way in (owner's choice W1): one box that takes typed or pasted text,
  * screenshots (dropped, attached or pasted), PDFs and CSV/Excel files. "Read it"
  * sends them to /api/investments/import, which returns rows to review;

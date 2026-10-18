@@ -28,7 +28,8 @@ from pathlib import Path
 
 from rapidfuzz import fuzz as _fuzz
 
-# Same threshold as news_sentiment._DEDUP_SIMILARITY — keep in sync.
+# Title-dedup threshold (percent). news_sentiment imports it, so the app and
+# the ml/ scripts cluster headlines at the same cut.
 DEDUP_SIMILARITY = 85
 
 # Fuzzy company-name match threshold (partial_ratio on normalized text).
@@ -52,7 +53,7 @@ _NAME_SUFFIX_RE = re.compile(
 
 # ------------------------------------------------------------------ dedup
 def norm_title(title: str) -> str:
-    """Identical to news_sentiment._norm_title — lowercase, alnum-only, squeezed."""
+    """Lowercase, alnum-only, whitespace-squeezed title key (imported by news_sentiment)."""
     return " ".join(
         "".join(c if c.isalnum() or c.isspace() else " " for c in (title or "").lower()).split()
     )
@@ -63,8 +64,9 @@ def cluster_titles(titles: list[str]) -> tuple[list[int], list[int]]:
 
     Returns (keep_indices, dup_counts): positions of cluster canonicals in the
     input list and, aligned with them, how many duplicates each absorbed.
-    Same semantics as news_sentiment._dedup_articles; titles that normalize to
-    empty are kept as their own singletons (they carry no dedup evidence).
+    Same clustering as news_sentiment._dedup_articles, except that titles which
+    normalize to empty are kept as their own singletons here (they carry no
+    dedup evidence) while the app drops them.
     """
     keep_idx: list[int] = []
     dup_counts: list[int] = []

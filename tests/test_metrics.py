@@ -12,47 +12,19 @@ _normalize_dividend_yield is imported from convexity.helpers.
 """
 
 import math
-import sys
-import os
 
 import numpy as np
 import pandas as pd
-import pytest
 
 # ---------------------------------------------------------------------------
 # Import helpers from the app modules
 # ---------------------------------------------------------------------------
-
-_REPO = os.path.dirname(os.path.dirname(__file__))
-if _REPO not in sys.path:
-    sys.path.insert(0, _REPO)
-
 # Import mpt directly (pure numpy/pandas, no server deps).
 from convexity import mpt
 
-# Import _normalize_dividend_yield from the package (module-level function,
-# importable once the pyproject.toml dependencies are installed). If the import fails
-# (e.g. missing yfinance/numba on a stripped env) skip all dashboard tests
-# explicitly — do NOT silently fall back to a local copy, which would make
-# tests pass even when the package is broken or has diverged.
-try:
-    from convexity.helpers import _normalize_dividend_yield  # noqa: E402
-
-    _DASHBOARD_IMPORT_ERROR = None
-except Exception as _exc:
-    _DASHBOARD_IMPORT_ERROR = str(_exc)
-    _normalize_dividend_yield = None  # type: ignore[assignment]
-
-
-def _require_dashboard():
-    """Skip the calling test if convexity.helpers could not be imported."""
-    if _DASHBOARD_IMPORT_ERROR is not None:
-        pytest.skip(f"convexity.helpers not importable: {_DASHBOARD_IMPORT_ERROR}")
-
-
 # The real analytics stats helpers (ret = daily returns, val = equity curve).
 from convexity.analytics import _relative, _stats  # noqa: E402
-
+from convexity.helpers import _normalize_dividend_yield  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helper — build a dated index of N business days
@@ -260,20 +232,17 @@ def test_dividend_yield_raw_is_percent():
     2.41 = 2.41%): always / 100. The old size heuristic read 0.32 as 32%.
     Source: helpers._normalize_dividend_yield
     """
-    _require_dashboard()
     assert abs(_normalize_dividend_yield(0.32) - 0.0032) < 1e-12
     assert abs(_normalize_dividend_yield(2.41) - 0.0241) < 1e-12
 
 
 def test_dividend_yield_none():
     """None input → None output."""
-    _require_dashboard()
     assert _normalize_dividend_yield(None) is None
 
 
 def test_dividend_yield_zero():
     """Yield of 0 is valid (no dividend) → 0.0."""
-    _require_dashboard()
     assert _normalize_dividend_yield(0.0) == 0.0
 
 
@@ -282,7 +251,6 @@ def test_dividend_yield_rate_over_price():
     Prefer dividend_rate / price over the (2-decimal) raw yield field.
     dividend_rate=1.0, price=20.0  →  1.0/20.0 = 0.05
     """
-    _require_dashboard()
     result = _normalize_dividend_yield(raw_yield=0.99, price=20.0, dividend_rate=1.0)
     assert abs(result - 0.05) < 1e-12
 
@@ -292,7 +260,6 @@ def test_dividend_yield_minor_unit_price():
     SHEL.L (live, 2026-09-29): price 3654.5 GBp, dividendRate 1.16 GBP,
     dividendYield 3.2. The price is in pence, the rate in pounds: 1.16/36.545.
     """
-    _require_dashboard()
     result = _normalize_dividend_yield(
         3.2, price=3654.5, dividend_rate=1.16, currency="GBp", financial_currency="USD"
     )
@@ -305,7 +272,6 @@ def test_dividend_yield_trailing_skipped_across_currencies():
     TSM (live): USD price, TWD statements; the trailing rate is 26 TWD. With no
     forward fields the trailing ones must NOT be used (26/452.88 = 5.7%).
     """
-    _require_dashboard()
     result = _normalize_dividend_yield(
         None,
         price=452.88,
@@ -319,7 +285,6 @@ def test_dividend_yield_trailing_skipped_across_currencies():
 
 def test_dividend_yield_trailing_same_currency():
     """KO-style: forward fields missing, same currency → trailing rate / price."""
-    _require_dashboard()
     result = _normalize_dividend_yield(
         None, price=87.18, trailing_rate=2.08, currency="USD", financial_currency="USD"
     )
@@ -328,28 +293,24 @@ def test_dividend_yield_trailing_same_currency():
 
 def test_dividend_yield_trailing_yield_is_fraction():
     """trailingAnnualDividendYield is a fraction (KO 0.0237 = 2.37%)."""
-    _require_dashboard()
     result = _normalize_dividend_yield(raw_yield=None, trailing_yield=0.0237)
     assert abs(result - 0.0237) < 1e-12
 
 
 def test_dividend_yield_negative_raw_skipped():
     """Negative raw_yield is skipped; the trailing yield is used."""
-    _require_dashboard()
     result = _normalize_dividend_yield(raw_yield=-0.5, trailing_yield=0.02)
     assert abs(result - 0.02) < 1e-12
 
 
 def test_dividend_yield_price_zero_falls_to_raw():
     """price=0 skips rate/price; raw 4.0 (percent) → 0.04."""
-    _require_dashboard()
     result = _normalize_dividend_yield(raw_yield=4.0, price=0.0, dividend_rate=1.0)
     assert abs(result - 0.04) < 1e-12
 
 
 def test_dividend_yield_both_none_returns_none():
     """All inputs unavailable → None."""
-    _require_dashboard()
     assert _normalize_dividend_yield(None, trailing_yield=None) is None
 
 
@@ -974,10 +935,6 @@ def test_mpt_run_history_last_three(tmp_path, monkeypatch):
     assert len(runs) == 3 and runs[0]["symbols"] == ["A", "B", "C"]
     assert [r["params"]["alpha"] for r in runs] == [0.99, 0.975, 0.95]
     assert P.get_mpt_runs("Missing") == [] and P.get_mpt_runs("Missing") == []
-    # legacy single-dict format → tolerated as a one-element history
-    P._write_mpt_raw({"runs": {"Old": {"id": "r1", "params": {"alpha": 0.95}}}})
-    assert P.get_mpt_runs("Old")[0]["id"] == "r1"
-    assert len(P.get_mpt_runs("Old")) == 1
-    # legacy multi-run list format → newest entry is index 0
-    P._write_mpt_raw({"runs": {"Leg": [{"id": "r2"}, {"id": "r1"}]}})
-    assert P.get_mpt_runs("Leg")[0]["id"] == "r2"
+    # a stored list is returned as-is, newest entry first; stray entries dropped
+    P._write_mpt_raw({"runs": {"Leg": [{"id": "r2"}, "junk", {"id": "r1"}]}})
+    assert [r["id"] for r in P.get_mpt_runs("Leg")] == ["r2", "r1"]

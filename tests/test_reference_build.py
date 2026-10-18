@@ -1,12 +1,18 @@
-"""`convexity build-reference-pack` (reference_build.py).
+"""`convexity build-reference-pack` (reference_build.py) and its fixed universe.
 
-No network: news, prices and the key are stubbed; the Market read is the
-real code path on the tiny test artifact from test_ml_sentiment."""
+No network: news, prices and the key are stubbed; the Market read is the real code path
+on the tiny test artifact from test_ml_sentiment.
+
+The universe (src/convexity/data/sp500.json) is public index membership only, in the
+Yahoo ticker format the rest of the app uses (class shares with a dash, not a dot), with
+its provenance recorded."""
 
 import gzip
 import json
+import re
 import time
 from datetime import UTC, datetime, timedelta
+from importlib import resources
 
 import numpy as np
 import pandas as pd
@@ -226,3 +232,27 @@ def test_manifest_date_is_utc_today(env, tmp_path):
         <= datetime.now(UTC) - datetime.fromisoformat(m["generated_at"])
         < timedelta(minutes=5)
     )
+
+
+_YAHOO = re.compile(r"^[A-Z]{1,5}(-[A-Z])?$")
+
+
+def _load():
+    return json.loads(resources.files("convexity").joinpath("data/sp500.json").read_text("utf-8"))
+
+
+def test_universe_is_the_sp500_in_yahoo_format():
+    d = _load()
+    syms = [s["symbol"] for s in d["symbols"]]
+    assert 495 <= len(syms) <= 510
+    assert len(set(syms)) == len(syms)
+    bad = [s for s in syms if not _YAHOO.match(s)]
+    assert not bad, bad
+    assert "BRK-B" in syms and "BRK.B" not in syms
+    assert all(s["name"] for s in d["symbols"])
+
+
+def test_universe_records_its_source_and_date():
+    d = _load()
+    assert d["source"].startswith("https://")
+    assert re.match(r"^\d{4}-\d{2}-\d{2}$", d["as_of"])

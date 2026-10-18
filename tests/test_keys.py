@@ -20,20 +20,17 @@ import urllib.request
 import pytest
 
 from convexity import finnhub_adapter as fh
-from convexity import helpers, keys, logbuf, news_sentiment as ns, paths, server
+from convexity import helpers, keys, logbuf, paths, server
+from convexity import news_sentiment as ns
 
 SENTINEL = "SENTINELkey0123456789abcdefXYZ"
 
 
 @pytest.fixture(autouse=True)
 def _no_ambient_keys(tmp_path, monkeypatch):
-    """No env keys, and no legacy key file found by walking up from the
-    checkout (a developer's real .finnhub_key would otherwise be picked up)."""
+    """No env keys: a developer's real ones must not leak into the tests."""
     for var in ("FINNHUB_API_KEY", "NVIDIA_API_KEY"):
         monkeypatch.delenv(var, raising=False)
-    fake = tmp_path / "pkg" / "a" / "b" / "c" / "d" / "e" / "f" / "helpers.py"
-    fake.parent.mkdir(parents=True)
-    monkeypatch.setattr(helpers, "__file__", str(fake))
     monkeypatch.setattr(helpers, "_CONFIG_WARNED", [])
     monkeypatch.setattr(keys, "_MALFORMED_WARNED", [])
     # Module globals are restored after each test by monkeypatch.
@@ -161,17 +158,6 @@ def test_env_var_wins_and_is_reported(monkeypatch):
         "env_var": "NVIDIA_API_KEY",
         "env_overrides": False,
     }
-
-
-def test_legacy_file_still_read(tmp_path):
-    (tmp_path / "pkg" / "a" / ".nvidia_key").write_text("legacy-val\n")
-    st = keys.status()
-    assert st["nvidia"]["source"] == "legacy" and st["nvidia"]["set"] is True
-    keys.save("nvidia", SENTINEL)
-    assert keys.status()["nvidia"]["source"] == "config"
-    keys.clear("nvidia")
-    assert keys.status()["nvidia"]["source"] == "legacy"
-    assert (tmp_path / "pkg" / "a" / ".nvidia_key").exists()  # never touched
 
 
 # ----------------------------- reload ---------------------------------------

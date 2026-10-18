@@ -167,7 +167,6 @@ at the next chunk boundary.
 `_MPT_LOOKBACK_YF = {"1Y":"1y","3Y":"3y","5Y":"5y","10Y":"10y"}`. Request fields:
 `lookback, display_ccy, rf, alpha, fully_invested, bounds ({sym:{min,max}} fractions),
 cov_model, haircut, budget (light/standard/dense wall-clock tiers), current_weights`.
-Legacy scalar `w_min`/`w_max` and `cloud_budget` are still accepted as fallbacks.
 Frequency is fixed **daily**. Response frontier points carry `cvar_lo/cvar_med/cvar_hi`
 (bootstrap band) plus `cvar30_lo/med/hi`; `meta.n_boot` is the achieved replica count.
 
@@ -198,7 +197,7 @@ and non-streaming callers are unaffected. `done` also carries `asset_stats` and
 `save_mpt_run` unshifts and truncates to `_MPT_MAX_RUNS = 3`; a run whose `params`
 equal the newest entry's **replaces** it (dedupe) rather than duplicating.
 `get_mpt_runs` returns the list (newest first); `_as_run_list`
-tolerates both legacy formats (bare dict, or an older list). Rename/delete cascades
+drops stray non-dict entries. Rename/delete cascades
 move the whole value and are format-agnostic. The cloud **is** persisted now (it was
 previously stripped and never re-sampled, so restored runs rendered an empty
 scatter) — downsampled to ~2.5k points so 3 runs stay small on disk.

@@ -1,4 +1,4 @@
-"""First-run download of the Market read model (roadmap Phase 5).
+"""First-run download of the Market read model (Phase 5).
 
 A fresh install has no ``<data>/models/mlsent-v1.1/`` — the artifact is ~4 MB
 of trained weights that are not in the package — so without this the Market
@@ -148,15 +148,11 @@ def complete(d: Path) -> bool:
 
 def needed() -> bool:
     """True when the Market read has no complete artifact to load. An explicit
-    MLSENT_MODEL_DIR is the user's choice and is never downloaded into; a
-    complete copy in the one-release legacy location still counts as present
-    (ml_sentiment only falls back to it while the data-folder one is absent)."""
+    MLSENT_MODEL_DIR is the user's choice and is never downloaded into."""
     if os.environ.get("MLSENT_MODEL_DIR"):
         return False
     t = target_dir()
     if complete(t):
-        return False
-    if not t.exists() and complete(paths.legacy_model_root() / MODEL_VERSION):
         return False
     return True
 
@@ -192,7 +188,7 @@ def start(force: bool = False) -> dict:
             finished_at=None,
             source="",
         )
-        _THREAD = threading.Thread(target=_run, name="pt-model-fetch", daemon=True)
+        _THREAD = threading.Thread(target=_run, name="cx-model-fetch", daemon=True)
         _THREAD.start()
         return dict(_STATUS)
 

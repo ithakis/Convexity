@@ -7,7 +7,7 @@
 ### GitHub Actions (`.github/workflows/ci.yml`)
 
 Runs on every push to `main`, `claude/**` or (until v2.0.0 merges) `distribution`, and on every PR to
-`main`. Python jobs install through `astral-sh/setup-uv` (SHA-pinned, cache
+`main` or `distribution`. Python jobs install through `astral-sh/setup-uv` (SHA-pinned, cache
 on) and `uv sync --locked` from `uv.lock`; `server-smoke` uses the base deps,
 `desktop-import-smoke` adds `--extra desktop`. The three installer jobs
 instead do what a user's machine does: `uv tool install`, which resolves from

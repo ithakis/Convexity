@@ -1,29 +1,26 @@
-"""Tests for the intraday half of the chart granularity ladder (fetcher.py).
+"""Tests for the chart data behind the stock window (fetcher.py), no network.
 
-No network: yfinance is monkeypatched. What matters here is the routing and the
-cap guard, because both failure modes are silent — an over-cap request comes
-back as an EMPTY frame from Yahoo rather than an error, and a symbol with no
+Intraday half of the granularity ladder: yfinance is monkeypatched. What matters is the
+routing and the cap guard, because both failure modes are silent: an over-cap request
+comes back as an EMPTY frame from Yahoo rather than an error, and a symbol with no
 intraday data looks identical to a transient outage.
-"""
 
-import sys
-from pathlib import Path
-
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+Also fetcher.fetch_events: the E and D flags."""
 
 import pandas as pd  # noqa: E402
+import pytest
 
-from convexity import cache as ptcache  # noqa: E402
-from convexity import fetcher  # noqa: E402
+from convexity import (
+    cache,  # noqa: E402
+    fetcher,  # noqa: E402
+)
 
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    ptcache._CACHE.clear()
+    cache._CACHE.clear()
     yield
-    ptcache._CACHE.clear()
+    cache._CACHE.clear()
 
 
 class _FakeTicker:
@@ -161,7 +158,7 @@ def test_empty_result_is_cached_but_a_raised_error_is_not(fake_yf):
     assert fetcher.intraday_history("X", "30m", "60d") is None
     assert len(fake_yf.calls) == 1, "the empty result should have been cached"
 
-    ptcache._CACHE.clear()
+    cache._CACHE.clear()
     fake_yf.calls = []
 
     class _Boom(_FakeTicker):
@@ -179,3 +176,47 @@ def test_single_bar_is_rejected(fake_yf):
     """One point can't be drawn or measured; treat it as no data."""
     fake_yf.frames = {"*": _frame(1)}
     assert fetcher.intraday_history("AAPL", "30m", "60d") is None
+
+
+class FakeTk:
+    def __init__(self, sym):
+        self.fast_info = type("FI", (), {"timezone": "Europe/Amsterdam", "last_price": 30.0})()
+        idx = pd.DatetimeIndex(
+            ["2026-07-29 21:00", "2026-07-29 21:00", "2026-04-30 00:00", "2026-01-28 10:00"],
+            tz="America/New_York",
+        )
+        self._ed = pd.DataFrame(
+            {
+                "EPS Estimate": [0.65, 0.65, 0.50, 0.45],
+                "Reported EPS": [float("nan"), 0.68, 0.54, 0.48],
+                "Surprise(%)": [float("nan"), 5.19, 7.59, 6.95],
+            },
+            index=idx,
+        )
+        today = pd.Timestamp.now(tz="Europe/Amsterdam").normalize()
+        self.dividends = pd.Series(
+            [0.71, 0.40, 0.80],
+            index=[
+                today - pd.Timedelta(days=500),
+                today - pd.Timedelta(days=200),
+                today - pd.Timedelta(days=30),
+            ],
+        )
+
+    def get_earnings_dates(self, limit=60):
+        return self._ed
+
+
+def test_events_read_timing_dedupe_and_yield(monkeypatch):
+    monkeypatch.setattr(fetcher.yf, "Ticker", FakeTk)
+    out = fetcher.fetch_events("ZZEV.AS")
+    days = [e["date"] for e in out["earnings"]]
+    assert days == sorted(set(days))  # one row per report
+    q2 = next(e for e in out["earnings"] if e["date"] == "2026-07-30")
+    # 21:00 New York is 03:00 in Amsterdam the next day: before the open.
+    assert q2["actual"] == 0.68 and q2["timing"] == "before" and q2["react"] == "2026-07-30"
+    jan = next(e for e in out["earnings"] if e["date"] == "2026-01-28")
+    assert jan["timing"] == "after" and jan["react"] == "2026-01-29"  # 16:00 local
+    assert next(e for e in out["earnings"] if e["date"] == "2026-04-30")["timing"] == ""
+    assert out["div_ttm"] == pytest.approx(1.20)
+    assert out["div_yield_ttm"] == pytest.approx(1.20 / 30.0)

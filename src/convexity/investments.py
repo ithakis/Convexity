@@ -1,4 +1,4 @@
-"""My Investments: the user's real book (docs/plans/my-investments-roadmap.md).
+"""My Investments: the user's real book (docs/architecture/backend.md, "My Investments").
 
 This module owns ``state/investments.json`` and turns it into the page
 payload. The maths lives in ``ledger.py`` (pure, no I/O); this file does the
@@ -308,7 +308,7 @@ def _closes(symbols: list[str], period: str, retry: bool = True):
     """Daily closes as traded, quote unit, ``period`` back. Not
     dividend-adjusted, because the book books dividends as cash (an adjusted
     close would count each one twice); still split-adjusted, like the
-    ledger's quantities (roadmap Appendix B)."""
+    ledger's quantities (backend.md, engine rules)."""
     from convexity.analytics import _bulk_close
 
     return _bulk_close(symbols, period, adjusted=False, retry=retry)
@@ -918,7 +918,7 @@ def _remember(raw: dict, aliases, used: set[str]) -> None:
 
 def add_batch(items, base_rev, aliases=None, ccy=None) -> dict:
     """An import's Apply: every entry in ONE journal item, so one Undo
-    removes the whole batch (roadmap Phase 5). ``aliases`` are the names the
+    removes the whole batch (Phase 5). ``aliases`` are the names the
     owner corrected in the review, remembered for the next import."""
 
     def change(raw):
@@ -1239,11 +1239,11 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
                  splits: dict, warnings: list[str], bench: str = "SPY") -> dict:  # fmt: skip
     """The daily book in the display currency: value, the money put in, the
     benchmark (``INV_BENCHMARKS[bench]``, the S&P 500 unless the owner picked
-    another) bought with the same money, and the TWR index (roadmap Phase 3).
+    another) bought with the same money, and the TWR index (Phase 3).
 
     Every day is valued with that day's as-traded close and that day's FX
     rate, so a GBP view shows what the pound did too. Performance flows
-    follow Appendix B (inflows at the start of the day, outflows at the end)
+    follow the engine rules (inflows at the start of the day, outflows at the end)
     with two rules on top: an opening holding enters at its market value
     (``ledger.is_opening``), and unrecorded Yahoo dividends count as paid out
     to the owner (``ledger.estimate_dividends``): in returns and profit,
@@ -1595,7 +1595,7 @@ def _xray(series, since: str, divs=None) -> dict:
 
 def _contrib_daily(syms, vps, qty_s, flow_s, open_s, est_s, value, perf_in, paid) -> pd.DataFrame:
     """Each holding's share of each day's TWR, as a fraction of that day's
-    start capital (V_{t-1} + D_t, the TWR's own denominator, Appendix B).
+    start capital (V_{t-1} + D_t, the TWR's own denominator, engine rules).
 
     A holding's day P&L is its value change less the money put into it
     (fees left out), with dividends it paid (recorded or estimated) counted
@@ -1671,7 +1671,7 @@ def _risk_share(syms, vps, qty_s, traded, i0: int) -> dict[str, float]:
 def book(ccy: str | None = None) -> dict:
     """The page payload, in the display currency ``ccy`` (the book's base
     currency when it isn't one the app supports). The keys are the ones
-    Phase 1 built the page against (roadmap, Phase 1 Findings).
+    Phase 1 built the page against (Phase 1 findings).
 
     Everything is in the display currency, every day at its own rate: the
     value and the money put in come from the replay in the book's base

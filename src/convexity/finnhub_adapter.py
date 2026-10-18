@@ -38,13 +38,10 @@ from convexity.helpers import (
     _safe_num,
 )
 
-# Key resolution (env var, then a strictly-local ``.finnhub_key`` found by
-# walking upward from this module's directory) lives in
+# Key resolution (env var, then config.json in the data folder) lives in
 # helpers._load_local_secret — shared with news_sentiment.py so both modules
-# resolve secrets identically instead of maintaining two copies of the same
-# walk-up loop. That file is gitignored and a pre-commit guard blocks it from
-# ever being staged, so the secret stays local across commits.
-FINNHUB_API_KEY = _load_local_secret("FINNHUB_API_KEY", ".finnhub_key")
+# resolve secrets identically.
+FINNHUB_API_KEY = _load_local_secret("FINNHUB_API_KEY")
 _BASE_URL = "https://finnhub.io/api/v1/"
 
 # TTL cache mirroring cache.py's (timestamp, ttl, val) tuple shape.
@@ -64,7 +61,7 @@ def reload_keys() -> None:
     read once at import). A changed key drops the cache: its _MISS entries may
     have been recorded while the old key was being rejected."""
     global FINNHUB_API_KEY
-    new = _load_local_secret("FINNHUB_API_KEY", ".finnhub_key")
+    new = _load_local_secret("FINNHUB_API_KEY")
     if new != FINNHUB_API_KEY:
         _FH_CACHE.clear()
     FINNHUB_API_KEY = new

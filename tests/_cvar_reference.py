@@ -11,7 +11,10 @@ scipy in the request path.
 
 import numpy as np
 from scipy.optimize import linprog
-from scipy.sparse import csr_matrix, eye as speye, hstack as sphstack, vstack as spvstack
+from scipy.sparse import csr_matrix
+from scipy.sparse import eye as speye
+from scipy.sparse import hstack as sphstack
+from scipy.sparse import vstack as spvstack
 
 
 def cvar_lp_reference(R, a_ret, b_ret, l, h, alpha, fully_invested):

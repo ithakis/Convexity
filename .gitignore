@@ -39,9 +39,6 @@ ENV/
 .portfolio_tracker_*.json
 .dashboard.pid
 
-# Conda
-.conda/
-
 # macOS
 .DS_Store
 .AppleDouble
@@ -91,9 +88,6 @@ ml/**/*.npz
 icon.icns
 icon.ico
 
-# Pre-1.14 Windows shortcut launcher (conda era) — no longer generated
-launch_desktop.vbs
-
 # Jupyter (if notebooks ever added)
 .ipynb_checkpoints/
 *.ipynb
@@ -101,4 +95,3 @@ launch_desktop.vbs
 # OS
 Thumbs.db
 ehthumbs.db
-scripts/kappa_sensitivity_results.json

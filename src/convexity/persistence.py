@@ -41,10 +41,8 @@ def _atomic_write(path: Path, body: str) -> None:
 # ----------------------------- File paths -----------------------------------
 
 # All under <data>/state/ (src/convexity/paths.py) — never next to the code. The
-# pre-1.14 repo-root ``.convexity_*.json`` files are moved here by migrate.py.
 _WATCHLISTS_FILE = paths.state_file("watchlists")
 _VIEWS_FILE = paths.state_file("views")
-_LEGACY_SESSION_FILE = paths.state_file("session")
 _MPT_FILE = paths.state_file("mpt")
 _COLUMN_VIEWS_FILE = paths.state_file("column_views")
 
@@ -79,25 +77,6 @@ def _read_views_raw() -> dict:
         if not isinstance(data, dict):
             return {}
         return data
-    legacy = Path(_LEGACY_SESSION_FILE)
-    if legacy.exists():
-        try:
-            legacy_data = json.loads(legacy.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            legacy_data = None
-        if isinstance(legacy_data, dict) and legacy_data.get("rows"):
-            views = {
-                "views": {_CURRENT_KEY: legacy_data},
-                "last_view": _CURRENT_KEY,
-            }
-            try:
-                _atomic_write(path, json.dumps(views, indent=2) + "\n")
-                legacy.unlink()
-            except OSError:
-                pass
-            return views
-        with contextlib.suppress(OSError):
-            legacy.unlink()
     return {}
 
 
@@ -536,13 +515,10 @@ _MPT_MAX_RUNS = 3  # per-portfolio run history depth (user request)
 def _as_run_list(val) -> list[dict]:
     """Normalize the on-disk per-view value to a newest-first list of run dicts.
 
-    Tolerates the legacy single-dict format (pre-history) and any stray non-dict
-    entries, so an old ``.convexity_mpt.json`` upgrades transparently.
+    Tolerates stray non-dict entries.
     """
     if isinstance(val, list):
         return [r for r in val if isinstance(r, dict)]
-    if isinstance(val, dict):
-        return [val]
     return []
 
 
@@ -582,22 +558,16 @@ def save_mpt_run(view_name: str, run: dict) -> dict:
 
 # ----------------------------- Column views (Pass D) ------------------------
 
-_BUILTIN_COLUMN_VIEW_ALIASES = {
-    "IB View": "Fundamentals",
-    "Trader View": "Momentum",
-}
 _BUILTIN_COLUMN_VIEW_NAMES = {"Default", "Fundamentals", "Momentum"}
 # Valid per-column color-coding ("heat") modes. Persisted per view (both
 # built-in overrides and custom views carry their own map) so, e.g.,
-# EV/EBITDA can be percentile-colored in Fundamentals but min-max elsewhere.
-# "percentile" is retained only so legacy stored overrides still validate on
-# read; the frontend migrates it to "quantile" and never writes it anew.
-_HEAT_MODES = {"off", "on", "percentile", "quantile", "2c", "minmax"}
+# EV/EBITDA can be quantile-colored in Fundamentals but min-max elsewhere.
+# "percentile" (removed in 1.7.0) is rewritten to "quantile" by _sanitize_heat.
+_HEAT_MODES = {"off", "on", "quantile", "2c", "minmax"}
 
 
 def _normalize_builtin_column_view_name(name: str) -> str:
-    clean = (name or "Default").strip() or "Default"
-    return _BUILTIN_COLUMN_VIEW_ALIASES.get(clean, clean)
+    return (name or "Default").strip() or "Default"
 
 
 def _sanitize_heat(heat) -> dict:
@@ -607,6 +577,8 @@ def _sanitize_heat(heat) -> dict:
         return {}
     out: dict[str, str] = {}
     for key, mode in heat.items():
+        if mode == "percentile":
+            mode = "quantile"
         if isinstance(key, str) and isinstance(mode, str) and mode in _HEAT_MODES:
             out[key] = mode
     return out

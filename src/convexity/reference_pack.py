@@ -448,7 +448,7 @@ def start(force: bool = False) -> dict:
                 _STATUS["state"] = "up_to_date"
             return dict(_STATUS)
         _STATUS.update(state="checking", error="")
-        _THREAD = threading.Thread(target=_run, name="pt-reference-pack", daemon=True)
+        _THREAD = threading.Thread(target=_run, name="cx-reference-pack", daemon=True)
         _THREAD.start()
         return dict(_STATUS)
 

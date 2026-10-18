@@ -8,7 +8,8 @@ import json
 
 import pytest
 
-from convexity import reference_pack as rp, symbol_db as sdb
+from convexity import reference_pack as rp
+from convexity import symbol_db as sdb
 from tests.test_reference_pack import _Stub
 
 C = sdb.COLUMNS

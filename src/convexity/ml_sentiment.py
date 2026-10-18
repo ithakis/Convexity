@@ -78,20 +78,12 @@ except Exception:  # pragma: no cover
 def model_dir() -> Path:
     """``MLSENT_MODEL_DIR``, else ``<data>/models/<version>`` (paths.py).
 
-    One-release fallback (logged once): the pre-1.14 ``~/.convexity/ml_model``
-    location, until migrate.py has moved it. When neither exists the data-dir
-    path is returned, so the "missing artifact" reason names the new place."""
+    The path is returned even when it does not exist yet, so the "missing
+    artifact" reason names the right place."""
     env = os.environ.get("MLSENT_MODEL_DIR")
     if env:
         return Path(env)
-    new = paths.models_dir() / ARTIFACT_VERSION
-    if new.exists():
-        return new
-    legacy = paths.legacy_model_root() / ARTIFACT_VERSION
-    if legacy.exists():
-        paths.note_legacy("ML model dir", legacy)
-        return legacy
-    return new
+    return paths.models_dir() / ARTIFACT_VERSION
 
 
 def _load() -> dict:

@@ -1,7 +1,7 @@
-"""My Investments' Attention rail (roadmap Phase 7): X-ray rules, events,
+"""My Investments' Attention rail (Phase 7): X-ray rules, events,
 severity, dismiss and the unread badge.
 
-The rail tells the owner what needs a look, calmly (roadmap Appendix D:
+The rail tells the owner what needs a look, calmly (backend.md, alert research:
 price-tracking alerts make retail investors trade more and earn less). So the
 rules are few, static and the owner's own: every threshold is editable in
 Settings -> Attention, and a dismissed item stays away until it gets worse.
@@ -28,14 +28,13 @@ from __future__ import annotations
 
 import contextlib
 import json
-import math
 import secrets
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 
 from convexity import paths
-from convexity.helpers import major_ccy
+from convexity.helpers import finite_num, major_ccy
 
 # ------------------------------------------------------------------ rules
 #
@@ -65,7 +64,7 @@ RULES: dict[str, dict] = {
     # Phase 8: the owner's own plan (set per holding, from its row). Switches
     # only: the levels are the plan's. A target or review level reached is
     # the plan asking for a decision, so it needs a look; a plain price
-    # alert stays information (Appendix D, *Alert for Alerts*).
+    # alert stays information (alert research, *Alert for Alerts*).
     "review": {"label": "A holding falls below your review level", "unit": None, "value": None,
                "step": 10.0, "severity": "high", "note": "Set in a holding's plan: click its row."},
     "target": {"label": "A holding reaches your target", "unit": None, "value": None,
@@ -86,16 +85,6 @@ def _state_path():
     return paths.state_file("attention")
 
 
-def _num(v) -> float | None:
-    if not isinstance(v, int | float) or isinstance(v, bool):
-        return None
-    try:
-        f = float(v)  # an int with 400 digits overflows (a 400, never a 500)
-    except OverflowError:
-        return None
-    return f if math.isfinite(f) else None
-
-
 def _clean_rules(raw) -> dict:
     """{rule: {on, value}} for every rule, the defaults filling any gap;
     a value out of range is clamped, anything unknown dropped."""
@@ -103,7 +92,9 @@ def _clean_rules(raw) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     for k, r in RULES.items():
         got = raw.get(k) if isinstance(raw.get(k), dict) else {}
-        v = _num(got.get("value")) if r["value"] is not None else None  # a switch has no value
+        v = (
+            finite_num(got.get("value")) if r["value"] is not None else None
+        )  # a switch has no value
         on = got.get("on")
         out[k] = {"on": on if isinstance(on, bool) else True,
                   "value": min(max(v, r["min"]), r["max"]) if v is not None else r["value"]}  # fmt: skip
@@ -113,7 +104,7 @@ def _clean_rules(raw) -> dict:
 def _clean_levels(raw) -> dict[str, float]:
     if not isinstance(raw, dict):
         return {}
-    nums = {k[:200]: _num(v) for k, v in raw.items() if isinstance(k, str)}
+    nums = {k[:200]: finite_num(v) for k, v in raw.items() if isinstance(k, str)}
     return {k: v for k, v in nums.items() if v is not None}
 
 
@@ -166,7 +157,7 @@ def set_rules(changes) -> dict:
     for k, c in changes.items():
         if k not in RULES or not isinstance(c, dict):
             raise ValueError(f"unknown rule {str(k)[:40]}")
-        if "value" in c and (RULES[k]["value"] is None or _num(c["value"]) is None):
+        if "value" in c and (RULES[k]["value"] is None or finite_num(c["value"]) is None):
             raise ValueError(f"{k}: value must be a number")
         if "on" in c and not isinstance(c["on"], bool):
             raise ValueError(f"{k}: on must be true or false")
@@ -188,7 +179,7 @@ def _check_key(key) -> str:
 def dismiss(key, level) -> None:
     """Hide an item until it gets worse than ``level`` (or clears and fires
     again: ``prune`` forgets it then)."""
-    key, lvl = _check_key(key), _num(level)
+    key, lvl = _check_key(key), finite_num(level)
     if lvl is None:
         raise ValueError("level must be a number")
 
@@ -237,9 +228,9 @@ def mark_seen(items) -> None:
         raise ValueError("items must be a list")
     pairs = []
     for it in items:
-        if not isinstance(it, list | tuple) or len(it) != 2 or _num(it[1]) is None:
+        if not isinstance(it, list | tuple) or len(it) != 2 or finite_num(it[1]) is None:
             raise ValueError("each item is [key, level]")
-        pairs.append((_check_key(it[0]), _num(it[1])))
+        pairs.append((_check_key(it[0]), finite_num(it[1])))
 
     def change(st):
         for k, lvl in pairs:
@@ -255,7 +246,7 @@ def mark_notified(items) -> None:
     """[[key, level], ...]: the items a notification has now gone out for
     (Phase 9). Same cap and pruning as seen: one that clears and fires
     again is new, one a full step worse notifies again."""
-    pairs = [(_check_key(k), lvl) for k, lvl in items if _num(lvl) is not None]
+    pairs = [(_check_key(k), lvl) for k, lvl in items if finite_num(lvl) is not None]
 
     def change(st):
         for k, lvl in pairs:
@@ -277,7 +268,7 @@ def should_notify(att: dict, state: dict | None = None) -> list[dict]:
     """The Needs-a-look items a notification is due for: shown in the rail
     (so not dismissed or snoozed), unread, and not notified at this level
     (or a full step worse since). Plain price alerts are information, so
-    never here (Appendix D)."""
+    never here (alert research)."""
     state = state if state is not None else load_state()
     return [it for it in att.get("high") or [] if it.get("unread") and _over(it, state["notified"])]
 
@@ -334,7 +325,7 @@ def prune(firing: set[str], checked: set[str]) -> None:
 
 # ------------------------------------------------------------------ plans
 #
-# The owner's plan per holding (roadmap Phase 8): a target, a review level,
+# The owner's plan per holding (Phase 8): a target, a review level,
 # a maximum weight, one line on why they hold it, and plain price alerts.
 # ``state/plans.json`` is the owner's own input, so unlike ``attention.json``
 # a malformed file is never read as "no plans" and never overwritten (the
@@ -366,25 +357,25 @@ def _clean_alert(a) -> dict | None:
         or a.get("side") not in ("above", "below")
     ):
         return None
-    lvl = _num(a.get("level"))
+    lvl = finite_num(a.get("level"))
     if lvl is None or lvl <= 0:
         return None
     out = {"id": a["id"][:16], "level": lvl, "side": a["side"],
            "set_on": a["set_on"] if _is_day(a.get("set_on")) else None}  # fmt: skip
     if _is_day(a.get("levels_on")):
         out["levels_on"] = a["levels_on"]
-    if _is_day(a.get("fired_on")) and _num(a.get("fired_price")) is not None:
-        out.update(fired_on=a["fired_on"], fired_price=_num(a["fired_price"]))
+    if _is_day(a.get("fired_on")) and finite_num(a.get("fired_price")) is not None:
+        out.update(fired_on=a["fired_on"], fired_price=finite_num(a["fired_price"]))
     return out
 
 
 def _clean_plan(v: dict) -> dict:
     out: dict = {}
     for k in ("target", "review", "set_price"):
-        x = _num(v.get(k))
+        x = finite_num(v.get(k))
         if x is not None and x > 0:
             out[k] = x
-    mw = _num(v.get("max_weight"))
+    mw = finite_num(v.get("max_weight"))
     if mw is not None and 0 < mw <= 100:
         out["max_weight"] = mw
     if isinstance(v.get("why"), str) and v["why"].strip():
@@ -472,7 +463,7 @@ def _check_symbol(symbol) -> str:
 
 
 def _price_arg(price) -> float:
-    v = _num(price)
+    v = finite_num(price)
     if v is None or v <= 0:
         raise ValueError("price must be a positive number")
     return v
@@ -488,12 +479,12 @@ def set_plan(symbol, fields, price, today: date | None = None) -> dict:
     new: dict = {}
     for k in ("target", "review"):
         if k in fields and fields[k] is not None:
-            v = _num(fields[k])
+            v = finite_num(fields[k])
             if v is None or v <= 0:
                 raise ValueError(f"{k} must be a positive price")
             new[k] = v
     if fields.get("max_weight") is not None:
-        mw = _num(fields["max_weight"])
+        mw = finite_num(fields["max_weight"])
         if mw is None or not 0 < mw <= 100:
             raise ValueError("max weight must be between 0 and 100%")
         new["max_weight"] = mw
@@ -544,7 +535,7 @@ def add_alert(symbol, level, price, today: date | None = None) -> dict:
     """A one-shot alert at ``level``. Its side is fixed now, against today's
     price, so a crossing can't be read both ways."""
     symbol, today = _check_symbol(symbol), today or date.today()
-    lvl, now = _num(level), _price_arg(price)
+    lvl, now = finite_num(level), _price_arg(price)
     if lvl is None or lvl <= 0:
         raise ValueError("the alert price must be a positive number")
     if abs(lvl / now - 1) < 1e-6:
@@ -673,7 +664,7 @@ def _plan_items(held: list[dict], plans: dict, on, today: date, checked: set[str
     fired = []
     for p in held:
         plan, sym = plans.get(p["symbol"]), p["symbol"]
-        price = _num(p.get("price"))
+        price = finite_num(p.get("price"))
         if not plan or price is None or p.get("note"):  # no Yahoo price: can't say
             continue
         q, name = p.get("quote_ccy"), p["name"]
@@ -750,7 +741,9 @@ def _names(xs: list[dict], most: int = 3, extra: str | None = None) -> str:
 def _items(page: dict, rules: dict, today: date, checked: set[str], plans: dict | None = None,
            fired: list | None = None) -> list[dict]:  # fmt: skip
     held = [
-        p for p in page.get("positions") or [] if not p.get("pending") and _num(p.get("weight"))
+        p
+        for p in page.get("positions") or []
+        if not p.get("pending") and finite_num(p.get("weight"))
     ]
     disp = page.get("ccy") or "USD"
     out: list[dict] = []
@@ -805,7 +798,7 @@ def _items(page: dict, rules: dict, today: date, checked: set[str], plans: dict 
                 groups.setdefault(c, []).append(p)
         checked.add(f"currency|in:{disp}")
         hl = page.get("headline") or {}
-        cash_w, base = _num(hl.get("cash_weight")) or 0.0, page.get("base_ccy") or disp
+        cash_w, base = finite_num(hl.get("cash_weight")) or 0.0, page.get("base_ccy") or disp
         for c in sorted(set(groups) | ({base} if base != disp and cash_w > 0 else set())):
             xs = groups.get(c, [])
             w = sum(x["weight"] for x in xs) + (cash_w if c == base else 0.0)
@@ -818,14 +811,14 @@ def _items(page: dict, rules: dict, today: date, checked: set[str], plans: dict 
     for p in held:
         x = p.get("xray") or {}
         # A holding valued at its last trade price (no Yahoo price) can't say.
-        r = _num(p.get("return_pct")) if not p.get("note") else None
+        r = finite_num(p.get("return_pct")) if not p.get("note") else None
         if on("from_cost") and r is not None:
             checked.add(f"from_cost|{p['symbol']}|in:{disp}")
         if on("from_cost") and r is not None and -r > lim["from_cost"]:
             add("from_cost", f"from_cost|{p['symbol']}|in:{disp}", round(-r - lim["from_cost"], 2),
                 f"{p['name']} is {_pct(r, lim['from_cost'])} below what you paid",
                 f"Your limit is {lim['from_cost']:g}%", [p["symbol"]], value=r)  # fmt: skip
-        pk = _num(x.get("peak_pct"))
+        pk = finite_num(x.get("peak_pct"))
         if on("from_peak") and pk is not None:
             checked.add(f"from_peak|{p['symbol']}")
         if on("from_peak") and pk is not None and -pk > lim["from_peak"]:
@@ -833,7 +826,7 @@ def _items(page: dict, rules: dict, today: date, checked: set[str], plans: dict 
                 f"{p['name']} is {_pct(pk, lim['from_peak'])} below its peak",
                 f"Peak {_day(x['peak_date'])} · your limit is {lim['from_peak']:g}%", [p["symbol"]],
                 value=pk)  # fmt: skip
-        z, dp, dd = _num(x.get("day_z")), _num(x.get("day_pct")), x.get("day_date")
+        z, dp, dd = finite_num(x.get("day_z")), finite_num(x.get("day_pct")), x.get("day_date")
         fresh = isinstance(dd, str) and (today - date.fromisoformat(dd)).days <= MOVE_FRESH_DAYS
         if on("move") and z is not None:
             checked.add(f"move|{p['symbol']}")
@@ -864,8 +857,8 @@ def _divergence(p: dict, x: dict, limit: float, today: date, add) -> bool:
     tier, at, wz, wp = (
         news.get("tier"),
         news.get("assessed_at"),
-        _num(x.get("week_z")),
-        _num(x.get("week_pct")),
+        finite_num(x.get("week_z")),
+        finite_num(x.get("week_pct")),
     )
     if (
         not isinstance(tier, str)

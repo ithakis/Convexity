@@ -135,10 +135,3 @@ def read(since: int = 0, limit: int = 1000) -> dict:
         lines = lines[-limit:]
         dropped = True
     return {"lines": lines, "last_seq": last_seq, "dropped": dropped, "capacity": _MAXLEN}
-
-
-def reset_for_tests() -> None:
-    global _SEQ
-    with _LOCK:
-        _BUF.clear()
-        _SEQ = 0

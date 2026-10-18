@@ -7,14 +7,10 @@ the guard that stops a background job overwriting good holdings with a batch
 Yahoo mostly failed to answer.
 """
 
-import sys
 import threading
 import time
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from convexity import fetcher, jobs, persistence  # noqa: E402
 
@@ -54,7 +50,6 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(persistence, "_VIEWS_FILE", tmp_path / "views.json")
     monkeypatch.setattr(persistence, "_WATCHLISTS_FILE", tmp_path / "watch.json")
     monkeypatch.setattr(persistence, "_MPT_FILE", tmp_path / "mpt.json")
-    monkeypatch.setattr(persistence, "_LEGACY_SESSION_FILE", tmp_path / "legacy.json")
     return tmp_path
 
 

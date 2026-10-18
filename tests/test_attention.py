@@ -1,4 +1,4 @@
-"""My Investments' Attention rail (attention.py, roadmap Phase 7): each rule
+"""My Investments' Attention rail (attention.py, Phase 7): each rule
 fires on a crafted book and stays quiet on a calm one; dismiss, seen and
 prune; thresholds; the events cache; the routes. Public tickers, synthetic
 numbers, no network."""
