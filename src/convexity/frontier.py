@@ -17,7 +17,7 @@ import time
 import numpy as np
 
 from convexity import mpt
-from convexity.analytics import _analyst_for, _bulk_close, _market_cap_usd
+from convexity.analytics import _analyst_for, _bulk_close, _drift, _market_cap_usd, _rebalance_days
 from convexity.cache import _cache_get, _cache_put
 from convexity.fx import _apply_fx_to_closes
 from convexity.helpers import _dedupe_rows_by_symbol, major_ccy
@@ -210,6 +210,57 @@ def _build_bounds(active: list[str], bounds: dict | None, w_min: float, w_max: f
     return lo_v, hi_v
 
 
+# Rebalances a year and trading days per interval for each calendar
+# (persistence.REBALANCE); "N" (buy and hold) never trades after the start.
+_PER_YEAR = {"D": 252, "W": 52, "M": 12, "Q": 4, "S": 2, "Y": 1, "N": 0}
+_HORIZON = {"D": 1, "W": 5, "M": 21, "Q": 63, "S": 126, "Y": 252, "N": 1}
+
+
+def _drift_cost(returns, ref_w: np.ndarray, rebalance: str, tc: float) -> np.ndarray:
+    """Each asset's yearly cost of keeping its weight, per unit of weight.
+
+    Between rebalances a weight drifts by w_i (R_i - R_p) / (1 + R_p), so
+    resetting it trades w_i |R_i - R_p| / (1 + R_p): linear in w_i once R_p
+    is taken as the reference basket's (the BL market weights). The cost is
+    tc x rebalances a year x that drift's mean over overlapping windows of one
+    interval. Being linear it comes straight off mu, so the CVaR LP stays exact
+    (proportional costs: Krokhmal, Palmquist & Uryasev 2002; a turnover penalty
+    as regularisation: Olivares-Nadal & DeMiguel 2018); the exact drift
+    backtest (_turnover) reports what each portfolio actually trades."""
+    n = returns.shape[1]
+    f = _PER_YEAR.get(rebalance, 0)
+    if not f or tc <= 0:
+        return np.zeros(n)
+    g = np.log1p(returns.to_numpy(dtype=float))
+    h = min(_HORIZON[rebalance], max(1, len(g) // 3))
+    c = np.vstack([np.zeros(n), np.cumsum(g, axis=0)])
+    rh = np.expm1(c[h:] - c[:-h])
+    rref = rh @ ref_w
+    return tc * f * np.mean(np.abs(rh - rref[:, None]) / (1.0 + rref[:, None]), axis=0)
+
+
+def _turnover(returns, w: dict, rebalance: str, tc: float, rf: float) -> dict:
+    """What a portfolio held at weights ``w`` and rebalanced on the calendar
+    trades over the lookback (one-way, a year) and what that costs a year:
+    the same drift and reset as the portfolio chart (analytics._drift). Cash
+    left over by "allow cash" earns rf and drifts like any holding."""
+    r = returns.to_numpy(dtype=float)
+    wv = np.array([float(w.get(s, 0.0)) for s in returns.columns])
+    if wv.sum() < 1.0 - 1e-9:
+        r = np.hstack([r, np.full((len(r), 1), rf / 252.0)])
+        wv = np.append(wv, 1.0 - wv.sum())
+    reset = _rebalance_days(returns.index, rebalance)
+    reset[0] = True
+    _, traded = _drift(r, np.broadcast_to(wv, r.shape), reset)
+    traded[0] = 0.0
+    years = max(len(r) / 252.0, 1e-9)
+    cost = tc * traded.sum(axis=1)
+    return {
+        "turnover_ann": float(traded.sum() / 2.0 / years),
+        "cost_ann": float(1.0 - np.prod(1.0 - cost) ** (1.0 / years)),
+    }
+
+
 def compute_efficient_frontier_stream(
     rows: list[dict],
     *,
@@ -225,6 +276,8 @@ def compute_efficient_frontier_stream(
     haircut: float = 0.25,
     budget: str = _DEF_BUDGET,
     current_weights: dict | None = None,
+    rebalance: str = "D",
+    tc_bps: float = 0.0,
     max_seconds: float | None = None,
 ):
     """Streaming mean-CVaR frontier. Yields ``{"type": ...}`` messages.
@@ -269,6 +322,8 @@ def compute_efficient_frontier_stream(
         cov_model = "ledoit"
     haircut = float(min(max(haircut, 0.0), 1.0))
     display_ccy = major_ccy(display_ccy or "USD")
+    rebalance = rebalance if rebalance in _PER_YEAR else "D"
+    tc = min(max(float(tc_bps or 0.0), 0.0), 200.0) / 1e4
 
     # Deduped before the 2-symbol gate: two rows for one ticker would pass it
     # and then fail later with a misleading "1 assets" data error (see
@@ -308,7 +363,12 @@ def compute_efficient_frontier_stream(
     mkt_w = _market_cap_weights(active, by_sym)
     views, analyst_detail = _analyst_views(active, by_sym, rf)
     bl = mpt.black_litterman(active, cov, mkt_w, views, rf=rf, haircut=haircut)
-    mu = bl["mu"]
+    # Everything below (frontier, cloud, anchors) optimizes and reports the
+    # return net of the rebalancing cost (_drift_cost); bl.mu stays gross.
+    mw = np.array([mkt_w.get(s, 0.0) for s in active])
+    ref_w = mw / mw.sum() if mw.sum() > 0 else np.full(len(active), 1.0 / len(active))
+    cost_v = _drift_cost(returns, ref_w, rebalance, tc)
+    mu = {s: bl["mu"][s] - float(cost_v[i]) for i, s in enumerate(active)}
     bl_ms = int((time.perf_counter() - t_bl) * 1000)
 
     # ---- base frontier (exact weights) ----
@@ -357,6 +417,10 @@ def compute_efficient_frontier_stream(
         )
 
     anchors = {"equal": _anchor(eq_w), "cap": _anchor(cap_w), "current": _anchor(cur_w)}
+    # What each portfolio would trade, and moving to it from the current weights.
+    for p in [*frontier, *anchors.values(), fr["min_cvar"], fr["max_ret"]]:
+        p.update(_turnover(returns, p["weights"], rebalance, tc, rf))
+        p["switch_cost"] = tc * sum(abs(p["weights"].get(s, 0.0) - cur_w[s]) for s in active)
     bl_payload = {
         "mu": bl["mu"],
         "prior": bl["prior"],
@@ -366,6 +430,7 @@ def compute_efficient_frontier_stream(
         "haircut": bl["haircut"],
         "viewed": bl["viewed"],
         "no_view": bl["no_view"],
+        "cost": {s: float(cost_v[i]) for i, s in enumerate(active)},
     }
     params_payload = {
         "lookback": lookback_u,
@@ -378,6 +443,8 @@ def compute_efficient_frontier_stream(
         "haircut": haircut,
         "budget": budget,
         "bounds": bounds or {},
+        "rebalance": rebalance,
+        "tc_bps": round(tc * 1e4, 6),
     }
 
     # Ship the frontier + anchors NOW so the client can fix the axis domain and

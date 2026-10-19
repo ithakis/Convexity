@@ -1343,6 +1343,7 @@ class Handler(BaseHTTPRequestHandler):
             _bounds = payload.get("bounds")
             bounds = _bounds if isinstance(_bounds, dict) else None
             budget = str(payload.get("budget") or "standard")
+            trading = trading_prefs()
 
             from convexity.frontier import compute_efficient_frontier_stream
 
@@ -1363,6 +1364,8 @@ class Handler(BaseHTTPRequestHandler):
                 haircut=_fnum("haircut", 0.25),
                 budget=budget,
                 current_weights=payload.get("current_weights") or {},
+                rebalance=str(payload.get("rebalance") or trading["rebalance"]),
+                tc_bps=_fnum("tc_bps", trading["tc_bps"]),
             )
             try:
                 for msg in gen:
