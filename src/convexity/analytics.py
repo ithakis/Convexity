@@ -24,6 +24,7 @@ from convexity.cache import (
 )
 from convexity.fetcher import _SECTOR_ETF
 from convexity.fx import _apply_fx_to_closes, convert_amount
+from convexity.persistence import REBALANCE
 from convexity.helpers import (
     _dedupe_rows_by_symbol,
     _safe_num,
@@ -263,22 +264,76 @@ def _basket_weights(avail: pd.DataFrame, w: pd.Series) -> pd.DataFrame:
     return m.div(tot.where(tot > 0), axis=0).fillna(0.0)
 
 
-def _linked_contribution(win_ret: pd.DataFrame, w: pd.Series) -> dict[str, float]:
+def _linked_contribution(
+    win_ret: pd.DataFrame,
+    w: pd.Series | pd.DataFrame,
+    cost: pd.Series | None = None,
+    traded: pd.DataFrame | None = None,
+    tc: float = 0.0,
+) -> dict[str, float]:
     """Each holding's contribution (percentage points) to the portfolio's
     period return, adding up to it exactly.
 
-    The portfolio is rebalanced to its weights daily, so its return is
-    compounded from daily returns r_p,t = Σ_i w_i·r_i,t. The daily
-    contributions w_i·r_i,t add up within a day but not across days
-    (compounding), and `weight x the holding's own period return` adds up to
-    neither. Carino (1999) logarithmic linking scales each day by
-    k_t / k, with k_t = ln(1+r_p,t)/r_p,t and k = ln(1+R)/R, so that
-    Σ_i Σ_t (k_t/k)·w_i·r_i,t = R, the period return shown above it.
+    The portfolio's daily return is r_p,t = (1 - c_t)(1 + Σ_i w_i,t·r_i,t) - 1,
+    with w_t the start-of-day weights (a constant Series, or one row per day
+    when they drift between rebalances, see _drift) and c_t the day's trading
+    cost. Each holding pays for its own trades, so its day is
+    (1 - c_t)·w_i,t·r_i,t - tc·|Δw_i,t|, and the holdings add up to r_p,t.
+    Those add up within a day but not across days (compounding), and
+    `weight x the holding's own period return` adds up to neither. Carino
+    (1999) logarithmic linking scales each day by k_t / k, with
+    k_t = ln(1+r_p,t)/r_p,t and k = ln(1+R)/R, so the parts sum to R.
     """
     if win_ret is None or win_ret.empty:
         return {}
-    w = w.reindex(win_ret.columns).fillna(0.0)
-    return {s: v * 100.0 for s, v in _carino_link(win_ret.mul(w, axis=1)).items()}
+    if isinstance(w, pd.Series):
+        daily = win_ret.mul(w.reindex(win_ret.columns).fillna(0.0), axis=1)
+    else:
+        daily = win_ret * w.loc[win_ret.index, win_ret.columns]
+    if traded is not None and cost is not None:
+        daily = (
+            daily.mul(1.0 - cost.loc[win_ret.index], axis=0)
+            - tc * traded.loc[win_ret.index, win_ret.columns]
+        )
+    return {s: v * 100.0 for s, v in _carino_link(daily).items()}
+
+
+def _rebalance_days(index: pd.DatetimeIndex, freq: str) -> np.ndarray:
+    """True on the first trading day of each new calendar period."""
+    if freq == "D":
+        return np.ones(len(index), dtype=bool)
+    if freq == "N" or not len(index):
+        return np.zeros(len(index), dtype=bool)
+    y, m = index.year.to_numpy(), index.month.to_numpy()
+    key = {
+        "W": (index - pd.to_timedelta(index.weekday, unit="D")).normalize().to_numpy(),
+        "M": y * 12 + m,
+        "Q": y * 4 + (m - 1) // 3,
+        "S": y * 2 + (m - 1) // 6,
+        "Y": y,
+    }[freq]
+    return np.r_[False, key[1:] != key[:-1]]
+
+
+def _drift(ret: np.ndarray, target: np.ndarray, reset: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Start-of-day weights of a book set to ``target`` (one row per day) on
+    ``reset`` days and left to drift with the prices in between, and each
+    day's traded weight |Δw| (what a reset buys and sells). Day 0 starts on
+    target with nothing traded. A reset every day keeps the target exactly,
+    so the daily-rebalanced index is reproduced bit for bit."""
+    n_days, n = ret.shape
+    weights, traded = np.empty((n_days, n)), np.zeros((n_days, n))
+    w = target[0].copy()
+    for t in range(n_days):
+        if reset[t]:
+            traded[t] = np.abs(target[t] - w)
+            w = target[t].copy()
+        weights[t] = w
+        g = w * (1.0 + ret[t])
+        tot = g.sum()
+        if tot > 0:
+            w = g / tot
+    return weights, traded
 
 
 def _carino_link(daily: pd.DataFrame) -> dict[str, float]:
@@ -510,17 +565,23 @@ def _wick_cap(b: pd.DataFrame) -> float:
 
 
 def _portfolio_bars(
-    port_val: pd.Series, w_vec: pd.Series, period_yf: str, conv_closes: pd.DataFrame
+    port_val: pd.Series,
+    w_vec: pd.Series | pd.DataFrame,
+    period_yf: str,
+    conv_closes: pd.DataFrame,
+    cost: pd.Series | None = None,
 ) -> dict | None:
     """Approximate daily open/high/low and traded value for the portfolio index.
 
-    A portfolio has no traded high or low of its own. The index is rebalanced
-    daily, so day t's value is P(t-1) * sum_i w_i * (1 + r_i,t). Replacing each
-    holding's close by its open/high/low on that day gives the bar:
+    A portfolio has no traded high or low of its own. With start-of-day
+    weights w_i,t (constant, or one row per day when they drift between
+    rebalances) and the day's trading cost c_t, day t's value is
+    P(t-1) * (1 - c_t) * sum_i w_i,t * (1 + r_i,t). Replacing each holding's
+    close by its open/high/low on that day gives the bar:
 
-        X_t = P(t-1) * sum_i w_i * (1 + r_i,t) * X_i,t / C_i,t,   X in {O, H, L}
+        X_t = P(t-1) * (1 - c_t) * sum_i w_i,t * (1 + r_i,t) * X_i,t / C_i,t,   X in {O, H, L}
 
-    with P(t-1) = P(t) / sum_i w_i (1 + r_i,t). X/C is taken in the listing's
+    with P(t-1) = P(t) / ((1 - c_t) * sum_i w_i,t (1 + r_i,t)). X/C is taken in the listing's
     own currency and r in the display currency, so FX is applied at the close
     rate. This is exact for a basket whose holdings all peak (or trough) at the
     same moment and otherwise an upper (lower) bound on the true basket high
@@ -538,9 +599,11 @@ def _portfolio_bars(
     num = {k: pd.Series(0.0, index=idx) for k in ("Open", "High", "Low")}
     growth = pd.Series(0.0, index=idx)
     traded = pd.Series(0.0, index=idx)
+    frame = isinstance(w_vec, pd.DataFrame)
     try:
-        for s, w in w_vec.items():
-            if w <= 0:
+        for s in w_vec.columns if frame else w_vec.index:
+            w = w_vec[s].reindex(idx).fillna(0.0) if frame else w_vec[s]
+            if (w <= 0).all() if frame else w <= 0:
                 continue
             bars = _bulk_bars_get(s, period_yf)
             if bars is None or getattr(bars, "empty", True) or s not in conv_closes:
@@ -565,6 +628,8 @@ def _portfolio_bars(
             traded += w * b["Volume"].fillna(0.0) * conv.reindex(idx).fillna(0.0)
     except (KeyError, ValueError, TypeError):
         return empty  # a malformed cached frame must never 500 the analytics
+    if cost is not None:
+        growth = growth * (1.0 - cost.reindex(idx).fillna(0.0))
     prev = port_val / growth.where(growth > 0)
     hi = np.maximum(prev * num["High"], port_val)
     lo = np.minimum(prev * num["Low"], port_val)
@@ -978,8 +1043,12 @@ def analyze_portfolios_multi(
     weight_sets: dict[str, dict],
     period: str,
     display_ccy: str = "USD",
+    rebalance: str = "D",
+    tc_bps: float = 0.0,
 ) -> dict:
     period_u = (period or "1Y").upper()
+    rebalance = rebalance if rebalance in REBALANCE else "D"
+    tc = min(max(float(tc_bps or 0.0), 0.0), 200.0) / 1e4
     if period_u not in _PERIOD_YF:
         period_u = "1Y"
 
@@ -1009,7 +1078,7 @@ def analyze_portfolios_multi(
         key = (
             "pf|"
             + "|".join(f"{s}:{weights[s]:.6f}" for s in sorted(symbols))
-            + f"|{period_u}|{display_ccy}"
+            + f"|{period_u}|{display_ccy}|{rebalance}|{tc:.6f}"
         )
         per_set_cache_keys[name] = key
         hit = _cache_get(key)
@@ -1153,13 +1222,28 @@ def analyze_portfolios_multi(
             weights = _normalize_weights({s: weights.get(s, 0.0) for s in active}, active)
 
         w_vec = pd.Series([weights[s] for s in active], index=active)
-        # Daily-rebalanced index over the whole warm-up window; the reported
-        # series is its period slice rebased to 100.
-        daily_w = _basket_weights(avail, w_vec) if ragged else None
+        # The index over the whole warm-up window, set to its weights on the
+        # first day of the period shown (free: the weights apply from there)
+        # and then on each rebalance day, paying tc on what that trades; a
+        # holding starting to trade is a rebalance too. The reported series is
+        # its period slice rebased to 100.
+        ret_np = wide_ret[active].to_numpy()
+        target = (
+            _basket_weights(avail, w_vec).to_numpy()
+            if ragged
+            else np.broadcast_to(w_vec.to_numpy(), ret_np.shape)
+        )
+        reset = _rebalance_days(wide_ret.index, rebalance)
         if ragged:
-            port_ext = (1.0 + (wide_ret[active] * daily_w).sum(axis=1)).cumprod()
-        else:
-            port_ext = (1.0 + (wide_ret[active] * w_vec).sum(axis=1)).cumprod()
+            reset |= np.r_[False, (avail.to_numpy()[1:] != avail.to_numpy()[:-1]).any(axis=1)]
+        p1 = wide_ret.index.get_loc(common_index[1])
+        reset[p1] = True
+        w_np, tr_np = _drift(ret_np, target, reset)
+        tr_np[p1] = 0.0
+        day_w = pd.DataFrame(w_np, index=wide_ret.index, columns=active)
+        traded = pd.DataFrame(tr_np, index=wide_ret.index, columns=active)
+        cost = pd.Series(tc * tr_np.sum(axis=1), index=wide_ret.index)
+        port_ext = ((1.0 + (wide_ret[active] * day_w).sum(axis=1)) * (1.0 - cost)).cumprod()
         base = port_ext.loc[common_index[0]]
         port_val = 100.0 * port_ext.loc[common_index] / base
         port_ret = port_val.pct_change().dropna()
@@ -1313,11 +1397,17 @@ def analyze_portfolios_multi(
         herfindahl = float(sum(w * w for w in weights.values()))
         effective_n = (1.0 / herfindahl) if herfindahl > 0 else 0.0
 
-        if ragged:  # each day's own weights, so the parts still add up to the whole
-            linked = {k: v * 100.0 for k, v in
-                      _carino_link(win_ret * daily_w.loc[win_ret.index, active]).items()}  # fmt: skip
-        else:
-            linked = _linked_contribution(win_ret, w_vec)
+        linked = _linked_contribution(win_ret, day_w, cost, traded, tc)
+        years = max((common_index[-1] - common_index[0]).days / 365.25, 1e-9)
+        win_traded, win_cost = traded.loc[common_index[1:]], cost.loc[common_index[1:]]
+        trading = {
+            "rebalance": rebalance,
+            "tc_bps": round(tc * 1e4, 6),
+            "rebalances": int((win_traded.sum(axis=1) > 0).sum()),
+            # One-way: half of what is bought and sold, per year.
+            "turnover_ann": float(win_traded.to_numpy().sum() / 2.0 / years),
+            "cost_drag_ann": float(1.0 - np.prod(1.0 - win_cost.to_numpy()) ** (1.0 / years)),
+        }
         contribution = []
         for s in active:
             w = weights.get(s, 0.0)
@@ -1339,7 +1429,7 @@ def analyze_portfolios_multi(
         # before the period, leaves the bars intact.
         whole = not sym_closes[active].isna().to_numpy().any()
         approx = (
-            _portfolio_bars(port_val, w_vec, warmup_yf, wide_sym)
+            _portfolio_bars(port_val, day_w, warmup_yf, wide_sym, cost)
             if whole
             else {"ohlc": [], "volume": []}
         )
@@ -1359,6 +1449,7 @@ def analyze_portfolios_multi(
                 **approx,
             },
             "stats": pf_stats,
+            "trading": trading,
             "benchmarks": benchmarks,
             "weighted": weighted,
             "analyst": analyst,

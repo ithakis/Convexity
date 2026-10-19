@@ -1,6 +1,7 @@
 """HTTP server — routes, static file serving, and main() entrypoint."""
 
 import contextlib
+import functools
 import json
 import logging
 import mimetypes
@@ -78,6 +79,7 @@ from convexity.persistence import (
     save_view,
     set_active_column_view,
     set_builtin_view_acked,
+    trading_prefs,
     set_builtin_view_heat,
     set_active_weight_preset,
     set_last_view,
@@ -775,7 +777,7 @@ class Handler(BaseHTTPRequestHandler):
                 # tabs already computed are then cache hits.
                 blob = xlsx_export.build_workbook(
                     full,
-                    analytics_runner=analyze_portfolios_multi,
+                    analytics_runner=functools.partial(analyze_portfolios_multi, **trading_prefs()),
                     prefetch=prefetch_closes,
                     period="1Y",
                     display_ccy=ccy,
@@ -1292,8 +1294,18 @@ class Handler(BaseHTTPRequestHandler):
                         400, {"error": "rows[] and weight_sets{name: weights} required"}
                     )
                     return
+                trading = trading_prefs()
+                try:
+                    tc_bps = float(payload.get("tc_bps", trading["tc_bps"]))
+                except (TypeError, ValueError):
+                    tc_bps = trading["tc_bps"]
                 results = analyze_portfolios_multi(
-                    rows, weight_sets, period, display_ccy=display_ccy
+                    rows,
+                    weight_sets,
+                    period,
+                    display_ccy=display_ccy,
+                    rebalance=str(payload.get("rebalance") or trading["rebalance"]),
+                    tc_bps=tc_bps,
                 )
                 self._send_json(200, {"results": results} if "error" not in results else results)
             except Exception as exc:

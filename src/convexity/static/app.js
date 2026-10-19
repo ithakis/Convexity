@@ -1099,6 +1099,12 @@ let FX_HOVER_CCY = null;
    fetched first thing, and the boot below waits for them, briefly. */
 let APP_PREFS = {};
 const BOOT_PREFS = fetch("/api/prefs").then(r => r.ok ? r.json() : {}).catch(() => ({}));
+/* The portfolio chart's (and the optimizer's) trading assumption, prefs.json:
+   how often the weights are reset and the cost per unit traded. Defaults
+   mirror persistence.TRADING_DEFAULTS. */
+const REBALANCE_LABEL = {D: "Daily", W: "Weekly", M: "Monthly", Q: "Quarterly", S: "Semi-annual", Y: "Yearly", N: "Never"};
+const tradingPrefs = () => ({rebalance: APP_PREFS.rebalance || "M", tc_bps: APP_PREFS.tc_bps ?? 10});
+const tradingLabel = () => { const t = tradingPrefs(); return `${t.rebalance === "N" ? "Buy and hold" : REBALANCE_LABEL[t.rebalance]} · ${+t.tc_bps} bps`; };
 async function savePrefs(changes) {
   try {
     const r = await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -2974,6 +2980,65 @@ function wireChartTypeDd(dd, onPick) {
     const o = e.target.closest(".ct-opt"); if (!o) return;
     close(); btn.focus(); setChartType(o.dataset.ct); syncChartTypeDd(dd); onPick();
   };
+}
+
+/* Constraints (portfolio chart): the rebalancing calendar and trading cost,
+   one prefs.json setting for every portfolio and the optimizer. A body-level
+   panel (invMenuOpen), so the analytics redraw each change triggers leaves it
+   open: the readout then fills in from the new payload (tradingPopSync). */
+let _trLast = null;
+function tradingPopOpen(anchor, a) {
+  const el = invMenuOpen(anchor, "tr-pop", (e) => {
+    const b = e.target.closest("[data-tr]");
+    if (b) tradingSet(b.dataset.tr === "rebalance" ? {rebalance: b.dataset.v} : {tc_bps: +b.dataset.v});
+  });
+  if (!el) return;
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-label", "Constraints");
+  tradingPopRender(el);
+  const r = anchor.getBoundingClientRect();
+  el.style.left = Math.max(8, Math.min(r.right - el.offsetWidth, innerWidth - el.offsetWidth - 8)) + "px";
+  el.style.top = r.bottom + 6 + "px";
+  tradingPopSync(a);
+}
+function tradingPopRender(el) {
+  const t = tradingPrefs();
+  const seg = (k, v, label, tip) => `<button type="button" data-tr="${k}" data-v="${v}" class="${String(t[k]) === String(v) ? "on" : ""}" aria-pressed="${String(t[k]) === String(v)}" data-tip="${tip}">${label}</button>`;
+  el.innerHTML = `
+    <div class="tr-row"><span class="tr-k">Rebalance</span><div class="tr-seg">${Object.entries(REBALANCE_LABEL).map(([k, l]) =>
+      seg("rebalance", k, k === "S" ? "6M" : l, k === "N" ? "Buy and hold: set once, never reset" : `Reset to the target weights on the first trading day of each ${{D: "day", W: "week", M: "month", Q: "quarter", S: "half-year", Y: "year"}[k]}`)).join("")}</div></div>
+    <div class="tr-row"><span class="tr-k">Trading cost</span><div class="tr-seg">${[0, 5, 10, 25].map(v =>
+      seg("tc_bps", v, `${v}`, v ? `${v} bps of every amount bought or sold` : "No trading cost")).join("")}</div>
+      <label class="tr-num"><input type="number" min="0" max="200" step="1" value="${+t.tc_bps}" aria-label="Trading cost in bps"> bps</label></div>
+    <div class="tr-read" id="tr-read"></div>
+    <p class="tr-note">The weights apply from the first day of the period and drift with prices; each rebalance resets them and pays the cost on everything it buys and sells. The first purchase is free.</p>`;
+  const inp = el.querySelector("input");
+  inp.addEventListener("change", () => {
+    const v = Math.round(Math.min(200, Math.max(0, +inp.value || 0)));
+    inp.value = v;
+    tradingSet({tc_bps: v});
+  });
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+}
+function tradingSet(change) {
+  const next = {...tradingPrefs(), ...change};
+  if (next.rebalance === tradingPrefs().rebalance && next.tc_bps === tradingPrefs().tc_bps) return;
+  APP_PREFS = {...APP_PREFS, ...change};
+  savePrefs(change);
+  const el = document.querySelector(".tr-pop");
+  if (el) { tradingPopRender(el); tradingPopSync(null); }
+  requestAnalytics();
+}
+function tradingPopSync(a) {
+  if (a) _trLast = a;
+  const read = document.querySelector(".tr-pop #tr-read");
+  if (!read) return;
+  const t = _trLast?.trading, cur = tradingPrefs();
+  const fresh = t && t.rebalance === cur.rebalance && t.tc_bps === +cur.tc_bps && !STATE.analyticsLoading;
+  const p = (v, d) => (v * 100).toFixed(d) + "%";
+  read.innerHTML = !fresh ? lcHtml("recomputing")
+    : t.rebalance === "N" ? `Never rebalanced: the weights drift with prices over ${escapeHtml(STATE.period)}.`
+    : `<b>${t.rebalances}</b> rebalance${t.rebalances === 1 ? "" : "s"} over ${escapeHtml(STATE.period)} · turnover <b>${p(t.turnover_ann, 0)}</b>/yr · costs <b>${p(t.cost_drag_ann, 2)}</b>/yr`;
 }
 
 /* Join a close series with its [t,o,h,l] and [t,v] arrays on timestamp. A bar
@@ -5268,7 +5333,7 @@ async function warmRecentTabs(maxN) {
       const res = await fetch("/api/portfolio-analytics-multi", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({rows, weight_sets: wsets, period: STATE.period, display_ccy: FX_QUOTE}),
+        body: JSON.stringify({rows, weight_sets: wsets, period: STATE.period, display_ccy: FX_QUOTE, ...tradingPrefs()}),
       });
       if (!res.ok) continue;
       const dr = await res.json();
@@ -5832,7 +5897,10 @@ function openExportPopup(fname, url) {
  * Portfolio analytics — weights, request, render, chart
  * --------------------------------------------------------------------------- */
 
-function analyticsCacheKey(mode, period) { return mode + "|" + period + "|" + FX_QUOTE; }
+function analyticsCacheKey(mode, period) {
+  const t = tradingPrefs();
+  return mode + "|" + period + "|" + FX_QUOTE + "|" + t.rebalance + "|" + t.tc_bps;
+}
 
 let _analyticsReqId = 0;
 async function requestAnalytics(opts) {
@@ -5887,7 +5955,7 @@ async function requestAnalytics(opts) {
     const r = await fetch("/api/portfolio-analytics-multi", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({rows: DATA, weight_sets: wsets, period, display_ccy: FX_QUOTE}),
+      body: JSON.stringify({rows: DATA, weight_sets: wsets, period, display_ccy: FX_QUOTE, ...tradingPrefs()}),
     });
     const d = await r.json();
     if (reqId !== _analyticsReqId) return;
@@ -5943,7 +6011,7 @@ function renderAnalyticsBody() {
   body.innerHTML = `
     <div class="pf-grid">
       <div class="pf-card">
-        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${escapeHtml(labelForMode(STATE.mode))} · ${escapeHtml(a.display_ccy || FX_QUOTE)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span>${chartTypeSelectHtml("pf-chart-type")}</h4>
+        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${escapeHtml(labelForMode(STATE.mode))} · ${escapeHtml(a.display_ccy || FX_QUOTE)} · ${escapeHtml(tradingLabel())}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span><button type="button" class="ct-btn tr-btn" id="pf-trading" aria-haspopup="dialog" data-tip="How often the weights are reset, and what trading costs">Constraints</button>${chartTypeSelectHtml("pf-chart-type")}</h4>
         <div class="pf-chart-card">
           <div class="pf-chart-wrap" id="pf-chart-host"></div>
           <div class="pf-chart-legend" id="pf-chart-legend"></div>
@@ -5978,6 +6046,8 @@ function renderAnalyticsBody() {
   `;
   drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
   wireChartTypeDd($("#pf-chart-type"), () => drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend")));
+  $("#pf-trading").onclick = (e) => tradingPopOpen(e.currentTarget, a);
+  tradingPopSync(a);
   wireBenchSelect($("#pf-bench"), (k) => {
     if (k === STATE.bench) return;
     STATE.bench = k;
@@ -6019,7 +6089,7 @@ function fmtNumOr(v, d, suffix) {
 const METRIC_INFO = {
   "Period return": {
     formula: String.raw`R = \dfrac{V_T}{V_0} - 1 = \prod_{t=1}^{T}\Bigl(1 + \sum_i w_i\, r_{i,t}\Bigr) - 1`,
-    desc: "Total return of the portfolio over the chosen period, in the display currency, on dividend-adjusted closes. The portfolio is rebalanced to its weights every day. V₀ is the last close on or before the period start (for YTD, the previous year's last close).",
+    desc: "Total return of the portfolio over the chosen period, in the display currency, on dividend-adjusted closes. Weights are set on the first day and reset at the rebalancing interval set under Constraints, net of the trading cost there. V₀ is the last close on or before the period start (for YTD, the previous year's last close).",
     range: "Compare to the benchmark in the same period. A positive read with low volatility is the cleanest win."
   },
   "Ann. return": {
@@ -6729,8 +6799,8 @@ function renderBarsHtml(map) {
 
 /* Contribution to return (#8). Each holding's linked contribution (Carino,
    from analytics._linked_contribution) is split into W×R, the naive
-   weight × own-period-return, and Compounding, the rest: what daily
-   rebalancing and compounding add or take away. The three columns reconcile
+   weight × own-period-return, and Compounding, the rest: what rebalancing,
+   trading costs and compounding add or take away. The three columns reconcile
    exactly per row, and the Contribution column sums to the period return.
    Sort and the Table/Chart choice are per-viewer conveniences in localStorage;
    re-rendering touches only #pf-contrib-body, not the whole analytics grid. */
@@ -6739,18 +6809,18 @@ const CONTRIB_INFO = {
     label: "W×R",
     formula: String.raw`\text{W×R}_i = w_i \cdot R_i`,
     desc: "The holding's weight times its own return over the period, in percentage points. The contribution you would get if the weights were set once at the start and each holding's return simply scaled by its weight.",
-    range: "Summed over holdings it is not the portfolio's return: the portfolio is rebalanced to its weights daily, and that compounds differently.",
+    range: "Summed over holdings it is not the portfolio's return: the portfolio's weights drift and are reset at the rebalancing interval, and that compounds differently.",
   },
   comp: {
     label: "Compounding",
     formula: String.raw`\text{Compounding}_i = \text{Contribution}_i - w_i R_i`,
-    desc: "What daily rebalancing and compounding add to or take from the holding's W×R: the gap between the holding compounding on its own and its daily contributions to a portfolio reset to its weights every day (then Carino-linked).",
+    desc: "What rebalancing, trading costs and compounding add to or take from the holding's W×R: the gap between the holding compounding on its own and its daily contributions to the portfolio as it is rebalanced under Constraints (then Carino-linked).",
     range: "Small for calm holdings and short periods. It grows with the size of the holding's move, its volatility and the length of the period, and can have either sign.",
   },
   contribution: {
     label: "Contribution",
-    formula: String.raw`C_i = \sum_t \dfrac{k_t}{k}\, w_i\, r_{i,t},\quad k_t = \dfrac{\ln(1+r_{p,t})}{r_{p,t}},\ k = \dfrac{\ln(1+R_p)}{R_p}`,
-    desc: "Percentage points of the portfolio's period return from this holding: daily contributions w·r of the daily-rebalanced portfolio, linked across days with Carino's log scaling so they add up to the period return exactly.",
+    formula: String.raw`C_i = \sum_t \dfrac{k_t}{k}\,\big[(1-c_t)\, w_{i,t}\, r_{i,t} - \tau\,|\Delta w_{i,t}|\big],\quad k_t = \dfrac{\ln(1+r_{p,t})}{r_{p,t}},\ k = \dfrac{\ln(1+R_p)}{R_p}`,
+    desc: "Percentage points of the portfolio's period return from this holding: its daily contributions w·r at that day's weights (which drift between rebalances), less the cost of its own trades, linked across days with Carino's log scaling so they add up to the period return exactly.",
     range: "The column sums to the period return shown in Risk & return. Negative means the holding cost the portfolio return over the period.",
   },
 };

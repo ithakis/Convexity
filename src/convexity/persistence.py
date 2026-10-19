@@ -795,8 +795,18 @@ _PREF_NUMS = {
     "dist_erp": (0.0, 0.15),
     "dist_kappa_stock": (0.5, 1.2),
     "dist_kappa_index": (0.5, 1.2),
+    "tc_bps": (0.0, 200.0),
 }
-_PREF_CHOICES = {"dist_measure": {"P", "Q"}, "pf_contrib_view": {"table", "chart"}}
+# The portfolio chart and the optimizer share one trading assumption: how often
+# the weights are reset (D daily, W weekly, M monthly, Q quarterly, S half-yearly,
+# Y yearly, N never = buy and hold) and the cost per unit traded, in bps.
+REBALANCE = ("D", "W", "M", "Q", "S", "Y", "N")
+TRADING_DEFAULTS = {"rebalance": "M", "tc_bps": 10.0}
+_PREF_CHOICES = {
+    "dist_measure": {"P", "Q"},
+    "pf_contrib_view": {"table", "chart"},
+    "rebalance": set(REBALANCE),
+}
 
 
 def _is_hhmm(v) -> bool:
@@ -828,6 +838,12 @@ def load_prefs() -> dict:
     except (OSError, ValueError):
         return {}
     return _clean_prefs(raw)
+
+
+def trading_prefs() -> dict:
+    """The saved rebalancing calendar and cost, the defaults where unset."""
+    saved = load_prefs()
+    return {k: saved.get(k, v) for k, v in TRADING_DEFAULTS.items()}
 
 
 def save_prefs(changes: dict) -> dict:

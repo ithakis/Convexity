@@ -594,8 +594,9 @@ COLUMN_DEFS: dict[str, tuple[str, str, str]] = {
 METRIC_DEFS: dict[str, tuple[str, str, str]] = {
     # STATS_KEYS (Portfolio Metrics); the SPY / NASDAQ columns use the same definitions.
     "total_return": (
-        "prod_t(1 + sum_i w_i r_i,t) - 1",
-        "Total return over the period in the display currency, dividend-adjusted, rebalanced to the weights daily.",
+        "prod_t (1 - c_t)(1 + sum_i w_i,t r_i,t) - 1",
+        "Total return over the period in the display currency, dividend-adjusted; the weights drift between "
+        "rebalances (the calendar and trading cost c set under Constraints in the app).",
         "",
     ),
     "ann_return": (

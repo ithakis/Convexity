@@ -136,7 +136,7 @@ def test_market_cap_usd_converts_and_uses_major_units(monkeypatch):
     assert A._mcap_bucket(2.5e9) == "Mid ($2B–10B)"
 
 
-def _analytics(monkeypatch, rows, weights, period="1Y", extra=None):
+def _analytics(monkeypatch, rows, weights, period="1Y", extra=None, **trading):
     tickers = [r["symbol"] for r in rows] + [t for t, _, _ in A._BENCHMARKS.values()]
     rng = np.random.default_rng(1)
     idx = pd.bdate_range(end="2026-09-25", periods=520)
@@ -158,7 +158,58 @@ def _analytics(monkeypatch, rows, weights, period="1Y", extra=None):
             "dist": (row or {}).get("rating_dist"),
         },
     )
-    return A.analyze_portfolios_multi(rows, {"w": weights}, period)["w"]
+    return A.analyze_portfolios_multi(rows, {"w": weights}, period, **trading)["w"]
+
+
+def _closes_like_analytics(rows):
+    """The same synthetic closes _analytics feeds in (same seed, same order)."""
+    tickers = [r["symbol"] for r in rows] + [t for t, _, _ in A._BENCHMARKS.values()]
+    rng = np.random.default_rng(1)
+    idx = pd.bdate_range(end="2026-09-25", periods=520)
+    return pd.DataFrame(
+        {s: 100 * np.cumprod(1 + rng.normal(0.0005, 0.012, len(idx))) for s in tickers}, index=idx
+    )
+
+
+def test_rebalancing_daily_is_constant_mix_and_never_is_buy_and_hold(monkeypatch):
+    rows = [{"symbol": s, "currency": "USD"} for s in ("AAA", "BBB", "CCC")]
+    w = {"AAA": 0.5, "BBB": 0.3, "CCC": 0.2}
+    px = _closes_like_analytics(rows)[list(w)]
+    wv = pd.Series(w)
+
+    def series(out):
+        pts = out["series"]["portfolio"]
+        return pd.Series([v for _, v in pts], index=pd.to_datetime([t for t, _ in pts], unit="ms"))
+
+    d = series(_analytics(monkeypatch, rows, w, rebalance="D", tc_bps=0))
+    p = px.loc[d.index]
+    assert np.allclose(
+        d.pct_change().iloc[1:], (p.pct_change().iloc[1:] * wv).sum(axis=1), atol=1e-12
+    )
+    n = series(_analytics(monkeypatch, rows, w, rebalance="N", tc_bps=0))
+    assert np.allclose(n / n.iloc[0], (p / p.iloc[0] * wv).sum(axis=1), atol=1e-10)
+
+
+def test_rebalancing_costs_come_off_the_return_and_contributions_still_add_up(monkeypatch):
+    rows = [{"symbol": s, "currency": "USD"} for s in ("AAA", "BBB", "CCC")]
+    w = {"AAA": 0.5, "BBB": 0.3, "CCC": 0.2}
+    free = _analytics(monkeypatch, rows, w, rebalance="M", tc_bps=0)
+    paid = _analytics(monkeypatch, rows, w, rebalance="M", tc_bps=25)
+    assert paid["stats"]["total_return"] < free["stats"]["total_return"]
+    assert (
+        abs(sum(c["contribution"] for c in paid["contribution"]) - paid["stats"]["total_return"])
+        < 1e-9
+    )
+    t = paid["trading"]
+    assert t["rebalance"] == "M" and t["tc_bps"] == 25 and 11 <= t["rebalances"] <= 12
+    assert t["turnover_ann"] > 0 and 0 < t["cost_drag_ann"] < 2 * 25e-4 * t["turnover_ann"]
+    assert free["trading"]["cost_drag_ann"] == 0.0
+
+
+def test_rebalance_calendar():
+    idx = pd.bdate_range("2026-01-01", "2026-12-31")
+    n = {f: int(A._rebalance_days(idx, f).sum()) for f in A.REBALANCE}
+    assert n == {"D": len(idx), "W": 52, "M": 11, "Q": 3, "S": 1, "Y": 0, "N": 0}
 
 
 def test_analytics_contribution_sums_and_multiples(monkeypatch):
