@@ -702,6 +702,12 @@ document.addEventListener("mouseout", (ev) => {
   if (next && t.contains(next)) return;
   _APP_TIP.hide(t);
 }, true);
+// Keyboard focus shows the same tip (Tab onto a pill, an info cell).
+document.addEventListener("focusin", (ev) => {
+  const t = ev.target.closest?.("[data-tip]");
+  if (t && t.getAttribute("data-tip-off") !== "1" && t.matches(":focus-visible")) _APP_TIP.show(t);
+});
+document.addEventListener("focusout", (ev) => { const t = ev.target.closest?.("[data-tip]"); if (t) _APP_TIP.hide(t); });
 document.addEventListener("scroll", () => _APP_TIP.hide(), true);
 window.addEventListener("resize", () => _APP_TIP.hide());
 // Dismiss tooltip on any user click — pseudo-element ::after tooltips used
@@ -1099,13 +1105,31 @@ let FX_HOVER_CCY = null;
    fetched first thing, and the boot below waits for them, briefly. */
 let APP_PREFS = {};
 const BOOT_PREFS = fetch("/api/prefs").then(r => r.ok ? r.json() : {}).catch(() => ({}));
-async function savePrefs(changes) {
-  try {
-    const r = await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(changes) });
-    if (r.ok) APP_PREFS = await r.json();
-  } catch (e) {}
-  return APP_PREFS;
+/* The portfolio chart's (and the optimizer's) trading assumption, prefs.json:
+   how often the weights are reset and the cost per unit traded. Defaults
+   mirror persistence.TRADING_DEFAULTS. */
+const REBALANCE_LABEL = {D: "Daily", W: "Weekly", M: "Monthly", Q: "Quarterly", S: "Semi-annual", Y: "Yearly", N: "Never"};
+const tradingPrefs = () => ({rebalance: APP_PREFS.rebalance || "M", tc_bps: APP_PREFS.tc_bps ?? 10});
+const tradingLabel = () => { const t = tradingPrefs(); return `${t.rebalance === "N" ? "Buy and hold" : REBALANCE_LABEL[t.rebalance]} · ${+t.tc_bps} bps`; };
+/* One save at a time, in order: two quick clicks used to race (the server
+   could apply them out of order, and an older answer overwrote APP_PREFS). */
+let _prefsChain = Promise.resolve();
+const _prefsQueued = [];
+function savePrefs(changes) {
+  APP_PREFS = {...APP_PREFS, ...changes};
+  _prefsQueued.push(changes);
+  return _prefsChain = _prefsChain.then(async () => {
+    let saved = null;
+    try {
+      const r = await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(changes) });
+      if (r.ok) saved = await r.json();
+    } catch (e) {}
+    _prefsQueued.shift();
+    // The server's cleaned copy, with the changes still queued behind it on top.
+    if (saved) APP_PREFS = Object.assign(saved, ..._prefsQueued);
+    return APP_PREFS;
+  });
 }
 /* The app opens in the default currency (Settings -> General); the topbar
    switch lasts until the app is closed (owner, 2026-10-11), so it is kept
@@ -2505,26 +2529,36 @@ const DETAIL = {
 
 const RANGES = ["1M","3M","6M","YTD","1Y","5Y","MAX"];
 
+// The one close mark (.x-close). An SVG, not a × glyph: a glyph's size and baseline vary by font.
+const X_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>';
+
 function openModal(r) {
   if (r.error) return;
   DETAIL.data = null; DETAIL.row = r;
   DETAIL.range = "1Y"; DETAIL.showSP = false; DETAIL.showSector = false; DETAIL.showVol = true;
   DETAIL.showSigma = DETAIL.showMu = true; DETAIL.fcH = 365; DETAIL.fcAuto = true;
   DETAIL.fc = {}; DETAIL.fcPending = {}; DETAIL.fcSim = null; DETAIL.fcAnimKey = null; DETAIL.fcHov = null;
-  DETAIL.events = null; DETAIL.evOpen = null;
+  DETAIL.events = null; DETAIL.evOpen = null; DETAIL.fcBand = null;
   if (DETAIL.yTw) cancelAnimationFrame(DETAIL.yTw.raf);
   DETAIL.yDom = null; DETAIL.yTw = null;
   DETAIL.intraday = {}; DETAIL.intraPending = {};  // per-symbol; server caches the fetches
   DETAIL.sma = CHART_SMA;       // shared reference — see CHART_SMA
+  const seq = DETAIL.seq = (DETAIL.seq || 0) + 1;
   renderModalSkeleton();
   showOverlay("#modal-bg");
+  // The detail and the options are fetched together and drawn once, behind one
+  // loading chip; options slower than ~8 s from opening arrive later on their own.
+  const cap = new Promise(res => setTimeout(res, 8000));
+  const options = ensureDensity();
   fetch("/api/detail?symbol=" + encodeURIComponent(r.symbol))
     .then(res => res.json())
-    .then(d => {
+    .then(async d => {
+      if (DETAIL.seq !== seq) return;
       if (d && !d.error) {
+        await Promise.race([options, cap]);
+        if (DETAIL.seq !== seq) return;
         DETAIL.data = d;
         renderModalFull();
-        ensureDensity();
         // The user can pick 1M/3M/6M while this fetch is still in flight;
         // ensureIntraday bails on !DETAIL.data, and the range-tab handler's
         // same-range guard means re-clicking that tab does nothing — so the
@@ -2548,7 +2582,9 @@ function openModal(r) {
     .catch(() => {});
 }
 function closeModal() {
-  if (hideOverlay("#modal-bg")) DETAIL.data = null;
+  // A new seq drops answers still on their way (detail, options) for the
+  // closed window, which would otherwise render into it while hidden.
+  if (hideOverlay("#modal-bg")) { DETAIL.data = null; DETAIL.seq = (DETAIL.seq || 0) + 1; }
 }
 $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") closeModal(); });
 document.addEventListener("keydown", (e) => {
@@ -2670,7 +2706,7 @@ function renderModalSkeleton() {
         </div>
       </div>
       <div class="m-price-block" id="m-price-block">${modalPriceBlockHtml()}</div>
-      <button class="m-close" onclick="closeModal()" title="Close">×</button>
+      <button class="x-close" type="button" onclick="closeModal()" aria-label="Close" data-tip="Close (Esc)">${X_SVG}</button>
     </div>
     <div class="m-chart-wrap">
       <div class="m-chart-toolbar">
@@ -2689,7 +2725,7 @@ function renderModalSkeleton() {
         <button class="m-toolbar-btn m-greek active" id="m-toggle-mu" title="μ — where analysts expect the price, from their 12-month targets">μ</button>
       </div>
       <div class="m-chart" id="m-chart">
-        <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">${lcHtml("fetching detail", {bar: true})}</div>
+        <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">${lcHtml("fetching detail and options", {bar: true})}</div>
       </div>
       <div class="m-range-info" id="m-range-info" style="display:none;"></div>
       <div class="m-fc-ro" id="m-fc-ro" style="display:none;"></div>
@@ -2708,6 +2744,14 @@ function renderModalSkeleton() {
   $("#m-toggle-vol").onclick = () => { DETAIL.showVol = !DETAIL.showVol; renderModalFull(); };
   $("#m-toggle-sigma").onclick = () => { DETAIL.showSigma = !DETAIL.showSigma; ensureDensity(); renderModalFull(); };
   $("#m-toggle-mu").onclick = () => { DETAIL.showMu = !DETAIL.showMu; ensureDensity(); renderModalFull(); };
+  const fcBandHover = (e) => {
+    const b = e.type === "mouseout" ? null : e.target.closest("[data-fc-band]")?.dataset.fcBand ?? null;
+    if (b !== DETAIL.fcBand) { DETAIL.fcBand = b; fcDraw(); }
+  };
+  $("#m-fc-ro").addEventListener("mouseover", fcBandHover);
+  $("#m-fc-ro").addEventListener("mouseout", fcBandHover);
+  $("#m-fc-ro").addEventListener("focusin", fcBandHover);
+  $("#m-fc-ro").addEventListener("focusout", (e) => fcBandHover({type: "mouseout", target: e.target}));
   $("#m-fc-ro").addEventListener("click", (e) => {
     if (!e.target.closest("[data-fc-settings]")) return;
     e.preventDefault(); openSettings(); selectSettingsSection("distribution");
@@ -2958,6 +3002,93 @@ function wireChartTypeDd(dd, onPick) {
     const o = e.target.closest(".ct-opt"); if (!o) return;
     close(); btn.focus(); setChartType(o.dataset.ct); syncChartTypeDd(dd); onPick();
   };
+}
+
+/* Constraints (portfolio chart): the rebalancing calendar and trading cost,
+   one prefs.json setting for every portfolio and the optimizer. A body-level
+   panel (invMenuOpen), so the analytics redraw each change triggers leaves it
+   open: the readout then fills in from the new payload (tradingPopSync). */
+let _trLast = null;
+function tradingPopOpen(anchor, a) {
+  const el = invMenuOpen(anchor, "tr-pop", () => {});
+  if (!el) return;
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-label", "Constraints");
+  el.innerHTML = `<div data-tr-host></div><div class="tr-read" id="tr-read"></div>
+    <p class="tr-note">The weights apply from the first day of the period and drift with prices; each rebalance resets them and pays the cost on everything it buys and sells. The first purchase is free.</p>`;
+  tradingControlsRender(el.querySelector("[data-tr-host]"));
+  invMenuPlace(el, anchor, true);
+  tradingPopSync(a);
+  el.querySelector("button.on")?.focus({preventScroll: true});
+}
+/* The calendar pills, the cost presets and the custom bps field: one renderer
+   for the chart's panel and the optimizer's Constraints sheet ([data-tr-host]). */
+function tradingControlsRender(host) {
+  if (!host) return;
+  const t = tradingPrefs();
+  const seg = (k, v, label, tip) => `<button type="button" data-tr="${k}" data-v="${v}" data-tip="${tip}">${label}</button>`;
+  host.innerHTML = `
+    <div class="tr-row"><span class="tr-k">Rebalance</span><div class="tr-seg">${Object.entries(REBALANCE_LABEL).map(([k, l]) =>
+      seg("rebalance", k, k === "S" ? "6M" : l, k === "N" ? "Buy and hold: set once, never reset" : `Reset to the target weights on the first trading day of each ${{D: "day", W: "week", M: "month", Q: "quarter", S: "half-year", Y: "year"}[k]}`)).join("")}</div></div>
+    <div class="tr-row"><span class="tr-k">Trading cost</span><div class="tr-seg">${[0, 5, 10, 25].map(v =>
+      seg("tc_bps", v, `${v}`, v ? `${v} bps of every amount bought or sold` : "No trading cost")).join("")}</div>
+      <label class="tr-num"><input type="number" min="0" max="200" step="1" value="${+t.tc_bps}" aria-label="Trading cost in bps"> bps</label></div>`;
+  // The custom field commits as you type (a click outside closes the panel
+  // before a `change` would fire); blank or junk goes back to the setting.
+  const inp = host.querySelector("input");
+  let timer = 0;
+  const commit = () => {
+    clearTimeout(timer);
+    const v = Number(inp.value);
+    if (inp.value.trim() === "" || !Number.isFinite(v)) return;
+    tradingSet({tc_bps: Math.round(Math.min(200, Math.max(0, v)))});
+  };
+  inp.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(commit, 350); });
+  inp.addEventListener("blur", () => { commit(); inp.value = +tradingPrefs().tc_bps; });
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+  if (!host._trWired) host.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tr]");
+    if (b) tradingSet(b.dataset.tr === "rebalance" ? {rebalance: b.dataset.v} : {tc_bps: +b.dataset.v});
+  });
+  host._trWired = true;
+  tradingControlsSync(host);
+}
+/* Mark the current setting in a host without rebuilding it: a rebuild under
+   the pointer swallowed the click that caused it (mousedown blurs the field,
+   its commit re-rendered, the click landed on a new button). */
+function tradingControlsSync(host) {
+  const t = tradingPrefs();
+  host.querySelectorAll("[data-tr]").forEach(b => {
+    const on = String(t[b.dataset.tr]) === b.dataset.v;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", on);
+  });
+  const inp = host.querySelector("input");
+  if (inp && document.activeElement !== inp) inp.value = +t.tc_bps;
+}
+let _trTimer = 0;
+function tradingSet(change) {
+  const cur = tradingPrefs(), next = {...cur, ...change};
+  if (next.rebalance === cur.rebalance && +next.tc_bps === +cur.tc_bps) return;
+  savePrefs(change);
+  document.querySelectorAll("[data-tr-host]").forEach(tradingControlsSync);
+  tradingPopSync(null);
+  mptConsSummary();
+  // A burst of clicks (Daily → Weekly → Monthly) asks for one run, not three.
+  clearTimeout(_trTimer);
+  _trTimer = setTimeout(() => requestAnalytics(), 250);
+}
+function tradingPopSync(a) {
+  if (a) _trLast = a;
+  const read = document.querySelector(".tr-pop #tr-read");
+  if (!read) return;
+  const t = _trLast?.trading, cur = tradingPrefs();
+  const fresh = t && t.rebalance === cur.rebalance && t.tc_bps === +cur.tc_bps && !STATE.analyticsLoading;
+  const p = (v, d) => (v * 100).toFixed(d) + "%";
+  read.innerHTML = !fresh ? lcHtml("recomputing")
+    : t.rebalance === "N" ? `Never rebalanced: the weights drift with prices over ${escapeHtml(STATE.period)}.`
+    : !t.rebalances ? `No ${REBALANCE_LABEL[t.rebalance].toLowerCase()} rebalance falls inside ${escapeHtml(STATE.period)}, a longer period shows what rebalancing costs.`
+    : `<b>${t.rebalances}</b> rebalance${t.rebalances === 1 ? "" : "s"} over ${escapeHtml(STATE.period)} · turnover <b>${p(t.turnover_ann, 0)}</b>/yr · costs <b>${p(t.cost_drag_ann, 2)}</b>/yr`;
 }
 
 /* Join a close series with its [t,o,h,l] and [t,v] arrays on timestamp. A bar
@@ -3371,7 +3502,9 @@ function renderChart() {
     if (range === "6M" || range === "YTD" || range === "1Y") return dt.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
     return dt.toLocaleDateString(undefined, { year: "numeric" });
   };
+  // Plotted in the listing's currency; labelled in the display currency like every other price here.
   const fmtTickVal = (v) => {
+    v = fxConvert(v, DETAIL.data.currency);
     if (v >= 1000) return v.toFixed(0);
     if (v >= 100) return v.toFixed(1);
     return v.toFixed(2);
@@ -3526,7 +3659,7 @@ function openEventCard(i, btn) {
     h = `<div class="hd"><span class="m-ev e${sur == null ? "" : sur >= 0 ? " beat" : " miss"}">E</span><div><b>Earnings</b><span>${date(e.date)} · ${timing}</span></div></div>`;
     if (e.actual != null) {
       h += row("Reported EPS", e.actual.toFixed(2));
-      h += row("Expected EPS", e.estimate != null ? e.estimate.toFixed(2) : "—", "", "analysts’ consensus");
+      h += row("Expected EPS <small>(analysts’ consensus)</small>", e.estimate != null ? e.estimate.toFixed(2) : "—");
       h += row("Surprise", sur != null ? `${sur >= 0 ? "+" : "−"}${Math.abs(sur).toFixed(1)}%` : "—", cls(sur == null ? null : sur), sur == null ? "" : sur >= 0 ? "beat" : "missed");
     } else h += `<div class="nt">The reported figures aren’t in Yahoo’s calendar yet.</div>`;
     const j = evIdx(pts, e.react || e.date);
@@ -3553,9 +3686,13 @@ function openEventCard(i, btn) {
       const dd = (Date.parse(e.date) - Date.parse(x.date)) / 864e5; return dd > 300 && dd < 430;
     }).pop();
     h = `<div class="hd"><span class="m-ev d">D</span><div><b>Dividend</b><span>ex-date ${date(e.date)}</span></div></div>`;
-    h += row("Amount", `${money(e.amount)}`, "", "a share");
-    if (yr) h += row("A year earlier", money(yr.amount), "", `${pctS(e.amount / yr.amount - 1, 0)}, ${date(yr.date)}`);
-    if (prev && prev !== yr) h += row("Previous", money(prev.amount), "", date(prev.date));
+    // Newest first: this payment, the one before it, the same payment a year earlier.
+    const vs = (x) => `${date(x.date)} · ${pctS(e.amount / x.amount - 1, 0)} since`;
+    // An ex-date still ahead is announced, not paid.
+    const ahead = Date.parse(e.date) > Date.now();
+    h += row(ahead ? "Dividend amount to be paid" : "Dividend amount paid", money(e.amount), "", "a share");
+    if (prev) h += row("Previous dividend", money(prev.amount), "", vs(prev));
+    if (yr && yr !== prev) h += row("One year ago", money(yr.amount), "", vs(yr));
     const j = evIdx(pts, e.date);
     if (j > 0 && j < pts.length && evDay(pts[j][0]) === e.date) {
       const yld = e.amount / pts[j - 1][1];
@@ -3601,29 +3738,36 @@ const FC_ANIM = { paths: 750, pdf: 300 };
 
 function fcOn() { return DETAIL.showSigma || DETAIL.showMu; }
 
-/* The payload for the window's symbol and horizon; fetches it (12M first, then
- * 3M in the background so switching is instant). Successes re-render. */
+/* The payload for the window's symbol and horizon (a promise while it is
+ * fetched). With no horizon: the shown one, then the other, so switching is
+ * instant. One after the other, not together: the second reuses the option
+ * chain the first downloaded (the server caches chains, unlocked). The
+ * promise settles when the window can draw: the first horizon, or both when
+ * the first is too thin and the window falls back to 3M. */
 function ensureDensity(h) {
-  if (!DETAIL.data || !fcOn()) return;
-  const sym = DETAIL.row.symbol;
-  const want = h || DETAIL.fcH;
-  if (DETAIL.fc[want] || DETAIL.fcPending[want]) return;
-  DETAIL.fcPending[want] = true;
-  const beta = DETAIL.data.beta ?? DETAIL.row.beta;
-  const q = `symbol=${encodeURIComponent(sym)}&h=${want}` + (beta != null && isFinite(beta) ? `&beta=${beta}` : "");
-  fetch("/api/density?" + q).then(r => r.json()).then(d => {
-    if (!DETAIL.data || DETAIL.row.symbol !== sym) return;   // the window moved on
-    DETAIL.fc[want] = d;
-    DETAIL.fcPending[want] = false;
+  if (!DETAIL.row || !fcOn()) return;
+  if (!h) {
+    const first = DETAIL.fcH, other = first === 365 ? 91 : 365;
+    return Promise.resolve(ensureDensity(first)).then(() => {
+      const next = ensureDensity(other);
+      return DETAIL.fc[first]?.ok ? undefined : next;
+    });
+  }
+  if (DETAIL.fc[h] || DETAIL.fcPending[h]) return DETAIL.fcPending[h];
+  const seq = DETAIL.seq;
+  const beta = DETAIL.data?.beta ?? DETAIL.row.beta;
+  const q = `symbol=${encodeURIComponent(DETAIL.row.symbol)}&h=${h}` + (beta != null && isFinite(beta) ? `&beta=${beta}` : "");
+  const mine = DETAIL.fcPending[h] = fetch("/api/density?" + q).then(r => r.json()).catch(() => ({ ok: false, reason: "error" })).then(d => {
+    if (DETAIL.fcPending[h] === mine) delete DETAIL.fcPending[h];   // never leave a dead fetch "pending"
+    if (DETAIL.seq !== seq) return;   // the window moved on
+    DETAIL.fc[h] = d;
     // 12M is the default, but long chains are often too thin to trust their
     // tails (SPY, DELL today); then the window opens on 3M and says why.
-    if (want === 91 && DETAIL.fcAuto && d.ok && DETAIL.fc[365] && !DETAIL.fc[365].ok) DETAIL.fcH = 91;
-    if (want === DETAIL.fcH) renderChart();
-    if (want === 365) ensureDensity(91);
-  }).catch(() => {
-    DETAIL.fcPending[want] = false;
-    if (DETAIL.data && DETAIL.row.symbol === sym) { DETAIL.fc[want] = { ok: false, reason: "error" }; if (want === DETAIL.fcH) renderChart(); }
+    const was = DETAIL.fcH;
+    if (DETAIL.fcAuto && DETAIL.fc[365] && !DETAIL.fc[365].ok && DETAIL.fc[91]?.ok) DETAIL.fcH = 91;
+    if (DETAIL.data && (h === DETAIL.fcH || DETAIL.fcH !== was)) renderChart();
   });
+  return mine;
 }
 
 /* Which picture the toggles ask for, given what the payload has. */
@@ -3762,7 +3906,9 @@ function fcMarks(d) {
  * the window's history ∪ the end curve's 5%..95%, i.e. the fan's 90% band.
  * History drives the axis, so every range tab rescales; the curve's tails past
  * the frame are clipped and fcDraw labels the mass that lies beyond. (It was
- * 3%..97%, which on a 12M curve set both limits: 1Y and 5Y looked identical.) */
+ * 3%..97%, which on a 12M curve set both limits: 1Y and 5Y looked identical.)
+ * The analysts' low..high, when shown, is in too: a High past the 95% point
+ * was drawn off the plot. */
 function fcYRange(lo, hi) {
   const d = DETAIL.fc[DETAIL.fcH];
   if (!d || !d.ok) return [lo, hi];
@@ -3773,8 +3919,10 @@ function fcYRange(lo, hi) {
     if (mk) { lo = Math.min(lo, mk.low ?? mk.cons, d.s0); hi = Math.max(hi, mk.high ?? mk.cons, d.s0); }
     return [lo, hi];
   }
-  const sim = fcSimulate(d, mode);
-  return [Math.min(lo, fcCurveQ(sim, 0.05)), Math.max(hi, fcCurveQ(sim, 0.95))];
+  const sim = fcSimulate(d, mode), mk = DETAIL.showMu ? fcMarks(d) : null;
+  lo = Math.min(lo, fcCurveQ(sim, 0.05), mk?.low ?? Infinity);
+  hi = Math.max(hi, fcCurveQ(sim, 0.95), mk?.high ?? -Infinity);
+  return [lo, hi];
 }
 
 const fcPctTxt = (p) => (p < 0.01 ? "<1%" : `${Math.round(p * 100)}%`);
@@ -3992,6 +4140,23 @@ function fcDraw() {
       const ys0 = y(d.s0);
       ctx.save(); ctx.beginPath(); ctx.rect(xH, top, Wd + 8, ys0 - top); ctx.clip(); curve(`rgba(${col.posRgb},0.2)`, col.pos); ctx.restore();
       ctx.save(); ctx.beginPath(); ctx.rect(xH, ys0, Wd + 8, bot - ys0); ctx.clip(); curve(`rgba(${col.negRgb},0.2)`, col.neg); ctx.restore();
+      // The strip's hovered band (renderFcReadouts): a level band across the zone and that slice of the curve.
+      const hb = DETAIL.fcBand;
+      if (hb) {
+        const rgb = hb === "20" ? col.negRgb : col.acc;
+        // Clamped to the plot: a level past the axis (a -20% below a calm
+        // 3M range) painted over the volume and date rows.
+        const cl = (v) => Math.min(bot, Math.max(top, v));
+        const yt = cl(y(hb === "20" ? d.s0 * 0.8 : fcCurveQ(sim, hb === "50" ? 0.75 : 0.95)));
+        const yb = hb === "20" ? bot : cl(y(fcCurveQ(sim, hb === "50" ? 0.25 : 0.05)));
+        if (yb > yt) {
+        ctx.fillStyle = `rgba(${rgb},0.12)`; ctx.fillRect(xT, yt, xR - xT, yb - yt);
+        ctx.save(); ctx.beginPath(); ctx.rect(xH, yt, Wd + 8, yb - yt); ctx.clip(); curve(`rgba(${rgb},0.45)`, `rgb(${rgb})`); ctx.restore();
+        ctx.strokeStyle = `rgb(${rgb})`; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.beginPath();
+        for (const yy of hb === "20" ? [yt] : [yt, yb]) { ctx.moveTo(xT, yy); ctx.lineTo(xR, yy); }
+        ctx.stroke(); ctx.setLineDash([]);
+        }
+      }
       // The axis shows the fan's 90% band (fcYRange), so the tails run past
       // the frame: say how much of the curve lies beyond each edge. The left
       // of the density's top is free (the 3M | 12M pill sits on the right).
@@ -4017,9 +4182,12 @@ function fcDraw() {
     ctx.setLineDash([3, 4]); ctx.lineWidth = 1.2; ctx.strokeStyle = `rgba(${col.amberRgb},0.55)`;
     ctx.beginPath(); ctx.moveTo(xH, yc); ctx.lineTo(xR, yc); ctx.stroke(); ctx.setLineDash([]);
     const ccy = DETAIL.data.currency, labs = [[yh, "High", mk.high, false], [yc, "Consensus", mk.cons, true], [yl, "Low", mk.low, false]];
-    let prev = -1e9;
-    for (const [y0, k, v, main] of labs) {
-      const yy = Math.max(y0, prev + 26); prev = yy;
+    // Labels keep 26 px apart and inside the plot: pushed down from the top, then up from the bottom.
+    const pos = labs.map(l => l[0]);
+    for (let i = 0; i < 3; i++) pos[i] = Math.max(pos[i], i ? pos[i - 1] + 26 : top + 12);
+    for (let i = 2; i >= 0; i--) pos[i] = Math.min(pos[i], i < 2 ? pos[i + 1] - 26 : bot - 12);
+    for (const [i, [y0, k, v, main]] of labs.entries()) {
+      const yy = pos[i];
       const val = fmtMoney(v, ccy);
       ctx.font = font(main ? 700 : 600, 13); const vw = ctx.measureText(val).width;
       ctx.font = font(500, 12); const kw = ctx.measureText(k).width;
@@ -4116,7 +4284,9 @@ function renderFcReadouts() {
   if (!fcOn()) { el.style.display = "none"; return; }
   el.style.display = "";
   const d = DETAIL.fc[DETAIL.fcH], ccy = DETAIL.data.currency;
-  const cell = (k, v, cls, tip) => `<div${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}><span>${k}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
+  // A cell with a band ("50", "90", "20") carries an (i): hovering it lights that part of the curve (fcDraw).
+  const cell = (k, v, cls, tip, band) => `<div${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}${band ? ` data-fc-band="${band}" tabindex="0"` : ""}>` +
+    `<span>${k}${band ? ' <i class="m-fc-i" aria-hidden="true">i</i>' : ""}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
   const pct = (v) => (v * 100).toFixed(0) + "%";
   const sgn = (v) => (v >= 0 ? "+" : "") + v.toFixed(0) + "%";
   const money = (v) => fmtMoney(v, ccy);
@@ -4229,10 +4399,10 @@ function renderFcReadouts() {
   el.innerHTML = `<div class="m-fc-grid">
     ${cell(prTex(">", d.s0), pct(fcCurveAbove(sim, d.s0)), "pos", `The chance the price is above today’s (${money(d.s0)}) in ${hz}.`)}
     ${cell(meanLabel, `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`, "", meanTip)}
-    ${cell("Median · 50% range", `${money(fcCurveQ(sim, 0.5))} · ${money(fcCurveQ(sim, 0.25))} – ${money(fcCurveQ(sim, 0.75))}`, "", "Half the outcomes end inside the range, a quarter below it and a quarter above.")}
-    ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`, "", "Nine outcomes in ten end inside this range.")}
+    ${cell("Median · 50% range", `${money(fcCurveQ(sim, 0.5))} · ${money(fcCurveQ(sim, 0.25))} – ${money(fcCurveQ(sim, 0.75))}`, "", `The middle half of outcomes: in ${hz} the price ends inside this range half the time, a quarter of the time below it and a quarter above. Highlighted on the chart.`, "50")}
+    ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`, "", `A wide but likely range: in ${hz} the price ends inside it nine times in ten, below it one time in twenty and above it one time in twenty. Highlighted on the chart.`, "90")}
     ${cell("Falls 20% or more", `${((1 - fcCurveAbove(sim, d.s0 * 0.8)) * 100).toFixed(1)}% <small>by the end · ${pct(s20.touch)} at some point</small>`, "neg",
-      `The chance of ending ${hz} at least 20% below today (${money(d.s0 * 0.8)} or less), and the chance of trading there at any time before, even if it recovers.`)}
+      `The chance of ending ${hz} at least 20% below today (${money(d.s0 * 0.8)} or less), and the chance of trading there at any time before, even if it recovers. The zone is highlighted on the chart.`, "20")}
     ${consCell}
     ${cell("Dividend Yield", dy, "", dyTip)}
     ${cell("Hist. / Imp. Volatility", `${vpct(vo.hist)} / ${vpct(vo.implied)}`, "", volTip)}
@@ -4980,7 +5150,7 @@ function _slimAnalyticsForCache(a) {
   const keep = ["period", "display_ccy", "weights_applied", "active_symbols",
                 "missing_symbols", "stats", "benchmarks",
                 "weighted", "contribution", "analyst", "exposure",
-                "concentration", "warnings", "series"];
+                "concentration", "warnings", "series", "trading"];
   for (const k of keep) if (k in a) out[k] = a[k];
   return out;
 }
@@ -5228,12 +5398,16 @@ async function warmRecentTabs(maxN) {
       const eq = equalWeightsOf(rows);
       const cap = capWeightsOf(rows);
       const wsets = {equal: eq, cap: cap};
+      // The cache keys carry the period, currency and trading assumption: a
+      // change while this request is out (Constraints in the first seconds
+      // after launch) would file old-assumption numbers under the new key.
+      const asked = analyticsCacheKey("", STATE.period);
       const res = await fetch("/api/portfolio-analytics-multi", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({rows, weight_sets: wsets, period: STATE.period, display_ccy: FX_QUOTE}),
+        body: JSON.stringify({rows, weight_sets: wsets, period: STATE.period, display_ccy: FX_QUOTE, ...tradingPrefs()}),
       });
-      if (!res.ok) continue;
+      if (!res.ok || analyticsCacheKey("", STATE.period) !== asked) continue;
       const dr = await res.json();
       const results = dr.results || {};
       const tabMap = analyticsMapForTab(name);
@@ -5375,12 +5549,15 @@ function viewLabel(name) {
 /* The unsaved tab is "Untitled N" (lowest free N); its first edit saves it
    under that name (commitEntries) — the server keeps no empty portfolios. */
 function untitledName() {
+  if (STATE.adhocName && !(STATE.adhocName in WATCHLISTS)) return STATE.adhocName;
   let n = 1;
   while (`Untitled ${n}` in WATCHLISTS) n++;
   return `Untitled ${n}`;
 }
 
+let TAB_RENAME = null;   // {pending} while a label is being edited: a redraw then would destroy it mid-edit
 function renderTabs() {
+  if (TAB_RENAME) { TAB_RENAME.pending = true; return; }
   const wrap = $("#pf-tabs"); wrap.innerHTML = "";
   // Tab order: saved watchlists alphabetically, then ad-hoc (if present), then "+ New".
   const wlNames = Object.keys(WATCHLISTS).sort((a, b) => a.localeCompare(b));
@@ -5408,24 +5585,25 @@ function renderTabs() {
     const view = VIEWS[name];
     const staleDot = view && view.stale ? `<span class="pf-tab-stale" title="Constituents changed — refresh to update"></span>` : "";
     const closeBtn = `<span class="pf-tab-close" title="Delete">✕</span>`;
-    tab.innerHTML = `${staleDot}<span class="pf-tab-label" title="Double-click to rename">${escapeHtml(viewLabel(name))}</span>${closeBtn}`;
+    // The full name in a (slow) native title for a cut-off label; the rename
+    // hint only on the open tab, not popping up on every tab you pass over.
+    const tip = STATE.activeView === name ? ' data-tip="Double-click or right-click to rename"' : "";
+    tab.innerHTML = `${staleDot}<span class="pf-tab-label" title="${escapeHtml(viewLabel(name))}"${tip}>${escapeHtml(viewLabel(name))}</span>${closeBtn}`;
     tab.addEventListener("click", (e) => {
-      if (e.target.closest(".pf-tab-close")) return;
-      if (e.target.closest(".pf-tab-rename-input")) return;
+      // Re-activating the open tab would redraw the row between the two clicks of a double-click.
+      if (e.target.closest(".pf-tab-close") || TAB_RENAME || STATE.activeView === name) return;
       activateTab(name);
     });
+    tab.addEventListener("contextmenu", (e) => { e.preventDefault(); tabMenuOpen(e, tab, name); });
     tab.querySelector(".pf-tab-close").addEventListener("click", async (e) => {
       e.stopPropagation();
       await deletePortfolio(name);
     });
-    // Double-click the label → inline rename (saved portfolios only, not ad-hoc).
-    if (name !== AD_HOC_KEY) {
-      tab.querySelector(".pf-tab-label").addEventListener("dblclick", (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        beginTabRename(tab, name);
-      });
-    }
+    tab.querySelector(".pf-tab-label").addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      beginTabRename(tab, name);
+    });
     wrap.appendChild(tab);
   }
 
@@ -5437,35 +5615,88 @@ function renderTabs() {
   wrap.appendChild(add);
 }
 
-function beginTabRename(tab, oldName) {
-  const labelEl = tab.querySelector(".pf-tab-label");
-  if (!labelEl || tab.querySelector(".pf-tab-rename-input")) return;
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "pf-tab-rename-input";
-  input.value = oldName;
-  input.spellcheck = false;
-  input.size = Math.max(8, oldName.length + 2);
-  labelEl.style.display = "none";
-  labelEl.insertAdjacentElement("afterend", input);
-  input.focus();
-  input.select();
-  let done = false;
-  const finish = async (commit) => {
-    if (done) return; done = true;
-    const next = input.value.trim();
-    input.remove();
-    labelEl.style.display = "";
-    if (!commit || !next || next === oldName) return;
-    await renamePortfolio(oldName, next);
-  };
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); finish(true); }
-    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+function tabMenuOpen(e, tab, name) {
+  const el = invMenuOpen(tab, "pf-tab-menu", (ev) => {
+    if (!ev.target.closest("[data-act=rename]")) return;
+    invMenuClose();
+    beginTabRename(tab, name);
   });
-  input.addEventListener("blur", () => finish(true));
-  input.addEventListener("click", (e) => e.stopPropagation());
-  input.addEventListener("dblclick", (e) => e.stopPropagation());
+  if (!el) return;
+  el.innerHTML = `<div class="inv-menu-list"><button type="button" class="inv-menu-it" data-act="rename" role="menuitem">Rename</button></div>`;
+  el.style.left = Math.min(e.clientX, window.innerWidth - el.offsetWidth - 8) + "px";
+  el.style.top = Math.min(e.clientY, window.innerHeight - el.offsetHeight - 8) + "px";
+  el.querySelector("button").focus();
+}
+
+/* The label itself becomes editable (no input box): Enter or a click away
+   commits, Esc restores. renderTabs() holds off until it is done. */
+function beginTabRename(tab, name) {
+  const label = tab.querySelector(".pf-tab-label");
+  if (!label || TAB_RENAME || viewIsBook(name)) return;
+  const old = label.textContent;
+  TAB_RENAME = {pending: false};
+  tab.classList.add("renaming");
+  label.contentEditable = "plaintext-only";
+  label.spellcheck = false;
+  label.focus();
+  getSelection().selectAllChildren(label);
+  // A click elsewhere ends the edit on mousedown; redrawing the row right
+  // then would swap the tab under the pointer and lose that click.
+  let down = false;
+  const onDown = () => { down = true; }, onUp = () => { down = false; };
+  document.addEventListener("pointerdown", onDown, true);
+  document.addEventListener("pointerup", onUp, true);
+  const render = () => {
+    if (!down) return renderTabs();
+    document.addEventListener("pointerup", () => setTimeout(renderTabs), {once: true, capture: true});
+  };
+  const finish = async (commit) => {
+    if (!TAB_RENAME) return;
+    document.removeEventListener("pointerdown", onDown, true);
+    document.removeEventListener("pointerup", onUp, true);
+    const next = label.textContent.replace(/\s+/g, " ").trim().slice(0, 60);
+    label.removeEventListener("keydown", onKey);
+    label.removeEventListener("blur", onBlur);
+    label.contentEditable = "false";
+    tab.classList.remove("renaming");
+    label.textContent = old;
+    const pending = TAB_RENAME.pending;
+    TAB_RENAME = null;
+    if (commit && next && next !== old) {
+      // Case-blind ("growth" vs "Growth" read as one tab), and the book's label is taken too.
+      const low = next.toLowerCase();
+      const clash = [...Object.keys(WATCHLISTS), BOOK_KEY, AD_HOC_KEY, "My Investments"]
+        .some(n => n !== name && n.toLowerCase() === low);
+      if (clash) { toast(`"${next}" is already taken.`); tab.classList.add("shake"); setTimeout(() => tab.classList.remove("shake"), 400); }
+      else if (name === AD_HOC_KEY) await renameAdhoc(next);
+      else await renamePortfolio(name, next);
+      render();   // also after a clash or a failed save, which redraw nothing themselves
+      return;
+    }
+    if (pending) render();
+  };
+  const onKey = (e) => {
+    // Enter commits by itself: through blur it waited on window focus.
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); finish(true); }   // not mid-IME
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
+  };
+  const onBlur = () => {
+    // Switching apps (⌘-Tab) blurs too: keep editing, and pick up on return.
+    if (!document.hasFocus()) { window.addEventListener("focus", () => label.focus(), {once: true}); return; }
+    finish(true);
+  };
+  label.addEventListener("keydown", onKey);
+  label.addEventListener("blur", onBlur);
+}
+
+/* The unsaved tab has no server record: its name is the one the first edit
+   will save it under, or, if it already has companies, saved now. */
+async function renameAdhoc(next) {
+  STATE.adhocName = next;
+  // ENTRIES are the open tab's: save now only if that is the unsaved tab,
+  // else the name waits for its first edit (it used to re-save the open one).
+  if (STATE.activeView === AD_HOC_KEY && entriesArr(ENTRIES).length) await commitEntries(ENTRIES);
+  else renderTabs();
 }
 
 async function renamePortfolio(oldName, newName) {
@@ -5564,6 +5795,7 @@ async function commitEntries(next) {
         delete VIEWS[AD_HOC_KEY];
       }
       STATE.activeView = name;
+      STATE.adhocName = null;
       // The first edit names the tab: make it the one a reload reopens.
       LAST_VIEW = name;
       fetch("/api/last-view", {method: "POST", headers: {"Content-Type": "application/json"},
@@ -5592,6 +5824,7 @@ $("#pf-chips").addEventListener("click", (e) => {
 async function createNewTab() {
   // Open the panel in fresh ad-hoc state.
   STATE.activeView = AD_HOC_KEY;
+  STATE.adhocName = null;
   STATE.customWeights = null;
   DATA = []; render();
   setEntries("");
@@ -5762,7 +5995,10 @@ function openExportPopup(fname, url) {
  * Portfolio analytics — weights, request, render, chart
  * --------------------------------------------------------------------------- */
 
-function analyticsCacheKey(mode, period) { return mode + "|" + period + "|" + FX_QUOTE; }
+function analyticsCacheKey(mode, period) {
+  const t = tradingPrefs();
+  return mode + "|" + period + "|" + FX_QUOTE + "|" + t.rebalance + "|" + t.tc_bps;
+}
 
 let _analyticsReqId = 0;
 async function requestAnalytics(opts) {
@@ -5784,8 +6020,10 @@ async function requestAnalytics(opts) {
   const cached = tabMap[key];
   // Payloads saved before v1.19 also lack `series.ohlc` (the chart bars); the
   // server always sends the key now (empty when no bars), so this runs once.
+  // Payloads from before 1.28.1 have no `trading` block (the Constraints
+  // readout waits for it).
   const backfill = !!(cached && !opts.force &&
-                      (!cached.benchmarks || !(cached.series && "ohlc" in cached.series)));
+                      (!cached.benchmarks || !(cached.series && "ohlc" in cached.series) || !cached.trading));
   if (cached && !opts.force && !backfill) {
     STATE.analytics = cached;
     STATE.analyticsLoading = false;
@@ -5817,7 +6055,7 @@ async function requestAnalytics(opts) {
     const r = await fetch("/api/portfolio-analytics-multi", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({rows: DATA, weight_sets: wsets, period, display_ccy: FX_QUOTE}),
+      body: JSON.stringify({rows: DATA, weight_sets: wsets, period, display_ccy: FX_QUOTE, ...tradingPrefs()}),
     });
     const d = await r.json();
     if (reqId !== _analyticsReqId) return;
@@ -5873,7 +6111,7 @@ function renderAnalyticsBody() {
   body.innerHTML = `
     <div class="pf-grid">
       <div class="pf-card">
-        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${escapeHtml(labelForMode(STATE.mode))} · ${escapeHtml(a.display_ccy || FX_QUOTE)}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span>${chartTypeSelectHtml("pf-chart-type")}</h4>
+        <h4>Portfolio chart <span class="sub">${escapeHtml(STATE.period)} · ${escapeHtml(labelForMode(STATE.mode))} · ${escapeHtml(a.display_ccy || FX_QUOTE)} · ${escapeHtml(tradingLabel())}${STATE.analyticsLoading ? '<span class="pf-loading"> refreshing…</span>' : ''}</span><button type="button" class="ct-btn tr-btn" id="pf-trading" aria-haspopup="dialog" data-tip="How often the weights are reset, and what trading costs">Constraints</button>${chartTypeSelectHtml("pf-chart-type")}</h4>
         <div class="pf-chart-card">
           <div class="pf-chart-wrap" id="pf-chart-host"></div>
           <div class="pf-chart-legend" id="pf-chart-legend"></div>
@@ -5908,6 +6146,13 @@ function renderAnalyticsBody() {
   `;
   drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend"));
   wireChartTypeDd($("#pf-chart-type"), () => drawPortfolioChart(a, $("#pf-chart-host"), $("#pf-chart-legend")));
+  $("#pf-trading").onclick = (e) => tradingPopOpen(e.currentTarget, a);
+  // The panel outlives this redraw: hand it the new button (its .open state).
+  if (_invMenu?.anchor?.id === "pf-trading") {
+    _invMenu.anchor = $("#pf-trading"); _invMenu.anchor.classList.add("open");
+    invMenuPlace(_invMenu.el, _invMenu.anchor, true);   // the redraw may have moved it
+  }
+  tradingPopSync(a);
   wireBenchSelect($("#pf-bench"), (k) => {
     if (k === STATE.bench) return;
     STATE.bench = k;
@@ -5949,7 +6194,7 @@ function fmtNumOr(v, d, suffix) {
 const METRIC_INFO = {
   "Period return": {
     formula: String.raw`R = \dfrac{V_T}{V_0} - 1 = \prod_{t=1}^{T}\Bigl(1 + \sum_i w_i\, r_{i,t}\Bigr) - 1`,
-    desc: "Total return of the portfolio over the chosen period, in the display currency, on dividend-adjusted closes. The portfolio is rebalanced to its weights every day. V₀ is the last close on or before the period start (for YTD, the previous year's last close).",
+    desc: "Total return of the portfolio over the chosen period, in the display currency, on dividend-adjusted closes. Weights are set on the first day and reset at the rebalancing interval set under Constraints, net of the trading cost there. V₀ is the last close on or before the period start (for YTD, the previous year's last close).",
     range: "Compare to the benchmark in the same period. A positive read with low volatility is the cleanest win."
   },
   "Ann. return": {
@@ -6659,28 +6904,28 @@ function renderBarsHtml(map) {
 
 /* Contribution to return (#8). Each holding's linked contribution (Carino,
    from analytics._linked_contribution) is split into W×R, the naive
-   weight × own-period-return, and Compounding, the rest: what daily
-   rebalancing and compounding add or take away. The three columns reconcile
+   weight × own-period-return, and Compounding, the rest: what rebalancing,
+   trading costs and compounding add or take away. The three columns reconcile
    exactly per row, and the Contribution column sums to the period return.
-   Sort and the Table/Chart choice are per-viewer conveniences in localStorage;
-   re-rendering touches only #pf-contrib-body, not the whole analytics grid. */
+   Sort is a per-viewer convenience in localStorage; the Table/Chart choice
+   is kept in prefs.json (pf_contrib_view, Chart by default). Re-rendering touches only #pf-contrib-body, not the whole analytics grid. */
 const CONTRIB_INFO = {
   wxr: {
     label: "W×R",
     formula: String.raw`\text{W×R}_i = w_i \cdot R_i`,
     desc: "The holding's weight times its own return over the period, in percentage points. The contribution you would get if the weights were set once at the start and each holding's return simply scaled by its weight.",
-    range: "Summed over holdings it is not the portfolio's return: the portfolio is rebalanced to its weights daily, and that compounds differently.",
+    range: "Summed over holdings it is not the portfolio's return: the portfolio's weights drift and are reset at the rebalancing interval, and that compounds differently.",
   },
   comp: {
     label: "Compounding",
     formula: String.raw`\text{Compounding}_i = \text{Contribution}_i - w_i R_i`,
-    desc: "What daily rebalancing and compounding add to or take from the holding's W×R: the gap between the holding compounding on its own and its daily contributions to a portfolio reset to its weights every day (then Carino-linked).",
+    desc: "What rebalancing, trading costs and compounding add to or take from the holding's W×R: the gap between the holding compounding on its own and its daily contributions to the portfolio as it is rebalanced under Constraints (then Carino-linked).",
     range: "Small for calm holdings and short periods. It grows with the size of the holding's move, its volatility and the length of the period, and can have either sign.",
   },
   contribution: {
     label: "Contribution",
-    formula: String.raw`C_i = \sum_t \dfrac{k_t}{k}\, w_i\, r_{i,t},\quad k_t = \dfrac{\ln(1+r_{p,t})}{r_{p,t}},\ k = \dfrac{\ln(1+R_p)}{R_p}`,
-    desc: "Percentage points of the portfolio's period return from this holding: daily contributions w·r of the daily-rebalanced portfolio, linked across days with Carino's log scaling so they add up to the period return exactly.",
+    formula: String.raw`C_i = \sum_t \dfrac{k_t}{k}\,\big[(1-c_t)\, w_{i,t}\, r_{i,t} - \tau\,|\Delta w_{i,t}|\big],\quad k_t = \dfrac{\ln(1+r_{p,t})}{r_{p,t}},\ k = \dfrac{\ln(1+R_p)}{R_p}`,
+    desc: "Percentage points of the portfolio's period return from this holding: its daily contributions w·r at that day's weights (which drift between rebalances), less the cost of its own trades, linked across days with Carino's log scaling so they add up to the period return exactly.",
     range: "The column sums to the period return shown in Risk & return. Negative means the holding cost the portfolio return over the period.",
   },
 };
@@ -6697,11 +6942,11 @@ const CONTRIB_COLS = [
   {k: "contribution", label: "Contribution", tip: "contrib:contribution", sv: (c) => c.contribution},
 ];
 const CONTRIB_UI = (() => {
-  const ui = {sort: {k: "contribution", dir: -1}, view: "table", last: null};
+  // The Table/Chart choice is in prefs.json (it must survive a quick quit of the app); chart by default.
+  const ui = {sort: {k: "contribution", dir: -1}, get view() { return APP_PREFS.pf_contrib_view || "chart"; }, last: null};
   try {
     const s = JSON.parse(localStorage.getItem("pf_contrib_sort") || "null");
     if (s && CONTRIB_COLS.some(c => c.k === s.k) && (s.dir === 1 || s.dir === -1)) ui.sort = s;
-    if (localStorage.getItem("pf_contrib_view") === "chart") ui.view = "chart";
   } catch { /* private mode / bad JSON: defaults */ }
   return ui;
 })();
@@ -6835,8 +7080,7 @@ document.addEventListener("click", (ev) => {
   }
   const btn = ev.target.closest && ev.target.closest(".pf-contrib-toggle button[data-contrib-view]");
   if (btn && btn.dataset.contribView !== CONTRIB_UI.view) {
-    CONTRIB_UI.view = btn.dataset.contribView;
-    try { localStorage.setItem("pf_contrib_view", CONTRIB_UI.view); } catch { /* private mode */ }
+    savePrefs({pf_contrib_view: btn.dataset.contribView});
     rerenderContrib();
   }
 });
@@ -7411,6 +7655,7 @@ const CO = {query: null, chips: [], fields: {}, results: [], total: 0,
             picked: new Map(), choice: {}, editing: null};
 
 async function coSearch(body) {
+  const seq = CO.seq = (CO.seq || 0) + 1;   // Clear, or a newer search, drops this answer
   const go = $("#co-go");
   go.disabled = true; go.textContent = "Searching…";
   try {
@@ -7420,14 +7665,16 @@ async function coSearch(body) {
       body: JSON.stringify(body),
     });
     const d = await r.json();
+    if (CO.seq !== seq) return;
     if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
     CO.picked.clear();
     Object.assign(CO, {query: d.query, chips: d.chips, fields: d.fields || {}, results: d.results,
                        total: d.total, choice: {}, editing: null, last: d});
-    // A pasted list is a decision already made: every new company starts picked.
+    // A pasted list is a decision already made: every new company starts
+    // picked, except a guess (the closest name to a part, not a sure match).
     if (d.query.kind === "list") {
       const held = coHeld();
-      d.results.forEach((c, i) => { if (!held.has(c.ticker)) coPick(i, c.ticker, c.name); });
+      d.results.forEach((c, i) => { if (!held.has(c.ticker) && c.match !== "guess") coPick(i, c.ticker, c.name); });
     }
     coRender();
   } catch (e) {
@@ -7474,7 +7721,8 @@ function coRender() {
   $("#co-out").hidden = false;
   $("#co-ai").hidden = q.engine !== "ai";
   const kind = {name: "Name", screen: "Screen", theme: "Theme", list: "List"}[q.kind] || "";
-  $("#co-chips").innerHTML = `<span class="co-kind">${kind} ·</span>` +
+  $("#co-chips").innerHTML = `<button type="button" class="co-clear">Clear</button>` +
+    `<span class="co-kind">${kind} ·</span>` +
     (CO.chips.length ? "" : `<span class="co-kind">${q.kind === "list" ? `${CO.total} found` : `closest matches to "${escapeHtml(q.text)}"`}</span>`) +
     coChipsHtml(true);
   $("#co-msg").innerHTML = d.warnings.map(w => `<div class="warn">${escapeHtml(w)}</div>`).join("") +
@@ -7516,6 +7764,7 @@ function coCard(c, i, held) {
     <div class="co-name" title="${escapeHtml(c.name)}">${escapeHtml(shortName(c.name))}</div>
     <div class="co-tk">${escapeHtml([tk, shown.exchange_name].filter(Boolean).join(" · "))}</div>${rows.join("")}
     ${c.why ? `<div class="co-why">${escapeHtml(c.why)}</div>` : ""}
+    ${c.match === "guess" ? `<div class="co-guess" data-tip="Not a sure match: check it is the company you meant before adding it">Closest match to “${escapeHtml(c.query || "")}”</div>` : ""}
     ${isHeld ? '<div class="co-sub">In this portfolio</div>' : ""}${alts}</div>`;
 }
 
@@ -7684,7 +7933,9 @@ async function coAdd() {
 }
 
 function coClear() {
+  CO.seq = (CO.seq || 0) + 1;
   CO.picked.clear(); CO.editing = null;
+  $("#co-grid").innerHTML = "";
   $("#co-out").hidden = true;
   $("#co-ai").hidden = true;
 }
@@ -7695,9 +7946,20 @@ $("#co-form").addEventListener("submit", (e) => {
   if (text) coSearch({q: text});
   else coClear();   // an empty box + Enter dismisses the results (the old Close button)
 });
+// A one-line box turns pasted line breaks into spaces, so a column copied from
+// Excel or a statement read as one long name: make them commas (a list).
+$("#co-q").addEventListener("paste", (e) => {
+  const txt = e.clipboardData?.getData("text/plain") || "";
+  if (!/[\r\n\t]/.test(txt.trim())) return;
+  e.preventDefault();
+  const inp = e.currentTarget;
+  const list = txt.split(/[\r\n\t]+/).map(t => t.trim()).filter(Boolean).join(", ");
+  inp.setRangeText(list, inp.selectionStart, inp.selectionEnd, "end");
+});
 $("#co-more").onclick = coFullOpen;
 $("#co-add").onclick = coAdd;
 $("#co-chips").addEventListener("click", (e) => {
+  if (e.target.closest(".co-clear")) { coClear(); $("#co-q").value = ""; $("#co-q").focus(); return; }
   const btn = e.target.closest(".co-chip");
   if (!btn || btn.disabled) return;
   const i = Number(btn.dataset.i), c = CO.chips[i];
@@ -7772,8 +8034,13 @@ $("#edit-btn").onclick = () => {
 window.addEventListener("scroll", () => {
   $("#topbar").classList.toggle("scrolled", window.scrollY > 4);
 });
+let _modalResizeT = 0;
 window.addEventListener("resize", () => {
   if (STATE.fitColumns) render();
+  // The stock chart's SVG stretches with the window but its forecast canvas does not: redraw both.
+  // A timer, not rAF: rAF does not run while the window is in the background.
+  clearTimeout(_modalResizeT);
+  _modalResizeT = setTimeout(() => { if (DETAIL.data && $("#modal-bg").classList.contains("show")) renderChart(); }, 120);
 });
 
 /* --- Trackpad discipline ---------------------------------------------------
@@ -9587,7 +9854,7 @@ function methodologyHtml() {
       <h2>How the two reads work</h2>
       <div class="mth-sub">Two independent engines read the same headlines. They answer different questions, so they are shown side by side and never blended.</div>
     </div>
-    <button class="m-close" id="methodology-close" title="Close" aria-label="Close">×</button>
+    <button class="x-close" type="button" id="methodology-close" aria-label="Close" data-tip="Close (Esc)">${X_SVG}</button>
   </div>
   <div class="mth-body">
    <div class="mth-cols">
@@ -9823,7 +10090,6 @@ const MPT = {
   view: null,          // portfolio name this run is bound to
   bounds: {},          // {symbol: {min?, max?}} per-position weight limits (fractions)
   abort: null,         // AbortController for the in-flight streaming run (Cancel)
-  alphaTimer: 0,       // debounce id for α auto-rerun
   busy: false,
 };
 
@@ -9836,8 +10102,11 @@ async function openMptOverlay() {
       "Save the portfolio first to keep runs / presets.";
   } else {
     document.getElementById("pf-mpt-sub").textContent =
-      "Black-Litterman returns · mean-CVaR frontier · " + STATE.activeView;
+      STATE.activeView + " · Black-Litterman returns · mean-CVaR frontier";
   }
+  // A run belongs to one portfolio: opening on another must not keep showing
+  // (and let Apply use) the last portfolio's frontier when this one has no run.
+  if (MPT.view !== STATE.activeView && !MPT.busy) mptResetResult();
   MPT.view = STATE.activeView;
   showOverlay("#pf-mpt-bg");
   MPT.bounds = {};                       // start clean each open (mptRestoreLast may repopulate)
@@ -9848,6 +10117,7 @@ async function openMptOverlay() {
   // restored rf. No saved run ⇒ rf falls through to Auto (the requested default).
   const restored = await mptRestoreLast();  // repaint the last saved run, if any
   await mptFetchRfAuto({silent: true, keepRf: restored});
+  mptConsSummary();
 }
 function closeMptOverlay() {
   if (MPT.abort) { try { MPT.abort.abort(); } catch (_) {} MPT.abort = null; }
@@ -9864,7 +10134,7 @@ const MPT_BUDGET_LABEL = {
   dense: "Dense — ~60s",
 };
 
-// What each budget buys, for the "i" next to Compute budget. The numbers
+// What each budget buys, for the Guide's Compute budget card. The numbers
 // mirror frontier.py's _BUDGETS / _BOOT_MIN / _BOOT_CAP; change them together.
 const MPT_BUDGET_INFO = [
   {name: "Light",    secs: "~5 s",  nf: 24, cloud: "20k", use: "while iterating on bounds, views or the lookback"},
@@ -9889,9 +10159,9 @@ RICH_TIPS["mpt-budget"] = () => `
 function mptAlpha() { return MPT.result?.params?.alpha || 0.95; }
 const MPT_METRIC_INFO = {
   ret: () => ({
-    label: "Expected return (Black-Litterman)",
-    formula: String.raw`\mu_p = \sum_i w_i\,\mu_i^{BL}`,
-    desc: "Annual expected return of this frontier point from the Black-Litterman posterior: market-implied equilibrium returns blended with analyst price-target views, in proportion to the analyst-trust setting. Cash, when allowed, earns the risk-free rate.",
+    label: "Return, net of trading cost",
+    formula: String.raw`\mu_p^{net} = \sum_i w_i\,\mu_i^{BL} - \text{trading cost a year}`,
+    desc: "Annual expected return from the Black-Litterman posterior (market-implied returns blended with the analysts' price targets, as far as the trust setting allows), less this portfolio's own trading cost from the backtest below. The frontier ranks portfolios with a quicker cost estimate, so the chart's height can differ slightly from this figure. Cash, when allowed, earns the risk-free rate.",
     range: "A model estimate, not a forecast to bank on: it moves with the trust setting and the views. Use it to compare points along the frontier.",
   }),
   var: () => {
@@ -9951,6 +10221,24 @@ const MPT_METRIC_INFO = {
     desc: "Fully invested is off, so part of the portfolio can sit in cash earning the risk-free rate.",
     range: "Cash usually grows toward the low-risk end of the frontier, where it is the cheapest way to cut CVaR.",
   }),
+  cost: () => ({
+    label: "Trading cost a year",
+    formula: String.raw`1 - \Big(\prod_t (1 - c\,\textstyle\sum_i |\Delta w_{i,t}|)\Big)^{1/\text{years}}`,
+    desc: "What rebalancing this portfolio back to its weights on the chosen calendar cost a year over the lookback: its weights drift with prices, each rebalance buys and sells the difference, and every trade pays the cost per trade set under Constraints.",
+    range: "Grows with the calendar's frequency, the cost per trade and how differently the holdings move. The expected return above is already net of it.",
+  }),
+  turnover: () => ({
+    label: "Turnover a year",
+    formula: String.raw`\tfrac12 \sum_t \sum_i |\Delta w_{i,t}| \,/\, \text{years}`,
+    desc: "Half of everything bought and sold a year to keep the weights, from the same drift backtest over the lookback.",
+    range: "Buy and hold trades nothing after the start; daily rebalancing of volatile names can trade several times the portfolio a year.",
+  }),
+  switch: () => ({
+    label: "Cost to switch",
+    formula: String.raw`c \sum_i |w_i - w_i^{\text{now}}|`,
+    desc: "The one-off cost of moving from the portfolio's current weights to this point, at the cost per trade set under Constraints.",
+    range: "Paid once, unlike the yearly trading cost; small next to it unless the move is large or the cost per trade high.",
+  }),
   views: () => ({
     label: "Analyst views",
     formula: String.raw`\text{views} = \#\{\,i : \text{analyst price target available}\,\}`,
@@ -9990,7 +10278,152 @@ function mptGetParams() {
   const cov_model = document.querySelector("#pf-mpt-cov .active")?.dataset.v || "ledoit";
   const haircut = (Number(document.getElementById("pf-mpt-haircut").value) || 0) / 100;
   const budget = document.getElementById("pf-mpt-budget").dataset.value || "standard";
-  return {lookback, alpha, rf, fully_invested, cov_model, haircut, budget, bounds: mptGetBounds()};
+  return {lookback, alpha, rf, fully_invested, cov_model, haircut, budget, bounds: mptGetBounds(), ...tradingPrefs()};
+}
+
+/* Segmented pills (lookback, CVaR, risk model, investment) are radiogroups:
+   one roving tab stop, ←/→ move and pick. data-v is compared NUMERICALLY when
+   both sides are numbers, because a saved run's alpha 0.9 must find the
+   "0.90" pill (a string compare left no pill active and the next run silently
+   went back to 95%). */
+const MPT_SEGS = ["pf-mpt-lookback", "pf-mpt-alpha", "pf-mpt-cov", "pf-mpt-invest"];
+function mptSegSet(id, v) {
+  const btns = [...document.querySelectorAll(`#${id} button`)];
+  const same = (a, b) => String(a) === String(b)
+    || (a !== "" && b !== "" && isFinite(+a) && isFinite(+b) && Math.abs(+a - +b) < 1e-9);
+  const hit = btns.find(b => same(b.dataset.v, v));
+  if (!hit) return false;               // unknown value: keep the current pick
+  btns.forEach(b => {
+    const on = b === hit;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-checked", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1;
+  });
+  return true;
+}
+function mptSegInit() {
+  MPT_SEGS.forEach(id => {
+    document.querySelectorAll(`#${id} button`).forEach(b => {
+      b.type = "button";
+      b.setAttribute("role", "radio");
+    });
+    const cur = document.querySelector(`#${id} button.active`) || document.querySelector(`#${id} button`);
+    if (cur) mptSegSet(id, cur.dataset.v);
+  });
+}
+
+// Display names for the run's settings (the stale line and the run history).
+const MPT_COV_LABEL = {sample: "Sample", ledoit: "Shrunk", ewma: "Recent"};
+const MPT_BUDGET_SHORT = {light: "Light", standard: "Standard", dense: "Dense", exhaustive: "Exhaustive"};
+const mptRunTrading = (p) => p?.rebalance ? {rebalance: p.rebalance, tc_bps: +p.tc_bps || 0} : {rebalance: "D", tc_bps: 0};
+function mptTradingLabel(p) {
+  if (!p || !p.rebalance) return "";
+  return `${p.rebalance === "N" ? "Buy and hold" : (REBALANCE_LABEL[p.rebalance] || p.rebalance)} · ${+p.tc_bps || 0} bps`;
+}
+
+/* What differs between the shown run and the controls now, as
+   [{key, was, now}] (empty = up to date). Numbers are compared at the
+   precision their control has (rf in 0.01%, trust and CVaR in whole %), so a
+   restored "4.50" against a stored 0.045 or "0.90" against 0.9 is not a
+   change. A field the run never recorded (an older saved run) is skipped. */
+function mptParamsDiffer() {
+  const was = MPT.result?.params;
+  if (!was) return [];
+  const now = mptGetParams();
+  const out = [];
+  const num = (x, k) => (x == null || !isFinite(+x)) ? null : Math.round(+x * k);
+  const add = (key, a, b) => out.push({key, was: a, now: b});
+  if (was.lookback != null && String(was.lookback).toUpperCase() !== String(now.lookback).toUpperCase())
+    add("lookback", was.lookback, now.lookback);
+  if (was.alpha != null && num(was.alpha, 100) !== num(now.alpha, 100))
+    add("alpha", `CVaR ${Math.round(was.alpha * 100)}%`, `CVaR ${Math.round(now.alpha * 100)}%`);
+  if (was.cov_model != null && was.cov_model !== now.cov_model)
+    add("cov", MPT_COV_LABEL[was.cov_model] || was.cov_model, MPT_COV_LABEL[now.cov_model] || now.cov_model);
+  if (was.haircut != null && num(was.haircut, 100) !== num(now.haircut, 100))
+    add("trust", `${Math.round(was.haircut * 100)}% trust`, `${Math.round(now.haircut * 100)}% trust`);
+  if (was.budget != null && was.budget !== now.budget)
+    add("budget", MPT_BUDGET_SHORT[was.budget] || was.budget, MPT_BUDGET_SHORT[now.budget] || now.budget);
+  if (was.rf != null && num(was.rf, 1e4) !== num(now.rf, 1e4))
+    add("rf", `rf ${(was.rf * 100).toFixed(2)}%`, `rf ${(now.rf * 100).toFixed(2)}%`);
+  if (was.fully_invested != null && !!was.fully_invested !== !!now.fully_invested)
+    add("invest", was.fully_invested ? "fully invested" : "cash allowed", now.fully_invested ? "fully invested" : "cash allowed");
+  if (was.bounds && typeof was.bounds === "object") {
+    const norm = (b) => JSON.stringify(Object.keys(b || {}).sort().map(s =>
+      [s, num(b[s]?.min, 1e4), num(b[s]?.max, 1e4)]).filter(([, lo, hi]) => lo != null || hi != null));
+    if (norm(was.bounds) !== norm(now.bounds)) {
+      const n = (b) => Object.keys(b || {}).length;
+      const lbl = (k) => k ? `${k} limit${k > 1 ? "s" : ""}` : "no limits";
+      const a = n(was.bounds), b = n(now.bounds);
+      add("bounds", lbl(a), a === b ? "edited limits" : lbl(b));
+    }
+  }
+  // A run saved before 1.28.1 has no trading fields: it was optimised with no
+  // cost (daily at 0 bps), but that was never a choice to offer back.
+  const wt = mptRunTrading(was);
+  if (wt.rebalance !== now.rebalance || num(wt.tc_bps, 100) !== num(now.tc_bps, 100)) {
+    add("trading", was.rebalance ? mptTradingLabel(wt) : "no trading costs", mptTradingLabel(now));
+    out[out.length - 1].legacy = !was.rebalance;
+  }
+  if (was.display_ccy && was.display_ccy !== FX_QUOTE) add("ccy", was.display_ccy, FX_QUOTE);
+  return out;
+}
+
+/* Mark the shown result stale instead of re-running (owner, 2026-10-19): the
+   Run button gets a dot and "Run to update", the chart and side panel dim, and
+   a line under the tiles says what changed. When the shared rebalancing/cost
+   is the difference (a saved run made under another setting), "Use these"
+   sets it back; loading a run never changes the shared setting by itself. */
+function mptStaleUpdate() {
+  const bg = document.getElementById("pf-mpt-bg");
+  const line = document.getElementById("pf-mpt-stale");
+  if (!bg || !line) return;
+  const diffs = (MPT.busy || !MPT.result) ? [] : mptParamsDiffer();
+  const stale = diffs.length > 0;
+  bg.classList.toggle("is-stale", stale);
+  mptRunLabel();
+  if (!stale) { line.hidden = true; line.innerHTML = ""; return; }
+  const tr = diffs.find(d => d.key === "trading");
+  const others = diffs.filter(d => d.key !== "trading");
+  const use = tr && !tr.legacy ? ` <button type="button" class="pf-mpt-link" data-mpt-use-trading data-tip="Set rebalancing and trading cost to ${escapeHtml(tr.was)} (shared with the portfolio chart)">Use these</button>` : "";
+  line.innerHTML = (!others.length && tr)
+    ? `This run used ${escapeHtml(tr.was)}; now ${escapeHtml(tr.now)}.${use ? use + " or run" : " Run"} to update.`
+    : `Run used ${escapeHtml(diffs.map(d => d.was).join(", "))}; now ${escapeHtml(diffs.map(d => d.now).join(", "))}. Run to update.${use}`;
+  line.hidden = false;
+}
+// The Run button's label: progress while running, "Run to update" when stale.
+function mptRunLabel(text) {
+  const run = document.getElementById("pf-mpt-run");
+  const lbl = run?.querySelector(".pf-mpt-run-label");
+  if (!run || !lbl) return;
+  const stale = !MPT.busy && document.getElementById("pf-mpt-bg")?.classList.contains("is-stale");
+  run.classList.toggle("is-stale", !!stale);
+  if (text && MPT.busy) MPT._runText = text;   // a side-panel repaint mid-run keeps the %
+  lbl.textContent = text || (MPT.busy ? (MPT._runText || "Running…") : stale ? "Run to update" : "Run optimization");
+}
+// Use / Save need a result to act on, and wait while a run is in flight.
+function mptSyncActions() {
+  const off = !MPT.result || !mptActiveSel() || MPT.busy;
+  for (const id of ["pf-mpt-apply", "pf-mpt-save"]) {
+    const b = document.getElementById(id);
+    if (b) b.disabled = off;
+  }
+}
+// Forget the shown run (opening the optimizer on another portfolio).
+function mptResetResult() {
+  MPT.result = null;
+  MPT.selectedIdx = 0;
+  mptClearChart();
+  const status = document.getElementById("pf-mpt-status");
+  if (status) status.textContent = "Run the optimization to draw the efficient frontier.";
+  const slider = document.getElementById("pf-mpt-slider");
+  if (slider) slider.disabled = true;
+  const readout = document.getElementById("pf-mpt-slider-readout");
+  if (readout) readout.textContent = "—";
+  for (const id of ["pf-mpt-tiles", "pf-mpt-wlist"]) { const el = document.getElementById(id); if (el) el.innerHTML = ""; }
+  const stats = document.getElementById("pf-mpt-stats");
+  if (stats) stats.innerHTML = `<span class="k">Run the optimization to see metrics.</span>`;
+  mptStaleUpdate();
+  mptSyncActions();
 }
 
 /* --- Streaming progress bar (real pct + ETA from the NDJSON stream) --- */
@@ -10028,15 +10461,24 @@ function mptProgressHide(state) {
 
 function mptSetRunning(on) {
   MPT.busy = on;
+  MPT._runText = "";
   const run = document.getElementById("pf-mpt-run");
   const cancel = document.getElementById("pf-mpt-cancel");
   if (run) run.disabled = on;
   if (cancel) cancel.hidden = !on;
+  // The side panel keeps showing the previous run while this one computes:
+  // dimmed and inert, so nobody applies a half-streamed frontier.
+  document.getElementById("pf-mpt-side")?.classList.toggle("is-busy", on);
+  mptStaleUpdate();
+  mptSyncActions();
 }
 
 async function mptRun() {
   if (!DATA.length || MPT.busy) return;
   const status = document.getElementById("pf-mpt-status");
+  // The run on screen survives until this one finishes: mptStreamFrontier
+  // replaces MPT.result mid-stream, so a Cancel or an error puts it back.
+  const prev = MPT.result, prevIdx = MPT.selectedIdx;
   mptClearChart();
   const params = mptGetParams();
   mptProgressShow();
@@ -10071,7 +10513,10 @@ async function mptRun() {
         buf = buf.slice(nl + 1);
         if (!line) continue;
         const msg = JSON.parse(line);
-        if (msg.type === "progress") mptProgressSet(msg.pct, msg.eta, msg.label);
+        if (msg.type === "progress") {
+          mptProgressSet(msg.pct, msg.eta, msg.label);
+          if (msg.pct != null && isFinite(msg.pct)) mptRunLabel(`Running ${Math.round(msg.pct)}%`);
+        }
         else if (msg.type === "frontier") mptStreamFrontier(msg);
         else if (msg.type === "cloud") mptStreamCloud(msg.points);
         else if (msg.type === "done") done = msg.result;
@@ -10113,10 +10558,29 @@ async function mptRun() {
     mptSaveRun({silent: true}).catch(() => {});  // persist onto this portfolio's run history
   } catch (e) {
     mptProgressHide("fail");
-    if (status) {
-      status.innerHTML = e.name === "AbortError"
+    const cancelled = e.name === "AbortError";
+    const why = cancelled ? "Optimization cancelled." : `Optimization failed: ${e.message || String(e)}`;
+    MPT.result = prev;
+    MPT.selectedIdx = prevIdx;
+    if (prev && document.getElementById("pf-mpt-bg")?.classList.contains("show")) {
+      // Back to the previous run, exactly as it was (chart, slider, panel).
+      if (status) status.innerHTML = "";
+      const slider = document.getElementById("pf-mpt-slider");
+      slider.disabled = false;
+      slider.max = String(Math.max(0, (prev.frontier || []).length - 1));
+      slider.value = String(prevIdx);
+      MPT.busy = false;              // let mptRender's stale check see the restored run
+      mptRender();
+      toast(`${why} Showing the previous run.`);
+    } else if (status) {
+      if (!prev) {                   // no earlier run: drop the half-drawn frontier
+        mptClearChart();
+        const slider = document.getElementById("pf-mpt-slider");
+        if (slider) slider.disabled = true;
+      }
+      status.innerHTML = cancelled
         ? `<div class="pf-mpt-status">Optimization cancelled.</div>`
-        : `<div class="pf-mpt-error">Optimization failed: ${escapeHtml(e.message || String(e))}</div>`;
+        : `<div class="pf-mpt-error">${escapeHtml(why)}</div>`;
     }
   } finally {
     MPT.abort = null;
@@ -10248,10 +10712,9 @@ function mptClearChart() {
    The redraw is a FULL mptRenderChart() with no fixedProj: the cloud is complete
    by now and gets repainted from MPT.result.cloud against the same recomputed
    projection, so chart and scatter cannot disagree. _settling bounds this to a
-   single extra pass; skipped while the limits panel is open, because that
-   shrinkage IS the intended crop. */
+   single extra pass. */
 function mptSettleChartHeight() {
-  if (MPT._settling || !MPT.result || mptBoundsPanelOpen()) return;
+  if (MPT._settling || !MPT.result) return;
   const host = document.getElementById("pf-mpt-chart");
   if (!host) return;
   const h = Math.max(280, Math.floor(host.getBoundingClientRect().height));
@@ -10282,47 +10745,18 @@ function mptCvarHi(p) { return p && p.cvar30_hi != null ? p.cvar30_hi : (p ? p.c
 // Format a loss fraction (e.g. 0.12) as "12.0%"; null/NaN → "—".
 function mptFmtLoss(v, dp = 1) { return (v == null || !isFinite(v)) ? "—" : (v * 100).toFixed(dp) + "%"; }
 
-// Resize both canvases identically through one helper so their backing
+// Resize the three canvases identically through one helper so their backing
 // stores cannot drift apart. CSS controls the *display* size (width:100% +
 // height:var(--mpt-chart-h)); we touch ONLY the backing store. Setting inline
 // width/height previously left the canvas stuck at its first measurement
 // even when the modal reflowed, causing axis labels to render below the
 // chart's visual box.
-//
-// The height is additionally LOCKED while the per-position limits panel is open,
-// as a second line of defence. Primary defence is mptPinBodyHeight() below: the
-// panel pushes the workspace down inside a scroll container instead of stealing
-// height from it, so .pf-mpt-chart does not actually change size. The lock still
-// matters because the browser can reflow the obstructed box for other reasons
-// (a window resize with the panel up), and re-measuring then would rescale a
-// stale bitmap — which is precisely what deformed the plot before any of this
-// existed: nothing called this on toggle at all, so the old bitmap was simply
-// stretched into the new box.
-function mptBoundsPanelOpen() {
-  const p = document.getElementById("pf-mpt-bounds");
-  return !!(p && !p.hidden);
-}
-/* Freeze / release .pf-mpt-body's height around the limits panel opening.
-   `--mpt-body-h` is read by the CSS as .pf-mpt-body's min-height; with the panel
-   open the scroll container overflows by exactly the panel's height and the user
-   scrolls down to the chart, rather than the chart being squeezed or clipped.
-   Must be called BEFORE `panel.hidden` flips, so the measurement is the
-   un-pushed height. */
-function mptPinBodyHeight(pin) {
-  const scroll = document.getElementById("pf-mpt-scroll");
-  const body = scroll?.querySelector(".pf-mpt-body");
-  if (!scroll || !body) return;
-  if (!pin) { scroll.style.removeProperty("--mpt-body-h"); return; }
-  const h = Math.round(body.getBoundingClientRect().height);
-  if (h > 0) scroll.style.setProperty("--mpt-body-h", h + "px");
-}
 function mptSizeCanvases(host) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const rect = host.getBoundingClientRect();
   const cssW = Math.max(360, Math.floor(rect.width));
-  const locked = mptBoundsPanelOpen() && MPT._chartH ? MPT._chartH : null;
-  const cssH = locked != null ? locked : Math.max(280, Math.floor(rect.height));
-  if (locked == null) MPT._chartH = cssH;
+  const cssH = Math.max(280, Math.floor(rect.height));
+  MPT._chartH = cssH;
   // Publish the drawn height to CSS so the canvas elements keep it even after the
   // parent shrinks. Without this the CSS box would follow the parent and rescale.
   host.style.setProperty("--mpt-chart-h", cssH + "px");
@@ -10508,10 +10942,10 @@ function mptRenderChart(opts = {}) {
   const blNote = (nViewed != null && nAssets != null)
     ? `BL: ${nViewed}/${nAssets} assets with analyst views` : "";
   legend.innerHTML = `
-    <span data-legend="frontier" title="Highlight the mean-CVaR efficient frontier.">${legendSwatch("frontier")}Mean-CVaR frontier</span>
-    <span data-legend="equal" title="Click to jump to the equal-weight portfolio.">${legendSwatch("equal")}Equal-weight</span>
-    <span data-legend="cap" title="Click to jump to the cap-weight portfolio.">${legendSwatch("cap")}Cap-weight</span>
-    <span data-legend="current" title="Click to jump to the current portfolio.">${legendSwatch("current")}Current</span>
+    <span data-legend="frontier" data-tip="Highlight the mean-CVaR efficient frontier">${legendSwatch("frontier")}Mean-CVaR frontier</span>
+    <span data-legend="equal" data-tip="Jump to the point nearest the equal-weight portfolio">${legendSwatch("equal")}Equal-weight</span>
+    <span data-legend="cap" data-tip="Jump to the point nearest the cap-weight portfolio">${legendSwatch("cap")}Cap-weight</span>
+    <span data-legend="current" data-tip="Jump to the point nearest the current portfolio">${legendSwatch("current")}Current</span>
     <span class="no-click">${legendSwatch("selected")}Selected</span>
     <span class="no-click" style="margin-left:auto">${(d.cloud || []).length.toLocaleString(NUM_LOCALE)} portfolios · ${d.meta?.n_obs || "?"} daily obs · ${blNote} · ${d.meta?.total_ms || "?"}ms</span>
   `;
@@ -10923,21 +11357,28 @@ function mptRenderSide() {
   const cash = d.params?.fully_invested === false;
   const invested = Object.values(sel.weights || {}).reduce((a, b) => a + b, 0);
   const lo = mptCvarLo(sel), hi = mptCvarHi(sel);
-  const bandRow = (lo != null && hi != null)
-    ? `<span class="k" tabindex="0" data-rich-tip="mpt:band">CVaR band (bootstrap)</span><span class="v">${mptFmtLoss(lo)}–${mptFmtLoss(hi)}</span>`
-    : "";
-  stats.innerHTML = `
-    <span class="k" tabindex="0" data-rich-tip="mpt:ret">Expected return (BL)</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
-    ${sel.var30 != null ? `<span class="k" tabindex="0" data-rich-tip="mpt:var">VaR ${aConf}% (30-day)</span><span class="v neg">${mptFmtLoss(sel.var30, 2)}</span>` : ""}
-    <span class="k" tabindex="0" data-rich-tip="${sel.cvar30 != null ? "mpt:cvar" : "mpt:cvar-legacy"}">CVaR ${aConf}% ${sel.cvar30 != null ? "(30-day)" : "(annualized · legacy)"}</span><span class="v neg">${mptFmtLoss(mptCvar(sel), 2)}</span>
-    ${bandRow}
-    <span class="k" tabindex="0" data-rich-tip="mpt:mdd">Max drawdown</span><span class="v neg">${(sel.mdd * 100).toFixed(1)}%</span>
-    <span class="k" tabindex="0" data-rich-tip="mpt:cdar">CDaR (95%)</span><span class="v neg">${(sel.cdar * 100).toFixed(1)}%</span>
-    <span class="k" tabindex="0" data-rich-tip="mpt:vol">Volatility (ref.)</span><span class="v">${sel.vol != null ? (sel.vol * 100).toFixed(2) + "%" : "—"}</span>
-    ${cash ? `<span class="k" tabindex="0" data-rich-tip="mpt:cash">Invested / cash</span><span class="v">${(invested*100).toFixed(0)}% / ${((1-invested)*100).toFixed(0)}%</span>` : ""}
-    <span class="k" tabindex="0" data-rich-tip="mpt:views">Analyst views</span><span class="v">${(bl.viewed || []).length}/${(d.symbols || []).length}${bl.haircut != null ? ` <span style="color:var(--muted);font-weight:400">@ ${Math.round(bl.haircut*100)}% trust</span>` : ""}</span>
-    <span class="k" tabindex="0" data-rich-tip="mpt:assets">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
-  `;
+  const pc = (v, dp = 1) => (v == null || !isFinite(v) ? "—" : (v * 100).toFixed(dp) + "%");
+  const costed = sel.cost_ann != null;
+  const tile = (k, label, v, cls) => `<div class="pf-mpt-tile" tabindex="0" data-rich-tip="mpt:${k}"><span>${label}</span><b class="${cls || ""}">${v}</b></div>`;
+  const row = (k, label, v, cls) => `<span class="k" tabindex="0" data-rich-tip="mpt:${k}">${label}</span><span class="v ${cls || ""}">${v}</span>`;
+  const sub = (t) => ` <span class="pf-mpt-subv">${t}</span>`;
+  document.getElementById("pf-mpt-tiles").innerHTML =
+    // The tile uses this portfolio's own backtested cost (ret_net); the chart
+    // keeps `ret`, the figure the frontier was ranked on.
+    tile("ret", costed ? "Return, net" : "Expected return", pc(sel.ret_net ?? sel.ret), (sel.ret_net ?? sel.ret) >= 0 ? "pos" : "neg") +
+    tile(sel.cvar30 != null ? "cvar" : "cvar-legacy", `CVaR ${aConf}% · 30d`, mptFmtLoss(mptCvar(sel)), "neg") +
+    tile("mdd", "Max drawdown", mptFmtLoss(sel.mdd), "neg") +
+    tile("cost", "Trading cost", costed ? pc(sel.cost_ann, 2) + "/yr" : "—");
+  stats.innerHTML =
+    (sel.var30 != null ? row("var", `VaR ${aConf}% (30-day)`, mptFmtLoss(sel.var30, 2), "neg") : "") +
+    (lo != null && hi != null ? row("band", "CVaR band (bootstrap)", `${mptFmtLoss(lo)}–${mptFmtLoss(hi)}`) : "") +
+    row("cdar", "CDaR (95%)", mptFmtLoss(sel.cdar), "neg") +
+    row("vol", "Volatility", pc(sel.vol, 2)) +
+    (costed ? row("turnover", "Turnover", `${pc(sel.turnover_ann, 0)}/yr` + sub(d.params?.rebalance ? escapeHtml(REBALANCE_LABEL[d.params.rebalance]) : "")) : "") +
+    (costed ? row("switch", "Cost to switch", pc(sel.switch_cost, 2) + sub("from current")) : "") +
+    (cash ? row("cash", "Invested / cash", `${(invested * 100).toFixed(0)}% / ${((1 - invested) * 100).toFixed(0)}%`) : "") +
+    row("views", "Analyst views", `${(bl.viewed || []).length}/${(d.symbols || []).length}` + (bl.haircut != null ? sub(`@ ${Math.round(bl.haircut * 100)}% trust`) : "")) +
+    row("assets", "Active assets", `${(d.symbols || []).length}` + ((d.missing || []).length ? sub(`(${d.missing.length} dropped)`) : ""));
   // Weights bars (sorted descending; zero-weight rows hidden). Each row's symbol
   // carries a rich hover (mptAssetTip) with the asset's risk/return/analyst stats.
   const wlist = document.getElementById("pf-mpt-wlist");
@@ -10950,12 +11391,14 @@ function mptRenderSide() {
     const maxW = ws[0][1];
     wlist.innerHTML = ws.map(([sym, w]) => `
       <div class="pf-mpt-wrow">
-        <span data-mpt-sym="${escapeHtml(sym)}">${escapeHtml(sym)}</span>
+        <span class="pf-mpt-wsym" data-mpt-sym="${escapeHtml(sym)}">${escapeHtml(sym)}</span>
         <div class="pf-mpt-track"><div class="pf-mpt-fill" style="width:${(w/maxW*100).toFixed(1)}%"></div></div>
         <span class="pf-mpt-val">${(w * 100).toFixed(2)}%</span>
       </div>`).join("");
     mptWireAssetTips(wlist);
   }
+  mptStaleUpdate();
+  mptSyncActions();
 }
 
 // ---- Per-company hover tooltip (Weights list + bounds editor) ---------------
@@ -11074,7 +11517,7 @@ function mptSaveAsPreset() {
   const aConf = Math.round((d.params?.alpha || 0.95) * 100);
   const suggested = `Mean-CVaR${aConf} ${d.params.lookback}`;
   showInlinePrompt({
-    title: "Save as Custom Weights",
+    title: "Save as preset",
     description:
       "Saves the currently selected portfolio (the point on the mean-CVaR frontier under the slider) as a named Custom-Weights configuration under this portfolio. " +
       "Switch between custom configurations from the mode bar to compare strategies side-by-side against Equal-weight and Cap-weight.",
@@ -11156,9 +11599,10 @@ function mptRunParamsLabel(p) {
   if (!p) return "run";
   const parts = [];
   if (p.lookback) parts.push(p.lookback);
-  if (p.alpha != null) parts.push(Math.round(p.alpha * 100) + "%");
-  if (p.budget) parts.push(p.budget);
-  if (p.cov_model) parts.push(p.cov_model);
+  if (p.alpha != null) parts.push(`CVaR ${Math.round(p.alpha * 100)}%`);
+  if (p.cov_model) parts.push(MPT_COV_LABEL[p.cov_model] || p.cov_model);
+  if (p.budget) parts.push(MPT_BUDGET_SHORT[p.budget] || p.budget);
+  if (p.rebalance) parts.push(mptTradingLabel(p));
   return parts.join(" · ");
 }
 function mptRunHeadline(run) {
@@ -11175,7 +11619,7 @@ function mptRenderRunHistory(runs) {
   const list = Array.isArray(runs) ? runs.filter(r => r && Array.isArray(r.frontier) && r.frontier.length) : [];
   if (!list.length) { host.innerHTML = ""; return; }
   const curId = MPT.result?.id;
-  host.innerHTML = `<div class="pf-mpt-runs-head">Recent runs</div>` + list.map((run, i) => {
+  host.innerHTML = `<div class="pf-mpt-runs-head pf-mpt-kicker">Recent runs</div>` + list.map((run, i) => {
     const active = (run.id && run.id === curId) ? " active" : "";
     const when = mptFmtWhen(run.saved_at);
     return `<button type="button" class="pf-mpt-hist${active}" data-run-idx="${i}">
@@ -11207,11 +11651,13 @@ function mptLoadRun(run) {
   if (!run || !Array.isArray(run.frontier) || !run.frontier.length) return;
   MPT.result = {...run, cloud: run.cloud || []};
   const p = run.params || {};
-  const setSeg = (id, v) => document.querySelectorAll(`#${id} button`).forEach(b => b.classList.toggle("active", b.dataset.v === v));
-  if (p.lookback) setSeg("pf-mpt-lookback", p.lookback);
-  if (p.alpha != null) setSeg("pf-mpt-alpha", String(p.alpha));
-  if (p.fully_invested != null) setSeg("pf-mpt-invest", p.fully_invested ? "full" : "cash");
-  if (p.cov_model) setSeg("pf-mpt-cov", p.cov_model);
+  // mptSegSet compares numerically (alpha 0.9 finds the "0.90" pill). The
+  // shared rebalancing/cost is NOT set from the run: mptStaleUpdate flags the
+  // difference and offers "Use these" instead.
+  if (p.lookback) mptSegSet("pf-mpt-lookback", p.lookback);
+  if (p.alpha != null) mptSegSet("pf-mpt-alpha", p.alpha);
+  if (p.fully_invested != null) mptSegSet("pf-mpt-invest", p.fully_invested ? "full" : "cash");
+  if (p.cov_model) mptSegSet("pf-mpt-cov", p.cov_model);
   if (p.rf != null) document.getElementById("pf-mpt-rf").value = (p.rf * 100).toFixed(2);
   if (p.haircut != null) mptSetHaircut(Math.round(p.haircut * 100));
   if (p.budget) mptSetBudget(p.budget);
@@ -11225,6 +11671,7 @@ function mptLoadRun(run) {
   if (status) status.innerHTML = "";
   mptRender();
   mptRenderRunHistory(MPT._runs);          // refresh the active-row highlight
+  mptConsSummary();
 }
 
 // On overlay open: fetch this portfolio's run history (last 3), render the list,
@@ -11271,21 +11718,27 @@ $("#pf-mpt-slider").addEventListener("input", (e) => {
   });
 });
 
-// Segmented single-select controls: clicking a button makes it the active one.
-["pf-mpt-lookback", "pf-mpt-alpha", "pf-mpt-invest", "pf-mpt-cov"].forEach(id => {
-  document.querySelectorAll(`#${id} button`).forEach(b => {
-    b.addEventListener("click", () => {
-      document.querySelectorAll(`#${id} button`).forEach(x => x.classList.remove("active"));
-      b.classList.add("active");
-      // CVaR confidence α is structurally part of the optimization (it defines
-      // which tail is minimized), so a change needs a re-solve — but re-solves
-      // are fast, so auto-rerun (debounced) to make α feel dynamic. The risk
-      // slider stays fully dynamic client-side; other controls wait for Run.
-      if (id === "pf-mpt-alpha" && MPT.result && !MPT.busy) {
-        clearTimeout(MPT.alphaTimer);
-        MPT.alphaTimer = setTimeout(() => mptRun(), 250);
-      }
-    });
+// Segmented single-select controls (radiogroups): a click picks; ←/→ (and
+// ↑/↓) move the pick and the focus. No control re-runs by itself, not even the
+// CVaR level (owner, 2026-10-19): a change marks the result stale
+// (mptStaleUpdate, via the delegated listeners below) and Run updates it.
+mptSegInit();
+MPT_SEGS.forEach(id => {
+  const group = document.getElementById(id);
+  if (!group) return;
+  group.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-v]");
+    if (b && group.contains(b)) mptSegSet(id, b.dataset.v);
+  });
+  group.addEventListener("keydown", (e) => {
+    const step = {ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1}[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const btns = [...group.querySelectorAll("button[data-v]")];
+    const i = Math.max(0, btns.findIndex(b => b.classList.contains("active")));
+    const next = btns[(i + step + btns.length) % btns.length];
+    next.click();                       // same path as a pointer pick
+    next.focus();
   });
 });
 
@@ -11294,30 +11747,47 @@ document.getElementById("pf-mpt-cancel")?.addEventListener("click", () => {
   if (MPT.abort) { try { MPT.abort.abort(); } catch (_) {} }
 });
 
-// Per-position limits panel: toggle, live edits, "all" broadcast, reset.
-document.getElementById("pf-mpt-bounds-btn")?.addEventListener("click", (e) => {
-  const panel = document.getElementById("pf-mpt-bounds");
-  if (!panel) return;
-  const show = panel.hidden;
-  // The panel is a temporary editor, so it PUSHES the workspace down rather than
-  // stealing height from it: pin .pf-mpt-body to the height it has right now,
-  // then let .pf-mpt-scroll overflow. The chart, slider and legend keep their
-  // exact geometry and simply move below the fold — nothing is squashed and
-  // nothing is cropped, so MPT._proj stays valid and hover/click keep hitting the
-  // right frontier point. Measure BEFORE unhiding, or the panel is already in the
-  // flow and we would pin the post-push height.
-  mptPinBodyHeight(show);
-  panel.hidden = !show;
-  e.currentTarget.setAttribute("aria-expanded", show ? "true" : "false");
-  if (show) mptRenderBounds();
-  // Closing releases the pin, so .pf-mpt-body grows back to fill the scroll
-  // column. That is a no-op unless the window was resized while the panel was up
-  // — in which case the body lands at a new height and the chart has to be
-  // re-measured. MPT.abort is non-null only while a run streams; re-rendering
-  // then would drop the streaming fixed projection and repaint a half-filled
-  // cloud, and the geometry is unchanged in the common case anyway.
-  else if (MPT.result && !MPT.abort) mptRender();
+/* Constraints sheet (over the optimizer): cash, the shared rebalancing and
+   cost, the risk-free rate and the per-position limits. It floats over the
+   workspace, so the chart never changes size when it opens. */
+function mptConsSummary() {
+  const el = document.getElementById("pf-mpt-cons-sum");
+  if (!el) return;
+  const n = Object.keys(mptGetBounds() || {}).length;
+  const cash = (document.querySelector("#pf-mpt-invest .active")?.dataset.v || "full") === "cash";
+  el.textContent = [tradingLabel(), n ? `${n} limit${n > 1 ? "s" : ""}` : "", cash ? "cash" : ""].filter(Boolean).join(" · ");
+  // tradingSet calls this on every change of the shared rebalancing/cost, so it
+  // is also the optimizer's hook for flagging the shown run as stale.
+  mptStaleUpdate();
+}
+// Focus moves into the sheet on open, Tab cycles inside it, and closing
+// returns focus to the Constraints chip.
+const MPT_FOCUSABLE = 'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+function openMptCons() {
+  mptRenderBounds();
+  tradingControlsRender(document.getElementById("pf-mpt-trading"));
+  if (!showOverlay("#pf-mpt-cons-bg")) return;
+  const first = document.querySelector("#pf-mpt-invest button.active") || document.querySelector("#pf-mpt-cons-bg " + "button");
+  first?.focus();
+}
+function closeMptCons() {
+  if (!hideOverlay("#pf-mpt-cons-bg")) return;
+  mptConsSummary();
+  document.getElementById("pf-mpt-cons-btn")?.focus();
+}
+document.getElementById("pf-mpt-cons-bg")?.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  const items = [...document.querySelectorAll(`#pf-mpt-cons-bg .pf-mpt-cons :is(${MPT_FOCUSABLE})`)]
+    .filter(el => el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && (document.activeElement === first || !items.includes(document.activeElement))) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && (document.activeElement === last || !items.includes(document.activeElement))) { e.preventDefault(); first.focus(); }
 });
+document.getElementById("pf-mpt-cons-btn")?.addEventListener("click", openMptCons);
+document.getElementById("pf-mpt-cons-close")?.addEventListener("click", closeMptCons);
+document.getElementById("pf-mpt-cons-done")?.addEventListener("click", closeMptCons);
+document.getElementById("pf-mpt-cons-bg")?.addEventListener("click", (e) => { if (e.target.id === "pf-mpt-cons-bg") closeMptCons(); });
 document.getElementById("pf-mpt-bounds-reset")?.addEventListener("click", mptResetBounds);
 const _mptBoundsGrid = document.getElementById("pf-mpt-bounds-grid");
 _mptBoundsGrid?.addEventListener("input", (e) => {
@@ -11377,7 +11847,9 @@ document.getElementById("pf-mpt-haircut")?.addEventListener("input", (e) => {
   });
   root.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); menu.hidden ? open() : close(); }
-    else if (e.key === "Escape") { close(); }
+    // An open menu eats Esc: without stopPropagation the document handler
+    // below closed the whole optimizer along with it.
+    else if (e.key === "Escape" && !menu.hidden) { e.preventDefault(); e.stopPropagation(); close(); }
   });
   document.addEventListener("click", (e) => {
     if (!root.contains(e.target)) close();
@@ -11514,13 +11986,48 @@ function _rfLookbackLabel(lb) {
   });
 })();
 
-document.getElementById("pf-mpt-rf-auto")?.addEventListener("click", () => mptFetchRfAuto({silent: false}));
+document.getElementById("pf-mpt-rf-auto")?.addEventListener("click", () => mptFetchRfAuto({silent: false}).then(mptStaleUpdate));
+
+// Any edit in the toolbar or the Constraints sheet re-checks the shown run
+// against the controls. Bubble phase, so each control's own handler ran first.
+for (const sel of ["#pf-mpt-bg", "#pf-mpt-cons-bg"]) {
+  const host = document.querySelector(sel);
+  for (const ev of ["click", "input", "change"]) host?.addEventListener(ev, () => mptStaleUpdate());
+}
+// "Use these": set the shared rebalancing/cost to what the shown run used.
+// Only this click changes the shared setting; loading a run never does.
+document.getElementById("pf-mpt-stale")?.addEventListener("click", (e) => {
+  if (!e.target.closest("[data-mpt-use-trading]")) return;
+  if (MPT.result?.params) tradingSet(mptRunTrading(MPT.result.params));
+});
+// The Guide's Compute budget card shows the same table the chip used to show
+// on hover (one source: RICH_TIPS["mpt-budget"] over MPT_BUDGET_INFO).
+(function mptFillBudgetGuide() {
+  const host = document.getElementById("pf-mpt-info-budget");
+  if (!host) return;
+  host.innerHTML = RICH_TIPS["mpt-budget"]();
+  host.querySelector("[role=tooltip]")?.removeAttribute("role");
+})();
+// ⌘/Ctrl+Enter runs while the optimizer is the top layer (the Constraints
+// sheet closes first); not over the guide, a prompt or an open budget menu.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+  if (!document.getElementById("pf-mpt-bg")?.classList.contains("show")) return;
+  if (document.getElementById("pf-mpt-info-bg")?.classList.contains("show")) return;
+  if (document.getElementById("pf-mpt-budget")?.classList.contains("open")) return;
+  if (document.getElementById("pf-name-prompt")?.classList.contains("show")) return;
+  if (MPT.busy) return;
+  e.preventDefault();
+  if (document.getElementById("pf-mpt-cons-bg")?.classList.contains("show")) closeMptCons();
+  mptRun();
+});
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   // About-MPT modal takes precedence (it sits on top of the MPT overlay)
   const infoBg = document.getElementById("pf-mpt-info-bg");
   if (infoBg && infoBg.classList.contains("show")) { closeMptInfo(); return; }
+  if (document.getElementById("pf-mpt-cons-bg")?.classList.contains("show")) { closeMptCons(); return; }
   if (document.getElementById("pf-mpt-bg").classList.contains("show")) closeMptOverlay();
 });
 // Re-draw chart on window resize while overlay is open.
@@ -12922,7 +13429,7 @@ async function renderSettingsDistribution(el) {
       if (!r.ok) throw new Error();
       APP_PREFS = await r.json();
       DETAIL.fc = {}; DETAIL.fcPending = {}; DETAIL.fcSim = null; DETAIL.fcAnimKey = null;
-      if (DETAIL.data) { ensureDensity(); renderChart(); }
+      if (DETAIL.data) { DETAIL.seq++; ensureDensity(); renderChart(); }   // seq: drop curves priced on the old settings
       msg("Saved. Charts use it from the next look.");
     } catch (e) { msg("Couldn't save that. Try again in a moment."); }
   };
@@ -13762,7 +14269,7 @@ function invRecapHtml(r) {
   return `<div class="inv-recap-head"><div><div class="sa-kicker">Weekly recap</div>
       <div class="inv-recap-title">Your week to ${escapeHtml(invDay(r.week_end))}</div>
       <div class="inv-recap-sub">${r.partial ? `Since you started, ${escapeHtml(invDay(r.from))}` : `${escapeHtml(invDay(r.from))} close to ${escapeHtml(invDay(r.to))} close`}${r.demo ? " · demo book" : ""}</div></div>
-      <button type="button" class="co-full-x" data-inv-recap-close aria-label="Close">✕</button></div>
+      <button type="button" class="x-close" data-inv-recap-close aria-label="Close">${X_SVG}</button></div>
     <div class="inv-recap-grid">
       ${row("Return", pct(r.return_pct), invOk(r.bench_pct) ? `${escapeHtml(r.bench_label || "Benchmark")} ${invPct(r.bench_pct)}${pp != null ? ` · ${invPct(pp, 1, " pp")}` : ""}` : "")}
       ${row("Gain", invOk(r.gain) ? `<span class="${invCls(r.gain)}">${money(r.gain, r.ccy)}</span>` : dash, "money in and out left out")}
@@ -13786,7 +14293,7 @@ function invRecapOpen() {
     document.body.appendChild(bg);
   }
   bg.querySelector(".inv-recap").innerHTML = r ? invRecapHtml(r)
-    : `<div class="inv-recap-head"><div class="inv-recap-title">No recap yet</div><button type="button" class="co-full-x" data-inv-recap-close aria-label="Close">✕</button></div><div class="inv-recap-foot">The first one comes after this Friday's US close.</div>`;
+    : `<div class="inv-recap-head"><div class="inv-recap-title">No recap yet</div><button type="button" class="x-close" data-inv-recap-close aria-label="Close">${X_SVG}</button></div><div class="inv-recap-foot">The first one comes after this Friday's US close.</div>`;
   showOverlay(bg);
   if (r) { try { localStorage.setItem("recapSeen", r.week_end); } catch (e) { /* the line stays */ } }
 }
@@ -14900,7 +15407,10 @@ function invMenuClose() {
   if (pending) invRender();
 }
 function invMenuOpen(anchor, cls, onClick) {
-  const again = _invMenu?.anchor === anchor;
+  // The same button by identity or by id: a redraw (the portfolio chart's,
+  // after each Constraints change) replaces it while the panel stays open.
+  const same = (a) => a === anchor || (!!anchor.id && a?.id === anchor.id);
+  const again = same(_invMenu?.anchor);
   invMenuClose();
   // A second click on the same button closes it; a deferred redraw may just
   // have replaced the button clicked.
@@ -14910,7 +15420,8 @@ function invMenuOpen(anchor, cls, onClick) {
   el.setAttribute("role", "menu");
   document.body.appendChild(el);
   anchor.classList.add("open");
-  const away = (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) invMenuClose(); };
+  const onAnchor = (t) => anchor.contains(t) || (!!anchor.id && !!t?.closest?.("#" + CSS.escape(anchor.id)));
+  const away = (e) => { if (!el.contains(e.target) && !onAnchor(e.target)) invMenuClose(); };
   const esc = (e) => { if (e.key === "Escape") { e.stopPropagation(); invMenuClose(); } };
   el.addEventListener("click", (e) => { e.stopPropagation(); onClick(e); });
   document.addEventListener("mousedown", away, true);
@@ -14919,10 +15430,11 @@ function invMenuOpen(anchor, cls, onClick) {
   _invMenu = { el, anchor, away, esc };
   return el;
 }
-/* Below the anchor, or above it when there is no room; kept on screen. */
-function invMenuPlace(el, anchor) {
+/* Below the anchor, or above it when there is no room; kept on screen.
+   `right` lines its right edge up with the anchor's instead of the left. */
+function invMenuPlace(el, anchor, right) {
   const a = anchor.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
-  el.style.left = Math.max(8, Math.min(a.left, window.innerWidth - w - 8)) + "px";
+  el.style.left = Math.max(8, Math.min(right ? a.right - w : a.left, window.innerWidth - w - 8)) + "px";
   el.style.top = (a.bottom + 4 + h > window.innerHeight - 8 && a.top - 4 - h > 8 ? a.top - 4 - h : a.bottom + 4) + "px";
 }
 
@@ -15334,7 +15846,10 @@ try { INV.showClosed = localStorage.getItem("inv_closed") === "1"; } catch (e) {
 setTheme(readTheme());
 (async () => {
   // A local request; the cap only guards a server busy importing at launch.
-  APP_PREFS = await Promise.race([BOOT_PREFS, new Promise(r => setTimeout(() => r({}), 1500))]);
+  const late = {};
+  APP_PREFS = await Promise.race([BOOT_PREFS, new Promise(r => setTimeout(() => r(late), 1500))]);
+  // Missed the cap: fill them in when they come (anything set since wins).
+  if (APP_PREFS === late) BOOT_PREFS.then(p => { APP_PREFS = {...p, ...APP_PREFS}; });
   fxInit();
   syncChipsFold();
   renderHeader();

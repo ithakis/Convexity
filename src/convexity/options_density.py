@@ -840,9 +840,25 @@ def _earnings(
 
 def _analysts(tk) -> dict | None:
     """Each firm's latest 12-month target (yfinance ``upgrades_downgrades``),
-    Yahoo's summary as the fallback. Prices are in the chain's currency."""
+    Yahoo's summary as the fallback. Prices are in the chain's currency.
+    A firm's target is kept only within 4x of the summary's own price: the
+    per-firm feed can carry another line's figure (AZN.L had one firm at 198,
+    a US-line number, against 12,446p), which drew the marks off the chart."""
     today = dt.datetime.now()
     firms = []
+    try:
+        s = tk.analyst_price_targets or {}
+    except Exception:
+        s = {}
+
+    def num(k):
+        try:
+            v = float(s.get(k))
+        except (TypeError, ValueError):
+            return None
+        return v if math.isfinite(v) and v > 0 else None
+
+    px = num("current")
     try:
         ud = tk.upgrades_downgrades
     except Exception:
@@ -850,7 +866,8 @@ def _analysts(tk) -> dict | None:
     if ud is not None and not ud.empty and "currentPriceTarget" in ud.columns:
         df = ud.reset_index()
         datecol = "GradeDate" if "GradeDate" in df.columns else df.columns[0]
-        df = df[df["currentPriceTarget"].fillna(0).between(1e-9, 1e12)]
+        lo, hi = (px / 4, px * 4) if px else (1e-9, 1e12)
+        df = df[df["currentPriceTarget"].fillna(0).between(lo, hi)]
         df = df.sort_values(datecol).groupby("Firm").tail(1)
         for _, r in df.iterrows():
             when = r[datecol].to_pydatetime().replace(tzinfo=None)
@@ -868,18 +885,6 @@ def _analysts(tk) -> dict | None:
                 "raised_90d": bool(age <= 90 and prior and prior == prior and r["currentPriceTarget"] > prior),
             })  # fmt: skip
     if not firms:
-        try:
-            s = tk.analyst_price_targets or {}
-        except Exception:
-            s = {}
-
-        def num(k):
-            try:
-                v = float(s.get(k))
-            except (TypeError, ValueError):
-                return None
-            return v if math.isfinite(v) and v > 0 else None
-
         med = num("median") or num("mean")
         if not med:
             return None

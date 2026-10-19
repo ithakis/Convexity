@@ -1,6 +1,7 @@
 """HTTP server — routes, static file serving, and main() entrypoint."""
 
 import contextlib
+import functools
 import json
 import logging
 import mimetypes
@@ -78,6 +79,7 @@ from convexity.persistence import (
     save_view,
     set_active_column_view,
     set_builtin_view_acked,
+    trading_prefs,
     set_builtin_view_heat,
     set_active_weight_preset,
     set_last_view,
@@ -91,6 +93,13 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # Largest POST body accepted (Handler._read_json). The biggest real one, a
 # saved view carrying its cached rows, is a few megabytes at most.
 _MAX_BODY_BYTES = 32 << 20
+
+
+def _trading(payload: dict) -> dict:
+    """The rebalancing calendar and cost a request asks for, the saved
+    setting where it doesn't say (Excel export, an older page). The engines
+    clean the values (persistence.clean_trading)."""
+    return {k: v if payload.get(k) is None else payload[k] for k, v in trading_prefs().items()}
 
 
 def _rows_summary(rows, period=None) -> str:
@@ -775,7 +784,7 @@ class Handler(BaseHTTPRequestHandler):
                 # tabs already computed are then cache hits.
                 blob = xlsx_export.build_workbook(
                     full,
-                    analytics_runner=analyze_portfolios_multi,
+                    analytics_runner=functools.partial(analyze_portfolios_multi, **trading_prefs()),
                     prefetch=prefetch_closes,
                     period="1Y",
                     display_ccy=ccy,
@@ -1293,7 +1302,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
                 results = analyze_portfolios_multi(
-                    rows, weight_sets, period, display_ccy=display_ccy
+                    rows, weight_sets, period, display_ccy=display_ccy, **_trading(payload)
                 )
                 self._send_json(200, {"results": results} if "error" not in results else results)
             except Exception as exc:
@@ -1351,6 +1360,7 @@ class Handler(BaseHTTPRequestHandler):
                 haircut=_fnum("haircut", 0.25),
                 budget=budget,
                 current_weights=payload.get("current_weights") or {},
+                **_trading(payload),
             )
             try:
                 for msg in gen:

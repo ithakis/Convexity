@@ -16,6 +16,7 @@ from convexity import analytics as A
 from convexity import fetcher, fx, mpt
 from convexity import news_diagnostics as nd
 from convexity.helpers import _rsi, _ytd_change, finite_num, major_ccy, price_in_major
+from convexity.persistence import REBALANCE, clean_trading
 
 
 # ----------------------------------------------------------------- returns
@@ -136,7 +137,7 @@ def test_market_cap_usd_converts_and_uses_major_units(monkeypatch):
     assert A._mcap_bucket(2.5e9) == "Mid ($2B–10B)"
 
 
-def _analytics(monkeypatch, rows, weights, period="1Y", extra=None):
+def _analytics(monkeypatch, rows, weights, period="1Y", extra=None, **trading):
     tickers = [r["symbol"] for r in rows] + [t for t, _, _ in A._BENCHMARKS.values()]
     rng = np.random.default_rng(1)
     idx = pd.bdate_range(end="2026-09-25", periods=520)
@@ -158,7 +159,93 @@ def _analytics(monkeypatch, rows, weights, period="1Y", extra=None):
             "dist": (row or {}).get("rating_dist"),
         },
     )
-    return A.analyze_portfolios_multi(rows, {"w": weights}, period)["w"]
+    return A.analyze_portfolios_multi(rows, {"w": weights}, period, **trading)["w"]
+
+
+def _closes_like_analytics(rows):
+    """The same synthetic closes _analytics feeds in (same seed, same order)."""
+    tickers = [r["symbol"] for r in rows] + [t for t, _, _ in A._BENCHMARKS.values()]
+    rng = np.random.default_rng(1)
+    idx = pd.bdate_range(end="2026-09-25", periods=520)
+    return pd.DataFrame(
+        {s: 100 * np.cumprod(1 + rng.normal(0.0005, 0.012, len(idx))) for s in tickers}, index=idx
+    )
+
+
+def test_rebalancing_daily_is_constant_mix_and_never_is_buy_and_hold(monkeypatch):
+    rows = [{"symbol": s, "currency": "USD"} for s in ("AAA", "BBB", "CCC")]
+    w = {"AAA": 0.5, "BBB": 0.3, "CCC": 0.2}
+    px = _closes_like_analytics(rows)[list(w)]
+    wv = pd.Series(w)
+
+    def series(out):
+        pts = out["series"]["portfolio"]
+        return pd.Series([v for _, v in pts], index=pd.to_datetime([t for t, _ in pts], unit="ms"))
+
+    d = series(_analytics(monkeypatch, rows, w, rebalance="D", tc_bps=0))
+    p = px.loc[d.index]
+    assert np.allclose(
+        d.pct_change().iloc[1:], (p.pct_change().iloc[1:] * wv).sum(axis=1), atol=1e-12
+    )
+    n = series(_analytics(monkeypatch, rows, w, rebalance="N", tc_bps=0))
+    assert np.allclose(n / n.iloc[0], (p / p.iloc[0] * wv).sum(axis=1), atol=1e-10)
+
+
+def test_rebalancing_costs_come_off_the_return_and_contributions_still_add_up(monkeypatch):
+    rows = [{"symbol": s, "currency": "USD"} for s in ("AAA", "BBB", "CCC")]
+    w = {"AAA": 0.5, "BBB": 0.3, "CCC": 0.2}
+    free = _analytics(monkeypatch, rows, w, rebalance="M", tc_bps=0)
+    paid = _analytics(monkeypatch, rows, w, rebalance="M", tc_bps=25)
+    assert paid["stats"]["total_return"] < free["stats"]["total_return"]
+    assert (
+        abs(sum(c["contribution"] for c in paid["contribution"]) - paid["stats"]["total_return"])
+        < 1e-9
+    )
+    t = paid["trading"]
+    assert t["rebalance"] == "M" and t["tc_bps"] == 25 and 11 <= t["rebalances"] <= 12
+    assert t["turnover_ann"] > 0 and 0 < t["cost_drag_ann"] < 2 * 25e-4 * t["turnover_ann"]
+    assert free["trading"]["cost_drag_ann"] == 0.0
+
+
+def test_a_late_listings_entry_is_a_trade_not_a_rebalance(monkeypatch):
+    """CCC starts trading mid-period: buying it is turnover and cost, but the
+    count says how many calendar rebalances there were (it read 13 a year)."""
+    rows = [{"symbol": s, "currency": "USD"} for s in ("AAA", "BBB", "CCC")]
+    late = _closes_like_analytics(rows)["CCC"].copy()
+    late.iloc[:400] = np.nan
+    w = {"AAA": 0.4, "BBB": 0.4, "CCC": 0.2}
+    never = _analytics(monkeypatch, rows, w, extra={"CCC": late}, rebalance="N", tc_bps=10)
+    assert never["trading"]["rebalances"] == 0 and never["trading"]["turnover_ann"] > 0
+    monthly = _analytics(monkeypatch, rows, w, extra={"CCC": late}, rebalance="M", tc_bps=10)
+    assert 11 <= monthly["trading"]["rebalances"] <= 12
+
+
+def test_rebalance_calendar():
+    idx = pd.bdate_range("2026-01-01", "2026-12-31")
+    n = {f: int(A._rebalance_days(idx, f).sum()) for f in REBALANCE}
+    assert n == {"D": len(idx), "W": 52, "M": 11, "Q": 3, "S": 1, "Y": 0, "N": 0}
+
+
+def test_a_late_listing_trades_only_itself_between_rebalances():
+    """Never-rebalanced basket where C starts trading on day 3: C is bought at
+    its target weight, A and B are scaled pro rata (their ratio kept, nothing
+    else traded), so "Never" stays buy-and-hold for what was owned."""
+    ret = np.array([[0.0, 0.0, 0.0], [0.10, -0.05, 0.0], [0.02, 0.01, 0.0], [0.0, 0.0, 0.03]])
+    target = np.array([[0.5, 0.5, 0.0]] * 3 + [[0.4, 0.4, 0.2]])
+    entry = np.array([False, False, False, True])
+    reset = np.array([True, False, False, False])
+    w, traded = A._drift(ret, target, reset, entry)
+    before = w[2] * (1 + ret[2])  # day 2's close: what day 3 starts from
+    assert w[3][2] == 0.2 and abs(w[3].sum() - 1.0) < 1e-12
+    assert abs(w[3][0] / w[3][1] - before[0] / before[1]) < 1e-12
+    assert abs(traded[3].sum() - 0.4) < 1e-12  # bought 0.2 of C, sold 0.2 pro rata
+
+
+def test_trading_inputs_are_cleaned():
+    assert clean_trading("M", 10) == ("M", 0.001)
+    assert clean_trading("m", float("nan")) == ("M", 0.001)  # unknown / not finite: defaults
+    assert clean_trading("D", "junk") == ("D", 0.001)
+    assert clean_trading("N", 1e9) == ("N", 0.02) and clean_trading("W", -5) == ("W", 0.0)
 
 
 def test_analytics_contribution_sums_and_multiples(monkeypatch):

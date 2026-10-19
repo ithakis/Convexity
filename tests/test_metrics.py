@@ -15,6 +15,7 @@ import math
 
 import numpy as np
 import pandas as pd
+import pytest
 
 # ---------------------------------------------------------------------------
 # Import helpers from the app modules
@@ -691,6 +692,18 @@ def test_mean_cvar_frontier_per_position_bounds():
         assert all(v <= 0.30 + 1e-6 for v in w.values())
 
 
+def test_position_limits_are_read_safely():
+    """A blank or non-numeric limit is no limit; min above max says which."""
+    from convexity.frontier import _build_bounds
+
+    lo, hi = _build_bounds(
+        ["A", "B"], {"A": {"min": "abc", "max": None}, "B": {"max": 2}}, 0.0, 1.0
+    )
+    assert lo == [0.0, 0.0] and hi == [1.0, 1.0]
+    with pytest.raises(ValueError, match="A: minimum 30% is above its maximum 20%"):
+        _build_bounds(["A"], {"A": {"min": 0.3, "max": 0.2}}, 0.0, 1.0)
+
+
 def test_mean_cvar_frontier_infeasible_per_position():
     """Σmin > 1 (either mode) and Σmax < 1 (fully invested) are rejected cleanly."""
     R, mu_v = _rand_problem(3, 4, 200)
@@ -938,3 +951,86 @@ def test_mpt_run_history_last_three(tmp_path, monkeypatch):
     # a stored list is returned as-is, newest entry first; stray entries dropped
     P._write_mpt_raw({"runs": {"Leg": [{"id": "r2"}, "junk", {"id": "r1"}]}})
     assert [r["id"] for r in P.get_mpt_runs("Leg")] == ["r2", "r1"]
+
+
+def _frontier_closes(n=6, t=400, seed=1):
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2022-01-01", periods=t, freq="B")
+    cols = [f"A{i}" for i in range(n)]
+    vols = np.linspace(0.005, 0.03, n)  # A5 moves six times as much as A0
+    return pd.DataFrame(
+        np.cumprod(1 + rng.standard_normal((t, n)) * vols, axis=0) * 100, index=idx, columns=cols
+    )
+
+
+def test_drift_cost_is_zero_without_cost_and_grows_with_drift():
+    from convexity import frontier
+
+    ret = _frontier_closes().pct_change().dropna()
+    ref = np.full(6, 1 / 6)
+    assert not frontier._drift_cost(ret, ref, "M", 0.0).any()
+    assert not frontier._drift_cost(ret, ref, "N", 0.001).any()
+    c = frontier._drift_cost(ret, ref, "M", 0.001)
+    assert (np.diff(c) > 0).sum() >= 4 and c[-1] > 3 * c[0]
+    assert (
+        frontier._drift_cost(ret, ref, "Q", 0.001) < frontier._drift_cost(ret, ref, "D", 0.001)
+    ).all()
+
+
+def test_turnover_backtest():
+    from convexity import frontier
+
+    ret = _frontier_closes(n=2).pct_change().dropna()
+    w = {"A0": 0.5, "A1": 0.5}
+    assert frontier._turnover(ret, w, "N", 0.001, 0.0) == {"turnover_ann": 0.0, "cost_ann": 0.0}
+    # Daily: each day re-trades yesterday's drift, w_i |r_i - r_p| / (1 + r_p).
+    r = ret.to_numpy()
+    rp = r @ np.array([0.5, 0.5])
+    drift = (0.5 * np.abs(r - rp[:, None]) / (1 + rp[:, None])).sum(axis=1)[:-1]
+    got = frontier._turnover(ret, w, "D", 0.0, 0.0)["turnover_ann"]
+    years = (ret.index[-1] - ret.index[0]).days / 365.25  # as analytics annualises
+    assert abs(got - drift.sum() / 2 / years) < 1e-12
+    # Half in cash: cash takes the other side of every trade but costs nothing,
+    # so the cost is what the stock half alone trades (adversarial review).
+    one = ret[["A0"]]
+    half = frontier._turnover(one, {"A0": 0.5}, "M", 0.001, 0.0)
+    full_turn = half["turnover_ann"] * 2 * years  # one-way, both legs
+    assert half["cost_ann"] < 0.001 * full_turn / 2 / years * 1.001
+
+
+def test_frontier_stream_costs_come_off_mu_and_are_reported():
+    from convexity import frontier
+
+    rows = [
+        {"symbol": f"A{i}", "price": 100.0, "market_cap": 1e11, "currency": "USD"} for i in range(6)
+    ]
+    closes = _frontier_closes()
+    orig_close, orig_views = frontier._bulk_close, frontier._analyst_views
+    frontier._bulk_close = lambda syms, period: closes[[s for s in syms if s in closes.columns]]
+    frontier._analyst_views = lambda active, by_sym, rf: ({}, {})
+    try:
+        run = lambda tc: frontier.compute_efficient_frontier(  # noqa: E731
+            rows, budget="light", max_seconds=0.0, rebalance="M", tc_bps=tc,
+            current_weights={"A0": 1.0},
+        )  # fmt: skip
+        free, paid = run(0), run(50)
+    finally:
+        frontier._bulk_close, frontier._analyst_views = orig_close, orig_views
+    assert not any(free["bl"]["cost"].values())
+    cost = paid["bl"]["cost"]
+    assert cost["A5"] > cost["A0"] > 0
+    assert paid["anchors"]["equal"]["ret"] < free["anchors"]["equal"]["ret"]
+    assert paid["params"]["rebalance"] == "M" and paid["params"]["tc_bps"] == 50
+    p = paid["max_ret"]
+    assert p["turnover_ann"] >= 0 and 0 <= p["cost_ann"] < 0.05
+    # ret_net = the return before the linear estimate, less the exact backtest.
+    e = paid["anchors"]["equal"]
+    est = sum(cost[s] / 6 for s in cost)
+    assert abs(e["ret_net"] - (e["ret"] + est - e["cost_ann"])) < 1e-12
+    assert free["anchors"]["equal"]["ret_net"] == free["anchors"]["equal"]["ret"]
+    assert (
+        abs(
+            p["switch_cost"] - 0.005 * sum(abs(p["weights"][s] - (s == "A0")) for s in p["weights"])
+        )
+        < 1e-12
+    )

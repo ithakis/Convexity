@@ -376,3 +376,11 @@ def test_stale_and_missing_reads():
 
 def test_the_payload_blob_is_not_exported_raw():
     assert "news_sentiment" in xe.HOLDINGS_SKIP_EXTRAS
+
+
+def test_the_read_me_says_which_rebalancing_the_returns_assume():
+    assert "monthly at a trading cost of 10 bps" in xe._trading_line(
+        {"rebalance": "M", "tc_bps": 10.0}
+    )
+    assert xe._trading_line({"rebalance": "N", "tc_bps": 2.5}).startswith("Buy and hold")
+    assert xe._trading_line(None) is None  # analytics failed: no line, no guess

@@ -33,6 +33,7 @@ _OVERLAY_IDS = [
     "pf-weights-bg",
     "pf-mpt-bg",
     "pf-mpt-info-bg",
+    "pf-mpt-cons-bg",
     "cv-modal-bg",
     "modal-bg",
     "methodology-bg",
@@ -114,6 +115,7 @@ def test_overlay_scroll_containers_contain_their_overscroll():
         ".ns-prog-jobs",
         ".ns-tape-fs-body",
         ".pf-weights-body",
+        ".pf-mpt-cons-body",
         ".cv-list",
         ".settings-pane-body.scroll",
     ):

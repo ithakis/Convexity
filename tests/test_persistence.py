@@ -249,6 +249,12 @@ def test_distribution_prefs_are_bounded():
     assert persistence.save_prefs({"dist_erp": True})["dist_erp"] == 0.06
 
 
+def test_ui_choice_prefs_are_allow_listed():
+    assert persistence.save_prefs({"pf_contrib_view": "table"})["pf_contrib_view"] == "table"
+    assert persistence.save_prefs({"pf_contrib_view": "pie"})["pf_contrib_view"] == "table"
+    assert "pf_contrib_view" not in persistence.save_prefs({"pf_contrib_view": None})
+
+
 def _last():
     return persistence.list_views()["last_view"]
 

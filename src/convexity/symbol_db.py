@@ -551,6 +551,7 @@ class Hit:
     mcap_usd: float | None
     group: int
     score: float  # match quality 0..100, before the size/type tie-breaks
+    adv_usd: float | None = None  # traded value a day: picks the liquid line of a fund
 
 
 _COLS = "ticker, name, type, exchange, region, sector, industry, mcap_usd, adv_usd, grp"
@@ -607,7 +608,7 @@ def _rank(score: float, mcap: float | None, adv: float | None, typ: str) -> floa
 
 
 def _hit(row, score: float) -> Hit:
-    return Hit(*row[:8], group=row[9], score=round(score, 1))
+    return Hit(*row[:8], group=row[9], score=round(score, 1), adv_usd=row[8])
 
 
 def lookup(query: str, *, limit: int = 5, min_score: float = 72.0) -> list[Hit]:
