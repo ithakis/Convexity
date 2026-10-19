@@ -352,9 +352,15 @@ The conventions (audit of 2026-09-29, `docs/METRICS_AUDIT.md`):
   (`persistence.TRADING_DEFAULTS`: monthly, 10 bps), sent by the client,
   defaulting to the prefs in the route and the Excel export, and part of both
   cache keys. Daily at 0 bps reproduces the old constant-mix index exactly
-  (tested). A holding starting to trade is a rebalance; the entry is free.
+  (tested). A holding starting (or stopping) to trade between rebalances
+  trades only itself: bought at its target weight, the others scaled pro rata
+  (`_drift`'s `entry`), so "Never" stays buy-and-hold for what was owned; the
+  first purchase is free. Request values go through
+  `persistence.clean_trading` (unknown calendar or a non-finite cost, which
+  JSON's NaN slips past `float()`, falls back to the defaults; 0–200 bps).
   `trading{rebalances, turnover_ann (one-way), cost_drag_ann}` goes out with
-  the stats.
+  the stats, and the client's disk cache keeps it (a cached payload without it
+  is refetched once).
 - **Sharpe / Sortino** on excess returns r_t − rf_t: in USD rf_t is the
   13-week T-bill (`^IRX`, (1+y/100)^(1/252) − 1 per day); other display
   currencies have no Yahoo short-rate series and use 0. `stats.rf_source`
@@ -1396,6 +1402,24 @@ the page shows it as chips, every search prints one `[search]` line.
   ETF" is SPY). A short name of a giant is the giant ("Taiwan Semiconductor"
   is TSMC, not the $0.8B namesake). All on one page, in the order pasted,
   misses named.
+  **Review pass (2026-10-19).** Tabs split too (an Excel row; the page turns
+  pasted line breaks into commas, since a one-line box makes them spaces).
+  Each list card carries `match` ("exact" a typed ticker in some form, "hit" a
+  sure match, "guess" a name under 85 or tied within a point) and `query` (the
+  part as typed); the page pre-picks exact and hit only and labels a guess
+  "Closest match to …". Formats read like the Add box: broker pairs (`NOV
+  IBIS`, `GLE SBF` via `resolver._broker_pair`), class tickers (BRK.B, BF/B →
+  -B), Bloomberg `X CC Equity` (`_BBG_SUFFIX`; the resolver's "GR" is
+  Greece), `Name (TICKER)` when it is the same company, ISINs (yfinance
+  Search), bare European ETF tickers (VWCE → VWCE.DE: the main venues, the
+  most traded line; initials alone are a guess). A fund line trading under 5%
+  of the liquid one is dropped and liquidity breaks ties (CSPX.L, not a
+  Colombian line). Legal forms ("S.A.", "N.V.", "AB") join the name before
+  them (`sdb._SUFFIX`); weights, amounts and bare numbers after a ticker are
+  stripped. A paste where fewer than half the parts are sure matches is not
+  a list ("AI, robotics, automation" is a theme). The whole list runs under
+  one 20 s `Deadline`; truncation (50 names, 4,000 characters), duplicates
+  and unfinished parts are warnings, never silent.
 - **`run`** — names and pure sector/region screens offline on the pack;
   criteria through `yf.screen`, deduped to home listings, regions checked on
   the home listing (LLY.DE is not a European company); `Ticker.info` for the

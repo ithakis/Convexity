@@ -24,7 +24,7 @@ from convexity.cache import (
 )
 from convexity.fetcher import _SECTOR_ETF
 from convexity.fx import _apply_fx_to_closes, convert_amount
-from convexity.persistence import REBALANCE
+from convexity.persistence import clean_trading
 from convexity.helpers import (
     _dedupe_rows_by_symbol,
     _safe_num,
@@ -315,12 +315,19 @@ def _rebalance_days(index: pd.DatetimeIndex, freq: str) -> np.ndarray:
     return np.r_[False, key[1:] != key[:-1]]
 
 
-def _drift(ret: np.ndarray, target: np.ndarray, reset: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _drift(
+    ret: np.ndarray, target: np.ndarray, reset: np.ndarray, entry: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """Start-of-day weights of a book set to ``target`` (one row per day) on
     ``reset`` days and left to drift with the prices in between, and each
     day's traded weight |Δw| (what a reset buys and sells). Day 0 starts on
     target with nothing traded. A reset every day keeps the target exactly,
-    so the daily-rebalanced index is reproduced bit for bit."""
+    so the daily-rebalanced index is reproduced bit for bit.
+
+    ``entry`` marks days a holding starts (or stops) trading between
+    rebalances: only that holding trades, bought at its target weight (or
+    sold) with the others scaled pro rata to pay for it, so "Never" stays
+    buy-and-hold for everything already owned."""
     n_days, n = ret.shape
     weights, traded = np.empty((n_days, n)), np.zeros((n_days, n))
     w = target[0].copy()
@@ -328,6 +335,13 @@ def _drift(ret: np.ndarray, target: np.ndarray, reset: np.ndarray) -> tuple[np.n
         if reset[t]:
             traded[t] = np.abs(target[t] - w)
             w = target[t].copy()
+        elif entry is not None and entry[t]:
+            new = (target[t] > 0) & (w == 0)
+            held = np.where((target[t] > 0) & ~new, w, 0.0)
+            room, tot = 1.0 - target[t][new].sum(), held.sum()
+            nxt = np.where(new, target[t], held * room / tot) if tot > 0 else target[t].copy()
+            traded[t] = np.abs(nxt - w)
+            w = nxt
         weights[t] = w
         g = w * (1.0 + ret[t])
         tot = g.sum()
@@ -1047,8 +1061,7 @@ def analyze_portfolios_multi(
     tc_bps: float = 0.0,
 ) -> dict:
     period_u = (period or "1Y").upper()
-    rebalance = rebalance if rebalance in REBALANCE else "D"
-    tc = min(max(float(tc_bps or 0.0), 0.0), 200.0) / 1e4
+    rebalance, tc = clean_trading(rebalance, tc_bps)
     if period_u not in _PERIOD_YF:
         period_u = "1Y"
 
@@ -1234,11 +1247,14 @@ def analyze_portfolios_multi(
             else np.broadcast_to(w_vec.to_numpy(), ret_np.shape)
         )
         reset = _rebalance_days(wide_ret.index, rebalance)
-        if ragged:
-            reset |= np.r_[False, (avail.to_numpy()[1:] != avail.to_numpy()[:-1]).any(axis=1)]
+        entry = (
+            np.r_[False, (avail.to_numpy()[1:] != avail.to_numpy()[:-1]).any(axis=1)]
+            if ragged
+            else None
+        )
         p1 = wide_ret.index.get_loc(common_index[1])
         reset[p1] = True
-        w_np, tr_np = _drift(ret_np, target, reset)
+        w_np, tr_np = _drift(ret_np, target, reset, entry)
         tr_np[p1] = 0.0
         day_w = pd.DataFrame(w_np, index=wide_ret.index, columns=active)
         traded = pd.DataFrame(tr_np, index=wide_ret.index, columns=active)

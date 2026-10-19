@@ -173,13 +173,19 @@ rebalance, tc_bps` (the last two default to the shared prefs). Scenarios are fix
 **Trading costs (2026-10-19).** Each asset's yearly cost of rebalancing is linear in its
 weight: `tc · f · m_i`, f the rebalances a year and m_i its mean drift from the market
 basket over one interval, |R_i − R_ref| / (1 + R_ref) on overlapping windows
-(`frontier._drift_cost`). It comes straight off the BL μ, so the frontier, the cloud and
+(`frontier._drift_cost`; a lookback too short for three windows of the interval uses
+shorter ones scaled by √(H/h), drift growing like a random walk's spread). It comes straight off the BL μ, so the frontier, the cloud and
 the anchors all use the net return and `_cvar_pdip` is untouched (proportional costs:
 Krokhmal, Palmquist & Uryasev 2002; a turnover penalty as regularisation: Olivares-Nadal
 & DeMiguel 2018). `bl.mu` stays gross and `bl.cost` carries the vector. Every frontier
 point and anchor also carries the exact drift backtest's `turnover_ann` / `cost_ann`
-(`frontier._turnover`, the portfolio chart's `analytics._drift`; cash earns rf) and
-`switch_cost` = tc · Σ|w − w_current|. Response frontier points carry `cvar_lo/cvar_med/cvar_hi`
+(`frontier._turnover`, the portfolio chart's `analytics._drift` and calendar-year
+annualisation; cash earns rf and its side of a trade is free) and
+`switch_cost` = tc · Σ|w − w_current|. The linear cost is exact near the market basket but
+charges a concentrated portfolio for drift it never has (100% in one name never trades),
+so `ret_net` = ret + (the linear estimate) − `cost_ann` is what the side panel's return
+tile shows; the chart keeps `ret`, the LP's ranking, so the cloud and the frontier still
+share one μ. Response frontier points carry `cvar_lo/cvar_med/cvar_hi`
 (bootstrap band) plus `cvar30_lo/med/hi`; `meta.n_boot` is the achieved replica count.
 
 **Streaming message order (v1.9):** the route is message-type-agnostic (it JSON-writes

@@ -95,6 +95,13 @@ _STATIC_DIR = Path(__file__).parent / "static"
 _MAX_BODY_BYTES = 32 << 20
 
 
+def _trading(payload: dict) -> dict:
+    """The rebalancing calendar and cost a request asks for, the saved
+    setting where it doesn't say (Excel export, an older page). The engines
+    clean the values (persistence.clean_trading)."""
+    return {k: v if payload.get(k) is None else payload[k] for k, v in trading_prefs().items()}
+
+
 def _rows_summary(rows, period=None) -> str:
     """One-line shape of a rows payload for an error log: row count vs distinct
     symbols (so a repeated-symbol payload is obvious at a glance) and period."""
@@ -1294,18 +1301,8 @@ class Handler(BaseHTTPRequestHandler):
                         400, {"error": "rows[] and weight_sets{name: weights} required"}
                     )
                     return
-                trading = trading_prefs()
-                try:
-                    tc_bps = float(payload.get("tc_bps", trading["tc_bps"]))
-                except (TypeError, ValueError):
-                    tc_bps = trading["tc_bps"]
                 results = analyze_portfolios_multi(
-                    rows,
-                    weight_sets,
-                    period,
-                    display_ccy=display_ccy,
-                    rebalance=str(payload.get("rebalance") or trading["rebalance"]),
-                    tc_bps=tc_bps,
+                    rows, weight_sets, period, display_ccy=display_ccy, **_trading(payload)
                 )
                 self._send_json(200, {"results": results} if "error" not in results else results)
             except Exception as exc:
@@ -1343,7 +1340,6 @@ class Handler(BaseHTTPRequestHandler):
             _bounds = payload.get("bounds")
             bounds = _bounds if isinstance(_bounds, dict) else None
             budget = str(payload.get("budget") or "standard")
-            trading = trading_prefs()
 
             from convexity.frontier import compute_efficient_frontier_stream
 
@@ -1364,8 +1360,7 @@ class Handler(BaseHTTPRequestHandler):
                 haircut=_fnum("haircut", 0.25),
                 budget=budget,
                 current_weights=payload.get("current_weights") or {},
-                rebalance=str(payload.get("rebalance") or trading["rebalance"]),
-                tc_bps=_fnum("tc_bps", trading["tc_bps"]),
+                **_trading(payload),
             )
             try:
                 for msg in gen:

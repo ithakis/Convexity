@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 import threading
@@ -844,6 +845,21 @@ def trading_prefs() -> dict:
     """The saved rebalancing calendar and cost, the defaults where unset."""
     saved = load_prefs()
     return {k: saved.get(k, v) for k, v in TRADING_DEFAULTS.items()}
+
+
+def clean_trading(rebalance, tc_bps) -> tuple[str, float]:
+    """(calendar, cost as a fraction) from request values: an unknown calendar
+    or a cost that is not a finite number (JSON lets "NaN" through float(),
+    and NaN survives min/max) falls back to the defaults; the cost is capped
+    at the Constraints range, 0-200 bps."""
+    rebalance = rebalance if rebalance in REBALANCE else TRADING_DEFAULTS["rebalance"]
+    try:
+        bps = float(tc_bps)
+    except (TypeError, ValueError):
+        bps = TRADING_DEFAULTS["tc_bps"]
+    if not math.isfinite(bps):
+        bps = TRADING_DEFAULTS["tc_bps"]
+    return rebalance, min(max(bps, 0.0), 200.0) / 1e4
 
 
 def save_prefs(changes: dict) -> dict:

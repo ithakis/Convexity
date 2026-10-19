@@ -30,12 +30,13 @@ sources — see FIELDS — and are converted at exactly one place each.
 """
 
 import json
+import math
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from convexity import resolver
 from convexity import symbol_db as sdb
@@ -237,9 +238,9 @@ def empty(text: str = "") -> dict:
 def validate(q) -> dict:
     """Clean an untrusted query (the LLM's, or a chip edit from the page):
     unknown fields, operators or vocabulary move to `ignored`, never through."""
-    out = empty(str((q or {}).get("text", ""))[:300])
     if not isinstance(q, dict):
-        return out
+        return empty()
+    out = empty(str(q.get("text", ""))[: _LIST_TEXT if q.get("kind") == "list" else 300])
     out["kind"] = q.get("kind") if q.get("kind") in ("name", "screen", "theme", "list") else "name"
     out["engine"] = "ai" if q.get("engine") == "ai" else "rules"
     out["ignored"] = [str(x)[:80] for x in (q.get("ignored") or [])[:10] if str(x).strip()]
@@ -533,34 +534,71 @@ def _ticker_run(text: str) -> list[str] | None:
     return toks if all(sdb.get(t) for t in toks) else None
 
 
-# A part that is only a legal form or share class belongs to the name before
-# it: "Apple Inc., Microsoft" or "Alphabet Inc., Class A".
-_SUFFIX_PART = re.compile(r"(inc|ltd|plc|corp|co|llc|sa|ag|nv|se|class\s+[a-c])\.?", re.IGNORECASE)
+# Pasted lists ------------------------------------------------------------
+_LIST_MAX = 50  # parts searched; the rest is reported, not silently dropped
+_LIST_TEXT = 4000  # characters of a paste kept in the query
+# A trailing weight or amount is not part of a name ("Apple 25%", "SAP
+# €1,200.50"); a bare whole number may be ("S&P 500", "FTSE 100"), so it is
+# dropped only after a ticker ("AAPL 100").
+_AMOUNT = re.compile(r"\s+(?:[$€£]\s?\d[\d.,]*|\d[\d.,]*\s?%|\d+\.\d+)$")
+_NUMBER = re.compile(r"[$€£]?\s?[\d.,]*\d[\d.,]*\s?%?")
+
+
+def _legal_form(p: str, prev: str) -> bool:
+    """A part that is only a legal form or share class belongs to the name
+    before it: "Nestle, S.A.", "Eni, S.p.A.", "Alphabet Inc., Class A".
+    symbol_db's own list, also read without spaces ("L.P." is "lp"). An
+    upper-case word after a ticker is a ticker: "NVDA, SE" is Sea Ltd."""
+    f = sdb._fold(p)
+    if not f or all(sdb._SUFFIX.sub(" ", x).strip() for x in (f, f.replace(" ", ""))):
+        return False
+    return not (p.isalpha() and p.isupper() and _TICKERISH.fullmatch(prev))
 
 
 def _parts(text: str) -> list[str]:
+    """One name or ticker per comma, semicolon, line or tab (an Excel row);
+    weights and amounts stripped, number-only cells dropped (a CSV row
+    "Apple Inc.,AAPL,100" is a name and its ticker)."""
     run = _ticker_run(text)
     if run:
         return run
     out: list[str] = []
-    for p in (p.strip() for p in re.split(r"[,;\n]+", text)):
-        if out and _SUFFIX_PART.fullmatch(p):
+    for p in re.split(r"[,;\n\t]+", text):
+        p = _AMOUNT.sub("", p.strip())
+        if m := re.fullmatch(r"(\S+)\s+\d+", p):
+            p = m[1] if _TICKERISH.fullmatch(m[1]) and sdb.get(m[1]) else p
+        if not p or (_NUMBER.fullmatch(p) and not sdb.get(p)):
+            continue
+        if out and _legal_form(p, out[-1]):
             out[-1] += ", " + p
-        elif p:
+        else:
             out.append(p)
     return out
 
 
 def _all_categories(parts: list[str]) -> bool:
-    """Every part a category and nothing else ("semiconductors, banks"): a
-    screen, not a list of companies."""
+    """Every part a category and nothing else ("semiconductors, banks",
+    "large caps, Europe"): a screen, not a list of companies."""
     for p in parts:
         pq, left = parse_rules(p)
-        if left or not any(
-            pq[k] for k in ("sectors", "industries", "regions", "types", "exchanges")
+        if left or not (
+            pq["rank"]
+            or any(pq[k] for k in ("sectors", "industries", "regions", "types", "exchanges"))
         ):
             return False
     return True
+
+
+def _mostly_names(parts: list[str]) -> bool:
+    """At least half the parts name a company for sure (pack only, no
+    network). "AI, robotics, automation" is a theme with commas: as a list
+    it showed C3.ai and two random matches."""
+    need, sure = (len(parts) + 1) // 2, 0
+    for i, p in enumerate(parts):
+        sure += bool(_ISIN.fullmatch(p)) or _pack_match(p)[0] != "guess"
+        if sure >= need or sure + len(parts) - i - 1 < need:
+            break
+    return sure >= need
 
 
 def _brief(q: dict) -> dict:
@@ -578,20 +616,22 @@ def parse(text: str) -> dict:
     # A pasted list ("AAPL, microsft, Novo"): one company per part, no AI.
     # Any length of name ("HSBC S&P 500 Dist UCITS ETF"); criteria with an
     # operator, or parts that are all categories, stay a screen. Not cut to
-    # the screen's 300 characters: a long paste keeps every part.
+    # the screen's 300 characters: a long paste keeps every part. A list
+    # that is mostly not companies is a theme with commas ("AI, robotics").
     parts = _parts(text)
     if (
         len(parts) >= 2
         and not q["filters"]
         and not re.search(r"[<>=]", text)
         and not _all_categories(parts)
+        and _mostly_names(parts[:_LIST_MAX])
     ):
-        return {**empty(text.strip()[:_LIST_TEXT]), "kind": "list"}
+        return _list_query(text, parts)
     if left and not q["filters"]:
         # "deutsche bank", "bank of america", "american express": category
         # words inside a company name. A near-exact name wins over the parse.
         top = sdb.lookup(q["text"], limit=1)
-        if top and top[0].score >= 85:
+        if top and top[0].score >= _SURE:
             return empty(q["text"])
     needs_ai = bool(left) or (q["rank"] or {}).get("by") == "default"
     if q["kind"] == "name":
@@ -600,7 +640,7 @@ def parse(text: str) -> dict:
         # real name or a typo of one scores 85+ ("tjx companies" 100, "novo
         # nordsk" 89.7, "microsft" 88.1); single words stay name lookups.
         top = sdb.lookup(q["text"], limit=1)
-        needs_ai = len(q["text"].split()) >= 2 and (not top or top[0].score < 85)
+        needs_ai = len(q["text"].split()) >= 2 and (not top or top[0].score < _SURE)
         if not needs_ai:
             return q
     if needs_ai and ai_available():
@@ -645,12 +685,11 @@ def run(q: dict, offset: int = 0, limit: int = _TOP_N) -> dict:
             # Smith Micro Software); keep the ones within 15 points.
             typed = q["text"].strip().upper()  # a typed ticker keeps that listing
             base = [_card(h, keep=h.ticker == typed) for h in hits if h.score >= hits[0].score - 15]
-            if not hits or hits[0].score < 85:  # a name the pack lacks (Gedeon Richter)
+            if not hits or hits[0].score < _SURE:  # a name the pack lacks (Gedeon Richter)
                 live = _yahoo_cards(q["text"], {c["ticker"] for c in base})
                 # A company whose name has the typed word in it ("richter")
                 # beats the pack's partial matches (Richtech Robotics).
-                words = set(sdb.name_key(q["text"]).split())
-                exact = [c for c in live if words and words <= set(sdb.name_key(c["name"]).split())]
+                exact = [c for c in live if _has_words(q["text"], c["name"])]
                 base = exact + base + [c for c in live if c not in exact]
         elif q["kind"] in ("name", "theme"):
             base, dropped = _verify_picks(q["picks"])
@@ -711,39 +750,84 @@ def run(q: dict, offset: int = 0, limit: int = _TOP_N) -> dict:
 
 
 _LABELS = {k: v[:2] for k, v in FIELDS.items()}  # the page formats values with these
-_LIST_MAX = 50
-
-
-_LIST_TEXT = 4000
+_SURE = 85.0  # a name match this good is the company; below it, a guess
+_NEAR = 6.0  # name matches this close to the best are weighed by _pick...
+_FUND_NEAR = 12.0  # ...funds wider: thin lines named exactly beat CSPX.L by 7, Amundi by 11
+_THIN = 0.05  # a fund line trading < 5% of the liquid one is not the one meant
+_QUAL_COST = 4.0  # per fund-changing word nobody typed
+_GIANT = 20  # a short name of a company 20x its namesake's size is that company
+_GIANT_USD = 1e10  # initials (TSMC) or a tied word (Samsung) are trusted this big only
+_TIE = 1.0  # another company's name match this close makes the best one a guess
+_LIST_WORKERS = 6
+_LIST_DEADLINE_S = 20.0  # one whole list; a Yahoo fallback alone can take 8 s
+_YAHOO_TIMEOUT_S = 8.0
+_EURO = (".L", ".DE", ".AS", ".SW", ".PA", ".MI")  # where a bare ETF ticker (VWCE) trades
+_ISIN = re.compile(r"[A-Z]{2}[A-Z0-9]{9}\d")
+_SHORT_TICKER = re.compile(r"(?=.*[A-Z])[A-Z0-9]{2,6}")
+_CLASS_TICKER = re.compile(r"([A-Z]{1,5})[./ ]([A-C])")  # BRK.B, BF/B: Yahoo writes BRK-B
+_PAREN = re.compile(r"(.*?)\s*\(([A-Z0-9][A-Z0-9.\-]{0,11})\)")  # Apple Inc. (AAPL)
+_BBG = re.compile(r"([A-Z0-9][A-Z0-9/.\-]{0,11})\s+([A-Z]{2})\s+(?i:equity)")  # VOD LN Equity
+# Bloomberg's exchange codes -> Yahoo's suffix: US composites and the main venues.
+_BBG_SUFFIX = {"US": "", "UN": "", "UW": "", "UQ": "", "LN": ".L", "GY": ".DE", "GR": ".DE",
+               "FP": ".PA", "NA": ".AS", "BB": ".BR", "PL": ".LS", "IM": ".MI", "SM": ".MC",
+               "SW": ".SW", "VX": ".SW", "SS": ".ST", "DC": ".CO", "FH": ".HE", "NO": ".OL",
+               "AV": ".VI", "ID": ".IR", "JP": ".T", "JT": ".T", "HK": ".HK", "CN": ".TO",
+               "CT": ".TO", "AU": ".AX"}  # fmt: skip
+# Share classes whose tickers carry no class letter (GOOG is Alphabet's class C).
+_CLASS_LINES = {("GOOGL", "c"): "GOOG", ("GOOG", "a"): "GOOGL"}
 # Words that make a fund a different fund; a candidate carrying one the user
 # did not type is a worse match ("Swap", "ESG", "EUR Hdg" next to the plain one).
-_QUALIFIERS = {"swap", "esg", "hedged", "hdg", "leveraged", "short", "inverse", "2x", "3x",
+_QUALIFIERS = {"swap", "esg", "sri", "climate", "screened", "pab", "hedged", "hdg", "leveraged", "short", "inverse", "2x", "3x",
                "income", "ex", "equal", "covered", "buffer", "daily", "ultra"}  # fmt: skip
 # A currency in a fund's name ("2C EUR", "3CCHF") marks a hedged or currency
 # share class: a different line from the plain one unless typed.
 _CCY_CLASS = re.compile(r"(eur|chf|gbp|jpy|cad|aud|sek|nok|hkd)$")
 _ACC = {"acc", "accumulating", "accumulation"}
 _DIST = {"dist", "distributing", "distribution"}
-_CLASS_WORDS = re.compile(rf"\b({'|'.join(_ACC | _DIST)})\b", re.IGNORECASE)
-# Share-class and wrapper words: out of a Yahoo name search, kept as hints.
-_FUND_WORDS = re.compile(rf"\b(ucits|etf|class\s+[a-c]|{'|'.join(_ACC | _DIST)})\b", re.IGNORECASE)
+# Share-class words lower a name's score ("Vanguard FTSE All-World Dist":
+# 82.5 with them, 92.5 without), so the pack is asked with and without them
+# and _pick reads them as hints. Yahoo's name search is asked without the
+# wrapper words too.
+_CLASS_WORDS = rf"{'|'.join(_ACC | _DIST)}"
+_FUND_WORDS = rf"ucits|etf|class\s+[a-c]|{_CLASS_WORDS}"
+
+
+def _without(words: str, part: str) -> str:
+    return re.sub(rf"\b({words})\b", " ", part, flags=re.IGNORECASE).strip() or part
+
+
+_MATCH_RANK = {"exact": 0, "hit": 1, "guess": 2}
+
+
+def _has_words(typed: str, name: str) -> bool:
+    """Every word typed is a word of the name, legal forms aside: how a Yahoo
+    answer ("richter" is Gedeon Richter, not Richtech) and a capitalised part
+    (NVIDIA, not a fund with those initials) are checked."""
+    words = set(sdb.name_key(typed).split())
+    return bool(words) and words <= set(sdb.name_key(name).split())
 
 
 def _pick(part: str, hits: list) -> sdb.Hit | None:
-    """The best of the near-equal name matches (within 6 points of the top),
-    read with what the typed name says beyond the company: UCITS wants a
-    non-US line, Acc/Dist the matching share class, Class B a -B ticker, and
-    a qualifier nobody typed costs. Then a short name of a giant is the giant:
-    "Taiwan Semiconductor" is TSMC, not the $0.8B company with that exact name."""
+    """The best of the near-equal name matches, read with what the typed name
+    says beyond the company: UCITS wants a non-US line, Acc/Dist the matching
+    share class, a qualifier nobody typed costs. Among funds a thin line is
+    dropped and liquidity breaks ties ("iShares Core S&P 500 UCITS ETF" is
+    CSPX.L, not the Colombian line named exactly that). Then a short name of
+    a giant is the giant: "Taiwan Semiconductor" is TSMC, not the $0.8B
+    company with that exact name (whole words: "Ali" is not Alibaba)."""
     if not hits:
         return None
     typed = set(sdb.name_key(part).split())
     acc, dist = typed & _ACC, typed & _DIST
     if acc or dist:  # only UCITS funds come in Acc / Dist share classes
         typed.add("ucits")
-    cls = re.search(r"class\s+([a-c])\b", part, re.IGNORECASE)
-
-    near = [h for h in hits if h.score >= hits[0].score - 6]
+    floor = hits[0].score - (_NEAR if hits[0].type == "stock" else _FUND_NEAR)
+    near = [h for h in hits if h.score >= floor]
+    # The liquid line is measured among the lines that fit what was typed: a
+    # US fund (IVV) must not make every UCITS line look thin.
+    liquid = max((h.adv_usd or 0 for h in near if h.type != "stock" and not ("ucits" in typed and h.region == "us")),
+                 default=0)  # fmt: skip
+    near = [h for h in near if h.type == "stock" or (h.adv_usd or 0) >= _THIN * liquid]
     # UCITS nobody typed counts against a line only when the US fund of that
     # name is in the running ("SPDR S&P 500 ETF" is SPY).
     us_alt = any(h.region == "us" for h in near)
@@ -751,7 +835,7 @@ def _pick(part: str, hits: list) -> sdb.Hit | None:
     def adj(h) -> float:
         n = set(sdb.name_key(h.name).split())
         extra = n - typed
-        a = h.score - 4 * (
+        a = h.score - _QUAL_COST * (
             len(extra & _QUALIFIERS) + sum(bool(_CCY_CLASS.search(w)) for w in extra)
         )
         if us_alt and "ucits" in extra:
@@ -762,74 +846,198 @@ def _pick(part: str, hits: list) -> sdb.Hit | None:
             a += 3 if n & _ACC else -6 if n & (_DIST | {"inc"}) else -3
         if dist:
             a += 3 if n & (_DIST | {"inc"}) else -6 if n & _ACC else 0
-        if cls and re.search(rf"[-.]{cls[1]}$", h.ticker, re.IGNORECASE):
-            a += 3
+        if h.type != "stock" and h.adv_usd:  # 0 for the most liquid, down to -1.3
+            a += math.log10(h.adv_usd / liquid)
         return a
 
     best = max(near, key=adj)
     if best.type == "stock" and best.mcap_usd:
-        key = sdb.name_key(part)
+        key = sdb.name_key(part) + " "
         giants = [h for h in hits if h.type == "stock" and h.score >= 90 and h.mcap_usd
-                  and h.mcap_usd >= 20 * best.mcap_usd and sdb.name_key(h.name).startswith(key)]  # fmt: skip
+                  and h.mcap_usd >= _GIANT * best.mcap_usd and (sdb.name_key(h.name) + " ").startswith(key)]  # fmt: skip
         if giants:
             best = max(giants, key=lambda h: h.mcap_usd)
     return best
 
 
-def _resolve_part(part: str) -> tuple[str, object]:
-    """One pasted part: ("exact", Hit) for a ticker as typed (that listing is
-    kept), ("hit", Hit) for a name, ("card", card) from Yahoo, or ("miss", part)."""
-    pair = resolver._normalize_exchange_prefix(resolver._normalize_google_colon(part))
-    exact = sdb.get(pair[0] if pair else part)  # "LSE:HSPX" is HSPX.L
-    if exact is not None:
-        return "exact", exact
-    # The share-class words lower a name's score ("Vanguard FTSE All-World
-    # Dist": 82.5 with them, 92.5 without), so both readings are matched and
-    # _pick weighs the words as hints.
-    plain = _CLASS_WORDS.sub(" ", part).strip() or part
+def _class_line(h: sdb.Hit, cls: str) -> sdb.Hit:
+    """The typed share class's own line: BRK-A for "Berkshire Hathaway Class
+    A", GOOG for "Alphabet Class C"."""
+    want = _CLASS_LINES.get((h.ticker, cls), f"-{cls.upper()}")
+    for x in (h, *sdb.listings(h.group)):
+        if x.ticker == want or (x.ticker.endswith(want) and x.region == h.region):
+            return replace(x, score=h.score)
+    return h
+
+
+def _dash(t: str) -> str:
+    m = _CLASS_TICKER.fullmatch(t)
+    return f"{m[1]}-{m[2]}" if m else t
+
+
+def _pack_match(part: str) -> tuple[str, sdb.Hit | None, bool]:
+    """One pasted part read offline: (match, hit, keep). "exact": a ticker in
+    any form a broker, Bloomberg or a spreadsheet writes it (LSE:HSPX, GLE
+    SBF, AAPL US Equity, BRK.B, Apple Inc. (AAPL)). "hit": a sure name match,
+    or a bare European ETF ticker (VWCE is VWCE.DE). "guess": the closest
+    name, shown as such. `keep`: show that listing, not the company's most
+    traded one."""
+    if _ISIN.fullmatch(part):  # only Yahoo knows ISINs
+        return "guess", None, False
+    m = _PAREN.fullmatch(part)
+    if m and (h := sdb.get(m[2])) and (not m[1] or sdb.same_company(m[1], h.name)
+                                       or any(x.group == h.group for x in sdb.lookup(m[1], limit=3, min_score=_SURE))):  # fmt: skip
+        return "exact", h, True
+    pair = resolver._broker_pair(part) or resolver._normalize_exchange_prefix(
+        resolver._normalize_google_colon(part)
+    )
+    forms = [part, _dash(part), pair[0] if pair else ""]
+    if (m := _BBG.fullmatch(part)) and (sfx := _BBG_SUFFIX.get(m[2])) is not None:
+        t = _dash(m[1].replace("/", "-"))
+        forms.append((t.zfill(4) if sfx == ".HK" else t) + sfx)
+    for t in forms:
+        if t and (h := sdb.get(t)):
+            return "exact", h, True
+    if _SHORT_TICKER.fullmatch(part):
+        lines = [h for sfx in _EURO if (h := sdb.get(part + sfx))]
+        if lines:
+            return "hit", max(lines, key=lambda h: h.adv_usd or 0), True
+    plain = _without(_CLASS_WORDS, part)
     hits = {x.ticker: x for x in sdb.lookup(plain, limit=10)} if plain != part else {}
     for x in sdb.lookup(part, limit=10):
         if x.score >= getattr(hits.get(x.ticker), "score", -1):
             hits[x.ticker] = x
     h = _pick(part, sorted(hits.values(), key=lambda x: -x.score))
-    if h is not None and h.score >= 85:
-        return "hit", h
-    # A weak pack match ("richter" -> Richtech Robotics) loses to a company
-    # Yahoo names with the typed words in it (share-class words aside).
-    plain = _FUND_WORDS.sub(" ", part).strip() or part
-    words = set(sdb.name_key(plain).split())
-    card = next((c for c in _yahoo_cards(plain, (), part)
-                 if c["ticker"] == part.upper() or (words and words <= set(sdb.name_key(c["name"]).split()))),
-                None)  # fmt: skip
+    if h is None:
+        return "guess", None, False
+    # A word several companies tie on is the biggest of them ("Honeywell":
+    # HON, not the HONA spin-off 0.2 points ahead), and a guess unless it
+    # starts a giant's name or initials (Samsung, TSMC): "robotics" ties five small companies,
+    # "automation" Rockwell Automation and three others.
+    tied = [
+        x
+        for x in hits.values()
+        if x.type == "stock" and x.group != h.group and x.score >= h.score - _TIE
+    ]
+    if tied and h.type == "stock":
+        h = max([h, *tied], key=lambda x: x.mcap_usd or 0)
+    giant = h.type == "stock" and (h.mcap_usd or 0) >= _GIANT_USD
+    starts = (sdb.name_key(h.name) + " ").startswith(sdb.name_key(part) + " ") or (
+        bool(_TICKERISH.fullmatch(part)) and sdb.acronym(h.name).startswith(part.lower()))  # fmt: skip
+    cls = re.search(r"class\s+([a-c])\b", part, re.IGNORECASE)
+    if cls and h.type == "stock":
+        h = _class_line(h, cls[1].lower())
+    # A capitalised part matched by initials or a typo is a guess too (VWCE
+    # hit a Virtus fund's initials at 90), unless a giant's (TSMC).
+    if tied:
+        sure = giant and starts
+    else:
+        sure = giant or not _TICKERISH.fullmatch(part) or _has_words(part, h.name)
+    sure = sure and h.score >= _SURE
+    return ("hit" if sure else "guess"), h, bool(cls)
+
+
+def _isin_symbols(isin: str) -> list[str]:
+    """Yahoo's search knows ISINs (its Lookup and the pack don't)."""
+    import yfinance as yf
+
+    try:
+        found = yf.Search(isin, max_results=3, news_count=0, lists_count=0,
+                          timeout=_YAHOO_TIMEOUT_S, raise_errors=False).quotes  # fmt: skip
+    except Exception as e:
+        print(f"[search] ISIN lookup for {isin} failed: {type(e).__name__}", flush=True)
+        return []
+    return [str(q.get("symbol") or "") for q in found or [] if isinstance(q, dict)]
+
+
+def _yahoo_card(part: str) -> dict | None:
+    """A company Yahoo names with every typed word in it (share-class words
+    aside), or the typed ticker; an ISIN's listing, the fund's most traded
+    line. A weak pack match ("richter" -> Richtech Robotics) loses to it."""
+    if _ISIN.fullmatch(part):
+        h = next(filter(None, map(sdb.get, _isin_symbols(part))), None)
+        return _card(sdb.top(h.group) or h, keep=True) if h else None
+    plain = _without(_FUND_WORDS, part)
+    tk = part.upper() if _TICKERISH.fullmatch(part) else ""  # a name is no ticker
+    return next(
+        (
+            c
+            for c in _yahoo_cards(plain, (), tk)
+            if c["ticker"] == tk or _has_words(plain, c["name"])
+        ),
+        None,
+    )
+
+
+def _resolve_part(part: str, dl: Deadline) -> dict | None:
+    """One pasted part as a card, with `match` and `query` (the part as
+    typed), or None. The pack first; Yahoo only for what the pack is unsure
+    of, and only while the list's deadline allows."""
+    match, h, keep = _pack_match(part)
+    card = _yahoo_card(part) if match == "guess" and not dl.is_set() else None
     if card is not None:
-        return "card", card
-    return ("hit", h) if h is not None else ("miss", part)
+        return {**card, "match": "hit", "query": part}
+    return {**_card(h, keep=keep), "match": match, "query": part} if h else None
+
+
+def _list_query(text: str, parts: list[str]) -> dict:
+    """A list query: the paste as typed, or, past 50 names or 4,000
+    characters, its first whole names and a warning that says so."""
+    kept, size = [], 0
+    for p in parts[:_LIST_MAX]:
+        size += len(p) + 1
+        if size > _LIST_TEXT:
+            break
+        kept.append(p)
+    q = {**empty(text.strip()), "kind": "list"}
+    if len(kept) < len(parts) or len(q["text"]) > _LIST_TEXT:
+        q["text"] = "\n".join(kept)
+    if len(kept) < len(parts):
+        q["notes"] = [f"Searched the first {len(kept)} of {len(parts)} names."]
+    return q
 
 
 def _run_list(q: dict, t0: float) -> dict:
     """A pasted list: each part as typed (an exact ticker stays that listing),
     else its best name match; all on one page, in the order pasted. Parts
-    resolve in parallel (a Yahoo fallback can take seconds each). Not cached:
-    lookups are."""
+    resolve in parallel within one deadline. A guess says so on its card
+    (`match`), and two parts landing on one card are told, unless one is
+    the other's ticker (a CSV row) or a repeat. Not cached: lookups are."""
     parts = _parts(q["text"])[:_LIST_MAX]
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        found = list(pool.map(_resolve_part, parts))
-    cards, seen, missing = [], set(), []
-    for part, (kind, v) in zip(parts, found, strict=True):
-        if kind == "miss":
-            missing.append(part)
+    dl = Deadline(_LIST_DEADLINE_S)
+    pool = ThreadPoolExecutor(max_workers=_LIST_WORKERS)
+    futs = [pool.submit(_resolve_part, p, dl) for p in parts]
+    wait(futs, timeout=_LIST_DEADLINE_S)
+    pool.shutdown(wait=False, cancel_futures=True)  # a late Yahoo call ends on its own
+    cards, at, missing, late, warnings = [], {}, [], [], list(q["notes"])
+    for part, f in zip(parts, futs, strict=True):
+        card = f.result() if f.done() and not f.cancelled() else "late"
+        if card is None or card == "late":
+            (missing if card is None else late).append(part)
             continue
-        card = v if kind == "card" else _card(v, keep=kind == "exact")
-        if card["ticker"] not in seen:
-            seen.add(card["ticker"])
+        i = at.setdefault(card["ticker"], len(cards))
+        if i == len(cards):
             cards.append(card)
-    warnings = [f"Not found: {', '.join(missing)}."] if missing else []
+            continue
+        old = cards[i]
+        if _MATCH_RANK[card["match"]] < _MATCH_RANK[old["match"]]:
+            cards[i] = card
+        if "exact" not in (old["match"], card["match"]) and old["query"].lower() != part.lower():
+            warnings.append(f'"{old["query"]}" and "{part}" are both {card["ticker"]}: shown once.')
+    if missing:
+        warnings.append(f"Not found: {', '.join(missing)}.")
+    if late:
+        warnings.append(f"Out of time before: {', '.join(late)}. Search them again.")
     if not cards and not sdb.status()["installed"]:
         warnings = ["The symbol list is still downloading; try again in a minute."]
-    print(f"[search] list of {len(parts)} engine=rules kind=list"
-          f" results={len(cards)} missing={len(missing)} {time.time() - t0:.1f}s", flush=True)  # fmt: skip
+    print(f"[search] list of {len(parts)} engine=rules kind=list results={len(cards)}"
+          f" missing={len(missing)} late={len(late)} {time.time() - t0:.1f}s", flush=True)  # fmt: skip
     return {"query": q, "chips": [], "results": cards, "total": len(cards), "offset": 0,
             "warnings": warnings, "notes": [], "fields": _LABELS}  # fmt: skip
+
+
+def _hit_fields(h: sdb.Hit) -> dict:
+    return {k: v for k, v in asdict(h).items() if k not in ("score", "adv_usd")}
 
 
 def _card(h: sdb.Hit, why: str = "", keep: bool = False, exchanges=()) -> dict:
@@ -839,7 +1047,7 @@ def _card(h: sdb.Hit, why: str = "", keep: bool = False, exchanges=()) -> dict:
     lst = h if keep or h.type != "stock" else (sdb.top(h.group, exchanges) or h)
     alts = sdb.alternates(h.group, exclude=lst.ticker) if h.type == "stock" else []
     return {
-        **{k: v for k, v in asdict(h).items() if k != "score"},
+        **_hit_fields(h),
         "ticker": lst.ticker,
         "exchange": lst.exchange,
         "exchange_name": EXCHANGE_NAMES.get(lst.exchange or "", lst.exchange),
@@ -881,7 +1089,7 @@ def _yahoo_cards(text: str, have=(), ticker: str = "") -> list[dict]:
     for group in by_co.values():
         h, rest = group[0], group[1:]
         cards.append({
-            **{k: v for k, v in asdict(h).items() if k != "score"},
+            **_hit_fields(h),
             "exchange_name": EXCHANGE_NAMES.get(h.exchange or "", h.exchange),
             "why": "From Yahoo Finance: not in the offline symbol list.",
             "alternates": [{"ticker": a.ticker, "exchange": a.exchange, "region": a.region,

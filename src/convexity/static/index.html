@@ -248,7 +248,7 @@
       <span class="co-full-title" id="co-full-title"></span>
       <span class="co-full-count" id="co-full-count"></span>
       <span class="spacer"></span>
-      <button type="button" class="co-full-x" id="co-full-close" aria-label="Close">&#10005;</button>
+      <button type="button" class="x-close" id="co-full-close" aria-label="Close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
     </div>
     <div class="co-chips co-full-chips" id="co-full-chips"></div>
     <div class="co-full-scroll" id="co-full-scroll">
@@ -287,7 +287,7 @@
       <div class="pf-weights-sum" id="pf-weights-sum">100.0%</div>
       <button id="pf-weights-equal" class="pf-weights-action" title="Set all to equal weight">Equal-weighted</button>
       <button id="pf-weights-reset" class="pf-weights-action" title="Reset to market-cap weights">Cap-weighted</button>
-      <button id="pf-weights-close" class="pf-weights-action" title="Close">✕</button>
+      <button type="button" id="pf-weights-close" class="x-close" aria-label="Close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
     </div>
     <div class="pf-name-row">
       <input id="pf-weights-name" type="text" placeholder="Preset name (e.g. Growth Tilt)" autocomplete="off" spellcheck="false"/>
@@ -332,34 +332,37 @@
       <span class="spacer"></span>
       <button id="pf-mpt-info" class="pf-mpt-chip" type="button" data-tip="How the optimizer works: Black-Litterman and mean-CVaR">Guide</button>
       <button class="pf-mpt-cancel" id="pf-mpt-cancel" type="button" hidden>Cancel</button>
-      <button class="pf-mpt-run" id="pf-mpt-run" type="button" data-tip="Solve the frontier with these settings">Run optimization</button>
+      <button class="pf-mpt-run" id="pf-mpt-run" type="button" data-tip="Solve the frontier with these settings (⌘/Ctrl+Enter)"><span class="pf-mpt-run-label">Run optimization</span></button>
       <button id="pf-mpt-close" class="x-close" type="button" aria-label="Close" data-tip="Close (Esc)"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
     </div>
     <!-- One toolbar of pills. Every control explains itself on hover (data-tip);
          the rarely-changed limits live behind Constraints (#pf-mpt-cons-bg). -->
-    <div class="pf-mpt-controls" id="pf-mpt-controls">
-      <div class="seg" id="pf-mpt-lookback" role="group" aria-label="Lookback">
+    <div class="pf-mpt-controls">
+      <div class="seg" id="pf-mpt-lookback" role="radiogroup" aria-label="Lookback">
+        <span class="seg-k" aria-hidden="true">Lookback</span>
         <button data-v="1Y" data-tip="Measure risk on the last year of prices">1Y</button>
         <button data-v="3Y" class="active" data-tip="Measure risk on the last 3 years of prices">3Y</button>
         <button data-v="5Y" data-tip="Measure risk on the last 5 years of prices">5Y</button>
         <button data-v="10Y" data-tip="Measure risk on the last 10 years of prices">10Y</button>
       </div>
-      <div class="seg" id="pf-mpt-alpha" role="group" aria-label="CVaR confidence">
-        <button data-v="0.90" data-tip="Risk = the average loss in the worst 10% of months">CVaR 90%</button>
+      <div class="seg" id="pf-mpt-alpha" role="radiogroup" aria-label="CVaR confidence">
+        <span class="seg-k" aria-hidden="true">CVaR</span>
+        <button data-v="0.90" data-tip="Risk = the average loss in the worst 10% of months">90%</button>
         <button data-v="0.95" class="active" data-tip="Risk = the average loss in the worst 5% of months">95%</button>
         <button data-v="0.99" data-tip="Risk = the average loss in the worst 1% of months">99%</button>
       </div>
-      <div class="seg" id="pf-mpt-cov" role="group" aria-label="Covariance">
-        <button data-v="sample" data-tip="How stocks moved together, as measured">Sample</button>
-        <button data-v="ledoit" class="active" data-tip="Measured co-movement, pulled toward the average: steadier">Ledoit-Wolf</button>
-        <button data-v="ewma" data-tip="Recent months count more">EWMA</button>
+      <div class="seg" id="pf-mpt-cov" role="radiogroup" aria-label="Risk model (covariance)">
+        <span class="seg-k" aria-hidden="true">Risk model</span>
+        <button data-v="sample" data-tip="Sample covariance: how the stocks moved together, exactly as measured">Sample</button>
+        <button data-v="ledoit" class="active" data-tip="Ledoit-Wolf: the measured co-movement pulled toward the average, so one odd pair moves the result less. Steadier">Shrunk</button>
+        <button data-v="ewma" data-tip="EWMA: the same measurement with recent months counting more">Recent</button>
       </div>
       <label class="pf-mpt-chip pf-mpt-trust" data-tip="How far the analysts' price targets move expected returns: 0% ignores them, 100% follows them">
         <span class="k">Analyst trust</span>
         <input id="pf-mpt-haircut" type="range" min="0" max="100" step="5" value="25"/>
         <span class="pf-mpt-haircut-val" id="pf-mpt-haircut-val">25%</span>
       </label>
-      <div class="pf-mpt-select pf-mpt-chip" id="pf-mpt-budget" data-value="standard" tabindex="0" role="combobox" aria-expanded="false" aria-haspopup="listbox" data-rich-tip="mpt-budget">
+      <div class="pf-mpt-select pf-mpt-chip" id="pf-mpt-budget" data-value="standard" tabindex="0" role="combobox" aria-expanded="false" aria-haspopup="listbox" data-tip="More time: a finer frontier, a steadier band (the Guide has the numbers)">
         <span class="k">Budget</span>
         <span class="pf-mpt-select-label">Standard — ~15s</span>
         <span class="pf-mpt-select-caret" aria-hidden="true">▾</span>
@@ -369,12 +372,11 @@
           <li data-value="dense" role="option">Dense — ~60s</li>
         </ul>
       </div>
-      <span class="spacer"></span>
       <button type="button" class="pf-mpt-chip pf-mpt-cons-btn" id="pf-mpt-cons-btn" data-tip="Cash, position limits, rebalancing, trading costs and the risk-free rate">
         <span class="k">Constraints</span><span id="pf-mpt-cons-sum">Monthly · 10 bps</span>
       </button>
     </div>
-    <div class="pf-mpt-scroll" id="pf-mpt-scroll">
+    <div class="pf-mpt-scroll">
     <div class="pf-mpt-body">
       <div class="pf-mpt-chartwrap">
         <div class="pf-mpt-chart" id="pf-mpt-chart">
@@ -389,10 +391,10 @@
           <canvas id="pf-mpt-overlay" class="pf-mpt-cv pf-mpt-cv-overlay" aria-hidden="true"></canvas>
           <div class="pf-mpt-status" id="pf-mpt-status">Run the optimization to draw the efficient frontier.</div>
         </div>
-        <div class="pf-mpt-slider-row" data-line="frontier">
+        <div class="pf-mpt-slider-row">
           <span class="pf-mpt-slider-label">Risk</span>
           <span>Min-CVaR</span>
-          <input type="range" id="pf-mpt-slider" min="0" max="100" value="50" disabled/>
+          <input type="range" id="pf-mpt-slider" min="0" max="100" value="50" disabled aria-label="Risk: from the safest to the highest-return mix" data-tip="Slide from the safest to the highest-return mix"/>
           <span>Max-return</span>
           <span class="pf-mpt-slider-readout" id="pf-mpt-slider-readout">—</span>
         </div>
@@ -400,14 +402,18 @@
       </div>
       <div class="pf-mpt-side" id="pf-mpt-side">
         <div class="pf-mpt-tiles" id="pf-mpt-tiles"></div>
+        <!-- Stale-result line (mptStaleUpdate): what the shown run used vs the
+             controls now, and "Use these" when only the shared trading
+             assumption differs. Never re-runs by itself (owner, 2026-10-19). -->
+        <div class="pf-mpt-stale" id="pf-mpt-stale" hidden></div>
         <div class="pf-mpt-kv" id="pf-mpt-stats">
           <span class="k">Run the optimization to see metrics.</span>
         </div>
-        <h4>Weights</h4>
+        <h4 class="pf-mpt-kicker">Weights</h4>
         <div class="pf-mpt-weights" id="pf-mpt-wlist"></div>
         <div class="pf-mpt-actions">
-          <button id="pf-mpt-apply" class="primary" type="button" data-tip="Use these weights for this portfolio now">Apply to portfolio</button>
-          <button id="pf-mpt-save" type="button" data-tip="Keep these weights as a named preset">Save as weights</button>
+          <button id="pf-mpt-apply" class="primary" type="button" disabled data-tip="Use the selected point's weights for this portfolio now">Use these weights</button>
+          <button id="pf-mpt-save" type="button" disabled data-tip="Keep the selected point's weights as a named preset">Save as preset…</button>
         </div>
         <!-- Last-3 run history for this portfolio; a row reloads that run. -->
         <div class="pf-mpt-runs" id="pf-mpt-runs"></div>
@@ -429,19 +435,19 @@
     </div>
     <div class="pf-mpt-cons-body">
       <section>
-        <h5>Investment</h5>
-        <div class="seg" id="pf-mpt-invest" role="group" aria-label="Investment">
+        <h5 class="pf-mpt-kicker">Investment</h5>
+        <div class="seg" id="pf-mpt-invest" role="radiogroup" aria-label="Investment">
           <button data-v="full" class="active" data-tip="Weights add up to 100%">Fully invested</button>
           <button data-v="cash" data-tip="Weight left over sits in cash at the risk-free rate">Allow cash</button>
         </div>
       </section>
       <section>
-        <h5>Rebalancing and trading cost <span>shared with the portfolio chart</span></h5>
+        <h5 class="pf-mpt-kicker">Rebalancing and trading cost <span>shared with the portfolio chart</span></h5>
         <div id="pf-mpt-trading" data-tr-host></div>
         <p class="pf-mpt-cons-note">Expected returns are net of what keeping each weight costs: its drift between rebalances times the cost per trade.</p>
       </section>
       <section>
-        <h5>Risk-free rate <span>annual %, the cash return and the prior's baseline</span></h5>
+        <h5 class="pf-mpt-kicker">Risk-free rate <span>annual %, the cash return and the prior's baseline</span></h5>
         <div class="pf-mpt-rf-wrap">
           <input id="pf-mpt-rf" type="number" min="0" max="20" step="0.05" value="4.50"/>
           <div class="pf-mpt-rf-spark-wrap" id="pf-mpt-rf-spark-wrap">
@@ -452,7 +458,7 @@
         </div>
       </section>
       <section>
-        <h5>Position limits <span>min / max %, blank = 0–100</span></h5>
+        <h5 class="pf-mpt-kicker">Position limits <span>min / max %, blank = 0–100</span></h5>
         <div class="pf-mpt-bounds-grid" id="pf-mpt-bounds-grid"></div>
       </section>
     </div>
@@ -578,6 +584,13 @@
           <li><b>Cloud</b> — random long-only portfolios rebased into (CVaR, return)
               space, so you can see the frontier really is the upper edge.</li>
         </ul>
+      </div>
+
+      <div class="info-card info-card-wide">
+        <div class="info-card-name">Compute budget</div>
+        <!-- Filled from RICH_TIPS["mpt-budget"] at load (MPT_BUDGET_INFO), so the
+             table cannot drift from frontier._BUDGETS twice. -->
+        <div class="pf-mpt-budget-guide" id="pf-mpt-info-budget"></div>
       </div>
 
       <div class="info-card">

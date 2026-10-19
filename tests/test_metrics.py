@@ -975,7 +975,14 @@ def test_turnover_backtest():
     rp = r @ np.array([0.5, 0.5])
     drift = (0.5 * np.abs(r - rp[:, None]) / (1 + rp[:, None])).sum(axis=1)[:-1]
     got = frontier._turnover(ret, w, "D", 0.0, 0.0)["turnover_ann"]
-    assert abs(got - drift.sum() / 2 / (len(r) / 252)) < 1e-12
+    years = (ret.index[-1] - ret.index[0]).days / 365.25  # as analytics annualises
+    assert abs(got - drift.sum() / 2 / years) < 1e-12
+    # Half in cash: cash takes the other side of every trade but costs nothing,
+    # so the cost is what the stock half alone trades (adversarial review).
+    one = ret[["A0"]]
+    half = frontier._turnover(one, {"A0": 0.5}, "M", 0.001, 0.0)
+    full_turn = half["turnover_ann"] * 2 * years  # one-way, both legs
+    assert half["cost_ann"] < 0.001 * full_turn / 2 / years * 1.001
 
 
 def test_frontier_stream_costs_come_off_mu_and_are_reported():
@@ -1003,6 +1010,11 @@ def test_frontier_stream_costs_come_off_mu_and_are_reported():
     assert paid["params"]["rebalance"] == "M" and paid["params"]["tc_bps"] == 50
     p = paid["max_ret"]
     assert p["turnover_ann"] >= 0 and 0 <= p["cost_ann"] < 0.05
+    # ret_net = the return before the linear estimate, less the exact backtest.
+    e = paid["anchors"]["equal"]
+    est = sum(cost[s] / 6 for s in cost)
+    assert abs(e["ret_net"] - (e["ret"] + est - e["cost_ann"])) < 1e-12
+    assert free["anchors"]["equal"]["ret_net"] == free["anchors"]["equal"]["ret"]
     assert (
         abs(
             p["switch_cost"] - 0.005 * sum(abs(p["weights"][s] - (s == "A0")) for s in p["weights"])

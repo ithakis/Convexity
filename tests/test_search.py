@@ -541,3 +541,122 @@ def test_category_words_alone_stay_a_screen(funds, yahoo):
 def test_a_long_paste_is_not_cut_at_300_characters(funds, yahoo):
     text = ", ".join(["Apple Inc"] * 40 + ["Micron Technology"])
     assert len(text) > 300 and _tickers(text)[0] == ["AAPL", "MU"]
+
+
+# Review findings (2026-10-19): guesses, ticker forms, thin fund lines, themes.
+_MORE = [
+    ["GOOG", "Alphabet Inc.", "stock", "NMS", "us", None, None, 2e12, None, 6, 0],
+    ["VWCE.DE", "Vanguard FTSE All-World UCITS ETF USD Accumulation", "etf", "GER", "de", None, None, None, 5e7, 920, 0],
+    ["VWCE.AS", "Vanguard FTSE All-World UCITS ETF USD Accumulation", "etf", "AMS", "nl", None, None, None, 3e6, 920, 0],
+    ["WCFRX", "Virtus Westchester Credit Event Fd A", "fund", "NAS", "us", None, None, None, None, 921, 1],
+    ["CSPXCO.CL", "ISHARES CORE S&P 500 UCITS ETF", "etf", "BVC", "co", None, None, None, 3e5, 922, 1],
+    ["CSPX.L", "iShares Core S&P 500 UCITS ETF USD (Acc)", "etf", "LSE", "gb", None, None, None, 8e7, 923, 1],
+    ["IVV", "iShares Core S&P 500 ETF", "etf", "PCX", "us", None, None, None, 5e9, 924, 1],
+    ["9988.HK", "Alibaba Group Holding Limited", "stock", "HKG", "hk", None, None, 3e11, None, 925, 1],
+    ["3041.TW", "ALi Corporation", "stock", "TAI", "tw", None, None, 1e8, None, 926, 1],
+    ["ARB1", "Alpha Robotics Inc.", "stock", "NMS", "us", None, None, 2e8, None, 927, 1],
+    ["ARB2", "Beta Robotics Inc.", "stock", "NMS", "us", None, None, 3e8, None, 928, 1],
+]  # fmt: skip
+
+
+@pytest.fixture()
+def more():
+    from tests.test_symbol_db import ROWS
+
+    install(ROWS + _FUNDS + _MORE)
+
+
+def _list(text):
+    out = s.search(text)
+    assert out["query"]["kind"] == "list", out["query"]
+    return out
+
+
+def test_parts_split_tabs_strip_weights_and_keep_legal_forms(more):
+    assert s._parts("Apple\tMicrosoft") == ["Apple", "Microsoft"]  # an Excel row
+    assert s._parts("Apple 25%, NVDA, 30, $1200, AAPL 100") == ["Apple", "NVDA", "AAPL"]
+    assert s._parts("HSBC S&P 500, FTSE 100") == ["HSBC S&P 500", "FTSE 100"]  # names keep numbers
+    assert s._parts("Nestle, S.A., Eni, S.p.A., Volvo, AB, KKR, L.P.") == [
+        "Nestle, S.A.", "Eni, S.p.A.", "Volvo, AB", "KKR, L.P."]  # fmt: skip
+    assert s._parts("NVDA, SE") == ["NVDA", "SE"]  # after a ticker, SE is Sea Ltd
+
+
+def test_every_card_says_how_it_matched(more):
+    out = _list("AAPL, Microsoft, Robotics")
+    got = [(c["ticker"], c["match"], c["query"]) for c in out["results"]]
+    # Two companies tie on "robotics": the best is shown, as a guess.
+    assert got[:2] == [("AAPL", "exact", "AAPL"), ("MSFT", "hit", "Microsoft")]
+    assert got[2][1:] == ("guess", "Robotics") and got[2][0] in ("ARB1", "ARB2")
+
+
+def test_ticker_forms_brokers_and_spreadsheets_write(more):
+    text = "NOV IBIS, BRK.B, AAPL US Equity, MSF GY Equity, Microsoft Corporation (MSFT), Nvidia (NVDA)"
+    got = [(c["ticker"], c["match"]) for c in _list(text)["results"]]
+    assert got == [("NOV.DE", "exact"), ("BRK-B", "exact"), ("AAPL", "exact"), ("MSF.DE", "exact"),
+                   ("MSFT", "exact"), ("NVDA", "exact")]  # fmt: skip
+    # The ticker in brackets belongs to another company: the name decides.
+    assert [c["ticker"] for c in _list("BRK/B, Apple Inc. (NVDA)")["results"]] == ["BRK-B", "AAPL"]
+
+
+def test_a_bare_european_etf_ticker_is_its_liquid_line_never_initials(more):
+    out = _list("VWCE, AAPL")["results"][0]
+    assert (out["ticker"], out["match"]) == ("VWCE.DE", "hit")
+    from tests.test_symbol_db import ROWS
+
+    install(ROWS + _MORE[3:4])
+    out = _list("VWCE, AAPL")["results"][0]
+    assert (out["ticker"], out["match"]) == ("WCFRX", "guess")  # its initials only
+
+
+def test_a_thin_fund_line_named_exactly_loses_to_the_liquid_one(more):
+    assert _tickers("iShares Core S&P 500 UCITS ETF, AAPL")[0] == ["CSPX.L", "AAPL"]
+
+
+def test_share_classes_duplicates_and_csv_rows(more):
+    out = _list("Alphabet Class A, Alphabet Class C, Google")
+    assert [c["ticker"] for c in out["results"]] == ["GOOGL", "GOOG"]
+    assert out["warnings"] == ['"Alphabet Class A" and "Google" are both GOOGL: shown once.']
+    out = _list("Apple Inc.,AAPL,100")  # a name and its own ticker: one card, no warning
+    assert [(c["ticker"], c["match"]) for c in out["results"]] == [("AAPL", "exact")]
+    assert out["warnings"] == []
+
+
+def test_a_short_name_is_not_a_prefix_of_a_giant(more):
+    assert _tickers("Ali, Apple")[0] == ["3041.TW", "AAPL"]  # ALi, not Alibaba
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["large caps, Europe", "robotics, automation widgets, Apple", "chip makers, cloud providers"],
+)
+def test_themes_with_commas_are_not_lists(more, text):
+    assert s.parse(text)["kind"] != "list"
+
+
+def test_a_long_paste_says_what_it_left_out(more):
+    out = _list(", ".join(["AAPL", "MSFT"] * 30))
+    assert out["warnings"][0] == "Searched the first 50 of 60 names."
+
+
+def test_yahoo_gets_a_ticker_only_for_a_ticker_and_the_list_has_a_deadline(more, monkeypatch):
+    import time as _t
+
+    asked = []
+
+    def lookup(q, **k):
+        asked.append(q)
+        _t.sleep(0.5 if q == "SLOWCO" else 0)
+        return []
+
+    monkeypatch.setattr(s.sdb, "yahoo_lookup", lookup)
+    monkeypatch.setattr(s, "_LIST_DEADLINE_S", 0.2)
+    out = _list("AAPL, MSFT, Zqxv Widgets, SLOWCO")
+    assert "ZQXV WIDGETS" not in asked and "Zqxv Widgets" in asked
+    assert out["warnings"][-1] == "Out of time before: SLOWCO. Search them again."
+
+
+def test_an_isin_asks_yahoo_search(more, monkeypatch):
+    monkeypatch.setattr(s, "_isin_symbols", lambda isin: ["AAPL"] if isin == "US0378331005" else [])
+    out = _list("US0378331005, NVDA, IE00B5BMR087")
+    assert [c["ticker"] for c in out["results"]] == ["AAPL", "NVDA"]
+    assert out["warnings"] == ["Not found: IE00B5BMR087."]

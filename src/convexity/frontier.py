@@ -18,6 +18,7 @@ import numpy as np
 
 from convexity import mpt
 from convexity.analytics import _analyst_for, _bulk_close, _drift, _market_cap_usd, _rebalance_days
+from convexity.persistence import clean_trading
 from convexity.cache import _cache_get, _cache_put
 from convexity.fx import _apply_fx_to_closes
 from convexity.helpers import _dedupe_rows_by_symbol, major_ccy
@@ -232,19 +233,26 @@ def _drift_cost(returns, ref_w: np.ndarray, rebalance: str, tc: float) -> np.nda
     if not f or tc <= 0:
         return np.zeros(n)
     g = np.log1p(returns.to_numpy(dtype=float))
+    # A lookback too short for three windows of one interval (yearly on 1Y)
+    # uses shorter windows, scaled up by sqrt(time): drift grows like a
+    # random walk's spread, so plain short windows would under-charge.
     h = min(_HORIZON[rebalance], max(1, len(g) // 3))
     c = np.vstack([np.zeros(n), np.cumsum(g, axis=0)])
     rh = np.expm1(c[h:] - c[:-h])
     rref = rh @ ref_w
-    return tc * f * np.mean(np.abs(rh - rref[:, None]) / (1.0 + rref[:, None]), axis=0)
+    drift = np.mean(np.abs(rh - rref[:, None]) / (1.0 + rref[:, None]), axis=0)
+    return tc * f * drift * np.sqrt(_HORIZON[rebalance] / h)
 
 
 def _turnover(returns, w: dict, rebalance: str, tc: float, rf: float) -> dict:
     """What a portfolio held at weights ``w`` and rebalanced on the calendar
     trades over the lookback (one-way, a year) and what that costs a year:
-    the same drift and reset as the portfolio chart (analytics._drift). Cash
-    left over by "allow cash" earns rf and drifts like any holding."""
+    the same drift and reset as the portfolio chart (analytics._drift), the
+    same calendar-year annualisation. Cash left over by "allow cash" earns rf
+    and drifts like any holding; moving money in or out of it costs nothing
+    (the asset side of the trade pays)."""
     r = returns.to_numpy(dtype=float)
+    n = r.shape[1]
     wv = np.array([float(w.get(s, 0.0)) for s in returns.columns])
     if wv.sum() < 1.0 - 1e-9:
         r = np.hstack([r, np.full((len(r), 1), rf / 252.0)])
@@ -253,8 +261,8 @@ def _turnover(returns, w: dict, rebalance: str, tc: float, rf: float) -> dict:
     reset[0] = True
     _, traded = _drift(r, np.broadcast_to(wv, r.shape), reset)
     traded[0] = 0.0
-    years = max(len(r) / 252.0, 1e-9)
-    cost = tc * traded.sum(axis=1)
+    years = max((returns.index[-1] - returns.index[0]).days / 365.25, 1e-9)
+    cost = tc * traded[:, :n].sum(axis=1)
     return {
         "turnover_ann": float(traded.sum() / 2.0 / years),
         "cost_ann": float(1.0 - np.prod(1.0 - cost) ** (1.0 / years)),
@@ -322,8 +330,7 @@ def compute_efficient_frontier_stream(
         cov_model = "ledoit"
     haircut = float(min(max(haircut, 0.0), 1.0))
     display_ccy = major_ccy(display_ccy or "USD")
-    rebalance = rebalance if rebalance in _PER_YEAR else "D"
-    tc = min(max(float(tc_bps or 0.0), 0.0), 200.0) / 1e4
+    rebalance, tc = clean_trading(rebalance, tc_bps)
 
     # Deduped before the 2-symbol gate: two rows for one ticker would pass it
     # and then fail later with a misleading "1 assets" data error (see
@@ -417,9 +424,20 @@ def compute_efficient_frontier_stream(
         )
 
     anchors = {"equal": _anchor(eq_w), "cap": _anchor(cap_w), "current": _anchor(cur_w)}
-    # What each portfolio would trade, and moving to it from the current weights.
+    # What each portfolio would trade, and moving to it from the current
+    # weights. The optimizer ranks on a cost linearised around the market
+    # basket (_drift_cost); "ret_net" swaps that estimate for this exact
+    # backtest, so a concentrated portfolio that hardly drifts isn't shown
+    # paying for trades it never makes. (min_cvar / max_ret are usually the
+    # frontier's end points: the same dicts, done once.)
+    seen: set[int] = set()
     for p in [*frontier, *anchors.values(), fr["min_cvar"], fr["max_ret"]]:
+        if id(p) in seen:
+            continue
+        seen.add(id(p))
         p.update(_turnover(returns, p["weights"], rebalance, tc, rf))
+        est = sum(float(cost_v[i]) * p["weights"].get(s, 0.0) for i, s in enumerate(active))
+        p["ret_net"] = p["ret"] + est - p["cost_ann"]
         p["switch_cost"] = tc * sum(abs(p["weights"].get(s, 0.0) - cur_w[s]) for s in active)
     bl_payload = {
         "mu": bl["mu"],

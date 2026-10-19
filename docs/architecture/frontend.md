@@ -339,7 +339,7 @@ Every number the app shows explains itself on hover; the registries are:
 | Analytics panels (Risk & return, Valuation, Concentration) | `METRIC_INFO` | `statRowHtml` → in-place `.pf-metric-tip` |
 | Stock detail modal grids | `DETAIL_METRIC_INFO` | `renderDetailMetricGrid` → in-place `.pf-metric-tip` |
 | Optimize side panel | `MPT_METRIC_INFO` (functions: read α / `n_boot` at hover) | `[data-rich-tip="mpt:<key>"]` |
-| Optimize → Compute budget "i" | `MPT_BUDGET_INFO` (mirrors `frontier._BUDGETS`) | `[data-rich-tip="mpt-budget"]` |
+| Optimize Guide → Compute budget card | `MPT_BUDGET_INFO` (mirrors `frontier._BUDGETS`) via `RICH_TIPS["mpt-budget"]` | `#pf-mpt-info-budget` (filled at load; the chip itself has a one-line `data-tip`) |
 | Contribution table headers | `CONTRIB_INFO` | `[data-rich-tip="contrib:<key>"]` |
 | Excel export | `xlsx_export.COLUMN_DEFS` / `METRIC_DEFS` (plain-text mirror) | header comments + Definitions sheet |
 
@@ -426,11 +426,16 @@ padding plus `FC_LANE` px of headroom for the E/D flags. A change of domain
 eases over ~280 ms (`fcTweenDomain`, final-state redraws, a slow frame snaps).
 The density's mass beyond the frame is labelled ("▲ 4% above",
 `fcDraw`). And
-**One load** (2026-10-19): `openModal` starts `/api/detail` and both
-`/api/density` horizons together (`ensureDensity()` keys on `DETAIL.row`, and
-`DETAIL.seq` drops answers for a window that moved on) and draws once behind
-one "fetching detail and options" chip, waiting for the options at most 8 s
-from opening; slower ones arrive on their own. **Axis labels are in the
+**One load** (2026-10-19): `openModal` starts `/api/detail` and the
+options together (`ensureDensity()` keys on `DETAIL.row`, and `DETAIL.seq`
+drops answers for a window that moved on; `closeModal` bumps it too, or a
+load finishing after Esc rendered into the hidden window) and draws once
+behind one "fetching detail and options" chip, waiting for the options at
+most 8 s from opening; slower ones arrive on their own. The two horizons are
+fetched one after the other (the shown one first), never together: the
+server's chain cache is unlocked, so parallel requests downloaded every
+expiry twice. `ensureDensity()` returns a promise that settles when the
+window can draw (the first horizon, or both when it falls back to 3M). **Axis labels are in the
 display currency**: everything is plotted in the listing's own currency, and
 `fmtTickVal` converts the ticks and today's tag like every label (NVDA's axis
 read $214.1 beside a EUR header and EUR targets, so "Low €191.24" looked level
@@ -541,7 +546,23 @@ picked.
   of the double-click), and `renderTabs()` defers while `TAB_RENAME` is set,
   redrawing on finish. The unsaved "Untitled N" tab renames too: the name is
   held in `STATE.adhocName` and used by its first save (`untitledName`), or
-  saved at once when it already has companies.
+  saved at once when it is the open tab and already has companies (`ENTRIES`
+  are the open tab's). Names clash case-blind, "My Investments" included;
+  Enter during IME composition doesn't commit; ⌘-Tab away keeps editing; a
+  click that ends the edit is not lost to the redraw (it waits for pointerup).
+  The rename hint shows on the open tab only; every label has its full name
+  as a native title.
+- **Constraints popover** (`tradingPopOpen`, the portfolio chart): an
+  `invMenuOpen` panel, right-aligned under its button (`invMenuPlace(..,
+  right)`), at most the window's width. `invMenuOpen` treats a redrawn button
+  with the same id as the same anchor (the analytics redraw replaces
+  `#pf-trading` while the panel stays open; the render hands the panel the new
+  button and re-places it). `tradingControlsRender` builds the pills once and
+  wires its own clicks; `tradingControlsSync` marks the setting without a
+  rebuild (a rebuild under the pointer swallowed the click). The bps field
+  commits as you type (350 ms), blank or junk reverts; `tradingSet` debounces
+  `requestAnalytics` (250 ms). `savePrefs` saves one change at a time, in
+  order, and keeps queued changes over an older answer.
 - **Loading chip** (`lc-anchor`, `lc-spin`, `lcHtml`, `lcShow`,
   `lcHide`): a small terminal-flavoured indicator. Braille spinner cycles
   ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ via CSS keyframes on `content`. Optional shimmer bar +
@@ -815,7 +836,7 @@ picked.
 - **The optimizer is one toolbar and a Constraints sheet** (owner's pick
   "A · Inspector", 2026-10-19). The toolbar holds lookback, CVaR level and
   covariance as segmented pills and analyst trust / compute budget as chips;
-  every control explains itself on hover (`data-tip`, the budget a rich tip),
+  every control explains itself on hover (`data-tip`; the budget's table is in the Guide),
   never an (i) beside it. The **Constraints** chip (`#pf-mpt-cons-sum`,
   `mptConsSummary`) opens `#pf-mpt-cons-bg`, a sheet over the workspace (z 95,
   like the guide; Esc closes it first) holding cash vs fully invested, the
@@ -827,6 +848,37 @@ picked.
   are gone. The side panel leads with four tiles (return net of costs, 30-day
   CVaR, max drawdown, trading cost a year) and keeps its rich tips without the
   dotted underline (`.pf-mpt-bg [data-rich-tip]`); weight bars are pills.
+  The "Return, net" tile shows `ret_net ?? ret` (this portfolio's own
+  backtested cost); the chart, slider readout and best-point pick keep `ret`,
+  the figure the frontier was ranked on.
+- **Nothing re-runs by itself; a changed input marks the run stale** (owner,
+  2026-10-19; the CVaR pills' old auto-rerun is gone). `mptParamsDiffer()`
+  compares `mptGetParams()` with `MPT.result.params` at each control's
+  precision (rf 0.01%, trust/CVaR whole %, so "0.90" vs 0.9 is equal) and
+  `mptStaleUpdate()` dims the chart and panel (`.pf-mpt-bg.is-stale`, still
+  interactive), puts a dot and "Run to update" on Run and writes what differs
+  under the tiles. It runs from delegated click/input/change listeners on the
+  optimizer and its sheet, from `mptRenderSide()`, and from `mptConsSummary()`,
+  which `tradingSet` calls on every change of the shared rebalancing/cost.
+  **Loading a saved run never changes the shared trading setting**: a run made
+  under another one shows "This run used Weekly · 25 bps … Use these", and only
+  that click calls `tradingSet`. Segmented pills are set through `mptSegSet`
+  (numeric compare, radiogroup + roving ←/→).
+- **A run in flight keeps the previous result.** `mptStreamFrontier` replaces
+  `MPT.result` mid-stream, so `mptRun` keeps `prev` and puts it back (chart,
+  slider, panel) on Cancel or an error; meanwhile the side panel is
+  `.is-busy` (dimmed, inert) and Use/Save are disabled, as they are before any
+  run. Run shows the stream's progress ("Running 42%"); ⌘/Ctrl+Enter runs.
+  Opening the optimizer on another portfolio forgets the shown run
+  (`mptResetResult`). The Constraints sheet takes focus on open, traps Tab and
+  returns focus to its chip; Esc in the open Budget menu stops there.
+- **Light-theme navy and one pill look.** `--mpt-navy` (#002B51 on `:root`,
+  the accent in dark/Bloomberg) colours the title, Run and the active pills.
+  The toolbar trays, the sheet's trays and `.tr-seg` share one rule (search
+  "ONE segmented-pill look" in style.css); it lists `.tr-pop .tr-seg button`
+  because `.inv-menu button { font: inherit }` comes later. Below 980px the
+  body is one column with an explicit chart row (`minmax(360px, 60vh)`): a
+  content-height row left the flex:1/min-height:0 chart at 0px.
 - **The canvases CROP, they never rescale** — the second line of defence, and
   still load-bearing. They used to be `inset:0; width:100%; height:100%`, but
   their backing stores are only resized inside `mptSizeCanvases()`. The limits
