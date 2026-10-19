@@ -226,7 +226,10 @@ Each of these has cost real debugging time; the link goes to the full story.
   estimate (`source: "history"`). The chart's E/D flags come from
   `/api/events` and are a layer drawn over the finished chart. Weekly returns
   only for betas (European and US closes are hours apart). The paths are bridges to the drawn curve, not GBM, so the end marginal
-  is exact. `/api/density` caches successes only.
+  is exact. `/api/density` caches successes only. **One analyst number** (the
+  firms' mean 12-month target, also the coverage card's), moved to the
+  options' expiry for the solid diamond where the dashed **mean** path ends;
+  the y axis is linear (2026-10-20).
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·
   [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
 - **A secondary listing borrows its research** (2026-10-18): Yahoo has no
