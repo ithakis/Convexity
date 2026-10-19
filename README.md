@@ -221,7 +221,8 @@ shorter-horizon returns. Settings → Guide in the app has every formula.
 ### Reading the numbers
 
 **Risk & Return card** (Portfolio analytics, under the table). $r_t$ is the
-portfolio's daily return (rebalanced daily), $V_t$ its value, $r^b_t$ the
+portfolio's daily return (weights reset on the rebalancing calendar under
+Constraints, net of the trading cost there), $V_t$ its value, $r^b_t$ the
 benchmark's, and $e_t = r_t - r^f_t$ the return over the T-bill rate. A year
 is 252 trading days.
 

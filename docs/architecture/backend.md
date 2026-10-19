@@ -324,8 +324,9 @@ has no traded bar, so `series.ohlc` / `series.volume` are **approximate**,
 built by `analytics._portfolio_bars` from the OHLCV that `_bulk_close` already
 downloads and now keeps beside the close (`cache._BULK_BARS_CACHE`, filled by
 `_put_bars`, never fetched on its own; duplicate dates dropped there). The
-index is daily-rebalanced, so the bar is the exact rebalanced form
-`X_t = P(t-1)·Σ w_i (1+r_i,t)·X_i,t/C_i,t` with `P(t-1) = P(t)/Σ w_i(1+r_i,t)`:
+bar is the exact form for the day's start-of-day weights w_i,t and trading
+cost c_t: `X_t = P(t-1)·(1−c_t)·Σ w_i,t (1+r_i,t)·X_i,t/C_i,t` with
+`P(t-1) = P(t)/((1−c_t)·Σ w_i,t(1+r_i,t))`:
 X/C in the listing's own currency, r in the display currency (FX at the close
 rate). It is an upper/lower bound on the true basket high/low (the holdings
 need not peak together) and always contains the close. Wicks beyond
@@ -343,7 +344,17 @@ chart). Returns and statistics never read these bars.
 `tests/test_chart_bars.py` holds the invariants.
 
 The conventions (audit of 2026-09-29, `docs/METRICS_AUDIT.md`):
-- **Portfolio** = daily-rebalanced to the weights (Σ w_i r_i,t, compounded).
+- **Portfolio** = the weights set on the period's first day, left to drift
+  with prices and reset on the rebalancing calendar (`rebalance`: D/W/M/Q/S/Y,
+  or N = buy and hold), each reset paying `tc_bps` on what it buys and sells:
+  r_p,t = (1 − c_t)(1 + Σ w_i,t r_i,t) − 1 (`_rebalance_days`, `_drift`;
+  DeMiguel-Garlappi-Uppal net return). One shared setting in prefs.json
+  (`persistence.TRADING_DEFAULTS`: monthly, 10 bps), sent by the client,
+  defaulting to the prefs in the route and the Excel export, and part of both
+  cache keys. Daily at 0 bps reproduces the old constant-mix index exactly
+  (tested). A holding starting to trade is a rebalance; the entry is free.
+  `trading{rebalances, turnover_ann (one-way), cost_drag_ann}` goes out with
+  the stats.
 - **Sharpe / Sortino** on excess returns r_t − rf_t: in USD rf_t is the
   13-week T-bill (`^IRX`, (1+y/100)^(1/252) − 1 per day); other display
   currencies have no Yahoo short-rate series and use 0. `stats.rf_source`
@@ -357,8 +368,9 @@ The conventions (audit of 2026-09-29, `docs/METRICS_AUDIT.md`):
   currency (`weighted.market_cap_ccy`); the size buckets use USD caps.
 - **Rating distribution** — each holding's share of votes × its weight
   (raw vote counts let a 50-analyst name outvote a 5-analyst one 10:1).
-- **Contribution** — Carino log-linked from the daily-rebalanced portfolio,
-  so the column adds up to `stats.total_return` exactly.
+- **Contribution** — Carino log-linked from the day's weights, each holding
+  paying for its own trades ((1−c_t)·w_i,t·r_i,t − tc·|Δw_i,t|), so the
+  column adds up to `stats.total_return` exactly.
 
 The `analyst.holdings` list feeds the Excel export's analyst columns; the
 row fields are the fallback, so the export never calls `Ticker.info` itself.
@@ -1368,9 +1380,22 @@ the page shows it as chips, every search prints one `[search]` line.
   BDRs — the builder uses the same rule) and none trading under 5% of the top
   listing (a CEDEAR). Every card carries the pack's USD market cap and the
   1-year change from `.info`.
-- **Pasted lists** — two or more comma/newline parts with no criteria are
-  `kind: "list"` (`_run_list`, rules only): an exact ticker keeps that listing,
-  anything else is its best name match; all on one page, misses named.
+- **Pasted lists** — two or more comma/semicolon/newline parts are `kind:
+  "list"` at any name length, unless the text has an operator (<, >, =) or
+  every part is only category words ("semiconductors, banks": a screen). A
+  part that is only "Inc." or "Class A" joins the name before it; lists are
+  not cut at the screen's 300 characters. `_run_list` resolves the parts in
+  parallel: an exact or exchange-prefixed ticker (`LSE:HSPX` via the
+  resolver's map) keeps that listing; a name is matched with and without its
+  share-class words and `_pick` re-ranks the near-ties (within 6 points) on
+  what the name says beyond the company — UCITS (implied by Acc/Dist) wants a
+  non-US line, Acc/Dist (Accumulation/Distribution) the matching class (an
+  unmarked UCITS line counts as the distributing one), Class B a -B ticker; a
+  qualifier nobody typed (Swap, ESG, Hedged, a currency class) costs, and so
+  does UCITS when the US fund of that name is in the running ("SPDR S&P 500
+  ETF" is SPY). A short name of a giant is the giant ("Taiwan Semiconductor"
+  is TSMC, not the $0.8B namesake). All on one page, in the order pasted,
+  misses named.
 - **`run`** — names and pure sector/region screens offline on the pack;
   criteria through `yf.screen`, deduped to home listings, regions checked on
   the home listing (LLY.DE is not a European company); `Ticker.info` for the

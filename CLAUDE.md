@@ -96,6 +96,12 @@ Each of these has cost real debugging time; the link goes to the full story.
   only** — returns, hover and measure use the exact closes; the portfolio's
   OHLC/volume are approximate and explained in Settings → About, not on the chart.
   [frontend.md → Portfolio panel](docs/architecture/frontend.md#portfolio-panel-and-constituents)
+- **One trading assumption, shared** (`prefs.json` `rebalance` + `tc_bps`,
+  defaults monthly / 10 bps): the portfolio chart's drift engine
+  (`analytics._drift`), the optimizer's net-of-cost μ (`frontier._drift_cost`)
+  and the Excel export all read it, and it is part of both analytics cache
+  keys. Daily at 0 bps must keep reproducing the old constant-mix index.
+  [backend.md §4](docs/architecture/backend.md), [mpt.md](docs/architecture/mpt.md)
 - **The MPT cloud and frontier share one feasible set**; re-run
   `pytest tests/test_metrics.py -k cvar_pdip` after any solver edit.
   [mpt.md](docs/architecture/mpt.md#the-cloud-and-the-frontier-must-share-one-feasible-set-v1113)

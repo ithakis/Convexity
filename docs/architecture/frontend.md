@@ -358,8 +358,9 @@ provider, and that the budget tip's numbers match `frontier.py`.
 Rows are `analytics.contribution` (Carino-linked, sums to the period return)
 plus two client-side columns: **W×R** = weight × the holding's own period
 return (pp) and **Compounding** = contribution − W×R, so each row reconciles
-exactly. Sort (`pf_contrib_sort`) and the Table | Chart toggle
-(`pf_contrib_view`) live in `CONTRIB_UI` + localStorage; clicks re-render only
+exactly. Sort (`pf_contrib_sort`) is a localStorage convenience; the Table |
+Chart toggle is `pf_contrib_view` in prefs.json (chart by default, the
+owner's call 2026-10-19), read through `CONTRIB_UI.view`; clicks re-render only
 `#pf-contrib-body`. The chart is an HTML/CSS horizontal waterfall
 (`renderContribChartHtml`) in contribution order, ending in a Total bar.
 
@@ -425,6 +426,20 @@ padding plus `FC_LANE` px of headroom for the E/D flags. A change of domain
 eases over ~280 ms (`fcTweenDomain`, final-state redraws, a slow frame snaps).
 The density's mass beyond the frame is labelled ("▲ 4% above",
 `fcDraw`). And
+**One load** (2026-10-19): `openModal` starts `/api/detail` and both
+`/api/density` horizons together (`ensureDensity()` keys on `DETAIL.row`, and
+`DETAIL.seq` drops answers for a window that moved on) and draws once behind
+one "fetching detail and options" chip, waiting for the options at most 8 s
+from opening; slower ones arrive on their own. **Axis labels are in the
+display currency**: everything is plotted in the listing's own currency, and
+`fmtTickVal` converts the ticks and today's tag like every label (NVDA's axis
+read $214.1 beside a EUR header and EUR targets, so "Low €191.24" looked level
+with a price it was above). The analysts' low..high is inside the y-domain
+when shown, the High/Consensus/Low labels are laid out inside the plot (pushed
+down from the top, then up from the bottom), and the chart redraws on window
+resize (a timer, not rAF, which stalls in a background window). The 50% / 90%
+/ falls-20% readouts carry an (i): hovering lights that band on the fan and
+the density (`DETAIL.fcBand`).
 `mountForecast` lays a canvas (`#m-fc-cv`, `pointer-events: none`) and a hit
 layer (`#m-fc-hit`) over the future zone and density; the history keeps its
 own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
@@ -503,6 +518,8 @@ Cards (top 5) are selectable; "Also listed on" swaps a card to another
 listing of the same company. **Add** passes the picked tickers to
 `commitEntries` (Refresh turns red; their rows load on the next refresh). A
 pasted list (`kind: "list"`) comes back with every new card preselected.
+**Clear** (`.co-clear`, first in the header row; muted text that becomes a
+pill on hover) runs `coClear()` and empties the box.
 Tickers already in the portfolio show as "In this portfolio" and cannot be
 picked.
 
@@ -515,9 +532,16 @@ picked.
   `upsertDataRow()`, never `push()`. Before this, overlapping writers left
   symbols in `DATA` twice and the build persisted them (§4 "One row per
   symbol").
-- **Inline tab rename**: double-click a `.pf-tab-label` →
-  `beginTabRename()` swaps the span for an input; Enter commits, Esc
-  cancels, blur commits. Calls `/api/portfolio/rename`.
+- **In-place tab rename** (2026-10-19): double-click a `.pf-tab-label`, or
+  right-click the tab → Rename (`tabMenuOpen`, an `invMenuOpen` menu), and the
+  label itself becomes editable (`contenteditable="plaintext-only"`, no input
+  box); Enter or a click away commits, Esc restores; a taken name shakes and
+  reverts. Two rules make it survive: a click on the already-open tab does not
+  re-run `activateTab` (its awaited redraw used to land between the two clicks
+  of the double-click), and `renderTabs()` defers while `TAB_RENAME` is set,
+  redrawing on finish. The unsaved "Untitled N" tab renames too: the name is
+  held in `STATE.adhocName` and used by its first save (`untitledName`), or
+  saved at once when it already has companies.
 - **Loading chip** (`lc-anchor`, `lc-spin`, `lcHtml`, `lcShow`,
   `lcHide`): a small terminal-flavoured indicator. Braille spinner cycles
   ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ via CSS keyframes on `content`. Optional shimmer bar +
@@ -788,20 +812,21 @@ picked.
   The topbar switch is kept in **sessionStorage** (`fx_quote`): it lasts
   until the app or tab closes, and a new one opens in the default.
 
-- **The limits panel PUSHES the workspace down; it never takes height from it.**
-  `.pf-mpt-scroll` (wrapping `.pf-mpt-bounds` + `.pf-mpt-body`) is the single
-  scroll column under the controls strip. `mptPinBodyHeight(true)` — called
-  **before** `panel.hidden` flips, or it measures the already-pushed height —
-  freezes `.pf-mpt-body` at its current height via `--mpt-body-h`, which the CSS
-  reads as its `min-height`; `flex-shrink:0` is what makes the body refuse to
-  yield. The column then overflows by exactly the panel's height, so the chart,
-  slider and legend keep their **exact geometry** and simply move below the fold.
-  Measured across an open/close cycle: backing store, CSS box, host height and
-  `MPT._proj` all byte-identical; only `scrollHeight` changes.
-  Closing must still call `mptRender()` — releasing the pin is a no-op unless the
-  window was resized while the panel was up, in which case the body lands at a new
-  height and the chart has to be re-measured (verified: 531px pinned during a
-  860→1180px resize, correctly re-rendered at 851px on close).
+- **The optimizer is one toolbar and a Constraints sheet** (owner's pick
+  "A · Inspector", 2026-10-19). The toolbar holds lookback, CVaR level and
+  covariance as segmented pills and analyst trust / compute budget as chips;
+  every control explains itself on hover (`data-tip`, the budget a rich tip),
+  never an (i) beside it. The **Constraints** chip (`#pf-mpt-cons-sum`,
+  `mptConsSummary`) opens `#pf-mpt-cons-bg`, a sheet over the workspace (z 95,
+  like the guide; Esc closes it first) holding cash vs fully invested, the
+  shared rebalancing/cost controls (`tradingControlsRender`, the same as the
+  chart's panel), the risk-free rate and the per-position limits grid. The ids
+  inside are the ones `mptGetParams` reads. Because the sheet floats, the chart
+  never changes size when it opens: the old in-flow limits panel, its
+  push-down pinning (`mptPinBodyHeight`, `--mpt-body-h`) and the height lock
+  are gone. The side panel leads with four tiles (return net of costs, 30-day
+  CVaR, max drawdown, trading cost a year) and keeps its rich tips without the
+  dotted underline (`.pf-mpt-bg [data-rich-tip]`); weight bars are pills.
 - **The canvases CROP, they never rescale** — the second line of defence, and
   still load-bearing. They used to be `inset:0; width:100%; height:100%`, but
   their backing stores are only resized inside `mptSizeCanvases()`. The limits
@@ -813,9 +838,6 @@ picked.
   to `--mpt-chart-h`, the canvases read **that** rather than `100%`, and
   `.pf-mpt-chart` is `min-height:0; overflow:hidden`. A shorter parent therefore
   clips the canvas instead of stretching it, and it returns intact.
-  While the panel is open the height is **locked** (`MPT._chartH` +
-  `mptBoundsPanelOpen()`) so a reflow of the obstructed box (a window resize)
-  cannot re-measure it.
   **`mptSettleChartHeight()` must be called after anything that paints the side
   panel** — `mptRenderSide()` writes the legend *below* the chart, shrinking the
   host ~22px after `mptRenderChart()` already locked it, which left the x-axis
@@ -865,12 +887,9 @@ picked.
   *after* focus and would undo a synchronous `select()`; and on `type="number"`
   **`selectionStart` reads `null`** — that is an API limitation, not a failure, so
   assert the behaviour by typing over the value, not by reading the selection.
-  **It is the only box left in the overlay, and that is deliberate** — a
-  transient editor dropped on the tool should read as a distinct sheet, whereas
-  `.pf-mpt-chartwrap` / `.pf-mpt-side` are the workspace itself and are now
-  boxless (transparent, no border; the side panel keeps a single hairline
-  `border-left` as a gutter rule). Padding on `.pf-mpt-bounds` is symmetric so
-  the head and the last row sit the same distance from the frame.
+  It lives in the Constraints sheet; `.pf-mpt-chartwrap` / `.pf-mpt-side` are
+  the workspace itself and stay boxless (the side panel keeps a single hairline
+  `border-left` as a gutter rule).
   **Do NOT wire `mptWireAssetTips` to this grid, and do not give the rows
   `data-mpt-sym`.** That tooltip fires on `mousemove` and each event rebuilds the
   tip's `innerHTML` and calls `placeTip()` (a forced synchronous layout), i.e. a
@@ -880,10 +899,7 @@ picked.
   `overscroll-behavior: contain`, which is what made scrolling feel broken: a
   short inner scroller hits its end after ~100px and then **stops dead** instead
   of chaining to the parent, so getting down a 20-name book took a stack of
-  separate gestures. One surface (`.pf-mpt-scroll`), one gesture. `.pf-mpt-bnd-head`
-  is correspondingly non-sticky — `.pf-mpt-bounds` is `overflow:hidden`, so it is
-  the sticky containing block and never scrolls; sticky there would be inert
-  anyway, just with a promoted layer for nothing.
+  separate gestures. One surface (`.pf-mpt-cons-body`), one gesture.
 
 - **Analyst consensus table** (`renderAnalystDashboard`): Weight uses the blue
   quintile ramp, and Upside **and Upside (median)** share the diverging ramp
@@ -994,7 +1010,7 @@ grep -n "<symbol>" src/convexity/*.py src/convexity/static/*.{js,html,css}
 ```
 
 Anchors worth knowing (all greppable): `COLS` / `BUILTIN_VIEWS` (column registry,
-top of `app.js`); `renderTabs`, `beginTabRename` (tabs); `requestAnalytics`,
+top of `app.js`); `renderTabs`, `beginTabRename`, `tabMenuOpen` (tabs); `requestAnalytics`,
 `renderModeBar` (analytics); `exportXlsx`; `lcHtml` / `lcShow` / `lcHide` (loading
 chip, CSS `.lc-*`); `showOverlay` / `hideOverlay` and the global Escape handler;
 `Handler` and `_pick_port` in `server.py`; `fetch_one`, `fetch_detail` in
