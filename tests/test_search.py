@@ -579,6 +579,8 @@ def test_parts_split_tabs_strip_weights_and_keep_legal_forms(more):
     assert s._parts("Nestle, S.A., Eni, S.p.A., Volvo, AB, KKR, L.P.") == [
         "Nestle, S.A.", "Eni, S.p.A.", "Volvo, AB", "KKR, L.P."]  # fmt: skip
     assert s._parts("NVDA, SE") == ["NVDA", "SE"]  # after a ticker, SE is Sea Ltd
+    # A spreadsheet's header row is not three companies (it found Ticketplus).
+    assert s._parts("Ticker\tName\tWeight (%)\nAAPL\tApple Inc\t10") == ["AAPL", "Apple Inc"]
 
 
 def test_every_card_says_how_it_matched(more):
@@ -596,6 +598,9 @@ def test_ticker_forms_brokers_and_spreadsheets_write(more):
                    ("MSFT", "exact"), ("NVDA", "exact")]  # fmt: skip
     # The ticker in brackets belongs to another company: the name decides.
     assert [c["ticker"] for c in _list("BRK/B, Apple Inc. (NVDA)")["results"]] == ["BRK-B", "AAPL"]
+    # Typed in lower case too (it found a BRK.B option-income fund).
+    assert [(c["ticker"], c["match"]) for c in _list("brk.b, aapl")["results"]] == [
+        ("BRK-B", "exact"), ("AAPL", "exact")]  # fmt: skip
 
 
 def test_a_bare_european_etf_ticker_is_its_liquid_line_never_initials(more):
@@ -619,6 +624,11 @@ def test_share_classes_duplicates_and_csv_rows(more):
     out = _list("Apple Inc.,AAPL,100")  # a name and its own ticker: one card, no warning
     assert [(c["ticker"], c["match"]) for c in out["results"]] == [("AAPL", "exact")]
     assert out["warnings"] == []
+    # The row's ticker is another listing of the named company: that listing.
+    out = _list("Novo Nordisk, NOV IBIS, Microsoft")
+    assert [c["ticker"] for c in out["results"]] == ["NOV.DE", "MSFT"] and out["warnings"] == []
+    # Unless the name asks for a share class: then both, as typed.
+    assert [c["ticker"] for c in _list("GOOGL, Alphabet Class C")["results"]] == ["GOOGL", "GOOG"]
 
 
 def test_a_short_name_is_not_a_prefix_of_a_giant(more):

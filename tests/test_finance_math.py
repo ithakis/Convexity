@@ -207,6 +207,19 @@ def test_rebalancing_costs_come_off_the_return_and_contributions_still_add_up(mo
     assert free["trading"]["cost_drag_ann"] == 0.0
 
 
+def test_a_late_listings_entry_is_a_trade_not_a_rebalance(monkeypatch):
+    """CCC starts trading mid-period: buying it is turnover and cost, but the
+    count says how many calendar rebalances there were (it read 13 a year)."""
+    rows = [{"symbol": s, "currency": "USD"} for s in ("AAA", "BBB", "CCC")]
+    late = _closes_like_analytics(rows)["CCC"].copy()
+    late.iloc[:400] = np.nan
+    w = {"AAA": 0.4, "BBB": 0.4, "CCC": 0.2}
+    never = _analytics(monkeypatch, rows, w, extra={"CCC": late}, rebalance="N", tc_bps=10)
+    assert never["trading"]["rebalances"] == 0 and never["trading"]["turnover_ann"] > 0
+    monthly = _analytics(monkeypatch, rows, w, extra={"CCC": late}, rebalance="M", tc_bps=10)
+    assert 11 <= monthly["trading"]["rebalances"] <= 12
+
+
 def test_rebalance_calendar():
     idx = pd.bdate_range("2026-01-01", "2026-12-31")
     n = {f: int(A._rebalance_days(idx, f).sum()) for f in REBALANCE}

@@ -12,6 +12,7 @@ why the LP solver is a bespoke interior-point method rather than scipy.
 """
 
 import concurrent.futures as _fut
+import math
 import time
 
 import numpy as np
@@ -201,13 +202,25 @@ def _build_bounds(active: list[str], bounds: dict | None, w_min: float, w_max: f
     """
     if not bounds:
         return float(max(0.0, w_min)), (float(min(1.0, w_max)) if w_max else 1.0)
+
+    def frac(v, default: float) -> float:
+        # A blank, non-numeric or non-finite field is no bound, not a crash
+        # ("could not convert string to float" reached the page once).
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return default
+        return min(max(f, 0.0), 1.0) if math.isfinite(f) else default
+
     lo_v, hi_v = [], []
     for s in active:
-        b = bounds.get(s) or {}
-        lo = b.get("min")
-        hi = b.get("max")
-        lo_v.append(float(lo) if lo is not None else float(max(0.0, w_min)))
-        hi_v.append(float(hi) if hi is not None else (float(w_max) if w_max else 1.0))
+        b = bounds.get(s) if isinstance(bounds.get(s), dict) else {}
+        lo = frac(b.get("min"), float(max(0.0, w_min)))
+        hi = frac(b.get("max"), float(w_max) if w_max else 1.0)
+        if lo > hi + 1e-12:  # the LP would just report "infeasible"
+            raise ValueError(f"{s}: minimum {lo:.0%} is above its maximum {hi:.0%}")
+        lo_v.append(lo)
+        hi_v.append(hi)
     return lo_v, hi_v
 
 
@@ -381,7 +394,11 @@ def compute_efficient_frontier_stream(
     # ---- base frontier (exact weights) ----
     yield _prog("Solving mean-CVaR frontier…")
     t_opt = time.perf_counter()
-    lo_b, hi_b = _build_bounds(active, bounds, w_min, w_max)
+    try:
+        lo_b, hi_b = _build_bounds(active, bounds, w_min, w_max)
+    except ValueError as e:
+        yield {"type": "error", "error": str(e)}
+        return
     fr = mpt.mean_cvar_frontier(
         returns,
         mu,

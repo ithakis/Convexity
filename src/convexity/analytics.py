@@ -1419,7 +1419,14 @@ def analyze_portfolios_multi(
         trading = {
             "rebalance": rebalance,
             "tc_bps": round(tc * 1e4, 6),
-            "rebalances": int((win_traded.sum(axis=1) > 0).sum()),
+            # Calendar rebalances that traded; a late listing's entry trade
+            # is in turnover and cost, not in this count (13 a year read odd).
+            "rebalances": int(
+                (
+                    (win_traded.to_numpy().sum(axis=1) > 0)
+                    & reset[wide_ret.index.isin(win_traded.index)]
+                ).sum()
+            ),
             # One-way: half of what is bought and sold, per year.
             "turnover_ann": float(win_traded.to_numpy().sum() / 2.0 / years),
             "cost_drag_ann": float(1.0 - np.prod(1.0 - win_cost.to_numpy()) ** (1.0 / years)),

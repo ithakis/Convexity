@@ -1080,7 +1080,27 @@ def _write_overview(ws, summaries: list[dict], metric_periods: list[str], ccy: s
     ws.freeze_panes = "B5"
 
 
-def _write_readme(ws, summaries: list[dict], sheets: list[tuple[str, str]], ccy: str) -> None:
+_REBALANCE_WORDS = {"D": "daily", "W": "weekly", "M": "monthly", "Q": "quarterly",
+                    "S": "every six months", "Y": "yearly"}  # fmt: skip
+
+
+def _trading_line(t: dict | None) -> str | None:
+    """The rebalancing and cost the returns assume (the app's Constraints),
+    from the analytics that made them: a reader comparing numbers with the
+    app needs the same setting."""
+    if not t or not t.get("rebalance"):
+        return None
+    bps = f"{float(t.get('tc_bps') or 0):g} bps"
+    if t["rebalance"] == "N":
+        return (f"Buy and hold: the weights are set on the first day and drift with prices, never "
+                f"reset (Constraints in the app); a holding that starts trading later is bought at {bps}.")  # fmt: skip
+    how = _REBALANCE_WORDS.get(t["rebalance"], t["rebalance"])
+    return (f"Rebalanced {how} at a trading cost of {bps} (Constraints in the app): the weights drift "
+            f"with prices between rebalances, and each rebalance pays the cost on what it buys and sells.")  # fmt: skip
+
+
+def _write_readme(ws, summaries: list[dict], sheets: list[tuple[str, str]], ccy: str,
+                  trading: dict | None = None) -> None:  # fmt: skip
     created = datetime.now().astimezone().strftime("%d %b %Y, %H:%M %Z")
     _write_title(
         ws, "Convexity export", f"Created {created} · values in {ccy} · {len(summaries)} portfolios"
@@ -1101,6 +1121,7 @@ def _write_readme(ws, summaries: list[dict], sheets: list[tuple[str, str]], ccy:
         f"dividends and are in {ccy}, so currency moves are part of them.",
         "Each portfolio is weighted as it is set in the app: its active weight preset, else by market "
         "value. The benchmarks are the SPY (S&P 500) and QQQ (Nasdaq-100) funds, in the same currency.",
+        _trading_line(trading),
         "Green is a gain, red a loss. 'pts' are percentage points: the gap between two percentages.",
         "A % figure is in percent (12.5 means 12.5%); weights, margins and R² are Excel percentages.",
         "Hover any column or metric name for its formula and typical range, or see Definitions.",
@@ -1109,6 +1130,8 @@ def _write_readme(ws, summaries: list[dict], sheets: list[tuple[str, str]], ccy:
         "Past returns do not predict future ones. Prices, fundamentals and analyst figures come from "
         "Yahoo Finance and can be late or wrong; analysts' price targets lean optimistic.",
     ):
+        if not line:
+            continue
         ws.cell(row=r, column=2, value=line).alignment = _WRAP
         r += 1
     ws.column_dimensions["A"].width = 26
@@ -1552,7 +1575,9 @@ def build_workbook(
     _write_data(wb.create_sheet("Data"), data)
     _write_definitions(wb.create_sheet("Definitions"))
     _write_overview(overview, portfolios, metric_periods, display_ccy)
-    _write_readme(readme, portfolios, sheets, display_ccy)
+    trading = next((a["trading"] for p in portfolios for a in p["analytics_by_period"].values()
+                    if isinstance(a, dict) and a.get("trading")), None)  # fmt: skip
+    _write_readme(readme, portfolios, sheets, display_ccy, trading)
 
     buf = io.BytesIO()
     _colour_gains(wb)

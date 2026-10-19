@@ -41,6 +41,10 @@ mpt.var_cvar_horizon(port_ret, alpha, h_base=10, h_target=30) -> (var30, cvar30)
 mpt.asset_risk_stats(returns_df, alpha) -> {sym: {ret_ann, ret_total, var30, cvar30}}
 ```
 
+Position limits are read by `frontier._build_bounds`: a blank, non-numeric or
+non-finite min/max is no limit (clamped to 0–1), and a min above its max is a
+stream error naming the holding, before the solver runs.
+
 ### The cloud and the frontier must share one feasible set (v1.11.3)
 `cvar_return_cloud` sampled the bare simplex while `mean_cvar_frontier` solved
 inside the per-position box, so with limits set the scatter was drawn from a

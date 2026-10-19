@@ -15,6 +15,7 @@ import math
 
 import numpy as np
 import pandas as pd
+import pytest
 
 # ---------------------------------------------------------------------------
 # Import helpers from the app modules
@@ -689,6 +690,18 @@ def test_mean_cvar_frontier_per_position_bounds():
         w = p["weights"]
         assert w["A0"] >= 0.05 - 1e-6 and w["A3"] >= 0.10 - 1e-6
         assert all(v <= 0.30 + 1e-6 for v in w.values())
+
+
+def test_position_limits_are_read_safely():
+    """A blank or non-numeric limit is no limit; min above max says which."""
+    from convexity.frontier import _build_bounds
+
+    lo, hi = _build_bounds(
+        ["A", "B"], {"A": {"min": "abc", "max": None}, "B": {"max": 2}}, 0.0, 1.0
+    )
+    assert lo == [0.0, 0.0] and hi == [1.0, 1.0]
+    with pytest.raises(ValueError, match="A: minimum 30% is above its maximum 20%"):
+        _build_bounds(["A"], {"A": {"min": 0.3, "max": 0.2}}, 0.0, 1.0)
 
 
 def test_mean_cvar_frontier_infeasible_per_position():

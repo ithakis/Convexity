@@ -3087,7 +3087,7 @@ function tradingPopSync(a) {
   const p = (v, d) => (v * 100).toFixed(d) + "%";
   read.innerHTML = !fresh ? lcHtml("recomputing")
     : t.rebalance === "N" ? `Never rebalanced: the weights drift with prices over ${escapeHtml(STATE.period)}.`
-    : !t.rebalances ? `No ${REBALANCE_LABEL[t.rebalance].toLowerCase()} rebalance falls inside ${escapeHtml(STATE.period)}, so no cost shows here; a longer period shows what it costs.`
+    : !t.rebalances ? `No ${REBALANCE_LABEL[t.rebalance].toLowerCase()} rebalance falls inside ${escapeHtml(STATE.period)}, a longer period shows what rebalancing costs.`
     : `<b>${t.rebalances}</b> rebalance${t.rebalances === 1 ? "" : "s"} over ${escapeHtml(STATE.period)} · turnover <b>${p(t.turnover_ann, 0)}</b>/yr · costs <b>${p(t.cost_drag_ann, 2)}</b>/yr`;
 }
 
@@ -5676,7 +5676,8 @@ function beginTabRename(tab, name) {
     if (pending) render();
   };
   const onKey = (e) => {
-    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); label.blur(); }   // not mid-IME
+    // Enter commits by itself: through blur it waited on window focus.
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); finish(true); }   // not mid-IME
     else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
   };
   const onBlur = () => {
@@ -6906,8 +6907,8 @@ function renderBarsHtml(map) {
    weight × own-period-return, and Compounding, the rest: what rebalancing,
    trading costs and compounding add or take away. The three columns reconcile
    exactly per row, and the Contribution column sums to the period return.
-   Sort and the Table/Chart choice are per-viewer conveniences in localStorage;
-   re-rendering touches only #pf-contrib-body, not the whole analytics grid. */
+   Sort is a per-viewer convenience in localStorage; the Table/Chart choice
+   is kept in prefs.json (pf_contrib_view, Chart by default). Re-rendering touches only #pf-contrib-body, not the whole analytics grid. */
 const CONTRIB_INFO = {
   wxr: {
     label: "W×R",
@@ -10313,7 +10314,7 @@ function mptSegInit() {
 
 // Display names for the run's settings (the stale line and the run history).
 const MPT_COV_LABEL = {sample: "Sample", ledoit: "Shrunk", ewma: "Recent"};
-const MPT_BUDGET_SHORT = {light: "Light", standard: "Standard", dense: "Dense"};
+const MPT_BUDGET_SHORT = {light: "Light", standard: "Standard", dense: "Dense", exhaustive: "Exhaustive"};
 const mptRunTrading = (p) => p?.rebalance ? {rebalance: p.rebalance, tc_bps: +p.tc_bps || 0} : {rebalance: "D", tc_bps: 0};
 function mptTradingLabel(p) {
   if (!p || !p.rebalance) return "";
@@ -10357,10 +10358,12 @@ function mptParamsDiffer() {
     }
   }
   // A run saved before 1.28.1 has no trading fields: it was optimised with no
-  // cost, i.e. daily at 0 bps.
+  // cost (daily at 0 bps), but that was never a choice to offer back.
   const wt = mptRunTrading(was);
-  if (wt.rebalance !== now.rebalance || num(wt.tc_bps, 100) !== num(now.tc_bps, 100))
-    add("trading", mptTradingLabel(wt), mptTradingLabel(now));
+  if (wt.rebalance !== now.rebalance || num(wt.tc_bps, 100) !== num(now.tc_bps, 100)) {
+    add("trading", was.rebalance ? mptTradingLabel(wt) : "no trading costs", mptTradingLabel(now));
+    out[out.length - 1].legacy = !was.rebalance;
+  }
   if (was.display_ccy && was.display_ccy !== FX_QUOTE) add("ccy", was.display_ccy, FX_QUOTE);
   return out;
 }
@@ -10381,9 +10384,9 @@ function mptStaleUpdate() {
   if (!stale) { line.hidden = true; line.innerHTML = ""; return; }
   const tr = diffs.find(d => d.key === "trading");
   const others = diffs.filter(d => d.key !== "trading");
-  const use = tr ? ` <button type="button" class="pf-mpt-link" data-mpt-use-trading data-tip="Set rebalancing and trading cost to ${escapeHtml(tr.was)} (shared with the portfolio chart)">Use these</button>` : "";
+  const use = tr && !tr.legacy ? ` <button type="button" class="pf-mpt-link" data-mpt-use-trading data-tip="Set rebalancing and trading cost to ${escapeHtml(tr.was)} (shared with the portfolio chart)">Use these</button>` : "";
   line.innerHTML = (!others.length && tr)
-    ? `This run used ${escapeHtml(tr.was)}; now ${escapeHtml(tr.now)}.${use} or run to update.`
+    ? `This run used ${escapeHtml(tr.was)}; now ${escapeHtml(tr.now)}.${use ? use + " or run" : " Run"} to update.`
     : `Run used ${escapeHtml(diffs.map(d => d.was).join(", "))}; now ${escapeHtml(diffs.map(d => d.now).join(", "))}. Run to update.${use}`;
   line.hidden = false;
 }

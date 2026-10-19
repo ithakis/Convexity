@@ -542,6 +542,13 @@ _LIST_TEXT = 4000  # characters of a paste kept in the query
 # dropped only after a ticker ("AAPL 100").
 _AMOUNT = re.compile(r"\s+(?:[$€£]\s?\d[\d.,]*|\d[\d.,]*\s?%|\d+\.\d+)$")
 _NUMBER = re.compile(r"[$€£]?\s?[\d.,]*\d[\d.,]*\s?%?")
+# A spreadsheet's header row ("Ticker, Name, Weight") is not three companies:
+# as names they found Ticketplus, Nameson and an equal-weight ETF.
+_HEADER = re.compile(
+    r"(ticker|symbol|name|company|security|holding|instrument|isin|weight|shares|qty|quantity"
+    r"|amount|value|price|allocation|position|market value)s?(\s*\(?%\)?)?",
+    re.IGNORECASE,
+)
 
 
 def _legal_form(p: str, prev: str) -> bool:
@@ -557,8 +564,8 @@ def _legal_form(p: str, prev: str) -> bool:
 
 def _parts(text: str) -> list[str]:
     """One name or ticker per comma, semicolon, line or tab (an Excel row);
-    weights and amounts stripped, number-only cells dropped (a CSV row
-    "Apple Inc.,AAPL,100" is a name and its ticker)."""
+    weights and amounts stripped, number-only cells and header words dropped
+    (a CSV row "Apple Inc.,AAPL,100" is a name and its ticker)."""
     run = _ticker_run(text)
     if run:
         return run
@@ -567,7 +574,7 @@ def _parts(text: str) -> list[str]:
         p = _AMOUNT.sub("", p.strip())
         if m := re.fullmatch(r"(\S+)\s+\d+", p):
             p = m[1] if _TICKERISH.fullmatch(m[1]) and sdb.get(m[1]) else p
-        if not p or (_NUMBER.fullmatch(p) and not sdb.get(p)):
+        if not p or (_NUMBER.fullmatch(p) and not sdb.get(p)) or _HEADER.fullmatch(p):
             continue
         if out and _legal_form(p, out[-1]):
             out[-1] += ", " + p
@@ -764,6 +771,7 @@ _YAHOO_TIMEOUT_S = 8.0
 _EURO = (".L", ".DE", ".AS", ".SW", ".PA", ".MI")  # where a bare ETF ticker (VWCE) trades
 _ISIN = re.compile(r"[A-Z]{2}[A-Z0-9]{9}\d")
 _SHORT_TICKER = re.compile(r"(?=.*[A-Z])[A-Z0-9]{2,6}")
+_CLASS_PART = re.compile(r"class\s+[a-c]\b", re.IGNORECASE)  # "Alphabet Class C" wants GOOG
 _CLASS_TICKER = re.compile(r"([A-Z]{1,5})[./ ]([A-C])")  # BRK.B, BF/B: Yahoo writes BRK-B
 _PAREN = re.compile(r"(.*?)\s*\(([A-Z0-9][A-Z0-9.\-]{0,11})\)")  # Apple Inc. (AAPL)
 _BBG = re.compile(r"([A-Z0-9][A-Z0-9/.\-]{0,11})\s+([A-Z]{2})\s+(?i:equity)")  # VOD LN Equity
@@ -871,7 +879,7 @@ def _class_line(h: sdb.Hit, cls: str) -> sdb.Hit:
 
 
 def _dash(t: str) -> str:
-    m = _CLASS_TICKER.fullmatch(t)
+    m = _CLASS_TICKER.fullmatch(t.upper())  # "brk.b" too: it found a BRK.B option fund
     return f"{m[1]}-{m[2]}" if m else t
 
 
@@ -1009,11 +1017,16 @@ def _run_list(q: dict, t0: float) -> dict:
     futs = [pool.submit(_resolve_part, p, dl) for p in parts]
     wait(futs, timeout=_LIST_DEADLINE_S)
     pool.shutdown(wait=False, cancel_futures=True)  # a late Yahoo call ends on its own
+    got = [f.result() if f.done() and not f.cancelled() else "late" for f in futs]
+    # A spreadsheet row names a company twice ("NOV IBIS" and "Novo Nordisk"):
+    # the listing typed as a ticker is the one meant, not the most traded.
+    typed = {c.get("group") for c in got if isinstance(c, dict) and c["match"] == "exact"} - {None}
     cards, at, missing, late, warnings = [], {}, [], [], list(q["notes"])
-    for part, f in zip(parts, futs, strict=True):
-        card = f.result() if f.done() and not f.cancelled() else "late"
+    for part, card in zip(parts, got, strict=True):
         if card is None or card == "late":
             (missing if card is None else late).append(part)
+            continue
+        if card["match"] != "exact" and card.get("group") in typed and not _CLASS_PART.search(part):
             continue
         i = at.setdefault(card["ticker"], len(cards))
         if i == len(cards):

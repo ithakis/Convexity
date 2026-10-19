@@ -360,7 +360,10 @@ The conventions (audit of 2026-09-29, `docs/METRICS_AUDIT.md`):
   JSON's NaN slips past `float()`, falls back to the defaults; 0–200 bps).
   `trading{rebalances, turnover_ann (one-way), cost_drag_ann}` goes out with
   the stats, and the client's disk cache keeps it (a cached payload without it
-  is refetched once).
+  is refetched once). `rebalances` counts calendar reset days that traded; an
+  entry trade is in turnover and cost but not in the count (a late listing
+  made a monthly year read 13). The Excel export's Read me states the
+  setting its returns assume (`xlsx_export._trading_line`).
 - **Sharpe / Sortino** on excess returns r_t − rf_t: in USD rf_t is the
   13-week T-bill (`^IRX`, (1+y/100)^(1/252) − 1 per day); other display
   currencies have no Yahoo short-rate series and use 0. `stats.rf_source`
@@ -1417,7 +1420,12 @@ the page shows it as chips, every search prints one `[search]` line.
   Colombian line). Legal forms ("S.A.", "N.V.", "AB") join the name before
   them (`sdb._SUFFIX`); weights, amounts and bare numbers after a ticker are
   stripped. A paste where fewer than half the parts are sure matches is not
-  a list ("AI, robotics, automation" is a theme). The whole list runs under
+  a list ("AI, robotics, automation" is a theme). A header word as a whole
+  part ("Ticker", "Name", "Weight (%)": `_HEADER`) is dropped; lower-case class
+  tickers dash too (`brk.b` → BRK-B). A name that lands on the company of a
+  ticker typed elsewhere in the paste (a spreadsheet row "NOV IBIS, Novo
+  Nordisk") is dropped for that listing, unless it names a share class
+  ("GOOGL, Alphabet Class C" stays two). The whole list runs under
   one 20 s `Deadline`; truncation (50 names, 4,000 characters), duplicates
   and unfinished parts are warnings, never silent.
 - **`run`** — names and pure sector/region screens offline on the pack;
