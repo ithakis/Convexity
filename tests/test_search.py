@@ -476,3 +476,68 @@ def test_a_return_ranking_needs_a_profit(yahoo):
          "rank": {"field": "roe", "dir": "desc", "by": "ai"}}  # fmt: skip
     s.search("", query=q)
     assert ("gt", "netincomemargin.lasttwelvemonths", 0) in _flat(yahoo["calls"][0]["query"])
+
+
+# Fund lines and a namesake, for pasted lists of share classes and short names.
+_FUNDS = [
+    ["QQQM", "Invesco NASDAQ 100 ETF", "etf", "NGM", "us", None, None, None, None, 901, 1],
+    ["EQAC.SW", "Invesco EQQQ NASDAQ-100 UCITS ETF Acc", "etf", "EBS", "ch", None, None, None, None, 902, 1],
+    ["EQQS.L", "Invesco NASDAQ-100 Swap UCITS ETF Acc", "etf", "LSE", "gb", None, None, None, None, 903, 1],
+    ["EQQQ.L", "Invesco EQQQ NASDAQ-100 UCITS ETF", "etf", "LSE", "gb", None, None, None, None, 904, 1],
+    ["HSPX.L", "HSBC S&P 500 UCITS ETF", "etf", "LSE", "gb", None, None, None, None, 905, 1],
+    ["HSPA.L", "HSBC S&P 500 UCITS ETF USD (Acc)", "etf", "LSE", "gb", None, None, None, None, 906, 1],
+    ["HSPC.SW", "HSBC S&P 500 UCITS ETF CHF Hedged (Acc)", "etf", "EBS", "ch", None, None, None, None, 907, 1],
+    ["SPY", "SPDR S&P 500 ETF Trust", "etf", "PCX", "us", None, None, None, None, 908, 1],
+    ["SPPE.DE", "SPDR S&P 500 UCITS ETF", "etf", "GER", "de", None, None, None, None, 909, 1],
+    ["5425.TWO", "Taiwan Semiconductor Co., Ltd.", "stock", "TWO", "tw", "Technology", "Semiconductors", 8e8, None, 910, 1],
+    ["MU", "Micron Technology, Inc.", "stock", "NMS", "us", "Technology", "Semiconductors", 1.2e12, None, 911, 1],
+]  # fmt: skip
+
+
+@pytest.fixture()
+def funds():
+    from tests.test_symbol_db import ROWS
+
+    install(ROWS + _FUNDS)
+
+
+def _tickers(text):
+    out = s.search(text)
+    assert out["query"]["kind"] == "list", out["query"]
+    return [c["ticker"] for c in out["results"]], out["warnings"]
+
+
+def test_the_owners_paste_resolves_every_part(funds, yahoo):
+    """Two six-word fund names used to fail the old five-words-a-part rule, and
+    the rule parser then read Nasdaq / ETF / Taiwan / Technology as a screen."""
+    text = ("Invesco NASDAQ 100 Acc UCITS ETF, NVIDIA, HSBC S&P 500 Dist UCITS ETF, Apple, "
+            "Alphabet (Class A), Taiwan Semiconductor, Micron Technology")  # fmt: skip
+    # TSMC, not the $0.8B "Taiwan Semiconductor Co." (here its home line: the
+    # test pack has no ADR volume to prefer TSM).
+    assert _tickers(text) == (["EQAC.SW", "NVDA", "HSPX.L", "AAPL", "GOOGL", "2330.TW", "MU"], [])
+
+
+@pytest.mark.parametrize(
+    "text, want",
+    [
+        ("HSBC S&P 500 Acc\nHSBC S&P 500 Dist", ["HSPA.L", "HSPX.L"]),  # newline; share class
+        ("SPDR S&P 500 ETF; SPDR S&P 500 UCITS ETF", ["SPY", "SPPE.DE"]),  # UCITS only if typed
+        ("Apple Inc., Microsoft", ["AAPL", "MSFT"]),  # a legal form is not a part
+        ("Berkshire Hathaway Class B, NVDA", ["BRK-B", "NVDA"]),
+        ("LSE:HSPX, NASDAQ:MSFT", ["HSPX.L", "MSFT"]),  # exchange prefixes keep the listing
+        ("NVDA, MSFT, nvda, ,", ["NVDA", "MSFT"]),  # repeats and empty parts
+        ("S&P Global Inc., NVDA", ["NVDA"]),  # "&" is a name, not a filter: still a list
+    ],
+)
+def test_pasted_list_edge_cases(funds, yahoo, text, want):
+    got, _ = _tickers(text)
+    assert [t for t in got if t in want] == want
+
+
+def test_category_words_alone_stay_a_screen(funds, yahoo):
+    assert s.parse("semiconductors, banks")["kind"] == "screen"
+
+
+def test_a_long_paste_is_not_cut_at_300_characters(funds, yahoo):
+    text = ", ".join(["Apple Inc"] * 40 + ["Micron Technology"])
+    assert len(text) > 300 and _tickers(text)[0] == ["AAPL", "MU"]

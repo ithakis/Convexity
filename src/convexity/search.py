@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict
 
+from convexity import resolver
 from convexity import symbol_db as sdb
 from convexity.helpers import Deadline
 
@@ -532,8 +533,34 @@ def _ticker_run(text: str) -> list[str] | None:
     return toks if all(sdb.get(t) for t in toks) else None
 
 
+# A part that is only a legal form or share class belongs to the name before
+# it: "Apple Inc., Microsoft" or "Alphabet Inc., Class A".
+_SUFFIX_PART = re.compile(r"(inc|ltd|plc|corp|co|llc|sa|ag|nv|se|class\s+[a-c])\.?", re.IGNORECASE)
+
+
 def _parts(text: str) -> list[str]:
-    return _ticker_run(text) or [p.strip() for p in re.split(r"[,;\n]+", text) if p.strip()]
+    run = _ticker_run(text)
+    if run:
+        return run
+    out: list[str] = []
+    for p in (p.strip() for p in re.split(r"[,;\n]+", text)):
+        if out and _SUFFIX_PART.fullmatch(p):
+            out[-1] += ", " + p
+        elif p:
+            out.append(p)
+    return out
+
+
+def _all_categories(parts: list[str]) -> bool:
+    """Every part a category and nothing else ("semiconductors, banks"): a
+    screen, not a list of companies."""
+    for p in parts:
+        pq, left = parse_rules(p)
+        if left or not any(
+            pq[k] for k in ("sectors", "industries", "regions", "types", "exchanges")
+        ):
+            return False
+    return True
 
 
 def _brief(q: dict) -> dict:
@@ -549,9 +576,17 @@ def parse(text: str) -> dict:
     as a theme, or "best" needs a metric — and only with a key."""
     q, left = parse_rules(text)
     # A pasted list ("AAPL, microsft, Novo"): one company per part, no AI.
+    # Any length of name ("HSBC S&P 500 Dist UCITS ETF"); criteria with an
+    # operator, or parts that are all categories, stay a screen. Not cut to
+    # the screen's 300 characters: a long paste keeps every part.
     parts = _parts(text)
-    if len(parts) >= 2 and not q["filters"] and all(len(p.split()) <= 5 for p in parts):
-        return {**empty(q["text"]), "kind": "list"}
+    if (
+        len(parts) >= 2
+        and not q["filters"]
+        and not re.search(r"[<>=]", text)
+        and not _all_categories(parts)
+    ):
+        return {**empty(text.strip()[:_LIST_TEXT]), "kind": "list"}
     if left and not q["filters"]:
         # "deutsche bank", "bank of america", "american express": category
         # words inside a company name. A near-exact name wins over the parse.
@@ -679,35 +714,119 @@ _LABELS = {k: v[:2] for k, v in FIELDS.items()}  # the page formats values with 
 _LIST_MAX = 50
 
 
+_LIST_TEXT = 4000
+# Words that make a fund a different fund; a candidate carrying one the user
+# did not type is a worse match ("Swap", "ESG", "EUR Hdg" next to the plain one).
+_QUALIFIERS = {"swap", "esg", "hedged", "hdg", "leveraged", "short", "inverse", "2x", "3x",
+               "income", "ex", "equal", "covered", "buffer", "daily", "ultra"}  # fmt: skip
+# A currency in a fund's name ("2C EUR", "3CCHF") marks a hedged or currency
+# share class: a different line from the plain one unless typed.
+_CCY_CLASS = re.compile(r"(eur|chf|gbp|jpy|cad|aud|sek|nok|hkd)$")
+_ACC = {"acc", "accumulating", "accumulation"}
+_DIST = {"dist", "distributing", "distribution"}
+_CLASS_WORDS = re.compile(rf"\b({'|'.join(_ACC | _DIST)})\b", re.IGNORECASE)
+# Share-class and wrapper words: out of a Yahoo name search, kept as hints.
+_FUND_WORDS = re.compile(rf"\b(ucits|etf|class\s+[a-c]|{'|'.join(_ACC | _DIST)})\b", re.IGNORECASE)
+
+
+def _pick(part: str, hits: list) -> sdb.Hit | None:
+    """The best of the near-equal name matches (within 6 points of the top),
+    read with what the typed name says beyond the company: UCITS wants a
+    non-US line, Acc/Dist the matching share class, Class B a -B ticker, and
+    a qualifier nobody typed costs. Then a short name of a giant is the giant:
+    "Taiwan Semiconductor" is TSMC, not the $0.8B company with that exact name."""
+    if not hits:
+        return None
+    typed = set(sdb.name_key(part).split())
+    acc, dist = typed & _ACC, typed & _DIST
+    if acc or dist:  # only UCITS funds come in Acc / Dist share classes
+        typed.add("ucits")
+    cls = re.search(r"class\s+([a-c])\b", part, re.IGNORECASE)
+
+    near = [h for h in hits if h.score >= hits[0].score - 6]
+    # UCITS nobody typed counts against a line only when the US fund of that
+    # name is in the running ("SPDR S&P 500 ETF" is SPY).
+    us_alt = any(h.region == "us" for h in near)
+
+    def adj(h) -> float:
+        n = set(sdb.name_key(h.name).split())
+        extra = n - typed
+        a = h.score - 4 * (
+            len(extra & _QUALIFIERS) + sum(bool(_CCY_CLASS.search(w)) for w in extra)
+        )
+        if us_alt and "ucits" in extra:
+            a -= 4
+        if "ucits" in typed:
+            a += 3 if h.region != "us" else -5
+        if acc:  # an unmarked UCITS line is usually the distributing class
+            a += 3 if n & _ACC else -6 if n & (_DIST | {"inc"}) else -3
+        if dist:
+            a += 3 if n & (_DIST | {"inc"}) else -6 if n & _ACC else 0
+        if cls and re.search(rf"[-.]{cls[1]}$", h.ticker, re.IGNORECASE):
+            a += 3
+        return a
+
+    best = max(near, key=adj)
+    if best.type == "stock" and best.mcap_usd:
+        key = sdb.name_key(part)
+        giants = [h for h in hits if h.type == "stock" and h.score >= 90 and h.mcap_usd
+                  and h.mcap_usd >= 20 * best.mcap_usd and sdb.name_key(h.name).startswith(key)]  # fmt: skip
+        if giants:
+            best = max(giants, key=lambda h: h.mcap_usd)
+    return best
+
+
+def _resolve_part(part: str) -> tuple[str, object]:
+    """One pasted part: ("exact", Hit) for a ticker as typed (that listing is
+    kept), ("hit", Hit) for a name, ("card", card) from Yahoo, or ("miss", part)."""
+    pair = resolver._normalize_exchange_prefix(resolver._normalize_google_colon(part))
+    exact = sdb.get(pair[0] if pair else part)  # "LSE:HSPX" is HSPX.L
+    if exact is not None:
+        return "exact", exact
+    # The share-class words lower a name's score ("Vanguard FTSE All-World
+    # Dist": 82.5 with them, 92.5 without), so both readings are matched and
+    # _pick weighs the words as hints.
+    plain = _CLASS_WORDS.sub(" ", part).strip() or part
+    hits = {x.ticker: x for x in sdb.lookup(plain, limit=10)} if plain != part else {}
+    for x in sdb.lookup(part, limit=10):
+        if x.score >= getattr(hits.get(x.ticker), "score", -1):
+            hits[x.ticker] = x
+    h = _pick(part, sorted(hits.values(), key=lambda x: -x.score))
+    if h is not None and h.score >= 85:
+        return "hit", h
+    # A weak pack match ("richter" -> Richtech Robotics) loses to a company
+    # Yahoo names with the typed words in it (share-class words aside).
+    plain = _FUND_WORDS.sub(" ", part).strip() or part
+    words = set(sdb.name_key(plain).split())
+    card = next((c for c in _yahoo_cards(plain, (), part)
+                 if c["ticker"] == part.upper() or (words and words <= set(sdb.name_key(c["name"]).split()))),
+                None)  # fmt: skip
+    if card is not None:
+        return "card", card
+    return ("hit", h) if h is not None else ("miss", part)
+
+
 def _run_list(q: dict, t0: float) -> dict:
     """A pasted list: each part as typed (an exact ticker stays that listing),
-    else its best name match; all on one page. Not cached: lookups are."""
+    else its best name match; all on one page, in the order pasted. Parts
+    resolve in parallel (a Yahoo fallback can take seconds each). Not cached:
+    lookups are."""
+    parts = _parts(q["text"])[:_LIST_MAX]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        found = list(pool.map(_resolve_part, parts))
     cards, seen, missing = [], set(), []
-    for part in _parts(q["text"])[:_LIST_MAX]:
-        h = sdb.get(part) or next(iter(sdb.lookup(part, limit=1)), None)
-        if h is None or (h.score < 85 and h.ticker != part.upper()):
-            # A weak pack match ("richter" -> Richtech Robotics) loses to a
-            # company Yahoo names with the typed words in it.
-            words = set(sdb.name_key(part).split())
-            card = next((c for c in _yahoo_cards(part, seen, part)
-                         if c["ticker"] == part.upper() or (words and words <= set(sdb.name_key(c["name"]).split()))),
-                        None)  # fmt: skip
-            if card is None and h is not None and h.ticker not in seen:
-                seen.add(h.ticker)
-                cards.append(_card(h))
-                continue
-            if card is None:
-                missing.append(part)
-            else:
-                seen.add(card["ticker"])
-                cards.append(card)
-        elif h.ticker not in seen:
-            seen.add(h.ticker)
-            cards.append(_card(h, keep=h.ticker == part.upper()))
+    for part, (kind, v) in zip(parts, found, strict=True):
+        if kind == "miss":
+            missing.append(part)
+            continue
+        card = v if kind == "card" else _card(v, keep=kind == "exact")
+        if card["ticker"] not in seen:
+            seen.add(card["ticker"])
+            cards.append(card)
     warnings = [f"Not found: {', '.join(missing)}."] if missing else []
     if not cards and not sdb.status()["installed"]:
         warnings = ["The symbol list is still downloading; try again in a minute."]
-    print(f"[search] list of {len(_parts(q['text']))} engine=rules kind=list"
+    print(f"[search] list of {len(parts)} engine=rules kind=list"
           f" results={len(cards)} missing={len(missing)} {time.time() - t0:.1f}s", flush=True)  # fmt: skip
     return {"query": q, "chips": [], "results": cards, "total": len(cards), "offset": 0,
             "warnings": warnings, "notes": [], "fields": _LABELS}  # fmt: skip
