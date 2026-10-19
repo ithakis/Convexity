@@ -3001,18 +3001,19 @@ function tradingPopOpen(anchor, a) {
   el.style.top = r.bottom + 6 + "px";
   tradingPopSync(a);
 }
-function tradingPopRender(el) {
+/* The calendar pills, the cost presets and the custom bps field: one renderer
+   for the chart's panel and the optimizer's Constraints sheet ([data-tr-host]). */
+function tradingControlsRender(host) {
+  if (!host) return;
   const t = tradingPrefs();
   const seg = (k, v, label, tip) => `<button type="button" data-tr="${k}" data-v="${v}" class="${String(t[k]) === String(v) ? "on" : ""}" aria-pressed="${String(t[k]) === String(v)}" data-tip="${tip}">${label}</button>`;
-  el.innerHTML = `
+  host.innerHTML = `
     <div class="tr-row"><span class="tr-k">Rebalance</span><div class="tr-seg">${Object.entries(REBALANCE_LABEL).map(([k, l]) =>
       seg("rebalance", k, k === "S" ? "6M" : l, k === "N" ? "Buy and hold: set once, never reset" : `Reset to the target weights on the first trading day of each ${{D: "day", W: "week", M: "month", Q: "quarter", S: "half-year", Y: "year"}[k]}`)).join("")}</div></div>
     <div class="tr-row"><span class="tr-k">Trading cost</span><div class="tr-seg">${[0, 5, 10, 25].map(v =>
       seg("tc_bps", v, `${v}`, v ? `${v} bps of every amount bought or sold` : "No trading cost")).join("")}</div>
-      <label class="tr-num"><input type="number" min="0" max="200" step="1" value="${+t.tc_bps}" aria-label="Trading cost in bps"> bps</label></div>
-    <div class="tr-read" id="tr-read"></div>
-    <p class="tr-note">The weights apply from the first day of the period and drift with prices; each rebalance resets them and pays the cost on everything it buys and sells. The first purchase is free.</p>`;
-  const inp = el.querySelector("input");
+      <label class="tr-num"><input type="number" min="0" max="200" step="1" value="${+t.tc_bps}" aria-label="Trading cost in bps"> bps</label></div>`;
+  const inp = host.querySelector("input");
   inp.addEventListener("change", () => {
     const v = Math.round(Math.min(200, Math.max(0, +inp.value || 0)));
     inp.value = v;
@@ -3020,13 +3021,19 @@ function tradingPopRender(el) {
   });
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
 }
+function tradingPopRender(el) {
+  el.innerHTML = `<div data-tr-host></div><div class="tr-read" id="tr-read"></div>
+    <p class="tr-note">The weights apply from the first day of the period and drift with prices; each rebalance resets them and pays the cost on everything it buys and sells. The first purchase is free.</p>`;
+  tradingControlsRender(el.querySelector("[data-tr-host]"));
+}
 function tradingSet(change) {
   const next = {...tradingPrefs(), ...change};
   if (next.rebalance === tradingPrefs().rebalance && next.tc_bps === tradingPrefs().tc_bps) return;
   APP_PREFS = {...APP_PREFS, ...change};
   savePrefs(change);
-  const el = document.querySelector(".tr-pop");
-  if (el) { tradingPopRender(el); tradingPopSync(null); }
+  document.querySelectorAll("[data-tr-host]").forEach(tradingControlsRender);
+  tradingPopSync(null);
+  mptConsSummary();
   requestAnalytics();
 }
 function tradingPopSync(a) {
@@ -9984,7 +9991,7 @@ async function openMptOverlay() {
       "Save the portfolio first to keep runs / presets.";
   } else {
     document.getElementById("pf-mpt-sub").textContent =
-      "Black-Litterman returns · mean-CVaR frontier · " + STATE.activeView;
+      STATE.activeView + " · Black-Litterman returns · mean-CVaR frontier";
   }
   MPT.view = STATE.activeView;
   showOverlay("#pf-mpt-bg");
@@ -9996,6 +10003,7 @@ async function openMptOverlay() {
   // restored rf. No saved run ⇒ rf falls through to Auto (the requested default).
   const restored = await mptRestoreLast();  // repaint the last saved run, if any
   await mptFetchRfAuto({silent: true, keepRf: restored});
+  mptConsSummary();
 }
 function closeMptOverlay() {
   if (MPT.abort) { try { MPT.abort.abort(); } catch (_) {} MPT.abort = null; }
@@ -10037,9 +10045,9 @@ RICH_TIPS["mpt-budget"] = () => `
 function mptAlpha() { return MPT.result?.params?.alpha || 0.95; }
 const MPT_METRIC_INFO = {
   ret: () => ({
-    label: "Expected return (Black-Litterman)",
-    formula: String.raw`\mu_p = \sum_i w_i\,\mu_i^{BL}`,
-    desc: "Annual expected return of this frontier point from the Black-Litterman posterior: market-implied equilibrium returns blended with analyst price-target views, in proportion to the analyst-trust setting. Cash, when allowed, earns the risk-free rate.",
+    label: "Expected return (Black-Litterman, net of trading cost)",
+    formula: String.raw`\mu_p = \sum_i w_i\,\big(\mu_i^{BL} - c\,f\,m_i\big)`,
+    desc: "Annual expected return of this frontier point from the Black-Litterman posterior: market-implied equilibrium returns blended with analyst price-target views, in proportion to the analyst-trust setting, less what keeping each weight costs (c the cost per trade, f rebalances a year, m_i the holding's average drift from the market between rebalances). Cash, when allowed, earns the risk-free rate.",
     range: "A model estimate, not a forecast to bank on: it moves with the trust setting and the views. Use it to compare points along the frontier.",
   }),
   var: () => {
@@ -10099,6 +10107,24 @@ const MPT_METRIC_INFO = {
     desc: "Fully invested is off, so part of the portfolio can sit in cash earning the risk-free rate.",
     range: "Cash usually grows toward the low-risk end of the frontier, where it is the cheapest way to cut CVaR.",
   }),
+  cost: () => ({
+    label: "Trading cost a year",
+    formula: String.raw`1 - \Big(\prod_t (1 - c\,\textstyle\sum_i |\Delta w_{i,t}|)\Big)^{1/\text{years}}`,
+    desc: "What rebalancing this portfolio back to its weights on the chosen calendar cost a year over the lookback: its weights drift with prices, each rebalance buys and sells the difference, and every trade pays the cost per trade set under Constraints.",
+    range: "Grows with the calendar's frequency, the cost per trade and how differently the holdings move. The expected return above is already net of it.",
+  }),
+  turnover: () => ({
+    label: "Turnover a year",
+    formula: String.raw`\tfrac12 \sum_t \sum_i |\Delta w_{i,t}| \,/\, \text{years}`,
+    desc: "Half of everything bought and sold a year to keep the weights, from the same drift backtest over the lookback.",
+    range: "Buy and hold trades nothing after the start; daily rebalancing of volatile names can trade several times the portfolio a year.",
+  }),
+  switch: () => ({
+    label: "Cost to switch",
+    formula: String.raw`c \sum_i |w_i - w_i^{\text{now}}|`,
+    desc: "The one-off cost of moving from the portfolio's current weights to this point, at the cost per trade set under Constraints.",
+    range: "Paid once, unlike the yearly trading cost; small next to it unless the move is large or the cost per trade high.",
+  }),
   views: () => ({
     label: "Analyst views",
     formula: String.raw`\text{views} = \#\{\,i : \text{analyst price target available}\,\}`,
@@ -10138,7 +10164,7 @@ function mptGetParams() {
   const cov_model = document.querySelector("#pf-mpt-cov .active")?.dataset.v || "ledoit";
   const haircut = (Number(document.getElementById("pf-mpt-haircut").value) || 0) / 100;
   const budget = document.getElementById("pf-mpt-budget").dataset.value || "standard";
-  return {lookback, alpha, rf, fully_invested, cov_model, haircut, budget, bounds: mptGetBounds()};
+  return {lookback, alpha, rf, fully_invested, cov_model, haircut, budget, bounds: mptGetBounds(), ...tradingPrefs()};
 }
 
 /* --- Streaming progress bar (real pct + ETA from the NDJSON stream) --- */
@@ -10396,10 +10422,9 @@ function mptClearChart() {
    The redraw is a FULL mptRenderChart() with no fixedProj: the cloud is complete
    by now and gets repainted from MPT.result.cloud against the same recomputed
    projection, so chart and scatter cannot disagree. _settling bounds this to a
-   single extra pass; skipped while the limits panel is open, because that
-   shrinkage IS the intended crop. */
+   single extra pass. */
 function mptSettleChartHeight() {
-  if (MPT._settling || !MPT.result || mptBoundsPanelOpen()) return;
+  if (MPT._settling || !MPT.result) return;
   const host = document.getElementById("pf-mpt-chart");
   if (!host) return;
   const h = Math.max(280, Math.floor(host.getBoundingClientRect().height));
@@ -10430,47 +10455,18 @@ function mptCvarHi(p) { return p && p.cvar30_hi != null ? p.cvar30_hi : (p ? p.c
 // Format a loss fraction (e.g. 0.12) as "12.0%"; null/NaN → "—".
 function mptFmtLoss(v, dp = 1) { return (v == null || !isFinite(v)) ? "—" : (v * 100).toFixed(dp) + "%"; }
 
-// Resize both canvases identically through one helper so their backing
+// Resize the three canvases identically through one helper so their backing
 // stores cannot drift apart. CSS controls the *display* size (width:100% +
 // height:var(--mpt-chart-h)); we touch ONLY the backing store. Setting inline
 // width/height previously left the canvas stuck at its first measurement
 // even when the modal reflowed, causing axis labels to render below the
 // chart's visual box.
-//
-// The height is additionally LOCKED while the per-position limits panel is open,
-// as a second line of defence. Primary defence is mptPinBodyHeight() below: the
-// panel pushes the workspace down inside a scroll container instead of stealing
-// height from it, so .pf-mpt-chart does not actually change size. The lock still
-// matters because the browser can reflow the obstructed box for other reasons
-// (a window resize with the panel up), and re-measuring then would rescale a
-// stale bitmap — which is precisely what deformed the plot before any of this
-// existed: nothing called this on toggle at all, so the old bitmap was simply
-// stretched into the new box.
-function mptBoundsPanelOpen() {
-  const p = document.getElementById("pf-mpt-bounds");
-  return !!(p && !p.hidden);
-}
-/* Freeze / release .pf-mpt-body's height around the limits panel opening.
-   `--mpt-body-h` is read by the CSS as .pf-mpt-body's min-height; with the panel
-   open the scroll container overflows by exactly the panel's height and the user
-   scrolls down to the chart, rather than the chart being squeezed or clipped.
-   Must be called BEFORE `panel.hidden` flips, so the measurement is the
-   un-pushed height. */
-function mptPinBodyHeight(pin) {
-  const scroll = document.getElementById("pf-mpt-scroll");
-  const body = scroll?.querySelector(".pf-mpt-body");
-  if (!scroll || !body) return;
-  if (!pin) { scroll.style.removeProperty("--mpt-body-h"); return; }
-  const h = Math.round(body.getBoundingClientRect().height);
-  if (h > 0) scroll.style.setProperty("--mpt-body-h", h + "px");
-}
 function mptSizeCanvases(host) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const rect = host.getBoundingClientRect();
   const cssW = Math.max(360, Math.floor(rect.width));
-  const locked = mptBoundsPanelOpen() && MPT._chartH ? MPT._chartH : null;
-  const cssH = locked != null ? locked : Math.max(280, Math.floor(rect.height));
-  if (locked == null) MPT._chartH = cssH;
+  const cssH = Math.max(280, Math.floor(rect.height));
+  MPT._chartH = cssH;
   // Publish the drawn height to CSS so the canvas elements keep it even after the
   // parent shrinks. Without this the CSS box would follow the parent and rescale.
   host.style.setProperty("--mpt-chart-h", cssH + "px");
@@ -11071,21 +11067,26 @@ function mptRenderSide() {
   const cash = d.params?.fully_invested === false;
   const invested = Object.values(sel.weights || {}).reduce((a, b) => a + b, 0);
   const lo = mptCvarLo(sel), hi = mptCvarHi(sel);
-  const bandRow = (lo != null && hi != null)
-    ? `<span class="k" tabindex="0" data-rich-tip="mpt:band">CVaR band (bootstrap)</span><span class="v">${mptFmtLoss(lo)}–${mptFmtLoss(hi)}</span>`
-    : "";
-  stats.innerHTML = `
-    <span class="k" tabindex="0" data-rich-tip="mpt:ret">Expected return (BL)</span><span class="v ${sel.ret >= 0 ? "pos" : "neg"}">${(sel.ret * 100).toFixed(2)}%</span>
-    ${sel.var30 != null ? `<span class="k" tabindex="0" data-rich-tip="mpt:var">VaR ${aConf}% (30-day)</span><span class="v neg">${mptFmtLoss(sel.var30, 2)}</span>` : ""}
-    <span class="k" tabindex="0" data-rich-tip="${sel.cvar30 != null ? "mpt:cvar" : "mpt:cvar-legacy"}">CVaR ${aConf}% ${sel.cvar30 != null ? "(30-day)" : "(annualized · legacy)"}</span><span class="v neg">${mptFmtLoss(mptCvar(sel), 2)}</span>
-    ${bandRow}
-    <span class="k" tabindex="0" data-rich-tip="mpt:mdd">Max drawdown</span><span class="v neg">${(sel.mdd * 100).toFixed(1)}%</span>
-    <span class="k" tabindex="0" data-rich-tip="mpt:cdar">CDaR (95%)</span><span class="v neg">${(sel.cdar * 100).toFixed(1)}%</span>
-    <span class="k" tabindex="0" data-rich-tip="mpt:vol">Volatility (ref.)</span><span class="v">${sel.vol != null ? (sel.vol * 100).toFixed(2) + "%" : "—"}</span>
-    ${cash ? `<span class="k" tabindex="0" data-rich-tip="mpt:cash">Invested / cash</span><span class="v">${(invested*100).toFixed(0)}% / ${((1-invested)*100).toFixed(0)}%</span>` : ""}
-    <span class="k" tabindex="0" data-rich-tip="mpt:views">Analyst views</span><span class="v">${(bl.viewed || []).length}/${(d.symbols || []).length}${bl.haircut != null ? ` <span style="color:var(--muted);font-weight:400">@ ${Math.round(bl.haircut*100)}% trust</span>` : ""}</span>
-    <span class="k" tabindex="0" data-rich-tip="mpt:assets">Active assets</span><span class="v">${(d.symbols || []).length}${(d.missing || []).length ? ` <span style="color:var(--muted);font-weight:400">(${(d.missing||[]).length} dropped)</span>` : ""}</span>
-  `;
+  const pc = (v, dp = 1) => (v == null || !isFinite(v) ? "—" : (v * 100).toFixed(dp) + "%");
+  const costed = sel.cost_ann != null;
+  const tile = (k, label, v, cls) => `<div class="pf-mpt-tile" tabindex="0" data-rich-tip="mpt:${k}"><span>${label}</span><b class="${cls || ""}">${v}</b></div>`;
+  const row = (k, label, v, cls) => `<span class="k" tabindex="0" data-rich-tip="mpt:${k}">${label}</span><span class="v ${cls || ""}">${v}</span>`;
+  const sub = (t) => ` <span class="pf-mpt-subv">${t}</span>`;
+  document.getElementById("pf-mpt-tiles").innerHTML =
+    tile("ret", costed ? "Return, net" : "Expected return", pc(sel.ret), sel.ret >= 0 ? "pos" : "neg") +
+    tile(sel.cvar30 != null ? "cvar" : "cvar-legacy", `CVaR ${aConf}% · 30d`, mptFmtLoss(mptCvar(sel)), "neg") +
+    tile("mdd", "Max drawdown", pc(sel.mdd), "neg") +
+    tile("cost", "Trading cost", costed ? pc(sel.cost_ann, 2) + "/yr" : "—");
+  stats.innerHTML =
+    (sel.var30 != null ? row("var", `VaR ${aConf}% (30-day)`, mptFmtLoss(sel.var30, 2), "neg") : "") +
+    (lo != null && hi != null ? row("band", "CVaR band (bootstrap)", `${mptFmtLoss(lo)}–${mptFmtLoss(hi)}`) : "") +
+    row("cdar", "CDaR (95%)", pc(sel.cdar), "neg") +
+    row("vol", "Volatility", pc(sel.vol, 2)) +
+    (costed ? row("turnover", "Turnover", `${pc(sel.turnover_ann, 0)}/yr` + sub(d.params?.rebalance ? escapeHtml(REBALANCE_LABEL[d.params.rebalance]) : "")) : "") +
+    (costed ? row("switch", "Cost to switch", pc(sel.switch_cost, 2) + sub("from current")) : "") +
+    (cash ? row("cash", "Invested / cash", `${(invested * 100).toFixed(0)}% / ${((1 - invested) * 100).toFixed(0)}%`) : "") +
+    row("views", "Analyst views", `${(bl.viewed || []).length}/${(d.symbols || []).length}` + (bl.haircut != null ? sub(`@ ${Math.round(bl.haircut * 100)}% trust`) : "")) +
+    row("assets", "Active assets", `${(d.symbols || []).length}` + ((d.missing || []).length ? sub(`(${d.missing.length} dropped)`) : ""));
   // Weights bars (sorted descending; zero-weight rows hidden). Each row's symbol
   // carries a rich hover (mptAssetTip) with the asset's risk/return/analyst stats.
   const wlist = document.getElementById("pf-mpt-wlist");
@@ -11307,6 +11308,7 @@ function mptRunParamsLabel(p) {
   if (p.alpha != null) parts.push(Math.round(p.alpha * 100) + "%");
   if (p.budget) parts.push(p.budget);
   if (p.cov_model) parts.push(p.cov_model);
+  if (p.rebalance) parts.push(`${REBALANCE_LABEL[p.rebalance] || p.rebalance} ${+p.tc_bps || 0} bps`);
   return parts.join(" · ");
 }
 function mptRunHeadline(run) {
@@ -11373,6 +11375,7 @@ function mptLoadRun(run) {
   if (status) status.innerHTML = "";
   mptRender();
   mptRenderRunHistory(MPT._runs);          // refresh the active-row highlight
+  mptConsSummary();
 }
 
 // On overlay open: fetch this portfolio's run history (last 3), render the list,
@@ -11442,29 +11445,29 @@ document.getElementById("pf-mpt-cancel")?.addEventListener("click", () => {
   if (MPT.abort) { try { MPT.abort.abort(); } catch (_) {} }
 });
 
-// Per-position limits panel: toggle, live edits, "all" broadcast, reset.
-document.getElementById("pf-mpt-bounds-btn")?.addEventListener("click", (e) => {
-  const panel = document.getElementById("pf-mpt-bounds");
-  if (!panel) return;
-  const show = panel.hidden;
-  // The panel is a temporary editor, so it PUSHES the workspace down rather than
-  // stealing height from it: pin .pf-mpt-body to the height it has right now,
-  // then let .pf-mpt-scroll overflow. The chart, slider and legend keep their
-  // exact geometry and simply move below the fold — nothing is squashed and
-  // nothing is cropped, so MPT._proj stays valid and hover/click keep hitting the
-  // right frontier point. Measure BEFORE unhiding, or the panel is already in the
-  // flow and we would pin the post-push height.
-  mptPinBodyHeight(show);
-  panel.hidden = !show;
-  e.currentTarget.setAttribute("aria-expanded", show ? "true" : "false");
-  if (show) mptRenderBounds();
-  // Closing releases the pin, so .pf-mpt-body grows back to fill the scroll
-  // column. That is a no-op unless the window was resized while the panel was up
-  // — in which case the body lands at a new height and the chart has to be
-  // re-measured. MPT.abort is non-null only while a run streams; re-rendering
-  // then would drop the streaming fixed projection and repaint a half-filled
-  // cloud, and the geometry is unchanged in the common case anyway.
-  else if (MPT.result && !MPT.abort) mptRender();
+/* Constraints sheet (over the optimizer): cash, the shared rebalancing and
+   cost, the risk-free rate and the per-position limits. It floats over the
+   workspace, so the chart never changes size when it opens. */
+function mptConsSummary() {
+  const el = document.getElementById("pf-mpt-cons-sum");
+  if (!el) return;
+  const n = Object.keys(mptGetBounds() || {}).length;
+  const cash = (document.querySelector("#pf-mpt-invest .active")?.dataset.v || "full") === "cash";
+  el.textContent = [tradingLabel(), n ? `${n} limit${n > 1 ? "s" : ""}` : "", cash ? "cash" : ""].filter(Boolean).join(" · ");
+}
+function openMptCons() {
+  mptRenderBounds();
+  tradingControlsRender(document.getElementById("pf-mpt-trading"));
+  showOverlay("#pf-mpt-cons-bg");
+}
+function closeMptCons() { if (hideOverlay("#pf-mpt-cons-bg")) mptConsSummary(); }
+document.getElementById("pf-mpt-cons-btn")?.addEventListener("click", openMptCons);
+document.getElementById("pf-mpt-cons-close")?.addEventListener("click", closeMptCons);
+document.getElementById("pf-mpt-cons-done")?.addEventListener("click", closeMptCons);
+document.getElementById("pf-mpt-cons-bg")?.addEventListener("click", (e) => { if (e.target.id === "pf-mpt-cons-bg") closeMptCons(); });
+document.getElementById("pf-mpt-trading")?.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-tr]");
+  if (b) tradingSet(b.dataset.tr === "rebalance" ? {rebalance: b.dataset.v} : {tc_bps: +b.dataset.v});
 });
 document.getElementById("pf-mpt-bounds-reset")?.addEventListener("click", mptResetBounds);
 const _mptBoundsGrid = document.getElementById("pf-mpt-bounds-grid");
@@ -11669,6 +11672,7 @@ document.addEventListener("keydown", (e) => {
   // About-MPT modal takes precedence (it sits on top of the MPT overlay)
   const infoBg = document.getElementById("pf-mpt-info-bg");
   if (infoBg && infoBg.classList.contains("show")) { closeMptInfo(); return; }
+  if (document.getElementById("pf-mpt-cons-bg")?.classList.contains("show")) { closeMptCons(); return; }
   if (document.getElementById("pf-mpt-bg").classList.contains("show")) closeMptOverlay();
 });
 // Re-draw chart on window resize while overlay is open.

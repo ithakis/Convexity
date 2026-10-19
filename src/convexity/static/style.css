@@ -1019,7 +1019,7 @@
     text-decoration: underline dotted rgba(125, 125, 125, 0.75);
     text-underline-offset: 3px;
   }
-  .pf-mpt-rf-info[data-rich-tip], .pf-contrib-table [data-rich-tip], #inv-page [data-rich-tip] { text-decoration: none; }  /* the tip stays, the underline goes */
+  .pf-mpt-bg [data-rich-tip], .pf-contrib-table [data-rich-tip], #inv-page [data-rich-tip] { text-decoration: none; }  /* the tip stays, the underline goes */
   #m-sections .metric-tip-host[data-info] .k { text-decoration: none; }  /* stock window: the tip stays, the underline goes */
   [data-rich-tip]:focus-visible, .pf-contrib-table th[data-contrib-sort]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .pf-metric-tip .mt-table {
@@ -1434,102 +1434,87 @@
     display: flex; flex-direction: column; overflow: hidden;
   }
   .pf-mpt-head {
-    display: flex; align-items: center; gap: 14px;
-    padding: 12px 18px; border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, var(--bg-subtle), var(--bg-canvas));
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
   }
-  .pf-mpt-head .pf-mpt-title { font-weight: 700; font-size: 14.5px; }
+  .pf-mpt-head .pf-mpt-title, .pf-mpt-cons-head .pf-mpt-title { font-weight: 700; font-size: 14.5px; }
   .pf-mpt-head .pf-mpt-sub { color: var(--muted); font-size: 12px; }
-  .pf-mpt-head .spacer { flex: 1; }
-  .pf-mpt-info-btn {
-    width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center;
-    justify-content: center; border-radius: 50%; border: 1px solid var(--border);
-    background: var(--bg-canvas); cursor: pointer; color: var(--muted);
-  }
-  .pf-mpt-info-btn:hover { color: var(--accent); border-color: var(--accent); }
-  /* About-MPT overlay needs to layer on top of pf-mpt-bg (z-index 90). */
+  .pf-mpt-head .spacer, .pf-mpt-controls .spacer, .pf-mpt-cons-head .spacer, .pf-mpt-cons-foot .spacer { flex: 1; }
+  /* About-MPT and the Constraints sheet layer on top of pf-mpt-bg (z-index 90). */
   .pf-mpt-info-bg { z-index: 95; }
+  /* One toolbar of pills (TradingView-style): segmented groups, chip controls,
+     Constraints on the right. Every control says what it does on hover. */
   .pf-mpt-controls {
-    --mpt-ctl-h: 32px;
-    display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: end;
-    padding: 12px 18px; border-bottom: 1px solid var(--border);
-    background: var(--bg-subtle);
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 8px 16px; border-bottom: 1px solid var(--border);
   }
-  .pf-mpt-ctl {
-    display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; min-width: 0;
+  .pf-mpt-bg .seg {
+    display: inline-flex; gap: 2px; padding: 2px; height: 30px; box-sizing: border-box;
+    background: var(--bg-subtle); border-radius: 999px;
   }
-  .pf-mpt-ctl-run { margin-left: auto; }
-  .pf-mpt-ctl > label {
-    color: var(--muted); font-weight: 600; font-size: 10px; letter-spacing: 0.06em;
-    text-transform: uppercase; line-height: 14px;
+  .pf-mpt-bg .seg button {
+    background: transparent; border: none; padding: 0 11px; border-radius: 999px;
+    font: inherit; font-size: 12px; color: var(--text); cursor: pointer; line-height: 1;
   }
-  /* Uniform-height controls strip: every interactive control in the bar uses
-     --mpt-ctl-h so the four columns line up perfectly regardless of content. */
-  .pf-mpt-ctl .seg,
-  .pf-mpt-ctl input[type="number"],
-  .pf-mpt-ctl .pf-mpt-select,
-  .pf-mpt-ctl .pf-mpt-rf-wrap,
-  .pf-mpt-ctl .pf-mpt-bounds-btn,
-  .pf-mpt-ctl .pf-mpt-haircut-wrap,
-  .pf-mpt-run {
-    height: var(--mpt-ctl-h); box-sizing: border-box;
+  .pf-mpt-bg .seg button:hover { background: var(--hover); }
+  .pf-mpt-bg .seg button.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .pf-mpt-chip {
+    display: inline-flex; align-items: center; gap: 8px; height: 30px; box-sizing: border-box;
+    padding: 0 12px; border: 1px solid var(--border); border-radius: 999px;
+    background: transparent; color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+    white-space: nowrap; transition: border-color .12s;
   }
-  /* Per-position limits: a toggle button that opens the min/max grid below. */
-  .pf-mpt-bounds-btn {
-    padding: 0 12px; background: var(--bg-canvas); color: var(--text);
-    border: 1px solid var(--border); border-radius: var(--r-sm);
-    font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
-  }
-  .pf-mpt-bounds-btn:hover, .pf-mpt-bounds-btn[aria-expanded="true"] {
-    border-color: var(--accent); color: var(--accent);
-  }
-  /* Run + Cancel share one horizontal row so Cancel appears to the LEFT of Run
-     (not stacked below it — the column layout of .pf-mpt-ctl would otherwise
-     add vertical space when Cancel un-hides). */
-  .pf-mpt-run-row { display: flex; align-items: center; gap: 8px; }
-  /* Cancel button — sits beside Run while a streaming optimization is in flight. */
+  .pf-mpt-chip:hover, .pf-mpt-chip:focus-visible { border-color: var(--accent); outline: none; }
+  .pf-mpt-chip .k { color: var(--muted); }
+  .pf-mpt-cons-btn { border-color: rgba(var(--accent-rgb), 0.55); }
+  .pf-mpt-trust { cursor: default; }
+  .pf-mpt-trust input[type="range"] { width: 96px; accent-color: var(--accent); }
+  .pf-mpt-haircut-val { font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
   .pf-mpt-cancel {
-    height: var(--mpt-ctl-h); box-sizing: border-box; padding: 0 14px;
+    height: 30px; padding: 0 14px; border-radius: 999px;
     background: transparent; color: var(--neg); border: 1px solid var(--neg);
-    border-radius: var(--r-sm); font: inherit; font-weight: 600; cursor: pointer;
+    font: inherit; font-weight: 600; cursor: pointer;
   }
-  .pf-mpt-cancel:hover { background: var(--neg); color: var(--on-accent, #fff); }
+  .pf-mpt-cancel:hover { background: var(--neg); color: #fff; }
   .pf-mpt-cancel[hidden] { display: none; }
+  /* The Constraints sheet, over the optimizer. */
+  .pf-mpt-cons-bg {
+    position: fixed; inset: 0; z-index: 95; display: none; align-items: center; justify-content: center;
+    background: rgba(6, 10, 18, 0.45);
+  }
+  .pf-mpt-cons-bg.show { display: flex; }
+  .pf-mpt-cons {
+    width: min(620px, 94vw); max-height: 88vh; display: flex; flex-direction: column;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-xl);
+    box-shadow: 0 24px 60px rgba(0,0,0,0.45); overflow: hidden;
+  }
+  .pf-mpt-cons-head, .pf-mpt-cons-foot { display: flex; align-items: center; gap: 10px; padding: 12px 18px; }
+  .pf-mpt-cons-head { border-bottom: 1px solid var(--border); }
+  .pf-mpt-cons-foot { border-top: 1px solid var(--border); }
+  .pf-mpt-cons-body { overflow-y: auto; padding: 6px 18px 14px; }
+  .pf-mpt-cons-body section { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .pf-mpt-cons-body section:last-child { border-bottom: none; }
+  .pf-mpt-cons-body h5 {
+    margin: 0 0 8px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+  }
+  .pf-mpt-cons-body h5 span { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+  .pf-mpt-cons-body .seg {
+    display: inline-flex; gap: 2px; padding: 2px; background: var(--bg-subtle); border-radius: 999px;
+  }
+  .pf-mpt-cons-body .seg button {
+    background: transparent; border: none; padding: 5px 12px; border-radius: 999px;
+    font: inherit; font-size: 12px; color: var(--text); cursor: pointer;
+  }
+  .pf-mpt-cons-body .seg button:hover { background: var(--hover); }
+  .pf-mpt-cons-body .seg button.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .pf-mpt-cons-body #pf-mpt-trading { display: grid; gap: 8px; }
+  .pf-mpt-cons-note { margin: 8px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
   /* Per-position weight-limits grid — a spreadsheet, not a form. The numbers sit
      as bare text in their cell (no input chrome) until focused, at which point the
      cell gets an Excel-style active outline and the whole row tints light blue so
      you always know which company you are editing. Dense rows (24px) + a tall
      scroll box are the point: seeing ~18 holdings at once beats seeing 7. */
-  /* This is the ONE surface in the workspace that still gets a box, and that is
-     the point: it is a transient editor dropped on top of the tool, so it should
-     read as a distinct sheet. It takes its natural height (flex:none) inside
-     .pf-mpt-scroll and pushes everything below it down — see .pf-mpt-scroll.
-     Padding is symmetric so the head and the last row sit the same distance from
-     the frame. */
-  .pf-mpt-bounds {
-    flex: none;
-    margin: 10px 16px; padding: 10px 12px; background: var(--bg-canvas);
-    border: 1px solid var(--border); border-radius: var(--r-md);
-    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
-  }
-  .pf-mpt-bounds[hidden] { display: none; }
-  .pf-mpt-bounds-head {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 11.5px; color: var(--muted); margin-bottom: 6px; flex: none;
-  }
-  .pf-mpt-bounds-reset {
-    background: none; border: none; color: var(--accent); font: inherit;
-    font-size: 11.5px; cursor: pointer; padding: 0;
-  }
-  .pf-mpt-bounds-reset:hover { text-decoration: underline; }
-  /* NOT a scroller. The grid takes its natural height and .pf-mpt-scroll is the
-     single scroll surface for the whole workspace.
-
-     It used to be a nested scroller with its own max-height AND
-     overscroll-behavior: contain — which is what made scrolling feel broken.
-     A short inner scroller reaches its end after ~100px and then stops dead
-     rather than chaining to the parent, so getting down a 20-name book took a
-     stack of separate gestures. One surface, one gesture. */
+  /* The grid takes its natural height; the sheet's body is the one scroller. */
   .pf-mpt-bounds-grid { display: flex; flex-direction: column; }
   .pf-mpt-bnd-row {
     display: grid; grid-template-columns: minmax(0, 1fr) 96px 96px;
@@ -1543,11 +1528,6 @@
   .pf-mpt-bnd-row > span:first-child {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 2px;
   }
-  /* Deliberately NOT sticky any more. With the inner scroller gone the panel
-     scrolls as one block inside .pf-mpt-scroll, and sticky here would resolve
-     against .pf-mpt-bounds (overflow:hidden makes it the containing scroll box),
-     which never scrolls — so it would be inert anyway, just with a promoted
-     layer and a z-index for nothing. */
   .pf-mpt-bnd-head {
     background: var(--bg-canvas);
     color: var(--muted); font-size: 10px; font-weight: 700;
@@ -1593,43 +1573,17 @@
     outline: none; background: var(--bg-canvas);
     box-shadow: inset 0 0 0 1px var(--accent);
   }
-  /* Analyst-trust dial: range slider + live percentage readout. */
-  .pf-mpt-haircut-wrap {
-    display: inline-flex; align-items: center; gap: 8px; min-width: 150px;
-  }
-  .pf-mpt-haircut-wrap input[type="range"] { flex: 1 1 auto; min-width: 90px; accent-color: var(--accent); }
-  .pf-mpt-haircut-val {
-    font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text);
-    min-width: 34px; text-align: right;
-  }
-  .pf-mpt-ctl .seg {
-    display: inline-flex; background: var(--bg-canvas); border: 1px solid var(--border);
-    border-radius: var(--r-md); overflow: hidden;
-  }
-  .pf-mpt-ctl .seg button {
-    background: transparent; border: none; padding: 0 12px; font-size: 11.5px; color: var(--muted);
-    cursor: pointer; border-right: 1px solid var(--border); line-height: 1;
-  }
-  .pf-mpt-ctl .seg button:last-child { border-right: none; }
-  .pf-mpt-ctl .seg button:hover { color: var(--text); background: var(--bg-subtle); }
-  .pf-mpt-ctl .seg button.active { background: var(--accent); color: var(--on-accent); }
-  .pf-mpt-ctl input[type="number"] {
-    padding: 0 9px; border-radius: var(--r-md); border: 1px solid var(--border);
-    background: var(--bg-canvas); color: var(--text); font-size: 12px;
-    font-variant-numeric: tabular-nums; min-width: 0;
-  }
-  .pf-mpt-ctl input[type="number"]:focus { outline: none; border-color: var(--accent); }
-
   /* Risk-free input + inline sparkline + Auto button in a single shell. The
      sparkline gets its own horizontal lane between the number and the AUTO
      pill so it reads as a proper inline mini-chart, not a fading underline. */
   .pf-mpt-rf-wrap {
     position: relative; display: flex; align-items: center; gap: 6px;
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-md);
-    padding: 3px 5px 3px 0; overflow: visible; min-width: 240px;
+    padding: 3px 5px 3px 0; overflow: visible; min-width: 240px; height: 34px; box-sizing: border-box;
   }
   .pf-mpt-rf-wrap:focus-within { border-color: var(--accent); }
   .pf-mpt-rf-wrap input[type="number"] {
+    color: var(--text); font: inherit; font-size: 12.5px;
     width: 64px; flex: 0 0 auto; height: 100%; border: none; background: transparent;
     border-radius: 0; padding: 0 4px 0 8px; font-variant-numeric: tabular-nums;
   }
@@ -1679,15 +1633,6 @@
   }
   .pf-mpt-rf-auto:hover { color: var(--accent); border-color: var(--accent); }
   .pf-mpt-rf-auto.busy { opacity: 0.55; cursor: progress; }
-  /* Inline info icon next to any control label (Risk-free, Allocation, …). */
-  .pf-mpt-ctl > label { display: flex; align-items: center; gap: 6px; }
-  .pf-mpt-rf-info {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 13px; height: 13px; border-radius: 50%; border: 1px solid var(--muted);
-    color: var(--muted); font-size: 9px; font-weight: 700; line-height: 1;
-    cursor: default; text-transform: none;
-  }
-  .pf-mpt-rf-info:hover { color: var(--accent); border-color: var(--accent); }
   /* Floating tooltip for frontier hover — appended to <body> so it isn't
      clipped by the overlay panel. */
   .pf-mpt-frontier-tip {
@@ -1711,20 +1656,15 @@
   /* Custom-themed select to replace the native <select>. Built from a div +
      ul so the menu inherits the dashboard theme (border/colors/typography)
      and stays visually consistent with the segmented controls. */
-  .pf-mpt-select {
-    position: relative; display: flex; align-items: center; gap: 6px;
-    padding: 0 8px 0 10px; border-radius: var(--r-md); border: 1px solid var(--border);
-    background: var(--bg-canvas); color: var(--text); font-size: 12px; cursor: pointer;
-    user-select: none; line-height: 1;
-  }
+  .pf-mpt-select { position: relative; user-select: none; line-height: 1; }
   .pf-mpt-select:focus, .pf-mpt-select.open { outline: none; border-color: var(--accent); }
   .pf-mpt-select-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pf-mpt-select-caret { color: var(--muted); font-size: 10px; transition: transform 0.15s; }
   .pf-mpt-select.open .pf-mpt-select-caret { transform: rotate(180deg); }
   .pf-mpt-select-menu {
-    position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 5;
+    position: absolute; top: calc(100% + 6px); left: 0; min-width: 100%; z-index: 5;
     margin: 0; padding: 4px; list-style: none;
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-md);
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-xl);
     box-shadow: 0 8px 24px rgba(0,0,0,0.22); font-size: 12px;
   }
   .pf-mpt-select-menu[hidden] { display: none; }
@@ -1736,41 +1676,33 @@
   .pf-mpt-select-menu li[aria-selected="true"] { color: var(--accent); font-weight: 600; }
 
   .pf-mpt-run {
-    padding: 0 18px; border-radius: var(--r-md);
+    height: 30px; padding: 0 18px; border-radius: 999px;
     background: var(--accent); color: var(--on-accent); border: 1px solid var(--accent);
     font-weight: 700; font-size: 12.5px; cursor: pointer; line-height: 1;
   }
   .pf-mpt-run:hover { filter: brightness(1.08); }
   .pf-mpt-run:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
-  /* The single scroll column under the controls strip. With the limits panel
-     closed .pf-mpt-body grows to fill it exactly, so nothing scrolls. When the
-     panel opens, JS pins --mpt-body-h to the height the body already had; the
-     column then overflows by the panel's height and the workspace is pushed
-     down rather than compressed. */
+  /* The scroll column under the toolbar; the body fills it, with a floor the
+     chart stays usable at. */
   .pf-mpt-scroll {
     flex: 1; min-height: 0; overflow-y: auto;
     display: flex; flex-direction: column;
   }
-  /* flex-shrink:0 is what makes "push down" work — the body must refuse to give
-     up height to the panel above it. min-height carries the pinned value while
-     the panel is open, and falls back to a floor the chart stays usable at. */
   .pf-mpt-body {
-    flex: 1 0 auto; min-height: var(--mpt-body-h, 260px);
+    flex: 1 0 auto; min-height: 260px;
     display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
     gap: 14px; padding: 14px 18px; overflow: hidden;
   }
   @media (max-width: 980px) { .pf-mpt-body { grid-template-columns: 1fr; } }
   /* No box. The chart and the stats panel are the workspace itself, not cards
      dropped onto it — a frame and a tinted fill around each one just chopped a
-     single tool into three competing rectangles. The only surviving box is
-     .pf-mpt-bounds, which earns it by being transient. */
+     single tool into three competing rectangles. */
   .pf-mpt-chartwrap {
     display: flex; flex-direction: column; gap: 8px;
     background: transparent; border: none; padding: 0; overflow: hidden;
   }
   /* min-height:0 + overflow:hidden is what makes the "crop, never squash"
-     contract below work: the box is free to shrink when the per-position limits
-     panel opens, and whatever no longer fits is clipped rather than rescaled. */
+     contract below work: whatever no longer fits is clipped, never rescaled. */
   .pf-mpt-chart { position: relative; flex: 1; min-height: 0; overflow: hidden; }
   /* Two stacked canvases: base (axes + cloud + frontier) and overlay
      (selection ring + hover ghost). Both share the same backing-store size
@@ -1871,6 +1803,13 @@
   .pf-mpt-kv .v { font-weight: 600; font-variant-numeric: tabular-nums; }
   .pf-mpt-kv .v.pos { color: var(--pos); }
   .pf-mpt-kv .v.neg { color: var(--neg); }
+  .pf-mpt-subv { color: var(--muted); font-weight: 400; }
+  .pf-mpt-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .pf-mpt-tiles:empty { display: none; }
+  .pf-mpt-tile { background: var(--bg-subtle); border-radius: var(--r-md); padding: 9px 12px; }
+  .pf-mpt-tile span { display: block; color: var(--muted); font-size: 11.5px; }
+  .pf-mpt-tile b { display: block; margin-top: 2px; font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pf-mpt-tile b.pos { color: var(--pos); } .pf-mpt-tile b.neg { color: var(--neg); }
   .pf-mpt-weights {
     display: flex; flex-direction: column; gap: 3px; font-size: 11.5px;
     max-height: 280px; overflow-y: auto;
@@ -1879,10 +1818,10 @@
     display: grid; grid-template-columns: minmax(60px, 1fr) 4fr 48px; gap: 6px; align-items: center;
   }
   .pf-mpt-weights .pf-mpt-track {
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-xs); height: 8px; overflow: hidden;
+    background: var(--bg-subtle); border-radius: 999px; height: 8px; overflow: hidden;
   }
   .pf-mpt-weights .pf-mpt-fill {
-    height: 100%; background: var(--accent);
+    height: 100%; background: var(--accent); border-radius: 999px;
   }
   .pf-mpt-weights .pf-mpt-val { font-variant-numeric: tabular-nums; text-align: right; color: var(--muted); }
   /* Last-3 run history under Apply to Portfolio. Rows are clickable and reload
@@ -1897,7 +1836,7 @@
      accent "Run optimization" button). */
   .pf-mpt-hist {
     display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
-    padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-sm);
+    padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--r-md);
     cursor: pointer; background: transparent; text-align: left; width: 100%;
     font: inherit; color: var(--text); transition: border-color .12s, background .12s;
   }
@@ -1927,11 +1866,11 @@
   .pf-mpt-asset-tip .tip-row .v { font-weight: 600; font-variant-numeric: tabular-nums; }
   .pf-mpt-asset-tip .v.pos { color: var(--pos); }
   .pf-mpt-asset-tip .v.neg { color: var(--neg); }
-  .pf-mpt-weights .pf-mpt-wrow > span:first-child { cursor: help; }
+  .pf-mpt-weights .pf-mpt-wrow > span:first-child { cursor: default; }
 
   .pf-mpt-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .pf-mpt-actions button {
-    flex: 1; min-width: 110px; height: 32px; padding: 0 12px; border-radius: var(--r-md);
+    flex: 1; min-width: 110px; height: 32px; padding: 0 12px; border-radius: 999px;
     background: var(--bg-canvas); border: 1px solid var(--border); cursor: pointer; color: var(--text);
     font-size: 12px; font-weight: 600;
   }
@@ -2460,6 +2399,7 @@
   .pf-mpt-side,
   .pf-mpt-weights,
   .pf-mpt-scroll,
+  .pf-mpt-cons-body,
   .cv-list,
   .ns-prog-jobs,
   .ns-tape-fs-body,
