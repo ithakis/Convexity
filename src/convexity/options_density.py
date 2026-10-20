@@ -629,6 +629,25 @@ def market_curve(rn: dict, beta: float, erp: float, kappa: float) -> dict:
     return {"p": p, "method": method, "theta": theta}
 
 
+def _target_log_returns(rn: dict, t: np.ndarray, beta: float, erp: float) -> np.ndarray:
+    """Each 12-month target as a log return to the expiry: scaled to T
+    geometrically up to a year, carried on at the CAPM return after that."""
+    T = rn["T"]
+    return np.log(t / rn["S0"]) * min(T, 1.0) + max(T - 1.0, 0.0) * (rn["rf"] + beta * erp)
+
+
+def target_at_expiry(rn: dict, targets, beta: float, erp: float) -> float | None:
+    """The analysts' mean target moved to the options' expiry: the mean of the
+    firms' curves before any haircut (each firm's curve has S0 x exp(lr) as
+    its mean). The chart draws it as the solid diamond where the mean path
+    ends, and the 12-month mean as a hollow one at its own date: one target,
+    two dates (2026-10-20). The options set the horizon; the targets bend to it."""
+    t = np.array([float(v) for v in targets if v and math.isfinite(v) and v > 0])
+    if not len(t):
+        return None
+    return float(rn["S0"] * np.mean(np.exp(_target_log_returns(rn, t, beta, erp))))
+
+
 def analysts_mixture(
     rn: dict, targets, beta: float, erp: float, kappa: float, haircut: bool = False
 ) -> dict:
@@ -648,7 +667,7 @@ def analysts_mixture(
         raise DensityError("no_targets")
     T = rn["T"]
     V = (kappa * rn["sigma_q"]) ** 2 * T
-    lr = np.log(t / rn["S0"]) * min(T, 1.0) + max(T - 1.0, 0.0) * (rn["rf"] + beta * erp)
+    lr = _target_log_returns(rn, t, beta, erp)
     if haircut:
         lc = math.log(capm_ratio(rn, beta, erp))
         lr = lc + (1 - HAIRCUT) * (lr - lc)
@@ -888,11 +907,19 @@ def _analysts(tk) -> dict | None:
         med = num("median") or num("mean")
         if not med:
             return None
-        return {"firms": [], "consensus": med, "low": num("low"), "high": num("high"), "n": None}
+        return {
+            "firms": [],
+            "consensus": med,
+            "mean": num("mean") or med,
+            "low": num("low"),
+            "high": num("high"),
+            "n": None,
+        }
     t = sorted(f["target"] for f in firms)
     return {
         "firms": sorted(firms, key=lambda f: f["target"]),
         "consensus": float(np.median(t)),
+        "mean": float(np.mean(t)),
         "low": t[0],
         "high": t[-1],
         "n": len(firms),
@@ -921,7 +948,11 @@ def _research_analysts(symbol: str, S0: float) -> dict | None:
         {**f, "target": sc(f["target"]), "prior": sc(f.get("prior"))} for f in an["firms"]
     ]
     an.update(
-        consensus=an["consensus"] * k, low=sc(an.get("low")), high=sc(an.get("high")), via=line
+        consensus=an["consensus"] * k,
+        mean=an["mean"] * k if an.get("mean") is not None else None,
+        low=sc(an.get("low")),
+        high=sc(an.get("high")),
+        via=line,
     )
     return an
 
@@ -1547,7 +1578,8 @@ def _payload_curves(rn: dict, curves: dict, fx: dict | None) -> dict:
 def _analysts_curve(rn, an, horizon, beta, st, kappa):
     if not an or horizon != 365:
         return None
-    targets = [f["target"] for f in an["firms"]] or [an["consensus"]]
+    targets = [f["target"] for f in an["firms"]] or [an.get("mean") or an["consensus"]]
+    an["at_expiry"] = target_at_expiry(rn, targets, beta, st["erp"])
     try:
         mx = analysts_mixture(rn, targets, beta, st["erp"], kappa, st["haircut"])
     except DensityError:

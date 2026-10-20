@@ -1179,6 +1179,20 @@ def fetch_detail(symbol: str) -> dict:
     out["target_high"] = _safe_num(info.get("targetHighPrice"))
     out["target_low"] = _safe_num(info.get("targetLowPrice"))
     out["target_median"] = _safe_num(info.get("targetMedianPrice"))
+    # The mean target is the firms' own (each firm's latest 12-month target),
+    # the same list σ/μ draws, so the coverage card, the forecast readout and
+    # the chart's diamond read one number. Yahoo's summary mean pools a
+    # different set (59 opinions vs 36 firms on NVDA) and stays the fallback.
+    out["target_n_firms"] = None
+    try:
+        from convexity import options_density
+
+        an = options_density._analysts(tk)
+        if an and an.get("n") and an.get("mean"):
+            out["target_mean"] = an["mean"]
+            out["target_n_firms"] = an["n"]
+    except Exception as e:
+        print(f"[detail] analysts {symbol}: {type(e).__name__}")
 
     rec_trend: list[dict] = []
     try:

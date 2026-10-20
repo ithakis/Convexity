@@ -9,6 +9,13 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.28.2 — 2026-10-20
+
+- **Stock window: one analyst number.** NVDA showed three different "targets" at once: the median firm on the chart, the curve's mean in the readout, and Yahoo's own mean (a different set of opinions) in the coverage card. Now all three read **the mean of the firms' latest 12-month targets**. The options set the horizon, so the target is moved to the expiry: a **solid diamond** at the expiry and a dotted stub to a **hollow diamond** at the full 12-month target, at its own date (one target, two dates). The analysts' low, high and per-firm lines are moved the same way.
+- **The dashed line lands on the target.** It now traces the mean path (the paths' average, pinned to the curve's mean) instead of the median, which ends at the curve's median and so could never reach the diamond. With the analyst-trust haircut on, it ends short of the target on a labelled "Model mean" dot.
+- **Linear price axis.** With σ/μ on, the axis was logarithmic (ticks 9 → 28 → 89 → 276 → 859). It is now linear with round ticks, and the price curve is drawn per unit price, so its real right skew shows.
+- **Readouts and tooltips.** The (i) badges are gone; hovering any readout lights its part of the chart, now including Pr[S > today] (green) and Pr[S ≥ target] (amber). Tooltips across the app are a rounded card with a softer background, a 13 px system font and a shadow, and the stock window's lead with the formula, typeset in KaTeX.
+
 ## 1.28.1 — 2026-10-19
 
 - **Rebalancing and trading costs.** A **Constraints** button beside the chart type sets how often the weights are reset (daily, weekly, monthly, quarterly, half-yearly, yearly, or never: buy and hold) and the cost of every trade in bps (default: monthly, 10 bps). The weights apply from the period's first day and drift with prices until each rebalance resets them; the portfolio's return, risk, contributions and bars are all net of the cost. A readout shows the rebalances, turnover and cost a year. One setting for every portfolio and the optimizer, kept across restarts; daily at 0 bps gives exactly the old numbers.

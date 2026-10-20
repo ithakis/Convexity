@@ -103,6 +103,22 @@ def test_analysts_mixture_keeps_total_variance_and_averages_the_means(rn):
     assert st["var_x"] == pytest.approx((kappa * rn["sigma_q"]) ** 2 * T, rel=0.02)
 
 
+@pytest.mark.parametrize("T_", [0.5, 1.0, 1.4])
+def test_target_at_expiry_is_the_unhaircut_mixture_mean(rn, T_):
+    """The chart's solid diamond: one target at the expiry, pro-rated before a
+    year and carried at CAPM after, equal to the mixture's mean (no haircut)."""
+    r = {**rn, "T": T_}
+    targets = [100.0, 115.0, 140.0]
+    at = od.target_at_expiry(r, targets, 1.0, 0.05)
+    lr = np.log(np.array(targets) / S0) * min(T_, 1.0) + max(T_ - 1.0, 0.0) * (r["rf"] + 0.05)
+    assert at == pytest.approx(S0 * np.mean(np.exp(lr)), rel=1e-12)
+    if T_ == 1.0:
+        assert at == pytest.approx(np.mean(targets))
+    if T_ < 1.0:
+        assert S0 < at < np.mean(targets)
+    assert od.target_at_expiry(r, [float("nan")], 1.0, 0.05) is None
+
+
 def test_haircut_halves_the_excess_log_return(rn):
     beta, erp = 1.0, 0.05
     lc = math.log(od.capm_ratio(rn, beta, erp))
@@ -600,5 +616,26 @@ def test_analysts_drop_a_firm_target_in_another_lines_units():
 
     a = od._analysts(Tk())
     assert a["firms"] == [] and a["consensus"] == 15995.5 and a["low"] == 11617.0
+    assert a["mean"] == 15995.5  # no summary mean: the median stands in
     Tk.analyst_price_targets = {**Tk.analyst_price_targets, "current": 200.0}
     assert od._analysts(Tk())["firms"][0]["target"] == 198.0
+
+
+def test_analysts_carry_the_firms_mean():
+    """One analyst number in the stock window: the firms' mean (the coverage
+    card, the readout and the chart's diamonds all read it)."""
+    import pandas as pd
+
+    now = dt.datetime.now()
+    idx = pd.Index([pd.Timestamp(now - dt.timedelta(days=d)) for d in (5, 6, 7)], name="GradeDate")
+    ud = pd.DataFrame({"Firm": ["A", "B", "C"], "ToGrade": ["Buy"] * 3,
+                       "currentPriceTarget": [100.0, 110.0, 150.0],
+                       "priorPriceTarget": [None] * 3}, index=idx)  # fmt: skip
+
+    class Tk:
+        upgrades_downgrades = ud
+        analyst_price_targets = {"current": 100.0, "mean": 999.0}
+
+    a = od._analysts(Tk())
+    assert a["n"] == 3 and a["consensus"] == 110.0
+    assert a["mean"] == pytest.approx(120.0)

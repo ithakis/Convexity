@@ -660,6 +660,9 @@ const _APP_TIP = (() => {
     const arrow = document.createElement("div");
     arrow.className = "app-tip-arrow";
     el.appendChild(arrow);
+    const head = document.createElement("div");
+    head.className = "app-tip-h";
+    el.appendChild(head);
     const body = document.createElement("div");
     body.className = "app-tip-body";
     el.appendChild(body);
@@ -672,6 +675,14 @@ const _APP_TIP = (() => {
     const tip = ensure();
     currentTarget = target;
     tip.querySelector(".app-tip-body").textContent = text;
+    // An optional formula leads the tip (data-tip-tex, TeX source), typeset
+    // by KaTeX; without KaTeX (offline) the source shows as plain text.
+    const tex = target.getAttribute("data-tip-tex"), head = tip.querySelector(".app-tip-h");
+    head.hidden = !tex;
+    if (tex) {
+      if (window.katex) head.innerHTML = katex.renderToString(tex, { throwOnError: false, strict: false });
+      else head.textContent = tex;
+    }
     const r = target.getBoundingClientRect();
     // Default to below (matches the legacy CSS placement).
     placeTip(tip, r, {preferred: "below", offset: 8, gap: 8});
@@ -3441,23 +3452,21 @@ function renderChart() {
   if (usesRange) for (const b of drawBars) { if (b.l < lo) lo = b.l; if (b.h > hi) hi = b.h; }
   const rng = (hi - lo) || 1;
   const padPct = 0.05;
-  // With σ/μ the axis is log (a cone of returns is symmetric in log price)
-  // and spans the window's history plus the fan's 90% band (fcYRange). The
-  // top FC_LANE px are kept free for the E/D flags, and a change of domain
+  // With σ/μ the axis spans the window's history plus the fan's 90% band
+  // (fcYRange). It is linear like every other price chart here (the owner's
+  // call, 2026-10-20: the log axis it had read as "9 to 900" and looked off).
+  // The top FC_LANE px are kept free for the E/D flags, and a change of domain
   // (range tab, horizon, the density landing) eases in (fcTweenDomain).
-  let logY = false;
   if (FC && lo > 0) {
     [lo, hi] = fcYRange(lo, hi);
-    lo /= 1.05; hi *= 1.05;
-    hi = Math.exp(Math.log(hi) + (Math.log(hi) - Math.log(lo)) * FC_LANE / (chartH - FC_LANE));
+    const pad = (hi - lo) * padPct;
+    lo = Math.max(0, lo - pad); hi += pad;
+    hi += (hi - lo) * FC_LANE / (chartH - FC_LANE);
     [lo, hi] = fcTweenDomain(lo, hi);
-    logY = true;
   } else {
     lo -= rng * padPct; hi += rng * padPct;
   }
-  const yScale = logY
-    ? (v) => padT + (1 - (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo))) * chartH
-    : (v) => padT + (1 - (v - lo) / (hi - lo)) * chartH;
+  const yScale = (v) => padT + (1 - (v - lo) / (hi - lo)) * chartH;
 
   // Main path
   const buildPath = (pts) => {
@@ -3481,11 +3490,19 @@ function renderChart() {
     : priceLayerSvg(type, drawBars, stock, xScale, yScale, plotW, col);
   const volTop = padT + chartH + volGap;
 
-  // Y-axis ticks (4)
+  // Y-axis ticks: 4 even steps; with σ/μ, round values (1/2/5 × 10^k in the
+  // display currency, the one the labels are in), like a normal price axis.
   const ticks = [];
-  for (let i = 0; i <= 4; i++) {
-    const v = logY ? Math.exp(Math.log(lo) + (Math.log(hi) - Math.log(lo)) * (i / 4)) : lo + (hi - lo) * (i / 4);
-    ticks.push({ v, y: yScale(v) });
+  if (FC) {
+    const r = fxConvert(1, DETAIL.data.currency) || 1, dlo = lo * r, dhi = hi * r;
+    const raw = (dhi - dlo) / 5, mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
+    const step = (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * mag;
+    for (let t = Math.ceil(dlo / step) * step; t <= dhi + step * 1e-9; t += step) {
+      const v = t / r, yy = yScale(v);
+      if (yy >= padT + FC_LANE - 4) ticks.push({ v, y: yy });
+    }
+  } else {
+    for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * (i / 4); ticks.push({ v, y: yScale(v) }); }
   }
   // X-axis ticks (4-6 evenly spaced)
   const xTicks = [];
@@ -3514,7 +3531,7 @@ function renderChart() {
   // its tag on the left axis among the ticks (the tick it would cover hides).
   // The future zone's hover level gets the same tag (fcDraw moves it).
   let gaugeSvg = "";
-  if (FC && logY) {
+  if (FC) {
     const fd = DETAIL.fc[DETAIL.fcH];
     const lvl = fd && fd.ok ? fd.s0 : stock[stock.length - 1][1];
     const gy = yScale(lvl);
@@ -3546,7 +3563,7 @@ function renderChart() {
         </linearGradient>
       </defs>
       ${ticks.map(t => `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${FC ? fcPlotR : W-padR}" y2="${t.y.toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>`).join("")}
-      ${ticks.filter(t => !t.hide).map(t => `<text x="${padL-6}" y="${t.y+3}" font-size="10" fill="var(--muted)" text-anchor="end">${fmtTickVal(t.v)}</text>`).join("")}
+      ${ticks.filter(t => !t.hide).map(t => `<text x="${padL-6}" y="${t.y+3}" font-size="10" fill="var(--muted)" text-anchor="end">${FC ? String(+fxConvert(t.v, DETAIL.data.currency).toFixed(2)) : fmtTickVal(t.v)}</text>`).join("")}
       ${xTicks.filter((t, i) => !FC || i < xTicks.length - 1).map((t, i) => `<text x="${t.x}" y="${H - 7}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtTickDate(t.t)}</text>`).join("")}
       ${volSvg}
       ${gaugeSvg}
@@ -3849,7 +3866,18 @@ function fcSimulate(d, mode) {
     cols.push(col);
   }
   let mean = 0; for (let i = 0; i < n; i++) mean += p[i] * px[i] * dx;
-  Object.assign(sim, { x, px, p, cdf, total: acc, dx, V, v, P, cols, ev, mean, method: c.method });
+  // The mean path E[S_t]: the paths' average at each step, pinned so it ends
+  // exactly on the curve's mean (the stratified ends leave a sliver of
+  // sampling error; it is spread along the variance clock, so today stays
+  // put). It replaced the median line, which ends at the curve's median and
+  // so could never reach the analysts' diamond (2026-10-20).
+  const meanPath = new Float64Array(S + 1);
+  for (let j = 0; j <= S; j++) { let m = 0; for (let r = 0; r < NP; r++) m += Math.exp(P[r * (S + 1) + j]); meanPath[j] = m / NP; }
+  const pin = mean / meanPath[S];
+  for (let j = 0; j <= S; j++) meanPath[j] *= Math.pow(pin, v[j] / VT);
+  // Density per unit price: the linear axis's honest shape (c.p is per log price).
+  const pp = p.map((v, i) => v / px[i]);
+  Object.assign(sim, { x, px, p, pp, cdf, total: acc, dx, V, v, P, cols, ev, mean, meanPath, method: c.method });
   DETAIL.fcSim = sim;
   return sim;
 }
@@ -3891,14 +3919,33 @@ function fcRatingKind(r) {
   return "hold";
 }
 
-/* Analysts' marks in the window's currency (targets are in the chain's). */
+/* A 12-month target moved to the options' expiry, as the server's analysts'
+ * curve does (options_density._target_log_returns): pro-rated geometrically
+ * up to a year, carried at CAPM after. The options set the horizon; the
+ * targets bend to it. */
+function fcProRate(d, px) {
+  const T = d.T ?? d.days / 365;
+  return d.s0 * Math.pow(px / d.s0, Math.min(T, 1)) * Math.exp(Math.max(T - 1, 0) * (d.rf + (isFinite(+d.beta) ? +d.beta : 1) * d.erp));
+}
+
+/* Analysts' marks in the window's currency (targets are in the chain's).
+ * One target, two dates (2026-10-20): `mean` is the firms' mean 12-month
+ * target, the number the readout and the coverage card show; `atExp` is that
+ * target moved to the expiry, where the mean path ends. low/high/firms' `exp`
+ * are moved the same way, so everything on the expiry spine is at the expiry. */
 function fcMarks(d) {
   const a = d.analysts;
   if (!a || d.horizon !== 365) return null;
   const k = d.ratio;
+  const firms = (a.firms || []).map(f => ({ ...f, px: f.target * k, exp: fcProRate(d, f.target * k) }));
+  const mean = (a.mean ?? a.consensus) * k;
+  const atExp = a.at_expiry != null ? a.at_expiry * k
+    : firms.length ? firms.reduce((s, f) => s + f.exp, 0) / firms.length : fcProRate(d, mean);
   return {
-    low: a.low != null ? a.low * k : null, cons: a.consensus * k, high: a.high != null ? a.high * k : null,
-    firms: (a.firms || []).map(f => ({ ...f, px: f.target * k })),
+    mean, atExp, n: a.n || firms.length || null,
+    low: a.low != null ? fcProRate(d, a.low * k) : null, high: a.high != null ? fcProRate(d, a.high * k) : null,
+    low12: a.low != null ? a.low * k : null, high12: a.high != null ? a.high * k : null,
+    firms,
   };
 }
 
@@ -3916,12 +3963,12 @@ function fcYRange(lo, hi) {
   if (!mode) return [lo, hi];
   if (mode.kind === "mu") {
     const mk = fcMarks(d);
-    if (mk) { lo = Math.min(lo, mk.low ?? mk.cons, d.s0); hi = Math.max(hi, mk.high ?? mk.cons, d.s0); }
+    if (mk) { lo = Math.min(lo, mk.low ?? mk.atExp, d.s0); hi = Math.max(hi, mk.high ?? mk.atExp, mk.mean, d.s0); }
     return [lo, hi];
   }
   const sim = fcSimulate(d, mode), mk = DETAIL.showMu ? fcMarks(d) : null;
   lo = Math.min(lo, fcCurveQ(sim, 0.05), mk?.low ?? Infinity);
-  hi = Math.max(hi, fcCurveQ(sim, 0.95), mk?.high ?? -Infinity);
+  hi = Math.max(hi, fcCurveQ(sim, 0.95), mk?.high ?? -Infinity, mk?.mean ?? -Infinity);
   return [lo, hi];
 }
 
@@ -3931,14 +3978,14 @@ const fcPctTxt = (p) => (p < 0.01 ? "<1%" : `${Math.round(p * 100)}%`);
    17 px each), so a flag never sits on the line. */
 const FC_LANE = 42;
 
-/* Eases the log y-domain from the last one drawn to the new one over ~280 ms,
+/* Eases the y-domain from the last one drawn to the new one over ~280 ms,
  * redrawing the finished chart each frame (fcPlay keys on symbol/horizon/
  * mode, so a frame never restarts the animation). A frame slower than 12 ms
  * snaps to the end instead; reduced motion and a new window never tween. */
 function fcTweenDomain(lo, hi) {
   const tw = DETAIL.yTw, sym = DETAIL.row && DETAIL.row.symbol;
   if (tw && tw.frame) return [tw.cur.lo, tw.cur.hi];
-  const near = (a, b) => Math.abs(Math.log(a.lo / b.lo)) + Math.abs(Math.log(a.hi / b.hi)) < 0.01;
+  const near = (a, b) => (Math.abs(a.lo - b.lo) + Math.abs(a.hi - b.hi)) / Math.max(b.hi - b.lo, 1e-9) < 0.005;
   if (tw && near(tw.to, { lo, hi })) return [tw.cur.lo, tw.cur.hi];
   const prev = DETAIL.yDom;
   DETAIL.yDom = { lo, hi, sym };
@@ -3951,7 +3998,7 @@ function fcTweenDomain(lo, hi) {
   const from = tw ? tw.cur : prev, to = { lo, hi }, t0 = performance.now();
   const T = { from, to, cur: from, frame: false, raf: 0 };
   DETAIL.yTw = T;
-  const mix = (a, b, e) => Math.exp(Math.log(a) + (Math.log(b) - Math.log(a)) * e);
+  const mix = (a, b, e) => a + (b - a) * e;
   const step = (now) => {
     if (DETAIL.yTw !== T || !$("#m-chart")) return;
     const k = Math.min(1, (now - t0) / 280), e = 1 - Math.pow(1 - k, 3);
@@ -4085,16 +4132,17 @@ function fcDraw() {
     if (!mk) { ctx.restore(); note(d.horizon === 365 ? "No analyst targets" : "Analyst targets are 12-month only"); return; }
     for (const fm of mk.firms) {
       ctx.strokeStyle = `rgba(${col.amberRgb},${fm.stale ? 0.25 : 0.6})`; ctx.lineWidth = 1.2; ctx.beginPath();
-      for (let j = 0; j <= n; j++) { const yy = y(d.s0 * Math.pow(fm.px / d.s0, j / S)); j ? ctx.lineTo(X(j), yy) : ctx.moveTo(X(j), yy); }
+      for (let j = 0; j <= n; j++) { const yy = y(d.s0 * Math.pow(fm.exp / d.s0, j / S)); j ? ctx.lineTo(X(j), yy) : ctx.moveTo(X(j), yy); }
       ctx.stroke();
     }
-    // Where the targets sit: a Gaussian KDE in log price (Silverman's bandwidth).
+    // Where the targets sit at the expiry: a Gaussian KDE in log price
+    // (Silverman's bandwidth), drawn per unit price for the linear axis.
     if (grow > 0 && mk.firms.length > 1) {
-      const lt = mk.firms.map(fm => Math.log(fm.px)), m = lt.reduce((a, b) => a + b, 0) / lt.length;
+      const lt = mk.firms.map(fm => Math.log(fm.exp)), m = lt.reduce((a, b) => a + b, 0) / lt.length;
       const sd = Math.sqrt(lt.reduce((a, b) => a + (b - m) ** 2, 0) / lt.length) || 0.05;
       const bw = 1.06 * sd * Math.pow(lt.length, -0.2), ys = [], N = 160;
       const ylo = Math.min(...lt) - 3 * bw, yhi = Math.max(...lt) + 3 * bw;
-      for (let i = 0; i <= N; i++) { const l = ylo + (yhi - ylo) * i / N; ys.push([Math.exp(l), lt.reduce((s, tt) => s + Math.exp(-0.5 * ((l - tt) / bw) ** 2), 0)]); }
+      for (let i = 0; i <= N; i++) { const l = ylo + (yhi - ylo) * i / N; ys.push([Math.exp(l), lt.reduce((s, tt) => s + Math.exp(-0.5 * ((l - tt) / bw) ** 2), 0) / Math.exp(l)]); }
       const mx = Math.max(...ys.map(q => q[1])), Wd = (xR - xH - 6) * grow;
       ctx.beginPath(); ctx.moveTo(xH, y(ys[0][0]));
       for (const [pv, dv] of ys) ctx.lineTo(xH + dv / mx * Wd, y(pv));
@@ -4123,17 +4171,21 @@ function fcDraw() {
         for (let j = 0; j <= n; j++) { const yy = y(Math.exp(sim.P[o + j])); j ? ctx.lineTo(X(j), yy) : ctx.moveTo(X(j), yy); }
         ctx.stroke();
       }
-      ctx.strokeStyle = col.text; ctx.globalAlpha = 0.8; ctx.lineWidth = 1.4; ctx.setLineDash([6, 4]); ctx.beginPath();
-      for (let j = 0; j <= n; j++) ctx.lineTo(X(j), y(Math.exp(fcQ(sim.cols[j], 0.5))));
+      // The mean path, today → the curve's mean (with μ on and no haircut,
+      // the analysts' target at expiry: the solid diamond it lands on).
+      const hiM = DETAIL.fcBand === "mean";
+      ctx.strokeStyle = col.text; ctx.globalAlpha = hiM ? 1 : 0.85; ctx.lineWidth = hiM ? 2.2 : 1.6; ctx.setLineDash([6, 4]); ctx.beginPath();
+      for (let j = 0; j <= n; j++) ctx.lineTo(X(j), y(sim.meanPath[j]));
       ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
     }
     if (grow > 0) {
       const Wd = xR - xH - 6;
-      let mx = 0; for (const v of sim.p) if (v > mx) mx = v;
-      // Density per unit log price: the shape a log axis shows honestly.
+      let mx = 0; for (const v of sim.pp) if (v > mx) mx = v;
+      // Density per unit price: the shape a linear axis shows honestly (its
+      // right skew is real: a price can rise more than it can fall).
       const curve = (fill, stroke) => {
         ctx.beginPath(); ctx.moveTo(xH, bot);
-        for (let i = 0; i < sim.px.length; i++) ctx.lineTo(xH + sim.p[i] / mx * Wd * grow, y(sim.px[i]));
+        for (let i = 0; i < sim.px.length; i++) ctx.lineTo(xH + sim.pp[i] / mx * Wd * grow, y(sim.px[i]));
         ctx.lineTo(xH, top); ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = stroke; ctx.lineWidth = 1.8;
         ctx.setLineDash(mode.curve === "rn" ? [5, 4] : []); ctx.stroke(); ctx.setLineDash([]);
       };
@@ -4141,20 +4193,30 @@ function fcDraw() {
       ctx.save(); ctx.beginPath(); ctx.rect(xH, top, Wd + 8, ys0 - top); ctx.clip(); curve(`rgba(${col.posRgb},0.2)`, col.pos); ctx.restore();
       ctx.save(); ctx.beginPath(); ctx.rect(xH, ys0, Wd + 8, bot - ys0); ctx.clip(); curve(`rgba(${col.negRgb},0.2)`, col.neg); ctx.restore();
       // The strip's hovered band (renderFcReadouts): a level band across the zone and that slice of the curve.
+      // The strip's hovered cell (renderFcReadouts): a level band across the
+      // zone and that slice of the curve. [from, to] in price, null = the edge.
       const hb = DETAIL.fcBand;
-      if (hb) {
-        const rgb = hb === "20" ? col.negRgb : col.acc;
+      const bands = {
+        "50": [fcCurveQ(sim, 0.25), fcCurveQ(sim, 0.75), col.acc],
+        "90": [fcCurveQ(sim, 0.05), fcCurveQ(sim, 0.95), col.acc],
+        "20": [null, d.s0 * 0.8, col.negRgb],
+        up: [d.s0, null, col.posRgb],
+        p20: [d.s0 * 1.2, null, col.posRgb],
+        cons: mk ? [mk.atExp, null, col.amberRgb] : null,
+      };
+      const bd = hb && bands[hb];
+      if (bd) {
+        const [a, b, rgb] = bd;
         // Clamped to the plot: a level past the axis (a -20% below a calm
         // 3M range) painted over the volume and date rows.
         const cl = (v) => Math.min(bot, Math.max(top, v));
-        const yt = cl(y(hb === "20" ? d.s0 * 0.8 : fcCurveQ(sim, hb === "50" ? 0.75 : 0.95)));
-        const yb = hb === "20" ? bot : cl(y(fcCurveQ(sim, hb === "50" ? 0.25 : 0.05)));
+        const yt = b == null ? top : cl(y(b)), yb = a == null ? bot : cl(y(a));
         if (yb > yt) {
-        ctx.fillStyle = `rgba(${rgb},0.12)`; ctx.fillRect(xT, yt, xR - xT, yb - yt);
-        ctx.save(); ctx.beginPath(); ctx.rect(xH, yt, Wd + 8, yb - yt); ctx.clip(); curve(`rgba(${rgb},0.45)`, `rgb(${rgb})`); ctx.restore();
-        ctx.strokeStyle = `rgb(${rgb})`; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.beginPath();
-        for (const yy of hb === "20" ? [yt] : [yt, yb]) { ctx.moveTo(xT, yy); ctx.lineTo(xR, yy); }
-        ctx.stroke(); ctx.setLineDash([]);
+          ctx.fillStyle = `rgba(${rgb},0.12)`; ctx.fillRect(xT, yt, xR - xT, yb - yt);
+          ctx.save(); ctx.beginPath(); ctx.rect(xH, yt, Wd + 8, yb - yt); ctx.clip(); curve(`rgba(${rgb},0.45)`, `rgb(${rgb})`); ctx.restore();
+          ctx.strokeStyle = `rgb(${rgb})`; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.beginPath();
+          for (const v of [a, b]) if (v != null) { const yy = cl(y(v)); ctx.moveTo(xT, yy); ctx.lineTo(xR, yy); }
+          ctx.stroke(); ctx.setLineDash([]);
         }
       }
       // The axis shows the fan's 90% band (fcYRange), so the tails run past
@@ -4169,36 +4231,64 @@ function fcDraw() {
   }
   ctx.strokeStyle = col.border; ctx.beginPath(); ctx.moveTo(xH, top); ctx.lineTo(xH, bot); ctx.stroke();
 
-  // Analysts' marks: a range bar on the density's spine, labels to its left.
-  if (mk && grow > 0 && mk.low != null && mk.high != null) {
-    const bx = xH - 7, yh = y(mk.high), yc = y(mk.cons), yl = y(mk.low);
+  // Analysts' marks, one target at two dates: on the expiry spine a range bar
+  // (low..high moved to the expiry) and a solid diamond at the mean target
+  // moved to the expiry, where the mean path ends; a dotted stub on to a
+  // hollow diamond at the full 12-month mean, at its own date. Labels sit left
+  // of the spine, kept 26 px apart and inside the plot.
+  if (mk && grow > 0) {
+    const bx = xH - 7, yc = y(mk.atExp), ym = y(mk.mean);
+    const x12 = Math.min(xR - 12, Math.max(xT + 12, xT + (xH - xT) * 365 / d.days));
     ctx.globalAlpha = grow;
-    ctx.strokeStyle = `rgba(${col.amberRgb},0.55)`; ctx.lineWidth = 4; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(bx, yh); ctx.lineTo(bx, yl); ctx.stroke(); ctx.lineCap = "butt";
-    ctx.strokeStyle = col.amber; ctx.lineWidth = 2;
-    for (const yy of [yh, yl]) { ctx.beginPath(); ctx.moveTo(bx - 6, yy); ctx.lineTo(bx + 6, yy); ctx.stroke(); }
-    ctx.fillStyle = col.amber; ctx.strokeStyle = col.bg; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(bx, yc - 8); ctx.lineTo(bx + 8, yc); ctx.lineTo(bx, yc + 8); ctx.lineTo(bx - 8, yc); ctx.closePath(); ctx.fill(); ctx.stroke();
-    ctx.setLineDash([3, 4]); ctx.lineWidth = 1.2; ctx.strokeStyle = `rgba(${col.amberRgb},0.55)`;
-    ctx.beginPath(); ctx.moveTo(xH, yc); ctx.lineTo(xR, yc); ctx.stroke(); ctx.setLineDash([]);
-    const ccy = DETAIL.data.currency, labs = [[yh, "High", mk.high, false], [yc, "Consensus", mk.cons, true], [yl, "Low", mk.low, false]];
-    // Labels keep 26 px apart and inside the plot: pushed down from the top, then up from the bottom.
-    const pos = labs.map(l => l[0]);
-    for (let i = 0; i < 3; i++) pos[i] = Math.max(pos[i], i ? pos[i - 1] + 26 : top + 12);
-    for (let i = 2; i >= 0; i--) pos[i] = Math.min(pos[i], i < 2 ? pos[i + 1] - 26 : bot - 12);
-    for (const [i, [y0, k, v, main]] of labs.entries()) {
-      const yy = pos[i];
+    if (mk.low != null && mk.high != null) {
+      const yh = y(mk.high), yl = y(mk.low);
+      ctx.strokeStyle = `rgba(${col.amberRgb},0.55)`; ctx.lineWidth = 4; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(bx, yh); ctx.lineTo(bx, yl); ctx.stroke(); ctx.lineCap = "butt";
+      ctx.strokeStyle = col.amber; ctx.lineWidth = 2;
+      for (const yy of [yh, yl]) { ctx.beginPath(); ctx.moveTo(bx - 6, yy); ctx.lineTo(bx + 6, yy); ctx.stroke(); }
+    }
+    const hiT = DETAIL.fcBand === "mean";
+    ctx.setLineDash([2, 3]); ctx.lineWidth = hiT ? 2.2 : 1.6; ctx.strokeStyle = col.amber;
+    ctx.beginPath(); ctx.moveTo(bx, yc); ctx.lineTo(x12, ym); ctx.stroke(); ctx.setLineDash([]);
+    const diamond = (cx, cy, r, solid) => {
+      ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy); ctx.closePath();
+      if (solid) { ctx.fillStyle = col.amber; ctx.strokeStyle = col.bg; ctx.lineWidth = 2; ctx.fill(); ctx.stroke(); }
+      else { ctx.fillStyle = col.bg; ctx.strokeStyle = col.amber; ctx.lineWidth = 1.8; ctx.fill(); ctx.stroke(); }
+    };
+    diamond(x12, ym, 7, false);
+    diamond(bx, yc, 8, true);
+    const ccy = DETAIL.data.currency;
+    const labs = [[ym, "12M target", mk.mean, "ring", x12 - 7],
+      ...(mk.high != null ? [[y(mk.high), "High", mk.high, "", bx - 6]] : []),
+      [yc, "At expiry", mk.atExp, "main", bx - 8],
+      ...(mk.low != null ? [[y(mk.low), "Low", mk.low, "", bx - 6]] : [])].sort((a, b) => a[0] - b[0]);
+    const pos = labs.map(l => l[0]), L = labs.length;
+    for (let i = 0; i < L; i++) pos[i] = Math.max(pos[i], i ? pos[i - 1] + 26 : top + 12);
+    for (let i = L - 1; i >= 0; i--) pos[i] = Math.min(pos[i], i < L - 1 ? pos[i + 1] - 26 : bot - 12);
+    for (const [i, [y0, k, v, kind, tx]] of labs.entries()) {
+      const yy = pos[i], main = kind === "main";
       const val = fmtMoney(v, ccy);
       ctx.font = font(main ? 700 : 600, 13); const vw = ctx.measureText(val).width;
       ctx.font = font(500, 12); const kw = ctx.measureText(k).width;
-      const w = vw + kw + 22, x0 = bx - 14 - w;
+      const w = vw + kw + 22, x0 = bx - 18 - w;
       fcRoundRect(ctx, x0, yy - 11, w, 22, 6);
-      ctx.fillStyle = main ? col.amber : col.bg; ctx.fill(); ctx.strokeStyle = `rgba(${col.amberRgb},0.75)`; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = main ? col.amber : col.bg; ctx.fill(); ctx.strokeStyle = `rgba(${col.amberRgb},0.75)`; ctx.lineWidth = 1;
+      if (kind === "ring") ctx.setLineDash([3, 2]);
+      ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = main ? col.onAmber : col.amber; ctx.globalAlpha = grow * (main ? 0.8 : 0.85); ctx.fillText(k, x0 + 8, yy + 4);
       ctx.globalAlpha = grow; ctx.font = font(main ? 700 : 600, 13); ctx.fillStyle = main ? col.onAmber : col.amber; ctx.fillText(val, x0 + 14 + kw, yy + 5);
-      ctx.strokeStyle = `rgba(${col.amberRgb},0.6)`; ctx.beginPath(); ctx.moveTo(x0 + w, yy); ctx.lineTo(bx - 6, y0); ctx.stroke();
+      ctx.strokeStyle = `rgba(${col.amberRgb},0.6)`; ctx.beginPath(); ctx.moveTo(x0 + w, yy); ctx.lineTo(tx, y0); ctx.stroke();
     }
     ctx.globalAlpha = 1;
+  }
+  // With the haircut on the curve's mean is not the analysts' number: the
+  // path ends on its own small dot, short of the diamond, and says so.
+  if (mode.kind !== "mu" && mk && grow > 0) {
+    const sim = fcSimulate(d, mode), ym = y(sim.mean);
+    if (Math.abs(ym - y(mk.atExp)) > 6) {
+      ctx.globalAlpha = grow; ctx.fillStyle = col.text; ctx.beginPath(); ctx.arc(xH, ym, 3.5, 0, 7); ctx.fill();
+      ctx.font = font(600, 11); ctx.textAlign = "left"; ctx.fillText("Model mean", xH + 8, ym + 4); ctx.globalAlpha = 1;
+    }
   }
 
   // Today's dot (its level is the SVG gauge line, across the whole plot).
@@ -4240,11 +4330,11 @@ function fcHover(cx, cy) {
   const S = FC_ZONE.steps, inPdf = cx >= f.xH - 14;
   const x = inPdf ? f.xH : Math.max(f.xT, Math.min(cx, f.xH));
   const j = inPdf ? S : Math.round((x - f.xT) / (f.xH - f.xT) * S);
-  let K = Math.exp(Math.log(f.lo) + (g.padT + g.chartH - cy) / g.chartH * (Math.log(f.hi) - Math.log(f.lo)));
+  let K = f.lo + (g.padT + g.chartH - cy) / g.chartH * (f.hi - f.lo);
   const mk = DETAIL.showMu ? fcMarks(d) : null;
   let snap = null;
   if (inPdf && mk) {
-    for (const [k, v, who] of [["high", mk.high, "highest"], ["consensus", mk.cons, `median of ${d.analysts.n || 1} firms`], ["low", mk.low, "lowest"]]) {
+    for (const [k, v, who] of [["highest target", mk.high, "moved to the expiry"], ["mean target", mk.atExp, `${mk.n || 1} firms, moved to the expiry`], ["lowest target", mk.low, "moved to the expiry"]]) {
       if (v != null && Math.abs(g.yScale(v) - cy) < 8) { K = v; snap = { k, who }; break; }
     }
   }
@@ -4254,8 +4344,8 @@ function fcHover(cx, cy) {
     <div class="m">${j === S ? "At expiry · " : ""}${fcFmtDate(date)}</div><hr>`;
   if (mode.kind === "mu") {
     const firms = mk ? mk.firms : [];
-    h += `<div class="r"><span>Firms at or above</span><b>${firms.filter(fm => fm.px >= K).length} of ${firms.length}</b></div>`;
-    const near = inPdf ? firms.filter(fm => Math.abs(fm.px / K - 1) < 0.03) : [];
+    h += `<div class="r"><span>Firms at or above</span><b>${firms.filter(fm => (inPdf ? fm.exp : fm.px) >= K).length} of ${firms.length}</b></div>`;
+    const near = inPdf ? firms.filter(fm => Math.abs(fm.exp / K - 1) < 0.03) : [];
     if (near.length) h += "<hr>" + near.map(fm => `<div class="r"><span>${escapeHtml(fm.firm)}</span><span class="m">${fmtMoney(fm.target, d.chain_currency)} · ${escapeHtml(fm.rating)}</span></div>`).join("");
   } else {
     const sim = fcSimulate(d, mode), s = fcStats(sim, K, j), col = sim.cols[j];
@@ -4284,9 +4374,10 @@ function renderFcReadouts() {
   if (!fcOn()) { el.style.display = "none"; return; }
   el.style.display = "";
   const d = DETAIL.fc[DETAIL.fcH], ccy = DETAIL.data.currency;
-  // A cell with a band ("50", "90", "20") carries an (i): hovering it lights that part of the curve (fcDraw).
-  const cell = (k, v, cls, tip, band) => `<div${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}${band ? ` data-fc-band="${band}" tabindex="0"` : ""}>` +
-    `<span>${k}${band ? ' <i class="m-fc-i" aria-hidden="true">i</i>' : ""}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
+  // Hovering a cell with a band lights that part of the curve (fcDraw); its
+  // tip leads with the formula (`texSrc`, typeset by the shared tooltip).
+  const cell = (k, v, cls, tip, band, texSrc) => `<div${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}${texSrc ? ` data-tip-tex="${escapeHtml(texSrc)}"` : ""}${band ? ` data-fc-band="${band}" tabindex="0"` : ""}>` +
+    `<span>${k}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
   const pct = (v) => (v * 100).toFixed(0) + "%";
   const sgn = (v) => (v >= 0 ? "+" : "") + v.toFixed(0) + "%";
   const money = (v) => fmtMoney(v, ccy);
@@ -4339,13 +4430,14 @@ function renderFcReadouts() {
     const sigP = hist ? d.sigma_q : d.kappa * d.sigma_q;
     const msim = fcSimulate(d, { kind: "sigma", curve: "market", mu: "market" });
     el.innerHTML = `<div class="m-fc-grid">
-      ${cell(`Consensus · median of ${an.n || 1}`, `${money(mk.cons)} <small>${sgn((mk.cons / d.s0 - 1) * 100)}</small>`, "amb")}
-      ${cell("Range of targets", mk.low != null ? `${money(mk.low)} – ${money(mk.high)}` : "—")}
+      ${cell(`Analysts’ mean target · ${mk.n || 1} firms`, `${money(mk.mean)} <small>${sgn((mk.mean / d.s0 - 1) * 100)}</small>`, "amb",
+        `The mean of ${mk.n || 1} firms’ latest 12-month targets: the hollow diamond. Moved to the options’ expiry (${fcFmtDate(new Date(d.expiry + "T12:00:00"))}) it is ${money(mk.atExp)}: the solid diamond, where the lines meet the spine.`, "mean")}
+      ${cell("Range of targets", mk.low12 != null ? `${money(mk.low12)} – ${money(mk.high12)}` : "—")}
       ${cell("Ratings", firms.length ? `${kinds.buy} buy · ${kinds.hold} hold · ${kinds.sell} sell` : "—")}
       ${cell("Target spread vs σ", firms.length > 1 ? `${(spread * 100).toFixed(0)}% vs ${(sigP * 100).toFixed(0)}%` : "—")}
       ${cell("Raised in the last 90 days", firms.length ? `${firms.filter(fm => fm.raised_90d).length} of ${firms.length}` : "—")}
       ${cell("Latest", latest ? `${escapeHtml(latest.firm)} · ${fcFmtDate(new Date(latest.date + "T12:00:00"))}` : "—")}
-      ${cell(hist ? "History: chance ≥ consensus" : "Options: chance ≥ consensus", pct(fcCurveAbove(msim, mk.cons)))}
+      ${cell(hist ? "History: chance ≥ mean target" : "Options: chance ≥ mean target", pct(fcCurveAbove(msim, mk.atExp)))}
       ${cell("Older than 6 months", firms.length ? `${firms.filter(fm => fm.stale).length} (faded)` : "—")}
     </div><div class="m-fc-foot">μ only: a line from today to each firm’s 12-month target. It shows how much analysts disagree, not how uncertain the price is: that is σ. Targets run optimistic on average.${hist ? " " + srcTxt : ""}${via}${link}</div>`;
     return;
@@ -4353,7 +4445,6 @@ function renderFcReadouts() {
   const sim = fcSimulate(d, mode);
   const s20 = fcStats(sim, d.s0 * 0.8, FC_ZONE.steps);
   const mk = DETAIL.showMu ? fcMarks(d) : null;
-  const hz = d.horizon === 365 ? "12 months" : "3 months";
   // What the curve's mean is, named for where it comes from: "expected"
   // would claim more than a model's mean.
   const meanLabel = mode.mu === "analysts" ? (an.n ? "Analysts’ mean target" : "Analysts’ target")
@@ -4393,19 +4484,42 @@ function renderFcReadouts() {
   const cvq = d.curves[mode.curve];
   const sigNow = Math.sqrt(cvq.var_x / d.T);
   const sigTxt = hist ? "" : ` Curve σ ${(sigNow * 100).toFixed(0)}%${mode.curve === "rn" ? " (implied" : ` (κ ${d.kappa.toFixed(2)} × implied ${(d.sigma_q * 100).toFixed(0)}%`}${fx ? " + FX" : ""}).`;
+  // Each tip leads with its formula; S_T is the price at the options' expiry.
+  const expTxt = fcFmtDate(new Date(d.expiry + "T12:00:00"));
+  const S_ = String.raw`S_{\text{${hl}}}`, M = (v) => String.raw`\text{${kx(money(v))}}`;
+  const pUp = fcCurveAbove(sim, d.s0), p20 = 1 - fcCurveAbove(sim, d.s0 * 0.8);
+  const q05 = fcCurveQ(sim, 0.05), q25 = fcCurveQ(sim, 0.25), q50 = fcCurveQ(sim, 0.5), q75 = fcCurveQ(sim, 0.75), q95 = fcCurveQ(sim, 0.95);
+  const P = (v) => kx(pct(v));
   const consCell = mk
-    ? cell(prTex(">=", mk.cons), `${pct(fcCurveAbove(sim, mk.cons))} <small>consensus</small>`, "amb", `The chance the price ends at or above the analysts’ consensus (the median firm’s target, ${money(mk.cons)}) in ${hz}.`)
-    : cell(prTex(">=", d.s0 * 1.2), `${pct(fcCurveAbove(sim, d.s0 * 1.2))} <small>+20%</small>`, "", `The chance the price ends 20% or more above today’s (${money(d.s0 * 1.2)} or more) in ${hz}.`);
+    ? cell(prTex(">=", mk.atExp), `${pct(fcCurveAbove(sim, mk.atExp))} <small>mean target</small>`, "amb",
+      `The chance the price ends at or above the analysts’ mean target on ${expTxt}. The target is ${money(mk.mean)} over a full 12 months; moved to the expiry it is ${money(mk.atExp)}. Shaded amber on the chart.`,
+      "cons", String.raw`\Pr[${S_} \ge ${M(mk.atExp)}] = ${P(fcCurveAbove(sim, mk.atExp))}`)
+    : cell(prTex(">=", d.s0 * 1.2), `${pct(fcCurveAbove(sim, d.s0 * 1.2))} <small>+20%</small>`, "",
+      `The chance the price ends 20% or more above today’s (${money(d.s0 * 1.2)} or more) on ${expTxt}. Shaded green on the chart.`,
+      "p20", String.raw`\Pr[${S_} \ge 1.2\,S_0] = ${P(fcCurveAbove(sim, d.s0 * 1.2))}`);
+  const meanCell = mk && mode.mu === "analysts"
+    ? cell(meanLabel, `${money(mk.mean)} <small>${sgn((mk.mean / d.s0 - 1) * 100)}</small>`, "",
+      `The mean of ${mk.n || 1} firms’ latest 12-month targets: the hollow diamond. Moved to the options’ expiry (${expTxt}) it is ${money(mk.atExp)}: the solid diamond, where the dashed mean path ends.${d.haircut ? ` With the haircut on, the curve’s own mean is ${money(sim.mean)} (“Model mean”).` : ""}`,
+      "mean", String.raw`\bar{T} = \tfrac{1}{n}\textstyle\sum_i T_i = ${M(mk.mean)}`)
+    : cell(meanLabel, `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`, "",
+      `${meanTip} The dashed line is the mean path from today’s price to it.`, "mean", String.raw`\mathbb{E}[${S_}] = ${M(sim.mean)}`);
   el.innerHTML = `<div class="m-fc-grid">
-    ${cell(prTex(">", d.s0), pct(fcCurveAbove(sim, d.s0)), "pos", `The chance the price is above today’s (${money(d.s0)}) in ${hz}.`)}
-    ${cell(meanLabel, `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`, "", meanTip)}
-    ${cell("Median · 50% range", `${money(fcCurveQ(sim, 0.5))} · ${money(fcCurveQ(sim, 0.25))} – ${money(fcCurveQ(sim, 0.75))}`, "", `The middle half of outcomes: in ${hz} the price ends inside this range half the time, a quarter of the time below it and a quarter above. Highlighted on the chart.`, "50")}
-    ${cell("90% range", `${money(fcCurveQ(sim, 0.05))} – ${money(fcCurveQ(sim, 0.95))}`, "", `A wide but likely range: in ${hz} the price ends inside it nine times in ten, below it one time in twenty and above it one time in twenty. Highlighted on the chart.`, "90")}
-    ${cell("Falls 20% or more", `${((1 - fcCurveAbove(sim, d.s0 * 0.8)) * 100).toFixed(1)}% <small>by the end · ${pct(s20.touch)} at some point</small>`, "neg",
-      `The chance of ending ${hz} at least 20% below today (${money(d.s0 * 0.8)} or less), and the chance of trading there at any time before, even if it recovers. The zone is highlighted on the chart.`, "20")}
+    ${cell(prTex(">", d.s0), pct(pUp), "pos", `The chance the price is above today’s (${money(d.s0)}) on ${expTxt}. Shaded green on the chart.`,
+      "up", String.raw`\Pr[${S_} > S_0] = ${P(pUp)}`)}
+    ${meanCell}
+    ${cell("Median · 50% range", `${money(q50)} · ${money(q25)} – ${money(q75)}`, "",
+      `The middle half of outcomes: on ${expTxt} the price ends inside this range half the time, a quarter of the time below it and a quarter above. The median is ${money(q50)}. Highlighted on the chart.`,
+      "50", String.raw`\Pr[${M(q25)} \le ${S_} \le ${M(q75)}] = 50\%`)}
+    ${cell("90% range", `${money(q05)} – ${money(q95)}`, "",
+      `A wide but likely range: on ${expTxt} the price ends inside it nine times in ten, below it one time in twenty and above it one time in twenty. Highlighted on the chart.`,
+      "90", String.raw`\Pr[${M(q05)} \le ${S_} \le ${M(q95)}] = 90\%`)}
+    ${cell("Falls 20% or more", `${(p20 * 100).toFixed(1)}% <small>by the end · ${pct(s20.touch)} at some point</small>`, "neg",
+      `The chance of ending at least 20% below today (${money(d.s0 * 0.8)} or less) on ${expTxt}, and of trading there at any time before, even if it recovers. Shaded red on the chart.`,
+      "20", String.raw`\Pr[${S_} \le 0.8\,S_0] = ${kx((p20 * 100).toFixed(1) + "%")}`)}
     ${consCell}
     ${cell("Dividend Yield", dy, "", dyTip)}
-    ${cell("Hist. / Imp. Volatility", `${vpct(vo.hist)} / ${vpct(vo.implied)}`, "", volTip)}
+    ${cell("Hist. / Imp. Volatility", `${vpct(vo.hist)} / ${vpct(vo.implied)}`, "", volTip, null,
+      String.raw`\sigma_{\text{hist}} = ${kx(vpct(vo.hist))} \quad \sigma_{\text{imp}} = ${kx(vpct(vo.implied))}`)}
   </div><div class="m-fc-foot">${srcTxt}${sigTxt} ${muTxt}${fell}
     Paths: bridges to this curve${hist ? "" : " with earnings jumps"}.${via}${asofTxt} A chance, not a prediction.${qual}${link}</div>`;
 }
@@ -4754,6 +4868,7 @@ function renderSections() {
           <span>Current <b>${fmtMoney(d.price, d.currency)}</b></span>
           <span>Mean target <b>${fmtMoney(d.target_mean, d.currency)}</b>
             ${upside != null ? `<span class="upside ${upside>=0?'pos':'neg'}">(${(upside>=0?'+':'')+upside.toFixed(1)}%)</span>` : ""}
+            ${d.target_n_firms ? `<span style="color:var(--muted);font-weight:400"> · ${d.target_n_firms} firms</span>` : ""}
           </span>
         </div>
       `;

@@ -418,11 +418,15 @@ Owner-approved design (mockup v7, 2026-10-17). Two toolbar toggles after
 Volume, `DETAIL.showSigma` / `DETAIL.showMu`, both on at every open: σ+μ =
 options σ with the analysts' μ; σ = the market's (CAPM) μ; μ = a line per firm
 to its target plus a KDE of targets; neither = the old chart. While either is
-on, `renderChart` ends the history at ~58% of the plot (`padR`), switches the
-y axis to **log** and spans it over the window's history ∪ the end curve's
-5%..95% (`fcYRange`, rule "B · Balanced", owner 2026-10-18: it was 3–97%,
-which on 12M set both limits so 1Y and 5Y looked identical). There is 5% log
-padding plus `FC_LANE` px of headroom for the E/D flags. A change of domain
+on, `renderChart` ends the history at ~58% of the plot (`padR`) and spans
+the **linear** y axis over the window's history ∪ the end curve's 5%..95%
+(`fcYRange`, rule "B · Balanced", owner 2026-10-18: it was 3–97%, which on 12M
+set both limits so 1Y and 5Y looked identical). The axis was log until
+2026-10-20; the owner read its 9 → 28 → 89 → 276 → 859 ticks as broken, so it
+is linear like any price chart, with round 1/2/5 × 10^k ticks in the display
+currency, and the densities are drawn **per unit price** (`sim.pp` = p / S;
+the payload's curves are per log price), which shows their real right skew.
+There is 5% padding plus `FC_LANE` px of headroom for the E/D flags. A change of domain
 eases over ~280 ms (`fcTweenDomain`, final-state redraws, a slow frame snaps).
 The density's mass beyond the frame is labelled ("▲ 4% above",
 `fcDraw`). And
@@ -440,11 +444,30 @@ display currency**: everything is plotted in the listing's own currency, and
 `fmtTickVal` converts the ticks and today's tag like every label (NVDA's axis
 read $214.1 beside a EUR header and EUR targets, so "Low €191.24" looked level
 with a price it was above). The analysts' low..high is inside the y-domain
-when shown, the High/Consensus/Low labels are laid out inside the plot (pushed
+when shown, the marks' labels are laid out inside the plot (pushed
 down from the top, then up from the bottom), and the chart redraws on window
-resize (a timer, not rAF, which stalls in a background window). The 50% / 90%
-/ falls-20% readouts carry an (i): hovering lights that band on the fan and
-the density (`DETAIL.fcBand`).
+resize (a timer, not rAF, which stalls in a background window). Hovering a
+readout cell lights its part of the fan and the density (`DETAIL.fcBand`:
+`up`, `mean`, `50`, `90`, `20`, `cons`, `p20`); there is no (i) badge, the whole
+cell is the target (owner, 2026-10-20).
+
+**One analyst number, two dates** (owner, 2026-10-20). The window used to show
+three different "targets" for NVDA: the median firm (the diamond), the curve's
+mean pro-rated to an expiry 11 months out (the readout) and Yahoo's own mean
+over a different set of opinions (the coverage card). Now there is one number,
+**the mean of the firms' latest 12-month targets** (`analysts.mean`;
+`fetcher.fetch_detail` puts the same figure in `target_mean`, plus
+`target_n_firms`, Yahoo's summary only as the fallback). The options set the
+horizon, so the target bends to the expiry (`fcProRate`, mirroring
+`options_density._target_log_returns`): the **solid diamond** is that target at
+the expiry (`analysts.at_expiry`, equal to the analysts' curve mean when the
+haircut is off), a dotted stub runs on to a **hollow diamond** at the full
+12-month mean at its own date (before the expiry when T > 1). Low/High and the
+μ-only lines are moved to the expiry the same way. The dashed line is the
+**mean path** `sim.meanPath` (the paths' average per step, pinned to end on the
+curve's mean along the variance clock), not the median, which ends at the
+curve's median and so could never reach the diamond. With the haircut on, the
+path ends short of the diamond on a "Model mean" dot.
 `mountForecast` lays a canvas (`#m-fc-cv`, `pointer-events: none`) and a hit
 layer (`#m-fc-hit`) over the future zone and density; the history keeps its
 own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
@@ -474,11 +497,11 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   settings): 750 ms paths then 300 ms ease-out density, no histogram stage;
   a resize or range tab redraws the final state; reduced motion skips it.
 - **The hover box sits left of the density** (and left of the analyst chips
-  on the curve) and snaps to Low/Consensus/High.
+  on the curve) and snaps to the low, mean and high targets at the expiry.
 - 12M is the default; when the 12M chain fails the gate and 3M passes, the
   window switches to 3M once (`DETAIL.fcAuto`) and the footnote says why.
 - Readout labels name the horizon and the threshold (owner, 2026-10-18):
-  `Pr[S_12M > €35]` (S0), `Pr[S_12M ≥ €40]` with "consensus" or "+20%" in
+  `Pr[S_12M > €35]` (S0), `Pr[S_12M ≥ €40]` with "mean target" or "+20%" in
   the value. The threshold is in the display currency, from
   `fmtMoneyThreshold`: whole units from 10 up, two significant figures
   below.
@@ -486,8 +509,9 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   labels: style only `.m-fc-grid > div > span`, never every span, or KaTeX's
   own spans stack), the mean named by its source (analysts' mean target,
   CAPM mean, forward), median and ranges, "Falls 20% or more" (by the end ·
-  at some point), Pr[S_T ≥ consensus] (or ≥ 1.2 S_0), Dividend Yield and
-  Hist. / Imp. Volatility (payload `vol`); each cell's `data-tip` explains it.
+  at some point), Pr[S_T ≥ the mean target at expiry] (or ≥ 1.2 S_0), Dividend
+  Yield and Hist. / Imp. Volatility (payload `vol`); each cell's `data-tip`
+  explains it and its `data-tip-tex` leads the tip with the formula.
   The curve's own σ moved to the footnote. Its "Assumptions" link
   opens Settings → Price distribution (`renderSettingsDistribution`), whose
   saves clear `DETAIL.fc` so the window re-prices.
@@ -1013,6 +1037,11 @@ picked.
   Dark mode is **"Ink"** (`#0a0e14`, surfaces `#111823`, borders `#1d2938`):
   near-black with navy-tinted, not gray, surfaces; the 1.19 navy `#08182a` was
   too blue. The desktop splash (`desktop.py` `_BG`/`_ACCENT`) mirrors it.
+- **The shared tooltip is a card** (`.app-tip`, owner 2026-10-20): `--tip-bg`
+  / `--tip-border` / `--tip-shadow` per theme, a 10 px radius (rounder than the
+  `--r-*` scale on purpose: it floats), 13 px system font. A `data-tip-tex`
+  attribute beside `data-tip` leads the tip with a KaTeX-typeset formula
+  (`.app-tip-h`); without KaTeX the TeX source shows as text.
 - **Selected text has its own tokens** (`--sel-bg` / `--sel-fg` per theme,
   one `::selection` rule): without them the desktop shell's palette showed
   light-mode selections as near-black text on dark gray (owner, 2026-10-09).
