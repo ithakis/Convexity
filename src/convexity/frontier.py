@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 
-from convexity import mpt
+from convexity import analyst_targets, mpt
 from convexity.analytics import _analyst_for, _bulk_close, _drift, _market_cap_usd, _rebalance_days
 from convexity.persistence import clean_trading
 from convexity.cache import _cache_get, _cache_put
@@ -127,14 +127,19 @@ def _analyst_views(
 ) -> tuple[dict[str, dict], dict[str, dict]]:
     """Per-asset BL views + a richer analyst-detail block, in ONE fetch pass.
 
-    Returns ``(views, detail)``:
-      * ``views[s]`` = ``{q, n, disp}`` — the BL inputs: the expected 12-month
-        excess TOTAL return q_i = target_mean_i / price_i − 1 + dy_i − rf.
-        A price target is a price, so the dividend yield dy_i (the row's forward
-        yield, 0 when it pays none) is added to make the view the same kind of
-        return as the equilibrium prior Π, which is a total-return premium.
-        Confidence comes from the analyst count and the low/high dispersion.
+    Returns ``(views, detail, ref)``:
+      * ``views[s]`` = ``{alpha, n, disp, age}`` — the BL inputs. A view is
+        RELATIVE: the equilibrium return Π_i plus a tilt for how much more (or
+        less) optimistic the analysts are about this holding than usual,
+        alpha_i = IC x sigma_xs x z_i (analyst_targets.relative_alpha). Until
+        2026-10-23 a view was the raw upside, q_i = T/P - 1 + dy - rf, which
+        took a +20% target at face value although targets have not ranked
+        12-month returns (IC ~0.01-0.03 in two point-in-time studies) and
+        average ~11% of upside a year. Confidence comes from the analyst
+        count, the low/high dispersion and the targets' median age.
         Assets without a usable target get no view.
+      * ``ref`` = the IC used (and whether it is the prior or measured) and
+        the reference upside the tilts are relative to.
       * ``detail[s]`` = ``{price, target_mean, target_low, target_high,
         upside_pct, n_analysts, disp}`` — surfaced to the per-company hover in
         the Optimize tab. Same fetch (one ``_analyst_for`` call per symbol), so
@@ -162,7 +167,6 @@ def _analyst_views(
         except (TypeError, ValueError):
             dy = 0.0
         dy = dy if (dy == dy and 0.0 <= dy < 0.5) else 0.0  # NaN / absurd -> 0
-        q = tgt / price - 1.0 + dy - float(rf)
         lo, hi = blk.get("target_low"), blk.get("target_high")
         disp = None
         try:
@@ -181,8 +185,10 @@ def _analyst_views(
             "div_yield": dy,
             "n_analysts": (int(n) if n else 0),
             "disp": disp,
+            "age_days": blk.get("target_age_days"),
         }
-        return s, {"q": q, "n": (float(n) if n else 0.0), "disp": disp}, det
+        view = {"n": (float(n) if n else 0.0), "disp": disp, "age": blk.get("target_age_days")}
+        return s, view, det
 
     workers = min(8, max(1, len(active)))
     with _fut.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -191,7 +197,21 @@ def _analyst_views(
                 views[s] = v
             if det is not None:
                 detail[s] = det
-    return views, detail
+    ic, ic_src = analyst_targets.view_ic()
+    # Total upside: a price target is a price, and a high-yield name's target
+    # already prices in its slower growth, so the yield is added before the
+    # holdings are compared.
+    alphas, ref = analyst_targets.relative_alpha(
+        {s: detail[s]["upside_pct"] / 100.0 + detail[s]["div_yield"] for s in views}, ic
+    )
+    for s in list(views):
+        if s not in alphas:
+            views.pop(s)
+            continue
+        views[s]["alpha"] = alphas[s]["alpha"]
+        detail[s].update(view_alpha=alphas[s]["alpha"], view_z=alphas[s]["z"])
+    ref["ic_source"] = ic_src
+    return views, detail, ref
 
 
 def _build_bounds(active: list[str], bounds: dict | None, w_min: float, w_max: float):
@@ -382,7 +402,7 @@ def compute_efficient_frontier_stream(
     t_bl = time.perf_counter()
     cov = mpt.annualized_cov(returns, "daily", cov_model)
     mkt_w = _market_cap_weights(active, by_sym)
-    views, analyst_detail = _analyst_views(active, by_sym, rf)
+    views, analyst_detail, view_ref = _analyst_views(active, by_sym, rf)
     bl = mpt.black_litterman(active, cov, mkt_w, views, rf=rf, haircut=haircut)
     # Everything below (frontier, cloud, anchors) optimizes and reports the
     # return net of the rebalancing cost (_drift_cost); bl.mu stays gross.
@@ -466,6 +486,7 @@ def compute_efficient_frontier_stream(
         "haircut": bl["haircut"],
         "viewed": bl["viewed"],
         "no_view": bl["no_view"],
+        "view_ref": view_ref,
         "cost": {s: float(cost_v[i]) for i, s in enumerate(active)},
     }
     params_payload = {

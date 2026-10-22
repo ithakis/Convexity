@@ -485,7 +485,11 @@ def test_clustered_hit_rate_single_day_is_one_observation():
 
 
 # ----------------------------------------------------------------- optimizer
-def test_black_litterman_view_adds_the_dividend_yield(monkeypatch):
+def test_analyst_views_are_small_relative_tilts_with_the_dividend(monkeypatch):
+    """A view is the equilibrium plus IC x sigma_xs x z, never the raw upside:
+    two names with the same +8% target differ only by the dividend, and no
+    tilt exceeds the 3-sigma cap (2026-10-23)."""
+    from convexity import analyst_targets as at
     from convexity import frontier
 
     monkeypatch.setattr(
@@ -494,10 +498,22 @@ def test_black_litterman_view_adds_the_dividend_yield(monkeypatch):
         lambda s, row=None: {"price": 100.0, "target_mean": 108.0, "n_analysts": 10},
     )
     by_sym = {"A": {"dividend_yield": 0.03}, "B": {}}
-    views, detail = frontier._analyst_views(["A", "B"], by_sym, rf=0.04)
-    assert abs(views["A"]["q"] - (0.08 + 0.03 - 0.04)) < 1e-12
-    assert abs(views["B"]["q"] - (0.08 - 0.04)) < 1e-12
+    views, detail, ref = frontier._analyst_views(["A", "B"], by_sym, rf=0.04)
+    assert "q" not in views["A"] and views["A"]["alpha"] > views["B"]["alpha"]
+    cap = at.IC_PRIOR * at.SIGMA_XS * at.Z_CAP
+    assert all(abs(v["alpha"]) <= cap + 1e-12 for v in views.values())
+    assert ref["ic"] == at.IC_PRIOR and ref["ic_source"] == "prior"
     assert abs(detail["A"]["upside_pct"] - 8.0) < 1e-9  # the price upside stays price-only
+
+
+def test_a_relative_view_sits_on_the_equilibrium():
+    """alpha 0 with full trust leaves the posterior at the prior."""
+    syms = ["A", "B"]
+    cov = pd.DataFrame([[0.04, 0.01], [0.01, 0.09]], index=syms, columns=syms)
+    bl = mpt.black_litterman(syms, cov, {"A": 1, "B": 1},
+                             {"A": {"alpha": 0.0, "n": 20, "disp": 0.1}}, haircut=0.99)  # fmt: skip
+    assert abs(bl["mu"]["A"] - bl["prior"]["A"]) < 1e-9
+    assert abs(bl["q"]["A"] - bl["prior"]["A"]) < 1e-12
 
 
 def _closes(returns, dates, tz):

@@ -462,7 +462,11 @@ grid, the consensus table and the optimizer read the same number too
 (`analyst_targets.consensus`, backend.md), split-adjusted; and 3M shows the
 analysts as well (`fcMarks` no longer requires 365: the 12-month targets are
 moved to the 3-month expiry, and the hollow 12M diamond sits clamped at the
-plot's right edge). The options set the
+plot's right edge). **μ is off by default since 2026-10-23**: σ alone draws
+the market's (CAPM) mean, and μ switches to the analysts' curve, labelled as
+the Street's expectation; the analyst haircut (`dist_haircut`) defaults to on.
+Targets did not rank 12-month returns in point-in-time tests (backend.md,
+"What analyst targets predict"), so they are not the default forecast. The options set the
 horizon, so the target bends to the expiry (`fcProRate`, mirroring
 `options_density._target_log_returns`): the **solid diamond** is that target at
 the expiry (`analysts.at_expiry`, equal to the analysts' curve mean when the

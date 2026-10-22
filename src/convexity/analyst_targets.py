@@ -37,7 +37,9 @@ Network: one ``upgrades_downgrades`` request (~0.1 s) per symbol per ``TTL``;
 from __future__ import annotations
 
 import datetime as dt
+import json
 import math
+import threading
 
 from convexity.cache import _cache_get, _cache_put
 
@@ -138,6 +140,7 @@ def firm_targets(ud, splits=None, price: float | None = None, today: dt.datetime
                 "stale": age > TARGET_STALE,
                 "split_adjusted": k != 1.0,
                 "raised_90d": bool(age <= 90 and prior and target > prior),
+                "lowered_90d": bool(age <= 90 and prior and target < prior),
             }
         )
     return sorted(firms, key=lambda f: f["target"])
@@ -153,6 +156,7 @@ def summarise(firms: list[dict], summary: dict | None = None) -> dict | None:
         t = sorted(f["target"] for f in firms)
         n = len(t)
         med = t[n // 2] if n % 2 else (t[n // 2 - 1] + t[n // 2]) / 2
+        ages = sorted(f.get("age_days", 0) for f in firms)
         return {
             "firms": firms,
             "mean": sum(t) / n,
@@ -162,6 +166,9 @@ def summarise(firms: list[dict], summary: dict | None = None) -> dict | None:
             "high": t[-1],
             "n": n,
             "n_stale": sum(1 for f in firms if f["stale"]),
+            "age_days": ages[n // 2],
+            "n_raised_90d": sum(1 for f in firms if f.get("raised_90d")),
+            "n_lowered_90d": sum(1 for f in firms if f.get("lowered_90d")),
             "n_opinions": summary.get("n_opinions"),
             "source": "firms",
         }
@@ -178,6 +185,9 @@ def summarise(firms: list[dict], summary: dict | None = None) -> dict | None:
         "high": _num(summary.get("high")),
         "n": None,
         "n_stale": 0,
+        "age_days": None,
+        "n_raised_90d": None,
+        "n_lowered_90d": None,
         "n_opinions": summary.get("n_opinions"),
         "source": "summary",
     }
@@ -233,6 +243,8 @@ def consensus(symbol: str, tk=None, info: dict | None = None, splits=None, price
         except Exception:
             splits = None
     out = summarise(firm_targets(ud, splits, px), summary)
+    if key and out and px:
+        record(symbol, px, out)
     if key:
         # Only a firm list is kept for the full TTL. Yahoo answers a burst of
         # requests with EMPTY frames rather than errors (a throttle, see
@@ -271,3 +283,245 @@ def apply_to_row(out: dict, block: dict | None) -> None:
     out["target_high"] = block.get("high")
     out["target_n_firms"] = block.get("n")
     out["target_source"] = block.get("source")
+    out["target_age_days"] = block.get("age_days")
+    out["target_n_stale"] = block.get("n_stale")
+    out["target_raised_90d"] = block.get("n_raised_90d")
+    out["target_lowered_90d"] = block.get("n_lowered_90d")
+
+
+# ---------------------------------------------------------------------------
+# Targets as an expected return (the optimizer's Black-Litterman views)
+# ---------------------------------------------------------------------------
+# Two studies (2026-10-22; docs/architecture/backend.md "What analyst targets
+# predict") found that a target's raw upside is not a return forecast: on 80
+# large caps (2021-25) the plain mean ranked 12-month returns with IC 0.023
+# (t 0.5), and on the S&P 500 (2015-25) the best analyst signal fell to IC
+# 0.013 (t 0.9) once its volatility tilt was removed; the average upside
+# (~11% a year in log terms) also runs above what is realised. So a view is
+# the equilibrium return plus a small tilt for RELATIVE optimism, sized by
+# Grinold's rule alpha = IC x sigma_xs x z (Grinold & Kahn, Active Portfolio
+# Management, ch. 10): about +/-0.8% a year per standard deviation, never the
+# raw +20% a target can imply.
+IC_PRIOR = 0.02  # between the volatility-neutral (0.013) and raw (0.033) results
+SIGMA_XS = 0.42  # cross-sectional sd of 12-month returns, S&P 500 2015-25
+UPSIDE_MEAN = 0.11  # long-run mean ln(target / price), US large caps 2021-25
+UPSIDE_SD = 0.125  # its cross-sectional sd (stable month to month: 0.12-0.13)
+SHRINK_N0 = 10  # the holdings' own mean counts as this many universe names
+Z_CAP = 3.0
+
+
+def relative_alpha(upsides: dict[str, float], ic: float | None = None) -> tuple[dict, dict]:
+    """Per-symbol alpha (annual, excess over equilibrium) from each holding's
+    target upside (T / P - 1). The reference mean blends the holdings' own
+    mean with the long-run universe mean: the universe's average upside swings
+    from 2% to 31% with the market, which a fixed constant would misread as
+    every holding being relatively bullish or bearish."""
+    ic = IC_PRIOR if ic is None else ic
+    u = {s: math.log1p(v) for s, v in upsides.items() if v is not None and v > -0.95}
+    if not u:
+        return {}, {"ic": ic, "ref_upside": None}
+    n = len(u)
+    ref = (sum(u.values()) + SHRINK_N0 * UPSIDE_MEAN) / (n + SHRINK_N0)
+    out = {}
+    for s, v in u.items():
+        z = max(-Z_CAP, min(Z_CAP, (v - ref) / UPSIDE_SD))
+        out[s] = {"alpha": ic * SIGMA_XS * z, "z": z}
+    return out, {"ic": ic, "ref_upside": math.expm1(ref), "sigma_xs": SIGMA_XS}
+
+
+# ---------------------------------------------------------------------------
+# Our own point-in-time record (state/target_history.jsonl) and its track record
+# ---------------------------------------------------------------------------
+# Yahoo's per-firm history is thin before 2020 and every backtest on today's
+# index is survivorship-biased. The app therefore keeps its own dated record:
+# one line per (day, symbol) the first time a block is computed that day,
+# scored once the price 12 months on is known. Market data only (no holdings
+# sizes), so nothing about the owner's book is in it.
+_HIST_LOCK = threading.Lock()
+_SEEN: set[tuple[str, str]] = set()
+HIST_MAX_DAYS = 3 * 365
+HORIZON_DAYS = 365
+MIN_NAMES = 8  # a day's cross-section needs this many names to rank
+MIN_WEEKS = 52  # weeks with an outcome before a verdict
+
+
+def _hist_path():
+    from convexity import paths
+
+    return paths.state_dir() / "target_history.jsonl"
+
+
+def record(symbol: str, price: float, block: dict) -> None:
+    """Append today's block for ``symbol`` (once per day per symbol)."""
+    day = dt.date.today().isoformat()
+    key = (day, (symbol or "").upper())
+    if key in _SEEN or not block.get("mean"):
+        return
+    line = {
+        "d": day,
+        "s": key[1],
+        "p": round(float(price), 6),
+        "mean": round(float(block["mean"]), 6),
+        "median": round(float(block["median"]), 6) if block.get("median") else None,
+        "n": block.get("n"),
+        "src": block.get("source"),
+        "age": block.get("age_days"),
+    }
+    try:
+        with _HIST_LOCK:
+            if key in _SEEN:
+                return
+            path = _hist_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(line) + "\n")
+            _SEEN.add(key)
+    except OSError as e:
+        print(f"[targets] history: {type(e).__name__}")
+
+
+def load_history() -> list[dict]:
+    """The record, one line per (day, symbol) (the last wins), malformed
+    lines skipped, older than HIST_MAX_DAYS dropped."""
+    cutoff = (dt.date.today() - dt.timedelta(days=HIST_MAX_DAYS)).isoformat()
+    out: dict[tuple, dict] = {}
+    try:
+        text = _hist_path().read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for ln in text.splitlines():
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if (
+            isinstance(r, dict)
+            and r.get("d", "") >= cutoff
+            and _num(r.get("p"))
+            and _num(r.get("mean"))
+        ):
+            out[(r["d"], r["s"])] = r
+    return list(out.values())
+
+
+def _nw_t(x: list[float], lag: int) -> float | None:
+    n = len(x)
+    if n < 5:
+        return None
+    m = sum(x) / n
+    e = [v - m for v in x]
+    var = sum(v * v for v in e) / n
+    for k in range(1, min(lag, n - 1) + 1):
+        var += 2 * (1 - k / (lag + 1)) * sum(e[i] * e[i - k] for i in range(k, n)) / n
+    return m / math.sqrt(var / n) if var > 0 else None
+
+
+def _spearman(a: list[float], b: list[float]) -> float | None:
+    import pandas as pd
+
+    if len(a) < 3:
+        return None
+    r = pd.Series(a).corr(pd.Series(b), method="spearman")
+    return float(r) if r == r else None
+
+
+def track_record(closes=None) -> dict:
+    """How well relative target upside has ranked the next 12 months, on the
+    app's own record. Weekly cross-sections (the last recorded day of each
+    week with >= MIN_NAMES names), Spearman IC of ln(T/P) minus that day's
+    mean against the realised 12-month log return, Newey-West t with lag 51
+    (52 overlapping weeks). ``closes`` ({symbol: pandas Series}) is injected
+    by tests; otherwise fetched once for the symbols that need an outcome."""
+    hist = load_history()
+    today = dt.date.today()
+    matured = [r for r in hist if (today - dt.date.fromisoformat(r["d"])).days >= HORIZON_DAYS]
+    first = min((r["d"] for r in hist), default=None)
+    base = {
+        "n_records": len(hist),
+        "n_symbols": len({r["s"] for r in hist}),
+        "since": first,
+        "first_outcome": (
+            dt.date.fromisoformat(first) + dt.timedelta(days=HORIZON_DAYS)
+        ).isoformat()
+        if first
+        else None,
+        "ic_prior": IC_PRIOR,
+    }
+    weeks: dict[tuple, dict[str, dict]] = {}
+    for r in matured:
+        d = dt.date.fromisoformat(r["d"])
+        wk = d.isocalendar()[:2]
+        cur = weeks.setdefault(wk, {})
+        if r["s"] not in cur or cur[r["s"]]["d"] < r["d"]:
+            cur[r["s"]] = r
+    if matured and closes is None:
+        closes = _fetch_closes({r["s"] for r in matured}, min(r["d"] for r in matured))
+    ics: list[float] = []
+    for wk in sorted(weeks):
+        rows = list(weeks[wk].values())
+        pts = []
+        for r in rows:
+            ser = (closes or {}).get(r["s"])
+            if ser is None or len(ser) == 0:
+                continue
+            end = dt.date.fromisoformat(r["d"]) + dt.timedelta(days=HORIZON_DAYS)
+            later = ser[ser.index.date <= end]
+            # The close at the horizon, not the last one Yahoo had: a listing
+            # whose prices stop early is skipped, never scored on a stale price.
+            if not len(later) or (end - later.index[-1].date()).days > 10:
+                continue
+            p1 = float(later.iloc[-1])
+            if p1 > 0:
+                pts.append((math.log(r["mean"] / r["p"]), math.log(p1 / r["p"])))
+        if len(pts) >= MIN_NAMES:
+            mu = sum(p[0] for p in pts) / len(pts)
+            ic = _spearman([p[0] - mu for p in pts], [p[1] for p in pts])
+            if ic is not None:
+                ics.append(ic)
+    n = len(ics)
+    mean = sum(ics) / n if n else None
+    t = _nw_t(ics, 51) if n >= 5 else None
+    if n < MIN_WEEKS:
+        verdict = f"Too early — {n} of {MIN_WEEKS} weeks with a 12-month outcome"
+    elif t is not None and t >= 2 and mean > 0:
+        verdict = "Evidence of an edge"
+    elif t is not None and 1 <= t < 2 and mean > 0:
+        verdict = "Weak evidence"
+    else:
+        verdict = "No evidence"
+    out = {**base, "n_weeks": n, "ic": mean, "t": t, "ic_pos_share": (sum(1 for v in ics if v > 0) / n) if n else None,
+           "verdict": verdict, "ic_series": [round(v, 4) for v in ics]}  # fmt: skip
+    _cache_put("analyst_targets|track_record", {"v": out}, 6 * 3600.0)
+    return out
+
+
+def _fetch_closes(symbols: set[str], since: str) -> dict:
+    import yfinance as yf
+
+    out = {}
+    try:
+        df = yf.download(sorted(symbols), start=since, auto_adjust=False, progress=False)["Close"]
+    except Exception as e:
+        print(f"[targets] track record closes: {type(e).__name__}")
+        return out
+    if hasattr(df, "columns"):
+        for s in df.columns:
+            out[str(s)] = df[s].dropna()
+    return out
+
+
+def view_ic() -> tuple[float, str]:
+    """The IC behind the optimizer's analyst tilts: the app's own measured IC
+    once its track record shows evidence (>= MIN_WEEKS weeks, t >= 2), else
+    the studies' prior. Reads the last computed track record only (no network
+    on the optimizer's path)."""
+    hit = _cache_get("analyst_targets|track_record")
+    tr = hit.get("v") if hit else None
+    if (
+        tr
+        and tr.get("n_weeks", 0) >= MIN_WEEKS
+        and (tr.get("t") or 0) >= 2
+        and (tr.get("ic") or 0) > 0
+    ):
+        return float(tr["ic"]), "measured"
+    return IC_PRIOR, "prior"

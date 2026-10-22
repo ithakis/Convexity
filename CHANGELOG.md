@@ -9,6 +9,15 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.28.4 — 2026-10-23
+
+- **Analyst targets are treated as an expectation, not a forecast.** Two point-in-time studies (80 large caps 2021–25; the S&P 500 2015–25) found targets rank 12-month returns with IC ≈ 0.01–0.03 once their volatility tilt is removed. So:
+  - **Optimizer:** a view is the equilibrium return plus a small tilt for relative optimism, IC × 0.42 × z (about ±0.8% a year per σ, ±2.5% at most), with older targets trusted less. It used to take raw upside at face value (+110% for a quantum name).
+  - **Stock window and consensus table:** each target shows its firms, median age, stale count, 90-day raises and cuts and spread, with a one-line note on what a target is.
+  - **Track record → Analyst targets:** the app now keeps its own dated record of every target (`state/target_history.jsonl`) and scores it against the price 12 months on; once it shows evidence, its IC replaces the 0.02 prior in the optimizer.
+  - **σ/μ** opens on the market's μ; the analysts' curve is opt-in and the haircut is on by default.
+- The research script from 1.28.3 was removed; its findings are in `docs/architecture/backend.md`.
+
 ## 1.28.3 — 2026-10-22
 
 - **News read works again.** NVIDIA retired `nemotron-3-super-120b` (every call answered 404). The News read now runs on a chain of free NIM models, `nemotron-3.5-lightning-30b` first (passes every benchmark gate: lens 79.8%, direction 88.5%, p95 15.7 s) and `nemotron-3-ultra-550b` as the fallback; a retired model moves the same call to the next one, so a retirement can no longer take the News read down. The schema pins the item count and caps text length (lightning duplicated items and looped), and stray "(id 3)" tags are cut from briefs.

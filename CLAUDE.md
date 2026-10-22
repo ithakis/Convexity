@@ -240,7 +240,12 @@ Each of these has cost real debugging time; the link goes to the full story.
   target **split-adjusted** (Yahoo never restates them: CRWD's 4:1 split put
   $800 targets against a $240 price), Yahoo's summary only as the fallback.
   Never read `targetMeanPrice` directly for a displayed target. 3M shows the
-  analysts too, targets moved to the expiry.
+  analysts too, targets moved to the expiry. **A target is not a return
+  forecast** (IC ≈ 0.01–0.03 point-in-time, 2026-10-23): the optimizer's views
+  are equilibrium + IC × 0.42 × z of relative upside (≤ ±2.5%), σ/μ opens on
+  the market's μ, and the app's own dated record
+  (`state/target_history.jsonl`, Track record → Analyst targets) is the only
+  thing that may raise the IC. Never feed raw target upside to the optimizer.
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·
   [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
 - **A secondary listing borrows its research** (2026-10-18): Yahoo has no
@@ -290,7 +295,7 @@ sub-decision.
 │   ├── cli.py                   ← The `convexity` command: no args = server, `build-symbols` (symbol pack, CI) — §6, `build-reference-pack`
 │   ├── server.py                ← HTTP server, route handlers, start_server()/shutdown_server() — §4, §14
 │   ├── fetcher.py                ← fetch_one() per-symbol row builder — §4
-│   ├── analyst_targets.py       ← THE analyst target (each firm's latest, split-adjusted; summary fallback), read by every surface — §4
+│   ├── analyst_targets.py       ← THE analyst target (each firm's latest, split-adjusted; summary fallback), read by every surface; BL tilts; dated record + track record — §4
 │   ├── analytics.py             ← analyze_portfolios_multi(), bulk close, analyst blocks — §4
 │   ├── fx.py                    ← FX spot rates, basket index history, currency conversion — §4
 │   ├── frontier.py              ← Mean-CVaR frontier orchestrator (BL returns + CVaR risk, wraps mpt.py) — §12
@@ -377,6 +382,7 @@ overrides it):
 │   ├── proxies.json            ← found stand-in listings per young listing, a week (market data only; analytics._proxy_candidates)
 │   ├── attention.json          ← the Attention rail's thresholds, dismissed and seen items (preferences; malformed = defaults)
 │   ├── events.json             ← held shares' next earnings / ex-dividend dates from Yahoo (a cache, market data only)
+│   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
 │   ├── recaps.json             ← My Investments' weekly recaps, last 12 (derived from the computed page: a cache)
 │   └── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)

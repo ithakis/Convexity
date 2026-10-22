@@ -1234,6 +1234,31 @@ function fmt2(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed
 /* A value that is already in percent (Yahoo's debtToEquity: 78.4 = 78.4%). */
 function fmtPctNum(v) { return (v == null || !isFinite(v)) ? na() : Number(v).toFixed(1) + "%"; }
 
+/* What a mean target rests on (analyst_targets.summarise): how many firms,
+   how old their targets are, which way they moved lately, how far apart they
+   sit, and what a target is. Shared by the stock window and the consensus
+   table's hover so both say the same thing. */
+function targetFacts(x) {
+  const out = [];
+  if (x.n_firms) out.push(`${x.n_firms} firms`);
+  if (x.age_days != null) out.push(`median age ${x.age_days} d`);
+  if (x.n_stale) out.push(`${x.n_stale} older than 6 months`);
+  if (x.raised_90d != null || x.lowered_90d != null)
+    out.push(`last 90 d: ${x.raised_90d || 0} raised, ${x.lowered_90d || 0} lowered`);
+  if (x.target_low != null && x.target_high != null && x.target_mean)
+    out.push(`spread ${Math.round((x.target_high - x.target_low) / x.target_mean * 100)}% of the mean`);
+  return out;
+}
+const TARGET_NOTE = "A target is the Street's expectation, not a forecast: in point-in-time tests targets did not reliably rank 12-month returns, and their average upside runs above what is realized.";
+function targetContextHtml(d) {
+  const facts = targetFacts({
+    n_firms: d.target_n_firms, age_days: d.target_age_days, n_stale: d.target_n_stale,
+    raised_90d: d.target_raised_90d, lowered_90d: d.target_lowered_90d,
+    target_low: d.target_low, target_high: d.target_high, target_mean: d.target_mean,
+  }).filter(f => !/ firms$/.test(f));  // the count already sits beside the mean
+  return `<div class="m-target-context">${facts.length ? escapeHtml(facts.join(" · ")) + "<br>" : ""}<span>${TARGET_NOTE}</span></div>`;
+}
+
 /* A Date, epoch ms or ISO string as a Date; bare YYYY-MM-DD is a local-calendar day. */
 function parseLocalDay(d) {
   if (d instanceof Date) return d;
@@ -2523,7 +2548,10 @@ const DETAIL = {
   showSector: false,    // overlay sector ETF
   showVol: true,        // volume bars
   // σ/μ (the real-world price distribution): both on when a window opens.
-  showSigma: true, showMu: true,
+  // μ (the analysts' view) is opt-in since 2026-10-23: targets did not rank
+  // 12-month returns in point-in-time tests, so the default curve's mean is
+  // the market's (CAPM) and the Street's expectation is one click away.
+  showSigma: true, showMu: false,
   fcH: 365,             // horizon in days: 365 (12M, the default) or 91 (3M)
   fc: {}, fcPending: {}, // /api/density payloads by horizon, and in-flight fetches
   fcSim: null, fcAnimKey: null, fcT: 2, fcHov: null, fcRaf: 0,
@@ -2547,7 +2575,7 @@ function openModal(r) {
   if (r.error) return;
   DETAIL.data = null; DETAIL.row = r;
   DETAIL.range = "1Y"; DETAIL.showSP = false; DETAIL.showSector = false; DETAIL.showVol = true;
-  DETAIL.showSigma = DETAIL.showMu = true; DETAIL.fcH = 365; DETAIL.fcAuto = true;
+  DETAIL.showSigma = true; DETAIL.showMu = false; DETAIL.fcH = 365; DETAIL.fcAuto = true;
   DETAIL.fc = {}; DETAIL.fcPending = {}; DETAIL.fcSim = null; DETAIL.fcAnimKey = null; DETAIL.fcHov = null;
   DETAIL.events = null; DETAIL.evOpen = null; DETAIL.fcBand = null;
   if (DETAIL.yTw) cancelAnimationFrame(DETAIL.yTw.raf);
@@ -2733,7 +2761,7 @@ function renderModalSkeleton() {
         <button class="m-toolbar-btn active" id="m-toggle-vol" title="Toggle volume bars">Volume</button>
         <span class="m-toolbar-sep"></span>
         <button class="m-toolbar-btn m-greek active" id="m-toggle-sigma" title="σ — the spread of prices in 3 or 12 months, from the listed options">σ</button>
-        <button class="m-toolbar-btn m-greek active" id="m-toggle-mu" title="μ — where analysts expect the price, from their 12-month targets">μ</button>
+        <button class="m-toolbar-btn m-greek" id="m-toggle-mu" title="μ — where the Street expects the price (the analysts' 12-month targets). Off: the market's μ (CAPM). Targets are an expectation, not a forecast">μ</button>
       </div>
       <div class="m-chart" id="m-chart">
         <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">${lcHtml("fetching detail and options", {bar: true})}</div>
@@ -4873,6 +4901,7 @@ function renderSections() {
             ${d.target_n_firms ? `<span style="color:var(--muted);font-weight:400"> · ${d.target_n_firms} firms</span>` : ""}
           </span>
         </div>
+        ${targetContextHtml(d)}
       `;
     }
     // Latest recommendation distribution
@@ -6830,6 +6859,8 @@ function renderAnalystDashboard(a) {
         + `mean ${fmtUp(h.upside_pct)} (${fmtMoney(h.target_mean, h.currency)}) · `
         + `high ${fmtUp(upHi)} (${fmtMoney(h.target_high, h.currency)})`
         + (h.n_analysts ? ` · ${h.n_analysts} analysts` : "")
+        + (targetFacts(h).length ? `\n${targetFacts(h).join(" · ")}` : "")
+        + `\n${TARGET_NOTE}`
       : "No published low/high targets";
     return `<tr>
       <td class="sym">${escapeHtml(h.symbol)}<span class="muted">${escapeHtml((h.name || "").length > 22 ? h.name.slice(0, 22) + "…" : (h.name || ""))}</span></td>
@@ -9665,7 +9696,7 @@ async function toggleTrackRecord() {
    or "reference" (the S&P 500 reference pack, Market read only). Remembered
    per browser; the storage accessors can throw (private mode), hence try. */
 function trackRecordSource() {
-  try { return localStorage.getItem("tr_source") === "reference" ? "reference" : "holdings"; }
+  try { const v = localStorage.getItem("tr_source"); return v === "reference" || v === "targets" ? v : "holdings"; }
   catch { return "holdings"; }
 }
 
@@ -9676,13 +9707,16 @@ async function loadTrackRecord() {
   const seq = ++_trLoadSeq;
   body.innerHTML = trackSourceSwitch(src)
     + lcHtml(src === "reference" ? "scoring 500 names against realized returns"
+                                 : src === "targets" ? "scoring analyst targets against realized returns"
                                  : "scoring the history against realized returns", { bar: true });
   wireTrackSourceSwitch(body);
   try {
-    const url = src === "reference" ? "/api/news-diagnostics?source=reference" : "/api/news-diagnostics";
+    const url = src === "reference" ? "/api/news-diagnostics?source=reference"
+      : src === "targets" ? "/api/target-track-record" : "/api/news-diagnostics";
     const d = await fetch(url).then(r => r.json());
     if (seq !== _trLoadSeq) return;  // switched or reopened while loading
-    renderTrackRecord(d);
+    if (src === "targets") renderTargetTrackRecord(d, body);
+    else renderTrackRecord(d);
   } catch {
     if (seq !== _trLoadSeq) return;
     body.innerHTML = trackSourceSwitch(src) + '<div class="ns-panel-empty">Track record unavailable.</div>';
@@ -9695,6 +9729,7 @@ function trackSourceSwitch(src) {
   return `<div class="ns-tr-src" role="group" aria-label="Track record history">
     ${b("holdings", "Your holdings", "Both engines, scored on the reads this app has made of your holdings.")}
     ${b("reference", "Model (500 names)", "The Market read alone, scored on the S&amp;P 500 every weekday by the daily reference build — a far larger sample than one portfolio.")}
+    ${b("targets", "Analyst targets", "Whether analysts' relative optimism has ranked the next 12 months, on this app's own dated record of every target it has computed.")}
   </div>`;
 }
 
@@ -9707,6 +9742,36 @@ function wireTrackSourceSwitch(root) {
       loadTrackRecord();
     };
   });
+}
+
+/* Track record → Analyst targets (analyst_targets.track_record). The record
+   starts the day this version first computes a target, so for a year the
+   card can only say when the first outcome arrives; the optimizer uses the
+   studies' prior IC until this shows evidence. */
+function renderTargetTrackRecord(d, body) {
+  const parts = [trackSourceSwitch("targets")];
+  if (!d || d.error) {
+    body.innerHTML = parts[0] + '<div class="ns-panel-empty">Track record unavailable.</div>';
+    wireTrackSourceSwitch(body);
+    return;
+  }
+  const key = d.verdict === "Evidence of an edge" ? "edge" : d.verdict === "Weak evidence" ? "weak"
+    : (d.n_weeks || 0) < 52 ? "too_early" : "none";
+  const first = d.first_outcome ? fmtDateDMY(d.first_outcome) : "—";
+  parts.push(`<div class="ns-tr-card ns-tr-${key}">
+    <div class="ns-tr-title">Analyst targets — relative upside vs the next 12 months</div>
+    <div class="ns-tr-verdict">${escapeHtml(d.verdict || "Too early")}</div>
+    <div class="ns-tr-days"><span style="width:${Math.min(100, (d.n_weeks || 0) / 52 * 100).toFixed(0)}%"></span></div>
+    <div class="ns-tr-kv"><span>Weeks with a 12-month outcome</span><b>${d.n_weeks || 0}</b></div>
+    <div class="ns-tr-kv"><span>Weekly IC (12M)</span><b>${d.ic != null ? fmtSig(d.ic, 3) : "—"}${d.t != null ? ` <span class="ns-muted">t ${d.t.toFixed(1)}</span>` : ""}</b></div>
+    <div class="ns-tr-kv"><span>Recorded</span><b>${(d.n_records || 0).toLocaleString(NUM_LOCALE)} targets · ${d.n_symbols || 0} names${d.since ? ` <span class="ns-muted">since ${fmtDateDMY(d.since)}</span>` : ""}</b></div>
+    <div class="ns-tr-kv"><span>First 12-month outcome</span><b>${first}</b></div>
+    <div class="ns-tr-explain">Each week: the Spearman correlation between how much more optimistic analysts were about a name than about the others that day, and its price return over the next 12 months. t is Newey-West (lag 51) for the overlapping years. Until this shows evidence (a year of weeks, t ≥ 2), the optimizer sizes analyst views with IC ${fmtSig(d.ic_prior ?? 0.02, 2)} from two point-in-time studies.</div>
+  </div>`);
+  parts.push(`<div class="ns-diag-sec"><h5>What the studies found</h5>
+    <div class="ns-diag-note">On 80 US large caps (2021–25) the plain mean target ranked 12-month returns with IC 0.023 (t 0.5). On the S&amp;P 500 (2015–25) the best analyst signal, return-preserving upside, reached IC 0.035 (t 1.6), but most of that was a tilt to volatile names; without it, IC 0.013 (t 0.9). Average upside runs near 11% a year, above what is realized. Targets describe what the Street expects; they are not a forecast. Both backtests use today's index members, so they flatter volatile names; this record has no such bias.</div></div>`);
+  body.innerHTML = parts.join("");
+  wireTrackSourceSwitch(body);
 }
 
 function nsPct(x, digits = 0) { return x == null ? "—" : `${(x * 100).toFixed(digits)}%`; }
@@ -10278,7 +10343,7 @@ const MPT_METRIC_INFO = {
   ret: () => ({
     label: "Return, net of trading cost",
     formula: String.raw`\mu_p^{net} = \sum_i w_i\,\mu_i^{BL} - \text{trading cost a year}`,
-    desc: "Annual expected return from the Black-Litterman posterior (market-implied returns blended with the analysts' price targets, as far as the trust setting allows), less this portfolio's own trading cost from the backtest below. The frontier ranks portfolios with a quicker cost estimate, so the chart's height can differ slightly from this figure. Cash, when allowed, earns the risk-free rate.",
+    desc: "Annual expected return from the Black-Litterman posterior (market-implied returns tilted by the analysts' relative optimism, as far as the trust setting allows), less this portfolio's own trading cost from the backtest below. The frontier ranks portfolios with a quicker cost estimate, so the chart's height can differ slightly from this figure. Cash, when allowed, earns the risk-free rate.",
     range: "A model estimate, not a forecast to bank on: it moves with the trust setting and the views. Use it to compare points along the frontier.",
   }),
   var: () => {
@@ -11494,7 +11559,8 @@ function mptRenderSide() {
     (costed ? row("turnover", "Turnover", `${pc(sel.turnover_ann, 0)}/yr` + sub(d.params?.rebalance ? escapeHtml(REBALANCE_LABEL[d.params.rebalance]) : "")) : "") +
     (costed ? row("switch", "Cost to switch", pc(sel.switch_cost, 2) + sub("from current")) : "") +
     (cash ? row("cash", "Invested / cash", `${(invested * 100).toFixed(0)}% / ${((1 - invested) * 100).toFixed(0)}%`) : "") +
-    row("views", "Analyst views", `${(bl.viewed || []).length}/${(d.symbols || []).length}` + (bl.haircut != null ? sub(`@ ${Math.round(bl.haircut * 100)}% trust`) : "")) +
+    row("views", "Analyst views", `${(bl.viewed || []).length}/${(d.symbols || []).length}` + (bl.haircut != null ? sub(`@ ${Math.round(bl.haircut * 100)}% trust`) : "")
+      + (bl.view_ref && bl.view_ref.ic != null ? sub(`IC ${fmtSig(bl.view_ref.ic, 2)} ${bl.view_ref.ic_source === "measured" ? "measured" : "prior"}`) : "")) +
     row("assets", "Active assets", `${(d.symbols || []).length}` + ((d.missing || []).length ? sub(`(${d.missing.length} dropped)`) : ""));
   // Weights bars (sorted descending; zero-weight rows hidden). Each row's symbol
   // carries a rich hover (mptAssetTip) with the asset's risk/return/analyst stats.
@@ -11559,6 +11625,9 @@ function mptAssetTip(sym) {
       rows += row("Range (low–high)", `${fmtMoney(an.target_low, an.currency)}–${fmtMoney(an.target_high, an.currency)}`);
     }
     if (an.disp != null) rows += row("Target dispersion", pct(an.disp) + (an.n_analysts ? ` · ${an.n_analysts} an.` : ""));
+    // The view the optimizer actually uses: equilibrium + a small relative tilt
+    // (analyst_targets.relative_alpha), not the implied upside above.
+    if (an.view_alpha != null) rows += row("View tilt vs equilibrium", signed(an.view_alpha), an.view_alpha >= 0 ? "pos" : "neg");
   }
   return `<div class="tip-title">${escapeHtml(sym)}</div>${rows}`;
 }
@@ -13519,7 +13588,7 @@ async function renderSettingsDistribution(el) {
   let p = {};
   try { p = await (await fetch("/api/prefs")).json(); } catch (e) { /* the defaults */ }
   const erp = p.dist_erp ?? 0.05, ks = p.dist_kappa_stock ?? 0.92, ki = p.dist_kappa_index ?? 0.80;
-  const measure = p.dist_measure || "P", haircut = !!p.dist_haircut;
+  const measure = p.dist_measure || "P", haircut = p.dist_haircut !== false;  // on by default since 2026-10-23
   const num = (key, v, step, min, max, unit, label) => `<span class="att-rule"><input type="number" data-dist-num="${key}" value="${v}"
       step="${step}" min="${min}" max="${max}" aria-label="${label}" style="width:84px">${unit ? `<span class="att-unit">${unit}</span>` : ""}</span>`;
   el.innerHTML =
@@ -13527,7 +13596,7 @@ async function renderSettingsDistribution(el) {
       help: "The market's expected return over cash, per year. With σ alone, a stock's mean is the rate plus its beta times this (CAPM). Default 5%.",
       control: num("dist_erp", +(erp * 100).toFixed(2), 0.5, 0, 15, "%", "Equity premium, percent") }) +
     settingsRow({ id: "dist-haircut", label: "Analyst haircut",
-      help: "Analysts' 12-month targets run optimistic on average. On, each target's excess return over the market's is halved before it sets μ. Off by default.",
+      help: "Analysts' 12-month targets run optimistic on average. On, each target's excess return over the market's is halved before it sets μ. On by default.",
       control: `<label class="settings-check"><input type="checkbox" data-dist-bool="dist_haircut"${haircut ? " checked" : ""} aria-label="Analyst haircut"></label>` }) +
     settingsRow({ id: "dist-measure", label: "Measure",
       help: "Real-world: the options' curve tilted to the chosen μ, with σ scaled by κ (default). Risk-neutral: the options' own curve, mean = forward. It includes the risk premium, so it is what the options price, not a forecast.",

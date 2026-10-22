@@ -265,6 +265,40 @@ with the window at once; the grid's Target Δ follows on the next Refresh.
 A research line's targets are that line's block, scaled (`_research_row` runs
 the same `_apply_targets`; σ/μ uses `analyst_targets.scaled`).
 
+**What analyst targets predict, and how the app uses them (2026-10-22/23).**
+Two point-in-time studies rebuilt, at each month-end, the consensus from the
+targets known that day (each firm's latest, split-adjusted) and compared it
+with the price 12 months later:
+- 80 US large caps, 2021–25 (4,534 stock-months): the plain mean target
+  ranked returns with IC 0.023 (t 0.5); "return-preserving" upside (each
+  firm's upside when published, applied to today's price) 0.085 (t 1.6), with
+  90-day recency weights 0.080 (t 1.9); rolling a target forward by its age or
+  annualising its remaining horizon was worse. Mean ln(T/P) 0.116 a year
+  against 0.091 realised.
+- S&P 500, 2015–25 (~63k stock-months, IC by month, Newey-West lag 11):
+  return-preserving upside 0.035 (t 1.6), but it loads on volatility (+0.29)
+  and trailing volatility alone scored 0.061 on today's (survivor) index;
+  volatility-neutral it fell to 0.013 (t 0.9), negative in 2015–19. Momentum,
+  revision breadth and earnings surprise: ≈ 0. No composite passed the gates
+  (IC > 0 in every sub-period, t ≥ 2.5, monotone deciles).
+Conclusion: a target is the Street's expectation, not a return forecast. So
+(1) the optimizer's views are the equilibrium plus a small relative tilt
+(mpt.md, Views), (2) the stock window and the consensus table show what a
+target rests on (firms, median age, stale count, 90-day raises/cuts, spread)
+and say what it is (`targetFacts`, `TARGET_NOTE`), (3) σ/μ opens on the
+market's μ, the analysts' curve opt-in with the haircut on by default, and
+(4) the app keeps its own dated record, `state/target_history.jsonl` (one line
+per day and symbol the first time a block is computed: date, price, mean,
+median, n, source, median age; market data only), scored by
+`analyst_targets.track_record` (weekly cross-sections of ≥ 8 names, Spearman
+IC of relative ln(T/P) vs the realised 12-month log return, the close within
+10 days of the horizon or the name is skipped, NW t lag 51, a verdict after
+52 weeks) at `GET /api/target-track-record` and in Track record → Analyst
+targets. Once it shows evidence (52 weeks, t ≥ 2, IC > 0) `view_ic` hands its
+IC to the optimizer instead of the prior; it reads the cached evaluation only,
+so the optimizer never fetches for it. This record has no survivorship bias,
+which is why it, not a backtest, is what can raise the IC.
+
 **The research line: analysts for a secondary listing (2026-10-18).** Yahoo
 keeps a company's analysts, and much of its fundamentals, on its home or US
 line only. Checked live: NOV.DE and CCC3.DE (and every other Xetra or Vienna

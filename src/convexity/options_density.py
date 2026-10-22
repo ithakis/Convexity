@@ -1002,7 +1002,10 @@ def _settings(prefs: dict | None) -> dict:
         "kappa_stock": float(p.get("dist_kappa_stock", KAPPA_DEFAULT["stock"])),
         "kappa_index": float(p.get("dist_kappa_index", KAPPA_DEFAULT["index"])),
         "measure": p.get("dist_measure", "P") if p.get("dist_measure") in ("P", "Q") else "P",
-        "haircut": bool(p.get("dist_haircut", False)),
+        # On by default (2026-10-23): targets average more upside than is
+        # realised, so the analysts' curve halves their excess over CAPM
+        # unless the owner turns it off.
+        "haircut": bool(p.get("dist_haircut", True)),
     }
 
 

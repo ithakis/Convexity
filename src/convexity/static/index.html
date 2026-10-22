@@ -357,7 +357,7 @@
         <button data-v="ledoit" class="active" data-tip="Ledoit-Wolf: the measured co-movement pulled toward the average, so one odd pair moves the result less. Steadier">Shrunk</button>
         <button data-v="ewma" data-tip="EWMA: the same measurement with recent months counting more">Recent</button>
       </div>
-      <label class="pf-mpt-chip pf-mpt-trust" data-tip="How far the analysts' price targets move expected returns: 0% ignores them, 100% follows them">
+      <label class="pf-mpt-chip pf-mpt-trust" data-tip="How far the analysts' views move expected returns: 0% ignores them, 100% follows them. A view is a small tilt for relative optimism (about ±1% a year per standard deviation), not the target's raw upside">
         <span class="k">Analyst trust</span>
         <input id="pf-mpt-haircut" type="range" min="0" max="100" step="5" value="25"/>
         <span class="pf-mpt-haircut-val" id="pf-mpt-haircut-val">25%</span>
@@ -511,13 +511,23 @@
           doesn't swamp the prior on units alone.
         </div>
         <div class="info-card-desc">
-          <b>Views</b> come from 12-month analyst price targets — one absolute view
-          per covered asset, <b>q<sub>i</sub> = target<sub>i</sub>/price<sub>i</sub> − 1 + dy<sub>i</sub> − r<sub>f</sub></b>:
-          the expected excess <i>total</i> return, with the forward dividend yield
-          <b>dy<sub>i</sub></b> added because a price target is a price and the prior
-          <b>Π</b> is a total-return premium. Each view's uncertainty <b>Ω<sub>ii</sub></b>
-          tightens with more analysts and lower target dispersion. The posterior
-          combines prior and views:
+          <b>Views</b> come from 12-month analyst price targets, but not at face
+          value: in point-in-time tests targets barely ranked 12-month returns
+          (information coefficient ≈ 0.01–0.03) and their average upside runs above
+          what is realized. So each view is the equilibrium return plus a small tilt
+          for how much more optimistic the analysts are about this holding than usual,
+          sized by Grinold's rule:
+        </div>
+        <div class="info-formula">$$q_i = \Pi_i + \mathrm{IC}\cdot\sigma_{xs}\cdot z_i, \qquad z_i = \frac{\ln(1+u_i) - \bar{u}}{0.125}$$</div>
+        <div class="info-card-desc">
+          <b>u<sub>i</sub></b> is the target's upside plus the dividend yield, <b>ū</b>
+          the holdings' mean blended with the long-run large-cap mean (11%), <b>z</b>
+          capped at ±3, <b>σ<sub>xs</sub></b> = 0.42 the cross-sectional spread of
+          12-month returns and <b>IC</b> = 0.02 until the app's own Track record
+          (Analyst targets) measures one: about ±0.8% a year per standard deviation,
+          ±2.5% at most. Each view's uncertainty <b>Ω<sub>ii</sub></b> tightens with
+          more analysts and lower target dispersion, and widens as the targets age.
+          The posterior combines prior and views:
         </div>
         <div class="info-formula">$$\mu_{\mathrm{BL}} = \Pi + \tau\Sigma P^\top\!\left(P\,\tau\Sigma\,P^\top + \Omega\right)^{-1}\!\left(Q - P\Pi\right)$$</div>
         <div class="info-card-why">
