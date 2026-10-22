@@ -246,7 +246,9 @@ def check(provider) -> dict:
         )
         res = _call(req, _FH_TIMEOUT_S, helpers._FH_LIMITER)
     else:
-        from convexity.news_sentiment import _MODEL as model
+        from convexity.news_sentiment import active_model
+
+        model = active_model()
 
         body = json.dumps(
             {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]}

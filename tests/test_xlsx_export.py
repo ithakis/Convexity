@@ -326,13 +326,26 @@ def test_prefetch_closes_downloads_the_longest_window_once(monkeypatch):
 
 def test_no_target_range_call_for_a_holding_without_coverage(monkeypatch):
     def boom(symbol):
-        raise AssertionError("asked Yahoo for a fund's price targets")
+        raise AssertionError("asked Yahoo for price targets it did not need")
 
-    monkeypatch.setattr(analytics, "_fetch_target_trio", boom)
+    monkeypatch.setattr(analytics, "_fetch_targets", boom)
     assert analytics._analyst_for("ZZZ2", {"price": 50.0})["target_low"] is None
+    # A current row carries the shared block: it is the number, no call.
     row = {"price": 50.0, "target_mean_price": 60.0, "target_low": 40.0,
-           "target_high": 80.0, "target_median": 61.0}  # fmt: skip
+           "target_high": 80.0, "target_median": 61.0, "target_source": "firms"}  # fmt: skip
     assert analytics._analyst_for("ZZZ3", row)["target_median"] == 61.0
+
+
+def test_a_row_saved_before_the_shared_block_reads_the_stock_windows_number(monkeypatch):
+    """CRWD, 2026-10-22: an old saved row held Yahoo's summary ($246.65) while
+    the stock window showed the firms' mean. A legacy row now takes all four
+    figures from analyst_targets.consensus, the stock window's source."""
+    block = {"mean": 236.1, "median": 242.5, "low": 132.0, "high": 325.0, "source": "firms"}
+    monkeypatch.setattr(analytics, "_fetch_targets", lambda s: block)
+    row = {"price": 243.0, "target_mean_price": 246.65, "target_low": 132.0,
+           "target_high": 325.0, "target_median": 250.0}  # fmt: skip
+    out = analytics._analyst_for("ZZZ4", row)
+    assert out["target_mean"] == 236.1 and out["target_median"] == 242.5
 
 
 S = {

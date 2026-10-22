@@ -26,6 +26,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import sys
 import time
 import threading
@@ -302,7 +303,7 @@ def _load_persisted_caches() -> None:
             _SENTIMENT_CACHE[k] = (now, _SENTIMENT_TTL, val)
             loaded_sent += 1
     st = data.get("llm_status")
-    if isinstance(st, dict) and st.get("model") == _MODEL:
+    if isinstance(st, dict) and st.get("model") in _MODELS:
         _LLM_STATUS.update({k: st.get(k) for k in ("ok", "error", "at", "permanent")})
     if loaded_news or loaded_sent:
         print(
@@ -979,13 +980,25 @@ def _history_append(record: dict) -> None:
 # News read engine — NVIDIA NIM
 # ---------------------------------------------------------------------------
 
-# The only two NIM models that answered on 2026-09-24 were this one (6-12 s
-# per 15-headline ticker with thinking off) and openai/gpt-oss-20b (20-40 s,
-# timeouts). nemotron-nano-9b-v2, the previous model, was retired on
-# 2026-08-26 and answers every call with HTTP 410 — which the old code logged
-# and swallowed, so refreshes silently kept August's sentiment. One model, no
-# fallback chain: an unavailable model is SURFACED (llm_status) instead.
-_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+# NIM retires models without notice, and each retirement used to take the News
+# read down until a release shipped a new name: nemotron-nano-9b-v2 answered
+# 410 from 2026-08-26, nemotron-3-super-120b-a12b 404 from 2026-10 (it is still
+# listed in /v1/models — the catalogue is not proof a model answers). So the
+# model is now an ordered chain of free NIM models, each certified with
+# scripts/benchmark_news_read.py: a 404/410 retires the current one for this
+# process and the SAME call moves on to the next. Only when every model is gone
+# is the failure permanent and surfaced (llm_status → banner). The retired set
+# is cleared by llm_unblock() at the start of each refresh, so a model that
+# comes back is used again (the cost is one ~0.3 s 404 per refresh until then).
+# Probed with the owner's key on 2026-10-22: these two answered; super-120b,
+# nemotron-nano-3-30b, kimi-k2.6, mistral-large-2 and llama-3.1-nemotron-70b
+# were 404, and gpt-oss-20b / deepseek-v4.1-flash / glm-5.3-flash timed out.
+_MODELS: tuple[str, ...] = (
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+)
+_MODEL = _MODELS[0]  # the model in use; moves down _MODELS as models retire
+_RETIRED_MODELS: set[str] = set()
 _NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
 _NV_TIMEOUT_S = 60.0
 _MAX_TOKENS = 1800
@@ -1046,8 +1059,11 @@ def llm_unblock() -> None:
     Called at the start of every refresh: within a refresh, one 410 spares
     every later ticker the call; across refreshes, a fixed key or a restored
     model must get its chance (the status is persisted across restarts)."""
+    global _MODEL
     with _LLM_STATUS_LOCK:
         _LLM_STATUS["permanent"] = False
+        _RETIRED_MODELS.clear()
+        _MODEL = _MODELS[0]
 
 
 def reload_keys() -> None:
@@ -1073,6 +1089,29 @@ def reload_keys() -> None:
         _schedule_persist()  # or a restart would reload the old "key rejected"
 
 
+def active_model() -> str:
+    """The NIM model calls go to now (the first of `_MODELS` not retired)."""
+    return _MODEL
+
+
+def _retire_model(model: str) -> str | None:
+    """Mark `model` gone (404/410) and switch to the next one in the chain.
+    Returns the new model, or None when the chain is exhausted. Concurrent
+    calls that hit the same 404 retire it once; a call that already moved on
+    is not pushed further down by a late 404 from the old model."""
+    global _MODEL
+    with _LLM_STATUS_LOCK:
+        _RETIRED_MODELS.add(model)
+        if _MODEL not in _RETIRED_MODELS:
+            return _MODEL
+        for m in _MODELS:
+            if m not in _RETIRED_MODELS:
+                _MODEL = m
+                _LLM_STATUS["model"] = m
+                return m
+        return None
+
+
 def _get_client() -> Any:
     """Lazy OpenAI-compatible client. The `openai` import is deferred (~1.2 s)
     so it never sits on the desktop app's startup path."""
@@ -1096,6 +1135,16 @@ def _get_client() -> Any:
         return _nvidia_client
 
 
+def _strip_fence(text: str) -> str:
+    """The JSON object inside a ```json fence, or the text as it is. Guided
+    decoding should make this a no-op; some NIM backends ignore it."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[1] if "\n" in t else ""
+        t = t.rsplit("```", 1)[0].strip()
+    return t
+
+
 def _http_status(exc: Exception) -> int | None:
     code = getattr(exc, "status_code", None)
     if isinstance(code, int):
@@ -1105,30 +1154,45 @@ def _http_status(exc: Exception) -> int | None:
     return code if isinstance(code, int) else None
 
 
-def _json_schema(lens_enum: tuple[str, ...]) -> dict:
+def _json_schema(lens_enum: tuple[str, ...], n: int | None = None) -> dict:
     """Flat per-headline schema. A nested per-lens schema written by the model
     came back malformed on 2 of 4 calls; this one was 5/5 valid, so lens
-    verdicts are computed in Python instead (plan §2.3)."""
+    verdicts are computed in Python instead (plan §2.3).
+
+    With ``n`` the item count and the id range are part of the schema: the
+    30B fallback model (nemotron-3.5-lightning) wrote a second item for a
+    one-headline batch on most calls, which failed validation outright."""
+    items: dict = {"type": "array"}
+    if n:
+        items.update(minItems=n, maxItems=n)
+    # No "about the target?" field before the lens: tried 2026-10-22 on
+    # lightning-30b, none-recall rose 58% -> 80% but none-precision fell
+    # 96% -> 77% (a gate) and direction 88.5% -> 82%.
+    props: dict = {"id": {"type": "integer", **({"minimum": 1, "maximum": n} if n else {})}}
+    props.update(
+        lens={"type": "string", "enum": list(lens_enum)},
+        score={"type": "integer", "minimum": -2, "maximum": 2},
+        # Capped: the 30B model sometimes loops, writing one sentence over
+        # and over into a fact until max_tokens cuts the JSON off (EQIX,
+        # 2026-10-22). A cap makes the guided decoder close the string. The
+        # prompt asks for <= 14 words; validate_items keeps 160 chars.
+        fact={"type": "string", "maxLength": 160},
+    )
     return {
         "type": "object",
         "additionalProperties": False,
         "required": ["items", "brief"],
         "properties": {
             "items": {
-                "type": "array",
+                **items,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["id", "lens", "score", "fact"],
-                    "properties": {
-                        "id": {"type": "integer"},
-                        "lens": {"type": "string", "enum": list(lens_enum)},
-                        "score": {"type": "integer", "minimum": -2, "maximum": 2},
-                        "fact": {"type": "string"},
-                    },
+                    "required": list(props),
+                    "properties": props,
                 },
             },
-            "brief": {"type": "string"},
+            "brief": {"type": "string", "maxLength": 700},
         },
     }
 
@@ -1145,6 +1209,7 @@ def _nvidia_call(
     tag: str = "news",
     timeout: float | None = None,
     max_tokens: int | None = None,
+    model: str | None = None,
 ) -> dict | None:
     """One schema-constrained NIM completion, parsed.
 
@@ -1156,15 +1221,17 @@ def _nvidia_call(
     ("Service temporarily overloaded" is routine on NIM: a short jittered
     sleep, NO limiter penalty — the penalty backfills the whole rolling minute,
     and on the gold benchmark one 503 turned a 10 s ticker into 64 s),
-    timeouts and bad JSON. 404/410 mean the model is gone and 401/403 a bad
-    key: no retry, recorded in llm_status for the banner.
+    timeouts and bad JSON. 404/410 mean the model is gone: the call moves to
+    the next model in `_MODELS`, and only an exhausted chain is recorded in
+    llm_status for the banner. 401/403 is a bad key: no retry, recorded.
 
     Company search (search.py) reuses it with its own `schema`, `tag`,
     `record=False` (a search failure never flips the News LLM banner), a
     per-request `timeout` and a deadline as `cancel`; the client, the rate
     limiter and the circuit breaker stay shared. The My Investments import
     (importer.py) does the same with a larger `max_tokens`: a statement can
-    hold dozens of entries."""
+    hold dozens of entries. `model` pins one model (search's hedged pair):
+    it never walks the chain, and a 404 for it is just a failed call."""
     global _nv_rate_limit_until
     rec = _llm_record if record else (lambda *a, **k: None)
     if not NVIDIA_API_KEY:
@@ -1181,12 +1248,16 @@ def _nvidia_call(
         {"role": "user", "content": user_content},
     ]
     last_err = "no response"
-    for attempt in range(_MAX_RETRIES):
+    attempt = 0
+    while attempt < _MAX_RETRIES:
         _ck(cancel)
         _NV_LIMITER.acquire(cancel=cancel)
+        pinned = model
+        use = pinned or _MODEL
+        attempt += 1
         try:
             response = client.chat.completions.create(
-                model=_MODEL,
+                model=use,
                 messages=messages,
                 temperature=0.1,
                 max_tokens=max_tokens or _MAX_TOKENS,
@@ -1201,7 +1272,7 @@ def _nvidia_call(
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
                 **({"timeout": timeout} if timeout else {}),
             )
-            text = (response.choices[0].message.content or "").strip()
+            text = _strip_fence(response.choices[0].message.content or "")
             if not text:
                 raise json.JSONDecodeError("empty content", "", 0)
             data = json.loads(text)
@@ -1209,15 +1280,24 @@ def _nvidia_call(
             return data
         except json.JSONDecodeError:
             last_err = "malformed JSON"
-            print(f"[{tag}] NIM returned unusable JSON (attempt {attempt + 1})", file=sys.stderr)
+            print(f"[{tag}] NIM returned unusable JSON (attempt {attempt})", file=sys.stderr)
             time.sleep(1.0)
             continue
         except Cancelled:
             raise
         except Exception as exc:
             code = _http_status(exc)
+            if code in (404, 410) and pinned:
+                print(f"[{tag}] NIM {code} for {pinned}", file=sys.stderr)
+                return None
             if code in (404, 410):
-                reason = f"{code} model retired ({_MODEL})"
+                nxt = _retire_model(use)
+                if nxt is not None:
+                    # Not a failed attempt: the next model gets a full set.
+                    print(f"[{tag}] NIM {code} for {use} — switching to {nxt}", file=sys.stderr)
+                    attempt = 0
+                    continue
+                reason = f"{code} model retired ({', '.join(_MODELS)})"
                 print(f"[{tag}] NIM {reason}", file=sys.stderr)
                 rec(False, reason, permanent=True)
                 return None
@@ -1228,9 +1308,9 @@ def _nvidia_call(
                 return None
             if code == 503:
                 last_err = "503 service overloaded"
-                wait = 1.5 + attempt * 1.5 + random.random()
+                wait = 1.5 + (attempt - 1) * 1.5 + random.random()
                 print(
-                    f"[{tag}] NIM {last_err} (attempt {attempt + 1}/{_MAX_RETRIES}) — "
+                    f"[{tag}] NIM {last_err} (attempt {attempt}/{_MAX_RETRIES}) — "
                     f"retrying in {wait:.1f}s",
                     file=sys.stderr,
                 )
@@ -1240,35 +1320,52 @@ def _nvidia_call(
                 _NV_LIMITER.penalize()
                 last_err = "429 rate limited"
                 print(
-                    f"[{tag}] NIM {last_err} (attempt {attempt + 1}/{_MAX_RETRIES}) — "
+                    f"[{tag}] NIM {last_err} (attempt {attempt}/{_MAX_RETRIES}) — "
                     f"sleeping {_RETRY_SLEEP_S}s",
                     file=sys.stderr,
                 )
                 _notify_rate(
                     provider="nvidia",
                     reason="http_429",
-                    attempt=attempt + 1,
+                    attempt=attempt,
                     max_attempts=_MAX_RETRIES,
                     retry_in_s=_RETRY_SLEEP_S,
                 )
                 time.sleep(_RETRY_SLEEP_S)
-                if attempt == _MAX_RETRIES - 1:
+                if attempt == _MAX_RETRIES:
                     with _rate_limit_lock:
                         _nv_rate_limit_until = time.time() + _RATE_LIMIT_BACKOFF_S
                 continue
             last_err = f"{type(exc).__name__}: {str(exc)[:160]}"
-            print(f"[{tag}] NIM call failed: {last_err} (attempt {attempt + 1})", file=sys.stderr)
+            print(f"[{tag}] NIM call failed: {last_err} (attempt {attempt})", file=sys.stderr)
             continue
     rec(False, last_err)
     return None
+
+
+# The schema's own vocabulary leaking into prose: "(id 3)", "(ids 2, 5)",
+# "(other, -1)", "(street +1)". nemotron-3.5-lightning writes these into the
+# brief; they mean nothing to the reader, so they are cut in code (no prompt
+# change: that would need the benchmark re-run).
+_BRIEF_TAGS = re.compile(
+    r"\s*\((?:\s*(?:ids?|financials|outlook|competition|regulation|street|other|none"
+    r"|lens|score|[+-]?\d+(?:\.\d+)?|and|[,;:])\s*)+\)",
+    re.IGNORECASE,
+)
+
+
+def _clean_brief(text: str) -> str:
+    return re.sub(r"\s{2,}", " ", _BRIEF_TAGS.sub("", text)).replace(" .", ".").strip()
 
 
 def validate_items(
     raw: dict | None, n: int, lens_enum: tuple[str, ...] = _ITEM_LENSES
 ) -> tuple[list[dict], str] | None:
     """Strict check of one pass. Returns (items aligned to headline order,
-    brief) or None when the pass is unusable: every id 1..n must appear
-    exactly once with a lens from the enum and an integer score in -2..2.
+    brief) or None when the pass is unusable: every id 1..n must appear with
+    a lens from the enum and an integer score in -2..2. A repeated id keeps
+    its first reading (a model glitch seen on one-headline batches, where the
+    repeat restated the first item), but must still be well-formed.
     `none` items are forced to score 0 (the prompt's rule, enforced)."""
     if not isinstance(raw, dict) or not isinstance(raw.get("items"), list):
         return None
@@ -1277,7 +1374,7 @@ def validate_items(
         if not isinstance(it, dict):
             return None
         idx, lens, score = it.get("id"), it.get("lens"), it.get("score")
-        if isinstance(idx, bool) or not isinstance(idx, int) or not 1 <= idx <= n or idx in by_id:
+        if isinstance(idx, bool) or not isinstance(idx, int) or not 1 <= idx <= n:
             return None
         if lens not in lens_enum:
             return None
@@ -1289,6 +1386,8 @@ def validate_items(
             or not -2 <= score <= 2
         ):
             return None
+        if idx in by_id:
+            continue
         by_id[idx] = {
             "lens": lens,
             "score": 0 if lens == "none" else int(score),
@@ -1296,7 +1395,7 @@ def validate_items(
         }
     if len(by_id) != n:
         return None
-    return [by_id[i + 1] for i in range(n)], str(raw.get("brief") or "").strip()[:500]
+    return [by_id[i + 1] for i in range(n)], _clean_brief(str(raw.get("brief") or ""))[:500]
 
 
 def _read_pass(
@@ -1304,9 +1403,9 @@ def _read_pass(
 ) -> tuple[list[dict], str] | None:
     """One pass = one call; a response that fails validation is re-asked once."""
     for _ in range(2):
-        out = validate_items(
-            _nvidia_call(system_prompt, user_prompt, lens_enum, cancel=cancel), n, lens_enum
-        )
+        schema = _json_schema(lens_enum, n)
+        raw = _nvidia_call(system_prompt, user_prompt, lens_enum, cancel=cancel, schema=schema)
+        out = validate_items(raw, n, lens_enum)
         if out is not None:
             return out
         if _llm_blocked():

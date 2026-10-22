@@ -234,6 +234,37 @@ retried on every build: three wasted calls per European row).
   company never does, ADR or not (EU insider dealings are published regulator
   by regulator; there is no free feed). The n/a cell says why.
 
+**One analyst target, app-wide (`analyst_targets.py`, 2026-10-22).** The grid,
+the per-holding consensus table, the optimizer's views, the Excel export and
+My Investments read the row's `target_mean_price` (and `target_median` /
+`target_low` / `target_high`); the stock window's coverage card reads
+`fetch_detail`'s `target_*`; σ/μ reads `options_density._analysts`. All three
+now come from one cached function, `analyst_targets.consensus(symbol)`
+(6 h; a summary fallback or an empty answer only 30 min, since Yahoo answers
+a burst with empty frames). Before, the row carried Yahoo's summary
+(`targetMeanPrice`) while the stock window carried the firms' mean: CRWD read
+$246.65 in the table and $285.02 in the window. The firms' list itself was
+wrong too: **CRWD split 4:1 on 2026-07-02 and Yahoo never restates a firm's
+target**, so a June target of $800 counted as $800 against a $240 price (the
+4x band let most through). The rules, each with a test in
+`tests/test_analyst_targets.py`:
+- each firm's **latest** action; one without a target drops the firm, unless
+  it only maintained/reiterated an unchanged rating (then its previous target
+  stands). The old code dropped blank rows *before* taking the latest, so a
+  firm that moved to Neutral without a target kept its old Buy target;
+- **split-adjusted** by every split after the action's date (`fetch_one` passes
+  the dates from its own history, `actions=True`, so no extra request);
+- ≤ 365 days old, flagged stale past 182, within 4x of the price;
+- mean, median, low, high and n from **that one list** (the card's range used
+  to be Yahoo's while its mean was the firms');
+- no firm list (most non-US listings) → Yahoo's summary, `source: "summary"`.
+The row carries `target_n_firms` and `target_source`. A row saved before this
+(no `target_source`) still holds the summary: `analytics._analyst_for` swaps
+in the shared block for it, so the consensus table and the optimizer agree
+with the window at once; the grid's Target Δ follows on the next Refresh.
+A research line's targets are that line's block, scaled (`_research_row` runs
+the same `_apply_targets`; σ/μ uses `analyst_targets.scaled`).
+
 **The research line: analysts for a secondary listing (2026-10-18).** Yahoo
 keeps a company's analysts, and much of its fundamentals, on its home or US
 line only. Checked live: NOV.DE and CCC3.DE (and every other Xetra or Vienna
@@ -911,6 +942,11 @@ request): the composer is the way into the page.
   CSV/Excel rendered as CSV, a PDF's text layer) then goes to the text model
   under a strict schema of ledger rows (`_nvidia_call(..., max_tokens=8000)`,
   `record=False` so an import failure never flips the News banner).
+  **The text stage asks the careful model first** (`importer._CAREFUL_MODEL`,
+  nemotron-3-ultra-550b, 90 s; then the News read's chain head), since
+  2026-10-22: with lightning-30b alone the eval fell to 8/11 (pence read as
+  pounds, an exchange's currency dropped); careful-first is 11/11, slowest
+  case 81 s inside the 150 s stage deadline.
 - **Full resolution matters.** A phone screenshot shrunk to a third read
   405.00 as 405.05. The gold images are rendered at an iPhone's 1179 px.
 - **The model may suggest, never decide** (the `search.py` rule). Code then:
@@ -1162,9 +1198,14 @@ has no option history, so anything needing history is built forward.
   yfinance `upgrades_downgrades`; Finnhub's targets are 403 on the free plan),
   blended equally, the common variance shrunk by the between-firm variance so
   the blend's total is still (κσ_Q)²T. Optional haircut (prefs) halves each
-  target's excess log return over CAPM. 12M only. The expiry is rarely a
-  year out (AAPL 335 days, ARKK 461): a target's log return is scaled by T up
-  to a year and carried on at CAPM after it.
+  target's excess log return over CAPM. Any horizon (3M too since
+  2026-10-22, the owner's call): a target's log return is scaled by T up to a
+  year and carried on at CAPM after it, so on 3M each 12-month target is
+  moved to the 3-month expiry as S0·(T/S0)^(t/1y). The expiry is rarely
+  exactly the horizon (AAPL 335 days, ARKK 461) for the same reason. The
+  targets are `analyst_targets.consensus`'s (below): the listing's own block,
+  put in the chain's units when the chain is another line's
+  (`_own_analysts`), so σ/μ shows the row's number.
 - **No NaN reaches the page**: `json.dumps` writes NaN, which `JSON.parse`
   rejects. The gate fails a non-finite fit (NaN passes every `<` test), a
   missing last price is `error`, and `downsample` refuses a non-finite curve.
@@ -1378,8 +1419,17 @@ the page shows it as chips, every search prints one `[search]` line.
   the user only constrains is not the ranking unless they asked for an extreme
   ("best/top" may rank highest-first). A ROE/ROA ranking requires a profit at
   the screener (a loss over negative equity is a "high" ROE on Yahoo).
-  **After any prompt, rule or model change run `scripts/eval_search.py`** (20
+  **After any prompt, rule or model change run `scripts/eval_search.py`** (22
   live cases, the user's NVIDIA key via env; all must pass).
+  **The AI step is a hedged request** (`search._hedged_call`, 2026-10-22):
+  the careful model (nemotron-3-ultra, 3–33 s) and the fast one (the News
+  read's chain head, lightning-30b, ~2 s) are asked at once; the careful
+  reading wins if it lands within `_CAREFUL_WAIT_S` (18 s), else the fast
+  one, else whichever answers before the 25 s deadline. Lightning alone was
+  18–19/22 ("best" with nothing to rank by, "european" dropped, an empty
+  cybersecurity theme); hedged 21/22 and 22/22 on two runs, the one miss a
+  case where the careful model was slow. Free strings and lists in the schema
+  are capped (`maxLength`/`maxItems`) for the same loop the News read had.
 - **Which listing a card shows.** The most traded real listing of the company
   (`symbol_db.top`: NVO for Novo Nordisk, 7203.T for Toyota) — and on an
   exchange screen the listing there (SKHY for SK hynix on Nasdaq); a typed
