@@ -732,6 +732,16 @@ class Handler(BaseHTTPRequestHandler):
 
             self._send_json(200, load_prefs())
             return
+        if parsed.path == "/api/target-track-record":
+            # The app's own point-in-time record of analyst targets, scored
+            # against the price 12 months on (analyst_targets.track_record).
+            try:
+                from convexity import analyst_targets as _at
+
+                self._send_json(200, _at.track_record())
+            except Exception as e:
+                self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+            return
         if parsed.path == "/api/news-diagnostics":
             try:
                 from convexity import ml_sentiment as _ml

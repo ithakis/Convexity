@@ -115,3 +115,71 @@ def test_consensus_is_cached_and_a_summary_answer_is_asked_again_soon(monkeypatc
     assert at.consensus("ZZT1", tk=Tk())["source"] == "summary"
     assert puts == [at.MISS_TTL]  # might be a throttled answer
     cache._CACHE.pop("analyst_targets|ZZT1", None)
+
+
+# ------------------------------------------------- relative views (optimizer)
+def test_relative_alpha_is_small_centred_and_capped():
+    a, ref = at.relative_alpha({"HI": 0.60, "MID": 0.11, "LO": -0.20})
+    assert a["HI"]["alpha"] > 0 > a["LO"]["alpha"]
+    cap = at.IC_PRIOR * at.SIGMA_XS * at.Z_CAP
+    assert all(abs(v["alpha"]) <= cap + 1e-12 for v in a.values())
+    assert abs(a["HI"]["z"]) <= at.Z_CAP and ref["ic"] == at.IC_PRIOR
+
+
+def test_a_uniformly_bullish_street_is_not_a_bullish_view():
+    """Every holding at +30%: the reference moves toward their own mean, so
+    the tilts stay small; equal upsides give equal tilts."""
+    a, _ = at.relative_alpha(dict.fromkeys("ABCDEFGHIJ", 0.3))
+    vals = {round(v["alpha"], 12) for v in a.values()}
+    assert len(vals) == 1 and next(iter(vals)) < at.IC_PRIOR * at.SIGMA_XS * at.Z_CAP
+
+
+def test_view_ic_uses_the_prior_until_the_record_shows_evidence():
+    from convexity import cache
+
+    cache._CACHE.pop("analyst_targets|track_record", None)
+    assert at.view_ic() == (at.IC_PRIOR, "prior")
+    at._cache_put("analyst_targets|track_record", {"v": {"n_weeks": 60, "t": 2.4, "ic": 0.05}}, 60)
+    assert at.view_ic() == (0.05, "measured")
+    at._cache_put("analyst_targets|track_record", {"v": {"n_weeks": 30, "t": 3.0, "ic": 0.05}}, 60)
+    assert at.view_ic() == (at.IC_PRIOR, "prior")
+    cache._CACHE.pop("analyst_targets|track_record", None)
+
+
+# ------------------------------------------------- the app's own record
+def test_record_once_per_day_and_load_back():
+    at._SEEN.clear()
+    blk = {"mean": 120.0, "median": 118.0, "n": 9, "source": "firms", "age_days": 40}
+    at.record("aaa", 100.0, blk)
+    at.record("AAA", 101.0, blk)  # same day: ignored
+    rows = at.load_history()
+    assert len(rows) == 1 and rows[0]["s"] == "AAA" and rows[0]["p"] == 100.0
+
+
+def test_track_record_scores_relative_upside_against_the_next_year():
+    """Synthetic record a year and more old, where the most optimistic names
+    did best: IC near 1; too few weeks for a verdict."""
+    import json
+
+    at._SEEN.clear()
+    path = at._hist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    start = dt.date.today() - dt.timedelta(days=400)
+    closes = {}
+    lines = []
+    for k in range(10):
+        sym = f"S{k}"
+        up = 0.02 * k
+        idx = pd.date_range(start, periods=400, freq="D")
+        closes[sym] = pd.Series(
+            [100.0 if i < 300 else 100.0 * (1 + up) for i in range(400)], index=idx
+        )
+        for w in range(3):
+            d = start + dt.timedelta(days=7 * w)
+            lines.append(
+                json.dumps({"d": d.isoformat(), "s": sym, "p": 100.0, "mean": 100 * (1 + up)})
+            )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tr = at.track_record(closes=closes)
+    assert tr["n_weeks"] == 3 and tr["ic"] == pytest.approx(1.0)
+    assert tr["verdict"].startswith("Too early") and tr["n_symbols"] == 10

@@ -810,7 +810,7 @@ def test_frontier_stream_progress_then_done():
     )
     orig_close, orig_views = frontier._bulk_close, frontier._analyst_views
     frontier._bulk_close = lambda syms, period: closes[[s for s in syms if s in closes.columns]]
-    frontier._analyst_views = lambda active, by_sym, rf: ({}, {})
+    frontier._analyst_views = lambda active, by_sym, rf: ({}, {}, {})
     try:
         msgs = list(
             frontier.compute_efficient_frontier_stream(
@@ -907,6 +907,7 @@ def test_frontier_stream_cloud_frontier_messages_and_payload():
                 "disp": 0.42,
             }
         },
+        {},
     )
     try:
         msgs = list(
@@ -1007,7 +1008,7 @@ def test_frontier_stream_costs_come_off_mu_and_are_reported():
     closes = _frontier_closes()
     orig_close, orig_views = frontier._bulk_close, frontier._analyst_views
     frontier._bulk_close = lambda syms, period: closes[[s for s in syms if s in closes.columns]]
-    frontier._analyst_views = lambda active, by_sym, rf: ({}, {})
+    frontier._analyst_views = lambda active, by_sym, rf: ({}, {}, {})
     try:
         run = lambda tc: frontier.compute_efficient_frontier(  # noqa: E731
             rows, budget="light", max_seconds=0.0, rebalance="M", tc_bps=tc,

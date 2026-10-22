@@ -228,6 +228,11 @@ def black_litterman(
     mkt_weights   : market-cap weights w_mkt (any positive scaling; renormalized).
     views         : ``{sym: {"q": excess_view_return, "n": n_analysts,
                     "disp": (hi-lo)/tgt}}`` — one absolute view per covered asset.
+                    ``"alpha"`` in place of ``"q"`` makes the view RELATIVE to
+                    the equilibrium: q_i = Π_i + alpha_i (the app's analyst
+                    tilts, analyst_targets.relative_alpha). An ``"age"`` (median
+                    days since the targets were set) widens Ω: a view made
+                    half a year ago is half as sure.
                     Assets absent here get no view (fall back to the prior via Σ).
     rf            : annual risk-free rate (added back at the end).
     tau           : prior-uncertainty scalar (τΣ).
@@ -267,6 +272,8 @@ def black_litterman(
             if not v:
                 continue
             q = v.get("q")
+            if v.get("alpha") is not None and math.isfinite(float(v["alpha"])):
+                q = float(pi[i]) + float(v["alpha"])
             if q is None or not math.isfinite(float(q)):
                 continue
             nn = float(v.get("n") or 0.0)
@@ -275,7 +282,9 @@ def black_litterman(
             # Per-asset confidence: more analysts + tighter dispersion ⇒ tighter view.
             n_conf = nn / (nn + k0) if nn > 0 else 0.15
             disp_conf = 1.0 / (1.0 + max(0.0, disp) / max(1e-9, d0))
-            c_i = max(1e-3, n_conf * disp_conf)
+            age = v.get("age")
+            age_conf = 1.0 / (1.0 + max(0.0, float(age)) / 180.0) if age is not None else 1.0
+            c_i = max(1e-3, n_conf * disp_conf * age_conf)
             base = tau * Sig[i, i]
             # Ω tightens as H→1 and as confidence rises; (1-H)/H → 0 at full trust.
             omega_i = base / c_i * ((1.0 - H) / H)

@@ -2791,6 +2791,8 @@
   .m-target-labels b { color: var(--text); font-variant-numeric: tabular-nums; }
   .m-target-labels .upside.pos { color: var(--pos); font-weight: 700; }
   .m-target-labels .upside.neg { color: var(--neg); font-weight: 700; }
+  .m-target-context { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+  .m-target-context span { opacity: 0.85; }
 
   /* Recommendation distribution bars */
   .m-rec-bars { display: flex; height: 18px; border-radius: var(--r-sm); overflow: hidden; margin-top: 6px; border: 1px solid var(--border); }

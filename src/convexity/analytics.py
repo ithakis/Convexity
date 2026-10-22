@@ -693,6 +693,13 @@ def _analyst_for(symbol: str, row: dict | None = None) -> dict:
         "price": price,
         "currency": (row.get("currency") or "").upper() or None,
         "dist": row.get("rating_dist") if isinstance(row.get("rating_dist"), dict) else None,
+        # How old and how fresh the targets are (analyst_targets.summarise):
+        # the optimizer widens an old view, the consensus table says so.
+        "target_age_days": row.get("target_age_days"),
+        "target_n_stale": row.get("target_n_stale"),
+        "target_raised_90d": row.get("target_raised_90d"),
+        "target_lowered_90d": row.get("target_lowered_90d"),
+        "target_n_firms": row.get("target_n_firms"),
     }
 
     trio = {
@@ -727,6 +734,13 @@ def _analyst_for(symbol: str, row: dict | None = None) -> dict:
             block = _fetch_targets(symbol)
         if block:
             out["target_mean"] = block["mean"]
+            out.update(
+                target_age_days=block.get("age_days"),
+                target_n_stale=block.get("n_stale"),
+                target_raised_90d=block.get("n_raised_90d"),
+                target_lowered_90d=block.get("n_lowered_90d"),
+                target_n_firms=block.get("n"),
+            )
             trio = {
                 "target_low": block["low"],
                 "target_high": block["high"],
@@ -1353,6 +1367,11 @@ def analyze_portfolios_multi(
                         else None,
                         "dist": dist,
                         "via": row.get("research_symbol") if row.get("research_analysts") else None,
+                        "n_firms": blk.get("target_n_firms"),
+                        "age_days": blk.get("target_age_days"),
+                        "n_stale": blk.get("target_n_stale"),
+                        "raised_90d": blk.get("target_raised_90d"),
+                        "lowered_90d": blk.get("target_lowered_90d"),
                     }
                 )
             else:

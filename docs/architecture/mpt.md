@@ -123,12 +123,20 @@ at the next chunk boundary.
   `analytics._market_cap_usd`, the same conversion the app's cap-weighting uses;
   yfinance reports marketCap in native currency and a ¥ cap is ~150× a $ cap
   numerically). A cap with no FX rate counts as 0, never at the wrong scale.
-- Views: P = identity rows for assets with a valid analyst target;
-  q_i = target/price − 1 + dy_i − rf. The forward dividend yield dy_i (row
-  `dividend_yield`) is added since 2026-09-29: a price target is a price, while
-  Π is a total-return premium, so without it every payer's view was too low by
-  its yield. Ω diagonal, per-asset confidence from analyst count
-  (`n/(n+k0)`) × dispersion (`1/(1+((hi-lo)/tgt)/d0)`). The **analyst-trust haircut**
+- Views (relative since 2026-10-23): P = identity rows for assets with a valid
+  analyst target; q_i = Π_i + α_i with α_i = IC × σ_xs × z_i
+  (`analyst_targets.relative_alpha`, passed to `black_litterman` as
+  `{"alpha": …}`). u_i = ln(1 + upside_i + dy_i) (a price target is a price;
+  the yield makes it total), z_i = (u_i − ū)/0.125 capped at ±3, ū = the
+  holdings' mean blended with the long-run large-cap mean 0.11 (weight 10
+  names), σ_xs = 0.42, IC = 0.02 until the app's own track record measures one
+  (`view_ic`): ≈ ±0.8%/yr per σ, ±2.5% at most. The old view was the raw
+  upside (q_i = target/price − 1 + dy_i − rf), which took a +110% target on a
+  quantum name as a +110% expected return; two point-in-time studies found
+  targets rank 12-month returns with IC ≈ 0.01–0.03 (backend.md, "What
+  analyst targets predict"). Ω diagonal, per-asset confidence from analyst
+  count (`n/(n+k0)`) × dispersion (`1/(1+((hi-lo)/tgt)/d0)`) × age
+  (`1/(1+median_age/180)`). The **analyst-trust haircut**
   H ∈ [0,1] scales Ω by `(1-H)/H`: H→0 ⇒ Ω→∞ ⇒ posterior→prior; H→1 ⇒ Ω→0 ⇒
   posterior→views. Posterior μ_BL = Π + τΣPᵀ(PτΣPᵀ+Ω)⁻¹(Q−PΠ), k×k inverse (k≤N).
 - Posterior covariance is **not** used for risk — risk is empirical CVaR.

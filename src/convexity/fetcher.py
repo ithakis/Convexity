@@ -1220,6 +1220,10 @@ def fetch_detail(symbol: str) -> dict:
             out["target_high"] = block["high"]
             out["target_n_firms"] = block["n"]
             out["target_source"] = block["source"]
+            out["target_age_days"] = block.get("age_days")
+            out["target_n_stale"] = block.get("n_stale")
+            out["target_raised_90d"] = block.get("n_raised_90d")
+            out["target_lowered_90d"] = block.get("n_lowered_90d")
     except Exception as e:
         print(f"[detail] analysts {symbol}: {type(e).__name__}")
 
