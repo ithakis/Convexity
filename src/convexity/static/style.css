@@ -28,6 +28,15 @@
     /* Softer tier for the Claude-Code-style Settings (v1.19): its modal and its
        controls are deliberately rounder than the sharp dashboard. */
     --r-xl: 12px;   /* the Settings modal */
+    /* Windows (v1.28.6): no outer border. A window is one step lighter than the
+       page and floats on a deep, soft shadow; the edge comes from contrast, not
+       a line (the user's pick, "Frame B"). --surface-sunk is the step below it
+       (Settings sidebar, window footers). Literal values per theme, NOT
+       var(--bg-canvas): inside a window --bg-canvas is re-pointed at
+       --surface-raised, so referencing it here would be a cycle. */
+    --surface-raised: #ffffff;
+    --surface-sunk: #f2f6fa;
+    --shadow-window: 0 24px 64px rgba(11,34,57,0.22), 0 4px 14px rgba(11,34,57,0.10);
     --r-soft: 8px;  /* Settings buttons, inputs, search, close */
     --pos: #1f883d;   /* data colours are classic green/red, deliberately not the brand palette */
     --pos-rgb: 31, 136, 61;
@@ -88,6 +97,9 @@
     --rev-head-bg: #13202e;
     --header-bg: #111823;
     --hover: #152132;
+    --surface-raised: #0e141d;
+    --surface-sunk: #0b1018;
+    --shadow-window: 0 30px 80px rgba(0,0,0,0.60), 0 6px 18px rgba(0,0,0,0.45);
     --field-bg: #152132;
     --chip-bg: #131c29;
     --on-accent: #04121f;   /* white on the lighter dark-mode blue is only ~2.8:1 */
@@ -141,6 +153,9 @@
     --rev-head-bg: #1a1208;
     --header-bg: #141414;
     --hover: #14273f;           /* dark blue — Bloomberg's selection-bar blue */
+    --surface-raised: #0b0b0b;
+    --surface-sunk: #060606;
+    --shadow-window: 0 30px 80px rgba(0,0,0,0.75), 0 6px 18px rgba(0,0,0,0.55);
     --field-bg: #161616;        /* neutral, not the selection blue */
     --chip-bg: #171717;
     --on-accent: #050505;       /* near-black text on the bright orange accent */
@@ -1187,7 +1202,8 @@
   .ct-opt.on::after { content: "✓"; font-size: 11px; }
   .m-chart-toolbar .ct-dd { margin-left: 4px; }
   .tr-btn { margin-left: auto; text-transform: none; letter-spacing: 0; padding: 0 14px; }
-  .tr-btn + .ct-dd { margin-left: 8px; }
+  /* 6px from Constraints (the h4's 8px gap − 2px): the two read as one group. */
+  .tr-btn + .ct-dd { margin-left: -2px; }
   .tr-btn.open { border-color: var(--accent); }
   .tr-pop { width: min(548px, calc(100vw - 16px)); padding: 14px 16px 12px; display: grid; gap: 12px; font-size: 12.5px; }
   .tr-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -1310,7 +1326,11 @@
   .pf-wf-val.pos { color: var(--pos); }
   .pf-wf-val.neg { color: var(--neg); }
 
-  /* Custom weight popup */
+  /* Custom weight popup (v1.28.6, the user's "V1 · plain number"): one window
+     surface, no row dividers, a slim accent-filled slider, the weight printed as
+     text until hovered or focused, ghost SVG locks. Accent only — per-company
+     colours were tried and rejected. Rebalance behaviour lives in app.js and is
+     unchanged. */
   .pf-weights-bg {
     position: fixed; inset: 0; background: rgba(0,0,0,0.55);
     display: none; align-items: center; justify-content: center; z-index: 70;
@@ -1318,75 +1338,91 @@
   }
   .pf-weights-bg.show { display: flex; }
   .pf-weights-modal {
-    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-lg);
-    width: min(560px, 96vw); max-height: 86vh; display: flex; flex-direction: column;
+    position: relative; border-radius: var(--r-xl); overflow: hidden;
+    width: min(580px, 96vw); max-height: 86vh; display: flex; flex-direction: column;
   }
-  .pf-weights-head {
-    display: flex; align-items: center; gap: 8px;
-    padding: 12px 14px; border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
-  }
-  .pf-weights-title { font-weight: 700; font-size: 13.5px; flex: 1; }
-  .pf-weights-sum { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 12.5px; }
+  .pf-weights-head { display: flex; align-items: center; gap: 12px; padding: 16px 18px 10px 22px; }
+  .pf-weights-title { font-weight: 650; font-size: 15px; flex: 1; min-width: 0; }
+  .pf-weights-sum { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13px; }
   .pf-weights-sum.bad { color: var(--neg); }
   .pf-weights-sum.good { color: var(--pos); }
-  .pf-weights-action {
-    height: 26px; padding: 0 10px; border-radius: var(--r-sm); border: 1px solid var(--border);
-    background: var(--bg-subtle); cursor: pointer; font-size: 11.5px; color: var(--text);
+  .pf-weights-seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--surface-sunk); }
+  .pf-weights-seg button {
+    height: 26px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent;
+    color: var(--muted); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer;
   }
-  .pf-weights-action:hover { border-color: var(--accent); }
-  .pf-weights-hint { padding: 8px 14px; color: var(--muted); font-size: 11.5px; }
-  .pf-weights-body { padding: 4px 14px 12px; overflow-y: auto; flex: 1; }
+  .pf-weights-seg button:hover { color: var(--text); background: var(--hover); }
+  .pf-weights-body { padding: 4px 16px 14px 22px; overflow-y: auto; flex: 1; }
   .pf-w-row {
-    display: grid; grid-template-columns: 64px 1fr 64px 28px; gap: 8px;
-    align-items: center; padding: 4px 0; border-bottom: 1px dashed var(--border);
+    display: grid; grid-template-columns: minmax(96px, 150px) 1fr 70px 28px; gap: 14px;
+    align-items: center; min-height: 42px;
   }
-  .pf-w-row:last-child { border-bottom: none; }
-  .pf-w-row.locked .pf-w-slider { opacity: 0.55; }
-  .pf-w-sym { font-weight: 600; font-size: 12px; }
-  .pf-w-slider { width: 100%; accent-color: var(--accent); }
+  .pf-w-row.locked .pf-w-id, .pf-w-row.locked .pf-w-slider, .pf-w-row.locked .pf-w-num { opacity: 0.55; }
+  .pf-w-id { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+  .pf-w-sym { font-weight: 600; font-size: 13px; }
+  .pf-w-name { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pf-w-slider {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 4px; margin: 0;
+    border-radius: 2px; cursor: pointer; outline: none;
+    background: linear-gradient(var(--accent), var(--accent)) 0 / var(--p, 0%) 100% no-repeat,
+                color-mix(in srgb, var(--text) 14%, transparent);
+  }
+  .pf-w-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.45); cursor: pointer;
+    transition: transform .12s ease;
+  }
+  .pf-w-slider::-moz-range-thumb {
+    width: 14px; height: 14px; border: 0; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.45); cursor: pointer;
+  }
+  .pf-w-slider:hover::-webkit-slider-thumb, .pf-w-slider:focus-visible::-webkit-slider-thumb { transform: scale(1.15); }
+  .pf-w-slider:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.35); }
+  .pf-w-slider:disabled { cursor: default; }
+  /* The weight reads as plain text; hover hints it is editable, focus turns it
+     into a field (same inset-ring language as the optimizer's limits grid). */
   .pf-w-num {
-    width: 100%; padding: 3px 6px; border: 1px solid var(--border);
-    border-radius: var(--r-sm); background: var(--bg-canvas); color: var(--text);
-    font-size: 11.5px; font-variant-numeric: tabular-nums; text-align: right;
+    width: 100%; height: 28px; padding: 0 6px; border: 0; border-radius: 6px;
+    background: transparent; color: var(--text); font: inherit; font-size: 14px; font-weight: 600;
+    font-variant-numeric: tabular-nums; text-align: right; cursor: text;
+    transition: background .12s ease;
   }
-  .pf-w-num:focus { outline: none; border-color: var(--accent); }
+  .pf-w-num:hover { background: var(--hover); }
+  .pf-w-num:focus { outline: none; background: var(--surface-sunk); box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .pf-w-num[readonly] { cursor: default; }
+  .pf-w-num[readonly]:hover { background: transparent; }
   .pf-w-lock {
-    width: 28px; height: 24px; border-radius: var(--r-sm); border: 1px solid var(--border);
-    background: var(--bg-subtle); cursor: pointer; color: var(--muted); padding: 0;
-    font-size: 12px;
+    width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent;
+    color: color-mix(in srgb, var(--muted) 55%, transparent); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
   }
-  .pf-w-lock.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .pf-w-lock svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+  .pf-w-lock:hover { color: var(--text); background: var(--hover); }
+  .pf-w-lock.on { color: var(--accent); }
+  .pf-w-lock:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px var(--accent); }
   .pf-weights-foot {
-    display: flex; justify-content: flex-end; gap: 8px;
-    padding: 10px 14px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 18px 12px 22px; background: var(--surface-sunk);
   }
+  .pf-weights-foot input[type="text"] {
+    flex: 1; min-width: 120px; height: 32px; padding: 0 10px; border: 0; border-radius: 7px;
+    background: var(--surface-raised); color: var(--text); font: inherit; font-size: 12.5px;
+  }
+  .pf-weights-foot input[type="text"]:focus { outline: none; box-shadow: inset 0 0 0 1.5px var(--accent); }
   .pf-weights-foot button {
-    height: 30px; padding: 0 14px; border-radius: var(--r-md); border: 1px solid var(--border);
-    background: var(--bg-subtle); cursor: pointer; color: var(--text); font-size: 12.5px;
+    height: 32px; padding: 0 14px; border-radius: 7px; border: 0;
+    background: var(--hover); cursor: pointer; color: var(--text); font: inherit; font-size: 12.5px; font-weight: 500;
   }
-  .pf-weights-foot button.primary {
-    background: var(--accent); color: var(--on-accent); border-color: var(--accent);
-  }
+  .pf-weights-foot button:hover { filter: brightness(1.12); }
+  .pf-weights-foot button:disabled { opacity: 0.45; cursor: default; filter: none; }
+  .pf-weights-foot button.primary { background: var(--accent); color: var(--on-accent); padding: 0 18px; }
   .pf-weights-foot button.primary:hover { filter: brightness(1.08); }
-  .pf-weights-foot button.danger {
-    background: transparent; color: var(--neg); border-color: var(--neg);
+  .pf-weights-foot button.danger { background: rgba(var(--neg-rgb), 0.14); color: var(--neg); }
+  .pf-weights-modal .pf-name-status {
+    padding: 0 22px 10px; margin-top: -2px; background: var(--surface-sunk);
+    color: var(--muted); font-size: 11px;
   }
-  .pf-weights-foot button.danger:hover { background: rgba(var(--neg-rgb), 0.10); }
-  .pf-name-row {
-    display: flex; align-items: center; gap: 6px;
-    padding: 6px 14px 0; flex-wrap: wrap;
-  }
-  .pf-name-row input[type="text"] {
-    flex: 1; min-width: 140px;
-    padding: 5px 8px; border-radius: var(--r-sm); border: 1px solid var(--border);
-    background: var(--bg-subtle); color: var(--text);
-    font-size: 12px;
-  }
-  .pf-name-row input[type="text"]:focus { outline: none; border-color: var(--accent); }
-  .pf-name-row .pf-name-status {
-    color: var(--muted); font-size: 11px; font-style: italic;
-  }
+  .pf-weights-modal .pf-name-status:empty { display: none; }
   /* Inline overlay used for "Save as…" — renders fixed at top-level so it
      can appear over EITHER the weights modal or the MPT overlay. */
   .pf-inline-prompt {
@@ -1394,7 +1430,6 @@
     display: none; align-items: center; justify-content: center; z-index: 200;
     backdrop-filter: blur(2px);
   }
-  .pf-weights-modal { position: relative; }
   .pf-inline-prompt.show { display: flex; }
   .pf-inline-prompt .pf-ip-box {
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-md);
@@ -3251,65 +3286,71 @@
   }
   .settings-bg.show { display: flex; }
   .settings-modal {
-    width: 78vw; height: 76vh; min-width: 620px;
-    background: var(--bg-canvas); border: 1px solid var(--border);
-    border-radius: var(--r-xl); box-shadow: 0 24px 60px rgba(0,0,0,0.45);
-    display: flex; flex-direction: column; overflow: hidden;
+    position: relative;
+    width: 78vw; height: 76vh; min-width: 680px;
+    border-radius: var(--r-xl);
+    display: flex; flex-direction: row; overflow: hidden;
   }
-  /* S3 · top tabs (v1.19, modelled on the Claude Code settings the user
-     picked): one header row — title, section pills, search, close — and no
-     sidebar. Bigger type than the rest of the app (14px), no lines between
-     tabs, and the ONLY shape is the filled pill on the selected tab. */
-  .settings-head {
-    display: flex; align-items: center; gap: 14px;
-    padding: 12px 16px 12px 22px; border-bottom: 1px solid var(--border);
-    background: var(--bg-canvas);
+  /* Sidebar (v1.28.6, modelled on Claude desktop — replaces the v1.19 top
+     tabs): one step below the window surface, no border-right; the surface step
+     is the divider. The selected row is a neutral fill with --text, not the
+     accent pill, so the sidebar stays quiet and the pane carries the colour. */
+  .settings-side {
+    width: 228px; flex: none; display: flex; flex-direction: column; min-height: 0;
+    background: var(--surface-sunk); padding: 14px 10px 10px;
   }
-  .settings-title { font-weight: 650; font-size: 16px; flex: none; margin-right: 6px; }
-  .settings-body { flex: 1; display: flex; min-height: 0; }
-  /* The tab strip takes the space between the title and the search and
-     scrolls sideways (without a visible bar) if the window gets narrow. */
-  /* The tabs WRAP onto a second line when the modal is narrow. A hidden
-     sideways scroller (the first cut) left "Logs"/"About" unreachable below
-     ~1200px of window width; the search box gives up width first. */
-  .settings-nav { flex: 1; min-width: 0; }
-  .settings-nav-list { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-  .settings-search-wrap { position: relative; flex: 0 1 200px; min-width: 120px; }
+  .settings-body { flex: 1; display: flex; min-width: 0; min-height: 0; }
+  .settings-search-wrap { position: relative; flex: none; margin-bottom: 12px; }
   .settings-search-icon {
-    position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
-    color: var(--muted); font-size: 13px; pointer-events: none;
+    position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+    width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 1.5;
+    stroke-linecap: round; pointer-events: none;
   }
   .settings-search {
-    width: 100%; background: var(--bg-subtle); border: 1px solid transparent;
-    color: var(--text); border-radius: var(--r-soft); font-size: 13.5px;
-    padding: 7px 10px 7px 30px; font-family: inherit;
+    width: 100%; height: 34px; background: var(--surface-raised); border: 0;
+    color: var(--text); border-radius: 8px; font-size: 13.5px;
+    padding: 0 10px 0 31px; font-family: inherit;
   }
   .settings-search::placeholder { color: var(--muted); }
-  .settings-search:focus { outline: none; border-color: var(--accent); background: var(--bg-canvas); }
-  .settings-nav-item {
-    flex: none; background: transparent; border: 0; white-space: nowrap;
-    color: var(--muted); font-size: 14px; font-weight: 500; padding: 6px 14px;
-    cursor: pointer; border-radius: 999px; font-family: inherit;
-    display: inline-flex; align-items: center; gap: 7px;
+  .settings-search:focus { outline: none; box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .settings-nav { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .settings-nav-list { flex: 1; min-height: 0; overflow-y: auto; }
+  .settings-nav-group + .settings-nav-group { margin-top: 14px; }
+  .settings-nav-group-label {
+    font-size: 12px; color: var(--muted); padding: 2px 10px 6px; font-weight: 500;
   }
-  .settings-nav-item:hover { color: var(--text); background: var(--hover); }
+  .settings-nav-item {
+    width: 100%; background: transparent; border: 0; white-space: nowrap; text-align: left;
+    color: var(--text); font-size: 14px; font-weight: 450; padding: 0 10px; height: 34px;
+    cursor: pointer; border-radius: 8px; font-family: inherit;
+    display: flex; align-items: center; gap: 11px;
+  }
+  .settings-nav-icon {
+    width: 17px; height: 17px; flex: none; fill: none; stroke: currentColor;
+    stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; color: var(--muted);
+  }
+  .settings-nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .settings-nav-item:hover { background: var(--hover); }
+  .settings-nav-item:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px var(--accent); }
   .settings-nav-item.active,
   .settings-nav-item.active:hover {
-    color: var(--on-accent); background: var(--accent); font-weight: 600;
+    background: color-mix(in srgb, var(--text) 10%, transparent); font-weight: 600;
   }
+  .settings-nav-item.active .settings-nav-icon { color: var(--text); }
   /* How many settings inside this section matched the search. */
   .settings-nav-count {
     font-size: 11px; font-weight: 700; min-width: 18px; padding: 0 5px;
     border-radius: 999px; text-align: center;
-    background: rgba(var(--accent-rgb), 0.14); color: var(--text);
+    background: rgba(var(--accent-rgb), 0.16); color: var(--text);
   }
-  .settings-nav-item.active .settings-nav-count { background: rgba(255, 255, 255, 0.22); color: inherit; }
-  .settings-nav-empty { font-size: 13px; color: var(--muted); padding: 6px 4px; white-space: nowrap; }
+  .settings-nav-empty { font-size: 13px; color: var(--muted); padding: 6px 10px; line-height: 1.5; white-space: normal; }
+  /* Floating close, top-right of the pane (there is no header bar any more). */
+  .settings-modal > .settings-close { position: absolute; top: 14px; right: 14px; z-index: 2; }
   .settings-pane {
     flex: 1; min-width: 0; display: flex; flex-direction: column;
     padding: 22px 32px 18px;
   }
-  .settings-pane-head { flex: none; margin-bottom: 14px; }
+  .settings-pane-head { flex: none; margin-bottom: 14px; padding-right: 40px; }
   /* The scroll modifier is applied to every section EXCEPT Logs: .settings-log-body
      is itself flex:1/overflow:auto, and wrapping it in a second scroll container
      breaks the tail-to-bottom behaviour. */
@@ -3353,7 +3394,7 @@
     background: none; border: 0; border-radius: 0; padding: 14px 2px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
-  /* Segmented control. Deliberately reuses .settings-nav-item.active's recipe,
+  /* Segmented control. Deliberately reuses the v1.19 accent-pill recipe,
      which is already proven in light/dark/bloomberg — do NOT copy
      .cv-fit-toggle.active's hardcoded blue, which reads wrong under Bloomberg. */
   .settings-seg { display: inline-flex; gap: 4px; }
@@ -4117,3 +4158,32 @@
   .pf-tab.pf-tab-book.active { background: rgba(var(--book-rgb), 0.12); border-color: var(--book); color: var(--book); box-shadow: 0 0 0 1px rgba(var(--book-rgb), 0.25); }
   [data-theme="dark"] .pf-tab.pf-tab-book.active { color: #fff; background: rgba(var(--book-rgb), 0.28); }
   #input-panel.pf-book-ro .co-search, #input-panel.pf-book-ro .pf-chip-x { display: none; }
+
+  /* --- Windows: borderless (v1.28.6) --------------------------------------
+     ONE place for every overlay's outer frame, kept last in the file so no
+     per-window rule (several sit further up with the same specificity) can put
+     a border back. No outer line; a window is --surface-raised over the dimmed
+     page on --shadow-window. Re-pointing --bg-canvas inside the window means
+     every sticky header, input and inner panel that paints "canvas" follows the
+     raised surface instead of reading as a darker strip (box-in-box). Inner
+     hairlines (header/footer dividers) stay — only the frame goes. A new
+     overlay surface belongs in this list. Small dropdown menus (.inv-menu,
+     .ct-menu, .bench-menu) keep their hairline: they open over the undimmed
+     page, where a shadow alone does not hold the edge. */
+  .modal,
+  .info-modal,
+  .confirm-modal,
+  .export-modal,
+  .pf-weights-modal,
+  .pf-mpt-modal,
+  .pf-mpt-cons,
+  .settings-modal,
+  .ns-tape-fs-modal,
+  .inv-pop,
+  .inv-menu.tr-pop,
+  .pf-inline-prompt .pf-ip-box {
+    --bg-canvas: var(--surface-raised);
+    background: var(--surface-raised);
+    border: 0;
+    box-shadow: var(--shadow-window);
+  }

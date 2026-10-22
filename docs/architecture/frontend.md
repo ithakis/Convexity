@@ -614,20 +614,24 @@ picked.
   custom `data-tip` pseudo-element pattern, not native `title`, so the
   help text is consistently visible in-browser.
 - **Settings overlay** (`#settings-btn` gear, `openSettings`/`closeSettings`):
-  78vw × 76vh over a blurred backdrop. **Top tabs since v1.19** ("S3", modelled
-  on the Claude Code settings): one header row holds the title, the sections as
-  pills (`.settings-nav-item`, filled accent = selected, no lines between them,
-  no group labels — the group is the tab's tooltip), the search and the close;
-  the pane is full width at 14px+ type. A search that matches settings inside a
-  section shows a count on its tab (`.settings-nav-count`) instead of the old
-  sub-lines; Left/Right walk the tabs. The tabs **wrap** to a second line when
-  the modal is narrow (a hidden sideways scroller left Logs/About unreachable
-  below ~1200px). Its radii are the softer `--r-xl` / `--r-soft` tokens. Follows the
+  78vw × 76vh over a blurred backdrop. **Left sidebar since v1.28.6** (modelled
+  on Claude desktop; replaced the v1.19 top tabs): `aside.settings-side` holds
+  the search and the grouped section list (`SETTINGS_GROUP_ORDER` = Settings /
+  Data & models / Help, each row an inline-SVG outline icon from
+  `SETTINGS_ICONS` + label); the selected row is a neutral fill with `--text`,
+  not the accent pill. The sidebar is `--surface-sunk` with no border-right —
+  the surface step is the divider. The close button floats top-right of the
+  pane (`.settings-modal > .settings-close`); there is no header bar. A search
+  that matches settings inside a section shows a count on its row
+  (`.settings-nav-count`); Up/Down walk the rows. The list scrolls inside the
+  sidebar, so nothing becomes unreachable on a short window.
+  Its radii are the softer `--r-xl` / `--r-soft` tokens. Follows the
   `openMptOverlay` idiom (the `document.body.style.overflow` lock +
   `dataset.*PrevOverflow` restore) and registers in the global Esc handler.
   See §16 for why Logs exists. Rebuilt in v1.10.1 — five load-bearing rules:
   1. **`SETTINGS_SECTIONS` is the only place a section is declared**
-     (`{id, group, label, description, keywords, items, render}`).
+     (`{id, group, label, description, keywords, items, render}`; give a new
+     section an icon in `SETTINGS_ICONS`, or it renders with a blank slot).
      `renderSettingsNav()` rebuilds the nav from it. Add a section there, never
      back in `index.html`. Sections today: General, Column Presets, My Investments, Attention, Models & Data, API keys, Logs, Guide, About.
      **Guide** (2026-10-13) is the old topbar "i" overlay, merged into Settings at
@@ -718,6 +722,28 @@ picked.
   frozen validation numbers and KaTeX formulas in collapsed `<details>`; live
   numbers belong in the Track record, not there.
 
+- **Windows have no outer border (v1.28.6, the user's "Frame B").** Every
+  overlay surface is listed ONCE in the grouped rule at the end of `style.css`:
+  `background: --surface-raised` (one step lighter than the page in dark and
+  Bloomberg), `border: 0`, `box-shadow: --shadow-window`, and `--bg-canvas`
+  re-pointed at `--surface-raised` so sticky headers and inputs that paint
+  "canvas" don't read as darker strips. It sits last in the file on purpose:
+  several per-window rules higher up have the same specificity. **A new overlay
+  surface goes in that list.** Inner hairlines (header/footer dividers) stay.
+  Small dropdowns (`.inv-menu`, `.ct-menu`, `.bench-menu`) keep their hairline —
+  they open over the undimmed page, where a shadow alone doesn't hold the edge;
+  the window-sized Constraints popover (`.inv-menu.tr-pop`) is in the list.
+  `--surface-raised` / `--surface-sunk` / `--shadow-window` are literal per
+  theme (never `var(--bg-canvas)` — that would be a cycle inside a window).
+- **Weights popup (v1.28.6, "V1 · plain number").** Slim slider with the accent
+  fill driven by a `--p` var (`syncWeightsInputs`), the weight printed as text
+  that only becomes a field on hover/focus (`type="text" inputmode="decimal"`,
+  `parseWeightPct` accepts `29,66`), inline-SVG ghost locks, no per-company
+  colours (tried and rejected). Behaviour is the original auto-rebalance, with
+  one fix: a row is capped at `1 − lockedTotal`, so it can no longer push the
+  total past 100%. Click-focus selects on the field's own **mouseup** — the
+  browser places the caret on mouseup, after focus and after any rAF, so a
+  focus-time `select()` was undone and "20" typed over 9.28 became "209.28".
 - **Overlays: `showOverlay()` / `hideOverlay()` are the ONLY way to open and
   close one** (v1.11.0). They own `lockBodyScroll`/`unlockBodyScroll`, a single
   **nesting counter** on `document.body`'s overflow. Never write
