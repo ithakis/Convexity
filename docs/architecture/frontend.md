@@ -464,7 +464,8 @@ analysts as well (`fcMarks` no longer requires 365: the 12-month targets are
 moved to the 3-month expiry, and the hollow 12M diamond sits clamped at the
 plot's right edge). **μ is off by default since 2026-10-23**: σ alone draws
 the market's (CAPM) mean, and μ switches to the analysts' curve, labelled as
-the Street's expectation; the analyst haircut (`dist_haircut`) defaults to on.
+the Street's expectation. The analysts' marks (diamonds, low/high, Pr ≥ target)
+are drawn either way: hiding them with μ (1.28.4) made the target vanish; the analyst haircut (`dist_haircut`) defaults to on.
 Targets did not rank 12-month returns in point-in-time tests (backend.md,
 "What analyst targets predict"), so they are not the default forecast. The options set the
 horizon, so the target bends to the expiry (`fcProRate`, mirroring

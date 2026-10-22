@@ -3996,7 +3996,7 @@ function fcYRange(lo, hi) {
     if (mk) { lo = Math.min(lo, mk.low ?? mk.atExp, d.s0); hi = Math.max(hi, mk.high ?? mk.atExp, mk.mean, d.s0); }
     return [lo, hi];
   }
-  const sim = fcSimulate(d, mode), mk = DETAIL.showMu ? fcMarks(d) : null;
+  const sim = fcSimulate(d, mode), mk = fcMarks(d)  /* the target is always drawn as a reference; μ only picks the curve's mean */;
   lo = Math.min(lo, fcCurveQ(sim, 0.05), mk?.low ?? Infinity);
   hi = Math.max(hi, fcCurveQ(sim, 0.95), mk?.high ?? -Infinity, mk?.mean ?? -Infinity);
   return [lo, hi];
@@ -4155,7 +4155,7 @@ function fcDraw() {
   const t = DETAIL.fcT ?? 2, S = FC_ZONE.steps, n = Math.floor(Math.min(1, t) * S);
   const X = (j) => xT + (xH - xT) * j / S;
   const grow = t >= 1 ? 1 - Math.pow(1 - Math.min(1, t - 1), 3) : 0;
-  const mk = DETAIL.showMu ? fcMarks(d) : null;
+  const mk = fcMarks(d);
   ctx.save(); ctx.beginPath(); ctx.rect(xT, top - 1, g.W - xT, bot - top + 2); ctx.clip();
 
   if (mode.kind === "mu") {
@@ -4361,7 +4361,7 @@ function fcHover(cx, cy) {
   const x = inPdf ? f.xH : Math.max(f.xT, Math.min(cx, f.xH));
   const j = inPdf ? S : Math.round((x - f.xT) / (f.xH - f.xT) * S);
   let K = f.lo + (g.padT + g.chartH - cy) / g.chartH * (f.hi - f.lo);
-  const mk = DETAIL.showMu ? fcMarks(d) : null;
+  const mk = fcMarks(d);
   let snap = null;
   if (inPdf && mk) {
     for (const [k, v, who] of [["highest target", mk.high, "moved to the expiry"], ["mean target", mk.atExp, `${mk.n || 1} firms, moved to the expiry`], ["lowest target", mk.low, "moved to the expiry"]]) {
@@ -4474,7 +4474,7 @@ function renderFcReadouts() {
   }
   const sim = fcSimulate(d, mode);
   const s20 = fcStats(sim, d.s0 * 0.8, FC_ZONE.steps);
-  const mk = DETAIL.showMu ? fcMarks(d) : null;
+  const mk = fcMarks(d);
   // What the curve's mean is, named for where it comes from: "expected"
   // would claim more than a model's mean.
   const meanLabel = mode.mu === "analysts" ? (an.n ? "Analysts’ mean target" : "Analysts’ target")

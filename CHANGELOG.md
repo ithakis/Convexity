@@ -9,6 +9,10 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.28.5 — 2026-10-23
+
+- **The analyst target is back on the σ/μ chart.** 1.28.4 made the market's μ the default by switching μ off, which also hid the target's diamonds, low/high range and Pr ≥ target. They are now always drawn as a reference; μ only decides whether the curve's mean is the market's or the analysts'.
+
 ## 1.28.4 — 2026-10-23
 
 - **Analyst targets are treated as an expectation, not a forecast.** Two point-in-time studies (80 large caps 2021–25; the S&P 500 2015–25) found targets rank 12-month returns with IC ≈ 0.01–0.03 once their volatility tilt is removed. So:
