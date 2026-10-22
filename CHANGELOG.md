@@ -9,6 +9,13 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.28.6 — 2026-10-23
+
+- **Windows lose their outline.** Every pop-up window (stock, weights, settings, optimizer, Constraints, dialogs, the full-screen tape) is now one step lighter than the page and floats on a soft shadow instead of a border. Small dropdown menus keep their hairline.
+- **Settings has a left sidebar,** like Claude desktop: search on top, then Settings / Data & models / Help groups with an icon per section.
+- **Weights popup refreshed:** slimmer sliders, the weight reads as plain text until hovered or clicked, outline lock icons, Equal | Cap in the header, no hint line or Cancel button. Same auto-rebalance. Fixes: clicking a number now selects it (typing 20 over 9.28 no longer gives 209.28), `29,66` is accepted, and a row can no longer push the total past 100% when others are locked.
+- **Constraints sits closer to the chart-type picker** (6px gap).
+
 ## 1.28.5 — 2026-10-23
 
 - **The analyst target is back on the σ/μ chart.** 1.28.4 made the market's μ the default by switching μ off, which also hid the target's diamonds, low/high range and Pr ≥ target. They are now always drawn as a reference; μ only decides whether the curve's mean is the market's or the analysts'.

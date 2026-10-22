@@ -7443,34 +7443,62 @@ function closeWeightsPopup() {
   hideInlinePrompt();
 }
 
+// Lock glyphs for the weights rows: inline SVG (no emoji, whose size and
+// colour vary by system font). Stroke follows currentColor, so the muted/accent
+// states are pure CSS.
+const W_LOCK_SVG = {
+  on: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>',
+  off: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 4.9-.7"/></svg>',
+};
+
+// Weights are typed with either decimal separator: the user's locale writes
+// "29,66", and a type="number" field silently drops that as invalid.
+function parseWeightPct(v) {
+  const n = Number(String(v).replace(",", ".").replace("%", "").trim());
+  return Number.isFinite(n) ? n : 0;
+}
+
 function renderWeightsRows() {
   const body = $("#pf-weights-body"); body.innerHTML = "";
   WEIGHTS_DRAFT.forEach((row, i) => {
     const r = document.createElement("div");
     r.className = "pf-w-row" + (row.locked ? " locked" : "");
+    const showName = row.name && row.name !== row.symbol;
     r.innerHTML = `
-      <span class="pf-w-sym" title="${escapeHtml(row.name)}">${escapeHtml(row.symbol)}</span>
-      <input class="pf-w-slider" type="range" min="0" max="1" step="0.001" value="${row.weight.toFixed(3)}" ${row.locked ? "disabled" : ""}/>
-      <input class="pf-w-num" type="number" min="0" max="100" step="0.1" value="${(row.weight*100).toFixed(2)}"/>
-      <button class="pf-w-lock${row.locked ? " on" : ""}" title="Lock">${row.locked ? "🔒" : "🔓"}</button>
+      <span class="pf-w-id"><span class="pf-w-sym">${escapeHtml(row.symbol)}</span>${showName ? `<span class="pf-w-name">${escapeHtml(row.name)}</span>` : ""}</span>
+      <input class="pf-w-slider" type="range" min="0" max="1" step="0.001" value="${row.weight.toFixed(3)}" aria-label="${escapeHtml(row.symbol)} weight" ${row.locked ? "disabled" : ""}/>
+      <input class="pf-w-num" type="text" inputmode="decimal" value="${(row.weight*100).toFixed(2)}" aria-label="${escapeHtml(row.symbol)} weight, percent" ${row.locked ? "readonly" : ""}/>
+      <button type="button" class="pf-w-lock${row.locked ? " on" : ""}" aria-pressed="${row.locked}" data-tip="${row.locked ? "Locked — click to unlock" : "Lock this weight; the others rebalance"}">${row.locked ? W_LOCK_SVG.on : W_LOCK_SVG.off}</button>
     `;
     const slider = r.querySelector(".pf-w-slider");
     const num = r.querySelector(".pf-w-num");
     const lock = r.querySelector(".pf-w-lock");
     slider.addEventListener("input", () => onWeightInput(i, Number(slider.value)));
-    num.addEventListener("input", () => onWeightInput(i, Math.max(0, Math.min(100, Number(num.value))) / 100));
+    num.addEventListener("input", () => onWeightInput(i, Math.max(0, Math.min(100, parseWeightPct(num.value))) / 100));
+    // Select the value on focus so typing replaces it. Keyboard focus selects
+    // at once; for a click the browser places the caret on MOUSEUP (after focus
+    // and after any rAF), which would undo the selection and make "20" typed
+    // over 9.28 read "209.28" — so a click-focus selects on its own mouseup.
+    let clickFocus = false;
+    num.addEventListener("mousedown", () => { clickFocus = document.activeElement !== num; });
+    num.addEventListener("mouseup", (e) => { if (clickFocus) { e.preventDefault(); num.select(); clickFocus = false; } });
+    num.addEventListener("focus", () => { if (!clickFocus) num.select(); });
+    num.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); num.blur(); } });
+    num.addEventListener("blur", () => { num.value = (WEIGHTS_DRAFT[i].weight * 100).toFixed(2); });
     lock.addEventListener("click", () => { row.locked = !row.locked; renderWeightsRows(); updateWeightsSum(); });
     body.appendChild(r);
   });
+  syncWeightsInputs();
   updateWeightsSum();
 }
 
 function onWeightInput(i, newVal) {
   const row = WEIGHTS_DRAFT[i];
   if (row.locked) return;
-  newVal = Math.max(0, Math.min(1, newVal));
   // Distribute the delta proportionally over the other unlocked rows so total stays at 1.
   const lockedTotal = WEIGHTS_DRAFT.filter(r => r.locked).reduce((a, r) => a + r.weight, 0);
+  // Capped at what the locks leave free, or one row could push the total past 100%.
+  newVal = Math.max(0, Math.min(1 - lockedTotal, newVal));
   const otherUnlocked = WEIGHTS_DRAFT.filter((r, j) => !r.locked && j !== i);
   const otherCurrent = otherUnlocked.reduce((a, r) => a + r.weight, 0);
   const remaining = Math.max(0, 1 - lockedTotal - newVal);
@@ -7498,6 +7526,8 @@ function syncWeightsInputs() {
     const s = el.querySelector(".pf-w-slider"); const n = el.querySelector(".pf-w-num");
     if (document.activeElement !== s) s.value = w.weight.toFixed(3);
     if (document.activeElement !== n) n.value = (w.weight*100).toFixed(2);
+    // Accent fill up to the thumb (the track is a two-layer background).
+    s.style.setProperty("--p", (Math.max(0, Math.min(1, w.weight)) * 100).toFixed(2) + "%");
     el.classList.toggle("locked", w.locked);
   });
 }
@@ -10227,7 +10257,7 @@ for (const n of SMA_PERIODS) wireSmaPill(`#pf-show-sma${n}`, n);
 /* --- Weights popup wiring --- */
 $("#pf-weights-bg").addEventListener("click", (e) => { if (e.target.id === "pf-weights-bg") closeWeightsPopup(); });
 $("#pf-weights-close").addEventListener("click", closeWeightsPopup);
-$("#pf-weights-cancel").addEventListener("click", closeWeightsPopup);
+$("#pf-weights-cancel")?.addEventListener("click", closeWeightsPopup);  // Cancel was dropped in 1.28.6 (× and Esc close)
 $("#pf-weights-equal").addEventListener("click", resetDraftToEqual);
 $("#pf-weights-reset").addEventListener("click", resetDraftToCap);
 $("#pf-weights-apply").addEventListener("click", applyWeightsDraft);
@@ -12705,7 +12735,7 @@ const SETTINGS_SECTIONS = [
   },
   {
     id: "logs",
-    group: "Diagnostics",
+    group: "Help",
     label: "Logs",
     description: "Live tail of the backend console (stdout + stderr). In the desktop app this "
                + "is the only place these lines are visible.",
@@ -12729,7 +12759,7 @@ const SETTINGS_SECTIONS = [
   },
   {
     id: "about",
-    group: "Diagnostics",
+    group: "Help",
     label: "About",
     description: "Version, where this app keeps its data, and how to update it.",
     keywords: ["version", "release", "update", "changelog", "paths", "state files", "data"],
@@ -12826,6 +12856,30 @@ function renderSettings() {
   renderSettingsPane();
 }
 
+// Settings sidebar (v1.28.6, modelled on Claude desktop): grouped vertical
+// list, an outline icon per section, the neutral fill on the selected row. The
+// groups render in this order; within a group, SETTINGS_SECTIONS order holds.
+const SETTINGS_GROUP_ORDER = ["Settings", "Data & models", "Help"];
+// 16px outline icons, stroke = currentColor (inline: no icon font, no CDN).
+const SETTINGS_ICONS = {
+  general: '<circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/>',
+  columns: '<rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6 2.5v11M10 2.5v11"/>',
+  models: '<ellipse cx="8" cy="4" rx="5" ry="1.8"/><path d="M3 4v8c0 1 2.2 1.8 5 1.8s5-.8 5-1.8V4M3 8c0 1 2.2 1.8 5 1.8s5-.8 5-1.8"/>',
+  investments: '<rect x="2" y="4" width="12" height="9.5" rx="1.5"/><path d="M5.5 4V3a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1M2 8h12"/>',
+  attention: '<path d="M8 2.2 14.2 13H1.8z"/><path d="M8 6.5v3M8 11.3v.2"/>',
+  notifications: '<path d="M4 11V7.5a4 4 0 0 1 8 0V11l1.2 1.2H2.8zM6.6 13.8a1.5 1.5 0 0 0 2.8 0"/>',
+  distribution: '<path d="M1.8 13.5h12.4M2.5 13c2-.2 2.8-9 5.5-9s3.5 8.8 5.5 9"/>',
+  keys: '<circle cx="5.2" cy="10.8" r="2.7"/><path d="M7.2 8.8 13.5 2.5M11.2 4.8l1.8 1.8M9.6 6.4l1.4 1.4"/>',
+  logs: '<rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M4.8 6.2 6.8 8l-2 1.8M8.2 10.2h3"/>',
+  guide: '<path d="M2.5 3.2c2-.6 3.8-.4 5.5.8 1.7-1.2 3.5-1.4 5.5-.8v9.6c-2-.6-3.8-.4-5.5.8-1.7-1.2-3.5-1.4-5.5-.8zM8 4v9.6"/>',
+  about: '<circle cx="8" cy="8" r="6"/><path d="M8 7.2v3.8M8 5v.2"/>',
+};
+function settingsIconSvg(id) {
+  const d = SETTINGS_ICONS[id];
+  return d ? `<svg class="settings-nav-icon" viewBox="0 0 16 16" aria-hidden="true">${d}</svg>`
+           : `<span class="settings-nav-icon" aria-hidden="true"></span>`;
+}
+
 function renderSettingsNav() {
   const list = $("#settings-nav-list");
   if (!list) return;
@@ -12835,17 +12889,24 @@ function renderSettingsNav() {
       “${escapeHtml(SETTINGS.query)}”.</div>`;
     return;
   }
-  // Top tabs (v1.19): one pill per section in SETTINGS_SECTIONS order, no group
-  // labels. A search that matched specific settings inside a section shows as
-  // a count on its tab (the pane then highlights the rows); listing them as
-  // sub-lines only worked in the old vertical sidebar.
-  const html = hits.map(({ section, matchedItemIds }) => {
-    const n = matchedItemIds.length;
-    return `<button class="settings-nav-item${section.id === SETTINGS.section ? " active" : ""}"
-        data-section="${section.id}" role="tab" aria-selected="${section.id === SETTINGS.section}"
-        title="${escapeHtml(section.group)}">
-        <span>${escapeHtml(section.label)}</span>${n ? `<span class="settings-nav-count">${n}</span>` : ""}
-      </button>`;
+  // A search that matched specific settings inside a section shows as a count
+  // on its row (the pane then highlights the matching rows).
+  const groups = [...SETTINGS_GROUP_ORDER,
+    ...new Set(hits.map(h => h.section.group).filter(g => !SETTINGS_GROUP_ORDER.includes(g)))];
+  const html = groups.map(g => {
+    const rows = hits.filter(h => h.section.group === g);
+    if (!rows.length) return "";
+    return `<div class="settings-nav-group" role="group" aria-label="${escapeHtml(g)}">
+      <div class="settings-nav-group-label">${escapeHtml(g)}</div>
+      ${rows.map(({ section, matchedItemIds }) => {
+        const n = matchedItemIds.length;
+        const on = section.id === SETTINGS.section;
+        return `<button type="button" class="settings-nav-item${on ? " active" : ""}"
+            data-section="${section.id}" role="tab" aria-selected="${on}">
+            ${settingsIconSvg(section.id)}<span class="settings-nav-label">${escapeHtml(section.label)}</span>${n ? `<span class="settings-nav-count">${n}</span>` : ""}
+          </button>`;
+      }).join("")}
+    </div>`;
   });
   list.innerHTML = html.join("");
 }
@@ -13802,14 +13863,14 @@ function setupSettings() {
     const item = e.target.closest(".settings-nav-item");
     if (item) selectSettingsSection(item.dataset.section);
   });
-  // The tabs run horizontally since v1.19, so Left/Right walk them.
+  // The sections run down the sidebar (v1.28.6), so Up/Down walk them.
   if (list) list.addEventListener("keydown", (e) => {
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     const items = [...list.querySelectorAll(".settings-nav-item")];
     const i = items.indexOf(document.activeElement);
     if (i < 0) return;
     e.preventDefault();
-    items[(i + (e.key === "ArrowRight" ? 1 : -1) + items.length) % items.length].focus();
+    items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
   });
 
   const search = $("#settings-search");

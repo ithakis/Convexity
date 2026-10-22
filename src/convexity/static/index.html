@@ -281,27 +281,28 @@
      editor into a named-preset manager; Apply alone still works as the
      legacy ad-hoc "custom" mode for one-off comparisons. -->
 <div class="pf-weights-bg" id="pf-weights-bg">
-  <div class="pf-weights-modal">
+  <!-- Weights editor (v1.28.6, "V1 · plain number"): slim sliders, the weight
+       reads as text until hovered/focused, ghost lock icons, no company colours.
+       Behaviour is unchanged — editing a row still rebalances the unlocked rest. -->
+  <div class="pf-weights-modal" role="dialog" aria-modal="true" aria-labelledby="pf-weights-title">
     <div class="pf-weights-head">
       <span class="pf-weights-title" id="pf-weights-title">Custom weights</span>
-      <div class="pf-weights-sum" id="pf-weights-sum">100.0%</div>
-      <button id="pf-weights-equal" class="pf-weights-action" title="Set all to equal weight">Equal-weighted</button>
-      <button id="pf-weights-reset" class="pf-weights-action" title="Reset to market-cap weights">Cap-weighted</button>
+      <div class="pf-weights-sum" id="pf-weights-sum" data-tip="Total of all weights">100.0%</div>
+      <span class="pf-weights-seg" role="group" aria-label="Fill weights">
+        <button type="button" id="pf-weights-equal" data-tip="Set every holding to the same weight">Equal</button>
+        <button type="button" id="pf-weights-reset" data-tip="Weight by market cap">Cap</button>
+      </span>
       <button type="button" id="pf-weights-close" class="x-close" aria-label="Close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
     </div>
-    <div class="pf-name-row">
-      <input id="pf-weights-name" type="text" placeholder="Preset name (e.g. Growth Tilt)" autocomplete="off" spellcheck="false"/>
-      <button id="pf-weights-save" class="pf-weights-action" title="Save as named preset">Save</button>
-      <button id="pf-weights-saveas" class="pf-weights-action" title="Save under a new name">Save as…</button>
-      <button id="pf-weights-delete" class="pf-weights-action" title="Delete this preset" style="display:none">Delete</button>
-      <span id="pf-weights-status" class="pf-name-status"></span>
-    </div>
-    <div class="pf-weights-hint">Slide or type to set weights. Lock pins a row; others auto-rebalance. Apply alone for an unsaved comparison, or name + Save to keep it.</div>
     <div class="pf-weights-body" id="pf-weights-body"></div>
     <div class="pf-weights-foot">
-      <button id="pf-weights-apply" class="primary">Apply</button>
-      <button id="pf-weights-cancel">Cancel</button>
+      <input id="pf-weights-name" type="text" placeholder="Preset name (e.g. Growth Tilt)" autocomplete="off" spellcheck="false" aria-label="Preset name"/>
+      <button type="button" id="pf-weights-save" title="Save as named preset">Save</button>
+      <button type="button" id="pf-weights-saveas" title="Save under a new name">Save as…</button>
+      <button type="button" id="pf-weights-delete" class="danger" title="Delete this preset" style="display:none">Delete</button>
+      <button type="button" id="pf-weights-apply" class="primary" title="Apply without saving, as an unsaved comparison">Apply</button>
     </div>
+    <div class="pf-name-status" id="pf-weights-status"></div>
   </div>
 </div>
 
@@ -895,29 +896,31 @@
      exists because in desktop mode every backend print() goes to a file
      descriptor nobody can read — this is the app's only console. -->
 <div class="settings-bg" id="settings-bg">
+  <!-- Sidebar layout (v1.28.6, modelled on Claude desktop): search + grouped
+       sections on the left, the pane on the right, the close button floating
+       top-right. No header bar. -->
   <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
-    <div class="settings-head">
-      <span class="settings-title">Settings</span>
-      <!-- The section tabs come from SETTINGS_SECTIONS in app.js — add a
-           section there, not here. -->
-      <nav class="settings-nav" id="settings-nav">
-        <div class="settings-nav-list" id="settings-nav-list" role="tablist"></div>
-      </nav>
+    <aside class="settings-side">
       <!-- The search input is STATIC on purpose. renderSettingsNav() rebuilds
            #settings-nav-list on every keystroke; if the input lived inside that
            subtree it would be destroyed and recreated mid-type, blurring the
            field and dropping the caret. -->
       <div class="settings-search-wrap">
-        <span class="settings-search-icon" aria-hidden="true">&#9906;</span>
+        <svg class="settings-search-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.4 10.4 14 14"/></svg>
         <input class="settings-search" id="settings-search" type="text"
-               placeholder="Search settings" autocomplete="off" spellcheck="false"
+               placeholder="Search" autocomplete="off" spellcheck="false"
                aria-label="Search settings">
       </div>
-      <button class="x-close" id="settings-close" type="button" aria-label="Close settings" data-tip="Close (Esc)"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
-    </div>
+      <!-- The sections come from SETTINGS_SECTIONS in app.js — add a section
+           there, not here. -->
+      <nav class="settings-nav" id="settings-nav" aria-label="Settings sections">
+        <div class="settings-nav-list" id="settings-nav-list" role="tablist" aria-orientation="vertical"></div>
+      </nav>
+    </aside>
     <div class="settings-body">
       <div class="settings-pane" id="settings-pane"></div>
     </div>
+    <button class="x-close settings-close" id="settings-close" type="button" aria-label="Close settings" data-tip="Close (Esc)"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
   </div>
 </div>
 
