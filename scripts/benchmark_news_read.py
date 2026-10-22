@@ -181,8 +181,13 @@ def main() -> None:
     ap.add_argument("--phrasebank", type=str, default=None)
     ap.add_argument("--pb-n", type=int, default=200)
     ap.add_argument("--out", type=str, default=None)
+    ap.add_argument(
+        "--model", type=str, default=None, help="certify this NIM model instead of the chain head"
+    )
     args = ap.parse_args()
 
+    if args.model:
+        ns._MODELS = (args.model,)  # one model, no fallback: certify exactly it
     ns.llm_unblock()
     rows = [json.loads(line) for line in GOLD.read_text().splitlines() if line.strip()]
     print(

@@ -3793,7 +3793,7 @@ function fcMode(d) {
   if (!S && !M) return null;
   if (!S) return { kind: "mu" };
   if (d.measure === "Q" && d.curves.rn) return { kind: "sigma", curve: "rn", mu: "options" };
-  if (M && d.horizon === 365 && d.curves.analysts) return { kind: "sigma", curve: "analysts", mu: "analysts" };
+  if (M && d.curves.analysts) return { kind: "sigma", curve: "analysts", mu: "analysts" };
   return { kind: "sigma", curve: "market", mu: "market", fellBack: M };
 }
 
@@ -3932,10 +3932,12 @@ function fcProRate(d, px) {
  * One target, two dates (2026-10-20): `mean` is the firms' mean 12-month
  * target, the number the readout and the coverage card show; `atExp` is that
  * target moved to the expiry, where the mean path ends. low/high/firms' `exp`
- * are moved the same way, so everything on the expiry spine is at the expiry. */
+ * are moved the same way, so everything on the expiry spine is at the expiry.
+ * On 3M too (2026-10-22): the 12-month targets moved to the 3-month expiry
+ * geometrically, (T/S0)^(t/1y), the same rule the backend's curve uses. */
 function fcMarks(d) {
   const a = d.analysts;
-  if (!a || d.horizon !== 365) return null;
+  if (!a) return null;
   const k = d.ratio;
   const firms = (a.firms || []).map(f => ({ ...f, px: f.target * k, exp: fcProRate(d, f.target * k) }));
   const mean = (a.mean ?? a.consensus) * k;
@@ -4129,7 +4131,7 @@ function fcDraw() {
   ctx.save(); ctx.beginPath(); ctx.rect(xT, top - 1, g.W - xT, bot - top + 2); ctx.clip();
 
   if (mode.kind === "mu") {
-    if (!mk) { ctx.restore(); note(d.horizon === 365 ? "No analyst targets" : "Analyst targets are 12-month only"); return; }
+    if (!mk) { ctx.restore(); note("No analyst targets"); return; }
     for (const fm of mk.firms) {
       ctx.strokeStyle = `rgba(${col.amberRgb},${fm.stale ? 0.25 : 0.6})`; ctx.lineWidth = 1.2; ctx.beginPath();
       for (let j = 0; j <= n; j++) { const yy = y(d.s0 * Math.pow(fm.exp / d.s0, j / S)); j ? ctx.lineTo(X(j), yy) : ctx.moveTo(X(j), yy); }
@@ -4421,7 +4423,7 @@ function renderFcReadouts() {
   const an = d.analysts;
   if (mode.kind === "mu") {
     const mk = fcMarks(d);
-    if (!mk) { el.innerHTML = `<div class="m-fc-foot">${d.horizon === 365 ? "No analyst targets for this company." : "Analyst targets are 12-month: switch to 12M."}${link}</div>`; return; }
+    if (!mk) { el.innerHTML = `<div class="m-fc-foot">No analyst targets for this company.${link}</div>`; return; }
     const firms = mk.firms, kinds = { buy: 0, hold: 0, sell: 0 };
     for (const fm of firms) kinds[fcRatingKind(fm.rating)]++;
     const lt = firms.map(fm => Math.log(fm.px)), m = lt.reduce((a, b) => a + b, 0) / (lt.length || 1);
@@ -4479,7 +4481,7 @@ function renderFcReadouts() {
     ? d12.reason === "thin" ? ` The 12-month chain is too thin to trust its tails (${escapeHtml(d12.quality?.why || "")}), so this shows 3 months.`
       : d12.reason === "no_expiry" ? ` No options expiry near 12 months (${escapeHtml(d12.detail || "")}), so this shows 3 months.` : ""
     : "";
-  const fell = auto + (mode.fellBack ? (d.horizon === 365 ? " No analyst targets, so the market’s μ." : " Analyst targets are 12-month, so 3M uses the market’s μ.") : "");
+  const fell = auto + (mode.fellBack ? " No analyst targets, so the market’s μ." : "");
   // The σ that drew the curve: kappa x implied (plus FX), or history's.
   const cvq = d.curves[mode.curve];
   const sigNow = Math.sqrt(cvq.var_x / d.T);
@@ -10013,7 +10015,7 @@ function methodologyHtml() {
       </section>
       <section class="mth-sec">
         <h4>Validation</h4>
-        <p class="mth-small">Gold set of 149 headlines across 51 tickers, labelled by hand: lens 85.6% (92.9% on the 111 unambiguous ones), "not about the company" precision 87.8% / recall 95.6%, direction 87.5% of 96 directional headlines. Financial PhraseBank: direction 94% of 200 sentences. JSON valid 100%, p95 latency 9.6 s per ticker. Model <code>nvidia/nemotron-3-super-120b-a12b</code> on NVIDIA NIM.</p>
+        <p class="mth-small">Gold set of 149 headlines across 51 tickers, labelled by hand: lens 79.8% (85.7% on the 111 unambiguous ones), "not about the company" precision 96.3% / recall 57.8%, direction 88.5% of 96 directional headlines. JSON valid 100%, p95 latency 15.7 s per ticker. Model <code>nvidia/nemotron-3.5-lightning-30b-a3b</code> on NVIDIA NIM (2026-10-22; NIM retired the previous model, and a retired model now falls back to the next one automatically). Its weak spot: it counts some headlines about other companies as news for the holding.</p>
       </section>
       <details class="mth-formula"><summary>Formulas</summary>
         <p>Weight of headline <i>i</i> (age in days, τ scaled with the window; 3 days on 7D):</p>
@@ -10083,7 +10085,7 @@ function methodologyHtml() {
       </details>
     </article>
    </div>
-   <div class="mth-foot">News read: <code>nvidia/nemotron-3-super-120b-a12b</code>. Market read: <code>mlsent-v1.1</code> (encoder trained on FNSPID 2009–2023). Numbers here are frozen validation results; live performance is in the Track record.</div>
+   <div class="mth-foot">News read: <code>nvidia/nemotron-3.5-lightning-30b-a3b</code>. Market read: <code>mlsent-v1.1</code> (encoder trained on FNSPID 2009–2023). Numbers here are frozen validation results; live performance is in the Track record.</div>
   </div>`;
 }
 
@@ -11551,10 +11553,10 @@ function mptAssetTip(sym) {
   if (mu != null) rows += row("BL posterior return", signed(mu));
   if (an) {
     rows += `<div class="tip-sub">Analyst target</div>`;
-    if (an.target_mean != null) rows += row("Mean target", an.target_mean.toLocaleString(NUM_LOCALE, {maximumFractionDigits: 2}));
+    if (an.target_mean != null) rows += row("Mean target", fmtMoney(an.target_mean, an.currency));
     if (an.upside_pct != null) rows += row("Implied upside", signed(an.upside_pct / 100), an.upside_pct >= 0 ? "pos" : "neg");
     if (an.target_low != null && an.target_high != null) {
-      rows += row("Range (low–high)", `${an.target_low.toLocaleString(NUM_LOCALE, {maximumFractionDigits: 2})}–${an.target_high.toLocaleString(NUM_LOCALE, {maximumFractionDigits: 2})}`);
+      rows += row("Range (low–high)", `${fmtMoney(an.target_low, an.currency)}–${fmtMoney(an.target_high, an.currency)}`);
     }
     if (an.disp != null) rows += row("Target dispersion", pct(an.disp) + (an.n_analysts ? ` · ${an.n_analysts} an.` : ""));
   }

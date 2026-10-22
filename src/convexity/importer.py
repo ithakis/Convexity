@@ -522,16 +522,35 @@ _UNSURE = re.compile(
 )
 
 
+# The reading step asks the careful model first (2026-10-22): with the News
+# read's chain head, nemotron-3.5-lightning, the eval fell to 8/11 (pence read
+# as pounds, an exchange's currency dropped, a ticker's line swapped). An
+# import is not a keystroke-latency path, so the slower model's judgement is
+# worth its wait; the fast one stands in when it fails or runs out of time.
+_CAREFUL_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+_CAREFUL_TIMEOUT_S = 90.0
+
+
 def _structure(text: str, today: str, base: str) -> dict | None:
     from convexity import news_sentiment as ns
 
-    try:
-        return ns._nvidia_call(_system(today, base), text, (), Deadline(_STAGE_DEADLINE_S), schema=_schema(),
-                               name="ledger_import", record=False, tag="import",
-                               timeout=120.0, max_tokens=_MAX_TOKENS)  # fmt: skip
-    except Cancelled:
-        print("[import] reading step timed out", flush=True)
-        return None
+    deadline = Deadline(_STAGE_DEADLINE_S)
+    fast = ns.active_model()
+    tries = [(_CAREFUL_MODEL, _CAREFUL_TIMEOUT_S)]
+    if fast != _CAREFUL_MODEL:
+        tries.append((fast, 120.0))
+    for model, timeout in tries:
+        try:
+            out = ns._nvidia_call(_system(today, base), text, (), deadline, schema=_schema(),
+                                  name="ledger_import", record=False, tag="import",
+                                  timeout=timeout, max_tokens=_MAX_TOKENS, model=model)  # fmt: skip
+        except Cancelled:
+            print("[import] reading step timed out", flush=True)
+            return None
+        if out is not None:
+            return out
+        print(f"[import] {model} gave no reading; trying the next model", flush=True)
+    return None
 
 
 _TWICE_LINES = 20  # blocks this short (typed text, a phone screen) are read twice

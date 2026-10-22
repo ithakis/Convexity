@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from convexity import analyst_targets
 from convexity.cache import (
     _BULK_CLOSE_MISS,
     _CACHE_TTL_ANALYTICS,
@@ -657,37 +658,27 @@ def _portfolio_bars(
     return {"ohlc": ohlc, "volume": volume}
 
 
-def _fetch_target_trio(symbol: str) -> dict:
-    """One bare `Ticker.info` reduced to the analyst target low/high/median.
-
-    Returns all-None on any failure, including the empty dict Yahoo hands back
-    when it is throttling — the caller distinguishes the two by retrying.
-    """
+def _fetch_targets(symbol: str) -> dict | None:
+    """The app's one analyst block (analyst_targets.consensus) for a row built
+    before rows carried it (no ``target_source``): the same number the stock
+    window shows. None on any failure."""
     try:
-        info = yf.Ticker(symbol).info or {}
+        return analyst_targets.consensus(symbol)
     except Exception:
-        info = {}
-    return {
-        "target_low": _safe_num(info.get("targetLowPrice")),
-        "target_high": _safe_num(info.get("targetHighPrice")),
-        "target_median": _safe_num(info.get("targetMedianPrice")),
-    }
+        return None
 
 
 def _analyst_for(symbol: str, row: dict | None = None) -> dict:
     """Analyst block for one symbol, reusing the fields `fetch_one` already put
     on the row instead of re-fetching them.
 
-    The streaming row already carries recommendation_mean / target_mean_price /
-    rec_key / n_analysts / rating_dist / dividend_yield / ev_ebitda / price /
-    currency per symbol, so re-hitting Ticker.info + tk.recommendations for those
-    is pure waste. Only the target low/high/median trio is absent from the row,
-    so that trio is the *sole* reason to touch Ticker.info here — and
-    tk.recommendations is dropped entirely (dist comes from row["rating_dist"]).
-    Net effect: cold analytics drops from ~2 yfinance calls/active symbol
-    (tk.info via _safe_info + tk.recommendations) to at most 1 (a bare tk.info
-    for the target trio), and to 0 when the row already supplies that trio.
-    Output shape is byte-for-byte identical to before (same 12 keys)."""
+    The streaming row already carries recommendation_mean / rec_key /
+    n_analysts / rating_dist / dividend_yield / ev_ebitda / price / currency
+    and the app's one analyst-target block (mean, median, low,
+    high from analyst_targets.consensus), so a current row costs no network.
+    Only a row saved before that (Yahoo's summary, no ``target_source``) asks
+    for the shared block, so the per-holding table, the optimizer's views and
+    the export read the stock window's number."""
     row = row or {}
     price = _safe_num(row.get("price"))
     out = {
@@ -704,52 +695,43 @@ def _analyst_for(symbol: str, row: dict | None = None) -> dict:
         "dist": row.get("rating_dist") if isinstance(row.get("rating_dist"), dict) else None,
     }
 
-    # Prefer any target trio the row supplies (future-proofing); only the gaps
-    # justify a network call. A single bare tk.info covers all three — cheaper
-    # than _safe_info (which additionally pings fast_info we don't need here).
     trio = {
         "target_low": _safe_num(row.get("target_low")),
         "target_high": _safe_num(row.get("target_high")),
         "target_median": _safe_num(row.get("target_median")),
     }
-    # No mean target on a built row = no analyst coverage (a fund): the range
-    # comes from the same Yahoo block, so asking would only cost a call.
+    # No mean target on a built row = no analyst coverage (a fund): asking
+    # would only cost a call.
     uncovered = out["target_mean"] is None and price is not None
     # A row whose analysts came from its research line (fetcher._apply_research)
     # already carries everything that line has; its own listing has nothing.
     borrowed = bool(row.get("research_analysts"))
-    if not uncovered and not borrowed and any(v is None for v in trio.values()):
-        cache_key = f"analyst_targets|{symbol}"
-        hit = _cache_get(cache_key)
-        if hit is not None:
-            for k in trio:
-                if trio[k] is None:
-                    trio[k] = hit.get(k)
-        else:
-            # This runs on 8 pool threads at once (see analyze_portfolios_multi),
-            # and Yahoo answers a burst of .info calls by handing some of them an
-            # EMPTY dict rather than an error. That is a throttle, not "this name
-            # has no published range" — verified directly: the mega-caps that came
-            # back thin here return a full low/median/high on a single sequential
-            # call moments later. Without the retry the whole batch of biggest
-            # holdings rendered "—" in the Upside (median) / Upside range columns,
-            # and the 300 s negative cache meant the next refresh usually failed
-            # the same way. Retries are jittered and escalating, and happen ONLY on
-            # the empty path — same shape as fx_index_history's bulk-then-
-            # sequential fallback. Two are needed, not one: with 8 workers a single
-            # retry still left roughly one name per batch thin, because the retries
-            # themselves collide.
-            fetched = _fetch_target_trio(symbol)
-            for attempt in range(2):
-                if not all(v is None for v in fetched.values()):
-                    break
-                time.sleep((0.5 + random.random()) * (attempt + 1))
-                fetched = _fetch_target_trio(symbol)
-            for k in trio:
-                if trio[k] is None:
-                    trio[k] = fetched[k]
-            thin = all(v is None for v in fetched.values())
-            _cache_put(cache_key, fetched, ttl=300.0 if thin else _CACHE_TTL_ANALYTICS)
+    # A row built with the shared block carries ``target_source``:
+    # it IS the number, so nothing is fetched. An older saved row holds Yahoo's
+    # summary, which the stock window no longer shows (CRWD: $246.65 here vs
+    # $285.02 there), so its four figures are replaced by the shared block.
+    legacy = not row.get("target_source")
+    if legacy and not uncovered and not borrowed:
+        # This runs on 8 pool threads at once (see analyze_portfolios_multi),
+        # and Yahoo answers a burst of requests by handing some of them an
+        # EMPTY answer rather than an error. That is a throttle, not "no
+        # coverage" — the same names answer in full on a sequential call
+        # moments later. Two jittered, escalating retries, only on the empty
+        # path: with 8 workers a single retry still left about one name per
+        # batch thin, because the retries themselves collide.
+        block = _fetch_targets(symbol)
+        for attempt in range(2):
+            if block:
+                break
+            time.sleep((0.5 + random.random()) * (attempt + 1))
+            block = _fetch_targets(symbol)
+        if block:
+            out["target_mean"] = block["mean"]
+            trio = {
+                "target_low": block["low"],
+                "target_high": block["high"],
+                "target_median": block["median"],
+            }
     out.update(trio)
     return out
 

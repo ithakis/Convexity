@@ -173,6 +173,7 @@ def _analyst_views(
         n = blk.get("n_analysts")
         det = {
             "price": price,
+            "currency": blk.get("currency"),
             "target_mean": tgt,
             "target_low": (float(lo) if lo is not None else None),
             "target_high": (float(hi) if hi is not None else None),

@@ -64,7 +64,9 @@ Each of these has cost real debugging time; the link goes to the full story.
   fraction), and the screener's market cap is local currency. The LLM may only
   emit registry keys; every AI pick is verified against the symbol pack.
   After any change to the search prompt, rules or model, run
-  `scripts/eval_search.py` live (all 22 cases must pass).
+  `scripts/eval_search.py` live (all 22 cases must pass). The AI step is a
+  hedged pair (careful ultra-550b vs fast chain head, `_hedged_call`): the
+  fast model alone misreads 3-4 cases.
   [backend.md → §6](docs/architecture/backend.md#6-symbol-pack--company-search-symbol_dbpy-symbol_buildpy-searchpy)
 - **Yahoo's screener serves at most 10,000 results per query** — deeper
   pages silently repeat the last one. Split big queries (`symbol_build.sweep`).
@@ -77,7 +79,9 @@ Each of these has cost real debugging time; the link goes to the full story.
 - **Any module that caches an API key needs a `reload_keys()`** hooked into
   `keys.reload_all()`. [news.md](docs/architecture/news.md)
 - **Two news engines, never blended**; re-run `scripts/benchmark_news_read.py`
-  after any prompt or model change; train/serve parity (`ml_features.py`,
+  after any prompt or model change (`--model` certifies one); the News read
+  is a **chain** of NIM models (`_MODELS`): a 404/410 moves the same call to
+  the next, since NIM retires models without notice; train/serve parity (`ml_features.py`,
   `relevance.py`) is the Market read's invariant. [news.md](docs/architecture/news.md)
 - **A dependency declaration is not a dependency** (`envcheck.py`), lightgbm
   needs Homebrew `libomp`, and the installers resolve from pyproject ranges,
@@ -194,7 +198,8 @@ Each of these has cost real debugging time; the link goes to the full story.
   undoable batch. Screenshots must reach the vision model at full resolution
   (shrunk, it misreads digits). Every NIM wait has a deadline. After any
   change to the prompts, matching rules or models, run
-  `scripts/eval_import.py` live (all 11 synthetic cases must pass).
+  `scripts/eval_import.py` live (all 11 synthetic cases must pass). Its text
+  stage asks the careful model first (`importer._CAREFUL_MODEL`).
   [backend.md → My Investments import](docs/architecture/backend.md#my-investments-import-importerpy)
 - **An import's exchange decides the listing** (AIR on SBF is AIR.PA, never
   the first euro line): plain code reads it beside the ticker (an exchange
@@ -229,7 +234,13 @@ Each of these has cost real debugging time; the link goes to the full story.
   is exact. `/api/density` caches successes only. **One analyst number** (the
   firms' mean 12-month target, also the coverage card's), moved to the
   options' expiry for the solid diamond where the dashed **mean** path ends;
-  the y axis is linear (2026-10-20).
+  the y axis is linear (2026-10-20). **That number is app-wide**
+  (`analyst_targets.consensus`, 2026-10-22): the grid, the consensus table,
+  the optimizer, the export and σ/μ read one cached block, each firm's latest
+  target **split-adjusted** (Yahoo never restates them: CRWD's 4:1 split put
+  $800 targets against a $240 price), Yahoo's summary only as the fallback.
+  Never read `targetMeanPrice` directly for a displayed target. 3M shows the
+  analysts too, targets moved to the expiry.
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·
   [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
 - **A secondary listing borrows its research** (2026-10-18): Yahoo has no
@@ -279,6 +290,7 @@ sub-decision.
 │   ├── cli.py                   ← The `convexity` command: no args = server, `build-symbols` (symbol pack, CI) — §6, `build-reference-pack`
 │   ├── server.py                ← HTTP server, route handlers, start_server()/shutdown_server() — §4, §14
 │   ├── fetcher.py                ← fetch_one() per-symbol row builder — §4
+│   ├── analyst_targets.py       ← THE analyst target (each firm's latest, split-adjusted; summary fallback), read by every surface — §4
 │   ├── analytics.py             ← analyze_portfolios_multi(), bulk close, analyst blocks — §4
 │   ├── fx.py                    ← FX spot rates, basket index history, currency conversion — §4
 │   ├── frontier.py              ← Mean-CVaR frontier orchestrator (BL returns + CVaR risk, wraps mpt.py) — §12

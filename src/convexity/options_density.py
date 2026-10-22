@@ -67,8 +67,6 @@ GRID_SD = 10  # the log-strike grid spans +-GRID_SD ATM standard deviations
 OUT_POINTS = 401
 TTL = 900.0
 RATE_TTL = 3600.0
-TARGET_MAX_AGE = 365  # days: a firm's target older than this is dropped
-TARGET_STALE = 182  # days: older than this is drawn faded
 HORIZONS = (91, 365)
 # The expiry a horizon may use. Small caps list nothing past 5-7 months
 # (OPRX's longest is 153 days): drawn as "12M", its analysts' 12-month
@@ -858,72 +856,27 @@ def _earnings(
 
 
 def _analysts(tk) -> dict | None:
-    """Each firm's latest 12-month target (yfinance ``upgrades_downgrades``),
-    Yahoo's summary as the fallback. Prices are in the chain's currency.
-    A firm's target is kept only within 4x of the summary's own price: the
-    per-firm feed can carry another line's figure (AZN.L had one firm at 198,
-    a US-line number, against 12,446p), which drew the marks off the chart."""
-    today = dt.datetime.now()
-    firms = []
-    try:
-        s = tk.analyst_price_targets or {}
-    except Exception:
-        s = {}
+    """The app's one analyst block for this ticker (analyst_targets.consensus:
+    each firm's latest 12-month target, split-adjusted; Yahoo's summary as the
+    fallback), in the chain's currency. The same cached block the grid row and
+    the coverage card read, so σ/μ can never show another number."""
+    from convexity import analyst_targets
 
-    def num(k):
-        try:
-            v = float(s.get(k))
-        except (TypeError, ValueError):
-            return None
-        return v if math.isfinite(v) and v > 0 else None
+    return analyst_targets.consensus(getattr(tk, "ticker", None), tk=tk)
 
-    px = num("current")
-    try:
-        ud = tk.upgrades_downgrades
-    except Exception:
-        ud = None
-    if ud is not None and not ud.empty and "currentPriceTarget" in ud.columns:
-        df = ud.reset_index()
-        datecol = "GradeDate" if "GradeDate" in df.columns else df.columns[0]
-        lo, hi = (px / 4, px * 4) if px else (1e-9, 1e12)
-        df = df[df["currentPriceTarget"].fillna(0).between(lo, hi)]
-        df = df.sort_values(datecol).groupby("Firm").tail(1)
-        for _, r in df.iterrows():
-            when = r[datecol].to_pydatetime().replace(tzinfo=None)
-            age = (today - when).days
-            if age > TARGET_MAX_AGE:
-                continue
-            prior = r.get("priorPriceTarget")
-            firms.append({
-                "firm": str(r["Firm"]),
-                "rating": str(r.get("ToGrade") or ""),
-                "target": round(float(r["currentPriceTarget"]), 4),
-                "prior": round(float(prior), 4) if prior and prior == prior and prior > 0 else None,
-                "date": when.date().isoformat(),
-                "stale": age > TARGET_STALE,
-                "raised_90d": bool(age <= 90 and prior and prior == prior and r["currentPriceTarget"] > prior),
-            })  # fmt: skip
-    if not firms:
-        med = num("median") or num("mean")
-        if not med:
-            return None
-        return {
-            "firms": [],
-            "consensus": med,
-            "mean": num("mean") or med,
-            "low": num("low"),
-            "high": num("high"),
-            "n": None,
-        }
-    t = sorted(f["target"] for f in firms)
-    return {
-        "firms": sorted(firms, key=lambda f: f["target"]),
-        "consensus": float(np.median(t)),
-        "mean": float(np.mean(t)),
-        "low": t[0],
-        "high": t[-1],
-        "n": len(firms),
-    }
+
+def _own_analysts(symbol: str, chain_sym: str, tk, ratio: float) -> dict | None:
+    """Analysts for a window whose options are another line's (a non-US name
+    on its US chain): the listing's OWN block, the number its row shows,
+    put in the chain's units (the page multiplies by ``ratio`` back), the
+    chain line's only when the listing has none."""
+    from convexity import analyst_targets
+
+    if chain_sym != symbol:
+        own = analyst_targets.consensus(symbol)
+        if own:
+            return analyst_targets.scaled(own, 1.0 / ratio)
+    return _analysts(tk)
 
 
 def _research_analysts(symbol: str, S0: float) -> dict | None:
@@ -937,24 +890,14 @@ def _research_analysts(symbol: str, S0: float) -> dict | None:
     line = fetcher.research_line(symbol)
     if not line:
         return None
+    from convexity import analyst_targets
+
     rtk = yf.Ticker(line)
     an = _analysts(rtk)
     px, _ = _last(rtk)
     if not an or not (math.isfinite(px) and px > 0):
         return None
-    k = S0 / px
-    sc = lambda v: round(v * k, 4) if v is not None else None  # noqa: E731
-    an["firms"] = [
-        {**f, "target": sc(f["target"]), "prior": sc(f.get("prior"))} for f in an["firms"]
-    ]
-    an.update(
-        consensus=an["consensus"] * k,
-        mean=an["mean"] * k if an.get("mean") is not None else None,
-        low=sc(an.get("low")),
-        high=sc(an.get("high")),
-        via=line,
-    )
-    return an
+    return analyst_targets.scaled(an, S0 / px, via=line)
 
 
 def _resolve_chain(symbol: str):
@@ -1576,7 +1519,10 @@ def _payload_curves(rn: dict, curves: dict, fx: dict | None) -> dict:
 
 
 def _analysts_curve(rn, an, horizon, beta, st, kappa):
-    if not an or horizon != 365:
+    """The analysts' curve at any horizon: each firm's 12-month target is
+    moved to the expiry geometrically (`_target_log_returns`), so a 3M chart
+    uses the same targets scaled to 3 months (owner, 2026-10-22)."""
+    if not an:
         return None
     targets = [f["target"] for f in an["firms"]] or [an.get("mean") or an["consensus"]]
     an["at_expiry"] = target_at_expiry(rn, targets, beta, st["erp"])
@@ -1684,7 +1630,7 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     mk = market_curve(rn, beta, st["erp"], kappa)
     an = None
     try:
-        an = _analysts(tk)
+        an = _own_analysts(symbol, chain_sym, tk, ratio)
     except Exception as e:
         print(f"[density] analysts {chain_sym}: {type(e).__name__}")
     curves = _payload_curves(

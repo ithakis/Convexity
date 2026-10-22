@@ -14,7 +14,7 @@ not reintroduce one; the engines answer different questions.
 | | **News read** (`news_sentiment.py`) | **Market read** (`ml_sentiment.py`) |
 |---|---|---|
 | Question | what the news says | how prices have reacted to news like this |
-| Engine | LLM on NVIDIA NIM, `nvidia/nemotron-3-super-120b-a12b` | mlsent-v1.1: the v1 LightGBM encoder, weighted over the window |
+| Engine | LLM on NVIDIA NIM, `nvidia/nemotron-3.5-lightning-30b-a3b` (chain: `_MODELS`) | mlsent-v1.1: the v1 LightGBM encoder, weighted over the window |
 | Output | five lens scores on −2…+2, overall score, fixed tiers | expected next-day SAR, z, percentile, tier (tails only) |
 | Window | the user's 3/7/14/30D | always 7 days |
 
@@ -92,8 +92,26 @@ not reintroduce one; the engines answer different questions.
   (`tier_for`): ≤ −1.25 very bearish, ≤ −0.4 bearish, < 0.4 neutral (shown as
   "Mixed"), < 1.25 bullish, else very bullish. Not quantile-calibrated, on
   purpose — "Bullish" means the same thing every day.
-- Failure semantics: 404/410 ("model retired"), 401/403 ("key rejected") and a
-  missing key are **permanent** — `_LLM_STATUS.permanent` short-circuits every
+- **A model chain, not a model** (2026-10-22). `nemotron-3-super-120b-a12b`
+  started answering 404 for the owner's key while still listed in `/v1/models`
+  (the catalogue is not proof a model answers: probe with a real call).
+  `_MODELS` is an ordered tuple; a 404/410 retires the current one for the
+  process (`_retire_model`, which a late 404 from an older model cannot push
+  further) and the SAME call moves on, so a retirement costs ~0.3 s instead of
+  the News read. `llm_unblock()` clears the retired set each refresh. Only an
+  exhausted chain is the permanent failure below. Probe on 2026-10-22: only
+  lightning-30b and ultra-550b answered; super-120b, nano-3-30b, kimi-k2.6,
+  mistral-large-2, llama-3.1-nemotron-70b were 404, gpt-oss-20b /
+  deepseek-v4.1-flash / glm-5.3-flash timed out. Lightning first: it passes
+  every gate (below); ultra fails two (none-precision 81.5%, p95 89 s) and is
+  only the emergency fallback. Lightning needed two schema fixes, both kept
+  for every model: the item count and id range in the schema
+  (`_json_schema(lens, n)`: it wrote a duplicate item on 1-headline batches,
+  and a repeated id now keeps its first reading), and `maxLength` on `fact`
+  and `brief` (it sometimes loops on one sentence until `max_tokens` cuts the
+  JSON off).
+- Failure semantics: 404/410 on every model in the chain ("model retired"),
+  401/403 ("key rejected") and a missing key are **permanent** — `_LLM_STATUS.permanent` short-circuits every
   later call with zero HTTP, and `llm_unblock()` at the start of each refresh
   re-arms it. 503 → jittered 1.5–5 s retries with **no limiter penalty** (one
   penalised 503 cost a single ticker 64 s). 429 → penalty + 5 s + breaker. A
@@ -114,12 +132,22 @@ not reintroduce one; the engines answer different questions.
   at 2 workers.
 - NIM availability changes without notice: `nvidia-nemotron-nano-9b-v2` was
   retired on 2026-08-26 and every call became a 410 while refreshes silently
-  kept August's reads. Probe a model before switching (`_MODEL`).
+  kept August's reads; super-120b followed in October. Probe a model and run
+  the benchmark (`--model <id>` certifies one model alone) before adding it
+  to `_MODELS`.
 - Certification: `scripts/benchmark_news_read.py` on
   `tests/data/news_gold.jsonl` (149 hand-labelled headlines, 51 tickers) and
-  Financial PhraseBank. Current: lens 85.6%, none-precision 87.8%, direction
-  87.5%, two-pass agreement 96%, PhraseBank 94%, p95 9.6 s per ticker. **Re-run
-  after any prompt or model change**; the gates are in the script.
+  Financial PhraseBank. Current (lightning-30b, 2026-10-22): lens 79.8%,
+  none-precision 96.3%, direction 88.5%, two-pass agreement 91%, JSON 100%,
+  p95 15.7 s per ticker; all gates pass. Its weak spot is none-RECALL,
+  57.8% (16 of 45 off-target headlines got a non-zero score, e.g. a Datadog
+  beat as NVDA outlook −1); an "about the target?" field before the lens
+  fixed recall but broke precision and direction, so it was dropped. Ultra
+  (the fallback): lens 85.6%, none-recall 97.8%, but none-precision 81.5% and
+  p95 89 s fail two gates. (super-120b had lens 85.6%,
+  none-precision 87.8%, direction 87.5%, agreement 96%, PhraseBank 94%, p95
+  9.6 s.) **Re-run after any prompt or model change**; the gates are in the
+  script.
 
 *Market read (`ml_sentiment.py`, mlsent-v1.1).*
 - Per ticker: the 7-day articles → `window_sample(60, 15)` → the v1 encoder

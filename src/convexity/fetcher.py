@@ -37,6 +37,7 @@ from convexity.helpers import (
 from convexity.fx import convert_amount, usd_per_unit
 from convexity.resolver import _ordered_resolve
 
+from convexity import analyst_targets as _targets
 from convexity import finnhub_adapter as _fh
 from convexity import news_sentiment as _ns
 
@@ -270,6 +271,23 @@ def _row_fields(info: dict, last: float, out: dict) -> None:
     out["n_analysts"] = _safe_num(info.get("numberOfAnalystOpinions"))
 
 
+def _apply_targets(out: dict, symbol: str, tk, info: dict, splits) -> None:
+    """Replace the row's target fields (Yahoo's summary, set by `_row_fields`)
+    with the app's one analyst number (analyst_targets.consensus): the same
+    block the stock window, σ/μ and the analytics read. A fund (no target at
+    all) is not asked: its summary is already empty."""
+    if _safe_num(info.get("targetMeanPrice")) is None and not _safe_num(
+        info.get("numberOfAnalystOpinions")
+    ):
+        return
+    try:
+        block = _targets.consensus(symbol, tk=tk, info=info, splits=splits, price=out.get("price"))
+    except Exception as e:
+        print(f"[targets] {symbol}: {type(e).__name__}")
+        return
+    _targets.apply_to_row(out, block)
+
+
 def _yf_rec_trend(tk) -> list[dict]:
     """Yahoo's monthly rating counts, most recent first (empty on failure)."""
     out: list[dict] = []
@@ -419,6 +437,7 @@ def _research_row(symbol: str, own_price: float | None):
         return None
     row: dict = {"symbol": line, "price": rpx}
     _row_fields(info, rpx, row)
+    _apply_targets(row, line, None, info, None)
     ratio = own_price / rpx if own_price and own_price > 0 else None
     return line, row, ratio
 
@@ -552,11 +571,18 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
     for attempt in range(max_attempts):
         try:
             tk = yf.Ticker(symbol)
-            hist = tk.history(period="2y", auto_adjust=True, actions=False)
+            # actions=True only for the split dates (analyst targets are
+            # split-adjusted with them, analyst_targets.py): the columns are
+            # taken off and only real bars kept, so nothing below changes.
+            hist = tk.history(period="2y", auto_adjust=True, actions=True)
             if hist is None or getattr(hist, "empty", True):
                 last_err = "no data"
                 time.sleep(0.7 + attempt * 1.2 + random.random() * 0.3)
                 continue
+            splits = hist["Stock Splits"] if "Stock Splits" in hist.columns else None
+            hist = hist[hist["Close"].notna()].drop(
+                columns=["Dividends", "Stock Splits", "Capital Gains"], errors="ignore"
+            )
             close = hist["Close"].dropna()
             if close.empty:
                 last_err = "no data"
@@ -627,6 +653,7 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
 
             info = _safe_info(tk)
             _row_fields(info, last, out)
+            _apply_targets(out, symbol, tk, info, splits)
 
             out["earnings_surprise"] = _earnings_surprise_yf(tk, symbol)
 
@@ -1179,18 +1206,20 @@ def fetch_detail(symbol: str) -> dict:
     out["target_high"] = _safe_num(info.get("targetHighPrice"))
     out["target_low"] = _safe_num(info.get("targetLowPrice"))
     out["target_median"] = _safe_num(info.get("targetMedianPrice"))
-    # The mean target is the firms' own (each firm's latest 12-month target),
-    # the same list σ/μ draws, so the coverage card, the forecast readout and
-    # the chart's diamond read one number. Yahoo's summary mean pools a
-    # different set (59 opinions vs 36 firms on NVDA) and stays the fallback.
+    # The app's one analyst number (analyst_targets.consensus, cached): the
+    # same block the grid row, the per-holding table and σ/μ read, so the
+    # coverage card's mean AND its range come from one list of firms.
     out["target_n_firms"] = None
+    out["target_source"] = None
     try:
-        from convexity import options_density
-
-        an = options_density._analysts(tk)
-        if an and an.get("n") and an.get("mean"):
-            out["target_mean"] = an["mean"]
-            out["target_n_firms"] = an["n"]
+        block = _targets.consensus(symbol, tk=tk, info=info, price=out.get("price"))
+        if block:
+            out["target_mean"] = block["mean"]
+            out["target_median"] = block["median"]
+            out["target_low"] = block["low"]
+            out["target_high"] = block["high"]
+            out["target_n_firms"] = block["n"]
+            out["target_source"] = block["source"]
     except Exception as e:
         print(f"[detail] analysts {symbol}: {type(e).__name__}")
 

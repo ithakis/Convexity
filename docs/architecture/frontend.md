@@ -457,7 +457,12 @@ mean pro-rated to an expiry 11 months out (the readout) and Yahoo's own mean
 over a different set of opinions (the coverage card). Now there is one number,
 **the mean of the firms' latest 12-month targets** (`analysts.mean`;
 `fetcher.fetch_detail` puts the same figure in `target_mean`, plus
-`target_n_firms`, Yahoo's summary only as the fallback). The options set the
+`target_n_firms`, Yahoo's summary only as the fallback). Since 2026-10-22 the
+grid, the consensus table and the optimizer read the same number too
+(`analyst_targets.consensus`, backend.md), split-adjusted; and 3M shows the
+analysts as well (`fcMarks` no longer requires 365: the 12-month targets are
+moved to the 3-month expiry, and the hollow 12M diamond sits clamped at the
+plot's right edge). The options set the
 horizon, so the target bends to the expiry (`fcProRate`, mirroring
 `options_density._target_log_returns`): the **solid diamond** is that target at
 the expiry (`analysts.at_expiry`, equal to the analysts' curve mean when the

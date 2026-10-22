@@ -25,6 +25,11 @@ def _clean_news_state(monkeypatch, tmp_path):
     monkeypatch.setattr(ns, "_fh_rate_limit_until", 0.0)
     monkeypatch.setattr(ns, "_nv_rate_limit_until", 0.0)
     monkeypatch.setattr(ns, "NVIDIA_API_KEY", "nv-test")
+    # One model, so the transport tests below read as before; the fallback
+    # chain has its own tests (test_retired_model_falls_back_*).
+    monkeypatch.setattr(ns, "_MODELS", ("nim/model-a",))
+    monkeypatch.setattr(ns, "_MODEL", "nim/model-a")
+    monkeypatch.setattr(ns, "_RETIRED_MODELS", set())
     # The limiter's penalty (on 429/503) backfills the rolling window so the
     # next acquire waits ~60 s; with sleeps stubbed that would spin forever.
     monkeypatch.setattr(ns.time, "sleep", lambda *_a, **_k: None)
@@ -246,6 +251,36 @@ def test_validation_rejects_bad_ids_and_ranges(mutate):
     assert ns.validate_items(raw, 3) is None
 
 
+def test_a_repeated_id_keeps_the_first_reading():
+    """nemotron-3.5-lightning on a one-headline batch: id 1 twice."""
+    raw = _payload([("street", -1)])
+    raw["items"].append({"id": 1, "lens": "none", "score": 0, "fact": "restated"})
+    items, _ = ns.validate_items(raw, 1)
+    assert items[0]["lens"] == "street" and items[0]["score"] == -1
+
+
+def test_brief_loses_the_schemas_vocabulary():
+    b = ("CrowdStrike insider sold $4.56M worth of shares (other, -1). A supply "
+         "constraint bolsters the bull case (id 3), and Needham keeps a $300 Buy (ids 9, 10). "
+         "Revenue rose 21% (FY2026) to $4.8B.")  # fmt: skip
+    assert ns._clean_brief(b) == (
+        "CrowdStrike insider sold $4.56M worth of shares. A supply constraint bolsters the "
+        "bull case, and Needham keeps a $300 Buy. Revenue rose 21% (FY2026) to $4.8B."
+    )
+
+
+def test_schema_pins_the_item_count_and_ids():
+    sch = ns._json_schema(ns._ITEM_LENSES, 3)["properties"]["items"]
+    assert sch["minItems"] == sch["maxItems"] == 3
+    assert sch["items"]["properties"]["id"] == {"type": "integer", "minimum": 1, "maximum": 3}
+    assert "minItems" not in ns._json_schema(ns._ITEM_LENSES)["properties"]["items"]
+
+
+def test_a_fenced_json_answer_is_read():
+    assert ns._strip_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
+    assert ns._strip_fence(' {"a": 1} ') == '{"a": 1}'
+
+
 def test_validation_rejects_non_objects():
     assert ns.validate_items(None, 2) is None
     assert ns.validate_items({"brief": "no items"}, 2) is None
@@ -285,6 +320,43 @@ def test_404_is_treated_like_410(monkeypatch):
     calls = _install(monkeypatch, [_HTTPError(404)])
     assert ns._nvidia_call("sys", "user", ns._ITEM_LENSES) is None
     assert "404" in ns.llm_status()["error"] and len(calls) == 1
+
+
+def test_retired_model_falls_back_to_the_next_in_the_same_call(monkeypatch):
+    """NIM retires models without notice (super-120b: 404 in Oct 2026). The
+    call moves down the chain at once and the News read keeps working."""
+    monkeypatch.setattr(ns, "_MODELS", ("nim/model-a", "nim/model-b"))
+    good = _payload([("financials", 1)])
+    calls = _install(monkeypatch, [_HTTPError(404), good])
+    assert ns._nvidia_call("sys", "user", ns._ITEM_LENSES) == good
+    assert [c["model"] for c in calls] == ["nim/model-a", "nim/model-b"]
+    st = ns.llm_status()
+    assert st["ok"] is True and st["model"] == "nim/model-b" and ns.active_model() == "nim/model-b"
+    # later calls go straight to the live model...
+    _install(monkeypatch, [good])
+    ns._nvidia_call("sys", "user", ns._ITEM_LENSES)
+    assert ns.active_model() == "nim/model-b"
+    # ...and the next refresh gives the first one its chance again
+    ns.llm_unblock()
+    assert ns.active_model() == "nim/model-a"
+
+
+def test_retired_model_fallback_exhausted_is_permanent(monkeypatch):
+    monkeypatch.setattr(ns, "_MODELS", ("nim/model-a", "nim/model-b"))
+    calls = _install(monkeypatch, [_HTTPError(410)] * 5)
+    assert ns._nvidia_call("sys", "user", ns._ITEM_LENSES) is None
+    assert [c["model"] for c in calls] == ["nim/model-a", "nim/model-b"]
+    st = ns.llm_status()
+    assert st["ok"] is False and st["permanent"] and "410 model retired" in st["error"]
+
+
+def test_a_late_404_from_the_old_model_does_not_retire_the_new_one(monkeypatch):
+    """Two passes run concurrently: one that already moved to model-b must not
+    be pushed further down by the other's 404 from model-a."""
+    monkeypatch.setattr(ns, "_MODELS", ("nim/model-a", "nim/model-b", "nim/model-c"))
+    assert ns._retire_model("nim/model-a") == "nim/model-b"
+    assert ns._retire_model("nim/model-a") == "nim/model-b"
+    assert ns.active_model() == "nim/model-b"
 
 
 def test_503_is_retried_then_succeeds(monkeypatch):

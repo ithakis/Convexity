@@ -158,7 +158,45 @@ def _ai(monkeypatch, reply):
         return reply
 
     monkeypatch.setattr(ns, "_nvidia_call", fake)
+    # One model: these tests count readings; the hedge has its own tests.
+    monkeypatch.setattr(s, "_CAREFUL_MODEL", ns.active_model())
     return calls
+
+
+def _hedge(monkeypatch, careful_s, careful_reply, fast_reply):
+    import time as _t
+
+    monkeypatch.setattr(ns, "NVIDIA_API_KEY", "k")
+    monkeypatch.setattr(s, "_CAREFUL_MODEL", "nim/careful")
+    monkeypatch.setattr(s, "_CAREFUL_WAIT_S", 0.3)
+    monkeypatch.setattr(ns, "active_model", lambda: "nim/fast")
+    asked = []
+
+    def fake(system, user, lens, cancel=None, model=None, **kw):
+        asked.append(model)
+        if model == "nim/careful":
+            _t.sleep(careful_s)
+            return careful_reply
+        return fast_reply
+
+    monkeypatch.setattr(ns, "_nvidia_call", fake)
+    return asked
+
+
+def test_hedge_prefers_the_careful_reading_when_it_is_in_time(monkeypatch):
+    asked = _hedge(monkeypatch, 0.05, {"who": "careful"}, {"who": "fast"})
+    assert s._hedged_call(ns, Exception, "u") == {"who": "careful"}
+    assert sorted(asked) == ["nim/careful", "nim/fast"]
+
+
+def test_hedge_falls_back_to_the_fast_reading_when_careful_is_slow(monkeypatch):
+    _hedge(monkeypatch, 1.0, {"who": "careful"}, {"who": "fast"})
+    assert s._hedged_call(ns, Exception, "u") == {"who": "fast"}
+
+
+def test_hedge_waits_for_careful_when_fast_fails(monkeypatch):
+    _hedge(monkeypatch, 0.6, {"who": "careful"}, None)
+    assert s._hedged_call(ns, Exception, "u") == {"who": "careful"}
 
 
 def test_rules_first_no_llm_for_a_plain_name_or_a_full_parse(monkeypatch, yahoo):

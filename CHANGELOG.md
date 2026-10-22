@@ -9,6 +9,14 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.28.3 — 2026-10-22
+
+- **News read works again.** NVIDIA retired `nemotron-3-super-120b` (every call answered 404). The News read now runs on a chain of free NIM models, `nemotron-3.5-lightning-30b` first (passes every benchmark gate: lens 79.8%, direction 88.5%, p95 15.7 s) and `nemotron-3-ultra-550b` as the fallback; a retired model moves the same call to the next one, so a retirement can no longer take the News read down. The schema pins the item count and caps text length (lightning duplicated items and looped), and stray "(id 3)" tags are cut from briefs.
+- **Company search and import** ask the careful model too: search races ultra against lightning and prefers ultra's reading within 18 s (22/22 and 21/22 live); import's reading step asks ultra first (11/11).
+- **One analyst target everywhere.** The table read Yahoo's summary ($246.65 for CRWD) while the stock window read the firms' mean ($285.02). Every surface now reads one cached block (`analyst_targets.py`): each firm's latest target, **split-adjusted** (CRWD's 4:1 split left $800 targets against a $240 price), at most a year old, with mean, median, low and high from that one list; Yahoo's summary is the fallback. A firm that moved without a target no longer keeps its old one.
+- **Analysts on 3M.** The σ/μ chart's analysts curve and marks now work at 3 months, each 12-month target moved to the expiry.
+- **Research:** `scripts/study_target_aggregation.py`, a point-in-time test of ways to aggregate dated targets (return-preserving with recency weights ranked best).
+
 ## 1.28.2 — 2026-10-20
 
 - **Stock window: one analyst number.** NVDA showed three different "targets" at once: the median firm on the chart, the curve's mean in the readout, and Yahoo's own mean (a different set of opinions) in the coverage card. Now all three read **the mean of the firms' latest 12-month targets**. The options set the horizon, so the target is moved to the expiry: a **solid diamond** at the expiry and a dotted stub to a **hollow diamond** at the full 12-month target, at its own date (one target, two dates). The analysts' low, high and per-firm lines are moved the same way.

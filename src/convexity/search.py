@@ -439,8 +439,11 @@ Never invent fields. Never return prose outside the JSON."""
 
 
 def _llm_schema() -> dict:
-    s = {"type": "string"}
-    arr = lambda items: {"type": "array", "items": items}  # noqa: E731
+    # Free strings and lists are capped: NIM's 30B model can loop, repeating
+    # one phrase until max_tokens (news_sentiment._json_schema), which here
+    # meant the 20 s timeout and the rule parser's reading.
+    s = {"type": "string", "maxLength": 160}
+    arr = lambda items, n=40: {"type": "array", "items": items, "maxItems": n}  # noqa: E731
     obj = lambda props: {"type": "object", "additionalProperties": False,  # noqa: E731
                          "required": list(props), "properties": props}  # fmt: skip
     keys = list(FIELDS)
@@ -454,7 +457,7 @@ def _llm_schema() -> dict:
         "types": arr({"type": "string", "enum": list(sdb.TYPES)}),
         "exchanges": arr({"type": "string", "enum": list(EXCHANGES)}),
         "rank": obj({"field": {"type": "string", "enum": [*keys, "none"]}, "dir": {"type": "string", "enum": ["asc", "desc"]}, "why": s}),
-        "picks": arr(obj({"ticker": s, "name": s, "why": s})),
+        "picks": arr(obj({"ticker": {"type": "string", "maxLength": 24}, "name": s, "why": s}), 30),
         "ignored": arr(s),
     })  # fmt: skip
 
@@ -466,6 +469,14 @@ def ai_available() -> bool:
 
 
 _AI_DEADLINE_S = 25.0
+# Hedged request (2026-10-22). NIM's free models split speed and judgement:
+# nemotron-3.5-lightning answers in ~2 s but misread 3-4 of the 22 eval cases
+# ("best" with nothing to rank by, "european" dropped, an empty theme);
+# nemotron-3-ultra read all of them but took 3-33 s. Both are asked at once:
+# the careful answer is used when it lands within _CAREFUL_WAIT_S, else the
+# fast one. Search is user-triggered, so the second call costs little quota.
+_CAREFUL_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+_CAREFUL_WAIT_S = 18.0
 
 
 def parse_llm(text: str, hint: dict) -> dict | None:
@@ -480,17 +491,49 @@ def parse_llm(text: str, hint: dict) -> dict | None:
     # shown to the model, it was copied back instead of choosing a metric.
     brief = {k: v for k, v in _brief(hint).items() if k != "rank" or v.get("by") != "default"}
     user = f"Request: {text}\nA rule parser already read: {json.dumps(brief)}"
-    try:
-        raw = ns._nvidia_call(_SYSTEM, user, (), Deadline(_AI_DEADLINE_S), schema=_llm_schema(),
-                              name="company_search", record=False, tag="search", timeout=20.0)  # fmt: skip
-    except Cancelled:
-        print("[search] AI step timed out; using the rule parser's reading", flush=True)
-        return None
+    raw = _hedged_call(ns, Cancelled, user)
     if not isinstance(raw, dict):
         return None
     # The schema makes the model always send a rank; only a screen uses one.
     rank = {**(raw.get("rank") or {}), "by": "ai"} if raw.get("kind") == "screen" else None
     return _sane_rank(validate({**raw, "text": text, "engine": "ai", "rank": rank}))
+
+
+def _hedged_call(ns, cancelled, user: str) -> dict | None:
+    """The careful model's reading if it is back within _CAREFUL_WAIT_S,
+    else the fast model's (the News read chain's head), else whichever of
+    them answers before the deadline. One call when they are the same model."""
+    t0 = time.monotonic()
+    deadline = Deadline(_AI_DEADLINE_S)
+    fast = ns.active_model()
+
+    def ask(model: str, timeout: float):
+        try:
+            return ns._nvidia_call(_SYSTEM, user, (), deadline, schema=_llm_schema(),
+                                   name="company_search", record=False, tag="search",
+                                   timeout=timeout, model=model)  # fmt: skip
+        except cancelled:
+            return None
+
+    if fast == _CAREFUL_MODEL:
+        return ask(fast, 20.0)
+    pool = ThreadPoolExecutor(max_workers=2)
+    careful_f = pool.submit(ask, _CAREFUL_MODEL, _AI_DEADLINE_S - 1)
+    fast_f = pool.submit(ask, fast, 20.0)
+    pool.shutdown(wait=False)  # never join: a late answer is simply dropped
+    wait([careful_f], timeout=_CAREFUL_WAIT_S)
+    if careful_f.done() and isinstance(careful_f.result(), dict):
+        return careful_f.result()
+    left = lambda: max(0.0, _AI_DEADLINE_S - (time.monotonic() - t0))  # noqa: E731
+    wait([fast_f], timeout=left())
+    if fast_f.done() and isinstance(fast_f.result(), dict):
+        print("[search] careful model slow; using the fast model's reading", flush=True)
+        return fast_f.result()
+    wait([careful_f], timeout=left())
+    if careful_f.done() and isinstance(careful_f.result(), dict):
+        return careful_f.result()
+    print("[search] AI step timed out; using the rule parser's reading", flush=True)
+    return None
 
 
 _EXTREME = re.compile(
