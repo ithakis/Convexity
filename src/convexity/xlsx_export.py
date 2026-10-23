@@ -74,6 +74,10 @@ HOLDINGS_PRIMARY_COLS: list[tuple[str, str]] = [
     ("market_cap", "Market Cap (listing ccy)"),
     ("ps_ratio", "P/S"),
     ("pe_ratio", "P/E"),
+    ("beta", "Beta"),
+    ("beta_vs", "Beta Measured Against"),
+    ("model_mu", "Expected Return μ (12M)"),
+    ("model_price", "Model Price (12M)"),
     ("sector", "Sector"),
     ("industry", "Industry"),
     ("w52_high", "52W High"),
@@ -102,7 +106,6 @@ ANALYST_COLS: list[tuple[str, str]] = [
     ("forward_pe", "Forward P/E"),
     ("ev_ebitda", "EV/EBITDA"),
     ("peg", "PEG"),
-    ("beta_info", "Beta (info)"),
     ("dividend_yield", "Dividend Yield"),
 ]
 
@@ -126,7 +129,6 @@ EXTRA_LABELS: dict[str, str] = {
     "rsi_14": "RSI 14",
     "macd_hist_pct": "MACD Hist (% of price)",
     "bb_pct_b": "Bollinger %B",
-    "beta": "Beta (Yahoo, 5Y monthly)",
     "current_ratio": "Current Ratio",
     "quick_ratio": "Quick Ratio",
     "sma_20": "SMA 20",
@@ -144,6 +146,7 @@ FRACTION_KEYS = {
     "earnings_growth",
     "payout_ratio",
     "dividend_yield",
+    "model_mu",
 }
 
 # Fields explicitly skipped from the holdings "extras" pass — these are
@@ -188,6 +191,8 @@ HOLDINGS_SKIP_EXTRAS = {
     "research_ratio",
     "research_n",
     "research_analysts",
+    # The beta's provenance: its value and market are the Beta columns.
+    "beta_meta",
 }
 
 # News read (LLM, five lenses) + Market read (statistical) — the two engines
@@ -510,9 +515,28 @@ COLUMN_DEFS: dict[str, tuple[str, str, str]] = {
         "0 lower band, 0.5 middle, 1 upper; outside 0..1 = outside the bands.",
     ),
     "beta": (
-        "Cov(stock, S&P 500) / Var(S&P 500), 5 years monthly",
-        "Yahoo-reported beta against the S&P 500.",
-        "1 moves with the market; above 1 amplifies it.",
+        "1 + 0.9 (beta_BSWA - 1); beta_BSWA = weighted OLS slope of daily returns on the home index",
+        "The app's beta: 3 years of daily returns against the listing's home index in local "
+        "currency (S&P 500, DAX, FTSE All-Share, TOPIX...), slope-winsorised and age-weighted "
+        "(Welch 2022), shrunk 10% toward 1. Under a year of history: 1-year OLS; under 151 days: 1.",
+        "1 moves with its market; above 1 amplifies it.",
+    ),
+    "beta_vs": (
+        "",
+        "The market the beta is measured against, and how (BSWA, 1Y OLS or prior).",
+        "",
+    ),
+    "model_mu": (
+        "mu = rf_local + beta x ERP + alpha",
+        "The app's expected return: CAPM in the listing's currency plus the analysts' small "
+        "relative tilt (alpha = IC x 0.42 x z of relative upside, at most ~2.5%).",
+        "A model, not a forecast with an edge.",
+    ),
+    "model_price": (
+        "S0 x exp(mu x 1)",
+        "The model price 12 months out: today's price grown at mu. The same number as the "
+        "grid and the stock window.",
+        "",
     ),
     "current_ratio": (
         "current assets / current liabilities",
@@ -578,11 +602,6 @@ COLUMN_DEFS: dict[str, tuple[str, str, str]] = {
         "P/E / expected annual EPS growth (%)",
         "PEG ratio, using Yahoo's 5-year growth estimate.",
         "Around 1 is the classic 'fair' mark.",
-    ),
-    "beta_info": (
-        "Cov(stock, S&P 500) / Var(S&P 500), 5 years monthly",
-        "Yahoo-reported beta (the same figure as the Beta column).",
-        "",
     ),
     "dividend_yield": (
         "annual dividend per share / price",
@@ -821,8 +840,9 @@ _PP_COLS = {"pct_1d", "pct_2d", "pct_1w", "pct_1m", "pct_3m", "pct_6m", "pct_ytd
             "delta_ath", "target_upside_pct", "debt_equity"}  # fmt: skip
 _HOLDING_FMT = {
     **dict.fromkeys(["price", "change_abs_1d", "w52_high", "w52_low", "ath", "sma_20", "sma_50",
-                     "sma_200", "target_mean", "target_high", "target_low", "target_median"], "#,##0.00"),
-    **dict.fromkeys(["ps_ratio", "pe_ratio", "forward_pe", "ev_ebitda", "peg", "beta", "beta_info",
+                     "sma_200", "target_mean", "target_high", "target_low", "target_median",
+                     "model_price"], "#,##0.00"),
+    **dict.fromkeys(["ps_ratio", "pe_ratio", "forward_pe", "ev_ebitda", "peg", "beta",
                      "price_book", "ev_revenue", "current_ratio", "quick_ratio", "rsi_14", "bb_pct_b",
                      "macd_hist_pct", "recommendation_mean"], "0.00"),
     **dict.fromkeys(["market_cap", "market_cap_usd", "volume", "num_analysts"], "#,##0"),
@@ -1161,8 +1181,7 @@ def _analyst_cell(key: str, row: dict, ana: dict):
            "target_mean": ("target_mean", "target_mean_price"),
            "target_high": ("target_high", "target_high"),
            "target_low": ("target_low", "target_low"),
-           "target_median": ("target_median", "target_median"),
-           "beta_info": (None, "beta")}.get(key, (None, key))  # fmt: skip
+           "target_median": ("target_median", "target_median")}.get(key, (None, key))  # fmt: skip
     v = ana.get(src[0]) if src[0] else None
     return v if v is not None else row.get(src[1])
 
@@ -1494,6 +1513,31 @@ def _resolve_active_weights(view: dict, rows: list[dict]) -> tuple[dict[str, flo
 # --------------------------------------------------------------------------
 
 
+def _with_model(view: dict, model_runner) -> dict:
+    """``view`` with each row's beta / model columns from ``model_runner``
+    (rows copied: the saved view is never touched). Without a runner the
+    stale beta is dropped rather than exported under the new label."""
+    rows = [r for r in view["rows"] if isinstance(r, dict)]
+    models = {}
+    if model_runner is not None:
+        try:
+            models = model_runner(rows) or {}
+        except Exception as exc:
+            print(f"[export] model prices: {type(exc).__name__}: {exc}", flush=True)
+    out = []
+    for r in rows:
+        r = {k: v for k, v in r.items() if k not in ("beta", "beta_meta")}
+        m = models.get((r.get("symbol") or "").upper())
+        if m:
+            bm = m["beta_meta"]
+            how = {"bswa": f"{bm['years']}Y daily, BSWA", "ols1y": "1Y daily OLS",
+                   "prior": "prior (too little history)"}.get(bm["method"], bm["method"])  # fmt: skip
+            r.update(beta=m["beta"], beta_vs=f"{bm['proxy_name']} · {how}",
+                     model_mu=m["mu"], model_price=m["model_price"])  # fmt: skip
+        out.append(r)
+    return {**view, "rows": out}
+
+
 def build_workbook(
     views_map: dict[str, dict],
     *,
@@ -1502,6 +1546,7 @@ def build_workbook(
     period: str = "1Y",
     display_ccy: str = "USD",
     book: dict | None = None,
+    model_runner=None,
 ) -> bytes:
     """Build an .xlsx blob covering every saved portfolio.
 
@@ -1510,10 +1555,14 @@ def build_workbook(
     with the holdings only. ``prefetch(rows, periods, ccy)`` (``analytics.
     prefetch_closes``) downloads every portfolio's prices in one go first, so
     the runs that follow read the cache. ``book`` is My Investments' page
-    payload; it adds the Positions and Ledger sheets.
+    payload; it adds the Positions and Ledger sheets. ``model_runner(rows)``
+    is ``capm.for_rows``: the app's beta, mu and 12-month model price for
+    every row, one batch, so the sheet shows the grid's numbers (a saved row
+    may still carry a pre-1.29 Yahoo beta, which is never exported).
     """
     metric_periods = _metric_periods(period)
     valid = [(n, v) for n, v in views_map.items() if isinstance(v, dict) and v.get("rows")]
+    valid = [(n, _with_model(v, model_runner)) for n, v in valid]
     if analytics_runner is not None and prefetch is not None and valid:
         PROGRESS.update(step="downloading prices", done=0, total=len(valid))
         try:

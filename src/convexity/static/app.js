@@ -3806,8 +3806,8 @@ function ensureDensity(h) {
   }
   if (DETAIL.fc[h] || DETAIL.fcPending[h]) return DETAIL.fcPending[h];
   const seq = DETAIL.seq;
-  const beta = DETAIL.data?.beta ?? DETAIL.row.beta;
-  const q = `symbol=${encodeURIComponent(DETAIL.row.symbol)}&h=${h}` + (beta != null && isFinite(beta) ? `&beta=${beta}` : "");
+  // The mean is the server's model (capm.py): no beta is sent (1.29).
+  const q = `symbol=${encodeURIComponent(DETAIL.row.symbol)}&h=${h}`;
   const mine = DETAIL.fcPending[h] = fetch("/api/density?" + q).then(r => r.json()).catch(() => ({ ok: false, reason: "error" })).then(d => {
     if (DETAIL.fcPending[h] === mine) delete DETAIL.fcPending[h];   // never leave a dead fetch "pending"
     if (DETAIL.seq !== seq) return;   // the window moved on
@@ -3858,14 +3858,9 @@ function fcMode(d) {
   if (!S && !M) return null;
   if (!S) return { kind: "mu" };
   if (d.measure === "Q" && d.curves.rn) return { kind: "sigma", curve: "rn", mu: "options" };
-  if (M && d.curves.analysts) {
-    // Trust in targets (fcTrust): 1 the targets as published, 1/2 half their
-    // excess over CAPM, 0 the market's curve (the analysts' at zero trust,
-    // options_density._analysts_curves). All three ship in one payload.
-    let w = fcTrust();
-    if (w === 0.5 && !d.curves.analysts_t50) w = 1;
-    return { kind: "sigma", curve: w === 1 ? "analysts" : w === 0.5 ? "analysts_t50" : "market", mu: "analysts", trust: w };
-  }
+  // 1.29 interim (the redesign waits for sign-off): μ on draws the model
+  // curve (CAPM + the analysts' α, capm.py), μ off the pure CAPM one.
+  if (M && d.curves.model) return { kind: "sigma", curve: "model", mu: "analysts", trust: 1 };
   return { kind: "sigma", curve: "market", mu: "market", fellBack: M };
 }
 
@@ -3997,7 +3992,7 @@ function fcRatingKind(r) {
  * targets bend to it. */
 function fcProRate(d, px) {
   const T = d.T ?? d.days / 365;
-  return d.s0 * Math.pow(px / d.s0, Math.min(T, 1)) * Math.exp(Math.max(T - 1, 0) * (d.rf + (isFinite(+d.beta) ? +d.beta : 1) * d.erp));
+  return d.s0 * Math.pow(px / d.s0, Math.min(T, 1)) * Math.exp(Math.max(T - 1, 0) * (d.model ? d.model.mu_capm : d.rf + d.erp));
 }
 
 /* Analysts' marks in the window's currency (targets are in the chain's).
@@ -4176,7 +4171,7 @@ function fcDrawInset(cv, W, H, d, mode, mk) {
   // w of its excess log return over CAPM (options_density.analysts_mixture,
   // at T = 1). sigma-only is the market's (w = 0); risk-neutral has none.
   const w = mode.kind !== "sigma" ? null : mode.mu === "analysts" ? mode.trust ?? 1 : mode.mu === "market" ? 0 : null;
-  const lc = d.rf + (isFinite(+d.beta) ? +d.beta : 1) * d.erp;
+  const lc = d.model ? d.model.mu_capm : d.rf + d.erp;
   const tg = mk.firms.length ? mk.firms.map(fm => fm.px) : [mk.mean];
   let m12 = w == null ? null : s0 * tg.reduce((a, t) => a + Math.exp(lc + w * (Math.log(t / s0) - lc)), 0) / tg.length;
   const m3 = w == null ? null : fcSimulate(d, mode).mean;
@@ -4188,7 +4183,7 @@ function fcDrawInset(cv, W, H, d, mode, mk) {
   const d12 = DETAIL.fc[365];
   let band = null;
   if (d12 && d12.ok && w != null && d12.measure !== "Q") {
-    const name = w === 1 ? "analysts" : w === 0.5 ? "analysts_t50" : "market", c = d12.curves[name];
+    const name = w === 1 ? "model" : "market", c = d12.curves[name];
     if (c && c.mean_ratio) m12 = s0 * Math.pow(c.mean_ratio * d12.chain_s0 * d12.ratio / s0, YR / d12.days);
     if (c && c.x && c.p) {
       const dx = c.x[1] - c.x[0], tot = c.p.reduce((a, v) => a + v * dx, 0);
@@ -4717,8 +4712,8 @@ function renderFcReadouts() {
   const muTxt = mode.mu === "analysts" ? (an.n ? `μ from ${an.n} analysts (one ${hist ? "" : "options-"}shaped curve per firm, blended; ${keep}).`
       : `μ from the analysts’ consensus target (${keep}).`)
     : mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
-    : hist && d.measure === "Q" ? `μ from the market (CAPM: β ${(+d.beta).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium); no risk-neutral curve without options.`
-    : `μ from the market (CAPM: β ${(+d.beta).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium).`;
+    : hist && d.measure === "Q" ? `μ from the market (CAPM: β ${(+(d.model?.beta ?? 1)).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium); no risk-neutral curve without options.`
+    : `μ from the market (CAPM: β ${(+(d.model?.beta ?? 1)).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium).`;
   const d12 = DETAIL.fc[365];
   const auto = d.horizon === 91 && d12 && !d12.ok
     ? d12.reason === "thin" ? ` The 12-month chain is too thin to trust its tails (${escapeHtml(d12.quality?.why || "")}), so this shows 3 months.`

@@ -197,12 +197,20 @@ def _analyst_views(
                 views[s] = v
             if det is not None:
                 detail[s] = det
-    ic, ic_src = analyst_targets.view_ic()
+    # The model's settings (capm.py, Settings -> Model price): the owner may
+    # fix the IC and the z cap; the window's alpha uses the same two.
+    from convexity import capm
+    from convexity.persistence import load_prefs
+
+    mst = capm.settings(load_prefs())
+    ic, ic_src = (mst["ic"], "set") if mst["ic"] is not None else analyst_targets.view_ic()
     # Total upside: a price target is a price, and a high-yield name's target
     # already prices in its slower growth, so the yield is added before the
     # holdings are compared.
     alphas, ref = analyst_targets.relative_alpha(
-        {s: detail[s]["upside_pct"] / 100.0 + detail[s]["div_yield"] for s in views}, ic
+        {s: detail[s]["upside_pct"] / 100.0 + detail[s]["div_yield"] for s in views},
+        ic,
+        z_cap=mst["z_cap"],
     )
     for s in list(views):
         if s not in alphas:

@@ -233,33 +233,38 @@ def test_a_malformed_prefs_file_reads_as_empty():
 
 def test_distribution_prefs_are_bounded():
     saved = persistence.save_prefs(
-        {"dist_erp": 0.06, "dist_kappa_stock": 0.9, "dist_kappa_index": 3.0, "dist_measure": "Q",
-         "dist_trust": 1}
-    )  # fmt: skip
-    assert saved == {
-        "dist_erp": 0.06,
-        "dist_kappa_stock": 0.9,
-        "dist_measure": "Q",
-        "dist_trust": 1.0,
-    }
-    assert (
-        persistence.save_prefs({"dist_erp": "0.05", "dist_measure": "R", "dist_trust": 0.7})
-        == saved
+        {"dist_erp": 0.06, "dist_kappa_stock": 0.9, "dist_kappa_index": 3.0, "dist_measure": "Q"}
     )
+    assert saved == {"dist_erp": 0.06, "dist_kappa_stock": 0.9, "dist_measure": "Q"}
+    assert persistence.save_prefs({"dist_erp": "0.05", "dist_measure": "R"}) == saved
     assert persistence.save_prefs({"dist_erp": True})["dist_erp"] == 0.06
-    assert persistence.save_prefs({"dist_trust": True})["dist_trust"] == 1.0
-    assert persistence.save_prefs({"dist_trust": 0})["dist_trust"] == 0.0
 
 
-def test_old_haircut_switch_migrates_to_trust():
+def test_model_prefs_are_bounded():
+    """Settings -> Model price (capm.py): every parameter typed and bounded."""
+    ok = {"model_beta_shrink": 0.8, "model_beta_years": 2, "model_ic": 0.03, "model_z_cap": 2.5,
+          "dist_mu": False}  # fmt: skip
+    assert persistence.save_prefs(ok) == ok
+    bad = {"model_beta_shrink": 1.5, "model_beta_years": 4, "model_ic": -0.01, "model_z_cap": 9,
+           "dist_mu": "no"}  # fmt: skip
+    assert persistence.save_prefs(bad) == ok
+    assert persistence.save_prefs({"model_beta_years": 2.5}) == ok
+    assert persistence.save_prefs({"model_beta_years": True}) == ok
+    after = persistence.save_prefs({"model_ic": None})  # null = back to auto (measured/prior)
+    assert "model_ic" not in after
+
+
+def test_trust_prefs_are_dropped_on_read():
+    """1.28.8's Trust in targets (and the haircut before it) is gone in 1.29:
+    a saved value is not read back, and the next save leaves it out."""
     path = paths.state_file("prefs")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"dist_haircut": False}), encoding="utf-8")
-    assert persistence.load_prefs() == {"dist_trust": 1.0}
-    path.write_text(json.dumps({"dist_haircut": True}), encoding="utf-8")
-    assert persistence.load_prefs() == {}  # the default, 1/2: what the switch meant
-    path.write_text(json.dumps({"dist_haircut": False, "dist_trust": 0.5}), encoding="utf-8")
-    assert persistence.load_prefs() == {"dist_trust": 0.5}
+    for old in ({"dist_trust": 0.5}, {"dist_trust": 1.0, "dist_haircut": False}):
+        path.write_text(json.dumps({**old, "dist_erp": 0.05}), encoding="utf-8")
+        assert persistence.load_prefs() == {"dist_erp": 0.05}
+    persistence.save_prefs({"dist_kappa_stock": 0.9})
+    assert "dist_trust" not in json.loads(path.read_text(encoding="utf-8"))
+    assert persistence.save_prefs({"dist_trust": 1}) == {"dist_erp": 0.05, "dist_kappa_stock": 0.9}
 
 
 def test_ui_choice_prefs_are_allow_listed():

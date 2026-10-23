@@ -1228,7 +1228,7 @@ has no option history, so anything needing history is built forward.
   can't bid above the previous one's ask. DELL 12M had a K=165 put bid 12.15
   next to a K=170 ask of 4.40. The SVI bent into a Lee-slope kink to chase it,
   giving a smile fit of 1.5 vol pts and a mean 9% below F.
-- **Analysts' μ**: one B-tilt per firm (latest target ≤ 12 months old, from
+- **Analysts' μ (before 1.29, replaced by `capm.py`)**: one B-tilt per firm (latest target ≤ 12 months old, from
   yfinance `upgrades_downgrades`; Finnhub's targets are 403 on the free plan),
   blended equally, the common variance shrunk by the between-firm variance so
   the blend's total is still (κσ_Q)²T. **Trust** w keeps that share of each
@@ -1321,9 +1321,9 @@ has no option history, so anything needing history is built forward.
   horizon, β and the settings (a settings change is a new key). One
   computation per key at a time. Never called from `fetch_one`.
 - **Settings** (prefs.json, bounded in `persistence._clean_prefs`):
-  `dist_erp`, `dist_kappa_stock`, `dist_kappa_index`, `dist_measure` (P|Q),
-  `dist_trust` (0 | 0.5 | 1, read by the page only; a saved
-  `dist_haircut: false` reads as 1 until 2027-06-30).
+  `dist_erp`, `dist_kappa_stock`, `dist_kappa_index`, `dist_measure` (P|Q);
+  the model's own keys are in "The model price" below (1.29 dropped
+  `dist_trust`).
 - **Phase 2 (not built):** a snapshot collector (the reference-pack workflow
   appends daily 3M/12M density snapshots for the S&P 500: tickers, dates and
   numbers only, under the pack's allow-list rules); a Track-record-style page
@@ -1336,6 +1336,59 @@ has no option history, so anything needing history is built forward.
   Borovička, Hansen & Scheinkman (2016); Jackwerth & Menner (2020); Cuesdeanu &
   Jackwerth (2018); Gatheral & Jacquier (2014); Figlewski (2009);
   Vincent-Humphreys & Noss (2012).
+
+### The model price (`capm.py`, 1.29)
+
+One expected-return model for every asset, replacing Yahoo's beta, the US-bill
+CAPM and the per-firm analyst mixture with its trust control:
+
+    mu = rf_local + beta·ERP + alpha,   model price at T = S0·e^(mu T)
+
+- **Beta** (`capm.estimate`, `ensure`): the listing's home index in local
+  currency (`HOME` by Yahoo suffix: ^GSPC, ^FCHI, ^GDAXI, ^IBEX, FTSEMIB.MI,
+  ^AEX, ^BFX, ^OMXH25, ^ATX, ^SSMI, ^OMX, ^OMXC25, ^FTAS, 1306.T for TOPIX; HK,
+  AX, TO, KS, NS, SA by the same rule, not backtested), else STOXX 600 for an
+  unmapped European exchange, else the S&P 500 with the stock in USD. Welch's
+  BSWA on the last 3Y of daily returns on joint days (stock clipped to
+  [−2 r_m, 4 r_m], weights exp(−2·age/252), weighted OLS slope; |log r| > 1
+  is a glitch, zeroed), 1Y OLS with 151–251 joint days, beta 1 "prior" below.
+  Shrunk 1 + w(b − 1), w = 0.9. Backtest (164 names, 2008–2025, research branch
+  `scripts/backtest_beta.py`): MSE vs the realised beta −51% at 12M and −57% at
+  3M against Yahoo's. Cached per symbol and window per day in
+  `state/betas.json` (raw beta, so a shrink change needs no recompute); a
+  download that returned nothing is the prior, uncached.
+- **rf_local** is `options_density._local_rate` (a home-index beta is a local
+  CAPM). **alpha** is `analyst_targets.relative_alpha` on the name's total
+  upside (mean target / price − 1 + dividend yield, like the optimizer's
+  views), its reference the long-run universe mean blended 10:1 with the name's
+  own; IC = `model_ic` or `view_ic()` (measured, else the 0.02 prior), z capped
+  at `model_z_cap`. Zero without targets.
+- **One number everywhere.** `capm.model` builds the block
+  (`{mu, mu_capm, rf, rf_source, beta, beta_meta, erp, alpha, alpha_meta,
+  capm_price, model_price}`); `/api/density` returns it at the options' expiry,
+  `POST /api/model-prices` (`capm.for_rows`) at 12 months for the grid, and the
+  export calls the same. The window's alpha uses the listing's own or its
+  research line's target only (`_own_analysts` returns whether the block is
+  the listing's); the chain line's block is still shown as the Street
+  reference but sets no alpha, since the row has none. The window's dividend
+  yield is computed with the row's rule, currencies included (HSBA.L read
+  0.04% with a pence price).
+- **Portfolio beta**: `stats.beta` is the weighted sum of the holdings' app
+  betas (`beta_coverage` says how much weight had one); `benchmarks[*].rel.beta`
+  stays the basket's regression on the chosen benchmark.
+- **News and the reference pack**: the news context's betas are the app's
+  (the job batches the missing ones); the pack's CI beta is the same estimator
+  against SPY on 5Y of closes (its universe is the S&P 500). Neither is a
+  Market read feature: only the forward idiosyncratic return reads it.
+- **Settings** (prefs.json, bounded in `persistence._clean_prefs`):
+  `model_beta_shrink` 0–1, `model_beta_years` 1|2|3, `model_ic` 0–0.1 (unset =
+  auto), `model_z_cap` 0.5–5, `dist_mu` (the window's μ toggle, default on);
+  `dist_trust` / `dist_haircut` are dropped on read. All are in the density's
+  and the analytics' cache keys.
+- **Known limits** (live check 2026-10-23): the model price grows the price at
+  the total-return mu (dividends not subtracted); an FX pair gets a CAPM mu
+  (EURUSD β 0.09), not carry; a defensive name can have a negative beta when the
+  last year's correlation was negative (DUK −0.10: 1Y OLS −0.32 vs the S&P).
 
 ### Earnings and dividends for the chart (`fetcher.fetch_events`, `GET /api/events`)
 

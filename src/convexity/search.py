@@ -67,13 +67,16 @@ FIELDS: dict[str, tuple] = {
     "revenue_growth": ("Revenue growth 1y", "%", "totalrevenues1yrgrowth.lasttwelvemonths", 1, None, 1, "revenue growth|sales growth"),
     "eps_growth": ("EPS growth 1y", "%", "epsgrowth.lasttwelvemonths", 1, None, 1, "eps growth|earnings growth"),
     "dividend_yield": ("Dividend yield", "%", "forward_dividend_yield", 1, "dividendYield", 1, "dividend yield|yield"),
-    "beta": ("Beta", "x", "beta", 1, "beta", 1, "beta"),
     "perf_52w": ("52-week change", "%", "fiftytwowkpercentchange", 1, "52WeekChange", 100, "52 week change|52-week change|1 year return"),
     "short_float": ("Short % of float", "%", "short_percentage_of_float.value", 1, "shortPercentOfFloat", 100, "short interest|short float"),
     # Market cap: the screener's is in local currency, so it never goes there.
     "mcap": ("Market cap", "$", None, 1, None, 1, "market cap|market capitalization|mcap"),
 }
 # fmt: on
+# No "beta" field (1.29): the screener's and .info's beta is Yahoo's (5Y
+# monthly vs the S&P 500 in USD), which the app no longer shows anywhere; its
+# own beta (capm.py) exists only for names it has prices for. "Low beta" in a
+# request is passed through to `ignored`, so the chips say it was not applied.
 OPS = {"lt": "<", "lte": "≤", "gt": ">", "gte": "≥"}
 _OP_WORDS = {
     "lt": r"<|under|below|less than|lower than|smaller than",
@@ -157,7 +160,7 @@ EXCHANGE_NAMES.update({"PCX": "NYSE Arca", "BTS": "Cboe", "TAI": "Taiwan", "TWO"
 # "low leverage", "high dividend yield": a moderate threshold the chip shows
 # (and the user can edit), never a lowest-first ranking — "small leverage"
 # ranked by lowest D/E returned companies with no debt at all.
-_QUAL = {"de": (0.5, 1.5), "pe": (15, 30), "pb": (1.5, 4), "beta": (0.8, 1.3),
+_QUAL = {"de": (0.5, 1.5), "pe": (15, 30), "pb": (1.5, 4),
          "dividend_yield": (1, 3), "roe": (8, 15), "net_margin": (5, 15),
          "gross_margin": (25, 50), "revenue_growth": (5, 15), "eps_growth": (5, 15),
          "short_float": (2, 10), "current_ratio": (1, 2)}  # fmt: skip
@@ -410,7 +413,7 @@ How to read a request:
   highest first. Small caps mean a market-cap filter (< 2e9), not a rank.
 - Vague amounts get moderate thresholds, never extremes: low/small D/E < 0.5,
   high D/E > 1.5, cheap P/E < 15, high dividend yield > 3, high ROE > 15,
-  high margin > 15, high growth > 15, low beta < 0.8.
+  high margin > 15, high growth > 15. There is no beta field.
 - "best"/"top"/"quality" without a metric: rank by a quality metric (ROE or a
   margin) that the user does not already filter on; why in rank.why.
 - Exchanges (Nasdaq, NYSE, London...) go in "exchanges", not "regions".

@@ -51,8 +51,11 @@ CASES = [
     ("high growth US biotech",
      lambda q: q["regions"] == ["us"] and "Biotechnology" in q["industries"]
      and (f(q, "revenue_growth", "gt") or rank(q)[0] == "revenue_growth")),
+    # No beta field since 1.29 (Yahoo's beta is gone app-wide): the request
+    # still reads as staples, and "low beta" is reported as not applied.
     ("stable low beta consumer staples",
-     lambda q: q["sectors"] == ["Consumer Defensive"] and f(q, "beta", "lt")),
+     lambda q: q["sectors"] == ["Consumer Defensive"] and not f(q, "beta")
+     and any("beta" in str(x).lower() for x in q.get("ignored") or [])),
     ("companies with net margin above 20% and revenue growth over 10%",
      lambda q: f(q, "net_margin", "gt") and f(q, "net_margin")[0]["value"] == 20
      and f(q, "revenue_growth", "gt") and f(q, "revenue_growth")[0]["value"] == 10),

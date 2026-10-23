@@ -509,6 +509,8 @@ class Handler(BaseHTTPRequestHandler):
             # listed options (options_density.py). A network-heavy detail path,
             # asked for after the window has opened, never from fetch_one.
             # Always 200: an unusable chain is {"ok": false, "reason": ...}.
+            # The mean is the server's model (capm.py): a `beta` sent by an old
+            # page is ignored, never trusted.
             from convexity import options_density
             from convexity.persistence import load_prefs
 
@@ -521,11 +523,7 @@ class Handler(BaseHTTPRequestHandler):
                 h = int((q.get("h") or ["365"])[0])
             except ValueError:
                 h = 365
-            try:
-                beta = float((q.get("beta") or [""])[0])
-            except ValueError:
-                beta = None
-            self._send_json(200, options_density.density(sym, h, beta, load_prefs()))
+            self._send_json(200, options_density.density(sym, h, load_prefs()))
             return
         if parsed.path == "/api/history":
             # Intraday half of the chart granularity ladder (1M/3M/6M). Kept off
@@ -766,6 +764,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/export-xlsx":
             try:
                 from convexity import xlsx_export  # lazy: openpyxl is slow to import
+                from convexity import capm
+                from convexity.persistence import load_prefs
 
                 meta = list_views().get("views") or {}
                 full: dict[str, dict] = {}
@@ -799,6 +799,7 @@ class Handler(BaseHTTPRequestHandler):
                     period="1Y",
                     display_ccy=ccy,
                     book=book if has_book else None,
+                    model_runner=lambda rows: capm.for_rows(rows, load_prefs()),
                 )
                 stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
                 fname = f"convexity_export_{stamp}.xlsx"
@@ -1507,6 +1508,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
                 return
             self._send_json(200, out)
+            return
+
+        if parsed.path == "/api/model-prices":
+            # The grid's Beta and Model price columns: the app's one model
+            # (capm.for_rows) at 12 months for the rows the page sends (price,
+            # currency, mean target, dividend yield), one batch beta download.
+            # A POST because a portfolio's rows don't fit a URL.
+            from convexity import capm
+            from convexity.persistence import load_prefs
+
+            try:
+                payload = self._read_json()
+                rows = [r for r in (payload.get("rows") or []) if isinstance(r, dict)][:500]
+            except Exception as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            try:
+                self._send_json(200, {"models": capm.for_rows(rows, load_prefs())})
+            except Exception as exc:
+                print(f"[model-prices] {type(exc).__name__}: {exc}")
+                self._send_json(500, {"error": type(exc).__name__})
             return
 
         if parsed.path == "/api/news-rescore":

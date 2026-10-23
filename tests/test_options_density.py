@@ -52,17 +52,17 @@ def test_b_with_kappa_one_and_no_premium_returns_q(rn):
 
 
 def test_b_hits_its_mean_and_variance(rn):
-    beta, erp, kappa = 1.2, 0.05, 0.9
-    mk = od.market_curve(rn, beta, erp, kappa)
+    mu, kappa = 0.04 + 1.2 * 0.05, 0.9
+    mk = od.mean_curve(rn, mu, kappa)
     st = od.curve_stats(rn, mk["p"])
     assert mk["method"] == "B"
-    assert st["mean_ratio"] == pytest.approx(od.capm_ratio(rn, beta, erp), rel=1e-4)
+    assert st["mean_ratio"] == pytest.approx(math.exp(mu * T), rel=1e-4)
     assert st["var_x"] == pytest.approx((kappa * rn["sigma_q"]) ** 2 * T, rel=1e-3)
 
 
 def test_a_fallback_still_hits_its_mean(rn):
     # A variance no exponential-quadratic tilt can reach forces Approach A.
-    target = od.capm_ratio(rn, 1.0, 0.05)
+    target = math.exp((rn["rf"] + 0.05) * T)
     p, method, theta = od.tilt(rn, target, 1e-8)
     assert method == "A" and theta[1] == 0.0
     assert od.curve_stats(rn, p)["mean_ratio"] == pytest.approx(target, rel=1e-4)
@@ -94,73 +94,51 @@ def test_svi_wings_respect_lees_bound():
             assert abs(w[1] - w[0]) / 20.0 <= 2.0 + 1e-9
 
 
-def test_analysts_mixture_keeps_total_variance_and_averages_the_means(rn):
-    kappa = 0.92
-    targets = [100.0, 108.0, 115.0, 125.0]
-    mx = od.analysts_mixture(rn, targets, 1.0, 0.05, kappa)
-    st = od.curve_stats(rn, mx["p"])
-    assert st["mean_ratio"] == pytest.approx(np.mean(targets) / S0, rel=1e-3)
-    assert st["var_x"] == pytest.approx((kappa * rn["sigma_q"]) ** 2 * T, rel=0.02)
+def _model_stub(monkeypatch, alpha=0.012):
+    from convexity import capm
+
+    def fake(symbol, T, *, s0, ccy, target=None, div_yield=None, prefs=None, **_):
+        a = alpha if target else 0.0
+        return {"mu": 0.04 + 0.05 + a, "mu_capm": 0.09, "alpha": a, "T": T, "s0": s0,
+                "model_price": capm.model_price(s0, 0.09 + a, T),
+                "capm_price": capm.model_price(s0, 0.09, T)}  # fmt: skip
+
+    monkeypatch.setattr(capm, "model", fake)
 
 
-@pytest.mark.parametrize("T_", [0.5, 1.0, 1.4])
-def test_target_at_expiry_is_the_full_trust_mixture_mean(rn, T_):
-    """The chart's solid diamond: one target at the expiry, pro-rated before a
-    year and carried at CAPM after, equal to the mixture's mean at full trust."""
-    r = {**rn, "T": T_}
-    targets = [100.0, 115.0, 140.0]
-    at = od.target_at_expiry(r, targets, 1.0, 0.05)
-    lr = np.log(np.array(targets) / S0) * min(T_, 1.0) + max(T_ - 1.0, 0.0) * (r["rf"] + 0.05)
-    assert at == pytest.approx(S0 * np.mean(np.exp(lr)), rel=1e-12)
-    if T_ == 1.0:
-        assert at == pytest.approx(np.mean(targets))
-    if T_ < 1.0:
-        assert S0 < at < np.mean(targets)
-    assert od.target_at_expiry(r, [float("nan")], 1.0, 0.05) is None
+def test_model_curves_hit_mu_on_and_mu_off(rn, monkeypatch):
+    """One payload, two curves: "model" (mu on, with alpha) and "market"
+    (mu off, pure CAPM); each means S0 exp(mu T), the model block's price."""
+    _model_stub(monkeypatch)
+    st = {**od._settings({}), "prefs": {}}
+    cv, mdl = od._model_curves("X", rn, "USD", 1.0, {"mean": 130.0}, st, 0.92, 0.0)
+    assert set(cv) == {"model", "market"}
+    on, off = (od.curve_stats(rn, cv[k][0])["mean_ratio"] for k in ("model", "market"))
+    assert on * S0 == pytest.approx(mdl["model_price"], rel=1e-4)
+    assert off * S0 == pytest.approx(mdl["capm_price"], rel=1e-4)
+    assert on > off
 
 
-@pytest.mark.parametrize("w", [0.0, 0.5, 1.0])
-def test_trust_keeps_that_share_of_the_excess_log_return(rn, w):
-    beta, erp = 1.0, 0.05
-    lc = math.log(od.capm_ratio(rn, beta, erp))
-    mx = od.analysts_mixture(rn, [140.0], beta, erp, 0.92, w)
-    expect = math.exp(lc + w * (math.log(140.0 / S0) - lc))
-    assert od.curve_stats(rn, mx["p"])["mean_ratio"] == pytest.approx(expect, rel=1e-3)
+def test_no_targets_means_one_curve(rn, monkeypatch):
+    _model_stub(monkeypatch)
+    st = {**od._settings({}), "prefs": {}}
+    cv, mdl = od._model_curves("X", rn, "USD", 1.0, None, st, 0.92, None)
+    assert mdl["alpha"] == 0.0 and cv["model"] is cv["market"]
 
 
-def test_zero_trust_is_the_markets_curve(rn):
-    """At trust 0 every firm sits on CAPM, the firms agree, and the blend is
-    one tilt: the market's curve, which the page draws for 0%."""
-    beta, erp, kappa = 1.2, 0.05, 0.92
-    a = od.curve_stats(
-        rn, od.analysts_mixture(rn, [90.0, 140.0, 175.0], beta, erp, kappa, 0.0)["p"]
-    )
-    m = od.curve_stats(rn, od.market_curve(rn, beta, erp, kappa)["p"])
-    assert a["mean_ratio"] == pytest.approx(m["mean_ratio"], rel=1e-6)
-    assert a["var_x"] == pytest.approx(m["var_x"], rel=1e-6)
+def test_the_listing_target_is_used_in_its_own_units(rn, monkeypatch):
+    """A chain on another line (ratio != 1): the block is in chain units, the
+    model reads the listing's price and target (x ratio), like its grid row."""
+    seen = {}
+    from convexity import capm
 
+    def fake(symbol, T, *, s0, ccy, target=None, div_yield=None, prefs=None, **_):
+        seen.update(s0=s0, target=target, ccy=ccy)
+        return {"mu": 0.09, "mu_capm": 0.09, "alpha": 0.0}
 
-def test_both_trust_curves_ship_together(rn):
-    st = od._settings({})
-    an = {"firms": [{"target": 120.0}, {"target": 150.0}]}
-    cv, out = od._analysts_curves(rn, an, 365, 1.0, st, 0.92)
-    assert set(cv) == {"analysts", "analysts_t50"}
-    full, half = (od.curve_stats(rn, cv[k][0])["mean_ratio"] for k in ("analysts", "analysts_t50"))
-    assert full == pytest.approx(out["at_expiry"] / S0, rel=1e-3)
-    assert od.capm_ratio(rn, 1.0, st["erp"]) < half < full
-    assert od._analysts_curves(rn, None, 365, 1.0, st, 0.92)[0] == {
-        "analysts": (None, None), "analysts_t50": (None, None)}  # fmt: skip
-
-
-def test_each_horizon_gets_its_own_at_expiry(rn):
-    """analyst_targets.consensus hands out one cached dict to both horizons:
-    the 3M computation must not move the 12M payload's diamond."""
-    st, shared = od._settings({}), {"firms": [{"target": 140.0}]}
-    _, a12 = od._analysts_curves(rn, shared, 365, 1.0, st, 0.92)
-    _, a3 = od._analysts_curves({**rn, "T": 0.25}, shared, 91, 1.0, st, 0.92)
-    assert "at_expiry" not in shared
-    assert a12["at_expiry"] == pytest.approx(140.0)
-    assert a3["at_expiry"] == pytest.approx(S0 * (140.0 / S0) ** 0.25)
+    monkeypatch.setattr(capm, "model", fake)
+    od._model_curves("NOV.DE", rn, "EUR", 0.9, {"mean": 120.0}, {"prefs": {}}, 0.92, 0.01)
+    assert seen == {"s0": pytest.approx(S0 * 0.9), "target": pytest.approx(108.0), "ccy": "EUR"}
 
 
 def test_downsample_is_a_normalised_curve(rn):
@@ -183,7 +161,7 @@ def test_density_never_raises_and_caches_successes_only(monkeypatch):
     monkeypatch.setattr(od, "_compute", fail)
     monkeypatch.setattr(od, "_history", no_history)
     for _ in range(2):
-        out = od.density("ZZZZ.XX", 365, 1.0, {})
+        out = od.density("ZZZZ.XX", 365, {})
         assert out == {
             "ok": False,
             "reason": "no_options",
@@ -197,7 +175,7 @@ def test_density_never_raises_and_caches_successes_only(monkeypatch):
         raise RuntimeError("yahoo")
 
     monkeypatch.setattr(od, "_compute", boom)
-    assert od.density("ZZZZ.YY", 91, None, {})["reason"] == "error"
+    assert od.density("ZZZZ.YY", 91, {})["reason"] == "error"
 
     good = {"ok": True, "chain_symbol": "OKAY"}
 
@@ -207,15 +185,15 @@ def test_density_never_raises_and_caches_successes_only(monkeypatch):
 
     monkeypatch.setattr(od, "_compute", ok)
     calls["n"] = 0
-    assert od.density("OKAY", 365, 1.0, {}) is good
-    assert od.density("OKAY", 365, 1.0, {}) is good
+    assert od.density("OKAY", 365, {}) is good
+    assert od.density("OKAY", 365, {}) is good
     assert calls["n"] == 1
 
 
 def test_settings_and_horizon_snap():
     st = od._settings({"dist_erp": 0.04, "dist_measure": "Q", "dist_trust": 1.0})
     assert st["erp"] == 0.04 and st["measure"] == "Q"
-    assert "haircut" not in st and "trust" not in st  # trust is the page's: both curves ship
+    assert "haircut" not in st and "trust" not in st  # 1.29: no trust control at all
     assert od._settings({"dist_measure": "X"})["measure"] == "P"
     assert od._settings(None)["kappa_stock"] == od.KAPPA_DEFAULT["stock"]
 
@@ -225,17 +203,6 @@ def test_a_nan_fit_fails_the_gate(rn):
     for k in ("martingale_err", "svi_rmse_volpts"):
         ok, why = od.quality({**rn, k: float("nan")})
         assert not ok and why == "fit failed"
-
-
-def test_targets_scale_to_the_expiry():
-    # A 12-month target sets a 6-month mean at half its log return, and past a
-    # year the market's return carries it on (AAPL's "12M" is 335 days, ARKK's 461).
-    for t, expect in ((0.5, lambda lr, cp: 0.5 * lr), (1.5, lambda lr, cp: lr + 0.5 * cp)):
-        calls, puts = bs_chain(np.arange(40.0, 251.0, 2.5), t=t)
-        r = od.fit_density(S0, t, R, calls, puts)
-        mx = od.analysts_mixture(r, [130.0, float("nan"), float("inf")], 1.0, 0.05, 0.92)
-        got = math.log(od.curve_stats(r, mx["p"])["mean_ratio"])
-        assert got == pytest.approx(expect(math.log(1.3), R + 0.05), rel=2e-3)
 
 
 def mixture_chain(strikes, comps, s0=S0, r=R, t=T):
@@ -315,7 +282,7 @@ def test_no_expiry_near_the_horizon(monkeypatch):
     exps = [("2026-12-18", 62), ("2027-03-19", 153)]
     monkeypatch.setattr(od, "_resolve_chain", lambda s: ("OPRX", None, exps))
     monkeypatch.setattr(od, "_history", lambda *a: (_ for _ in ()).throw(od.DensityError("x")))
-    out = od.density("OPRX", 365, 1.0, {})
+    out = od.density("OPRX", 365, {})
     assert out["reason"] == "no_expiry" and "153" in out["detail"]
 
 
@@ -485,7 +452,7 @@ def test_history_stands_in_when_options_fail(monkeypatch):
     monkeypatch.setattr(
         od, "_history", lambda *a: {"ok": True, "source": "history", "chain_symbol": "ASML.AS"}
     )
-    out = od.density("ASML.AS", 365, 0.5, {"dist_erp": 0.051})
+    out = od.density("ASML.AS", 365, {"dist_erp": 0.051})
     assert out["source"] == "history"
     assert out["fallback"] == {
         "reason": "thin",
@@ -676,3 +643,18 @@ def test_analysts_carry_the_firms_mean():
     a = od._analysts(Tk())
     assert a["n"] == 3 and a["consensus"] == 110.0
     assert a["mean"] == pytest.approx(120.0)
+
+
+def test_a_borrowed_chain_block_sets_no_alpha(rn, monkeypatch):
+    """No targets on the listing or its research line: the chain line's block
+    is still the Street reference, but alpha stays 0, as on the grid row."""
+    _model_stub(monkeypatch)
+    st = {**od._settings({}), "prefs": {}}
+    _, mdl = od._model_curves("X.DE", rn, "EUR", 0.9, {"mean": 130.0}, st, 0.92, 0.0, own=False)
+    assert mdl["alpha"] == 0.0
+
+
+def test_window_dividend_yield_repairs_pence():
+    """HSBA.L: a pence price and a pound dividend rate (the row's rule)."""
+    info = {"currency": "GBp", "dividendRate": 0.56, "dividendYield": 4.07}
+    assert od._dividend_yield(info, 1347.8, "GBp") == pytest.approx(0.0415, abs=0.002)
