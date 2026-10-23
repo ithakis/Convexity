@@ -1384,7 +1384,7 @@ CAPM and the per-firm analyst mixture with its trust control:
   `model_beta_shrink` 0–1, `model_beta_years` 1|2|3, `model_ic` 0–0.1 (unset =
   auto), `model_z_cap` 0.5–5, `dist_mu` (the window's μ toggle, default on);
   `dist_trust` / `dist_haircut` are dropped on read. All are in the density's
-  and the analytics' cache keys.
+  cache key; the beta window and shrink are in the analytics'.
 - **Known limits** (live check 2026-10-23): the model price grows the price at
   the total-return mu (dividends not subtracted); an FX pair gets a CAPM mu
   (EURUSD β 0.09), not carry; a defensive name can have a negative beta when the
