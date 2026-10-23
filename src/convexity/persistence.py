@@ -788,7 +788,7 @@ def _prefs_allowed() -> dict:
 
 # Phase 9 (notifications): a switch and quiet hours, typed rather than
 # picked from a set. A time is "HH:MM", 24-hour.
-_PREF_BOOLS = ("notify_on", "quiet_on", "dist_haircut", "pf_chips_collapsed")
+_PREF_BOOLS = ("notify_on", "quiet_on", "pf_chips_collapsed")
 _PREF_TIMES = ("quiet_from", "quiet_to")
 # The stock window's σ/μ (options_density.py): numbers with bounds, so a typo
 # can't make the curve nonsense. Missing = the module's default.
@@ -803,6 +803,9 @@ _PREF_NUMS = {
 # Y yearly, N never = buy and hold) and the cost per unit traded, in bps.
 REBALANCE = ("D", "W", "M", "Q", "S", "Y", "N")
 TRADING_DEFAULTS = {"rebalance": "M", "tc_bps": 10.0}
+# How much of the analysts' excess return over CAPM the σ/μ curve keeps
+# (options_density.TRUSTS); missing = the page's default, 1/2.
+_PREF_TRUST = (0.0, 0.5, 1.0)
 _PREF_CHOICES = {
     "dist_measure": {"P", "Q"},
     "pf_contrib_view": {"table", "chart"},
@@ -829,6 +832,13 @@ def _clean_prefs(raw) -> dict:
             out[k] = float(v)
     out.update({k: raw[k] for k, ok in _PREF_CHOICES.items() if raw.get(k) in ok})
     out.update({k: raw[k] for k in _PREF_TIMES if _is_hhmm(raw.get(k))})
+    v = raw.get("dist_trust")
+    if isinstance(v, int | float) and not isinstance(v, bool) and float(v) in _PREF_TRUST:
+        out["dist_trust"] = float(v)
+    elif raw.get("dist_haircut") is False:
+        # Before 1.28.8 the trust was a haircut switch: off meant the targets
+        # as published. Delete this branch after 2027-06-30.
+        out["dist_trust"] = 1.0
     return out
 
 

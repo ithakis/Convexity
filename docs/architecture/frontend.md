@@ -461,23 +461,40 @@ over a different set of opinions (the coverage card). Now there is one number,
 grid, the consensus table and the optimizer read the same number too
 (`analyst_targets.consensus`, backend.md), split-adjusted; and 3M shows the
 analysts as well (`fcMarks` no longer requires 365: the 12-month targets are
-moved to the 3-month expiry, and the hollow 12M diamond sits clamped at the
-plot's right edge). **μ is off by default since 2026-10-23**: σ alone draws
+moved to the 3-month expiry). On 3M the hollow 12M diamond is **not** drawn:
+its date is ~4× the zone's width away, and clamped to the edge it squeezed nine
+months into the density, where x is probability, so a constant pace read ~4×
+steeper than the first leg. 3M draws an amber dotted **pace line** from today to
+the solid diamond instead, leaves the 12-month mean out of `fcYRange`, and puts
+the year on a true clock in an inset over the history (`mountFcInset` /
+`fcDrawInset`, its own canvas `#m-fc-in`): the Street's path through both
+diamonds, the curve's mean at the chosen trust (from the 12M payload's curve
+when loaded, pro-rated to 365 days), and that curve's 90% band. It sits in the
+free corner the price crosses least. **μ is off by default since 2026-10-23**: σ alone draws
 the market's (CAPM) mean, and μ switches to the analysts' curve, labelled as
 the Street's expectation. The analysts' marks (diamonds, low/high, Pr ≥ target)
-are drawn either way: hiding them with μ (1.28.4) made the target vanish; the analyst haircut (`dist_haircut`) defaults to on.
+are drawn either way: hiding them with μ (1.28.4) made the target vanish.
+**Trust in targets** (0 / 50 / 100%, `fcTrust`, prefs `dist_trust`, default
+50%) sits next to μ and in Settings → Price distribution; `fcSetTrust` is the
+one mutator and `syncTrustControls` the one painter. It picks the curve
+(`fcMode`: `analysts` / `analysts_t50` / `market`) with no refetch.
 Targets did not rank 12-month returns in point-in-time tests (backend.md,
 "What analyst targets predict"), so they are not the default forecast. The options set the
 horizon, so the target bends to the expiry (`fcProRate`, mirroring
 `options_density._target_log_returns`): the **solid diamond** is that target at
-the expiry (`analysts.at_expiry`, equal to the analysts' curve mean when the
-haircut is off), a dotted stub runs on to a **hollow diamond** at the full
+the expiry (`analysts.at_expiry`, equal to the analysts' curve mean at 100%
+trust), on 12M a dotted stub runs on to a **hollow diamond** at the full
 12-month mean at its own date (before the expiry when T > 1). Low/High and the
 μ-only lines are moved to the expiry the same way. The dashed line is the
 **mean path** `sim.meanPath` (the paths' average per step, pinned to end on the
 curve's mean along the variance clock), not the median, which ends at the
-curve's median and so could never reach the diamond. With the haircut on, the
-path ends short of the diamond on a "Model mean" dot.
+curve's median and so could never reach the diamond. The path ends on a white
+**"Curve mean" pill** (right of the spine; "= target" at 100% trust), and the
+readout's mean cell is always the curve's mean, "Curve mean · trust X%". It
+used to name the analysts' 12-month target while every chance beside it came
+from the 50%-trust curve, and the path's end was a bare dot: the owner read
+it as a bug (2026-10-23). The hover's dates count back from the expiry
+(`fcDateAt(days, d)`): `d.days` runs from the options' session, not today.
 `mountForecast` lays a canvas (`#m-fc-cv`, `pointer-events: none`) and a hit
 layer (`#m-fc-hit`) over the future zone and density; the history keeps its
 own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):

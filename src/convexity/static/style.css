@@ -2660,6 +2660,15 @@
     padding: 1px 12px; min-width: 38px; justify-content: center; }
   .m-fc-cv { position: absolute; top: 0; pointer-events: none; }
   .m-fc-hit { position: absolute; cursor: crosshair; }
+  /* The 3M view's "year ahead, to scale" (mountFcInset): a transient sheet
+     over the history, so it carries the one box the zone allows. */
+  .m-fc-in { position: absolute; pointer-events: none; z-index: 1; border: 1px solid var(--border);
+    border-radius: var(--r-md); }
+  /* Trust in targets, next to μ: shown only while σ and μ are both on. */
+  .m-fc-trust { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; }
+  .m-fc-trust[hidden] { display: none; }
+  .m-fc-trust-k { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .m-fc-trust .m-fc-seg button { padding: 3px 9px; font-size: 12px; }
   .m-fc-ctl { position: absolute; top: 8px; right: 10px; display: flex; gap: 6px; z-index: 2; }
   .m-fc-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-soft);
     background: var(--bg-canvas); padding: 2px; }

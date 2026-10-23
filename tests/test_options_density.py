@@ -104,9 +104,9 @@ def test_analysts_mixture_keeps_total_variance_and_averages_the_means(rn):
 
 
 @pytest.mark.parametrize("T_", [0.5, 1.0, 1.4])
-def test_target_at_expiry_is_the_unhaircut_mixture_mean(rn, T_):
+def test_target_at_expiry_is_the_full_trust_mixture_mean(rn, T_):
     """The chart's solid diamond: one target at the expiry, pro-rated before a
-    year and carried at CAPM after, equal to the mixture's mean (no haircut)."""
+    year and carried at CAPM after, equal to the mixture's mean at full trust."""
     r = {**rn, "T": T_}
     targets = [100.0, 115.0, 140.0]
     at = od.target_at_expiry(r, targets, 1.0, 0.05)
@@ -119,12 +119,48 @@ def test_target_at_expiry_is_the_unhaircut_mixture_mean(rn, T_):
     assert od.target_at_expiry(r, [float("nan")], 1.0, 0.05) is None
 
 
-def test_haircut_halves_the_excess_log_return(rn):
+@pytest.mark.parametrize("w", [0.0, 0.5, 1.0])
+def test_trust_keeps_that_share_of_the_excess_log_return(rn, w):
     beta, erp = 1.0, 0.05
     lc = math.log(od.capm_ratio(rn, beta, erp))
-    mx = od.analysts_mixture(rn, [140.0], beta, erp, 0.92, haircut=True)
-    expect = math.exp(lc + 0.5 * (math.log(140.0 / S0) - lc))
+    mx = od.analysts_mixture(rn, [140.0], beta, erp, 0.92, w)
+    expect = math.exp(lc + w * (math.log(140.0 / S0) - lc))
     assert od.curve_stats(rn, mx["p"])["mean_ratio"] == pytest.approx(expect, rel=1e-3)
+
+
+def test_zero_trust_is_the_markets_curve(rn):
+    """At trust 0 every firm sits on CAPM, the firms agree, and the blend is
+    one tilt: the market's curve, which the page draws for 0%."""
+    beta, erp, kappa = 1.2, 0.05, 0.92
+    a = od.curve_stats(
+        rn, od.analysts_mixture(rn, [90.0, 140.0, 175.0], beta, erp, kappa, 0.0)["p"]
+    )
+    m = od.curve_stats(rn, od.market_curve(rn, beta, erp, kappa)["p"])
+    assert a["mean_ratio"] == pytest.approx(m["mean_ratio"], rel=1e-6)
+    assert a["var_x"] == pytest.approx(m["var_x"], rel=1e-6)
+
+
+def test_both_trust_curves_ship_together(rn):
+    st = od._settings({})
+    an = {"firms": [{"target": 120.0}, {"target": 150.0}]}
+    cv, out = od._analysts_curves(rn, an, 365, 1.0, st, 0.92)
+    assert set(cv) == {"analysts", "analysts_t50"}
+    full, half = (od.curve_stats(rn, cv[k][0])["mean_ratio"] for k in ("analysts", "analysts_t50"))
+    assert full == pytest.approx(out["at_expiry"] / S0, rel=1e-3)
+    assert od.capm_ratio(rn, 1.0, st["erp"]) < half < full
+    assert od._analysts_curves(rn, None, 365, 1.0, st, 0.92)[0] == {
+        "analysts": (None, None), "analysts_t50": (None, None)}  # fmt: skip
+
+
+def test_each_horizon_gets_its_own_at_expiry(rn):
+    """analyst_targets.consensus hands out one cached dict to both horizons:
+    the 3M computation must not move the 12M payload's diamond."""
+    st, shared = od._settings({}), {"firms": [{"target": 140.0}]}
+    _, a12 = od._analysts_curves(rn, shared, 365, 1.0, st, 0.92)
+    _, a3 = od._analysts_curves({**rn, "T": 0.25}, shared, 91, 1.0, st, 0.92)
+    assert "at_expiry" not in shared
+    assert a12["at_expiry"] == pytest.approx(140.0)
+    assert a3["at_expiry"] == pytest.approx(S0 * (140.0 / S0) ** 0.25)
 
 
 def test_downsample_is_a_normalised_curve(rn):
@@ -177,8 +213,9 @@ def test_density_never_raises_and_caches_successes_only(monkeypatch):
 
 
 def test_settings_and_horizon_snap():
-    st = od._settings({"dist_erp": 0.04, "dist_measure": "Q", "dist_haircut": True})
-    assert st["erp"] == 0.04 and st["measure"] == "Q" and st["haircut"] is True
+    st = od._settings({"dist_erp": 0.04, "dist_measure": "Q", "dist_trust": 1.0})
+    assert st["erp"] == 0.04 and st["measure"] == "Q"
+    assert "haircut" not in st and "trust" not in st  # trust is the page's: both curves ship
     assert od._settings({"dist_measure": "X"})["measure"] == "P"
     assert od._settings(None)["kappa_stock"] == od.KAPPA_DEFAULT["stock"]
 

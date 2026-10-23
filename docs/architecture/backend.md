@@ -286,7 +286,7 @@ Conclusion: a target is the Street's expectation, not a return forecast. So
 (mpt.md, Views), (2) the stock window and the consensus table show what a
 target rests on (firms, median age, stale count, 90-day raises/cuts, spread)
 and say what it is (`targetFacts`, `TARGET_NOTE`), (3) σ/μ opens on the
-market's μ, the analysts' curve opt-in with the haircut on by default, and
+market's μ, the analysts' curve opt-in at 50% trust by default, and
 (4) the app keeps its own dated record, `state/target_history.jsonl` (one line
 per day and symbol the first time a block is computed: date, price, mean,
 median, n, source, median age; market data only), scored by
@@ -1231,8 +1231,14 @@ has no option history, so anything needing history is built forward.
 - **Analysts' μ**: one B-tilt per firm (latest target ≤ 12 months old, from
   yfinance `upgrades_downgrades`; Finnhub's targets are 403 on the free plan),
   blended equally, the common variance shrunk by the between-firm variance so
-  the blend's total is still (κσ_Q)²T. Optional haircut (prefs) halves each
-  target's excess log return over CAPM. Any horizon (3M too since
+  the blend's total is still (κσ_Q)²T. **Trust** w keeps that share of each
+  target's excess log return over CAPM, `lr = lc + w(lr − lc)`. Every payload
+  ships w = 1 (`curves.analysts`) and w = 1/2 (`curves.analysts_t50`); w = 0
+  is `curves.market` (every firm on CAPM, one tilt), so the page's trust
+  control never refetches and trust is not part of the cache key. The
+  analysts' block is copied before `at_expiry` is written: `consensus`
+  returns its cached dict, shared by both horizons, and writing into it let
+  the 3M computation move a cached 12M payload's diamond (fixed 1.28.8). Any horizon (3M too since
   2026-10-22, the owner's call): a target's log return is scaled by T up to a
   year and carried on at CAPM after it, so on 3M each 12-month target is
   moved to the 3-month expiry as S0·(T/S0)^(t/1y). The expiry is rarely
@@ -1316,7 +1322,8 @@ has no option history, so anything needing history is built forward.
   computation per key at a time. Never called from `fetch_one`.
 - **Settings** (prefs.json, bounded in `persistence._clean_prefs`):
   `dist_erp`, `dist_kappa_stock`, `dist_kappa_index`, `dist_measure` (P|Q),
-  `dist_haircut`.
+  `dist_trust` (0 | 0.5 | 1, read by the page only; a saved
+  `dist_haircut: false` reads as 1 until 2027-06-30).
 - **Phase 2 (not built):** a snapshot collector (the reference-pack workflow
   appends daily 3M/12M density snapshots for the S&P 500: tickers, dates and
   numbers only, under the pack's allow-list rules); a Track-record-style page

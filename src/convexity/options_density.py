@@ -26,7 +26,9 @@ two-moment solve fails or leaves its bounds. Two means are offered:
   between-firm variance so the blend's total variance is still
   (kappa sigma_Q)^2 T: disagreement lives inside the options' width, never
   on top of it. Targets run optimistic on average (Brav & Lehavy 2003), so
-  an optional haircut halves each target's excess return over CAPM.
+  the page lets the owner choose how much to trust them: each target keeps a
+  share (0, 1/2 or 1) of its excess log return over CAPM. 0 is the market's
+  curve, 1 the targets as published; all three ship in one payload.
 
 A quality gate (quotes, SVI fit, martingale error) hides chains whose tails
 can't be trusted. This is a network-heavy detail path: it is never called
@@ -57,7 +59,7 @@ from convexity.helpers import major_ccy
 
 ERP_DEFAULT = 0.05
 KAPPA_DEFAULT = {"index": 0.80, "stock": 0.92}  # physical / implied vol: placeholders (Phase 2)
-HAIRCUT = 0.5  # share of the analysts' excess return over CAPM removed when the haircut is on
+TRUSTS = (0.0, 0.5, 1.0)  # shares of the targets' excess log return over CAPM the page offers
 MAX_SPREAD = 0.6  # drop quotes whose bid-ask exceeds 60% of mid
 MIN_QUOTES = 30
 MAX_SVI_RMSE = 1.0  # vol points
@@ -636,7 +638,7 @@ def _target_log_returns(rn: dict, t: np.ndarray, beta: float, erp: float) -> np.
 
 def target_at_expiry(rn: dict, targets, beta: float, erp: float) -> float | None:
     """The analysts' mean target moved to the options' expiry: the mean of the
-    firms' curves before any haircut (each firm's curve has S0 x exp(lr) as
+    firms' curves at full trust (each firm's curve has S0 x exp(lr) as
     its mean). The chart draws it as the solid diamond where the mean path
     ends, and the 12-month mean as a hollow one at its own date: one target,
     two dates (2026-10-20). The options set the horizon; the targets bend to it."""
@@ -647,7 +649,7 @@ def target_at_expiry(rn: dict, targets, beta: float, erp: float) -> float | None
 
 
 def analysts_mixture(
-    rn: dict, targets, beta: float, erp: float, kappa: float, haircut: bool = False
+    rn: dict, targets, beta: float, erp: float, kappa: float, trust: float = 1.0
 ) -> dict:
     """The analysts' curve: one options-shaped tilt per firm, blended equally.
 
@@ -666,9 +668,12 @@ def analysts_mixture(
     T = rn["T"]
     V = (kappa * rn["sigma_q"]) ** 2 * T
     lr = _target_log_returns(rn, t, beta, erp)
-    if haircut:
+    if trust != 1.0:
+        # Trust w keeps that share of each target's excess log return over
+        # CAPM: w = 0 puts every firm on CAPM (between-firm variance 0, one
+        # tilt: the market's curve), w = 1/2 is the old haircut.
         lc = math.log(capm_ratio(rn, beta, erp))
-        lr = lc + (1 - HAIRCUT) * (lr - lc)
+        lr = lc + trust * (lr - lc)
     between = float(np.var(lr)) if len(lr) > 1 else 0.0
     Vw = max(0.3, 1 - between / V) * V
     parts = [tilt(rn, float(math.exp(v)), Vw) for v in lr]
@@ -1002,10 +1007,6 @@ def _settings(prefs: dict | None) -> dict:
         "kappa_stock": float(p.get("dist_kappa_stock", KAPPA_DEFAULT["stock"])),
         "kappa_index": float(p.get("dist_kappa_index", KAPPA_DEFAULT["index"])),
         "measure": p.get("dist_measure", "P") if p.get("dist_measure") in ("P", "Q") else "P",
-        # On by default (2026-10-23): targets average more upside than is
-        # realised, so the analysts' curve halves their excess over CAPM
-        # unless the owner turns it off.
-        "haircut": bool(p.get("dist_haircut", True)),
     }
 
 
@@ -1521,19 +1522,33 @@ def _payload_curves(rn: dict, curves: dict, fx: dict | None) -> dict:
     return out
 
 
-def _analysts_curve(rn, an, horizon, beta, st, kappa):
-    """The analysts' curve at any horizon: each firm's 12-month target is
-    moved to the expiry geometrically (`_target_log_returns`), so a 3M chart
-    uses the same targets scaled to 3 months (owner, 2026-10-22)."""
+def _analysts_curves(rn, an, horizon, beta, st, kappa) -> tuple[dict, dict | None]:
+    """The analysts' curves at any horizon, at full trust ("analysts") and at
+    half ("analysts_t50"); zero trust is the market's curve, already in the
+    payload. Each firm's 12-month target is moved to the expiry geometrically
+    (`_target_log_returns`), so a 3M chart uses the same targets scaled to 3
+    months (owner, 2026-10-22). Both ship so the page's trust control is
+    instant (2026-10-23): no refetch, no second cache entry.
+
+    Returns (curves, the analysts' block with this horizon's ``at_expiry``).
+    The block is a COPY: ``analyst_targets.consensus`` hands out its cached
+    dict, shared by both horizons and the grid, so writing ``at_expiry`` into
+    it let whichever horizon ran last move the other's diamond, cached 12M
+    payloads included (a 12M chart drew the 3M target, 2026-10-23)."""
+    none = {"analysts": (None, None), "analysts_t50": (None, None)}
     if not an:
-        return None
+        return none, an
+    an = {**an}
     targets = [f["target"] for f in an["firms"]] or [an.get("mean") or an["consensus"]]
     an["at_expiry"] = target_at_expiry(rn, targets, beta, st["erp"])
+    out = {}
     try:
-        mx = analysts_mixture(rn, targets, beta, st["erp"], kappa, st["haircut"])
+        for name, w in (("analysts", 1.0), ("analysts_t50", 0.5)):
+            mx = analysts_mixture(rn, targets, beta, st["erp"], kappa, w)
+            out[name] = (mx["p"], mx["method"])
     except DensityError:
-        return None
-    return mx["p"], mx["method"]
+        return none, an
+    return out, an
 
 
 def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
@@ -1588,7 +1603,6 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         "beta": beta,
         "erp": st["erp"],
         "measure": st["measure"],
-        "haircut": st["haircut"],
         "horizon": horizon,
         "fx": None,
         "quality": {
@@ -1636,12 +1650,13 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         an = _own_analysts(symbol, chain_sym, tk, ratio)
     except Exception as e:
         print(f"[density] analysts {chain_sym}: {type(e).__name__}")
+    an_curves, an = _analysts_curves(rn, an, horizon, beta, st, kappa)
     curves = _payload_curves(
         rn,
         {
             "rn": (rn["q"], "Q"),
             "market": (mk["p"], mk["method"]),
-            "analysts": _analysts_curve(rn, an, horizon, beta, st, kappa) or (None, None),
+            **an_curves,
         },
         fx,
     )
@@ -1776,12 +1791,13 @@ def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         an = _analysts(tk) or _research_analysts(symbol, S0)
     except Exception as e:
         print(f"[density] analysts {symbol}: {type(e).__name__}")
+    an_curves, an = _analysts_curves(rn, an, horizon, beta, st, 1.0)
     curves = _payload_curves(
         rn,
         {
             "rn": (None, None),
             "market": (mk["p"], mk["method"]),
-            "analysts": _analysts_curve(rn, an, horizon, beta, st, 1.0) or (None, None),
+            **an_curves,
         },
         None,
     )
@@ -1822,7 +1838,6 @@ def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         "beta": beta,
         "erp": st["erp"],
         "measure": "P",
-        "haircut": st["haircut"],
         "horizon": horizon,
         "fx": None,
         "quality": {

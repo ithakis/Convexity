@@ -2762,6 +2762,8 @@ function renderModalSkeleton() {
         <span class="m-toolbar-sep"></span>
         <button class="m-toolbar-btn m-greek active" id="m-toggle-sigma" title="σ — the spread of prices in 3 or 12 months, from the listed options">σ</button>
         <button class="m-toolbar-btn m-greek" id="m-toggle-mu" title="μ — where the Street expects the price (the analysts' 12-month targets). Off: the market's μ (CAPM). Targets are an expectation, not a forecast">μ</button>
+        <span class="m-fc-trust" id="m-fc-trust" hidden><span class="m-fc-trust-k">Trust in targets</span><span class="m-fc-seg" role="radiogroup" aria-label="Trust in analyst targets">${FC_TRUSTS.map(([w, l, tip]) =>
+          `<button type="button" role="radio" data-fc-trust="${w}" data-tip="${tip}">${l}</button>`).join("")}</span></span>
       </div>
       <div class="m-chart" id="m-chart">
         <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">${lcHtml("fetching detail and options", {bar: true})}</div>
@@ -2783,6 +2785,9 @@ function renderModalSkeleton() {
   $("#m-toggle-vol").onclick = () => { DETAIL.showVol = !DETAIL.showVol; renderModalFull(); };
   $("#m-toggle-sigma").onclick = () => { DETAIL.showSigma = !DETAIL.showSigma; ensureDensity(); renderModalFull(); };
   $("#m-toggle-mu").onclick = () => { DETAIL.showMu = !DETAIL.showMu; ensureDensity(); renderModalFull(); };
+  $("#m-fc-trust").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-fc-trust]"); if (b) fcSetTrust(+b.dataset.fcTrust);
+  });
   const fcBandHover = (e) => {
     const b = e.type === "mouseout" ? null : e.target.closest("[data-fc-band]")?.dataset.fcBand ?? null;
     if (b !== DETAIL.fcBand) { DETAIL.fcBand = b; fcDraw(); }
@@ -2871,6 +2876,7 @@ function renderModalFull() {
   $("#m-toggle-vol")?.classList.toggle("active", DETAIL.showVol);
   $("#m-toggle-sigma")?.classList.toggle("active", DETAIL.showSigma);
   $("#m-toggle-mu")?.classList.toggle("active", DETAIL.showMu);
+  syncTrustControls();
   for (const n of SMA_PERIODS) $(`#m-toggle-sma${n}`)?.classList.toggle("active", !!DETAIL.sma[n]);
   // Hide sector toggle if no sector ETF data
   if (!DETAIL.data.benchmark_sector || !DETAIL.data.benchmark_sector.length) {
@@ -3810,9 +3816,40 @@ function ensureDensity(h) {
     // tails (SPY, DELL today); then the window opens on 3M and says why.
     const was = DETAIL.fcH;
     if (DETAIL.fcAuto && DETAIL.fc[365] && !DETAIL.fc[365].ok && DETAIL.fc[91]?.ok) DETAIL.fcH = 91;
-    if (DETAIL.data && (h === DETAIL.fcH || DETAIL.fcH !== was)) renderChart();
+    // 12M landing under a 3M view redraws too: the inset's band reads it.
+    if (DETAIL.data && (h === DETAIL.fcH || DETAIL.fcH !== was || (h === 365 && d.ok && DETAIL.fcH === 91))) renderChart();
   });
   return mine;
+}
+
+/* Trust in analyst targets: how much of each target's excess log return
+ * over CAPM the σ+μ curve keeps (prefs.json dist_trust, default 1/2). It
+ * replaced the haircut checkbox (2026-10-23): the white mean path ended short
+ * of the analysts' diamond and nothing on the chart said why. */
+const FC_TRUSTS = [
+  [0, "0%", "The market's mean (CAPM): the targets are ignored"],
+  [0.5, "50%", "Half of each target's excess return over CAPM (default): targets run optimistic on average"],
+  [1, "100%", "The targets as published: the mean path ends on the analysts' diamond"],
+];
+function fcTrust() {
+  const w = APP_PREFS.dist_trust;
+  return w === 0 || w === 0.5 || w === 1 ? w : 0.5;
+}
+/* The one mutator; syncTrustControls is the one painter (chart and Settings). */
+function fcSetTrust(w) {
+  if (w === fcTrust() || !FC_TRUSTS.some(t => t[0] === w)) return;
+  savePrefs({ dist_trust: w });
+  syncTrustControls();
+  if (DETAIL.data) renderChart();
+}
+function syncTrustControls() {
+  const w = fcTrust(), d = DETAIL.fc && DETAIL.fc[DETAIL.fcH];
+  const box = document.getElementById("m-fc-trust");
+  if (box) box.hidden = !(DETAIL.showSigma && DETAIL.showMu && d && d.ok && d.measure !== "Q" && d.curves && d.curves.analysts);
+  document.querySelectorAll("[data-fc-trust], [data-dist-trust]").forEach(b => {
+    const on = +(b.dataset.fcTrust ?? b.dataset.distTrust) === w;
+    b.classList.toggle(b.dataset.fcTrust != null ? "on" : "active", on); b.setAttribute("aria-checked", String(on));
+  });
 }
 
 /* Which picture the toggles ask for, given what the payload has. */
@@ -3821,7 +3858,14 @@ function fcMode(d) {
   if (!S && !M) return null;
   if (!S) return { kind: "mu" };
   if (d.measure === "Q" && d.curves.rn) return { kind: "sigma", curve: "rn", mu: "options" };
-  if (M && d.curves.analysts) return { kind: "sigma", curve: "analysts", mu: "analysts" };
+  if (M && d.curves.analysts) {
+    // Trust in targets (fcTrust): 1 the targets as published, 1/2 half their
+    // excess over CAPM, 0 the market's curve (the analysts' at zero trust,
+    // options_density._analysts_curves). All three ship in one payload.
+    let w = fcTrust();
+    if (w === 0.5 && !d.curves.analysts_t50) w = 1;
+    return { kind: "sigma", curve: w === 1 ? "analysts" : w === 0.5 ? "analysts_t50" : "market", mu: "analysts", trust: w };
+  }
   return { kind: "sigma", curve: "market", mu: "market", fellBack: M };
 }
 
@@ -3839,7 +3883,7 @@ function fcRng(seedStr) {
 /* The simulation for one (symbol, horizon, curve). Seeded, so a redraw is the
  * same picture; cached on DETAIL until the payload or the mode changes. */
 function fcSimulate(d, mode) {
-  const key = `${d.symbol}|${d.horizon}|${mode.kind}|${mode.curve || ""}|${d.measure}|${d.erp}|${d.kappa}|${d.haircut}`;
+  const key = `${d.symbol}|${d.horizon}|${mode.kind}|${mode.curve || ""}|${d.measure}|${d.erp}|${d.kappa}|${mode.trust ?? ""}`;
   if (DETAIL.fcSim && DETAIL.fcSim.key === key) return DETAIL.fcSim;
   const sim = { key, d, mode, s0: d.s0, days: d.days, steps: FC_ZONE.steps };
   if (mode.kind === "mu") {
@@ -3993,12 +4037,14 @@ function fcYRange(lo, hi) {
   if (!mode) return [lo, hi];
   if (mode.kind === "mu") {
     const mk = fcMarks(d);
-    if (mk) { lo = Math.min(lo, mk.low ?? mk.atExp, d.s0); hi = Math.max(hi, mk.high ?? mk.atExp, mk.mean, d.s0); }
+    if (mk) { lo = Math.min(lo, mk.low ?? mk.atExp, d.s0); hi = Math.max(hi, mk.high ?? mk.atExp, d.horizon === 365 ? mk.mean : -Infinity, d.s0); }
     return [lo, hi];
   }
   const sim = fcSimulate(d, mode), mk = fcMarks(d)  /* the target is always drawn as a reference; μ only picks the curve's mean */;
   lo = Math.min(lo, fcCurveQ(sim, 0.05), mk?.low ?? Infinity);
-  hi = Math.max(hi, fcCurveQ(sim, 0.95), mk?.high ?? -Infinity, mk?.mean ?? -Infinity);
+  // The 12-month mean only on 12M: 3M no longer draws it (fcDraw), and an
+  // axis stretched to a level nothing on the plot reaches squashed the fan.
+  hi = Math.max(hi, fcCurveQ(sim, 0.95), mk?.high ?? -Infinity, d.horizon === 365 ? mk?.mean ?? -Infinity : -Infinity);
   return [lo, hi];
 }
 
@@ -4043,7 +4089,15 @@ function fcTweenDomain(lo, hi) {
   return [from.lo, from.hi];
 }
 
-function fcDateAt(days) {
+/* The date `days` into the zone. `d.days` counts from the options' session
+ * (Friday's close on a weekend), so the zone is anchored on the expiry and
+ * counted back, not on today: the hover read "19 Sep" under an axis saying
+ * "17 Sep" (2026-10-23). Without a payload, from today. */
+function fcDateAt(days, d) {
+  if (d && d.expiry && isFinite(d.days)) {
+    const t = new Date(d.expiry + "T12:00:00"); t.setDate(t.getDate() - Math.round(d.days - days));
+    return t;
+  }
   const t = new Date(); t.setHours(12, 0, 0, 0); t.setDate(t.getDate() + Math.round(days));
   return t;
 }
@@ -4078,7 +4132,135 @@ function mountForecast(wrap, g) {
   });
   hit.addEventListener("mouseleave", () => { DETAIL.fcHov = null; $("#m-fc-tt").classList.remove("show"); fcDraw(); });
   DETAIL.fcHov = null;
+  syncTrustControls();   // the payload may have just landed: show or hide the control
+  mountFcInset(wrap, g);
   if (d && d.ok && fcMode(d)) fcPlay(); else fcDraw();
+}
+
+/* The year ahead, to scale (owner's pick "1C", 2026-10-23): on 3M the zone
+ * spans one quarter, so the 12-month target cannot be placed at its own date
+ * without bending the time axis. A small inset in the history area draws the
+ * whole year on a true clock instead: the Street's path (amber, through the
+ * 3M diamond to the 12M target), the curve's mean at the chosen trust (white,
+ * through the main chart's "Curve mean" to its 12-month value), and the 12M
+ * curve's 90% band when that payload is loaded. Its own canvas: the forecast
+ * canvas starts at the zone. It sits in whichever free corner of the history
+ * the price crosses least, below the event-flag lanes. */
+function mountFcInset(wrap, g) {
+  const d = DETAIL.fc[DETAIL.fcH], f = g.fc;
+  if (!d || !d.ok || d.horizon === 365) return;
+  const mode = fcMode(d), mk = fcMarks(d);
+  if (!mode || !mk) return;
+  const iw = Math.min(310, Math.round((f.xT - g.padL) * 0.55)), ih = 136;
+  if (iw < 220 || g.chartH < ih + FC_LANE + 40) return;
+  // The corner the price line crosses least.
+  const L = g.padL + 10, R = f.xT - 14 - iw, T = g.padT + FC_LANE + 4, B = g.padT + g.chartH - ih - 8;
+  const pts = (g.stock || []).map(([t, v]) => [g.xScale(t), g.yScale(v)]);
+  const hits = (x, y) => pts.filter(([px, py]) => px >= x - 6 && px <= x + iw + 6 && py >= y - 6 && py <= y + ih + 6).length;
+  const [x0, y0] = [[L, T], [R, T], [L, B], [R, B]].map(c => [c, hits(...c)]).sort((a, b) => a[1] - b[1])[0][0];
+  wrap.insertAdjacentHTML("beforeend", `<canvas class="m-fc-in" id="m-fc-in" style="left:${x0}px;top:${y0}px;width:${iw}px;height:${ih}px"
+    role="img" aria-label="The year ahead to scale: the analysts' path to their 12-month target and the curve's mean"></canvas>`);
+  fcDrawInset($("#m-fc-in"), iw, ih, d, mode, mk);
+}
+
+function fcDrawInset(cv, W, H, d, mode, mk) {
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const css = getComputedStyle(document.documentElement), cvar = (k) => css.getPropertyValue(k).trim();
+  const col = { text: cvar("--text"), muted: cvar("--muted"), acc: cvar("--accent-rgb"), accent: cvar("--accent"),
+    amber: cvar("--amber"), bg: cvar("--bg-canvas") };
+  const font = (w, s) => `${w} ${s}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  const ccy = DETAIL.data.currency, s0 = d.s0, d3 = d.days, YR = 365;
+  // The curve's mean at 12 months, at this trust: each firm's target keeps
+  // w of its excess log return over CAPM (options_density.analysts_mixture,
+  // at T = 1). sigma-only is the market's (w = 0); risk-neutral has none.
+  const w = mode.kind !== "sigma" ? null : mode.mu === "analysts" ? mode.trust ?? 1 : mode.mu === "market" ? 0 : null;
+  const lc = d.rf + (isFinite(+d.beta) ? +d.beta : 1) * d.erp;
+  const tg = mk.firms.length ? mk.firms.map(fm => fm.px) : [mk.mean];
+  let m12 = w == null ? null : s0 * tg.reduce((a, t) => a + Math.exp(lc + w * (Math.log(t / s0) - lc)), 0) / tg.length;
+  const m3 = w == null ? null : fcSimulate(d, mode).mean;
+  // With the 12M payload loaded, its own curve (same trust) sets the 12-month
+  // mean and 5/95%: the estimate above leaves out what the server's tilt
+  // does (FX, a history fallback's rate) and read $283 against a curve at
+  // $275. Its expiry is rarely 365 days out: pro-rated geometrically to a
+  // year, the targets' own rule, so at 100% it lands on the 12M target.
+  const d12 = DETAIL.fc[365];
+  let band = null;
+  if (d12 && d12.ok && w != null && d12.measure !== "Q") {
+    const name = w === 1 ? "analysts" : w === 0.5 ? "analysts_t50" : "market", c = d12.curves[name];
+    if (c && c.mean_ratio) m12 = s0 * Math.pow(c.mean_ratio * d12.chain_s0 * d12.ratio / s0, YR / d12.days);
+    if (c && c.x && c.p) {
+      const dx = c.x[1] - c.x[0], tot = c.p.reduce((a, v) => a + v * dx, 0);
+      const q = (u) => { let a = 0; for (let i = 0; i < c.x.length; i++) { a += c.p[i] * dx / tot; if (a >= u) return d12.forward * Math.exp(c.x[i]); } return d12.forward * Math.exp(c.x[c.x.length - 1]); };
+      band = { lo: q(0.05), mid: q(0.5), hi: q(0.95), days: d12.days };
+    }
+  }
+  const vals = [s0, mk.mean, mk.atExp, ...(m12 ? [m12] : []), ...(band ? [band.lo, band.hi] : [])];
+  const lo = Math.log(Math.min(...vals)), hi = Math.log(Math.max(...vals)), padY = (hi - lo) * 0.12 || 0.05;
+  const px0 = 14, px1 = W - 48, py0 = 30, py1 = H - 22;   // a label column right of 12M
+  const X = (days) => px0 + (px1 - px0) * days / YR;
+  const Y = (v) => py1 - (Math.log(v) - lo + padY) / (hi - lo + 2 * padY) * (py1 - py0);
+
+  ctx.fillStyle = col.bg; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = `rgba(${col.acc},0.13)`; ctx.fillRect(px0, py0 - 4, X(d3) - px0, py1 - py0 + 8);
+  ctx.font = font(600, 10.5); ctx.fillStyle = col.accent; ctx.fillText("this chart", px0 + 4, py0 + 8);
+  if (band) {
+    const lb = (t, side) => Math.log(s0) + t * (Math.log(band.mid) - Math.log(s0)) + Math.sqrt(t) * (Math.log(side) - Math.log(band.mid));
+    ctx.fillStyle = `rgba(${col.acc},0.16)`; ctx.beginPath();
+    for (let k = 0; k <= 40; k++) { const t = k / 40; ctx.lineTo(X(t * band.days), Y(Math.exp(lb(t, band.hi)))); }
+    for (let k = 40; k >= 0; k--) { const t = k / 40; ctx.lineTo(X(t * band.days), Y(Math.exp(lb(t, band.lo)))); }
+    ctx.fill();
+    ctx.font = font(500, 10); ctx.fillStyle = col.muted; ctx.textAlign = "left";
+    ctx.fillText("90%", X(band.days) + 6, Y(band.lo) + 3);
+  }
+  // A geometric path through (0, s0), (d3, a), (365, b): the pace each leg implies.
+  const path = (a, b, stroke, dash, lw) => {
+    ctx.strokeStyle = stroke; ctx.setLineDash(dash); ctx.lineWidth = lw; ctx.beginPath();
+    for (let k = 0; k <= 60; k++) {
+      const t = YR * k / 60;
+      const v = t <= d3 ? s0 * Math.pow(a / s0, t / d3) : a * Math.pow(b / a, (t - d3) / (YR - d3));
+      k ? ctx.lineTo(X(t), Y(v)) : ctx.moveTo(X(t), Y(v));
+    }
+    ctx.stroke(); ctx.setLineDash([]);
+  };
+  const same = m12 != null && Math.abs(Y(m12) - Y(mk.mean)) < 2 && Math.abs(Y(m3) - Y(mk.atExp)) < 2;
+  path(mk.atExp, mk.mean, col.amber, [2, 3], 1.5);
+  if (m12 != null && !same) path(m3, m12, col.text, [5, 3], 1.4);
+  const diamond = (cx, cy, r, solid) => {
+    ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy); ctx.closePath();
+    ctx.lineWidth = 1.6; ctx.fillStyle = solid ? col.amber : col.bg; ctx.strokeStyle = solid ? col.bg : col.amber; ctx.fill(); ctx.stroke();
+  };
+  ctx.fillStyle = col.text; ctx.beginPath(); ctx.arc(px0, Y(s0), 2.5, 0, 7); ctx.fill();
+  if (m12 != null && !same) {
+    ctx.beginPath(); ctx.arc(X(d3), Y(m3), 2.8, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(px1, Y(m12), 3.2, 0, 7); ctx.fill();
+  }
+  diamond(X(d3), Y(mk.atExp), 5, true); diamond(px1, Y(mk.mean), 5, false);
+  // End labels in the column right of the 12M mark, kept 12 px apart.
+  const short = (v) => fmtMoney(v, ccy).replace(/\.\d+$/, "");
+  const ends = [[Y(mk.mean), short(mk.mean), col.amber], ...(m12 != null && !same ? [[Y(m12), short(m12), col.text]] : [])].sort((a, b) => a[0] - b[0]);
+  if (ends.length === 2 && ends[1][0] - ends[0][0] < 12) { const m = (ends[0][0] + ends[1][0]) / 2; ends[0][0] = m - 6; ends[1][0] = m + 6; }
+  ctx.font = font(600, 10.5); ctx.textAlign = "left";
+  for (const [yy, t, c] of ends) { ctx.fillStyle = c; ctx.fillText(t, px1 + 9, yy + 4); }
+  ctx.textAlign = "left"; ctx.fillStyle = col.amber;
+  ctx.fillText(short(mk.atExp), X(d3) + 8, Y(mk.atExp) + (Y(mk.atExp) < Y(s0) ? -6 : 12));
+  // Title, legend, and the clock.
+  ctx.font = font(600, 11.5); ctx.fillStyle = col.text; ctx.fillText("The year ahead, to scale", 10, 17);
+  ctx.font = font(500, 10.5);
+  let lx = W - 10;
+  const leg = [["Street", col.amber, [2, 3]], ...(m12 != null && !same ? [["Curve mean", col.text, [5, 3]]] : [])];
+  for (const [t, c, dash] of leg.reverse()) {
+    const tw = ctx.measureText(t).width; lx -= tw;
+    ctx.fillStyle = c; ctx.fillText(t, lx, 17);
+    ctx.strokeStyle = c; ctx.lineWidth = 1.4; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(lx - 22, 13); ctx.lineTo(lx - 4, 13); ctx.stroke(); ctx.setLineDash([]);
+    lx -= 32;
+  }
+  ctx.font = font(500, 10); ctx.fillStyle = col.muted;
+  [["Today", 0], ["3M", 91], ["6M", 182], ["9M", 274], ["12M", YR]].forEach(([t, dd]) => {
+    ctx.textAlign = dd === 0 ? "left" : "center"; ctx.fillText(t, X(dd), H - 7);
+  });
+  ctx.textAlign = "left";
 }
 
 /* Animate when the picture is new (open, horizon, toggles, settings);
@@ -4086,7 +4268,7 @@ function mountForecast(wrap, g) {
 function fcPlay() {
   const d = DETAIL.fc[DETAIL.fcH];
   const mode = d && d.ok ? fcMode(d) : null;
-  const key = mode ? `${d.symbol}|${d.horizon}|${mode.kind}|${mode.curve || ""}|${d.measure}|${d.erp}|${d.kappa}|${d.haircut}` : null;
+  const key = mode ? `${d.symbol}|${d.horizon}|${mode.kind}|${mode.curve || ""}|${d.measure}|${d.erp}|${d.kappa}|${mode.trust ?? ""}` : null;
   cancelAnimationFrame(DETAIL.fcRaf || 0);
   const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (!key || key === DETAIL.fcAnimKey || reduce) { DETAIL.fcAnimKey = key; DETAIL.fcT = 2; fcDraw(); return; }
@@ -4201,7 +4383,7 @@ function fcDraw() {
         for (let j = 0; j <= n; j++) { const yy = y(Math.exp(sim.P[o + j])); j ? ctx.lineTo(X(j), yy) : ctx.moveTo(X(j), yy); }
         ctx.stroke();
       }
-      // The mean path, today → the curve's mean (with μ on and no haircut,
+      // The mean path, today → the curve's mean (with μ on at 100% trust,
       // the analysts' target at expiry: the solid diamond it lands on).
       const hiM = DETAIL.fcBand === "mean";
       ctx.strokeStyle = col.text; ctx.globalAlpha = hiM ? 1 : 0.85; ctx.lineWidth = hiM ? 2.2 : 1.6; ctx.setLineDash([6, 4]); ctx.beginPath();
@@ -4263,13 +4445,25 @@ function fcDraw() {
 
   // Analysts' marks, one target at two dates: on the expiry spine a range bar
   // (low..high moved to the expiry) and a solid diamond at the mean target
-  // moved to the expiry, where the mean path ends; a dotted stub on to a
-  // hollow diamond at the full 12-month mean, at its own date. Labels sit left
-  // of the spine, kept 26 px apart and inside the plot.
+  // moved to the expiry, where the mean path ends at 100% trust. On 12M a
+  // dotted stub runs on to a hollow diamond at the full 12-month mean, at its
+  // own date (just past the spine). On 3M that date is ~4x the zone's width
+  // away: clamped to the edge, nine months of a constant pace were squeezed
+  // into the density (where x is probability, not time) and read ~4x steeper
+  // than the first leg (owner, 2026-10-23). So 3M draws the target's pace from
+  // today to the diamond instead, and the year to scale lives in the inset
+  // (fcDrawInset). Labels sit left of the spine, kept 26 px apart.
+  const long = d.horizon === 365;
   if (mk && grow > 0) {
     const bx = xH - 7, yc = y(mk.atExp), ym = y(mk.mean);
     const x12 = Math.min(xR - 12, Math.max(xT + 12, xT + (xH - xT) * 365 / d.days));
     ctx.globalAlpha = grow;
+    if (!long) {
+      ctx.save(); ctx.beginPath(); ctx.rect(xT, top - 1, xH - xT, bot - top + 2); ctx.clip();
+      ctx.strokeStyle = col.amber; ctx.globalAlpha = grow * 0.85; ctx.lineWidth = 1.4; ctx.setLineDash([2, 3]); ctx.beginPath();
+      for (let j = 0; j <= S; j++) ctx.lineTo(X(j), y(d.s0 * Math.pow(mk.atExp / d.s0, j / S)));
+      ctx.stroke(); ctx.setLineDash([]); ctx.restore(); ctx.globalAlpha = grow;
+    }
     if (mk.low != null && mk.high != null) {
       const yh = y(mk.high), yl = y(mk.low);
       ctx.strokeStyle = `rgba(${col.amberRgb},0.55)`; ctx.lineWidth = 4; ctx.lineCap = "round";
@@ -4278,17 +4472,19 @@ function fcDraw() {
       for (const yy of [yh, yl]) { ctx.beginPath(); ctx.moveTo(bx - 6, yy); ctx.lineTo(bx + 6, yy); ctx.stroke(); }
     }
     const hiT = DETAIL.fcBand === "mean";
-    ctx.setLineDash([2, 3]); ctx.lineWidth = hiT ? 2.2 : 1.6; ctx.strokeStyle = col.amber;
-    ctx.beginPath(); ctx.moveTo(bx, yc); ctx.lineTo(x12, ym); ctx.stroke(); ctx.setLineDash([]);
     const diamond = (cx, cy, r, solid) => {
       ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy); ctx.closePath();
       if (solid) { ctx.fillStyle = col.amber; ctx.strokeStyle = col.bg; ctx.lineWidth = 2; ctx.fill(); ctx.stroke(); }
       else { ctx.fillStyle = col.bg; ctx.strokeStyle = col.amber; ctx.lineWidth = 1.8; ctx.fill(); ctx.stroke(); }
     };
-    diamond(x12, ym, 7, false);
+    if (long) {
+      ctx.setLineDash([2, 3]); ctx.lineWidth = hiT ? 2.2 : 1.6; ctx.strokeStyle = col.amber;
+      ctx.beginPath(); ctx.moveTo(bx, yc); ctx.lineTo(x12, ym); ctx.stroke(); ctx.setLineDash([]);
+      diamond(x12, ym, 7, false);
+    }
     diamond(bx, yc, 8, true);
     const ccy = DETAIL.data.currency;
-    const labs = [[ym, "12M target", mk.mean, "ring", x12 - 7],
+    const labs = [...(long ? [[ym, "12M target", mk.mean, "ring", x12 - 7]] : []),
       ...(mk.high != null ? [[y(mk.high), "High", mk.high, "", bx - 6]] : []),
       [yc, "At expiry", mk.atExp, "main", bx - 8],
       ...(mk.low != null ? [[y(mk.low), "Low", mk.low, "", bx - 6]] : [])].sort((a, b) => a[0] - b[0]);
@@ -4311,13 +4507,26 @@ function fcDraw() {
     }
     ctx.globalAlpha = 1;
   }
-  // With the haircut on the curve's mean is not the analysts' number: the
-  // path ends on its own small dot, short of the diamond, and says so.
-  if (mode.kind !== "mu" && mk && grow > 0) {
-    const sim = fcSimulate(d, mode), ym = y(sim.mean);
-    if (Math.abs(ym - y(mk.atExp)) > 6) {
-      ctx.globalAlpha = grow; ctx.fillStyle = col.text; ctx.beginPath(); ctx.arc(xH, ym, 3.5, 0, 7); ctx.fill();
-      ctx.font = font(600, 11); ctx.textAlign = "left"; ctx.fillText("Model mean", xH + 8, ym + 4); ctx.globalAlpha = 1;
+  // The curve's mean, named: a white pill where the mean path ends, right of
+  // the spine (the analysts' labels sit left of it). It was a bare dot and
+  // "Model mean", and the readout named the analysts' number instead, so a
+  // 50%-trust path ending short of the diamond looked like a bug
+  // (owner, 2026-10-23). At 100% trust it is the diamond: one pill says so.
+  if (mode.kind !== "mu" && grow > 0) {
+    const sim = fcSimulate(d, mode), ym = y(sim.mean), ccy = DETAIL.data.currency;
+    const onT = mk && Math.abs(ym - y(mk.atExp)) <= 6;
+    if (mk || mode.mu !== "analysts") {
+      ctx.globalAlpha = grow;
+      if (!onT) { ctx.fillStyle = col.text; ctx.beginPath(); ctx.arc(xH, ym, 3.5, 0, 7); ctx.fill(); }
+      const k = "Curve mean", v = fmtMoney(sim.mean, ccy) + (onT ? " = target" : "");
+      ctx.font = font(500, 12); const kw = ctx.measureText(k).width;
+      ctx.font = font(600, 13); const vw = ctx.measureText(v).width;
+      const w = kw + vw + 22, x0 = xH + 12, yy = Math.min(bot - 14, Math.max(top + 30, onT ? ym + 24 : ym));
+      fcRoundRect(ctx, x0, yy - 11, w, 22, 6); ctx.fillStyle = col.bg; ctx.fill();
+      ctx.strokeStyle = col.text; ctx.globalAlpha = grow * 0.7; ctx.lineWidth = 1; ctx.stroke(); ctx.globalAlpha = grow;
+      ctx.fillStyle = col.text; ctx.font = font(500, 12); ctx.globalAlpha = grow * 0.75; ctx.fillText(k, x0 + 8, yy + 4);
+      ctx.globalAlpha = grow; ctx.font = font(600, 13); ctx.fillText(v, x0 + 14 + kw, yy + 5);
+      ctx.globalAlpha = 1;
     }
   }
 
@@ -4369,7 +4578,7 @@ function fcHover(cx, cy) {
     }
   }
   DETAIL.fcHov = { K, x, snap };
-  const ccy = DETAIL.data.currency, ret = (K / d.s0 - 1) * 100, date = fcDateAt(d.days * j / S);
+  const ccy = DETAIL.data.currency, ret = (K / d.s0 - 1) * 100, date = fcDateAt(d.days * j / S, d);
   let h = `<div class="r"><span class="p">${fmtMoney(K, ccy)}</span><span class="m">${ret >= 0 ? "+" : ""}${ret.toFixed(1)}%</span></div>
     <div class="m">${j === S ? "At expiry · " : ""}${fcFmtDate(date)}</div><hr>`;
   if (mode.kind === "mu") {
@@ -4477,9 +4686,14 @@ function renderFcReadouts() {
   const mk = fcMarks(d);
   // What the curve's mean is, named for where it comes from: "expected"
   // would claim more than a model's mean.
-  const meanLabel = mode.mu === "analysts" ? (an.n ? "Analysts’ mean target" : "Analysts’ target")
+  // With μ on it is the curve's mean at the chosen trust, never the
+  // analysts' number: every chance in this panel comes from that curve, and
+  // a cell naming the 12-month target beside them read as a contradiction
+  // (owner, 2026-10-23). The targets are in the tip and on the chart.
+  const trustPct = `${Math.round((mode.trust ?? 1) * 100)}%`;
+  const meanLabel = mode.mu === "analysts" ? `Curve mean · trust ${trustPct}`
     : mode.mu === "options" ? "Forward · risk-neutral mean" : "CAPM mean";
-  const meanTip = mode.mu === "analysts" ? `The mean of the drawn curve: ${an.n ? `the average of ${an.n} firms’ 12-month targets` : "the analysts’ consensus target"}${d.haircut ? ", with half the excess return over CAPM removed" : ""}.`
+  const meanTip = mode.mu === "analysts" ? `The mean of the drawn curve: ${an.n ? `each of ${an.n} firms’ 12-month targets` : "the analysts’ consensus target"} moved to the expiry, keeping ${trustPct} of ${an.n ? "its" : "the"} excess return over CAPM (Trust in targets, next to μ).`
     : mode.mu === "options" ? "The mean under the options’ own (risk-neutral) measure: the forward price."
     : `The mean of the drawn curve: today’s price grown at the CAPM return, the rate plus β × the equity premium.`;
   // Hist./Imp.: both annualised vols of log returns, on the same listing
@@ -4499,8 +4713,9 @@ function renderFcReadouts() {
   const kx = (t) => String(t).replace(/[\\{}$%&#_^~]/g, (c) => (c === "\\" ? "" : c === "~" || c === "^" ? "" : "\\" + c));
   const prTex = (op, v) => tex(String.raw`\Pr[S_{\text{${hl}}} ${op === ">" ? ">" : "\\ge"} \text{${kx(fmtMoneyThreshold(v, ccy))}}]`,
     `Pr[S_${hl} ${op === ">" ? ">" : "≥"} ${fmtMoneyThreshold(v, ccy)}]`);
-  const muTxt = mode.mu === "analysts" ? (an.n ? `μ from ${an.n} analysts (one ${hist ? "" : "options-"}shaped curve per firm, blended${d.haircut ? ", excess return halved" : ""}).`
-      : `μ from the analysts’ consensus target${d.haircut ? ", excess return halved" : ""}.`)
+  const keep = `${trustPct} of the excess return over CAPM kept`;
+  const muTxt = mode.mu === "analysts" ? (an.n ? `μ from ${an.n} analysts (one ${hist ? "" : "options-"}shaped curve per firm, blended; ${keep}).`
+      : `μ from the analysts’ consensus target (${keep}).`)
     : mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
     : hist && d.measure === "Q" ? `μ from the market (CAPM: β ${(+d.beta).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium); no risk-neutral curve without options.`
     : `μ from the market (CAPM: β ${(+d.beta).toFixed(2)} × ${(d.erp * 100).toFixed(1)}% premium).`;
@@ -4527,12 +4742,9 @@ function renderFcReadouts() {
     : cell(prTex(">=", d.s0 * 1.2), `${pct(fcCurveAbove(sim, d.s0 * 1.2))} <small>+20%</small>`, "",
       `The chance the price ends 20% or more above today’s (${money(d.s0 * 1.2)} or more) on ${expTxt}. Shaded green on the chart.`,
       "p20", String.raw`\Pr[${S_} \ge 1.2\,S_0] = ${P(fcCurveAbove(sim, d.s0 * 1.2))}`);
-  const meanCell = mk && mode.mu === "analysts"
-    ? cell(meanLabel, `${money(mk.mean)} <small>${sgn((mk.mean / d.s0 - 1) * 100)}</small>`, "",
-      `The mean of ${mk.n || 1} firms’ latest 12-month targets: the hollow diamond. Moved to the options’ expiry (${expTxt}) it is ${money(mk.atExp)}: the solid diamond, where the dashed mean path ends.${d.haircut ? ` With the haircut on, the curve’s own mean is ${money(sim.mean)} (“Model mean”).` : ""}`,
-      "mean", String.raw`\bar{T} = \tfrac{1}{n}\textstyle\sum_i T_i = ${M(mk.mean)}`)
-    : cell(meanLabel, `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`, "",
-      `${meanTip} The dashed line is the mean path from today’s price to it.`, "mean", String.raw`\mathbb{E}[${S_}] = ${M(sim.mean)}`);
+  const street = mk ? ` The analysts’ mean target is ${money(mk.mean)} over 12 months${d.horizon === 365 ? " (the hollow diamond)" : ""}; moved to ${expTxt} it is ${money(mk.atExp)}, the solid diamond. At 100% trust the mean path ends on it.` : "";
+  const meanCell = cell(meanLabel, `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`, "",
+    `${meanTip} The dashed line is the mean path from today’s price to it (“Curve mean”).${street}`, "mean", String.raw`\mathbb{E}[${S_}] = ${M(sim.mean)}`);
   el.innerHTML = `<div class="m-fc-grid">
     ${cell(prTex(">", d.s0), pct(pUp), "pos", `The chance the price is above today’s (${money(d.s0)}) on ${expTxt}. Shaded green on the chart.`,
       "up", String.raw`\Pr[${S_} > S_0] = ${P(pUp)}`)}
@@ -12709,10 +12921,10 @@ const SETTINGS_SECTIONS = [
                + "from its listed options (σ) and a mean (μ) from the market or the analysts. "
                + "Kept with your data.",
     keywords: ["sigma", "mu", "σ", "μ", "distribution", "options", "implied volatility", "forecast",
-               "equity premium", "erp", "kappa", "risk-neutral", "real-world", "analysts", "haircut"],
+               "equity premium", "erp", "kappa", "risk-neutral", "real-world", "analysts", "haircut", "trust"],
     items: [
       { id: "dist-erp", label: "Equity premium", keywords: ["erp", "capm", "beta", "expected return"] },
-      { id: "dist-haircut", label: "Analyst haircut", keywords: ["optimism", "targets", "shrink"] },
+      { id: "dist-trust", label: "Trust in targets", keywords: ["haircut", "optimism", "targets", "shrink", "analysts"] },
       { id: "dist-measure", label: "Measure", keywords: ["risk-neutral", "real-world", "q", "p"] },
       { id: "dist-kappa", label: "Volatility ratio κ (advanced)", keywords: ["kappa", "variance risk premium", "vrp"] },
     ],
@@ -13649,16 +13861,17 @@ async function renderSettingsDistribution(el) {
   let p = {};
   try { p = await (await fetch("/api/prefs")).json(); } catch (e) { /* the defaults */ }
   const erp = p.dist_erp ?? 0.05, ks = p.dist_kappa_stock ?? 0.92, ki = p.dist_kappa_index ?? 0.80;
-  const measure = p.dist_measure || "P", haircut = p.dist_haircut !== false;  // on by default since 2026-10-23
+  const measure = p.dist_measure || "P";
   const num = (key, v, step, min, max, unit, label) => `<span class="att-rule"><input type="number" data-dist-num="${key}" value="${v}"
       step="${step}" min="${min}" max="${max}" aria-label="${label}">${unit ? `<span class="att-unit">${unit}</span>` : ""}</span>`;
   el.innerHTML =
     settingsRow({ id: "dist-erp", label: "Equity premium",
       help: "The market's expected return over cash, per year. With σ alone, a stock's mean is the rate plus its beta times this (CAPM). Default 5%.",
       control: num("dist_erp", +(erp * 100).toFixed(2), 0.5, 0, 15, "%", "Equity premium, percent") }) +
-    settingsRow({ id: "dist-haircut", label: "Analyst haircut",
-      help: "Analysts' 12-month targets run optimistic on average. On, each target's excess return over the market's is halved before it sets μ. On by default.",
-      control: `<label class="settings-check"><input type="checkbox" data-dist-bool="dist_haircut"${haircut ? " checked" : ""} aria-label="Analyst haircut"></label>` }) +
+    settingsRow({ id: "dist-trust", label: "Trust in targets",
+      help: "How much of each analyst's 12-month target sets μ when μ is on: 0% the market's mean (CAPM), 50% half of each target's excess return over CAPM (default), 100% the targets as published. Targets run optimistic on average. Also next to μ in the stock window.",
+      control: `<span class="settings-seg" role="radiogroup" aria-label="Trust in targets">${FC_TRUSTS.map(([w, l]) =>
+        `<button type="button" class="settings-seg-opt${fcTrust() === w ? " active" : ""}" role="radio" aria-checked="${fcTrust() === w}" data-dist-trust="${w}">${l}</button>`).join("")}</span>` }) +
     settingsRow({ id: "dist-measure", label: "Measure",
       help: "Real-world: the options' curve tilted to the chosen μ, with σ scaled by κ (default). Risk-neutral: the options' own curve, mean = forward. It includes the risk premium, so it is what the options price, not a forecast.",
       control: `<span class="settings-seg" role="radiogroup" aria-label="Measure">${[["P", "Real-world"], ["Q", "Risk-neutral"]].map(([v, l]) =>
@@ -13684,7 +13897,9 @@ async function renderSettingsDistribution(el) {
     if (i.value === "" || !isFinite(v) || v < +i.min || v > +i.max) { msg(`Enter a value from ${i.min} to ${i.max}.`); return; }
     save({ [k]: k === "dist_erp" ? v / 100 : v });
   }));
-  el.querySelectorAll("[data-dist-bool]").forEach(i => i.addEventListener("change", () => save({ [i.dataset.distBool]: i.checked })));
+  // Trust needs no refetch (every trust's curve is in the payload): the
+  // chart's own setter, not save(), which drops the cached curves.
+  el.querySelectorAll("[data-dist-trust]").forEach(b => b.addEventListener("click", () => fcSetTrust(+b.dataset.distTrust)));
   el.querySelectorAll("[data-dist-choice]").forEach(b => b.addEventListener("click", () => {
     if (b.classList.contains("active")) return;
     b.parentNode.querySelectorAll("[data-dist-choice]").forEach(o => {
