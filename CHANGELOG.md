@@ -9,6 +9,11 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.28.7 — 2026-10-23
+
+- **Settings controls match the new weights window.** Numbers and times read as plain text and become a field on hover or click (no white boxes), checkboxes are switches, buttons are soft fills, API key fields have no outline, and Measure (Price distribution) is a two-option switch instead of a dropdown.
+- **Topbar:** the currency button is a soft pill with no border or arrow, the theme switch is one pill instead of a pill inside a pill, and Settings is a bare gear icon that fills on hover.
+
 ## 1.28.6 — 2026-10-23
 
 - **Windows lose their outline.** Every pop-up window (stock, weights, settings, optimizer, Constraints, dialogs, the full-screen tape) is now one step lighter than the page and floats on a soft shadow instead of a border. Small dropdown menus keep their hairline.
