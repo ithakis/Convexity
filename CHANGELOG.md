@@ -9,6 +9,13 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.28.8 — 2026-10-23
+
+- **Trust in targets, on the chart.** The hidden "Analyst haircut" checkbox is now a 0% / 50% / 100% control next to μ (and in Settings → Price distribution). 0% is the market's mean (CAPM), 50% keeps half of each target's excess return over CAPM (the default, as before), 100% uses the targets as published, and the mean path then ends on the analysts' diamond. Switching is instant: every curve ships in one payload.
+- **The curve's mean is named.** The dashed path ends on a "Curve mean" label, and the readout's mean cell shows that number ("Curve mean · trust 50%"), not the analysts' 12-month target, which no probability in the panel was computed from.
+- **3M view: the year ahead, to scale.** The 12-month target is no longer pinned to the chart's right edge with a steep line through the distribution. 3M draws the target's pace from today to the 3-month diamond, and a small inset over the history shows the whole year on a true clock: the Street's path, the curve's mean at the chosen trust, and the 12-month 90% band. The axis no longer stretches to fit the 12-month target, so the fan gets more room.
+- **Fixes:** a 12M chart could draw the 3M target as its "At expiry" diamond (the two horizons shared one cached analyst block); the hover's expiry date was off by the days since the options' session (19 Sep vs the axis's 17 Sep).
+
 ## 1.28.7 — 2026-10-23
 
 - **Settings controls match the new weights window.** Numbers and times read as plain text and become a field on hover or click (no white boxes), checkboxes are switches, buttons are soft fills, API key fields have no outline, and Measure (Price distribution) is a two-option switch instead of a dropdown.
