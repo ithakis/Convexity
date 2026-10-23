@@ -4187,3 +4187,115 @@
     border: 0;
     box-shadow: var(--shadow-window);
   }
+
+  /* --- Settings controls (v1.28.7) ---------------------------------------
+     The weights window's language, applied to every Settings section: a
+     number or time reads as plain text and becomes a field on hover/focus
+     (hover fill, then the sunk surface + inset accent ring); checkboxes are
+     switches; the Measure choice is a segmented tray; buttons are soft fills.
+     Scoped to .settings-pane so nothing outside Settings changes, and nothing
+     here paints white: every fill is a theme token. */
+  .settings-pane input[type="number"],
+  .settings-pane input[type="time"] {
+    width: 64px; height: 30px; padding: 0 6px; margin: 0;
+    border: 0; border-radius: 7px; background: transparent; color: var(--text);
+    font: inherit; font-size: 14px; font-weight: 600; text-align: right;
+    font-variant-numeric: tabular-nums; color-scheme: light dark;
+    -moz-appearance: textfield; appearance: textfield;
+    transition: background .12s ease;
+  }
+  .settings-pane input[type="time"] { width: 92px; text-align: left; }
+  .settings-pane input[type="number"]::-webkit-inner-spin-button,
+  .settings-pane input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  /* The clock button shows only while the field is in use. */
+  .settings-pane input[type="time"]::-webkit-calendar-picker-indicator { opacity: 0; cursor: pointer; }
+  .settings-pane input[type="time"]:hover::-webkit-calendar-picker-indicator,
+  .settings-pane input[type="time"]:focus::-webkit-calendar-picker-indicator { opacity: .55; }
+  .settings-pane input[type="number"]:hover,
+  .settings-pane input[type="time"]:hover { background: var(--hover); }
+  .settings-pane input[type="number"]:focus,
+  .settings-pane input[type="time"]:focus {
+    outline: none; background: var(--surface-sunk); box-shadow: inset 0 0 0 1.5px var(--accent);
+  }
+  .settings-pane input[type="number"]:disabled,
+  .settings-pane input[type="time"]:disabled { opacity: .45; background: transparent; cursor: default; }
+  .settings-pane .att-unit { min-width: 0; margin-right: 8px; font-size: 12.5px; }
+  .settings-pane .att-rule { gap: 4px; }
+
+  /* Checkbox → switch (CSS only, so every handler keeps reading .checked). */
+  .settings-pane .settings-check input[type="checkbox"],
+  .settings-pane #log-http {
+    -webkit-appearance: none; appearance: none; flex: none; margin: 0;
+    width: 34px; height: 20px; border-radius: 10px; position: relative; cursor: pointer;
+    background: color-mix(in srgb, var(--text) 20%, transparent);
+    transition: background .15s ease;
+  }
+  .settings-pane .settings-check input[type="checkbox"]::before,
+  .settings-pane #log-http::before {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+    transition: transform .15s ease;
+  }
+  .settings-pane .settings-check input[type="checkbox"]:checked,
+  .settings-pane #log-http:checked { background: var(--accent); }
+  .settings-pane .settings-check input[type="checkbox"]:checked::before,
+  .settings-pane #log-http:checked::before { transform: translateX(14px); }
+  .settings-pane .settings-check input[type="checkbox"]:disabled { opacity: .45; cursor: default; }
+  .settings-pane .settings-check input[type="checkbox"]:focus-visible,
+  .settings-pane #log-http:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.35); }
+  .settings-pane label:has(> #log-http) { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+
+  /* Segmented tray (theme, Measure): the selected option is lifted, not
+     accent-outlined. Shared with General's theme control. */
+  .settings-seg { display: inline-flex; gap: 0; padding: 2px; border-radius: 8px; background: var(--surface-sunk); }
+  .settings-seg-opt {
+    height: 28px; padding: 0 13px; border: 0; border-radius: 6px; background: transparent;
+    color: var(--muted); font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .settings-seg-opt:hover { color: var(--text); background: transparent; }
+  .settings-seg-opt.active, .settings-seg-opt.active:hover {
+    color: var(--text); font-weight: 600; border: 0;
+    background: color-mix(in srgb, var(--text) 12%, transparent);
+  }
+  .settings-seg-opt:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+  /* Buttons: soft fills, no outline. */
+  .settings-btn,
+  .settings-pane .att-rule button {
+    height: 30px; padding: 0 14px; border: 0; border-radius: 7px;
+    background: var(--hover); color: var(--text); font: inherit; font-size: 13px; font-weight: 500;
+    cursor: pointer;
+  }
+  .settings-btn:hover, .settings-pane .att-rule button:hover { filter: brightness(1.12); border: 0; color: var(--text); }
+  .settings-btn:disabled, .settings-pane .att-rule button:disabled { opacity: .45; cursor: default; filter: none; }
+  .settings-btn:disabled:hover { border: 0; color: var(--text); }
+  .settings-btn.danger, .settings-btn.danger:hover { background: rgba(var(--neg-rgb), 0.14); color: var(--neg); border: 0; }
+  .settings-pane .att-rule button + button { margin-left: 4px; }
+
+  /* API key field: a sunk field, no outline. */
+  .settings-key-input { border: 0; background: var(--surface-sunk); border-radius: 7px; }
+  .settings-key-input:focus { box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+  /* --- Topbar right cluster (v1.28.7) -------------------------------------
+     No outlines: currency is a soft pill (no caret), the theme switch is ONE
+     soft pill with the track inside, the gear is a bare icon that fills on
+     hover. `.topbar button.x` (0,2,1) because `.topbar button` (0,1,1) sets
+     border, background and height on every topbar button. */
+  .topbar button.fx-btn {
+    border: 0; border-radius: 999px; background: var(--hover); padding: 0 13px;
+    font-size: 13px;
+  }
+  .topbar button.fx-btn:hover, .topbar button.fx-btn.open { border: 0; filter: brightness(1.12); background: var(--hover); }
+  .topbar button.theme-switch {
+    border: 0; border-radius: 999px; background: var(--hover); padding: 0 11px; gap: 8px;
+  }
+  .topbar button.theme-switch:hover { border: 0; filter: brightness(1.12); background: var(--hover); }
+  .topbar button.theme-switch .ts-icon { font-size: 13px; }
+  .topbar button.gear-btn {
+    width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  }
+  .topbar button.gear-btn svg { flex: none; width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .topbar button.gear-btn:hover { border: 0; background: var(--hover); color: var(--text); }
+  /* The off track must read against the pill's own --hover fill (light mode's
+     --border track vanished into it). */
+  .topbar .theme-switch:not(.bbg) .ts-track:not(.on) { background: color-mix(in srgb, var(--text) 24%, transparent); }

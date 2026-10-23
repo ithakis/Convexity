@@ -13651,7 +13651,7 @@ async function renderSettingsDistribution(el) {
   const erp = p.dist_erp ?? 0.05, ks = p.dist_kappa_stock ?? 0.92, ki = p.dist_kappa_index ?? 0.80;
   const measure = p.dist_measure || "P", haircut = p.dist_haircut !== false;  // on by default since 2026-10-23
   const num = (key, v, step, min, max, unit, label) => `<span class="att-rule"><input type="number" data-dist-num="${key}" value="${v}"
-      step="${step}" min="${min}" max="${max}" aria-label="${label}" style="width:84px">${unit ? `<span class="att-unit">${unit}</span>` : ""}</span>`;
+      step="${step}" min="${min}" max="${max}" aria-label="${label}">${unit ? `<span class="att-unit">${unit}</span>` : ""}</span>`;
   el.innerHTML =
     settingsRow({ id: "dist-erp", label: "Equity premium",
       help: "The market's expected return over cash, per year. With σ alone, a stock's mean is the rate plus its beta times this (CAPM). Default 5%.",
@@ -13661,9 +13661,8 @@ async function renderSettingsDistribution(el) {
       control: `<label class="settings-check"><input type="checkbox" data-dist-bool="dist_haircut"${haircut ? " checked" : ""} aria-label="Analyst haircut"></label>` }) +
     settingsRow({ id: "dist-measure", label: "Measure",
       help: "Real-world: the options' curve tilted to the chosen μ, with σ scaled by κ (default). Risk-neutral: the options' own curve, mean = forward. It includes the risk premium, so it is what the options price, not a forecast.",
-      control: `<span class="att-rule"><select data-dist-choice="dist_measure" aria-label="Measure">
-        <option value="P"${measure === "P" ? " selected" : ""}>Real-world</option>
-        <option value="Q"${measure === "Q" ? " selected" : ""}>Risk-neutral</option></select></span>` }) +
+      control: `<span class="settings-seg" role="radiogroup" aria-label="Measure">${[["P", "Real-world"], ["Q", "Risk-neutral"]].map(([v, l]) =>
+        `<button type="button" class="settings-seg-opt${measure === v ? " active" : ""}" role="radio" aria-checked="${measure === v}" data-dist-choice="dist_measure" data-v="${v}">${l}</button>`).join("")}</span>` }) +
     settingsRow({ id: "dist-kappa", label: "Volatility ratio κ (advanced)",
       help: "Real-world σ = κ × implied σ: options carry a variance risk premium, so realised volatility runs below implied. Placeholders until Convexity has its own snapshots to estimate them.",
       control: `<span class="att-rule"><span class="att-unit">Stocks</span>${num("dist_kappa_stock", ks, 0.01, 0.5, 1.2, "", "κ for stocks")}
@@ -13686,7 +13685,13 @@ async function renderSettingsDistribution(el) {
     save({ [k]: k === "dist_erp" ? v / 100 : v });
   }));
   el.querySelectorAll("[data-dist-bool]").forEach(i => i.addEventListener("change", () => save({ [i.dataset.distBool]: i.checked })));
-  el.querySelectorAll("[data-dist-choice]").forEach(i => i.addEventListener("change", () => save({ [i.dataset.distChoice]: i.value })));
+  el.querySelectorAll("[data-dist-choice]").forEach(b => b.addEventListener("click", () => {
+    if (b.classList.contains("active")) return;
+    b.parentNode.querySelectorAll("[data-dist-choice]").forEach(o => {
+      o.classList.toggle("active", o === b); o.setAttribute("aria-checked", String(o === b));
+    });
+    save({ [b.dataset.distChoice]: b.dataset.v });
+  }));
   highlightSettingsMatches(el);
 }
 
