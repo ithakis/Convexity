@@ -246,6 +246,9 @@ Each of these has cost real debugging time; the link goes to the full story.
   the market's μ, and the app's own dated record
   (`state/target_history.jsonl`, Track record → Analyst targets) is the only
   thing that may raise the IC. Never feed raw target upside to the optimizer.
+  **Since 1.29 the window's mean is the app's model price** (`capm.py`,
+  below): μ on (the default, `dist_mu`) adds the analysts' α, μ off is pure
+  CAPM; the Street target is a hollow reference, the trust control is gone.
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·
   [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
 - **One beta, one model price** (capm.py, 1.29): every surface (grid,

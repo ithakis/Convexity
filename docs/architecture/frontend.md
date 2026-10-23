@@ -415,9 +415,11 @@ the analytics stale banner were removed in this change.
 ### σ/μ in the stock window (app.js "σ/μ: the real-world price distribution")
 
 Owner-approved design (mockup v7, 2026-10-17). Two toolbar toggles after
-Volume, `DETAIL.showSigma` / `DETAIL.showMu`, both on at every open: σ+μ =
-options σ with the analysts' μ; σ = the market's (CAPM) μ; μ = a line per firm
-to its target plus a KDE of targets; neither = the old chart. While either is
+Volume, `DETAIL.showSigma` / `DETAIL.showMu` (1.29): σ on at every open, μ on
+unless the owner turned it off (prefs `dist_mu`, `fcMuDefault`, saved by the
+toggle). σ+μ = the options' σ around the model price (CAPM + the analysts'
+α, `capm.py`); σ = pure CAPM; μ = the model path alone, no randomness;
+neither = the old chart. While either is
 on, `renderChart` ends the history at ~58% of the plot (`padR`) and spans
 the **linear** y axis over the window's history ∪ the end curve's 5%..95%
 (`fcYRange`, rule "B · Balanced", owner 2026-10-18: it was 3–97%, which on 12M
@@ -451,49 +453,33 @@ readout cell lights its part of the fan and the density (`DETAIL.fcBand`:
 `up`, `mean`, `50`, `90`, `20`, `cons`, `p20`); there is no (i) badge, the whole
 cell is the target (owner, 2026-10-20).
 
-**One analyst number, two dates** (owner, 2026-10-20). The window used to show
-three different "targets" for NVDA: the median firm (the diamond), the curve's
-mean pro-rated to an expiry 11 months out (the readout) and Yahoo's own mean
-over a different set of opinions (the coverage card). Now there is one number,
-**the mean of the firms' latest 12-month targets** (`analysts.mean`;
-`fetcher.fetch_detail` puts the same figure in `target_mean`, plus
-`target_n_firms`, Yahoo's summary only as the fallback). Since 2026-10-22 the
-grid, the consensus table and the optimizer read the same number too
-(`analyst_targets.consensus`, backend.md), split-adjusted; and 3M shows the
-analysts as well (`fcMarks` no longer requires 365: the 12-month targets are
-moved to the 3-month expiry). On 3M the hollow 12M diamond is **not** drawn:
-its date is ~4× the zone's width away, and clamped to the edge it squeezed nine
-months into the density, where x is probability, so a constant pace read ~4×
-steeper than the first leg. 3M draws an amber dotted **pace line** from today to
-the solid diamond instead, leaves the 12-month mean out of `fcYRange`, and puts
-the year on a true clock in an inset over the history (`mountFcInset` /
-`fcDrawInset`, its own canvas `#m-fc-in`): the Street's path through both
-diamonds, the curve's mean at the chosen trust (from the 12M payload's curve
-when loaded, pro-rated to 365 days), and that curve's 90% band. It sits in the
-free corner the price crosses least. **μ is off by default since 2026-10-23**: σ alone draws
-the market's (CAPM) mean, and μ switches to the analysts' curve, labelled as
-the Street's expectation. The analysts' marks (diamonds, low/high, Pr ≥ target)
-are drawn either way: hiding them with μ (1.28.4) made the target vanish.
-**Trust in targets** (0 / 50 / 100%, `fcTrust`, prefs `dist_trust`, default
-50%) sits next to μ and in Settings → Price distribution; `fcSetTrust` is the
-one mutator and `syncTrustControls` the one painter. It picks the curve
-(`fcMode`: `analysts` / `analysts_t50` / `market`) with no refetch.
-Targets did not rank 12-month returns in point-in-time tests (backend.md,
-"What analyst targets predict"), so they are not the default forecast. The options set the
-horizon, so the target bends to the expiry (`fcProRate`, mirroring
-`options_density._target_log_returns`): the **solid diamond** is that target at
-the expiry (`analysts.at_expiry`, equal to the analysts' curve mean at 100%
-trust), on 12M a dotted stub runs on to a **hollow diamond** at the full
-12-month mean at its own date (before the expiry when T > 1). Low/High and the
-μ-only lines are moved to the expiry the same way. The dashed line is the
-**mean path** `sim.meanPath` (the paths' average per step, pinned to end on the
-curve's mean along the variance clock), not the median, which ends at the
-curve's median and so could never reach the diamond. The path ends on a white
-**"Curve mean" pill** (right of the spine; "= target" at 100% trust), and the
-readout's mean cell is always the curve's mean, "Curve mean · trust X%". It
-used to name the analysts' 12-month target while every chance beside it came
-from the 50%-trust curve, and the path's end was a bare dot: the owner read
-it as a bug (2026-10-23). The hover's dates count back from the expiry
+**One model price, one Street reference** (1.29, owner's picks: option A,
+option 3). The mean is the app's model (`capm.py`): μ = rf_local + β·ERP + α,
+the curve is the options' shape tilted once to S0·e^(μT), and the payload's
+`model` block carries both μ on and μ off, so the toggle never refetches.
+`fcMode` picks `curves.model` / `curves.market` (`rn` under Q); `fcModelAt`
+gives μ and the model price with the server's formula, so the pill, the cell
+and the grid agree to the cent (the cell shows the model price itself, never
+the discretised curve's mean, which differs in the 4th digit). The path ends
+on one white **"Model price" pill** right of the spine ("· CAPM" with μ off,
+"Forward" under Q). The readout cell is named by the expiry's date
+("Model price · 17 Sep 27"): the grid's "Model 12M" is the same μ over exactly
+one year, and both numbers are in its tip with the decomposition
+(`rf + β×ERP + α = μ`, KaTeX). The Street's 12-month mean target (`fcMarks`:
+mean, n, low/high, in the window's currency) is a **reference only**: on 12M a
+hollow amber diamond at its own date with "Street target (12M) $X · not a
+forecast" (a canvas-coloured halo: it sits over the paths), the
+Pr[S ≥ Street] cell, and on 3M the inset. Gone in 1.29: the trust control,
+the per-firm mixture, the solid "At expiry" diamond, the low/high bar, the 3M
+pace line and the μ-only firm lines. Beta replaced the Dividend Yield cell
+(value, proxy and window; "prior" when it is the fallback); the yield is in
+the footnote. On 3M the year is on a true clock in an inset over the history
+(`mountFcInset` / `fcDrawInset`, its own canvas `#m-fc-in`): the model's
+path S0·e^(μt) through the main chart's model price to 12 months, the Street's
+pace to its target (hollow diamond), and the 12M payload's curve (same μ) for
+the 90% band. It sits in the free corner the price crosses least. The dashed
+line is the **mean path** `sim.meanPath` (the paths' average per step, pinned
+to end on the curve's mean along the variance clock). The hover's dates count back from the expiry
 (`fcDateAt(days, d)`): `d.days` runs from the options' session, not today.
 `mountForecast` lays a canvas (`#m-fc-cv`, `pointer-events: none`) and a hit
 layer (`#m-fc-hit`) over the future zone and density; the history keeps its
@@ -529,19 +515,27 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   window switches to 3M once (`DETAIL.fcAuto`) and the footnote says why.
 - Readout labels name the horizon and the threshold (owner, 2026-10-18):
   `Pr[S_12M > €35]` (S0), `Pr[S_12M ≥ €40]` with "mean target" or "+20%" in
-  the value. The threshold is in the display currency, from
+  the value ("Street target" since 1.29). The threshold is in the display currency, from
   `fmtMoneyThreshold`: whole units from 10 up, two significant figures
   below.
 - Readouts replace `#m-range-info` in `#m-fc-ro`: Pr[S_T > S_0] (KaTeX
   labels: style only `.m-fc-grid > div > span`, never every span, or KaTeX's
-  own spans stack), the mean named by its source (analysts' mean target,
-  CAPM mean, forward), median and ranges, "Falls 20% or more" (by the end ·
-  at some point), Pr[S_T ≥ the mean target at expiry] (or ≥ 1.2 S_0), Dividend
-  Yield and Hist. / Imp. Volatility (payload `vol`); each cell's `data-tip`
-  explains it and its `data-tip-tex` leads the tip with the formula.
-  The curve's own σ moved to the footnote. Its "Assumptions" link
-  opens Settings → Price distribution (`renderSettingsDistribution`), whose
-  saves clear `DETAIL.fc` so the window re-prices.
+  own spans stack), the model price (or the forward under Q), median and
+  ranges, "Falls 20% or more" (by the end · at some point), Pr[S_T ≥ the
+  Street's 12-month target] (or ≥ 1.2 S_0), Beta and Hist. / Imp. Volatility
+  (payload `vol`); each cell's `data-tip` explains it and its `data-tip-tex`
+  leads the tip with the formula. The curve's own σ and the dividend yield are
+  in the footnote. Its **"Model & assumptions"** link opens Settings → Model
+  price (`renderSettingsModel`: the formula, why the home index / BSWA / 0.9
+  shrink with the backtest's numbers, why α is small, κ, what it does not
+  claim, the open window's own numbers, and the parameters). Every model and
+  distribution save goes through `wireModelPrefs`, which clears `DETAIL.fc`
+  and re-prices the grid (`requestModelPrices(true)`).
+- **The grid's Beta / Model 12M / Model μ** come from `POST /api/model-prices`
+  (`requestModelPrices`, called with every analytics request, keyed on the
+  rows' symbols and prices): never on the streaming path, merged into DATA,
+  then `render()`. A saved row's figures are from the day it was saved, so a
+  new price re-prices them all.
 - **Every source says what it is** (`renderFcReadouts`, keyed on the payload's
   `source`, `quality.smile` and `fx`): a surface fit names its quotes over
   all expiries; an FX layer is "+ FX" in the σ label and the pair, vol and ρ
