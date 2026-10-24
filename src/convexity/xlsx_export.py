@@ -1531,8 +1531,10 @@ def _with_model(view: dict, model_runner) -> dict:
         if m:
             bm = m["beta_meta"]
             how = {"bswa": f"{bm['years']}Y daily, BSWA", "ols1y": "1Y daily OLS",
+                   "weekly": f"{bm['years']}Y weekly in USD",
                    "prior": "prior (too little history)"}.get(bm["method"], bm["method"])  # fmt: skip
-            r.update(beta=m["beta"], beta_vs=f"{bm['proxy_name']} · {how}",
+            via = f" · via {bm['via']}" if bm.get("via") else ""
+            r.update(beta=m["beta"], beta_vs=f"{bm['proxy_name']} · {how}{via}",
                      model_mu=m["mu"], model_price=m["model_price"])  # fmt: skip
         out.append(r)
     return {**view, "rows": out}

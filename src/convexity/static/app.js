@@ -4111,7 +4111,8 @@ function mountFcInset(wrap, g) {
   const d = DETAIL.fc[DETAIL.fcH], f = g.fc;
   if (!d || !d.ok || d.horizon === 365) return;
   const mode = fcMode(d), mk = fcMarks(d);
-  if (!mode || !mk) return;
+  // The model's year needs no targets; the Street's line is drawn when there are some.
+  if (!mode || (!mk && !d.model) || (!mk && mode.mu === "options")) return;
   const iw = Math.min(310, Math.round((f.xT - g.padL) * 0.55)), ih = 136;
   if (iw < 220 || g.chartH < ih + FC_LANE + 40) return;
   // The corner the price line crosses least.
@@ -4148,7 +4149,7 @@ function fcDrawInset(cv, W, H, d, mode, mk) {
       band = { lo: q(0.05), mid: q(0.5), hi: q(0.95), days: d12.days };
     }
   }
-  const vals = [s0, mk.mean, ...(m12 ? [m12] : []), ...(band ? [band.lo, band.hi] : [])];
+  const vals = [s0, ...(mk ? [mk.mean] : []), ...(m12 ? [m12] : []), ...(band ? [band.lo, band.hi] : [])];
   const lo = Math.log(Math.min(...vals)), hi = Math.log(Math.max(...vals)), padY = (hi - lo) * 0.12 || 0.05;
   const px0 = 14, px1 = W - 48, py0 = 30, py1 = H - 22;   // a label column right of 12M
   const X = (days) => px0 + (px1 - px0) * days / YR;
@@ -4172,18 +4173,20 @@ function fcDrawInset(cv, W, H, d, mode, mk) {
     ctx.stroke(); ctx.setLineDash([]);
   };
   // The Street: a straight pace to its 12-month mean, a reference (hollow).
-  line((t) => s0 * Math.pow(mk.mean / s0, t / YR), col.amber, [2, 3], 1.5);
+  if (mk) line((t) => s0 * Math.pow(mk.mean / s0, t / YR), col.amber, [2, 3], 1.5);
   if (m12 != null) line((t) => s0 * Math.exp(mdl.mu * t / 365), col.text, [5, 3], 1.5);
   ctx.fillStyle = col.text; ctx.beginPath(); ctx.arc(px0, Y(s0), 2.5, 0, 7); ctx.fill();
   if (m12 != null) {
     ctx.beginPath(); ctx.arc(X(d3), Y(m3), 2.8, 0, 7); ctx.fill();
     ctx.beginPath(); ctx.arc(px1, Y(m12), 3.2, 0, 7); ctx.fill();
   }
-  ctx.beginPath(); ctx.moveTo(px1, Y(mk.mean) - 5); ctx.lineTo(px1 + 5, Y(mk.mean)); ctx.lineTo(px1, Y(mk.mean) + 5); ctx.lineTo(px1 - 5, Y(mk.mean)); ctx.closePath();
-  ctx.lineWidth = 1.6; ctx.fillStyle = col.bg; ctx.strokeStyle = col.amber; ctx.fill(); ctx.stroke();
+  if (mk) {
+    ctx.beginPath(); ctx.moveTo(px1, Y(mk.mean) - 5); ctx.lineTo(px1 + 5, Y(mk.mean)); ctx.lineTo(px1, Y(mk.mean) + 5); ctx.lineTo(px1 - 5, Y(mk.mean)); ctx.closePath();
+    ctx.lineWidth = 1.6; ctx.fillStyle = col.bg; ctx.strokeStyle = col.amber; ctx.fill(); ctx.stroke();
+  }
   // End labels in the column right of the 12M mark, kept 12 px apart.
   const short = (v) => fmtMoney(v, ccy).replace(/\.\d+$/, "");
-  const ends = [[Y(mk.mean), short(mk.mean), col.amber], ...(m12 != null ? [[Y(m12), short(m12), col.text]] : [])].sort((a, b) => a[0] - b[0]);
+  const ends = [...(mk ? [[Y(mk.mean), short(mk.mean), col.amber]] : []), ...(m12 != null ? [[Y(m12), short(m12), col.text]] : [])].sort((a, b) => a[0] - b[0]);
   if (ends.length === 2 && ends[1][0] - ends[0][0] < 12) { const m = (ends[0][0] + ends[1][0]) / 2; ends[0][0] = m - 6; ends[1][0] = m + 6; }
   ctx.font = font(600, 10.5); ctx.textAlign = "left";
   for (const [yy, t, c] of ends) { ctx.fillStyle = c; ctx.fillText(t, px1 + 9, yy + 4); }
@@ -4191,7 +4194,7 @@ function fcDrawInset(cv, W, H, d, mode, mk) {
   ctx.font = font(600, 11.5); ctx.fillStyle = col.text; ctx.fillText("The year ahead, to scale", 10, 17);
   ctx.font = font(500, 10.5);
   let lx = W - 10;
-  const leg = [["Street", col.amber, [2, 3]], ...(m12 != null ? [["Model", col.text, [5, 3]]] : [])];
+  const leg = [...(mk ? [["Street", col.amber, [2, 3]]] : []), ...(m12 != null ? [["Model", col.text, [5, 3]]] : [])];
   for (const [t, c, dash] of leg.reverse()) {
     const tw = ctx.measureText(t).width; lx -= tw;
     ctx.fillStyle = c; ctx.fillText(t, lx, 17);
@@ -4553,11 +4556,14 @@ function renderFcReadouts() {
   const expTxt = fcFmtDate(new Date(d.expiry + "T12:00:00"));
   // The app's one model (capm.py): its decomposition, its beta, its words.
   const bm = m ? m.beta_meta || {} : {};
-  const bHow = bm.method === "bswa" ? `${bm.years || 3}Y daily` : bm.method === "ols1y" ? "1Y daily OLS" : "prior";
-  const betaCell = !m ? "" : cell("Beta", `${m.beta.toFixed(2)} <small>${bm.method === "prior" ? "prior · too little history" : `vs ${escapeHtml(bm.proxy_name || "")} · ${bHow}`}</small>`, "",
-    bm.method === "prior"
+  const bHow = bm.method === "bswa" ? `${bm.years || 3}Y daily` : bm.method === "ols1y" ? "1Y daily OLS" : bm.method === "weekly" ? `${bm.years || 3}Y weekly, in USD` : "prior";
+  const viaTxt = bm.via ? ` · via ${escapeHtml(bm.via)}` : "";
+  const betaCell = !m ? "" : cell("Beta", `${m.beta.toFixed(2)} <small>${bm.method === "prior" ? "prior · too little history" : `vs ${escapeHtml(bm.proxy_name || "")} · ${bHow}`}${viaTxt}</small>`, "",
+    (bm.via ? `Measured on ${bm.via}, the company’s home line: a secondary listing trades the same company, and its venue’s index is not its market. ` : "") + (bm.method === "prior"
       ? `Under 151 trading days of history against ${bm.proxy_name || "its market"}, so the prior: β = 1.`
-      : `The app’s beta: ${bm.n_days} joint trading days of daily returns against ${bm.proxy_name} in local currency, slope-winsorised and age-weighted (Welch’s BSWA)${bm.method === "ols1y" ? " — under a year of history, so a plain 1-year OLS" : ""}, raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.${bm.backtested === false ? " This market's index was not in the backtest." : ""}`,
+      : bm.method === "weekly"
+      ? `No home index for this exchange, so the S&P 500 stands in: Friday-to-Friday returns in USD over ${bm.years || 3} years (its close is hours from New York’s, which makes daily returns read a beta near zero), raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.`
+      : `The app’s beta: ${bm.n_days} joint trading days of daily returns against ${bm.proxy_name} in local currency, slope-winsorised and age-weighted (Welch’s BSWA)${bm.method === "ols1y" ? " — under a year of history, so a plain 1-year OLS" : ""}, raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.${bm.backtested === false ? " This market's index was not in the backtest." : ""}`),
     null, String.raw`\beta = 1 + ${(bm.shrink ?? 0.9).toFixed(2)}\,(\hat\beta - 1) = ${m.beta.toFixed(2)}`);
   const am = m ? m.alpha_meta || {} : {};
   const aTxt = !m ? "" : am.reason === "no_targets" ? "no analyst targets, so α = 0"
@@ -5428,9 +5434,19 @@ let BUILD_STREAMING = false;
 
 /* Replace-by-symbol, else append — the one way a row enters DATA outside a
    full reload. Shared by the build stream and the refresh job's live patch. */
+/* The model's columns (requestModelPrices) are merged into DATA after the
+ * rows land, so a row swapped in by a refresh carries the previous numbers
+ * over until the next batch re-prices it: no flash of "—" in the grid. */
 function upsertDataRow(row) {
   const i = row && row.symbol ? DATA.findIndex(r => r.symbol === row.symbol) : -1;
-  if (i >= 0) DATA[i] = row; else DATA.push(row);
+  if (i >= 0) {
+    const prev = DATA[i];
+    if (prev && row.model_price == null && prev.model_price != null) {
+      row.model_price = prev.model_price; row.model_mu = prev.model_mu;
+      if (!row.beta_meta) { row.beta_meta = prev.beta_meta; row.beta = prev.beta; }
+    }
+    DATA[i] = row;
+  } else DATA.push(row);
 }
 
 async function build(opts) {
@@ -6243,11 +6259,12 @@ let _analyticsReqId = 0;
  * one batch for the open tab's rows, merged into DATA like the
  * analytics; a settings change forces a re-price. Never on the streaming
  * path: rows arrive without them and fill in a moment later. */
-let _mpKey = "", _mpSeq = 0;
+let _mpKey = "";
 function betaTitle(bm) {
   if (!bm) return "";
-  const how = bm.method === "bswa" ? `${bm.years || 3}Y daily, BSWA` : bm.method === "ols1y" ? "1Y daily OLS" : "prior: under 151 days of history";
-  return `vs ${bm.proxy_name} · ${how}${bm.raw != null ? ` · raw ${(+bm.raw).toFixed(2)}` : ""}`;
+  const how = bm.method === "bswa" ? `${bm.years || 3}Y daily, BSWA` : bm.method === "ols1y" ? "1Y daily OLS"
+    : bm.method === "weekly" ? `${bm.years || 3}Y weekly in USD (no home index here)` : "prior: under 151 days of history";
+  return `vs ${bm.proxy_name} · ${how}${bm.via ? ` · via ${bm.via}` : ""}${bm.raw != null ? ` · raw ${(+bm.raw).toFixed(2)}` : ""}`;
 }
 async function requestModelPrices(force) {
   // Every row, keyed on symbols and prices: a saved row's numbers are from the
@@ -6255,19 +6272,26 @@ async function requestModelPrices(force) {
   const rows = DATA.filter(r => r && r.symbol && !r.error && r.price != null);
   if (!rows.length) return;
   const key = rows.map(r => `${r.symbol}:${r.price}`).join(",");
-  if (!force && key === _mpKey) return;
+  // Skip a repeat only when every row still carries its numbers: a refresh
+  // swaps in new row objects at the same prices (upsertDataRow), and a skip
+  // keyed on prices alone left the whole book without them (2026-10-23).
+  if (!force && key === _mpKey && rows.every(r => r.model_price != null)) return;
   _mpKey = key;
-  const seq = ++_mpSeq;
+  const priced = new Map(rows.map(r => [(r.symbol || "").toUpperCase(), r.price]));
   try {
     const res = await fetch("/api/model-prices", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows: rows.map(r => ({ symbol: r.symbol, price: r.price, currency: r.currency,
+      body: JSON.stringify({ rows: rows.map(r => ({ symbol: r.symbol, name: r.name, price: r.price, currency: r.currency,
         target_mean_price: r.target_mean_price, dividend_yield: r.dividend_yield })) }) });
-    if (!res.ok || seq !== _mpSeq) return;
+    if (!res.ok) return;
     const models = (await res.json()).models || {};
     let hit = false;
+    // Requests overlap (tab switches, the background warm-up, a refresh), so
+    // no "newest wins": every answer merges into the rows it was priced for,
+    // by symbol and by the price it used (a dropped answer left the whole book
+    // without its numbers, 2026-10-23), never over a row repriced since.
     for (const r of DATA) {
-      const m = r && models[(r.symbol || "").toUpperCase()];
-      if (!m) continue;
+      const sym = (r && r.symbol || "").toUpperCase(), m = models[sym];
+      if (!m || priced.get(sym) !== r.price) continue;
       r.beta = m.beta; r.beta_meta = m.beta_meta; r.model_price = m.model_price; r.model_mu = m.mu;
       hit = true;
     }
@@ -6298,7 +6322,8 @@ async function requestAnalytics(opts) {
   // Payloads from before 1.28.1 have no `trading` block (the Constraints
   // readout waits for it).
   const backfill = !!(cached && !opts.force &&
-                      (!cached.benchmarks || !(cached.series && "ohlc" in cached.series) || !cached.trading));
+                      (!cached.benchmarks || !(cached.series && "ohlc" in cached.series) || !cached.trading
+                       || !(cached.stats && "beta" in cached.stats)));   // 1.29: the holdings' beta
   if (cached && !opts.force && !backfill) {
     STATE.analytics = cached;
     STATE.analyticsLoading = false;
@@ -8910,7 +8935,12 @@ async function rfFinish(state) {
     // My Investments' refresh fetched the book's market data only: reload
     // the page payload; the research tabs were never touched.
     REFRESH.touchedViews.clear();
-    if (state === "done") invLoad();
+    if (state === "done") {
+      invLoad();
+      // Its Portfolio-tab mirror got new rows and prices: re-price the
+      // model columns (nothing else re-requests them on this path).
+      if (STATE.activeView === INV_BOOK_VIEW) requestModelPrices();
+    }
     return;
   }
   if (state === "cancelled") {

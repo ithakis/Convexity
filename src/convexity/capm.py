@@ -63,6 +63,7 @@ import datetime as dt
 import json
 import math
 import threading
+from functools import lru_cache
 
 import numpy as np
 
@@ -92,10 +93,25 @@ HOME: dict[str, tuple[str, str, str]] = {
     "NS": ("^NSEI", "Nifty 50", "INR"),
     "BO": ("^NSEI", "Nifty 50", "INR"),
     "SA": ("^BVSP", "Bovespa", "BRL"),
+    # Probed live on Yahoo (2026-10-23): a European listing whose market has
+    # an index of its own is measured against it, not the STOXX 600 (Equinor
+    # read -0.52 vs STOXX over a year oil and equities moved apart; it is
+    # ~30% of OSEBX), and an Asian one never against the S&P on daily data.
+    "OL": ("OSEBX.OL", "Oslo Børs Benchmark", "NOK"),
+    "IR": ("^ISEQ", "ISEQ", "EUR"),
+    "LS": ("PSI20.LS", "PSI 20", "EUR"),
+    "SI": ("^STI", "Straits Times", "SGD"),
+    **dict.fromkeys(("TW", "TWO"), ("^TWII", "TAIEX", "TWD")),
+    "NZ": ("^NZ50", "NZX 50", "NZD"),
+    "JK": ("^JKSE", "Jakarta Composite", "IDR"),
+    "KL": ("^KLSE", "FTSE Bursa Malaysia KLCI", "MYR"),
+    "MX": ("^MXX", "S&P/BMV IPC", "MXN"),
+    "TA": ("^TA125.TA", "TA-125", "ILS"),
+    "JO": ("^J203.JO", "FTSE/JSE All Share", "ZAR"),
 }
 BACKTESTED = {"PA", "DE", "MC", "MI", "AS", "BR", "HE", "VI", "SW", "ST", "CO", "L", "T"}
 # European listings with no mapped country index: the region.
-EUROPE = {"LS", "OL", "IR", "WA", "PR", "BD", "AT", "IC", "RG", "TL", "VS", "MT"}
+EUROPE = {"WA", "PR", "BD", "AT", "IC", "RG", "TL", "VS", "MT"}
 REGIONAL_EU = ("^STOXX", "STOXX Europe 600", "EUR")
 US = ("^GSPC", "S&P 500", "USD")
 
@@ -180,17 +196,39 @@ def shrink(raw: float, w: float = SHRINK) -> float:
     return 1.0 + w * (raw - 1.0)
 
 
-def estimate(stock, market, years: int = WINDOW_YEARS) -> dict:
+def estimate(stock, market, years: int = WINDOW_YEARS, weekly: bool = False) -> dict:
     """Raw beta of a stock's closes on its market's closes (pandas Series
     indexed by date, same currency): ``{raw, method, n_days, asof}`` where
-    method is "bswa", "ols1y" or "prior" (raw None). Joint trading days only,
-    so a holiday in one market merges into a two-day return in the other."""
+    method is "bswa", "ols1y", "weekly" or "prior" (raw None). Joint trading
+    days only, so a holiday in one market merges into a two-day return in the
+    other.
+
+    ``weekly``: the last resort for a non-US listing measured against the
+    S&P 500 (an exchange with no home index here). Its close and New York's
+    are hours apart, and daily returns then read a beta near zero (Japan
+    0.25 vs 1.02 against TOPIX in the backtest; DBS 0.14): Friday-to-Friday
+    returns over the window, plain OLS, the backtest's W104 family."""
     import pandas as pd
 
     if stock is None or market is None:
         return {"raw": None, "method": "prior", "n_days": 0, "asof": None}
     df = pd.concat([stock.rename("s"), market.rename("m")], axis=1, join="inner").dropna()
     df = df[(df["s"] > 0) & (df["m"] > 0)]
+    if weekly:
+        wk = df.iloc[-(252 * int(years) + 1) :].resample("W-FRI").last().dropna()
+        asof = str(df.index[-1].date()) if len(df) else None
+        if len(wk) < 53:
+            return {
+                "raw": None,
+                "method": "prior",
+                "n_days": len(df.iloc[-(252 * int(years) + 1) :]),
+                "asof": asof,
+            }
+        y, x = np.expm1(np.diff(_log_index(wk["s"]))), np.expm1(np.diff(_log_index(wk["m"])))
+        b = ols(y, x)
+        ok = math.isfinite(b)
+        return {"raw": b if ok else None, "method": "weekly" if ok else "prior",
+                "n_days": len(df.iloc[-(252 * int(years) + 1) :]), "asof": asof}  # fmt: skip
     n_win = 252 * int(years) + 1
     d = df.iloc[-n_win:]
     asof = str(d.index[-1].date()) if len(d) else None
@@ -269,9 +307,94 @@ def _fresh(ent) -> bool:
     return isinstance(ent, dict) and ent.get("day") == dt.date.today().isoformat()
 
 
+_LINE_LEARNED: dict[str, str] = {}
+
+
+def beta_line(symbol: str) -> str:
+    """See ``_pack_line``; plus what ``learn_line`` found by name this
+    process for a listing the pack doesn't know (a US company's Milan line -> its US line)."""
+    s = (symbol or "").upper()
+    return _LINE_LEARNED.get(s) or _pack_line(s)
+
+
+def _fold(name: str) -> str:
+    import re
+
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).split())
+
+
+def learn_line(symbol: str, name: str | None) -> str | None:
+    """A listing the symbol pack doesn't know (a US company's line
+    on Borsa Italiana's global segment): Yahoo's live Lookup by the company's name, accepted only when a
+    hit is a stock the pack does know under the same name, whose home line
+    then carries the beta. Network: the batch path only, never the streaming
+    one; the answer (a miss too) is kept for the process."""
+    from convexity import symbol_db as sdb
+
+    s = (symbol or "").upper()
+    if s in _LINE_LEARNED or "." not in s or not name:
+        return _LINE_LEARNED.get(s)
+    try:
+        if sdb.get(s) is not None:
+            return None
+        want = _fold(name)
+        hits = sdb.yahoo_lookup(name)
+        if not hits:
+            return None  # no answer (a network blip, or Yahoo's own empty): ask again later
+        for h in hits:
+            known = sdb.get(h.ticker) if h.type == "stock" else None
+            if known is None or known.group == sdb.YAHOO_GROUP or _fold(known.name) != want:
+                continue
+            home = sdb.home(known.group)
+            line = (home.ticker if home else known.ticker).upper()
+            if line != s:
+                _LINE_LEARNED[s] = line
+                print(f"[beta] {s}: no pack entry; measured on {line} ({name})")
+                return line
+    except Exception as e:
+        print(f"[beta] {s}: lookup {type(e).__name__}")
+    _LINE_LEARNED[s] = ""
+    return None
+
+
+@lru_cache(maxsize=8192)
+def _pack_line(symbol: str) -> str:
+    """The listing whose returns carry the company's beta: its home line when
+    ``symbol`` is a secondary listing of a stock (the symbol pack's company
+    group; NVD.DE -> NVDA, CCC3.DE -> KO, NSRGY -> NESN.SW, NOV.DE ->
+    NOVO-B.CO), else ``symbol`` itself. Measured on the Vienna line against
+    the ATX, Micron read as an Austrian stock; the home principle the
+    backtest chose is the company's market, not the venue's. Funds keep their
+    own line (a UCITS ETF's other listings are the same fund). Pack only, no
+    network, cached: safe on the streaming path."""
+    s = (symbol or "").upper()
+    try:
+        from convexity import symbol_db as sdb
+
+        me = sdb.get(s)
+        if me is None or me.type != "stock" or me.group == sdb.YAHOO_GROUP:
+            return s
+        h = sdb.home(me.group)
+        return h.ticker.upper() if h and h.ticker else s
+    except Exception:
+        return s
+
+
+def _via(meta: dict | None, symbol: str, line: str) -> dict | None:
+    if meta is None:
+        return None
+    return {**meta, "via": line if line != (symbol or "").upper() else None}
+
+
 def cached(symbol: str, prefs: dict | None = None) -> dict | None:
-    """Today's beta for ``symbol`` from memory or ``state/betas.json``, or
-    None. No network: safe on ``fetch_one``'s streaming path."""
+    """Today's beta for ``symbol`` (measured on its ``beta_line``) from memory
+    or ``state/betas.json``, or None. No network: safe on ``fetch_one``'s
+    streaming path."""
+    line = beta_line(symbol)
+    return _via(_cached_line(line, prefs), symbol, line)
+
+
+def _cached_line(symbol: str, prefs: dict | None = None) -> dict | None:
     st = settings(prefs)
     k = _key(symbol, st["years"])
     ent = _MEM.get(k)
@@ -300,19 +423,38 @@ def _to_ccy(series, frm: str, to: str, fx_series):
 
 
 def ensure(
+    symbols,
+    prefs: dict | None = None,
+    ccy: dict[str, str] | None = None,
+    names: dict[str, str] | None = None,
+) -> dict[str, dict]:
+    """``{symbol: beta_meta}`` for every symbol, each measured on its
+    ``beta_line`` (``beta_meta["via"]`` names the home line when it is not the
+    listing itself), computing the missing ones in one bulk download and
+    writing them to ``state/betas.json``. A symbol whose data never came back
+    gets the prior (beta 1) without being cached, so the next call tries
+    again (§9: never cache a failure)."""
+    syms = [s.upper() for s in dict.fromkeys(symbols or []) if s]
+    for s, n in (names or {}).items():
+        learn_line(s, n)
+    lines = {s: beta_line(s) for s in syms}
+    # A caller's currency belongs to its own listing, never to the home line.
+    hints = {k.upper(): v for k, v in (ccy or {}).items()}
+    by_line = _ensure_lines(sorted(set(lines.values())), prefs,
+                            {ln: hints[ln] for ln in set(lines.values()) if ln in hints})  # fmt: skip
+    return {s: _via(by_line.get(lines[s]), s, lines[s]) for s in syms}
+
+
+def _ensure_lines(
     symbols, prefs: dict | None = None, ccy: dict[str, str] | None = None
 ) -> dict[str, dict]:
-    """``{symbol: beta_meta}`` for every symbol, computing the missing ones in
-    one bulk download and writing them to ``state/betas.json``. A symbol whose
-    data never came back gets the prior (beta 1) without being cached, so the
-    next call tries again (§9: never cache a failure)."""
     from convexity import analytics, fx
     from convexity.helpers import major_ccy
     from convexity.persistence import _atomic_write
 
     st = settings(prefs)
     syms = [s.upper() for s in dict.fromkeys(symbols or []) if s]
-    out = {s: cached(s, prefs) for s in syms}
+    out = {s: _cached_line(s, prefs) for s in syms}
     todo = [s for s, v in out.items() if v is None]
     if not todo:
         return out
@@ -355,7 +497,9 @@ def ensure(
                 stock = _to_ccy(col, c_s, px["ccy"], {c: usd_per(c) for c in need})
                 if stock is None:
                     continue
-            raw = estimate(stock, m, st["years"])
+            # Weekly only for the S&P standing in for a foreign market.
+            weekly = px["proxy"] == US[0] and home_proxy(s)["kind"] != "us"
+            raw = estimate(stock, m, st["years"], weekly=weekly)
             best = (raw, px)
             break
         if best is None:
@@ -363,8 +507,12 @@ def ensure(
             continue
         raw, px = best
         ent = {**raw, "proxy": px, "day": dt.date.today().isoformat()}
-        fresh[_key(s, st["years"])] = ent
         out[s] = finish(ent, px, st)
+        # Every home index answers on Yahoo (probed 2026-10-23), so a beta on a
+        # later proxy means its download failed this time: shown, never kept
+        # for the day, so the next call measures it against its home again.
+        if px["proxy"] == chains[s][0]["proxy"]:
+            fresh[_key(s, st["years"])] = ent
     if fresh:
         _MEM.update(fresh)
         with _LOCK:
@@ -387,8 +535,12 @@ def ensure(
     return out
 
 
-def beta_for(symbol: str, prefs: dict | None = None, ccy: str | None = None) -> dict:
-    return ensure([symbol], prefs, {symbol: ccy} if ccy else None)[(symbol or "").upper()]
+def beta_for(
+    symbol: str, prefs: dict | None = None, ccy: str | None = None, name: str | None = None
+) -> dict:
+    return ensure(
+        [symbol], prefs, {symbol: ccy} if ccy else None, {symbol: name} if name else None
+    )[(symbol or "").upper()]
 
 
 # ------------------------------- the model --------------------------------
@@ -431,6 +583,7 @@ def model(
     prefs: dict | None = None,
     beta_meta: dict | None = None,
     rate: tuple[float, str] | None = None,
+    name: str | None = None,
 ) -> dict:
     """THE model block at horizon ``T`` (years) for a listing at price ``s0``:
     ``{mu, mu_capm, rf, rf_source, beta, beta_meta, erp, alpha, alpha_meta,
@@ -441,7 +594,7 @@ def model(
     from convexity import options_density
 
     st = settings(prefs)
-    bm = beta_meta or beta_for(symbol, prefs, ccy)
+    bm = beta_meta or beta_for(symbol, prefs, ccy, name)
     rf, rsrc = rate or options_density._local_rate(ccy or "")
     upside = None
     if target and s0 and target > 0 and s0 > 0:
@@ -482,7 +635,8 @@ def for_rows(rows: list[dict], prefs: dict | None = None, T: float = 1.0) -> dic
         return float(v) if isinstance(v, int | float) and math.isfinite(v) else None
 
     rows = [r for r in rows or [] if isinstance(r.get("symbol"), str) and not r.get("error")]
-    bm = ensure([r["symbol"] for r in rows], prefs, {r["symbol"]: r.get("currency") for r in rows})
+    bm = ensure([r["symbol"] for r in rows], prefs, {r["symbol"]: r.get("currency") for r in rows},
+                {r["symbol"]: r["name"] for r in rows if isinstance(r.get("name"), str)})  # fmt: skip
     rates: dict[str, tuple] = {}
     out = {}
     for r in rows:

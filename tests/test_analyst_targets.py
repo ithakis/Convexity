@@ -183,3 +183,27 @@ def test_track_record_scores_relative_upside_against_the_next_year():
     tr = at.track_record(closes=closes)
     assert tr["n_weeks"] == 3 and tr["ic"] == pytest.approx(1.0)
     assert tr["verdict"].startswith("Too early") and tr["n_symbols"] == 10
+
+
+def test_a_listing_without_its_own_target_never_takes_the_parents_firms():
+    """CCC3.DE: Yahoo's summary is empty for the Xetra line, but its
+    upgrades_downgrades is Coca-Cola's, in USD. Read as euros it put the
+    target ~11% high; the block must be None so the research line (scaled
+    into euros) stands in, as on the grid row."""
+    import datetime as dt
+
+    import pandas as pd
+
+    from convexity import analyst_targets as at
+
+    when = pd.Timestamp(dt.datetime.now() - dt.timedelta(days=10))
+    ud = pd.DataFrame({"Firm": ["X"], "ToGrade": ["Buy"], "currentPriceTarget": [93.7],
+                       "priorPriceTarget": [90.0]}, index=pd.Index([when], name="GradeDate"))  # fmt: skip
+
+    class Tk:
+        upgrades_downgrades = ud
+        analyst_price_targets = {"current": 83.4}
+        splits = None
+
+    assert at.consensus("ZZCCC.DE", tk=Tk()) is None
+    assert at.consensus("ZZCCC2.DE", tk=Tk(), info={"currentPrice": 83.4}) is None

@@ -601,6 +601,19 @@ def _column_views_path() -> Path:
     return Path(_COLUMN_VIEWS_FILE)
 
 
+# A built-in preset's earlier factory column lists. An override whose columns
+# equal one of them changed nothing but heat (or was saved without a real
+# edit), yet froze the list: a column added to the preset later never showed.
+# Read as "factory" so the current list applies; heat overrides are kept.
+_RETIRED_FACTORY_COLUMNS: dict[str, list[list[str]]] = {
+    "Fundamentals": [[
+        "symbol", "price", "market_cap", "sector", "industry", "ps_ratio", "pe_ratio",
+        "forward_pe", "peg", "ev_revenue", "ev_ebitda", "operating_margin", "debt_equity",
+        "current_ratio", "dividend_yield", "earnings_surprise", "rec_trend_fh", "insider_mspr",
+    ]],  # before 1.29 (Beta, Model 12M, Model μ)
+}  # fmt: skip
+
+
 def _read_column_views_raw() -> dict:
     path = _column_views_path()
     empty = {"custom_views": {}, "builtin_overrides": {}, "active_view": "Default"}
@@ -642,7 +655,9 @@ def _read_column_views_raw() -> dict:
         ov: dict = {}
         cols = entry.get("columns")
         if isinstance(cols, list) and cols:
-            ov["columns"] = [str(c) for c in cols if isinstance(c, (str, int))]
+            clean_cols = [str(c) for c in cols if isinstance(c, (str, int))]
+            if clean_cols not in _RETIRED_FACTORY_COLUMNS.get(clean_name, []):
+                ov["columns"] = clean_cols
         heat = _sanitize_heat(entry.get("heat"))
         if heat:
             ov["heat"] = heat

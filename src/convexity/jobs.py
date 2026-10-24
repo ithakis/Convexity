@@ -672,6 +672,11 @@ def _build_news_context(job: Job, rows_by_symbol: dict) -> dict:
                 missing,
                 persistence.load_prefs(),
                 {s: rows_by_symbol[s].get("currency") for s in missing},
+                {
+                    s: rows_by_symbol[s]["name"]
+                    for s in missing
+                    if isinstance(rows_by_symbol[s].get("name"), str)
+                },
             )
         except Exception as e:
             print(f"[jobs] betas: {type(e).__name__}: {e}")

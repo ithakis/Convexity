@@ -290,3 +290,21 @@ def test_last_view_still_ignores_unknown_names():
     assert _last() == "Kept"
     persistence.set_last_view("")
     assert _last() is None
+
+
+def test_an_override_frozen_on_an_old_factory_list_follows_the_preset():
+    """A Fundamentals override holding exactly the pre-1.29 factory columns
+    (only its heat was changed) reads as factory, so Beta / Model 12M /
+    Model μ appear; its heat stays. A real customisation is untouched."""
+    old = persistence._RETIRED_FACTORY_COLUMNS["Fundamentals"][0]
+    path = persistence._column_views_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"builtin_overrides": {
+        "Fundamentals": {"columns": old, "heat": {"ev_ebitda": "quantile"}},
+        "Momentum": {"columns": ["symbol", "price"]},
+    }}), encoding="utf-8")  # fmt: skip
+    ov = persistence.load_column_views()["builtin_overrides"]
+    assert "columns" not in ov["Fundamentals"] and ov["Fundamentals"]["heat"] == {
+        "ev_ebitda": "quantile"
+    }
+    assert ov["Momentum"]["columns"] == ["symbol", "price"]

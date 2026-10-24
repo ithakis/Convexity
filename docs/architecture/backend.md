@@ -1357,8 +1357,26 @@ CAPM and the per-firm analyst mixture with its trust control:
   3M against Yahoo's. Cached per symbol and window per day in
   `state/betas.json` (raw beta, so a shrink change needs no recompute); a
   download that returned nothing is the prior, uncached.
+- **Whose beta** (`beta_line`, 2026-10-24, from the owner's real book): a
+  secondary listing of a stock is measured on the company's home line (the
+  symbol pack's group: NVD.DE → NVDA, APC.DE → AAPL, CCC3.DE → KO, NSRGY →
+  NESN.SW, NOV.DE → NOVO-B.CO); on its venue's index NVIDIA read as a German
+  stock. A listing the pack lacks learns its home line by name
+  (`learn_line`: Yahoo Lookup, accepted only when the pack knows the hit under
+  the same name; a US company's line on Borsa Italiana's global segment), batch path only, kept for the process; a
+  lookup with no answer is asked again, never cached as a miss. Funds keep
+  their own line. `beta_meta.via` names the line; the window, the grid tip and
+  the export say "via MU". More home indices, all probed live: Oslo
+  (OSEBX.OL), Dublin, Lisbon, Singapore, Taiwan, NZ, Jakarta, KL, Mexico,
+  Tel Aviv, Johannesburg (Equinor read −0.52 vs STOXX 600, 1.82 vs OSEBX). An
+  exchange with no home index here uses the S&P 500 on **weekly** USD
+  returns (`method: "weekly"`): daily returns across a closing-time gap read
+  a beta near zero (DBS 0.14). Every home index answers on Yahoo, so a beta
+  on a fallback proxy means a failed download: shown, never cached.
 - **rf_local** is `options_density._local_rate` (a home-index beta is a local
-  CAPM). **alpha** is `analyst_targets.relative_alpha` on the name's total
+  CAPM). The CME spread is read on the two contracts' joint days, median of
+  the last five: the thin far contract's last close was a day older than the
+  near one's and EUR read 1.48% instead of ~2.4% (2026-10-24). **alpha** is `analyst_targets.relative_alpha` on the name's total
   upside (mean target / price − 1 + dividend yield, like the optimizer's
   views), its reference the long-run universe mean blended 10:1 with the name's
   own; IC = `model_ic` or `view_ic()` (measured, else the 0.02 prior), z capped
@@ -1370,7 +1388,11 @@ CAPM and the per-firm analyst mixture with its trust control:
   export calls the same. The window's alpha uses the listing's own or its
   research line's target only (`_own_analysts` returns whether the block is
   the listing's); the chain line's block is still shown as the Street
-  reference but sets no alpha, since the row has none. The window's dividend
+  reference but sets no alpha, since the row has none. `analyst_targets.consensus` returns None for a
+  listing with no target summary of its own: Yahoo hands such a secondary
+  line the parent's firm list in the parent's currency (CCC3.DE got Coca-Cola's
+  $93.73 as euros, ~11% high, in the window, the coverage card and old rows),
+  so every caller falls through to the research line, scaled. The window's dividend
   yield is computed with the row's rule, currencies included (HSBA.L read
   0.04% with a pence price).
 - **Portfolio beta**: `stats.beta` is the weighted sum of the holdings' app

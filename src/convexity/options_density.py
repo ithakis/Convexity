@@ -887,6 +887,18 @@ def _resolve_chain(symbol: str):
         found = symbol_db.discover_us_line(symbol)
         if found:
             cands.append(found)
+    if not cands:
+        # A listing the symbol pack doesn't know (a US company's line on
+        # Borsa Italiana's global segment): the company's home line found by name (capm.learn_line, the
+        # same lookup its beta uses) may list options. Shape only: the
+        # model's alpha still comes from the listing's own targets.
+        with contextlib.suppress(Exception):
+            from convexity import capm
+
+            info = yf.Ticker(symbol).info or {}
+            line = capm.learn_line(symbol, info.get("longName") or info.get("shortName"))
+            if line:
+                cands.append(line)
     cands = [c for i, c in enumerate(cands) if c and c != symbol and c not in cands[:i]]
     if not cands:
         raise DensityError("no_options")
@@ -1055,8 +1067,15 @@ def _local_rate(ccy: str) -> tuple[float, str]:
     if root:
         try:
             (c1, d1), (c2, d2) = _next_quarters()
-            f1, f2 = _close(f"{root}{c1}.CME"), _close(f"{root}{c2}.CME")
-            r = r_usd - math.log(float(f2.iloc[-1]) / float(f1.iloc[-1])) / ((d2 - d1).days / 365)
+            f1, f2 = _close(f"{root}{c1}.CME", "1mo"), _close(f"{root}{c2}.CME", "1mo")
+            # Same days only, and the median of the last five: the far contract
+            # trades thinly, and its "last close" was a day older than the near
+            # one's (6E H27 on 22 Oct against Z26 on 23 Oct), so a 0.3% EUR/USD
+            # move read as a one-point rate gap (EUR 1.48% against ~2.4%).
+            from convexity.helpers import by_trading_date
+
+            j = (by_trading_date(f2) / by_trading_date(f1)).dropna().tail(5)
+            r = r_usd - math.log(float(j.median())) / ((d2 - d1).days / 365)
             if -0.02 < r < 0.2:
                 _RATE[ccy] = (time.time(), r, "CME futures")
                 return r, "CME futures"
@@ -1468,7 +1487,7 @@ def _payload_curves(rn: dict, curves: dict, fx: dict | None) -> dict:
 
 
 def _model_curves(
-    symbol, rn, ccy, ratio, an, st, kappa, div_yield, own: bool = True
+    symbol, rn, ccy, ratio, an, st, kappa, div_yield, own: bool = True, name: str | None = None
 ) -> tuple[dict, dict]:
     """The two real-world curves and the model block at this expiry.
 
@@ -1485,7 +1504,7 @@ def _model_curves(
 
     target = an.get("mean") * ratio if own and an and an.get("mean") else None
     mdl = capm.model(symbol, rn["T"], s0=rn["S0"] * ratio, ccy=ccy, target=target,
-                     div_yield=div_yield, prefs=st["prefs"])  # fmt: skip
+                     div_yield=div_yield, prefs=st["prefs"], name=name)  # fmt: skip
     mk = mean_curve(rn, mdl["mu_capm"], kappa)
     curves = {"market": (mk["p"], mk["method"])}
     if mdl["alpha"]:
@@ -1621,7 +1640,16 @@ def _compute(symbol: str, horizon: int, st: dict) -> dict:
         except Exception:
             info = {}
     mcurves, mdl = _model_curves(
-        symbol, rn, ccy, ratio, an, st, kappa, _dividend_yield(info, S0 * ratio, ccy), own
+        symbol,
+        rn,
+        ccy,
+        ratio,
+        an,
+        st,
+        kappa,
+        _dividend_yield(info, S0 * ratio, ccy),
+        own,
+        name=info.get("longName") or info.get("shortName"),
     )
     curves = _payload_curves(rn, {"rn": (rn["q"], "Q"), **mcurves}, fx)
     try:
@@ -1761,7 +1789,8 @@ def _history(symbol: str, horizon: int, st: dict) -> dict:
         an = _analysts(tk) or _research_analysts(symbol, S0)
     except Exception as e:
         print(f"[density] analysts {symbol}: {type(e).__name__}")
-    mcurves, mdl = _model_curves(symbol, rn, ccy, 1.0, an, st, 1.0, _dividend_yield(info, S0, ccy))
+    mcurves, mdl = _model_curves(symbol, rn, ccy, 1.0, an, st, 1.0, _dividend_yield(info, S0, ccy),
+                                 name=name)  # fmt: skip
     curves = _payload_curves(rn, {"rn": (None, None), **mcurves}, None)
     earnings = []
     try:

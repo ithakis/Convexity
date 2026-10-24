@@ -1118,7 +1118,12 @@ def analyze_portfolios_multi(
     # surface shows. A regression of the basket on a benchmark is a different
     # number and stays in benchmarks[...]["rel"] (vs the benchmark picked).
     try:
-        betas = capm.ensure(symbols, prefs, {r["symbol"]: r.get("currency") for r in rows})
+        betas = capm.ensure(
+            symbols,
+            prefs,
+            {r["symbol"]: r.get("currency") for r in rows},
+            {r["symbol"]: r["name"] for r in rows if isinstance(r.get("name"), str)},
+        )
     except Exception as e:
         print(f"[analytics] betas: {type(e).__name__}: {e}")
         betas = {}

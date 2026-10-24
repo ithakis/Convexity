@@ -111,8 +111,8 @@ def test_glitch_returns_are_ignored():
         ("NOVO-B.CO", "^OMXC25", "home"),
         ("HSBA.L", "^FTAS", "home"),
         ("7203.T", "1306.T", "home"),
-        ("EDP.LS", "^STOXX", "regional"),
-        ("EQNR.OL", "^STOXX", "regional"),
+        ("PKO.WA", "^STOXX", "regional"),
+        ("CEZ.PR", "^STOXX", "regional"),
         ("XYZ.ZZ", "^GSPC", "fallback"),
     ],
 )
@@ -248,7 +248,7 @@ def test_one_model_price_on_every_path(model_env, monkeypatch):
     from convexity import options_density as od
     from convexity import xlsx_export
 
-    monkeypatch.setattr(capm, "ensure", lambda syms, prefs=None, ccy=None: {
+    monkeypatch.setattr(capm, "ensure", lambda syms, prefs=None, ccy=None, names=None: {
         s.upper(): model_env for s in syms})  # fmt: skip
     monkeypatch.setattr(capm, "beta_for", lambda *a, **k: model_env)
     row = {"symbol": "XYZ", "price": 80.0, "currency": "USD", "target_mean_price": 96.0,
@@ -292,3 +292,103 @@ def test_removed_fields_are_gone():
     src = open(options_density.__file__, encoding="utf-8").read()
     for gone in ('"analysts_t50"', '"at_expiry"', "dist_trust", 'q.get("beta")'):
         assert gone not in src
+
+
+def test_weekly_fixes_the_closing_time_bias():
+    """A market that closes before New York reacts to the S&P's day the next
+    morning: daily returns read beta ~0, Friday-to-Friday returns recover it."""
+    rng = np.random.default_rng(7)
+    idx = pd.bdate_range("2023-01-02", periods=800)
+    m = rng.normal(0, 0.01, 800)
+    s = np.r_[0.0, 1.2 * m[:-1]] + rng.normal(0, 0.004, 800)  # today's move = yesterday's S&P
+    stock = pd.Series(100 * np.exp(np.cumsum(s)), index=idx)
+    spx = pd.Series(4000 * np.exp(np.cumsum(m)), index=idx)
+    assert abs(capm.estimate(stock, spx)["raw"]) < 0.2
+    wk = capm.estimate(stock, spx, weekly=True)
+    assert wk["method"] == "weekly" and wk["raw"] == pytest.approx(1.2 * 0.8, abs=0.25)
+
+
+@pytest.mark.parametrize(
+    "sym,proxy", [("EQNR.OL", "OSEBX.OL"), ("D05.SI", "^STI"), ("2330.TW", "^TWII"),
+                  ("CRH.IR", "^ISEQ"), ("EDP.LS", "PSI20.LS"), ("PTT.BK", "^GSPC")],
+)  # fmt: skip
+def test_more_home_markets(sym, proxy):
+    assert capm.home_proxy(sym)["proxy"] == proxy
+
+
+def test_a_fallback_proxy_is_shown_but_never_cached(monkeypatch):
+    """The home index's download failed this time (every home index answers
+    on Yahoo): the beta against the next proxy is used, not kept for the day."""
+    s, m = _series(800, 1.4, seed=3)
+    frame = pd.DataFrame({"BNP.PA": s, "^STOXX": m, "^GSPC": m})  # no ^FCHI
+    from convexity import analytics
+
+    monkeypatch.setattr(
+        analytics,
+        "_bulk_close",
+        lambda syms, period, **_: frame[[c for c in syms if c in frame.columns]],
+    )
+    capm._MEM.clear()
+    out = capm.ensure(["BNP.PA"], {}, {"BNP.PA": "EUR"})["BNP.PA"]
+    assert out["proxy"] == "^STOXX" and out["method"] == "bswa"
+    assert capm.cached("BNP.PA") is None
+
+
+def test_a_secondary_listing_uses_its_home_line(monkeypatch):
+    """NVD.DE is NVIDIA on Xetra: its beta is NVIDIA's against the S&P 500,
+    measured on NVDA, not the DAX; the listing's EUR hint never touches NVDA."""
+    s, m = _series(800, 1.8, seed=11)
+    frame = pd.DataFrame({"NVDA": s, "^GSPC": m, "^GDAXI": m * 0 + 3000.0})
+    from convexity import analytics
+
+    seen = []
+
+    def bulk(syms, period, **_):
+        seen.append(list(syms))
+        return frame[[c for c in syms if c in frame.columns]]
+
+    monkeypatch.setattr(analytics, "_bulk_close", bulk)
+    monkeypatch.setattr(
+        capm, "beta_line", lambda sym: {"NVD.DE": "NVDA"}.get(sym.upper(), sym.upper())
+    )
+    capm._MEM.clear()
+    out = capm.ensure(["NVD.DE"], {}, {"NVD.DE": "EUR"})["NVD.DE"]
+    assert out["via"] == "NVDA" and out["proxy"] == "^GSPC"
+    assert out["raw"] == pytest.approx(1.8, abs=0.2)
+    assert "NVD.DE" not in seen[0] and "^GDAXI" not in seen[0]
+    assert capm.cached("NVD.DE")["via"] == "NVDA"
+
+
+def test_a_listing_the_pack_lacks_learns_its_home_line_by_name(monkeypatch):
+    """ZZXY.MI (a synthetic Milan line) is not in the symbol pack: Yahoo's
+    Lookup by name finds XYZ, which the pack knows under the same name."""
+    from convexity import symbol_db as sdb
+
+    Hit = sdb.Hit
+    pm = Hit(
+        "XYZ",
+        "Example Holdings Inc.",
+        "stock",
+        "NYQ",
+        "us",
+        None,
+        None,
+        3e11,
+        1309,
+        100.0,
+    )
+    monkeypatch.setattr(sdb, "get", lambda t: pm if t == "XYZ" else None)
+    monkeypatch.setattr(sdb, "home", lambda g: pm)
+    monkeypatch.setattr(
+        sdb,
+        "yahoo_lookup",
+        lambda q, **_: [pm._replace(group=-1)] if hasattr(pm, "_replace") else [pm],
+    )
+    capm._LINE_LEARNED.clear()
+    capm._pack_line.cache_clear()
+    assert capm.learn_line("ZZXY.MI", "Example Holdings Inc.") == "XYZ"
+    assert capm.beta_line("ZZXY.MI") == "XYZ"
+    assert (
+        capm.learn_line("ZZZ.MI", "Some Other Co") is None and capm.beta_line("ZZZ.MI") == "ZZZ.MI"
+    )
+    capm._LINE_LEARNED.clear()

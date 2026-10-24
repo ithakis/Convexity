@@ -232,6 +232,18 @@ def consensus(symbol: str, tk=None, info: dict | None = None, splits=None, price
         }
     else:
         summary = summary_from_info(info)
+    if all(summary.get(k) is None for k in ("mean", "median", "low", "high")) and not summary.get(
+        "n_opinions"
+    ):
+        # No target of the listing's own: a secondary line (CCC3.DE, NVD.DE,
+        # APC.DE). Yahoo still hands it the PARENT's firm list, in the
+        # parent's currency: CCC3.DE got Coca-Cola's 15 firms at $93.73 read as
+        # euros, ~11% high, while its grid row (fetch_one skips such a listing
+        # and scales the research line's targets) said EUR 84.09. None here,
+        # so every caller falls through to the research line the same way.
+        if key:
+            _cache_put(key, {"v": None}, MISS_TTL)
+        return None
     px = _num(price) or _num(summary.get("price"))
     try:
         ud = tk.upgrades_downgrades

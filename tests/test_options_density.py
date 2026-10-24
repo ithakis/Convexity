@@ -658,3 +658,27 @@ def test_window_dividend_yield_repairs_pence():
     """HSBA.L: a pence price and a pound dividend rate (the row's rule)."""
     info = {"currency": "GBp", "dividendRate": 0.56, "dividendYield": 4.07}
     assert od._dividend_yield(info, 1347.8, "GBp") == pytest.approx(0.0415, abs=0.002)
+
+
+def test_local_rate_compares_the_futures_on_the_same_days(monkeypatch):
+    """The far contract trades thinly: its last close can be a day older than
+    the near one's. Mixing dates turned a 0.3% EUR/USD move into a one-point
+    rate error; the spread is read on joint days only."""
+    import pandas as pd
+
+    days = pd.bdate_range("2026-10-12", periods=10)
+    near = pd.Series(1.1200, index=days)
+    far = pd.Series(1.1200 * math.exp((0.04 - 0.024) * 91 / 365), index=days)
+    near.iloc[-1] = 1.1200 * 0.997  # today's move, far has no print today
+    far = far.iloc[:-1]
+    monkeypatch.setattr(od, "_rate", lambda: 0.04)
+    monkeypatch.setattr(
+        od,
+        "_next_quarters",
+        lambda n=2: [("Z26", dt.date(2026, 12, 16)), ("H27", dt.date(2027, 3, 17))],
+    )
+    monkeypatch.setattr(od, "_close", lambda sym, period="5d": near if "Z26" in sym else far)
+    od._RATE.pop("EUR", None)
+    r, src = od._local_rate("EUR")
+    assert src == "CME futures" and r == pytest.approx(0.024, abs=0.002)
+    od._RATE.pop("EUR", None)

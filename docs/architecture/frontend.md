@@ -535,7 +535,14 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   (`requestModelPrices`, called with every analytics request, keyed on the
   rows' symbols and prices): never on the streaming path, merged into DATA,
   then `render()`. A saved row's figures are from the day it was saved, so a
-  new price re-prices them all.
+  new price re-prices them all. Requests overlap (tab switches, the warm-up, a
+  refresh), so there is no "newest wins": each answer merges into the rows it
+  was priced for (same symbol, same price); a refresh's swapped-in row keeps
+  the previous numbers until re-priced (`upsertDataRow`), and finishing a
+  refresh of the My Investments mirror re-prices it (`rfFinish`). A built-in
+  override whose columns equal a retired factory list reads as factory
+  (`persistence._RETIRED_FACTORY_COLUMNS`), so new preset columns appear for
+  an owner who only changed heat.
 - **Every source says what it is** (`renderFcReadouts`, keyed on the payload's
   `source`, `quality.smile` and `fx`): a surface fit names its quotes over
   all expiries; an FX layer is "+ FX" in the σ label and the pair, vol and ρ
