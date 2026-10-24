@@ -9,6 +9,13 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.29.0 — 2026-10-24
+
+- **One model price, everywhere.** Every asset gets one expected return, μ = r_f (local) + β·ERP + α, and one model price, S₀·e^(μT). The stock window, the grid's new Beta / Model 12M / Model μ columns (in Fundamentals), the export, portfolio beta and the optimizer's analyst settings all read it. μ on (the default) adds the analysts' small relative tilt α; μ off is pure CAPM. The trust control is gone; the Street's 12-month target is a hollow reference marked "not a forecast".
+- **The app's own beta.** Yahoo's beta is no longer read. β is measured against the listing's home index in local currency, on 3 years of daily returns with Welch's slope-winsorised, age-weighted estimator, shrunk 10% toward 1. A secondary listing uses the company's home line ("via MU"); a fund is measured against the index it tracks best (S&P 500, STOXX 600, MSCI ACWI, EM), and gold or bond funds with plain OLS; an exchange with no home index uses weekly returns against the S&P 500. More home markets: Oslo, Dublin, Lisbon, Singapore, Taiwan and others.
+- **Settings → Model price:** the formula, this asset's numbers, why each choice was made, and the parameters (equity premium, beta window and shrink, analyst IC, z cap, κ). Price distribution keeps Measure only.
+- **Fixes:** a secondary listing's analyst targets could be the parent's in the parent's currency (CCC3.DE read Coca-Cola's dollars as euros); the EUR short rate read 1.48% instead of ~2.4% from two futures closes on different days; the window and the grid now agree on every name's μ; a saved Fundamentals preset picks up the new columns and keeps its heat settings.
+
 ## 1.28.8 — 2026-10-23
 
 - **Trust in targets, on the chart.** The hidden "Analyst haircut" checkbox is now a 0% / 50% / 100% control next to μ (and in Settings → Price distribution). 0% is the market's mean (CAPM), 50% keeps half of each target's excess return over CAPM (the default, as before), 100% uses the targets as published, and the mean path then ends on the analysts' diamond. Switching is instant: every curve ships in one payload.
