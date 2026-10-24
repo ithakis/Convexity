@@ -57,6 +57,12 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     from convexity import attention
 
     monkeypatch.setattr(attention, "fetch_events", lambda s: None)
+    # capm's process memory (betas, learned home lines) follows the folder.
+    from convexity import capm
+
+    monkeypatch.setattr(capm, "_LINES_DISK", None)
+    monkeypatch.setattr(capm, "_LINE_LEARNED", {})
+    capm._MEM.clear()
     # Last line of defence: yfinance's transport (curl_cffi) answers as if
     # offline for anything but loopback. Since 6 Oct a stray live fetch ran
     # the full analytics on real Yahoo data on GitHub's runners only (a

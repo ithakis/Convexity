@@ -200,7 +200,7 @@ const COL_INFO = {
   rsi_14:        "14-day Relative Strength Index. Below 30 is oversold, above 70 is overbought.",
   macd_hist_pct: "MACD histogram as a percent of price. Positive means MACD is above its signal line; negative means momentum is fading.",
   bb_pct_b:      "Bollinger %B. 0 = lower band, 0.5 = middle band, 1 = upper band. Above 1 or below 0 means price is outside the bands.",
-  beta:          "The app's beta: 3 years of daily returns against the listing's home index in its own currency (S&P 500, DAX, FTSE All-Share, TOPIX…), slope-winsorised and age-weighted (Welch's BSWA), shrunk 10% toward 1. Under a year of history a 1-year OLS; under 151 days the prior, 1. Around 1 moves with its market; above 1 amplifies it. Settings → Model price.",
+  beta:          "The app's beta: 3 years of daily returns against the listing's home index in its own currency (S&P 500, DAX, FTSE All-Share, TOPIX…), slope-winsorised and age-weighted (Welch's BSWA), shrunk 10% toward 1. A secondary listing uses the company's home line (via …); a fund the index it tracks best. Under a year of history a 1-year OLS; under 151 days the prior, 1. Around 1 moves with its market; above 1 amplifies it. Hover a cell for its own; Settings → Model price.",
   model_price:   "The model price in 12 months: today's price × e^μ, μ = the local short rate + β × the equity premium + the analysts' small α (capm.py). The same number as the stock window's and the export's. A model, not a forecast with an edge.",
   model_mu:      "The model's expected return a year: r_f (local) + β × ERP + α. α is the analysts' relative optimism × IC × 0.42, at most ~±2.5%.",
   sector:        "GICS sector (e.g. Technology, Energy) reported by Yahoo Finance.",
@@ -4556,13 +4556,18 @@ function renderFcReadouts() {
   const expTxt = fcFmtDate(new Date(d.expiry + "T12:00:00"));
   // The app's one model (capm.py): its decomposition, its beta, its words.
   const bm = m ? m.beta_meta || {} : {};
-  const bHow = bm.method === "bswa" ? `${bm.years || 3}Y daily` : bm.method === "ols1y" ? "1Y daily OLS" : bm.method === "weekly" ? `${bm.years || 3}Y weekly, in USD` : "prior";
+  const bHow = bm.method === "bswa" ? `${bm.years || 3}Y daily` : bm.method === "ols1y" ? "1Y daily OLS" : bm.method === "ols" ? `${bm.years || 3}Y daily OLS` : bm.method === "weekly" ? `${Math.max(bm.years || 3, 2)}Y weekly` : "prior";
+  const fitTxt = bm.fit_r2 != null ? `A fund: measured against the index that explains it best, ${bm.proxy_name} (R² ${(+bm.fit_r2).toFixed(2)} of weekly returns), out of its home market, the S&P 500, STOXX Europe 600, MSCI ACWI and Emerging Markets. `
+    : bm.fit_best_r2 != null ? `A fund no market index explains (best R² ${(+bm.fit_best_r2).toFixed(2)} of weekly returns), like gold or bonds: measured against its home market with plain OLS — Welch’s winsorising is built for stocks and pulls a weakly correlated asset toward 1. ` : "";
   const viaTxt = bm.via ? ` · via ${escapeHtml(bm.via)}` : "";
   const betaCell = !m ? "" : cell("Beta", `${m.beta.toFixed(2)} <small>${bm.method === "prior" ? "prior · too little history" : `vs ${escapeHtml(bm.proxy_name || "")} · ${bHow}`}${viaTxt}</small>`, "",
-    (bm.via ? `Measured on ${bm.via}, the company’s home line: a secondary listing trades the same company, and its venue’s index is not its market. ` : "") + (bm.method === "prior"
+    (bm.via ? `Measured on ${bm.via}, the company’s home line: a secondary listing trades the same company, and its venue’s index is not its market. ` : "") + fitTxt + (bm.method === "prior"
       ? `Under 151 trading days of history against ${bm.proxy_name || "its market"}, so the prior: β = 1.`
+      : bm.method === "weekly" && bm.fit_r2 != null
+      ? `Friday-to-Friday returns in the index’s currency over ${Math.max(bm.years || 3, 2)} years, with one week’s lag (the fund closes hours from that market, which makes daily returns read a beta too low), raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.`
       : bm.method === "weekly"
-      ? `No home index for this exchange, so the S&P 500 stands in: Friday-to-Friday returns in USD over ${bm.years || 3} years (its close is hours from New York’s, which makes daily returns read a beta near zero), raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.`
+      ? `No home index for this exchange, so the S&P 500 stands in: Friday-to-Friday returns in USD over ${Math.max(bm.years || 3, 2)} years with one week’s lag (its close is hours from New York’s, which makes daily returns read a beta near zero), raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.`
+      : bm.method === "ols" ? `${bm.n_days} joint trading days of daily returns against ${bm.proxy_name}, plain OLS, raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.`
       : `The app’s beta: ${bm.n_days} joint trading days of daily returns against ${bm.proxy_name} in local currency, slope-winsorised and age-weighted (Welch’s BSWA)${bm.method === "ols1y" ? " — under a year of history, so a plain 1-year OLS" : ""}, raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.${bm.backtested === false ? " This market's index was not in the backtest." : ""}`),
     null, String.raw`\beta = 1 + ${(bm.shrink ?? 0.9).toFixed(2)}\,(\hat\beta - 1) = ${m.beta.toFixed(2)}`);
   const am = m ? m.alpha_meta || {} : {};
@@ -4786,7 +4791,7 @@ const DETAIL_METRIC_INFO = {
   },
   "Beta": {
     formula: String.raw`\beta = \dfrac{\mathrm{Cov}(r_i, r_m)}{\mathrm{Var}(r_m)}`,
-    desc: "The app's beta: 3 years of daily returns against the listing's home index in local currency, slope-winsorised and age-weighted (Welch's BSWA), shrunk 10% toward 1 (Settings → Model price). The β(SPY) in the Performance header is a plain regression on SPY over the last year of daily returns (two years of weekly returns outside US trading hours), so the two can differ.",
+    desc: "The app's beta: 3 years of daily returns against the listing's home index in local currency, slope-winsorised and age-weighted (Welch's BSWA), shrunk 10% toward 1 (Settings → Model price). A secondary listing is measured on the company's home line, a fund against the index that explains it best. The β(SPY) in the Performance header is a plain regression on SPY over the last year of daily returns (two years of weekly returns outside US trading hours), so the two can differ.",
     range: "Around 1 behaves like the market. Below 1 is more defensive; above 1.3 is usually high-beta growth or cyclicality. Beta is market sensitivity, not total volatility."
   },
   "Revenue (TTM)": {
@@ -6263,8 +6268,9 @@ let _mpKey = "";
 function betaTitle(bm) {
   if (!bm) return "";
   const how = bm.method === "bswa" ? `${bm.years || 3}Y daily, BSWA` : bm.method === "ols1y" ? "1Y daily OLS"
-    : bm.method === "weekly" ? `${bm.years || 3}Y weekly in USD (no home index here)` : "prior: under 151 days of history";
-  return `vs ${bm.proxy_name} · ${how}${bm.via ? ` · via ${bm.via}` : ""}${bm.raw != null ? ` · raw ${(+bm.raw).toFixed(2)}` : ""}`;
+    : bm.method === "ols" ? `${bm.years || 3}Y daily OLS (a fund no index explains)`
+    : bm.method === "weekly" ? `${Math.max(bm.years || 3, 2)}Y weekly${bm.fit_r2 != null ? "" : " in USD (no home index here)"}` : "prior: under 151 days of history";
+  return `vs ${bm.proxy_name} · ${how}${bm.fit_r2 != null ? ` · fund, best fit R² ${(+bm.fit_r2).toFixed(2)}` : ""}${bm.via ? ` · via ${bm.via}` : ""}${bm.raw != null ? ` · raw ${(+bm.raw).toFixed(2)}` : ""}`;
 }
 async function requestModelPrices(force) {
   // Every row, keyed on symbols and prices: a saved row's numbers are from the
@@ -13059,6 +13065,7 @@ const SETTINGS_ICONS = {
   attention: '<path d="M8 2.2 14.2 13H1.8z"/><path d="M8 6.5v3M8 11.3v.2"/>',
   notifications: '<path d="M4 11V7.5a4 4 0 0 1 8 0V11l1.2 1.2H2.8zM6.6 13.8a1.5 1.5 0 0 0 2.8 0"/>',
   distribution: '<path d="M1.8 13.5h12.4M2.5 13c2-.2 2.8-9 5.5-9s3.5 8.8 5.5 9"/>',
+  model: '<path d="M1.8 13.5h12.4M2.5 11.5 6 8l2.5 2 3.6-4.3"/><circle cx="13" cy="4.8" r="1.4"/>',
   keys: '<circle cx="5.2" cy="10.8" r="2.7"/><path d="M7.2 8.8 13.5 2.5M11.2 4.8l1.8 1.8M9.6 6.4l1.4 1.4"/>',
   logs: '<rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M4.8 6.2 6.8 8l-2 1.8M8.2 10.2h3"/>',
   guide: '<path d="M2.5 3.2c2-.6 3.8-.4 5.5.8 1.7-1.2 3.5-1.4 5.5-.8v9.6c-2-.6-3.8-.4-5.5.8-1.7-1.2-3.5-1.4-5.5-.8zM8 4v9.6"/>',
@@ -13911,11 +13918,12 @@ async function renderSettingsModel(el) {
   const theory = `<div class="settings-row model-theory" data-item="model-theory"><div class="settings-row-main">
     <div class="settings-row-label">How it is built</div>
     <div class="model-formula">${tx(String.raw`\mu = r_{f,\text{local}} + \beta\cdot\text{ERP} + \alpha`, "μ = r_f + β·ERP + α")}<span></span>${tx(String.raw`P_T = S_0\,e^{\mu T}`, "P_T = S_0 e^{μT}")}</div>
-    <div class="settings-row-help">r<sub>f</sub> is the short rate in the asset’s own currency; β is measured against its home market; α is the analysts’ small relative tilt, 0 without targets. μ off in a stock window is pure CAPM (α = 0). The options shape the distribution only: their curve, widened by κ, is tilted once so its mean is P<sub>T</sub>.</div>
+    <div class="settings-row-help">r<sub>f</sub> is the short rate in the asset’s own currency; β is measured against its home market (a secondary listing: the company’s home line; a fund: the index it tracks); α is the analysts’ small relative tilt, 0 without targets. μ off in a stock window is pure CAPM (α = 0). The options shape the distribution only: their curve, widened by κ, is tilted once so its mean is P<sub>T</sub>.</div>
     <details class="model-why" open><summary>Why the home index, three years of daily returns and a 0.9 shrink</summary><ul>
       <li>A backtest of 164 names (US, Europe, UK, Japan and 25 European banks), one forecast a year from 2008 to 2025, scored against the realised beta over the next 3 and 12 months: the mean squared error falls <b>51% at 12M and 57% at 3M</b> against Yahoo’s 5-year monthly beta vs the S&amp;P 500.</li>
       <li>The home index explains far more of a stock than the S&amp;P 500: European banks R² .52 vs .29; Japan’s daily beta vs the S&amp;P reads 0.25 against 1.02 vs TOPIX, since Tokyo closes before New York opens.</li>
       <li>Welch’s slope-winsorised, age-weighted beta (BSWA): ${tx(String.raw`r_i \in [-2\,r_m,\ 4\,r_m]`, "r_i clipped to [−2r_m, 4r_m]")}, weights ${tx(String.raw`e^{-2\,\text{age}/252}`, "e^(−2·age/252)")} (a half-life of about 87 trading days), a weighted OLS slope; ${tx(String.raw`\beta = 1 + w(\hat\beta - 1)`, "β = 1 + w(β̂ − 1)")} with w = 0.9, optimal within 0.001 in every group (Blume’s 0.67 is 7% worse here). Under a year of history: a 1-year OLS; under 151 days: β = 1, “prior”.</li>
+      <li>A fund is measured against the market it holds, not its listing’s: the best fit (weekly R²) of its home index, the S&amp;P 500, STOXX Europe 600, MSCI ACWI and Emerging Markets. An S&amp;P 500 tracker on London read 0.47 against the FTSE and 0.99 against the S&amp;P. A fund no index explains (gold, bonds: R² under 0.3) stays on its home market with plain OLS, since BSWA’s band pulls a weakly correlated asset toward 1 (gold 0.74, OLS 0.28). Weekly returns, for an index that closes hours from the listing, carry one week’s lag (Dimson).</li>
       <li>Levi &amp; Welch (2017), <i>Best practice for cost-of-capital estimates</i>; Hollstein &amp; Prokopczuk (2016), <i>Estimating beta</i>; Welch (2022), <i>Simply better market betas</i>.</li>
     </ul></details>
     <details class="model-why"><summary>Why analysts get only a small α</summary><ul>

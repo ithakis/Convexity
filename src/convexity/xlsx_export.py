@@ -1531,9 +1531,13 @@ def _with_model(view: dict, model_runner) -> dict:
         if m:
             bm = m["beta_meta"]
             how = {"bswa": f"{bm['years']}Y daily, BSWA", "ols1y": "1Y daily OLS",
-                   "weekly": f"{bm['years']}Y weekly in USD",
+                   "ols": f"{bm['years']}Y daily OLS",
+                   "weekly": f"{max(bm['years'], 2)}Y weekly"
+                   + ("" if bm.get("fit_r2") is not None else " in USD"),
                    "prior": "prior (too little history)"}.get(bm["method"], bm["method"])  # fmt: skip
             via = f" · via {bm['via']}" if bm.get("via") else ""
+            if bm.get("fit_r2") is not None:
+                via += f" · fund, best fit R² {bm['fit_r2']:.2f}"
             r.update(beta=m["beta"], beta_vs=f"{bm['proxy_name']} · {how}{via}",
                      model_mu=m["mu"], model_price=m["model_price"])  # fmt: skip
         out.append(r)

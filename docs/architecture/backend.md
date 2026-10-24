@@ -1351,7 +1351,9 @@ CAPM and the per-firm analyst mixture with its trust control:
   unmapped European exchange, else the S&P 500 with the stock in USD. Welch's
   BSWA on the last 3Y of daily returns on joint days (stock clipped to
   [−2 r_m, 4 r_m], weights exp(−2·age/252), weighted OLS slope; |log r| > 1
-  is a glitch, zeroed), 1Y OLS with 151–251 joint days, beta 1 "prior" below.
+  is a glitch, zeroed, and so is a one-bar bad print: a move over 15% the
+  next bar takes back, both bars — an S&P 500 ETF on London had a +30%/−28%
+  Friday pair that cut its weekly R² with the S&P to 0.18), 1Y OLS with 151–251 joint days, beta 1 "prior" below.
   Shrunk 1 + w(b − 1), w = 0.9. Backtest (164 names, 2008–2025, research branch
   `scripts/backtest_beta.py`): MSE vs the realised beta −51% at 12M and −57% at
   3M against Yahoo's. Cached per symbol and window per day in
@@ -1363,8 +1365,12 @@ CAPM and the per-firm analyst mixture with its trust control:
   NESN.SW, NOV.DE → NOVO-B.CO); on its venue's index NVIDIA read as a German
   stock. A listing the pack lacks learns its home line by name
   (`learn_line`: Yahoo Lookup, accepted only when the pack knows the hit under
-  the same name; a US company's line on Borsa Italiana's global segment), batch path only, kept for the process; a
-  lookup with no answer is asked again, never cached as a miss. Funds keep
+  the same name; a US company's line on Borsa Italiana's global segment), batch path only, a found line
+  kept a week in `state/beta_lines.json`; a lookup with no answer is asked
+  again, never cached as a miss, and until the line is known (`unresolved`)
+  the listing's own-line beta is shown but not cached (a timed-out lookup
+  after a restart put a US company's Milan line on the FTSE MIB for the
+  day, 2026-10-24). Funds keep
   their own line. `beta_meta.via` names the line; the window, the grid tip and
   the export say "via MU". More home indices, all probed live: Oslo
   (OSEBX.OL), Dublin, Lisbon, Singapore, Taiwan, NZ, Jakarta, KL, Mexico,
@@ -1373,6 +1379,25 @@ CAPM and the per-firm analyst mixture with its trust control:
   returns (`method: "weekly"`): daily returns across a closing-time gap read
   a beta near zero (DBS 0.14). Every home index answers on Yahoo, so a beta
   on a fallback proxy means a failed download: shown, never cached.
+- **Funds** (`is_fund` from the symbol pack's type, or an ETC/ETN/physical-metal
+  name Yahoo types "stock" — never a name ending in a company suffix; an ETC
+  also keeps its own line, never its group's; `fund_candidates`,
+  2026-10-24): a fund is measured against the candidate with the highest
+  weekly R² (`weekly_r2`) among its home chain, ^GSPC, ^STOXX, ACWI and EEM
+  (USD ETFs standing in for MSCI ACWI and EM), when that R² is at least
+  `FUND_MIN_R2` = 0.3 (`beta_meta.fit_r2`). On its venue's index an S&P 500
+  tracker on London read 0.47 (FTSE) and a world fund on Xetra 0.59 (DAX).
+  Below 0.3 (gold, bonds; `fit_best_r2`) it stays on its home market with
+  plain daily OLS (`method: "ols"`): BSWA's [−2 r_m, 4 r_m] band pulls a
+  weakly correlated asset toward 1 (GLD 0.74 BSWA, 0.28 OLS). Weekly
+  returns (`_weekly`: any proxy outside the listing's session) use one lag,
+  Dimson 1979 (`dimson`): plain weekly still read a London S&P tracker 0.86,
+  0.99 with the lag. A fund fitted without every candidate's download is
+  shown, not cached. The cache key carries `|f`, so betas from before the
+  fund rule recompute. Weekly estimates always read at least two years
+  (W104): a 1Y window has ~52 weeks, under the 53 needed. Concurrent callers
+  compute once (`_COMPUTE`: a page load asked from three places and
+  downloaded the same 27 names three times).
 - **rf_local** is `options_density._local_rate` (a home-index beta is a local
   CAPM). The CME spread is read on the two contracts' joint days, median of
   the last five: the thin far contract's last close was a day older than the

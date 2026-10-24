@@ -62,6 +62,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import re
 import threading
 from functools import lru_cache
 
@@ -114,6 +115,15 @@ BACKTESTED = {"PA", "DE", "MC", "MI", "AS", "BR", "HE", "VI", "SW", "ST", "CO", 
 EUROPE = {"WA", "PR", "BD", "AT", "IC", "RG", "TL", "VS", "MT"}
 REGIONAL_EU = ("^STOXX", "STOXX Europe 600", "EUR")
 US = ("^GSPC", "S&P 500", "USD")
+# A fund holds a market that is often not its listing's (an S&P 500 tracker
+# on London read beta 0.47 against the FTSE, a world fund on Xetra 0.59
+# against the DAX): it is measured against whichever of its home chain and
+# these explains it best (weekly R², asynchrony-robust), when one explains
+# it at all (FUND_MIN_R2; a bond or gold fund stays on its home market).
+FUND_TYPES = {"etf", "fund"}
+FUND_CANDIDATES = (US, REGIONAL_EU, ("ACWI", "MSCI ACWI", "USD"),
+                   ("EEM", "MSCI Emerging Markets", "USD"))  # fmt: skip
+FUND_MIN_R2 = 0.3
 
 WINDOW_YEARS = 3  # default; prefs model_beta_years (1, 2 or 3)
 SHRINK = 0.9  # default; prefs model_beta_shrink
@@ -121,9 +131,15 @@ RHO = 2.0 / 252.0  # age decay per trading day (Welch: half-life ~87 days)
 MIN_BSWA = 252  # joint price points for BSWA (the backtest's rule)
 MIN_OLS = 151  # ... for the 1-year daily OLS below that; fewer = prior
 GLITCH = 1.0  # |log return| above this is a data glitch, not a move
+SPIKE = 0.15  # ... and one this big that the next bar undoes (a bad print)
 TTL_DAYS = 1  # a beta is recomputed once a day
 
 _LOCK = threading.Lock()
+# One computation at a time: the grid, the analytics and a stock window ask
+# for the same names at once on a page load, and each used to download and
+# compute all of them (three bulk downloads of 27 names, 2026-10-24). A
+# waiter re-reads the cache first and computes only what is still missing.
+_COMPUTE = threading.Lock()
 _MEM: dict[str, dict] = {}
 
 
@@ -159,15 +175,90 @@ def fallbacks(symbol: str) -> list[dict]:
     return out
 
 
+# Exchange-traded commodities and notes are "stock" to Yahoo (iShares
+# Physical Gold ETC, Xetra-Gold) but hold no company: the fund rule.
+_ETC = re.compile(r"\b(ETC|ETN|ETP)\b|\bphysical (gold|silver|platinum|palladium|precious"
+                  r"|swiss gold|uranium|metals?)\b|^xetra-gold\b", re.IGNORECASE)  # fmt: skip
+_COMPANY = re.compile(r"\b(plc|inc|corp|corporation|ltd|ag|sa|se|nv)\.?$", re.IGNORECASE)
+
+
+def is_fund(symbol: str) -> bool:
+    """An ETF, fund or exchange-traded commodity by the symbol pack (no
+    network; False without a pack)."""
+    try:
+        from convexity import symbol_db
+
+        h = symbol_db.get(symbol)
+    except Exception:
+        return False
+    if not h:
+        return False
+    name = (h.name or "").strip()
+    return (h.type or "").lower() in FUND_TYPES or (
+        bool(_ETC.search(name)) and not _COMPANY.search(name)
+    )
+
+
+def fund_candidates(symbol: str) -> list[dict]:
+    """A fund's benchmarks to fit: its home chain, then the broad markets."""
+    out = fallbacks(symbol)
+    seen = {p["proxy"] for p in out}
+    for p, n, c in FUND_CANDIDATES:
+        if p not in seen:
+            out.append({"proxy": p, "name": n, "ccy": c, "kind": "fund", "backtested": False})
+            seen.add(p)
+    return out
+
+
+def _weekly(px: dict, symbol: str) -> bool:
+    """Weekly returns when the proxy trades in another session than the
+    listing (a non-US line against a US index, or any non-home index that is
+    not the European region for a European line); same-session pairs daily."""
+    home = home_proxy(symbol)
+    if px["proxy"] == home["proxy"]:
+        return home["kind"] == "fallback"  # an unmapped exchange on the S&P
+    if px["proxy"] == REGIONAL_EU[0] and (home["kind"] == "regional" or home["ccy"] in
+                                          ("EUR", "CHF", "SEK", "DKK", "GBP", "NOK")):  # fmt: skip
+        return False
+    return home["kind"] != "us" or px["ccy"] != "USD"
+
+
+def weekly_r2(stock, market, years: int = WINDOW_YEARS) -> float | None:
+    """R² of Friday-to-Friday returns over the window (None under 53 weeks)."""
+    import pandas as pd
+
+    if stock is None or market is None:
+        return None
+    df = pd.concat([stock.rename("s"), market.rename("m")], axis=1, join="inner").dropna()
+    df = df[(df["s"] > 0) & (df["m"] > 0)].iloc[-(252 * max(int(years), 2) + 1) :]
+    wk = df.resample("W-FRI").last().dropna()
+    if len(wk) < 53:
+        return None
+    y, x = np.diff(_log_index(wk["s"])), np.diff(_log_index(wk["m"]))
+    if y.std() == 0 or x.std() == 0:
+        return None
+    c = float(np.corrcoef(y, x)[0, 1])
+    return c * c if math.isfinite(c) else None
+
+
 # ------------------------------- estimators -------------------------------
 
 
 def _log_index(s) -> np.ndarray:
     """Log prices with glitch returns (|log r| > 1: Yahoo's x52 and negative
-    bars) zeroed out, as in the backtest."""
+    bars) zeroed out, as in the backtest, and one-bar bad prints: a move over
+    ``SPIKE`` the next bar takes back (net under a quarter of it), both bars
+    zeroed. An S&P 500 ETF on London has a +30%/-28% pair on a Friday
+    (2025-10-24) that cut its weekly R² with the S&P from ~0.8 to 0.18."""
     lp = np.log(np.asarray(s, dtype=float))
     r = np.diff(lp)
     r[~np.isfinite(r) | (np.abs(r) > GLITCH)] = 0.0
+    if len(r) > 1:
+        a, b = r[:-1], r[1:]
+        bad = (np.abs(a) > SPIKE) & (np.sign(a) == -np.sign(b)) & (np.abs(a + b) < 0.25 * np.abs(a))
+        idx = np.flatnonzero(bad)
+        r[idx] = 0.0
+        r[idx + 1] = 0.0
     return np.concatenate([[0.0], np.cumsum(r)])
 
 
@@ -196,7 +287,23 @@ def shrink(raw: float, w: float = SHRINK) -> float:
     return 1.0 + w * (raw - 1.0)
 
 
-def estimate(stock, market, years: int = WINDOW_YEARS, weekly: bool = False) -> dict:
+def dimson(y: np.ndarray, x: np.ndarray) -> float:
+    """OLS of y_t on x_t and x_(t-1), the two slopes summed (Dimson 1979):
+    what an asynchronous close misses this period it shows the next."""
+    y, x = np.asarray(y, float), np.asarray(x, float)
+    if len(y) < 3:
+        return math.nan
+    X = np.column_stack([np.ones(len(x) - 1), x[1:], x[:-1]])
+    try:
+        b = np.linalg.lstsq(X, y[1:], rcond=None)[0]
+    except np.linalg.LinAlgError:
+        return math.nan
+    return float(b[1] + b[2])
+
+
+def estimate(
+    stock, market, years: int = WINDOW_YEARS, weekly: bool = False, plain: bool = False
+) -> dict:
     """Raw beta of a stock's closes on its market's closes (pandas Series
     indexed by date, same currency): ``{raw, method, n_days, asof}`` where
     method is "bswa", "ols1y", "weekly" or "prior" (raw None). Joint trading
@@ -207,7 +314,14 @@ def estimate(stock, market, years: int = WINDOW_YEARS, weekly: bool = False) -> 
     S&P 500 (an exchange with no home index here). Its close and New York's
     are hours apart, and daily returns then read a beta near zero (Japan
     0.25 vs 1.02 against TOPIX in the backtest; DBS 0.14): Friday-to-Friday
-    returns over the window, plain OLS, the backtest's W104 family."""
+    returns over the window, the backtest's W104 family, with one lag
+    (``dimson``): a week's last hours still land in the next week's return
+    (an S&P 500 tracker on London read 0.86 plain, 0.99 with the lag).
+
+    ``plain``: daily OLS instead of BSWA (method "ols"), for a fund no market
+    index explains (gold, bonds): Welch's winsorising is built for stocks,
+    and its band around the market's move pulls a weakly correlated asset
+    toward 1 (gold 0.74 against the S&P, OLS 0.28)."""
     import pandas as pd
 
     if stock is None or market is None:
@@ -215,6 +329,10 @@ def estimate(stock, market, years: int = WINDOW_YEARS, weekly: bool = False) -> 
     df = pd.concat([stock.rename("s"), market.rename("m")], axis=1, join="inner").dropna()
     df = df[(df["s"] > 0) & (df["m"] > 0)]
     if weekly:
+        # At least two years of weeks (the backtest's W104): one year is ~52
+        # weeks, under the 53 needed, so a 1Y window read every weekly beta as
+        # the prior.
+        years = max(int(years), 2)
         wk = df.iloc[-(252 * int(years) + 1) :].resample("W-FRI").last().dropna()
         asof = str(df.index[-1].date()) if len(df) else None
         if len(wk) < 53:
@@ -225,7 +343,7 @@ def estimate(stock, market, years: int = WINDOW_YEARS, weekly: bool = False) -> 
                 "asof": asof,
             }
         y, x = np.expm1(np.diff(_log_index(wk["s"]))), np.expm1(np.diff(_log_index(wk["m"])))
-        b = ols(y, x)
+        b = dimson(y, x)
         ok = math.isfinite(b)
         return {"raw": b if ok else None, "method": "weekly" if ok else "prior",
                 "n_days": len(df.iloc[-(252 * int(years) + 1) :]), "asof": asof}  # fmt: skip
@@ -234,7 +352,7 @@ def estimate(stock, market, years: int = WINDOW_YEARS, weekly: bool = False) -> 
     asof = str(d.index[-1].date()) if len(d) else None
     if len(d) >= MIN_BSWA:
         y, x = np.expm1(np.diff(_log_index(d["s"]))), np.expm1(np.diff(_log_index(d["m"])))
-        b, method = bswa(y, x), "bswa"
+        b, method = (ols(y, x), "ols") if plain else (bswa(y, x), "bswa")
     elif len(d) >= MIN_OLS:
         d = d.iloc[-253:]
         y, x = np.expm1(np.diff(_log_index(d["s"]))), np.expm1(np.diff(_log_index(d["m"])))
@@ -277,6 +395,8 @@ def finish(raw: dict, proxy: dict, st: dict) -> dict:
         "n_days": int(raw.get("n_days") or 0),
         "method": raw.get("method") or "prior",
         "asof": raw.get("asof"),
+        "fit_r2": raw.get("fit_r2"),
+        "fit_best_r2": raw.get("fit_best_r2"),
         "years": st["years"],
         "shrink": st["shrink"],
     }
@@ -300,7 +420,8 @@ def _load() -> dict:
 
 
 def _key(symbol: str, years: int) -> str:
-    return f"{(symbol or '').upper()}|{int(years)}"
+    # "f": funds fitted to their benchmark (2026-10-24); older entries recompute.
+    return f"{(symbol or '').upper()}|{int(years)}|f"
 
 
 def _fresh(ent) -> bool:
@@ -308,13 +429,86 @@ def _fresh(ent) -> bool:
 
 
 _LINE_LEARNED: dict[str, str] = {}
+_LINES_DISK: dict[str, str] | None = None
 
 
 def beta_line(symbol: str) -> str:
-    """See ``_pack_line``; plus what ``learn_line`` found by name this
-    process for a listing the pack doesn't know (a US company's Milan line -> its US line)."""
+    """See ``_pack_line``; plus what ``learn_line`` found by name for a
+    listing the pack doesn't know (a US company's Milan line -> its US line),
+    this process or, for a week, on disk (``state/beta_lines.json``)."""
     s = (symbol or "").upper()
-    return _LINE_LEARNED.get(s) or _pack_line(s)
+    return _LINE_LEARNED.get(s) or _saved_lines().get(s) or _pack_line(s)
+
+
+LINES_TTL_DAYS = 7
+
+
+def _lines_path():
+    from convexity import paths
+
+    return paths.state_file("beta_lines")
+
+
+def _saved_lines() -> dict[str, str]:
+    """Learned home lines on disk, a week each: without them a restart
+    measured a US company's Milan line against the FTSE MIB until the next
+    name lookup answered
+    (one timed out, and that beta was then kept for the day)."""
+    global _LINES_DISK
+    if _LINES_DISK is None:
+        out = {}
+        try:
+            d = json.loads(_lines_path().read_text(encoding="utf-8"))
+            cut = (dt.date.today() - dt.timedelta(days=LINES_TTL_DAYS)).isoformat()
+            for k, v in (d if isinstance(d, dict) else {}).items():
+                if (
+                    isinstance(v, dict)
+                    and isinstance(v.get("line"), str)
+                    and str(v.get("day")) >= cut
+                ):
+                    out[k.upper()] = v["line"].upper()
+        except (OSError, ValueError):
+            pass
+        _LINES_DISK = out
+    return _LINES_DISK
+
+
+def _save_line(symbol: str, line: str) -> None:
+    from convexity.persistence import _atomic_write
+
+    _saved_lines()[symbol] = line
+    today = dt.date.today().isoformat()
+    with _LOCK:
+        try:
+            p = _lines_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            body = {k: {"line": v, "day": today} for k, v in _saved_lines().items()}
+            try:
+                old = json.loads(p.read_text(encoding="utf-8"))
+                for k in body:
+                    if k != symbol and isinstance(old.get(k), dict) and old[k].get("day"):
+                        body[k]["day"] = old[k]["day"]
+            except (OSError, ValueError, AttributeError):
+                pass
+            _atomic_write(p, json.dumps(body, indent=1, sort_keys=True))
+        except OSError as e:
+            print(f"[beta] lines save: {type(e).__name__}")
+
+
+def unresolved(symbol: str) -> bool:
+    """A listing whose company line is still unknown: not in the pack, not
+    learned, no definite miss. Its beta on its own line is shown but never
+    kept, so the next call (with a name) can still find the company's line."""
+    s = (symbol or "").upper()
+    if "." not in s or s.startswith("^") or s in _LINE_LEARNED or s in _saved_lines():
+        return False
+    try:
+        from convexity import symbol_db as sdb
+
+        # Without a pack nothing is ever resolved: keep betas as before.
+        return sdb.get(s) is None and bool(sdb.status().get("installed"))
+    except Exception:
+        return False
 
 
 def _fold(name: str) -> str:
@@ -349,6 +543,7 @@ def learn_line(symbol: str, name: str | None) -> str | None:
             line = (home.ticker if home else known.ticker).upper()
             if line != s:
                 _LINE_LEARNED[s] = line
+                _save_line(s, line)
                 print(f"[beta] {s}: no pack entry; measured on {line} ({name})")
                 return line
     except Exception as e:
@@ -374,6 +569,8 @@ def _pack_line(symbol: str) -> str:
         me = sdb.get(s)
         if me is None or me.type != "stock" or me.group == sdb.YAHOO_GROUP:
             return s
+        if _ETC.search(me.name or "") and not _COMPANY.search(me.name or ""):
+            return s  # an ETC is "stock" to Yahoo; its other lines are other notes
         h = sdb.home(me.group)
         return h.ticker.upper() if h and h.ticker else s
     except Exception:
@@ -441,12 +638,24 @@ def ensure(
     # A caller's currency belongs to its own listing, never to the home line.
     hints = {k.upper(): v for k, v in (ccy or {}).items()}
     by_line = _ensure_lines(sorted(set(lines.values())), prefs,
-                            {ln: hints[ln] for ln in set(lines.values()) if ln in hints})  # fmt: skip
+                            {ln: hints[ln] for ln in set(lines.values()) if ln in hints},
+                            keep=lambda ln: not unresolved(ln))  # fmt: skip
     return {s: _via(by_line.get(lines[s]), s, lines[s]) for s in syms}
 
 
 def _ensure_lines(
-    symbols, prefs: dict | None = None, ccy: dict[str, str] | None = None
+    symbols, prefs: dict | None = None, ccy: dict[str, str] | None = None, keep=None
+) -> dict[str, dict]:
+    syms = [s.upper() for s in dict.fromkeys(symbols or []) if s]
+    out = {s: _cached_line(s, prefs) for s in syms}
+    if all(v is not None for v in out.values()):
+        return out
+    with _COMPUTE:
+        return _compute_lines(syms, prefs, ccy, keep)
+
+
+def _compute_lines(
+    symbols, prefs: dict | None = None, ccy: dict[str, str] | None = None, keep=None
 ) -> dict[str, dict]:
     from convexity import analytics, fx
     from convexity.helpers import major_ccy
@@ -458,7 +667,8 @@ def _ensure_lines(
     todo = [s for s, v in out.items() if v is None]
     if not todo:
         return out
-    chains = {s: fallbacks(s) for s in todo}
+    funds = {s for s in todo if is_fund(s)}
+    chains = {s: fund_candidates(s) if s in funds else fallbacks(s) for s in todo}
     proxies = sorted({p["proxy"] for c in chains.values() for p in c})
     period = {1: "2y", 2: "5y", 3: "5y"}[st["years"]]
     closes = analytics._bulk_close(todo + proxies, period)
@@ -484,34 +694,61 @@ def _ensure_lines(
             out[s] = finish({"raw": None, "method": "prior"}, chains[s][0], st)
             continue
         c_s = listing_ccy(s)
-        best = None
-        for px in chains[s]:
-            m = closes[px["proxy"]].dropna() if px["proxy"] in closes.columns else None
-            if m is None or m.empty:
-                continue
+
+        def pair(px):
             # The stock in the index's currency: a GBP index for a USD-quoted
             # London line, USD for the S&P fallback (the backtest's SPX_usd).
+            m = closes[px["proxy"]].dropna() if px["proxy"] in closes.columns else None
+            if m is None or m.empty:
+                return None
             stock = col
             if c_s != px["ccy"]:
                 need = {c for c in (c_s, px["ccy"]) if c != "USD"}
                 stock = _to_ccy(col, c_s, px["ccy"], {c: usd_per(c) for c in need})
-                if stock is None:
+            return None if stock is None else (stock, m)
+
+        best, complete, fit, low = None, True, None, None
+        if s in funds:
+            scored = []
+            for px in chains[s]:
+                pm = pair(px)
+                r2 = weekly_r2(*pm, st["years"]) if pm else None
+                complete &= pm is not None
+                if r2 is not None:
+                    scored.append((r2, px, pm))
+            top = max(scored, key=lambda t: t[0], default=None)
+            if top and top[0] >= FUND_MIN_R2:
+                fit, px, pm = top
+                best = (estimate(*pm, st["years"], weekly=_weekly(px, s)), px)
+            elif top:
+                low = top[0]
+        if best is None:
+            for px in chains[s]:
+                pm = pair(px)
+                if pm is None:
+                    complete = False
                     continue
-            # Weekly only for the S&P standing in for a foreign market.
-            weekly = px["proxy"] == US[0] and home_proxy(s)["kind"] != "us"
-            raw = estimate(stock, m, st["years"], weekly=weekly)
-            best = (raw, px)
-            break
+                best = (
+                    estimate(*pm, st["years"], weekly=_weekly(px, s), plain=low is not None),
+                    px,
+                )
+                complete &= px["proxy"] == chains[s][0]["proxy"]
+                break
         if best is None:
             out[s] = finish({"raw": None, "method": "prior"}, chains[s][0], st)
             continue
         raw, px = best
         ent = {**raw, "proxy": px, "day": dt.date.today().isoformat()}
+        if fit is not None:
+            ent["fit_r2"] = round(fit, 4)
+        if low is not None:
+            ent["fit_best_r2"] = round(low, 4)
         out[s] = finish(ent, px, st)
         # Every home index answers on Yahoo (probed 2026-10-23), so a beta on a
-        # later proxy means its download failed this time: shown, never kept
-        # for the day, so the next call measures it against its home again.
-        if px["proxy"] == chains[s][0]["proxy"]:
+        # later proxy (or a fund fitted without all its candidates) means a
+        # download failed this time: shown, never kept for the day, so the next
+        # call measures it again.
+        if complete and (keep is None or keep(s)):
             fresh[_key(s, st["years"])] = ent
     if fresh:
         _MEM.update(fresh)
@@ -634,7 +871,8 @@ def for_rows(rows: list[dict], prefs: dict | None = None, T: float = 1.0) -> dic
     def num(v):
         return float(v) if isinstance(v, int | float) and math.isfinite(v) else None
 
-    rows = [r for r in rows or [] if isinstance(r.get("symbol"), str) and not r.get("error")]
+    rows = [r for r in rows or [] if isinstance(r, dict) and isinstance(r.get("symbol"), str)
+            and r["symbol"].strip() and not r.get("error")]  # fmt: skip
     bm = ensure([r["symbol"] for r in rows], prefs, {r["symbol"]: r.get("currency") for r in rows},
                 {r["symbol"]: r["name"] for r in rows if isinstance(r.get("name"), str)})  # fmt: skip
     rates: dict[str, tuple] = {}

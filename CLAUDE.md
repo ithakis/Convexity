@@ -399,6 +399,7 @@ overrides it):
 │   ├── attention.json          ← the Attention rail's thresholds, dismissed and seen items (preferences; malformed = defaults)
 │   ├── events.json             ← held shares' next earnings / ex-dividend dates from Yahoo (a cache, market data only)
 │   ├── betas.json              ← the app's beta per symbol and window, recomputed daily (capm.py; a cache, market data only)
+│   ├── beta_lines.json         ← home lines found by name for listings the pack lacks (a US company's Milan line → its US line), a week (capm.py; market data only)
 │   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
 │   ├── recaps.json             ← My Investments' weekly recaps, last 12 (derived from the computed page: a cache)
