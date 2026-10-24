@@ -246,8 +246,23 @@ Each of these has cost real debugging time; the link goes to the full story.
   the market's μ, and the app's own dated record
   (`state/target_history.jsonl`, Track record → Analyst targets) is the only
   thing that may raise the IC. Never feed raw target upside to the optimizer.
+  **Since 1.29 the window's mean is the app's model price** (`capm.py`,
+  below): μ on (the default, `dist_mu`) adds the analysts' α, μ off is pure
+  CAPM; the Street target is a hollow reference, the trust control is gone.
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity) ·
   [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
+- **One beta, one model price** (capm.py, 1.29): every surface (grid,
+  window, export, portfolio beta, the optimizer's alpha settings, the news
+  Track record, the reference pack) reads `capm`'s beta (home index in local
+  currency, Welch BSWA on 3Y daily, 1 + 0.9(b − 1); 1Y OLS under 252 days, 1
+  "prior" under 151) and mu = rf_local + beta·ERP + alpha (alpha =
+  `relative_alpha` of the name's total upside, 0 without targets). Yahoo's
+  `info["beta"]` is never read; a saved row's old one is dropped on load. Never
+  on `fetch_one`'s path (`capm.cached` only; `/api/model-prices` and jobs batch
+  the rest). `/api/density` ignores any client beta and ships `model` plus
+  curves `model` (mu on) and `market` (mu off); the window's alpha uses the
+  listing's own or research-line targets only, like its row, so the numbers
+  agree. [backend.md → model price](docs/architecture/backend.md#the-model-price-capmpy-129)
 - **A secondary listing borrows its research** (2026-10-18): Yahoo has no
   analysts on NOV.DE or CCC3.DE. `fetcher.research_line` (home or US
   line, the most analysts, a week in `state/research_lines.json`) fills them,
@@ -297,6 +312,7 @@ sub-decision.
 │   ├── fetcher.py                ← fetch_one() per-symbol row builder — §4
 │   ├── analyst_targets.py       ← THE analyst target (each firm's latest, split-adjusted; summary fallback), read by every surface; BL tilts; dated record + track record — §4
 │   ├── analytics.py             ← analyze_portfolios_multi(), bulk close, analyst blocks — §4
+│   ├── capm.py                  ← THE app's expected-return model: one beta (home index, 3Y daily BSWA, shrunk), mu = rf_local + beta·ERP + alpha, model price S0·e^(mu T) — §4
 │   ├── fx.py                    ← FX spot rates, basket index history, currency conversion — §4
 │   ├── frontier.py              ← Mean-CVaR frontier orchestrator (BL returns + CVaR risk, wraps mpt.py) — §12
 │   ├── mpt.py                   ← Optimization primitives: Black-Litterman + mean-CVaR numba solver — §12
@@ -382,6 +398,8 @@ overrides it):
 │   ├── proxies.json            ← found stand-in listings per young listing, a week (market data only; analytics._proxy_candidates)
 │   ├── attention.json          ← the Attention rail's thresholds, dismissed and seen items (preferences; malformed = defaults)
 │   ├── events.json             ← held shares' next earnings / ex-dividend dates from Yahoo (a cache, market data only)
+│   ├── betas.json              ← the app's beta per symbol and window, recomputed daily (capm.py; a cache, market data only)
+│   ├── beta_lines.json         ← home lines found by name for listings the pack lacks (a US company's Milan line → its US line), a week (capm.py; market data only)
 │   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
 │   ├── recaps.json             ← My Investments' weekly recaps, last 12 (derived from the computed page: a cache)

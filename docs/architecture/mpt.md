@@ -130,7 +130,15 @@ at the next chunk boundary.
   the yield makes it total), z_i = (u_i − ū)/0.125 capped at ±3, ū = the
   holdings' mean blended with the long-run large-cap mean 0.11 (weight 10
   names), σ_xs = 0.42, IC = 0.02 until the app's own track record measures one
-  (`view_ic`): ≈ ±0.8%/yr per σ, ±2.5% at most. The old view was the raw
+  (`view_ic`): ≈ ±0.8%/yr per σ, ±2.5% at most. Since 1.29 the IC override and
+  the z cap are the model's settings (`capm.settings`: prefs `model_ic`,
+  `model_z_cap`, Settings → Model price), so the optimizer's α and the model
+  price's α use the same two numbers. They differ only in the reference: here
+  the holdings' mean (a cross-sectional view within the book), there the
+  long-run universe mean for one name. The prior stays covariance-implied
+  (Π = δΣw_mkt): it must match the covariance the frontier uses, and for one
+  stock against its market Π_i = δ·Cov(i, m) = β_i·ERP, the model price's CAPM
+  term. The old view was the raw
   upside (q_i = target/price − 1 + dy_i − rf), which took a +110% target on a
   quantum name as a +110% expected return; two point-in-time studies found
   targets rank 12-month returns with IC ≈ 0.01–0.03 (backend.md, "What

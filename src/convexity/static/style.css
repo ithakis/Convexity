@@ -2665,10 +2665,19 @@
   .m-fc-in { position: absolute; pointer-events: none; z-index: 1; border: 1px solid var(--border);
     border-radius: var(--r-md); }
   /* Trust in targets, next to μ: shown only while σ and μ are both on. */
-  .m-fc-trust { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; }
-  .m-fc-trust[hidden] { display: none; }
-  .m-fc-trust-k { font-size: 12px; color: var(--muted); white-space: nowrap; }
-  .m-fc-trust .m-fc-seg button { padding: 3px 9px; font-size: 12px; }
+  /* The grid's "prior" tag on a beta with too little history (capm.py). */
+  .muted-tag { font-size: 10px; color: var(--muted); font-weight: 500; }
+  /* Settings → Model price (renderSettingsModel). */
+  .model-asset { display: flex; flex-wrap: wrap; gap: 8px 28px; align-items: baseline; padding: 10px 12px;
+    background: var(--accent-soft); border-radius: var(--r-soft); font-size: 13px; }
+  .model-asset span { color: var(--muted); font-size: 11.5px; margin-right: 6px; }
+  .model-asset small { color: var(--muted); }
+  .model-formula { display: flex; gap: 36px; align-items: baseline; font-size: 16px; padding: 8px 0 4px; }
+  .model-why { border-top: 1px solid var(--border); padding: 8px 0 2px; font-size: 12px; }
+  .model-why summary { cursor: pointer; font-weight: 600; color: var(--text); }
+  .model-why ul { margin: 6px 0 4px; padding-left: 18px; color: var(--th-ink); line-height: 1.5; }
+  .model-why a { color: var(--accent); }
+  .settings-row.model-theory .settings-row-main { max-width: none; }
   .m-fc-ctl { position: absolute; top: 8px; right: 10px; display: flex; gap: 6px; z-index: 2; }
   .m-fc-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-soft);
     background: var(--bg-canvas); padding: 2px; }

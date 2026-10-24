@@ -1081,13 +1081,18 @@ def analyze_portfolios_multi(
         name: _normalize_weights(w_in or {}, symbols) for name, w_in in weight_sets.items()
     }
 
+    from convexity import capm
+    from convexity.persistence import load_prefs
+
+    prefs = load_prefs()
+    mst = capm.settings(prefs)
     per_set_cache_keys: dict[str, str] = {}
     cached_results: dict[str, dict] = {}
     for name, weights in normalized_sets.items():
         key = (
             "pf|"
             + "|".join(f"{s}:{weights[s]:.6f}" for s in sorted(symbols))
-            + f"|{period_u}|{display_ccy}|{rebalance}|{tc:.6f}"
+            + f"|{period_u}|{display_ccy}|{rebalance}|{tc:.6f}|b{mst['years']}:{mst['shrink']}"
         )
         per_set_cache_keys[name] = key
         hit = _cache_get(key)
@@ -1108,6 +1113,20 @@ def analyze_portfolios_multi(
     wide = _bulk_close(
         list(dict.fromkeys(symbols + bench_tickers + sec_etfs + rf_tickers)), warmup_yf
     )
+    # The holdings' app betas (capm.py, a day cache; one batch on a miss):
+    # the portfolio's beta is their weighted sum, the same beta every other
+    # surface shows. A regression of the basket on a benchmark is a different
+    # number and stays in benchmarks[...]["rel"] (vs the benchmark picked).
+    try:
+        betas = capm.ensure(
+            symbols,
+            prefs,
+            {r["symbol"]: r.get("currency") for r in rows},
+            {r["symbol"]: r["name"] for r in rows if isinstance(r.get("name"), str)},
+        )
+    except Exception as e:
+        print(f"[analytics] betas: {type(e).__name__}: {e}")
+        betas = {}
     warnings: list[str] = []
     # Short lines first: one Yahoo serves only a few days of (a ticker
     # renamed yesterday) joins here, and is not "missing".
@@ -1457,6 +1476,16 @@ def analyze_portfolios_multi(
             if whole
             else {"ohlc": [], "volume": []}
         )
+        bw = {
+            s: weights.get(s, 0.0)
+            for s in active
+            if (betas.get(s.upper()) or {}).get("beta") is not None
+        }
+        wsum = sum(bw.values())
+        pf_stats["beta"] = (
+            sum(w * betas[s.upper()]["beta"] for s, w in bw.items()) / wsum if wsum > 0 else None
+        )
+        pf_stats["beta_coverage"] = wsum / max(sum(weights.get(s, 0.0) for s in active), 1e-12)
         out_one = {
             "period": period_u,
             "display_ccy": display_ccy,

@@ -43,8 +43,6 @@ from convexity import reference_pack as rp
 
 _WORKERS = 4  # enough to keep both rate limiters busy; they set the pace
 _MIN_SCORED_SHARE = 0.5
-_BETA_DAYS = 252
-_BETA_MIN_OBS = 60
 
 
 def universe() -> dict:
@@ -62,17 +60,18 @@ def _r(x, nd: int):
 
 
 def _beta(s, spy) -> float | None:
-    """1-year daily OLS beta vs SPY (the local history stores the quote's
-    beta; CI has no quote, so it is estimated from the same closes)."""
-    import pandas as pd
+    """The app's beta (capm.py: 3Y daily BSWA, shrunk toward 1) vs SPY, the
+    pack's universe being the S&P 500, so it is the same estimator and the
+    same market the local history records for a US name (its home index is
+    the S&P 500 itself; SPY's dividends barely move a daily slope). None
+    when the history is too short (the Track record then uses 1). Not a
+    Market read feature: only the forward idiosyncratic return reads it."""
+    from convexity import capm
 
     if s is None or spy is None:
         return None
-    df = pd.concat([s.pct_change(), spy.pct_change()], axis=1).dropna().tail(_BETA_DAYS)
-    if len(df) < _BETA_MIN_OBS:
-        return None
-    var = float(df.iloc[:, 1].var())
-    return float(df.iloc[:, 0].cov(df.iloc[:, 1]) / var) if var > 0 else None
+    raw = capm.estimate(s, spy, capm.WINDOW_YEARS).get("raw")
+    return None if raw is None else capm.shrink(raw)
 
 
 def _last_close(s, day: str) -> float | None:
@@ -185,8 +184,9 @@ def build(
         if r.get("date", "") >= first_anchor and isinstance(r.get("market_score"), (int, float))
     ]
 
+    # 5 years: the beta needs 3 (capm.py); the forward returns need weeks.
     closes = analytics._bulk_close(
-        sorted(set(symbols) | {r["symbol"] for r in prev} | {"SPY"}), "1Y"
+        sorted(set(symbols) | {r["symbol"] for r in prev} | {"SPY"}), "5y"
     )
     if closes is None or closes.empty or "SPY" not in closes.columns:
         raise SystemExit("price history unavailable (yfinance returned nothing for SPY)")

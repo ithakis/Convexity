@@ -657,13 +657,35 @@ def _build_news_context(job: Job, rows_by_symbol: dict) -> dict:
 
     Weights come from each view's active preset, else cap weight, else equal;
     merged across views by MAX so the staged ordering still puts the largest
-    position anywhere in the account first. Betas ride on the freshly-fetched
-    rows already (fetcher populates `beta`), so no analytics run is needed.
+    position anywhere in the account first. Betas are the app's (capm.py):
+    a row carries one when today's is cached, the rest come from one batch
+    here (this is the job's thread, never the streaming path).
     """
     betas, rows, weights = {}, {}, {}
+    missing = [s for s, r in rows_by_symbol.items() if r.get("beta") is None and not r.get("error")]
+    fresh = {}
+    if missing:
+        try:
+            from convexity import capm
+
+            fresh = capm.ensure(
+                missing,
+                persistence.load_prefs(),
+                {s: rows_by_symbol[s].get("currency") for s in missing},
+                {
+                    s: rows_by_symbol[s]["name"]
+                    for s in missing
+                    if isinstance(rows_by_symbol[s].get("name"), str)
+                },
+            )
+        except Exception as e:
+            print(f"[jobs] betas: {type(e).__name__}: {e}")
     for sym, r in rows_by_symbol.items():
-        if r.get("beta") is not None:
-            betas[sym] = r["beta"]
+        b = r.get("beta")
+        if b is None:
+            b = (fresh.get(sym.upper()) or {}).get("beta")
+        if b is not None:
+            betas[sym] = b
         rows[sym] = {
             "name": r.get("name"),
             "price": r.get("price"),

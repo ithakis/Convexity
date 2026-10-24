@@ -119,8 +119,20 @@ def load_view(name: str) -> dict:
         # Heals views written before save_view deduped (e.g. a 20-row, 16-name
         # "Data Center Builders"): the table, analytics and the Excel export all
         # read rows through here. The file itself is fixed on the next save.
-        entry = {**entry, "rows": _dedupe_rows_by_symbol(entry["rows"])}
+        entry = {
+            **entry,
+            "rows": [_drop_yahoo_beta(r) for r in _dedupe_rows_by_symbol(entry["rows"])],
+        }
     return entry
+
+
+def _drop_yahoo_beta(row):
+    """A row saved before 1.29 carries Yahoo's ``info["beta"]`` as ``beta``;
+    the app's own (capm.py) always comes with its ``beta_meta``. The old one
+    is dropped on read so no surface can show it; the next save rewrites it."""
+    if isinstance(row, dict) and "beta" in row and not row.get("beta_meta"):
+        row = {k: v for k, v in row.items() if k != "beta"}
+    return row
 
 
 def save_view(name: str, entries: str, rows: list, *, set_last: bool = True) -> dict:
@@ -589,6 +601,19 @@ def _column_views_path() -> Path:
     return Path(_COLUMN_VIEWS_FILE)
 
 
+# A built-in preset's earlier factory column lists. An override whose columns
+# equal one of them changed nothing but heat (or was saved without a real
+# edit), yet froze the list: a column added to the preset later never showed.
+# Read as "factory" so the current list applies; heat overrides are kept.
+_RETIRED_FACTORY_COLUMNS: dict[str, list[list[str]]] = {
+    "Fundamentals": [[
+        "symbol", "price", "market_cap", "sector", "industry", "ps_ratio", "pe_ratio",
+        "forward_pe", "peg", "ev_revenue", "ev_ebitda", "operating_margin", "debt_equity",
+        "current_ratio", "dividend_yield", "earnings_surprise", "rec_trend_fh", "insider_mspr",
+    ]],  # before 1.29 (Beta, Model 12M, Model μ)
+}  # fmt: skip
+
+
 def _read_column_views_raw() -> dict:
     path = _column_views_path()
     empty = {"custom_views": {}, "builtin_overrides": {}, "active_view": "Default"}
@@ -630,7 +655,9 @@ def _read_column_views_raw() -> dict:
         ov: dict = {}
         cols = entry.get("columns")
         if isinstance(cols, list) and cols:
-            ov["columns"] = [str(c) for c in cols if isinstance(c, (str, int))]
+            clean_cols = [str(c) for c in cols if isinstance(c, (str, int))]
+            if clean_cols not in _RETIRED_FACTORY_COLUMNS.get(clean_name, []):
+                ov["columns"] = clean_cols
         heat = _sanitize_heat(entry.get("heat"))
         if heat:
             ov["heat"] = heat
@@ -788,7 +815,7 @@ def _prefs_allowed() -> dict:
 
 # Phase 9 (notifications): a switch and quiet hours, typed rather than
 # picked from a set. A time is "HH:MM", 24-hour.
-_PREF_BOOLS = ("notify_on", "quiet_on", "pf_chips_collapsed")
+_PREF_BOOLS = ("notify_on", "quiet_on", "pf_chips_collapsed", "dist_mu")
 _PREF_TIMES = ("quiet_from", "quiet_to")
 # The stock window's σ/μ (options_density.py): numbers with bounds, so a typo
 # can't make the curve nonsense. Missing = the module's default.
@@ -797,15 +824,20 @@ _PREF_NUMS = {
     "dist_kappa_stock": (0.5, 1.2),
     "dist_kappa_index": (0.5, 1.2),
     "tc_bps": (0.0, 200.0),
+    # The app's expected-return model (capm.py, 1.29): beta shrink weight
+    # toward 1, the analysts' IC (unset = the app's measured one, else the
+    # 0.02 prior) and the cap on their z-score.
+    "model_beta_shrink": (0.0, 1.0),
+    "model_ic": (0.0, 0.1),
+    "model_z_cap": (0.5, 5.0),
 }
+# The beta's estimation window, in years.
+_PREF_INTS = {"model_beta_years": (1, 2, 3)}
 # The portfolio chart and the optimizer share one trading assumption: how often
 # the weights are reset (D daily, W weekly, M monthly, Q quarterly, S half-yearly,
 # Y yearly, N never = buy and hold) and the cost per unit traded, in bps.
 REBALANCE = ("D", "W", "M", "Q", "S", "Y", "N")
 TRADING_DEFAULTS = {"rebalance": "M", "tc_bps": 10.0}
-# How much of the analysts' excess return over CAPM the σ/μ curve keeps
-# (options_density.TRUSTS); missing = the page's default, 1/2.
-_PREF_TRUST = (0.0, 0.5, 1.0)
 _PREF_CHOICES = {
     "dist_measure": {"P", "Q"},
     "pf_contrib_view": {"table", "chart"},
@@ -832,13 +864,13 @@ def _clean_prefs(raw) -> dict:
             out[k] = float(v)
     out.update({k: raw[k] for k, ok in _PREF_CHOICES.items() if raw.get(k) in ok})
     out.update({k: raw[k] for k in _PREF_TIMES if _is_hhmm(raw.get(k))})
-    v = raw.get("dist_trust")
-    if isinstance(v, int | float) and not isinstance(v, bool) and float(v) in _PREF_TRUST:
-        out["dist_trust"] = float(v)
-    elif raw.get("dist_haircut") is False:
-        # Before 1.28.8 the trust was a haircut switch: off meant the targets
-        # as published. Delete this branch after 2027-06-30.
-        out["dist_trust"] = 1.0
+    for k, ok in _PREF_INTS.items():
+        v = raw.get(k)
+        if isinstance(v, int | float) and not isinstance(v, bool) and v in ok:
+            out[k] = int(v)
+    # `dist_trust` (1.28.8's Trust in targets) and `dist_haircut` (before it)
+    # are dropped here: 1.29 has one model price and no trust control, so a
+    # saved value is simply not read back and leaves the file on the next save.
     return out
 
 

@@ -18,25 +18,21 @@ side, `_options_rn`; maturities count from the quotes' session, `_session`):
         E_P[S_T] = S0 exp(mu T),  Var_P[x] = (kappa * sigma_Q)^2 T
 
 t2 = 0 is the one-parameter power tilt (Approach A), the fallback whenever the
-two-moment solve fails or leaves its bounds. Two means are offered:
-
-- the market's: mu = r + beta * ERP (CAPM);
-- the analysts': one tilted curve per firm, its mean that firm's 12-month
-  target, blended equally. Their common variance is shrunk by the
-  between-firm variance so the blend's total variance is still
-  (kappa sigma_Q)^2 T: disagreement lives inside the options' width, never
-  on top of it. Targets run optimistic on average (Brav & Lehavy 2003), so
-  the page lets the owner choose how much to trust them: each target keeps a
-  share (0, 1/2 or 1) of its excess log return over CAPM. 0 is the market's
-  curve, 1 the targets as published; all three ship in one payload.
+two-moment solve fails or leaves its bounds. The mean is the app's one model
+(capm.py, 1.29): mu = rf_local + beta * ERP + alpha, beta the app-wide
+home-index BSWA beta, alpha the analysts' small relative tilt. Two curves ship
+in one payload so the page's mu toggle never refetches: "model" (mu on, with
+alpha) and "market" (mu off, pure CAPM). The options shape the distribution
+only; the 1.28 per-firm analyst mixture and its trust control are gone (a
+target is not a return forecast: IC ~0.01-0.03). The Street's 12-month mean
+target stays in the payload as a reference mark.
 
 A quality gate (quotes, SVI fit, martingale error) hides chains whose tails
 can't be trusted. This is a network-heavy detail path: it is never called
 from `fetch_one`'s streaming hot path, and `/api/density` caches successes
 only, for 15 minutes (§9: never cache a failure for long).
 
-The pure functions (`fit_density`, `tilt`, `market_curve`,
-`analysts_mixture`, `quality`) take plain numbers and quote lists so tests
+The pure functions (`fit_density`, `tilt`, `mean_curve`, `quality`) take plain numbers and quote lists so tests
 can feed them a synthetic Black-Scholes chain without the network.
 """
 
@@ -59,7 +55,6 @@ from convexity.helpers import major_ccy
 
 ERP_DEFAULT = 0.05
 KAPPA_DEFAULT = {"index": 0.80, "stock": 0.92}  # physical / implied vol: placeholders (Phase 2)
-TRUSTS = (0.0, 0.5, 1.0)  # shares of the targets' excess log return over CAPM the page offers
 MAX_SPREAD = 0.6  # drop quotes whose bid-ask exceeds 60% of mid
 MIN_QUOTES = 30
 MAX_SVI_RMSE = 1.0  # vol points
@@ -618,73 +613,12 @@ def tilt(rn: dict, mean_ratio: float, var_target: float) -> tuple[np.ndarray, st
     return dens(g, 0), "A", [float(g), 0.0]
 
 
-def capm_ratio(rn: dict, beta: float, erp: float) -> float:
-    return math.exp((rn["rf"] + beta * erp) * rn["T"])
-
-
-def market_curve(rn: dict, beta: float, erp: float, kappa: float) -> dict:
-    """The real-world curve with the market's (CAPM) mean."""
+def mean_curve(rn: dict, mu: float, kappa: float) -> dict:
+    """The real-world curve with mean S0 exp(mu T) and variance (kappa sigma_Q)^2 T:
+    the options' shape, tilted once (capm.model gives mu)."""
     var_target = (kappa * rn["sigma_q"]) ** 2 * rn["T"]
-    p, method, theta = tilt(rn, capm_ratio(rn, beta, erp), var_target)
+    p, method, theta = tilt(rn, math.exp(mu * rn["T"]), var_target)
     return {"p": p, "method": method, "theta": theta}
-
-
-def _target_log_returns(rn: dict, t: np.ndarray, beta: float, erp: float) -> np.ndarray:
-    """Each 12-month target as a log return to the expiry: scaled to T
-    geometrically up to a year, carried on at the CAPM return after that."""
-    T = rn["T"]
-    return np.log(t / rn["S0"]) * min(T, 1.0) + max(T - 1.0, 0.0) * (rn["rf"] + beta * erp)
-
-
-def target_at_expiry(rn: dict, targets, beta: float, erp: float) -> float | None:
-    """The analysts' mean target moved to the options' expiry: the mean of the
-    firms' curves at full trust (each firm's curve has S0 x exp(lr) as
-    its mean). The chart draws it as the solid diamond where the mean path
-    ends, and the 12-month mean as a hollow one at its own date: one target,
-    two dates (2026-10-20). The options set the horizon; the targets bend to it."""
-    t = np.array([float(v) for v in targets if v and math.isfinite(v) and v > 0])
-    if not len(t):
-        return None
-    return float(rn["S0"] * np.mean(np.exp(_target_log_returns(rn, t, beta, erp))))
-
-
-def analysts_mixture(
-    rn: dict, targets, beta: float, erp: float, kappa: float, trust: float = 1.0
-) -> dict:
-    """The analysts' curve: one options-shaped tilt per firm, blended equally.
-
-    ``targets`` are 12-month prices in the chain's currency. Each firm's
-    curve has its target as the mean and a common variance V_w shrunk by the
-    between-firm variance of ln(target), floored at 30% of V, so the blend's
-    total variance stays at V = (kappa sigma_Q)^2 T.
-
-    The listed expiry is rarely exactly a year out (AAPL 335 days, ARKK 461):
-    a target's log return is scaled to T geometrically up to a year, and the
-    market's (CAPM) return carries it on after that.
-    """
-    t = np.array([float(v) for v in targets if v and math.isfinite(v) and v > 0])
-    if not len(t):
-        raise DensityError("no_targets")
-    T = rn["T"]
-    V = (kappa * rn["sigma_q"]) ** 2 * T
-    lr = _target_log_returns(rn, t, beta, erp)
-    if trust != 1.0:
-        # Trust w keeps that share of each target's excess log return over
-        # CAPM: w = 0 puts every firm on CAPM (between-firm variance 0, one
-        # tilt: the market's curve), w = 1/2 is the old haircut.
-        lc = math.log(capm_ratio(rn, beta, erp))
-        lr = lc + trust * (lr - lc)
-    between = float(np.var(lr)) if len(lr) > 1 else 0.0
-    Vw = max(0.3, 1 - between / V) * V
-    parts = [tilt(rn, float(math.exp(v)), Vw) for v in lr]
-    p = np.mean([pp[0] for pp in parts], axis=0)
-    p /= np.trapezoid(p, rn["x"])
-    methods = {pp[1] for pp in parts}
-    return {
-        "p": p,
-        "method": "B" if methods == {"B"} else "A" if methods == {"A"} else "B/A",
-        "targets": t.tolist(),
-    }
 
 
 def downsample(x: np.ndarray, p: np.ndarray, n: int = OUT_POINTS) -> dict:
@@ -870,18 +804,27 @@ def _analysts(tk) -> dict | None:
     return analyst_targets.consensus(getattr(tk, "ticker", None), tk=tk)
 
 
-def _own_analysts(symbol: str, chain_sym: str, tk, ratio: float) -> dict | None:
+def _own_analysts(
+    symbol: str, chain_sym: str, tk, ratio: float, s0: float
+) -> tuple[dict | None, bool]:
     """Analysts for a window whose options are another line's (a non-US name
-    on its US chain): the listing's OWN block, the number its row shows,
-    put in the chain's units (the page multiplies by ``ratio`` back), the
-    chain line's only when the listing has none."""
+    on its US chain): the listing's OWN block, the number its row shows (its
+    research line's, scaled, when it has none: NOV.DE reads NOVO-B.CO's, like
+    the row), put in the chain's units (the page multiplies by ``ratio``
+    back), the chain line's only when neither has one. The flag says whether
+    the block is the listing's own (or its research line's), the rule its
+    grid row uses: only then does it set the model's alpha."""
     from convexity import analyst_targets
 
     if chain_sym != symbol:
         own = analyst_targets.consensus(symbol)
+        if not own:
+            with contextlib.suppress(Exception):
+                own = _research_analysts(symbol, s0)
         if own:
-            return analyst_targets.scaled(own, 1.0 / ratio)
-    return _analysts(tk)
+            return analyst_targets.scaled(own, 1.0 / ratio), True
+        return _analysts(tk), False
+    return _analysts(tk), True
 
 
 def _research_analysts(symbol: str, S0: float) -> dict | None:
@@ -944,6 +887,18 @@ def _resolve_chain(symbol: str):
         found = symbol_db.discover_us_line(symbol)
         if found:
             cands.append(found)
+    if not cands:
+        # A listing the symbol pack doesn't know (a US company's line on
+        # Borsa Italiana's global segment): the company's home line found by name (capm.learn_line, the
+        # same lookup its beta uses) may list options. Shape only: the
+        # model's alpha still comes from the listing's own targets.
+        with contextlib.suppress(Exception):
+            from convexity import capm
+
+            info = yf.Ticker(symbol).info or {}
+            line = capm.learn_line(symbol, info.get("longName") or info.get("shortName"))
+            if line:
+                cands.append(line)
     cands = [c for i, c in enumerate(cands) if c and c != symbol and c not in cands[:i]]
     if not cands:
         raise DensityError("no_options")
@@ -1112,8 +1067,15 @@ def _local_rate(ccy: str) -> tuple[float, str]:
     if root:
         try:
             (c1, d1), (c2, d2) = _next_quarters()
-            f1, f2 = _close(f"{root}{c1}.CME"), _close(f"{root}{c2}.CME")
-            r = r_usd - math.log(float(f2.iloc[-1]) / float(f1.iloc[-1])) / ((d2 - d1).days / 365)
+            f1, f2 = _close(f"{root}{c1}.CME", "1mo"), _close(f"{root}{c2}.CME", "1mo")
+            # Same days only, and the median of the last five: the far contract
+            # trades thinly, and its "last close" was a day older than the near
+            # one's (6E H27 on 22 Oct against Z26 on 23 Oct), so a 0.3% EUR/USD
+            # move read as a one-point rate gap (EUR 1.48% against ~2.4%).
+            from convexity.helpers import by_trading_date
+
+            j = (by_trading_date(f2) / by_trading_date(f1)).dropna().tail(5)
+            r = r_usd - math.log(float(j.median())) / ((d2 - d1).days / 365)
             if -0.02 < r < 0.2:
                 _RATE[ccy] = (time.time(), r, "CME futures")
                 return r, "CME futures"
@@ -1434,9 +1396,7 @@ def _fx(chain_ccy: str, ccy: str, chain_sym: str, T: float) -> dict | None:
 # ------------------------------------ API ------------------------------------
 
 
-def density(
-    symbol: str, horizon: int = 365, beta: float | None = None, prefs: dict | None = None
-) -> dict:
+def density(symbol: str, horizon: int = 365, prefs: dict | None = None) -> dict:
     """The `/api/density` payload. Never raises.
 
     Options first (``source: "options"``). When they can't be used (no chain,
@@ -1445,14 +1405,18 @@ def density(
     ``fallback``); when that fails too it is
     ``{"ok": False, "reason": "no_options" | "no_expiry" | "thin" | "error"}``.
 
-    Cached per (symbol, horizon, beta, settings) for 15 minutes, successes
-    only; one computation per key at a time (a double-click must not fetch
-    the chain twice)."""
+    The mean comes from the app's model (``capm.model``: the server's own
+    beta, the local rate and the analysts' alpha; the page no longer sends a
+    beta). Cached per (symbol, horizon, settings incl. the model's) for 15
+    minutes, successes only; one computation per key at a time (a
+    double-click must not fetch the chain twice)."""
+    from convexity import capm
+
     symbol = (symbol or "").strip().upper()
     horizon = min(HORIZONS, key=lambda h: abs(h - int(horizon or 365)))
-    beta = 1.0 if beta is None or not math.isfinite(beta) else min(max(float(beta), 0.0), 3.0)
     st = _settings(prefs)
-    key = f"density|{symbol}|{horizon}|{beta:.3f}|{sorted(st.items())}"
+    st["prefs"] = prefs or {}
+    key = f"density|{symbol}|{horizon}|{sorted(_settings(prefs).items())}|{sorted(capm.settings(prefs).items())}"
     hit = cache._cache_get(key)
     if hit is not None:
         return hit
@@ -1464,7 +1428,7 @@ def density(
         fail = {"ok": False, "reason": "error", "detail": "", "symbol": symbol, "horizon": horizon}
         out = None
         try:
-            out = _compute(symbol, horizon, beta, st)
+            out = _compute(symbol, horizon, st)
         except DensityError as e:
             fail.update(reason=e.reason, detail=e.detail)
             if getattr(e, "chain", None):
@@ -1477,7 +1441,7 @@ def density(
         if out is None or not out["ok"]:
             if fail["reason"] != "error":
                 try:
-                    out = _history(symbol, horizon, beta, st)
+                    out = _history(symbol, horizon, st)
                     out["fallback"] = {
                         "reason": fail["reason"],
                         "detail": fail.get("detail", ""),
@@ -1522,36 +1486,56 @@ def _payload_curves(rn: dict, curves: dict, fx: dict | None) -> dict:
     return out
 
 
-def _analysts_curves(rn, an, horizon, beta, st, kappa) -> tuple[dict, dict | None]:
-    """The analysts' curves at any horizon, at full trust ("analysts") and at
-    half ("analysts_t50"); zero trust is the market's curve, already in the
-    payload. Each firm's 12-month target is moved to the expiry geometrically
-    (`_target_log_returns`), so a 3M chart uses the same targets scaled to 3
-    months (owner, 2026-10-22). Both ship so the page's trust control is
-    instant (2026-10-23): no refetch, no second cache entry.
+def _model_curves(
+    symbol, rn, ccy, ratio, an, st, kappa, div_yield, own: bool = True, name: str | None = None
+) -> tuple[dict, dict]:
+    """The two real-world curves and the model block at this expiry.
 
-    Returns (curves, the analysts' block with this horizon's ``at_expiry``).
-    The block is a COPY: ``analyst_targets.consensus`` hands out its cached
-    dict, shared by both horizons and the grid, so writing ``at_expiry`` into
-    it let whichever horizon ran last move the other's diamond, cached 12M
-    payloads included (a 12M chart drew the 3M target, 2026-10-23)."""
-    none = {"analysts": (None, None), "analysts_t50": (None, None)}
-    if not an:
-        return none, an
-    an = {**an}
-    targets = [f["target"] for f in an["firms"]] or [an.get("mean") or an["consensus"]]
-    an["at_expiry"] = target_at_expiry(rn, targets, beta, st["erp"])
-    out = {}
-    try:
-        for name, w in (("analysts", 1.0), ("analysts_t50", 0.5)):
-            mx = analysts_mixture(rn, targets, beta, st["erp"], kappa, w)
-            out[name] = (mx["p"], mx["method"])
-    except DensityError:
-        return none, an
-    return out, an
+    ``capm.model`` gives mu in the LISTING's currency (its own rate, the
+    app's beta, the alpha from its own mean target); the tilt is applied in
+    the chain's units, where E[S_T]/S0 = exp(mu T) is the same ratio, and the
+    FX layer keeps E[e^x], so the listing's curve means S0 exp(mu T) too.
+    "model" (mu on) carries alpha, "market" (mu off) is pure CAPM; with no
+    alpha they are the same curve, sent once. ``own`` False: ``an`` is the
+    chain line's block (the listing and its research line have none); it is
+    still shown as the Street's reference, but it sets no alpha, since the
+    listing's grid row has no target either (one model price everywhere)."""
+    from convexity import capm
+
+    target = an.get("mean") * ratio if own and an and an.get("mean") else None
+    mdl = capm.model(symbol, rn["T"], s0=rn["S0"] * ratio, ccy=ccy, target=target,
+                     div_yield=div_yield, prefs=st["prefs"], name=name)  # fmt: skip
+    mk = mean_curve(rn, mdl["mu_capm"], kappa)
+    curves = {"market": (mk["p"], mk["method"])}
+    if mdl["alpha"]:
+        md = mean_curve(rn, mdl["mu"], kappa)
+        curves["model"] = (md["p"], md["method"])
+    else:
+        curves["model"] = curves["market"]
+    return curves, mdl
 
 
-def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
+def _dividend_yield(info: dict | None, price: float | None, ccy: str | None) -> float | None:
+    """The listing's yield exactly as its grid row computes it
+    (``fetcher._row_fields``: same inputs, the price in the quote's unit and
+    the currencies that let it repair pence), so the window's alpha uses the
+    row's total upside. HSBA.L read 0.04% here before the currencies were
+    passed: a pence price against a pound dividend."""
+    from convexity.helpers import _normalize_dividend_yield
+
+    info = info or {}
+    return _normalize_dividend_yield(
+        info.get("dividendYield"),
+        price=price,
+        dividend_rate=info.get("dividendRate"),
+        trailing_yield=info.get("trailingAnnualDividendYield"),
+        trailing_rate=info.get("trailingAnnualDividendRate"),
+        currency=info.get("currency") or ccy or "USD",
+        financial_currency=info.get("financialCurrency"),
+    )
+
+
+def _compute(symbol: str, horizon: int, st: dict) -> dict:
     import yfinance as yf
 
     chain_sym, tk, exps = _resolve_chain(symbol)
@@ -1574,9 +1558,10 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         raise
 
     try:
-        qtype = (tk.info or {}).get("quoteType") or ""
+        cinfo = tk.info or {}
     except Exception:
-        qtype = ""
+        cinfo = {}
+    qtype = cinfo.get("quoteType") or ""
     is_index = qtype.upper() in _INDEX_TYPES
     kappa = st["kappa_index"] if is_index else st["kappa_stock"]
     tails = rn.get("tails")
@@ -1600,7 +1585,6 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         "sigma_q": round(rn["sigma_q"], 6),
         "kappa": kappa,
         "is_index": is_index,
-        "beta": beta,
         "erp": st["erp"],
         "measure": st["measure"],
         "horizon": horizon,
@@ -1644,22 +1628,30 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         fx = _fx(chain_ccy, ccy, chain_sym, rn["T"])
     except Exception as e:
         print(f"[density] fx {chain_sym}: {type(e).__name__}")
-    mk = market_curve(rn, beta, st["erp"], kappa)
-    an = None
+    an, own = None, True
     try:
-        an = _own_analysts(symbol, chain_sym, tk, ratio)
+        an, own = _own_analysts(symbol, chain_sym, tk, ratio, S0 * ratio)
     except Exception as e:
         print(f"[density] analysts {chain_sym}: {type(e).__name__}")
-    an_curves, an = _analysts_curves(rn, an, horizon, beta, st, kappa)
-    curves = _payload_curves(
+    info = cinfo
+    if chain_sym != symbol:
+        try:
+            info = yf.Ticker(symbol).info or {}
+        except Exception:
+            info = {}
+    mcurves, mdl = _model_curves(
+        symbol,
         rn,
-        {
-            "rn": (rn["q"], "Q"),
-            "market": (mk["p"], mk["method"]),
-            **an_curves,
-        },
-        fx,
+        ccy,
+        ratio,
+        an,
+        st,
+        kappa,
+        _dividend_yield(info, S0 * ratio, ccy),
+        own,
+        name=info.get("longName") or info.get("shortName"),
     )
+    curves = _payload_curves(rn, {"rn": (rn["q"], "Q"), **mcurves}, fx)
     try:
         earnings = _earnings(
             tk, chain_sym, exps, S0, rf, days, dt.date.fromisoformat(meta["session"])
@@ -1667,10 +1659,17 @@ def _compute(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     except Exception as e:
         print(f"[density] earnings {chain_sym}: {type(e).__name__}")
         earnings = []
-    return {**base, "fx": fx, "curves": curves, "analysts": an, "earnings": earnings}
+    return {
+        **base,
+        "fx": fx,
+        "curves": curves,
+        "analysts": an,
+        "model": mdl,
+        "earnings": earnings,
+    }
 
 
-def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
+def _history(symbol: str, horizon: int, st: dict) -> dict:
     """The estimate for a stock with no usable options, from its own history
     and its market's options.
 
@@ -1785,22 +1784,14 @@ def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
     sig = float(math.sqrt(max(np.trapezoid(q * (x - m1) ** 2, x), 1e-12)) / math.sqrt(T))
     rn = {"T": T, "S0": S0, "F": F, "rf": r_loc, "x": x, "q": q, "sigma_q": sig}
 
-    mk = market_curve(rn, beta, st["erp"], 1.0)
     an = None
     try:
         an = _analysts(tk) or _research_analysts(symbol, S0)
     except Exception as e:
         print(f"[density] analysts {symbol}: {type(e).__name__}")
-    an_curves, an = _analysts_curves(rn, an, horizon, beta, st, 1.0)
-    curves = _payload_curves(
-        rn,
-        {
-            "rn": (None, None),
-            "market": (mk["p"], mk["method"]),
-            **an_curves,
-        },
-        None,
-    )
+    mcurves, mdl = _model_curves(symbol, rn, ccy, 1.0, an, st, 1.0, _dividend_yield(info, S0, ccy),
+                                 name=name)  # fmt: skip
+    curves = _payload_curves(rn, {"rn": (None, None), **mcurves}, None)
     earnings = []
     try:
         from convexity import attention
@@ -1835,7 +1826,6 @@ def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         "sigma_q": round(sig, 6),
         "kappa": 1.0,
         "is_index": False,
-        "beta": beta,
         "erp": st["erp"],
         "measure": "P",
         "horizon": horizon,
@@ -1855,5 +1845,6 @@ def _history(symbol: str, horizon: int, beta: float, st: dict) -> dict:
         "vol": {"implied": None, "implied_days": None, "hist": _hist_vol(symbol), "symbol": symbol},
         "curves": curves,
         "analysts": an,
+        "model": mdl,
         "earnings": earnings,
     }

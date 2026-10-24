@@ -223,7 +223,10 @@ def _row_fields(info: dict, last: float, out: dict) -> None:
     out["peg"] = _positive(info.get("pegRatio") or info.get("trailingPegRatio"))
     out["ev_ebitda"] = _positive(info.get("enterpriseToEbitda"))
     out["ev_revenue"] = _positive(info.get("enterpriseToRevenue"))
-    out["beta"] = _safe_num(info.get("beta"))
+    # The app's beta (capm.py: home index, 3Y daily BSWA, shrunk), from its
+    # day cache only: never computed on this streaming path. A miss is None
+    # until the page's /api/model-prices batch (or the refresh job) fills it.
+    _set_beta(out, out.get("symbol") or "")
     out["dividend_yield"] = _normalize_dividend_yield(
         info.get("dividendYield"),
         price=last,
@@ -940,6 +943,21 @@ def _aligned_pct(a: pd.Series, b: pd.Series, days: int) -> tuple[float | None, f
     )
 
 
+def _set_beta(out: dict, symbol: str) -> None:
+    """``beta`` + ``beta_meta`` from the app's day cache (capm.cached), or
+    None. Yahoo's ``info["beta"]`` (5Y monthly vs the S&P 500 in USD) is never
+    read: it did worse than beta = 1 for European banks (1.29 backtest)."""
+    from convexity import capm
+    from convexity.persistence import load_prefs
+
+    try:
+        bm = capm.cached(symbol, load_prefs())
+    except Exception:
+        bm = None
+    out["beta"] = bm["beta"] if bm else None
+    out["beta_meta"] = bm
+
+
 def _beta_corr(stock_close: pd.Series, bench_close: pd.Series) -> tuple[float | None, float | None]:
     """β and ρ of a stock's returns on a benchmark's.
 
@@ -1094,7 +1112,7 @@ def fetch_detail(symbol: str) -> dict:
     out["market_cap_usd"] = fixed["market_cap_usd"]
     out["fcf_yield"] = fixed["fcf_yield"]
 
-    out["beta"] = _safe_num(info.get("beta"))
+    _set_beta(out, symbol)
     out["dividend_yield"] = _normalize_dividend_yield(
         info.get("dividendYield"),
         price=out.get("price")

@@ -232,6 +232,18 @@ def consensus(symbol: str, tk=None, info: dict | None = None, splits=None, price
         }
     else:
         summary = summary_from_info(info)
+    if all(summary.get(k) is None for k in ("mean", "median", "low", "high")) and not summary.get(
+        "n_opinions"
+    ):
+        # No target of the listing's own: a secondary line (CCC3.DE, NVD.DE,
+        # APC.DE). Yahoo still hands it the PARENT's firm list, in the
+        # parent's currency: CCC3.DE got Coca-Cola's 15 firms at $93.73 read as
+        # euros, ~11% high, while its grid row (fetch_one skips such a listing
+        # and scales the research line's targets) said EUR 84.09. None here,
+        # so every caller falls through to the research line the same way.
+        if key:
+            _cache_put(key, {"v": None}, MISS_TTL)
+        return None
     px = _num(price) or _num(summary.get("price"))
     try:
         ud = tk.upgrades_downgrades
@@ -310,7 +322,9 @@ SHRINK_N0 = 10  # the holdings' own mean counts as this many universe names
 Z_CAP = 3.0
 
 
-def relative_alpha(upsides: dict[str, float], ic: float | None = None) -> tuple[dict, dict]:
+def relative_alpha(
+    upsides: dict[str, float], ic: float | None = None, z_cap: float = Z_CAP
+) -> tuple[dict, dict]:
     """Per-symbol alpha (annual, excess over equilibrium) from each holding's
     target upside (T / P - 1). The reference mean blends the holdings' own
     mean with the long-run universe mean: the universe's average upside swings
@@ -324,7 +338,7 @@ def relative_alpha(upsides: dict[str, float], ic: float | None = None) -> tuple[
     ref = (sum(u.values()) + SHRINK_N0 * UPSIDE_MEAN) / (n + SHRINK_N0)
     out = {}
     for s, v in u.items():
-        z = max(-Z_CAP, min(Z_CAP, (v - ref) / UPSIDE_SD))
+        z = max(-z_cap, min(z_cap, (v - ref) / UPSIDE_SD))
         out[s] = {"alpha": ic * SIGMA_XS * z, "z": z}
     return out, {"ic": ic, "ref_upside": math.expm1(ref), "sigma_xs": SIGMA_XS}
 
