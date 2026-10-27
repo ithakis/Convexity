@@ -14,7 +14,9 @@ SPY. Now every surface reads this module:
   (``options_density._local_rate``: ^IRX for USD, CME futures for the majors).
   A home-index beta implies a local CAPM, so the rate is local too.
 * ``beta`` is estimated here (below), cached per symbol per day.
-* ``ERP`` is the owner's ``dist_erp`` (5% by default).
+* ``ERP`` is the owner's ``dist_erp`` (5% by default), or with
+  ``model_erp_mode`` "historical" the long-run premium of the market the beta
+  is measured against (``erp_for``, below).
 * ``alpha`` is the analysts' small relative tilt,
   ``analyst_targets.relative_alpha`` (IC x 0.42 x z of relative upside, z
   capped at +/-3): at most about +/-2.5% a year. It is 0 with no targets, or
@@ -373,6 +375,7 @@ def settings(prefs: dict | None = None) -> dict:
     years = p.get("model_beta_years", WINDOW_YEARS)
     return {
         "erp": float(p.get("dist_erp", options_density.ERP_DEFAULT)),
+        "erp_mode": p.get("model_erp_mode") if p.get("model_erp_mode") in ERP_MODES else "assumed",
         "shrink": float(p.get("model_beta_shrink", SHRINK)),
         "years": int(years) if years in (1, 2, 3, 1.0, 2.0, 3.0) else WINDOW_YEARS,
         "ic": float(p["model_ic"]) if isinstance(p.get("model_ic"), int | float) else None,
@@ -780,6 +783,84 @@ def beta_for(
     )[(symbol or "").upper()]
 
 
+# --------------------------- the equity premium ---------------------------
+# Two ways to set it (Settings -> Model price, prefs ``model_erp_mode``):
+#
+# * "assumed" (the default): one premium for every market, the owner's
+#   ``dist_erp``, 5% unless changed.
+# * "historical": the long-run premium of the market the beta is measured
+#   against, from data/erp_history.json (JST Macrohistory, 16 markets,
+#   1870-2020, scripts/build_erp_history.py). A market without a long record
+#   of its own (Hong Kong, Canada, Korea...) and a world fund take the pooled
+#   16-market premium; STOXX Europe 600 the pooled European one.
+#
+# Why assumed is the default (the build script's evidence, 2026-10-26): out of
+# sample a market's own history forecast its next 10-20 years worse than a
+# flat 5% (MSE +14% / +33%), and the gaps between markets are noise (Cochran's
+# Q p = 0.90). The premium is the arithmetic-mean one the model price needs:
+# S0 * exp(mu T) is a mean, so ERP = ln E[(1 + R_eq) / (1 + R_bill)].
+ERP_MODES = ("assumed", "historical")
+HIST_MARKET = {
+    "^GSPC": "USA", "^FCHI": "France", "^GDAXI": "Germany", "^IBEX": "Spain",
+    "FTSEMIB.MI": "Italy", "^AEX": "Netherlands", "^BFX": "Belgium", "^OMXH25": "Finland",
+    "^SSMI": "Switzerland", "^OMX": "Sweden", "^OMXC25": "Denmark", "^FTAS": "UK",
+    "1306.T": "Japan", "^AXJO": "Australia", "OSEBX.OL": "Norway", "PSI20.LS": "Portugal",
+    "^STOXX": "europe",
+}  # fmt: skip
+POOL_NAMES = {"world": "16 developed markets", "europe": "13 European markets"}
+# World funds are measured against these: the pooled premium is their own.
+_WORLD_PROXIES = {"ACWI", "EEM"}
+
+
+@lru_cache(maxsize=1)
+def erp_history() -> dict | None:
+    """The shipped table (data/erp_history.json), or None when it is missing
+    or malformed: the historical mode then falls back to the assumed premium
+    and says so (``erp_meta.reason``)."""
+    from importlib import resources
+
+    try:
+        doc = json.loads(
+            resources.files("convexity").joinpath("data/erp_history.json").read_text("utf-8")
+        )
+        if isinstance(doc.get("markets"), dict) and isinstance(doc.get("pools"), dict):
+            return doc
+    except Exception as exc:
+        print(f"[capm] erp_history.json unreadable: {type(exc).__name__}: {exc}", flush=True)
+    return None
+
+
+def erp_for(beta_meta: dict | None, st: dict) -> tuple[float, dict]:
+    """The premium for one name and what it is: ``(erp, erp_meta)``. In the
+    historical mode the market is the beta's own proxy, so beta and premium
+    describe the same market (a London S&P tracker: the S&P's beta and the US
+    premium)."""
+    if st.get("erp_mode") != "historical":
+        return st["erp"], {"mode": "assumed"}
+    h = erp_history()
+    if h is None:
+        return st["erp"], {"mode": "assumed", "reason": "no_history"}
+    proxy = (beta_meta or {}).get("proxy") or US[0]
+    key = HIST_MARKET.get(proxy, "world")
+    pooled = key in h["pools"]
+    row = h["pools"][key] if pooled else h["markets"].get(key) or h["pools"]["world"]
+    meta = {
+        "mode": "historical",
+        "market": POOL_NAMES.get(key, key),
+        "pooled": pooled,
+        # A home market with no long record of its own, as opposed to a
+        # world fund whose market IS the pool.
+        "fallback": key == "world" and proxy not in _WORLD_PROXIES,
+        "proxy_name": (beta_meta or {}).get("proxy_name"),
+        "from": row["from"],
+        "to": row["to"],
+        "years": row["years"],
+        "se": row["se"],
+        "geometric": row["geometric"],
+    }
+    return float(row["erp"]), meta
+
+
 # ------------------------------- the model --------------------------------
 
 
@@ -823,8 +904,8 @@ def model(
     name: str | None = None,
 ) -> dict:
     """THE model block at horizon ``T`` (years) for a listing at price ``s0``:
-    ``{mu, mu_capm, rf, rf_source, beta, beta_meta, erp, alpha, alpha_meta,
-    capm_price, model_price, T, s0}``. ``mu``/``model_price`` include the
+    ``{mu, mu_capm, rf, rf_source, beta, beta_meta, erp, erp_meta, alpha,
+    alpha_meta, capm_price, model_price, T, s0}``. ``mu``/``model_price`` include the
     analysts' alpha (mu on), ``mu_capm``/``capm_price`` are pure CAPM (mu
     off), so the page's toggle needs no refetch. ``target`` is the 12-month
     mean target in the same currency and units as ``s0``."""
@@ -838,7 +919,8 @@ def model(
         dy = div_yield if isinstance(div_yield, int | float) and 0 <= div_yield < 0.5 else 0.0
         upside = target / s0 - 1.0 + dy
     alpha, am = alpha_for(upside, st)
-    mu_capm = rf + bm["beta"] * st["erp"]
+    erp, em = erp_for(bm, st)
+    mu_capm = rf + bm["beta"] * erp
     mu = mu_capm + alpha
     return {
         "mu": round(mu, 6),
@@ -847,7 +929,8 @@ def model(
         "rf_source": rsrc,
         "beta": bm["beta"],
         "beta_meta": bm,
-        "erp": st["erp"],
+        "erp": round(erp, 6),
+        "erp_meta": em,
         "alpha": round(alpha, 6),
         "alpha_meta": am,
         "T": round(float(T), 6),

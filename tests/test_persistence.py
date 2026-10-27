@@ -252,6 +252,11 @@ def test_model_prefs_are_bounded():
     assert persistence.save_prefs({"model_beta_years": True}) == ok
     after = persistence.save_prefs({"model_ic": None})  # null = back to auto (measured/prior)
     assert "model_ic" not in after
+    assert (
+        persistence.save_prefs({"model_erp_mode": "historical"})["model_erp_mode"] == "historical"
+    )
+    assert persistence.save_prefs({"model_erp_mode": "implied"})["model_erp_mode"] == "historical"
+    assert "model_erp_mode" not in persistence.save_prefs({"model_erp_mode": None})
 
 
 def test_trust_prefs_are_dropped_on_read():

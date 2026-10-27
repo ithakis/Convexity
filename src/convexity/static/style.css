@@ -2677,6 +2677,13 @@
   .model-why summary { cursor: pointer; font-weight: 600; color: var(--text); }
   .model-why ul { margin: 6px 0 4px; padding-left: 18px; color: var(--th-ink); line-height: 1.5; }
   .model-why a { color: var(--accent); }
+  /* The historical premium per market (Settings → Equity premium: Historical). */
+  .model-erp-table { border-collapse: collapse; margin: 8px 0 4px; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .model-erp-table th { text-align: right; font-weight: 600; color: var(--muted); padding: 3px 0 3px 18px; border-bottom: 1px solid var(--border); }
+  .model-erp-table td { text-align: right; padding: 2px 0 2px 18px; color: var(--text); }
+  .model-erp-table th:first-child, .model-erp-table td:first-child { text-align: left; padding-left: 0; }
+  .model-erp-table tbody tr:nth-last-child(-n+2) td { color: var(--muted); }
+  .model-erp-table tbody tr:nth-last-child(2) td { border-top: 1px solid var(--border); padding-top: 4px; }
   .settings-row.model-theory .settings-row-main { max-width: none; }
   .m-fc-ctl { position: absolute; top: 8px; right: 10px; display: flex; gap: 6px; z-index: 2; }
   .m-fc-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-soft);
@@ -4289,6 +4296,19 @@
   .settings-btn:disabled:hover { border: 0; color: var(--text); }
   .settings-btn.danger, .settings-btn.danger:hover { background: rgba(var(--neg-rgb), 0.14); color: var(--neg); border: 0; }
   .settings-pane .att-rule button + button { margin-left: 4px; }
+  /* A segmented tray inside an .att-rule (Model price: Equity premium, Analyst
+     IC) keeps the tray's look: the soft-button rule above is (0,2,1) and beat
+     .settings-seg-opt.active (0,2,0), so the selected option looked like the
+     others. */
+  .settings-pane .att-rule .settings-seg .settings-seg-opt {
+    height: 28px; padding: 0 13px; border-radius: 6px; background: transparent; color: var(--muted);
+    font-weight: 400; filter: none; margin-left: 0;
+  }
+  .settings-pane .att-rule .settings-seg .settings-seg-opt:hover { color: var(--text); }
+  .settings-pane .att-rule .settings-seg .settings-seg-opt.active {
+    color: var(--text); font-weight: 600; background: color-mix(in srgb, var(--text) 12%, transparent);
+  }
+  .settings-pane .att-rule .settings-seg + .att-rule, .settings-pane .att-rule .settings-seg + input { margin-left: 8px; }
 
   /* API key field: a sunk field, no outline. */
   .settings-key-input { border: 0; background: var(--surface-sunk); border-radius: 7px; }

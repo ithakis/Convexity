@@ -4494,6 +4494,15 @@ function fcHover(cx, cy) {
   fcDraw();
 }
 
+/* Where a model block's equity premium came from (capm.erp_for): "assumed",
+ * or the market and years of its history. Plain text, for tips. */
+function erpSourceTxt(m) {
+  const em = m?.erp_meta || {};
+  if (em.mode !== "historical") return "assumed, Settings";
+  return `${em.pooled ? `${em.market} pooled` : `${em.market}’s history`}, ${em.from}–${em.to}`
+    + (em.fallback ? `; ${em.proxy_name || "this market"} has no long record of its own` : "");
+}
+
 /* The readouts box under the chart (it replaces the range strip while σ or μ
  * is on) and the assumptions footnote. */
 function renderFcReadouts() {
@@ -4576,7 +4585,7 @@ function renderFcReadouts() {
   const decTex = !m ? "" : DETAIL.showMu
     ? String.raw`\mu = r_f + \beta\,\text{ERP} + \alpha = ${kx(pp(m.rf))} + ${m.beta.toFixed(2)} \times ${kx(pp(m.erp))} ${m.alpha >= 0 ? "+" : "-"} ${kx(pp(Math.abs(m.alpha)))} = ${kx(pp(m.mu))}`
     : String.raw`\mu = r_f + \beta\,\text{ERP} = ${kx(pp(m.rf))} + ${m.beta.toFixed(2)} \times ${kx(pp(m.erp))} = ${kx(pp(m.mu_capm))}`;
-  const modelTip = !m ? "" : `${DETAIL.showMu ? "CAPM in the listing’s currency plus the analysts’ small tilt" : "μ off: pure CAPM, the analysts’ tilt left out"}: r_f ${pp(m.rf)} (${m.rf_source}), β ${m.beta.toFixed(2)}, equity premium ${pp(m.erp, 1)}${DETAIL.showMu ? `, ${aTxt}` : ""}. The price is S₀·e^(μT) at the options’ expiry (${expTxt}): μ on ${fmtMoney(d.s0 * Math.exp(m.mu * d.T), ccy)}, μ off ${fmtMoney(d.s0 * Math.exp(m.mu_capm * d.T), ccy)}; over exactly one year (the grid’s Model 12M) ${fmtMoney(d.s0 * Math.exp((DETAIL.showMu ? m.mu : m.mu_capm)), ccy)}. The drawn curve is the options’ shape, tilted once to this mean. A model, not a forecast with an edge.`;
+  const modelTip = !m ? "" : `${DETAIL.showMu ? "CAPM in the listing’s currency plus the analysts’ small tilt" : "μ off: pure CAPM, the analysts’ tilt left out"}: r_f ${pp(m.rf)} (${m.rf_source}), β ${m.beta.toFixed(2)}, equity premium ${pp(m.erp, 1)} (${erpSourceTxt(m)})${DETAIL.showMu ? `, ${aTxt}` : ""}. The price is S₀·e^(μT) at the options’ expiry (${expTxt}): μ on ${fmtMoney(d.s0 * Math.exp(m.mu * d.T), ccy)}, μ off ${fmtMoney(d.s0 * Math.exp(m.mu_capm * d.T), ccy)}; over exactly one year (the grid’s Model 12M) ${fmtMoney(d.s0 * Math.exp((DETAIL.showMu ? m.mu : m.mu_capm)), ccy)}. The drawn curve is the options’ shape, tilted once to this mean. A model, not a forecast with an edge.`;
   const muTxt = mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
     : !m ? ""
     : DETAIL.showMu ? ` Model price: CAPM in ${escapeHtml(ccy || "")}, ${pp(m.rf)} (${escapeHtml(m.rf_source)}) + β ${m.beta.toFixed(2)} × ${pp(m.erp, 1)} premium${am.reason === "no_targets" ? "; no analyst targets, so no tilt" : `, plus the analysts’ tilt α ${m.alpha >= 0 ? "+" : ""}${pp(m.alpha)}`}; S₀·e^(μT) at the expiry.`
@@ -13891,9 +13900,12 @@ function wireModelPrefs(el, msgSel, rerender) {
 /* Settings → Model price (capm.py, 1.29): the formula and why, this asset's
  * numbers when opened from a stock window, and the model's parameters. */
 async function renderSettingsModel(el) {
-  let p = {};
-  try { p = await (await fetch("/api/prefs")).json(); } catch (e) { /* the defaults */ }
+  let p = {}, hist = null;
+  const [rp, rh] = await Promise.allSettled([fetch("/api/prefs"), fetch("/api/erp-history")]);
+  try { p = await rp.value.json(); } catch (e) { /* the defaults */ }
+  try { if (rh.value.ok) hist = await rh.value.json(); } catch (e) { /* no table: Assumed only */ }
   const erp = p.dist_erp ?? 0.05, ks = p.dist_kappa_stock ?? 0.92, ki = p.dist_kappa_index ?? 0.80;
+  const erpMode = p.model_erp_mode === "historical" && hist ? "historical" : "assumed";
   const years = p.model_beta_years ?? 3, shrink = p.model_beta_shrink ?? 0.9, zc = p.model_z_cap ?? 3;
   const icSet = p.model_ic != null;
   const tx = (src, alt) => window.katex ? katex.renderToString(src, { throwOnError: false, strict: false, displayMode: false }) : alt;
@@ -13913,7 +13925,7 @@ async function renderSettingsModel(el) {
         <div><span>Model price · 12M</span><b>${fmtMoney(d.s0 * Math.exp(m.mu), ccy)}</b></div>
         <div><span>Beta</span><b>${m.beta.toFixed(2)}</b> <small>${bm.method === "prior" ? "prior" : `vs ${escapeHtml(bm.proxy_name || "")}, raw ${(+bm.raw).toFixed(2)}, ${bm.n_days} days`}</small></div>
       </div>
-      <div class="settings-row-help">r<sub>f</sub> ${escapeHtml(m.rf_source)}. α ${m.alpha_meta?.reason === "no_targets" ? "is 0: no analyst targets" : `= IC ${(+m.alpha_meta.ic).toFixed(3)} × 0.42 × z ${(+m.alpha_meta.z).toFixed(2)} (upside ${pp(m.alpha_meta.upside, 1)} vs a usual ${pp(m.alpha_meta.ref_upside, 1)})`}.</div>` });
+      <div class="settings-row-help">r<sub>f</sub> ${escapeHtml(m.rf_source)}. ERP ${pp(m.erp, 1)}: ${escapeHtml(erpSourceTxt(m))}. α ${m.alpha_meta?.reason === "no_targets" ? "is 0: no analyst targets" : `= IC ${(+m.alpha_meta.ic).toFixed(3)} × 0.42 × z ${(+m.alpha_meta.z).toFixed(2)} (upside ${pp(m.alpha_meta.upside, 1)} vs a usual ${pp(m.alpha_meta.ref_upside, 1)})`}.</div>` });
   })() : "";
   const theory = `<div class="settings-row model-theory" data-item="model-theory"><div class="settings-row-main">
     <div class="settings-row-label">How it is built</div>
@@ -13939,10 +13951,31 @@ async function renderSettingsModel(el) {
       <li>μ is a total return; the model price does not take out dividends. FX pairs and crypto get a CAPM μ too, which is a convention, not a view.</li>
     </ul></details>
   </div></div>`;
+  // The equity premium: one assumed number (the default) or each market's
+  // own history (capm.erp_for). The table and the evidence are the shipped
+  // data/erp_history.json, so what is shown is what the model reads.
+  const ev = hist?.evidence, pc = (v) => `${(v * 100).toFixed(1)}%`;
+  const histTable = !hist ? "" : `<table class="model-erp-table"><thead><tr><th>Market</th><th>ERP</th><th>Geometric</th><th>± 1 s.e.</th><th>Years</th></tr></thead><tbody>${
+    Object.entries(hist.markets).concat([["16 developed markets (pooled)", hist.pools.world], ["13 European markets (pooled)", hist.pools.europe]])
+      .map(([k, r]) => `<tr><td>${escapeHtml(k)}</td><td>${pc(r.erp)}</td><td>${pc(r.geometric)}</td><td>${pc(r.se)}</td><td>${r.from}–${r.to}</td></tr>`).join("")
+  }</tbody></table>`;
+  const erpWhy = !ev ? "" : `<details class="model-why"><summary>Why Assumed is the default</summary><ul>
+      <li>Out of sample (1950–2020, 16 markets), each market’s own history forecast its next 10 years <b>${Math.round(ev["10y"].mse_vs_assumed.local * 100)}% worse</b> than a flat 5% (mean squared error) and its next 20 years ${Math.round(ev["20y"].mse_vs_assumed.local * 100)}% worse; markets with a high past premium went on to a lower one (rank correlation ${ev["10y"].rank_corr_local_future.toFixed(2)}).</li>
+      <li>The differences between markets are noise: a test that all 16 share one premium cannot reject it (Cochran’s Q ${ev.homogeneity.cochran_q} on ${ev.homogeneity.df} df, p = ${ev.homogeneity.p.toFixed(2)}). Even 120–150 years leave a standard error of 1.2–2.4 points per market.</li>
+      <li>A pooled world history ties with 5% (${Math.round(ev["10y"].mse_vs_assumed.world * 100)}% at 10 years, not significant). The 5% also sits on Dimson, Marsh &amp; Staunton’s forward-looking 4½–5% (arithmetic) for the world, and on the consensus of finance professors (Welch 2008, Fernandez’s surveys: 5–6%).</li>
+      <li>ERP here is the arithmetic premium the model price needs, ${tx(String.raw`\ln \mathbb{E}\!\left[\tfrac{1+R_{eq}}{1+R_{bill}}\right]`, "ln E[(1+R_eq)/(1+R_bill)]")}: the price S₀·e<sup>μT</sup> is a mean. Tables that quote the geometric premium read about 1.5 points lower.</li>
+      <li>Source: ${escapeHtml(hist.citation)} Licence: ${escapeHtml(hist.license)}. Survivors only: markets that closed (Russia 1917, China 1949) are not in it, so history reads high.</li>
+    </ul></details>`;
   el.innerHTML = asset + theory +
     settingsRow({ id: "model-erp", label: "Equity premium",
-      help: "The market's expected return over cash, per year. Default 5%.",
-      control: num("dist_erp", +(erp * 100).toFixed(2), 0.5, 0, 15, "%", "Equity premium, percent") }) +
+      help: erpMode === "historical"
+        ? "Historical: each market’s own long-run premium over bills, 1870–2020."
+        : `Assumed: one premium for every market. Default 5%.`,
+      control: `<span class="att-rule">${hist ? seg("model_erp_mode", [["assumed", "Assumed"], ["historical", "Historical"]], erpMode, "Equity premium source") : ""}${
+        erpMode === "assumed" ? num("dist_erp", +(erp * 100).toFixed(2), 0.5, 0, 15, "%", "Equity premium, percent") : ""}</span>` }) +
+    (hist ? `<div class="settings-row model-theory" data-item="model-erp-detail"><div class="settings-row-main"><div class="settings-row-help">${erpMode === "historical"
+      ? "Each asset gets the premium of the market its beta is measured against. A market without a long record of its own (Hong Kong, Canada, Korea…) takes the 16-market pool; STOXX Europe 600 the European one." + histTable
+      : "Historical uses each market’s own long-run premium instead (the table is shown when it is on)."}${erpWhy}</div></div></div>` : "") +
     settingsRow({ id: "model-window", label: "Beta window",
       help: "Years of daily returns. 3Y was best in the backtest.",
       control: seg("model_beta_years", [[1, "1Y"], [2, "2Y"], [3, "3Y"]], years, "Beta window") }) +

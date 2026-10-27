@@ -76,6 +76,8 @@ HOLDINGS_PRIMARY_COLS: list[tuple[str, str]] = [
     ("pe_ratio", "P/E"),
     ("beta", "Beta"),
     ("beta_vs", "Beta Measured Against"),
+    ("model_erp", "Equity Premium (ERP)"),
+    ("model_erp_src", "ERP Source"),
     ("model_mu", "Expected Return μ (12M)"),
     ("model_price", "Model Price (12M)"),
     ("sector", "Sector"),
@@ -147,6 +149,7 @@ FRACTION_KEYS = {
     "payout_ratio",
     "dividend_yield",
     "model_mu",
+    "model_erp",
 }
 
 # Fields explicitly skipped from the holdings "extras" pass — these are
@@ -526,6 +529,14 @@ COLUMN_DEFS: dict[str, tuple[str, str, str]] = {
         "The market the beta is measured against, and how (BSWA, 1Y OLS or prior).",
         "",
     ),
+    "model_erp": (
+        "ln E[(1 + R_eq) / (1 + R_bill)]",
+        "The equity premium in mu: assumed (one number for every market, 5% by default) or, "
+        "with Settings -> Equity premium: Historical, the long-run premium over bills of the "
+        "market the beta is measured against (JST Macrohistory, 1870-2020).",
+        "Assumed is the default: out of sample a market's own history did worse than a flat 5%.",
+    ),
+    "model_erp_src": ("", "Where the equity premium came from.", ""),
     "model_mu": (
         "mu = rf_local + beta x ERP + alpha",
         "The app's expected return: CAPM in the listing's currency plus the analysts' small "
@@ -1538,7 +1549,16 @@ def _with_model(view: dict, model_runner) -> dict:
             via = f" · via {bm['via']}" if bm.get("via") else ""
             if bm.get("fit_r2") is not None:
                 via += f" · fund, best fit R² {bm['fit_r2']:.2f}"
+            em = m.get("erp_meta") or {}
+            src = (
+                "assumed"
+                if em.get("mode") != "historical"
+                else (
+                    f"{em['market']}{' pooled' if em['pooled'] else ' history'}, {em['from']}-{em['to']}"
+                )
+            )
             r.update(beta=m["beta"], beta_vs=f"{bm['proxy_name']} · {how}{via}",
+                     model_erp=m["erp"], model_erp_src=src,
                      model_mu=m["mu"], model_price=m["model_price"])  # fmt: skip
         out.append(r)
     return {**view, "rows": out}

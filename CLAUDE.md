@@ -255,7 +255,7 @@ Each of these has cost real debugging time; the link goes to the full story.
   window, export, portfolio beta, the optimizer's alpha settings, the news
   Track record, the reference pack) reads `capm`'s beta (home index in local
   currency, Welch BSWA on 3Y daily, 1 + 0.9(b − 1); 1Y OLS under 252 days, 1
-  "prior" under 151) and mu = rf_local + beta·ERP + alpha (alpha =
+  "prior" under 151) and mu = rf_local + beta·ERP + alpha (ERP assumed 5% by default, or each market's history, `model_erp_mode`, `docs/erp_research.md`; alpha =
   `relative_alpha` of the name's total upside, 0 without targets). Yahoo's
   `info["beta"]` is never read; a saved row's old one is dropped on load. Never
   on `fetch_one`'s path (`capm.cached` only; `/api/model-prices` and jobs batch
@@ -283,8 +283,9 @@ Single-user, local-only portfolio dashboard. Runs as a Python HTTP server
 on `127.0.0.1:8765` and prints its URL — it does **not** auto-open a browser
 (removed in v1.12.3 at the user's request); or runs in a native PySide6 window — §14. No accounts, no network calls except to yfinance
 (Yahoo Finance), Finnhub (news), NVIDIA NIM (the News read) and this repo's
-GitHub Releases (the one-time model download and the daily reference pack),
-no build step. Almost all logic lives in the `src/convexity/` package, split
+GitHub Releases (the one-time model download and the daily reference pack)
+and the BIS (central-bank policy rates, once a day, for the model price's
+rf in currencies without a CME future), no build step. Almost all logic lives in the `src/convexity/` package, split
 into focused modules (server, fetcher, analytics, fx, persistence, etc. —
 see the table below). The `convexity` command is `cli.main()`: no
 arguments runs the server, `convexity build-symbols` builds the symbol pack (CI),
@@ -399,6 +400,7 @@ overrides it):
 │   ├── attention.json          ← the Attention rail's thresholds, dismissed and seen items (preferences; malformed = defaults)
 │   ├── events.json             ← held shares' next earnings / ex-dividend dates from Yahoo (a cache, market data only)
 │   ├── betas.json              ← the app's beta per symbol and window, recomputed daily (capm.py; a cache, market data only)
+│   ├── policy_rates.json       ← central-bank policy rates from the BIS, refreshed daily: rf for currencies without a CME future (options_density.py; market data only)
 │   ├── beta_lines.json         ← home lines found by name for listings the pack lacks (a US company's Milan line → its US line), a week (capm.py; market data only)
 │   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
@@ -768,7 +770,8 @@ GitHub's side needs a GitHub Support request by the owner.
   Settings inputs are never prefilled and are emptied as soon as they are sent.
   Only `keys.py` writes `config.json`.
 - No new outbound hosts, CDNs, analytics or telemetry without asking (today:
-  Yahoo Finance, Finnhub, NVIDIA NIM, KaTeX CDN, and GitHub Releases for the
+  Yahoo Finance, Finnhub, NVIDIA NIM, KaTeX CDN, stats.bis.org (policy rates,
+  `options_density._policy_rates`, approved 2026-10-26), and GitHub Releases for the
   one-time model download — `model_fetch.py` — and the daily reference pack —
   `reference_pack.py`, §4 — plus the weekly symbol pack, `symbol_db.py`, §6;
   both packs can be switched off in Settings).

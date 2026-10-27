@@ -730,6 +730,14 @@ class Handler(BaseHTTPRequestHandler):
 
             self._send_json(200, load_prefs())
             return
+        if parsed.path == "/api/erp-history":
+            # Settings -> Model price: each market's historical premium and the
+            # evidence behind the default (package data, no network).
+            from convexity import capm
+
+            h = capm.erp_history()
+            self._send_json(200 if h else 404, h or {"error": "no history table"})
+            return
         if parsed.path == "/api/target-track-record":
             # The app's own point-in-time record of analyst targets, scored
             # against the price 12 months on (analyst_targets.track_record).
@@ -1768,6 +1776,15 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
             pass
 
     threading.Thread(target=_warm_optimizer, name="cx-warm-mpt", daemon=True).start()
+
+    # Central-bank policy rates (BIS) for the currencies without a CME future:
+    # the model price's rf. Fetched here so no request waits on BIS.
+    def _warm_rates() -> None:
+        from convexity import options_density
+
+        options_density.warm_policy_rates()
+
+    threading.Thread(target=_warm_rates, name="cx-warm-rates", daemon=True).start()
     threading.Thread(target=_warm_book, name="cx-warm-book", daemon=True).start()
     # Phase 9: the notification scheduler (a minute tick; its passes are
     # background jobs, so single-flight with every refresh).

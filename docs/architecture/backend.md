@@ -1399,7 +1399,15 @@ CAPM and the per-firm analyst mixture with its trust control:
   compute once (`_COMPUTE`: a page load asked from three places and
   downloaded the same 27 names three times).
 - **rf_local** is `options_density._local_rate` (a home-index beta is a local
-  CAPM). The CME spread is read on the two contracts' joint days, median of
+  CAPM): ^IRX for USD, the CME futures spread for EUR/GBP/CHF/JPY/CAD/AUD,
+  else the central bank's policy rate from the BIS (`_policy_rates`,
+  2026-10-26: one request a day for 26 central banks, `state/policy_rates.json`,
+  refreshed in the background while the last good table answers, a series
+  older than 60 days dropped), else the euro's rate for a European currency,
+  else the US bill, said so (TWD, SGD: no BIS series). Before, every
+  non-futures currency used the US bill or the euro's rate (Selic 13.75%
+  read as 4%). A policy rate is overnight, so it can lead the 3-month bill by
+  a move. Tests set `CONVEXITY_POLICY_RATES=0` (conftest). The CME spread is read on the two contracts' joint days, median of
   the last five: the thin far contract's last close was a day older than the
   near one's and EUR read 1.48% instead of ~2.4% (2026-10-24). **alpha** is `analyst_targets.relative_alpha` on the name's total
   upside (mean target / price − 1 + dividend yield, like the optimizer's
@@ -1420,6 +1428,20 @@ CAPM and the per-firm analyst mixture with its trust control:
   so every caller falls through to the research line, scaled. The window's dividend
   yield is computed with the row's rule, currencies included (HSBA.L read
   0.04% with a pence price).
+- **ERP** (`capm.erp_for`, prefs `model_erp_mode`, 2026-10-26): "assumed" (the
+  default: `dist_erp`, 5%, one number for every market) or "historical" (the
+  long-run premium of the market the beta is measured against, from
+  `data/erp_history.json`: JST Macrohistory R6, 16 markets, built by
+  `scripts/build_erp_history.py`; no long local record → the 16-market pool,
+  STOXX 600 → the European pool). The premium is ln E[(1+R_eq)/(1+R_bill)],
+  arithmetic, because the model price is a mean. Assumed is the default
+  because a market's own history forecast its next 10-20 years worse than a
+  flat 5% out of sample (MSE +14% / +33%) and the cross-market differences are
+  noise (Cochran's Q p = 0.90): `docs/erp_research.md`. The block carries
+  `erp_meta` (mode, market, years, se, fallback); a missing table falls back
+  to assumed with `reason: "no_history"`. `GET /api/erp-history` serves the
+  table to Settings; the export writes `model_erp` + `model_erp_src`.
+  `erp_mode` is in `capm.settings`, hence in the density cache key.
 - **Portfolio beta**: `stats.beta` is the weighted sum of the holdings' app
   betas (`beta_coverage` says how much weight had one); `benchmarks[*].rel.beta`
   stays the basket's regression on the chosen benchmark.
@@ -1428,7 +1450,7 @@ CAPM and the per-firm analyst mixture with its trust control:
   against SPY on 5Y of closes (its universe is the S&P 500). Neither is a
   Market read feature: only the forward idiosyncratic return reads it.
 - **Settings** (prefs.json, bounded in `persistence._clean_prefs`):
-  `model_beta_shrink` 0–1, `model_beta_years` 1|2|3, `model_ic` 0–0.1 (unset =
+  `model_erp_mode` assumed|historical, `model_beta_shrink` 0–1, `model_beta_years` 1|2|3, `model_ic` 0–0.1 (unset =
   auto), `model_z_cap` 0.5–5, `dist_mu` (the window's μ toggle, default on);
   `dist_trust` / `dist_haircut` are dropped on read. All are in the density's
   cache key; the beta window and shrink are in the analytics'.

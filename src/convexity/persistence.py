@@ -842,6 +842,8 @@ _PREF_CHOICES = {
     "dist_measure": {"P", "Q"},
     "pf_contrib_view": {"table", "chart"},
     "rebalance": set(REBALANCE),
+    # capm.ERP_MODES: one assumed premium (dist_erp) or each market's history.
+    "model_erp_mode": {"assumed", "historical"},
 }
 
 

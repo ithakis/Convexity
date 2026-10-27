@@ -543,3 +543,73 @@ def test_a_one_bar_bad_print_is_dropped():
     r = np.diff(capm._log_index(p))
     assert r[1] == 0 and r[2] == 0  # the spike pair
     assert r[4] == pytest.approx(np.log(130 / 100))  # a jump that holds
+
+
+# ------------------------------------------------------- the equity premium
+
+
+def test_the_assumed_premium_is_the_default(model_env):
+    m = capm.model("X", 1.0, s0=100.0, ccy="USD", beta_meta=model_env)
+    assert m["erp"] == 0.05 and m["erp_meta"] == {"mode": "assumed"}
+    own = capm.model("X", 1.0, s0=100.0, ccy="USD", beta_meta=model_env, prefs={"dist_erp": 0.04})
+    assert own["erp"] == 0.04
+    assert capm.settings({"model_erp_mode": "implied"})["erp_mode"] == "assumed"
+
+
+def test_the_shipped_history_table():
+    h = capm.erp_history()
+    assert len(h["markets"]) == 16 and set(h["pools"]) == {"world", "europe"}
+    assert "CC BY-NC-SA" in h["license"] and "Jordà" in h["citation"]
+    for row in [*h["markets"].values(), *h["pools"].values()]:
+        # the arithmetic premium the model price needs, above the geometric one
+        assert 0.0 < row["geometric"] < row["erp"] < 0.12 and row["years"] >= 100
+    # every mapped market is in the table
+    assert set(capm.HIST_MARKET.values()) <= set(h["markets"]) | set(h["pools"])
+    assert h["evidence"]["10y"]["mse_vs_assumed"]["local"] > 0  # why assumed is the default
+
+
+@pytest.mark.parametrize(
+    "sym, market, pooled, fallback",
+    [
+        ("AAPL", "USA", False, False),
+        ("SAN.PA", "France", False, False),
+        ("7203.T", "Japan", False, False),
+        ("PKO.WA", "13 European markets", True, False),  # STOXX 600
+        ("0700.HK", "16 developed markets", True, True),  # no long local record
+    ],
+)
+def test_the_historical_premium_follows_the_betas_market(model_env, sym, market, pooled, fallback):
+    hp = capm.home_proxy(sym)
+    bm = {**model_env, "proxy": hp["proxy"], "proxy_name": hp["name"]}
+    m = capm.model(
+        sym, 1.0, s0=100.0, ccy="USD", beta_meta=bm, prefs={"model_erp_mode": "historical"}
+    )
+    em = m["erp_meta"]
+    assert em["mode"] == "historical" and em["market"] == market
+    assert em["pooled"] is pooled and em["fallback"] is fallback
+    h = capm.erp_history()
+    row = (
+        h["pools"]["europe" if "European" in market else "world"]
+        if pooled
+        else h["markets"][market]
+    )
+    assert m["erp"] == pytest.approx(row["erp"])
+    assert m["mu_capm"] == pytest.approx(m["rf"] + m["beta"] * m["erp"], abs=1e-6)
+
+
+def test_a_world_fund_takes_the_pool_without_a_fallback_flag(model_env):
+    bm = {**model_env, "proxy": "ACWI", "proxy_name": "MSCI ACWI"}
+    em = capm.erp_for(bm, capm.settings({"model_erp_mode": "historical"}))[1]
+    assert em["pooled"] and not em["fallback"]
+
+
+def test_a_missing_table_falls_back_to_the_assumed_premium(model_env, monkeypatch):
+    monkeypatch.setattr(capm, "erp_history", lambda: None)
+    erp, em = capm.erp_for(model_env, capm.settings({"model_erp_mode": "historical"}))
+    assert erp == 0.05 and em == {"mode": "assumed", "reason": "no_history"}
+
+
+def test_the_mode_is_in_the_density_cache_key():
+    a = sorted(capm.settings({}).items())
+    b = sorted(capm.settings({"model_erp_mode": "historical"}).items())
+    assert a != b
