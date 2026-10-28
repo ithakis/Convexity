@@ -6340,16 +6340,41 @@ function renderConstituents() {
   const bySym = new Map(DATA.map(r => [String(r.symbol || "").toUpperCase(), r]));
   const list = entriesArr(ENTRIES);
   $("#pf-count").textContent = list.length ? String(list.length) : "";
+  const missing = [];
   $("#pf-chips").innerHTML = list.map(e => {
     const row = bySym.get(e.toUpperCase());
     const name = row && row.name && row.name !== row.symbol ? shortName(row.name) : ENTRY_NAMES[e.toUpperCase()];
-    const tk = name ? `<span class="pf-chip-tk">${escapeHtml(row ? row.symbol : e)}</span>` : "";
-    return `<span class="pf-chip"><span class="pf-chip-name" title="${escapeHtml(name || e)}">${escapeHtml(name || e)}</span>${tk}` +
+    if (!name && !(e.toUpperCase() in ENTRY_NAMES)) missing.push(e.toUpperCase());
+    // The ticker always gets its badge (owner, 2026-10-28); a name not known
+    // yet leaves the badge alone until fillEntryNames() finds one.
+    const tk = `<span class="pf-chip-tk">${escapeHtml(row ? row.symbol : e)}</span>`;
+    const nm = name ? `<span class="pf-chip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>` : "";
+    return `<span class="pf-chip${name ? "" : " pf-chip-bare"}">${nm}${tk}` +
       `<button type="button" class="pf-chip-x" data-entry="${escapeHtml(e)}" title="Remove" aria-label="Remove ${escapeHtml(name || e)}">✕</button></span>`;
   }).join("");
+  if (missing.length) fillEntryNames(missing);
   const shown = 7, tks = list.map(e => { const r = bySym.get(e.toUpperCase()); return r ? r.symbol : e; });
   $("#pf-chips-sum").textContent = tks.slice(0, shown).join(" · ") + (tks.length > shown ? `  +${tks.length - shown}` : "");
   syncChipsFold();
+}
+
+/* Names for pills whose rows aren't built yet (constituents edited since the
+   last Refresh): one local symbol-pack request per batch. A ticker the pack
+   doesn't know is remembered as "" so it is never asked for again. */
+let _entryNamesBusy = false;
+async function fillEntryNames(tickers) {
+  if (_entryNamesBusy) return;
+  _entryNamesBusy = true;
+  try {
+    const r = await fetch(`/api/symbol-names?s=${encodeURIComponent(tickers.join(","))}`);
+    const names = r.ok ? ((await r.json()).names || {}) : {};
+    for (const t of tickers) ENTRY_NAMES[t] = names[t] ? shortName(names[t]) : "";
+  } catch {
+    for (const t of tickers) ENTRY_NAMES[t] = "";
+  } finally {
+    _entryNamesBusy = false;
+  }
+  renderConstituents();
 }
 
 /* The constituents fold (owner, 2026-10-18): one global choice in prefs.json,

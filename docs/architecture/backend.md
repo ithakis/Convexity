@@ -482,6 +482,7 @@ before that (and never for a row with no mean target: no coverage, a fund).
 - `/api/prefs`                     — the saved preferences (`persistence.load_prefs`), allow-listed
 - `/api/investments/symbols`       — open positions only, no network (the Portfolio tab's pinned book pill)
 - `/api/investments/lookup?q=…`    — company typeahead for the Add popover (symbol pack)
+- `/api/symbol-names?s=A,B`         — company names for constituent pills not built yet (local symbol pack only, unknown tickers left out)
 - `/api/investments/price?symbol=…&date=…` — that day's close as traded (Yahoo's split adjustment undone), for the price auto-fill
 - `/api/fx-rates?base=USD`         — spot rates
 - `/api/fx-index?ccy=…`            — one synthetic basket index

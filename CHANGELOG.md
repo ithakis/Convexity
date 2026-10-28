@@ -16,7 +16,7 @@ launch); until then they have no tags or GitHub Releases of their own.
 - **Local risk-free rates.** Currencies without a CME future use their central bank's policy rate from the BIS, once a day (Selic read as 13.75%, not 4%).
 - **A sturdier beta.** Thinly traded names shrink less toward their (too-low) daily beta, a stock's weekly beta on an index in another session is shrunk harder, and Shanghai, Shenzhen, Istanbul and KOSDAQ listings are measured against their own index.
 - **Topbar time:** the portfolio's update time is a pill with a green dot when built today and amber when older, and reads "19:19", "Yesterday 19:19" or "Oct 26 19:19" (no seconds). Cached portfolios use the same pill.
-- **Constituent tickers** sit on a red badge with white letters in every theme.
+- **Constituent tickers** sit on a red badge with white letters in every theme, also before a Refresh: a pill whose row isn't built yet takes the company name from the local symbol pack (new `GET /api/symbol-names`), and an unknown ticker is a badge on its own.
 - **Risk & return header:** "vs", the benchmark pill and a separate currency tag sit on one line at the right of the title, evenly spaced; the benchmark menu opens leftwards so it stays on screen.
 
 ## 1.29.0 — 2026-10-24
