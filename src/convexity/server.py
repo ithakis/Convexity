@@ -494,13 +494,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/symbol-names":
             # Company names for constituent pills whose rows aren't built yet
-            # (an edit waiting for Refresh): the local symbol pack only, no
-            # network. Unknown tickers are simply left out.
+            # (an edit waiting for Refresh), and each one's exchange for the
+            # badge's ".US": the local symbol pack only, no network. Unknown
+            # tickers are simply left out.
             from convexity import symbol_db
 
             q = parse_qs(parsed.query)
             raw = (q.get("s") or [""])[0][:2000]
-            names = {}
+            names, exchanges = {}, {}
             for tk in {t.strip().upper() for t in raw.split(",") if t.strip()}:
                 try:
                     hit = symbol_db.get(tk[:32])
@@ -508,7 +509,9 @@ class Handler(BaseHTTPRequestHandler):
                     hit = None
                 if hit and hit.name:
                     names[tk] = hit.name
-            self._send_json(200, {"names": names})
+                if hit and hit.exchange:
+                    exchanges[tk] = hit.exchange
+            self._send_json(200, {"names": names, "exchanges": exchanges})
             return
         if parsed.path == "/api/events":
             # The stock window's E and D chart markers (fetcher.fetch_events).

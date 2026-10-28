@@ -5820,6 +5820,7 @@ function entriesArr(raw) { return String(raw || "").split(/[\n,]+/).map(s => s.t
    stores. Shown as chips (renderConstituents); never edited as text. */
 let ENTRIES = "";
 const ENTRY_NAMES = {};     // ticker -> company name, from search cards added this session
+const ENTRY_EXCH = {};      // ticker -> Yahoo exchange code, from the symbol pack (badge suffix)
 function setEntries(s) { ENTRIES = String(s || "").trim(); renderEditorMeta(); }
 
 /* Only the newest build() may write DATA. build() has five call sites, and
@@ -6397,6 +6398,16 @@ function shortName(n) {
   return String(n || "").replace(/[,.]?\s+(inc|corp|corporation|co|company|ltd|limited|plc|ag|sa|s\.a|nv|n\.v|se|a\/s|asa|ab|spa|s\.p\.a|holdings?|group)\.?$/i, "").trim() || n;
 }
 
+/* The badge names the exchange (owner, 2026-10-28): Yahoo's suffix as it is
+   (IE15.L, AIR.PA), and ".US" for a US line, which Yahoo leaves bare. A
+   ticker with neither (not in the pack, not built yet) stays bare. */
+const US_EXCHANGES = new Set(["NYQ", "NMS", "NGM", "NCM", "NAS", "ASE", "BTS", "PCX"]);
+function tickerBadge(sym, exch) {
+  const s = String(sym || ""), i = s.lastIndexOf(".");
+  const [base, ext] = i > 0 ? [s.slice(0, i), s.slice(i)] : [s, US_EXCHANGES.has(exch) ? ".US" : ""];
+  return `<span class="pf-chip-tk">${escapeHtml(base)}${ext ? `<span class="pf-chip-ex">${escapeHtml(ext)}</span>` : ""}</span>`;
+}
+
 function renderConstituents() {
   const bySym = new Map(DATA.map(r => [String(r.symbol || "").toUpperCase(), r]));
   const list = entriesArr(ENTRIES);
@@ -6405,10 +6416,11 @@ function renderConstituents() {
   $("#pf-chips").innerHTML = list.map(e => {
     const row = bySym.get(e.toUpperCase());
     const name = row && row.name && row.name !== row.symbol ? shortName(row.name) : ENTRY_NAMES[e.toUpperCase()];
-    if (!name && !(e.toUpperCase() in ENTRY_NAMES)) missing.push(e.toUpperCase());
+    const E = e.toUpperCase();
+    if ((!name && !(E in ENTRY_NAMES)) || (!row && !(E in ENTRY_EXCH))) missing.push(E);
     // The ticker always gets its badge (owner, 2026-10-28); a name not known
     // yet leaves the badge alone until fillEntryNames() finds one.
-    const tk = `<span class="pf-chip-tk">${escapeHtml(row ? row.symbol : e)}</span>`;
+    const tk = tickerBadge(row ? row.symbol : e, (row && row.exchange) || ENTRY_EXCH[e.toUpperCase()]);
     const nm = name ? `<span class="pf-chip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>` : "";
     return `<span class="pf-chip${name ? "" : " pf-chip-bare"}">${nm}${tk}` +
       `<button type="button" class="pf-chip-x" data-entry="${escapeHtml(e)}" title="Remove" aria-label="Remove ${escapeHtml(name || e)}">✕</button></span>`;
@@ -6428,10 +6440,13 @@ async function fillEntryNames(tickers) {
   _entryNamesBusy = true;
   try {
     const r = await fetch(`/api/symbol-names?s=${encodeURIComponent(tickers.join(","))}`);
-    const names = r.ok ? ((await r.json()).names || {}) : {};
-    for (const t of tickers) ENTRY_NAMES[t] = names[t] ? shortName(names[t]) : "";
+    const j = r.ok ? await r.json() : {}, names = j.names || {};
+    for (const t of tickers) {
+      if (!ENTRY_NAMES[t]) ENTRY_NAMES[t] = names[t] ? shortName(names[t]) : "";
+      ENTRY_EXCH[t] = (j.exchanges || {})[t] || "";
+    }
   } catch {
-    for (const t of tickers) ENTRY_NAMES[t] = "";
+    for (const t of tickers) { ENTRY_NAMES[t] = ENTRY_NAMES[t] || ""; ENTRY_EXCH[t] = ""; }
   } finally {
     _entryNamesBusy = false;
   }
