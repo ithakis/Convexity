@@ -762,12 +762,12 @@
   }
   .pf-chip:hover { background: var(--hover); }
   .pf-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* The ticker: a deep red badge with white letters in every theme (owner,
+  /* The ticker: a soft red badge with white letters in every theme (owner,
      2026-10-28). A fixed red, not --neg, so it never shifts with the theme;
      the exchange suffix (.US, .L) is a step quieter than the ticker. */
   .pf-chip-tk {
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px; font-weight: 600;
-    color: #fff; background: #991b1b; padding: 1px 6px; border-radius: var(--r-sm); letter-spacing: 0.02em;
+    color: #fff; background: #e05f5f; padding: 1px 6px; border-radius: var(--r-sm); letter-spacing: 0.02em;
   }
   .pf-chip-ex { font-weight: 500; opacity: 0.72; }
   .pf-chip-bare { padding-left: 6px; }  /* badge only, no name: even padding */
