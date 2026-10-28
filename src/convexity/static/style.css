@@ -1245,12 +1245,16 @@
      one centre line at the right, evenly spaced (owner, 2026-10-28). */
   .pf-card h4.rr-head { align-items: center; min-height: 24px; }
   .rr-ctl { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; text-transform: none; letter-spacing: 0; }
-  .rr-vs { font-size: 11.5px; font-weight: 500; color: var(--muted); }
+  .rr-vs { font-size: 11.5px; font-weight: 500; color: var(--muted); line-height: 22px; }
+  /* The pill and the currency tag share one 22px height, one radius and one
+     text size, so they read as a pair on the same centre line. */
+  .rr-ctl .bench-dd { display: inline-flex; }
+  .rr-ctl .bench-trigger { box-sizing: border-box; height: 22px; padding: 0 8px 0 10px; font-size: 11.5px; line-height: 1; }
   .rr-ccy {
-    margin-left: 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px; font-weight: 600;
-    color: var(--muted); background: var(--chip-bg); padding: 2px 6px; border-radius: var(--r-sm);
+    box-sizing: border-box; height: 22px; display: inline-flex; align-items: center; margin-left: 2px; padding: 0 8px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px; font-weight: 600; line-height: 1; letter-spacing: 0.3px;
+    color: var(--muted); background: var(--chip-bg); border: 1px solid var(--border); border-radius: 999px;
   }
-  .rr-ctl .bench-dd { vertical-align: middle; }
   .rr-ctl .bench-menu { left: auto; right: 0; }  /* the pill is at the card's right edge: open leftwards */
 
   /* The chart's own white card on the gray sheet, so the plot pops. This is
