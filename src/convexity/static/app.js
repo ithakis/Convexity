@@ -5487,6 +5487,30 @@ function relTime(iso) {
   } catch { return ""; }
 }
 
+/* The topbar's "name · when" status (owner, 2026-10-28): a freshness pill,
+   green when the portfolio was built today, amber when it is older. The
+   stamp drops seconds and says "Yesterday" or "Oct 26" only when the day
+   isn't today, so the topbar never shows a bare time from another day. */
+function stampLabel(when) {
+  const d = new Date(when);
+  if (isNaN(d)) return "";
+  const hm = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const ago = Math.round((day(new Date()) - day(d)) / 86400000);
+  if (ago === 0) return hm;
+  if (ago === 1) return `Yesterday ${hm}`;
+  return `${fmtDateMD(d)} ${hm}`;
+}
+function statusHtml(name, when, stale) {
+  const label = stampLabel(when);
+  const d = new Date(when);
+  const today = !isNaN(d) && d.toDateString() === new Date().toDateString();
+  const pill = label
+    ? `<span class="status-when${today && !stale ? "" : " old"}" title="Last updated ${escapeHtml(d.toLocaleString())}"><span class="status-dot"></span>${escapeHtml(label)}</span>`
+    : "";
+  return `<span class="status-name">${escapeHtml(viewLabel(name))}</span>${pill}${stale ? `<span class="status-stale">stale</span>` : ""}`;
+}
+
 /* ===========================================================================
  * Build / fetch (NDJSON streaming with progress)
  * --------------------------------------------------------------------------- */
@@ -5840,7 +5864,7 @@ async function build(opts) {
     if (!sawDone) flushRender();  // final sorted render if the stream ended without a "done" line
     {
       const _nm = STATE.activeView || AD_HOC_KEY;
-      $("#status").innerHTML = `<span class="status-name">${escapeHtml(viewLabel(_nm))}</span><span class="status-meta">updated ${escapeHtml(new Date().toLocaleTimeString())}</span>`;
+      $("#status").innerHTML = statusHtml(_nm, new Date());
     }
     // Persist this build as a view under the active tab name (or ad-hoc).
     const targetName = STATE.activeView || AD_HOC_KEY;
@@ -6078,8 +6102,7 @@ async function activateTab(name, opts) {
         // DATA just landed — refresh the mode bar so the [+] pill appears
         // and the active preset paints with the correct active state.
         renderModeBar();
-        const savedAt = view.saved_at ? relTime(view.saved_at) : "previously";
-        $("#status").innerHTML = `<span class="status-name">${escapeHtml(viewLabel(name))}</span><span class="status-meta">cached ${escapeHtml(savedAt)}</span>${view.stale ? `<span class="status-stale">stale</span>` : ""}`;
+        $("#status").innerHTML = statusHtml(name, view.saved_at, view.stale);
         // Changed constituents wait for Refresh (it is red); only rows saved
         // before a new column existed rebuild by themselves.
         renderEditorMeta();
@@ -6736,7 +6759,7 @@ function renderAnalyticsBody() {
         </div>
       </div>
       <div class="pf-card">
-        <h4>Risk &amp; return <span class="sub">vs ${benchSelectHtml(a)} · ${escapeHtml(a.display_ccy || FX_QUOTE)}</span></h4>
+        <h4 class="rr-head">Risk &amp; return <span class="rr-ctl"><span class="rr-vs">vs</span>${benchSelectHtml(a)}<span class="rr-ccy">${escapeHtml(a.display_ccy || FX_QUOTE)}</span></span></h4>
         ${renderStatsHtml(a)}
       </div>
       <div class="pf-card">
@@ -9286,9 +9309,7 @@ async function rfFinish(state) {
       }
       checkLlmHealth();
     }
-    $("#status").innerHTML =
-      `<span class="status-name">${escapeHtml(viewLabel(STATE.activeView))}</span>` +
-      `<span class="status-meta">updated ${new Date().toLocaleTimeString()}</span>`;
+    $("#status").innerHTML = statusHtml(STATE.activeView, new Date());
     // The job wrote rows straight to disk; re-read so tab metadata, analytics
     // and the news tape all reflect what actually landed.
     await loadViews();

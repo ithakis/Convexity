@@ -9,6 +9,16 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.29.1 — 2026-10-28
+
+- **Model price, explained.** The stock window's "Model price" hover is a card: both equations filled in, μ built up in % and in money, then one card per input (r_f, β, ERP, α) with its chart and Why / Used / What if rows, all on real data (new `GET /api/beta-scatter`).
+- **Equity premium: assumed or historical.** Settings → Model price chooses a flat 5% (the default: out of sample it forecast better) or each market's long-run premium over bills (16 markets, JST Macrohistory 1870-2020, `docs/erp_research.md`). The export adds the premium and its source.
+- **Local risk-free rates.** Currencies without a CME future use their central bank's policy rate from the BIS, once a day (Selic read as 13.75%, not 4%).
+- **A sturdier beta.** Thinly traded names shrink less toward their (too-low) daily beta, a stock's weekly beta on an index in another session is shrunk harder, and Shanghai, Shenzhen, Istanbul and KOSDAQ listings are measured against their own index.
+- **Topbar time:** the portfolio's update time is a pill with a green dot when built today and amber when older, and reads "19:19", "Yesterday 19:19" or "Oct 26 19:19" (no seconds). Cached portfolios use the same pill.
+- **Constituent tickers** sit on a red badge with white letters in every theme.
+- **Risk & return header:** "vs", the benchmark pill and a separate currency tag sit on one line at the right of the title, evenly spaced; the benchmark menu opens leftwards so it stays on screen.
+
 ## 1.29.0 — 2026-10-24
 
 - **One model price, everywhere.** Every asset gets one expected return, μ = r_f (local) + β·ERP + α, and one model price, S₀·e^(μT). The stock window, the grid's new Beta / Model 12M / Model μ columns (in Fundamentals), the export, portfolio beta and the optimizer's analyst settings all read it. μ on (the default) adds the analysts' small relative tilt α; μ off is pure CAPM. The trust control is gone; the Street's 12-month target is a hollow reference marked "not a forecast".

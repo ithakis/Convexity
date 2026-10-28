@@ -219,7 +219,14 @@
   .topbar .spacer { flex: 1; }
   .topbar .status { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .topbar .status .status-name { color: var(--accent); font-weight: 700; font-size: 15px; letter-spacing: 0.1px; }
-  .topbar .status .status-meta { color: var(--muted); font-size: 12px; margin-left: 6px; }
+  /* The freshness pill (app.js statusHtml): green dot built today, amber older. */
+  .topbar .status .status-when {
+    display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; vertical-align: 2px;
+    padding: 2px 10px 2px 8px; border-radius: 999px; background: var(--chip-bg);
+    color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums;
+  }
+  .topbar .status .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pos); }
+  .topbar .status .status-when.old .status-dot { background: var(--warn); }
   .topbar .status .status-stale { color: var(--warn, #d97706); font-weight: 600; margin-left: 6px; }
   /* Shared tooltip used by every [data-tip] in the app. One <div> at body
      level; a small JS positioner picks above/below and clamps horizontally
@@ -753,9 +760,11 @@
   }
   .pf-chip:hover { background: var(--hover); }
   .pf-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The ticker: a red badge with white letters in every theme (owner,
+     2026-10-28). A fixed red, not --neg, so it never shifts with the theme. */
   .pf-chip-tk {
-    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px; color: var(--muted);
-    background: var(--bg-canvas); padding: 1px 6px; border-radius: var(--r-sm);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px; font-weight: 600;
+    color: #fff; background: #c62828; padding: 1px 6px; border-radius: var(--r-sm); letter-spacing: 0.02em;
   }
   .pf-chip-x {
     width: 18px; height: 18px; border: 0; border-radius: 50%; padding: 0; flex-shrink: 0;
@@ -1231,6 +1240,17 @@
     text-transform: uppercase; letter-spacing: 0.4px;
   }
   .pf-card h4 .sub { font-size: 11px; color: var(--muted); font-weight: 500; text-transform: none; letter-spacing: 0; }
+  /* Risk & return: title left; "vs [benchmark pill]" and the currency tag on
+     one centre line at the right, evenly spaced (owner, 2026-10-28). */
+  .pf-card h4.rr-head { align-items: center; min-height: 24px; }
+  .rr-ctl { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; text-transform: none; letter-spacing: 0; }
+  .rr-vs { font-size: 11.5px; font-weight: 500; color: var(--muted); }
+  .rr-ccy {
+    margin-left: 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px; font-weight: 600;
+    color: var(--muted); background: var(--chip-bg); padding: 2px 6px; border-radius: var(--r-sm);
+  }
+  .rr-ctl .bench-dd { vertical-align: middle; }
+  .rr-ctl .bench-menu { left: auto; right: 0; }  /* the pill is at the card's right edge: open leftwards */
 
   /* The chart's own white card on the gray sheet, so the plot pops. This is
      the second (and last) box level: never put a box inside it. */
