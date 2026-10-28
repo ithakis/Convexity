@@ -1374,7 +1374,9 @@ CAPM and the per-firm analyst mixture with its trust control:
   their own line. `beta_meta.via` names the line; the window, the grid tip and
   the export say "via MU". More home indices, all probed live: Oslo
   (OSEBX.OL), Dublin, Lisbon, Singapore, Taiwan, NZ, Jakarta, KL, Mexico,
-  Tel Aviv, Johannesburg (Equinor read −0.52 vs STOXX 600, 1.82 vs OSEBX). An
+  Tel Aviv, Johannesburg (Equinor read −0.52 vs STOXX 600, 1.82 vs OSEBX), and
+  (2026-10-27) Shanghai, Shenzhen, Istanbul and KOSDAQ (weekly R² vs the S&P
+  .01–.11, vs the home index .19–.57). An
   exchange with no home index here uses the S&P 500 on **weekly** USD
   returns (`method: "weekly"`): daily returns across a closing-time gap read
   a beta near zero (DBS 0.14). Every home index answers on Yahoo, so a beta
@@ -1390,9 +1392,26 @@ CAPM and the per-firm analyst mixture with its trust control:
   Below 0.3 (gold, bonds; `fit_best_r2`) it stays on its home market with
   plain daily OLS (`method: "ols"`): BSWA's [−2 r_m, 4 r_m] band pulls a
   weakly correlated asset toward 1 (GLD 0.74 BSWA, 0.28 OLS). Weekly
-  returns (`_weekly`: any proxy outside the listing's session) use one lag,
-  Dimson 1979 (`dimson`): plain weekly still read a London S&P tracker 0.86,
-  0.99 with the lag. A fund fitted without every candidate's download is
+  returns (`_weekly`: any proxy outside the listing's session) use one lag
+  for a fund, Dimson 1979 (`dimson`): plain weekly still read a London S&P
+  tracker 0.86, 0.99 with the lag. A stock's weekly beta is plain OLS shrunk
+  0.6× harder (`WEEKLY_W`): out of sample the lag cost more in noise than it
+  fixed (below).
+- **Shrink scales** (`w_scale`, `beta_meta.shrink_eff`, 2026-10-27): a study
+  of 172 names in 30 markets (large, small and thin caps, ADRs, funds, IPOs,
+  unmapped exchanges), one forecast a quarter 2018–2025 (5,247), scored
+  against the next year's daily *and* lagged-weekly beta (the weekly target
+  is immune to thin trading, the daily one is not). Daily BSWA won or tied
+  in every group on both targets (all 0.217 vs daily OLS 0.231, weekly
+  Dimson 0.270, monthly 0.321, β = 1 0.298 on the weekly target), so the
+  frequency stands. Two weak spots: a stock with many zero-return days
+  (thin trading, or a coarse tick: TSMC 8%, Samsung 5%) reads low (−0.38 vs
+  the weekly beta over 10% zero days, where every estimator lost to β = 1),
+  so the weight falls linearly to 0 at `LIQ_Z0` = 25% zero days (weekly
+  target 0.217 → 0.214, over 5% zero days 0.326 → 0.304, daily target
+  unchanged); and cross-session weekly betas (46 non-US names on the S&P in
+  USD, 1,210 forecasts) were best as plain OLS shrunk ~0.5 (0.336 vs the
+  lagged 0.366). The cache key carries `|fw`. A fund fitted without every candidate's download is
   shown, not cached. The cache key carries `|f`, so betas from before the
   fund rule recompute. Weekly estimates always read at least two years
   (W104): a 1Y window has ~52 weeks, under the 53 needed. Concurrent callers
@@ -1442,6 +1461,12 @@ CAPM and the per-firm analyst mixture with its trust control:
   to assumed with `reason: "no_history"`. `GET /api/erp-history` serves the
   table to Settings; the export writes `model_erp` + `model_erp_src`.
   `erp_mode` is in `capm.settings`, hence in the density cache key.
+- **`GET /api/beta-scatter?symbol=&ccy=`** (`capm.scatter`, 2026-10-28): the
+  return pairs behind a symbol's beta for the window's model card: its beta
+  line against the proxy it was measured on, converted and glitch-cleaned as
+  in `estimate`, the last `SCATTER_N` = 250 days (weeks for a weekly beta).
+  Detail path only (one cached bulk read); a prior beta or missing data gives
+  `{x: [], y: []}`.
 - **Portfolio beta**: `stats.beta` is the weighted sum of the holdings' app
   betas (`beta_coverage` says how much weight had one); `benchmarks[*].rel.beta`
   stays the basket's regression on the chosen benchmark.

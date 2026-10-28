@@ -3816,6 +3816,7 @@ function ensureDensity(h) {
     if (DETAIL.fcPending[h] === mine) delete DETAIL.fcPending[h];   // never leave a dead fetch "pending"
     if (DETAIL.seq !== seq) return;   // the window moved on
     DETAIL.fc[h] = d;
+    if (d.ok) loadModelAux(d);   // the model card's charts (bill, premiums, beta pairs)
     // 12M is the default, but long chains are often too thin to trust their
     // tails (SPY, DELL today); then the window opens on 3M and says why.
     const was = DETAIL.fcH;
@@ -4503,6 +4504,310 @@ function erpSourceTxt(m) {
     + (em.fallback ? `; ${em.proxy_name || "this market"} has no long record of its own` : "");
 }
 
+/* ---------------------------------------------------------------------------
+ * The model price card: the hover on the window's "Model price" readout
+ * (owner's design, 2026-10-28, after four rounds of first-time-user critique).
+ * Both equations filled in, a sentence and a bar that build μ from its parts
+ * (in % a year and in money), then one card per input of μ, each with the
+ * picture of how it is measured and three rows: Why / Used / What if.
+ *
+ * Its charts read three small side payloads, fetched once per window after
+ * the density lands (loadModelAux): the US bill's past year, the 16 markets'
+ * premium history, and the return pairs behind the beta (/api/beta-scatter).
+ * A chart whose data has not arrived is simply left out; the numbers never
+ * depend on them. The parts are rounded so the equation adds up as written;
+ * the price is computed from the unrounded μ, like everywhere else.
+ * --------------------------------------------------------------------------- */
+const MODEL_AUX = { erp: null, erpPending: null, rf: null, rfPending: null, scatter: {} };
+
+function loadModelAux(d) {
+  const m = d?.model;
+  if (!m) return;
+  if (!MODEL_AUX.erp && !MODEL_AUX.erpPending) {
+    MODEL_AUX.erpPending = fetch("/api/erp-history").then(r => (r.ok ? r.json() : null))
+      .then(j => { MODEL_AUX.erp = j; }).catch(() => {}).finally(() => { MODEL_AUX.erpPending = null; });
+  }
+  if (/^US 3-month bill$/.test(m.rf_source || "") && !MODEL_AUX.rf && !MODEL_AUX.rfPending) {
+    MODEL_AUX.rfPending = fetch("/api/risk-free-history?ccy=USD&lookback=1Y").then(r => (r.ok ? r.json() : null))
+      .then(j => { MODEL_AUX.rf = j; }).catch(() => {}).finally(() => { MODEL_AUX.rfPending = null; });
+  }
+  const sym = d.symbol, bm = m.beta_meta || {};
+  if (sym && bm.method !== "prior" && !(sym in MODEL_AUX.scatter)) {
+    MODEL_AUX.scatter[sym] = null;   // one request per symbol per page
+    const ccy = DETAIL.data?.currency || "";
+    fetch(`/api/beta-scatter?symbol=${encodeURIComponent(sym)}&ccy=${encodeURIComponent(ccy)}`)
+      .then(r => (r.ok ? r.json() : null)).then(j => { if (j && j.x && j.x.length) MODEL_AUX.scatter[sym] = j; })
+      .catch(() => { delete MODEL_AUX.scatter[sym]; });
+  }
+}
+
+/* The theme's colour for one input, for SVG fills and KaTeX \color (which
+ * needs a literal). Read at hover time, so a theme switch is picked up. */
+function mpColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(`--mp-${name}`).trim() || "#888";
+}
+
+function modelCardHtml(d) {
+  const m = d?.model;
+  if (!m) return "";
+  const ccy = DETAIL.data?.currency, money = (v) => fmtMoney(v, ccy);
+  const on = DETAIL.showMu, T = d.T, s0 = d.s0;
+  const bm = m.beta_meta || {}, am = m.alpha_meta || {}, em = m.erp_meta || {};
+  const r2 = (v) => Math.round(v * 10000) / 100;   // a fraction as % to 2 dp
+  const f2 = (v) => v.toFixed(2);
+  const pc = (v) => `${f2(v)}%`;
+  // Rounded parts that add up as written; the price uses the unrounded μ.
+  const rfP = r2(m.rf), bP = r2(m.beta * m.erp), aP = on ? r2(m.alpha) : 0;
+  const muP = Math.round((rfP + bP + aP) * 100) / 100;
+  const mu = on ? m.mu : m.mu_capm, price = s0 * Math.exp(mu * T), gain = price - s0;
+  const at = (muX) => s0 * Math.exp(muX * T);
+  const share = (x) => (Math.abs(mu) > 1e-9 ? gain * x / mu : 0);
+  const gRf = share(m.rf), gB = share(m.beta * m.erp), gA = on ? share(m.alpha) : 0;
+  const sgnM = (v) => `${v >= 0 ? "+" : "−"}${money(Math.abs(v))}`;
+  const sgnP = (v) => `${v >= 0 ? "" : "−"}${pc(Math.abs(v))}`;
+  const col = { rf: mpColor("rf-ink"), beta: mpColor("beta-ink"), erp: mpColor("erp-ink"), alpha: mpColor("alpha-ink") };
+  // TeX-escape a money or percent string ("$217.94" would open math mode).
+  const kx = (t) => String(t).replace(/[\\{}$%&#_^~]/g, (c) => (c === "\\" || c === "~" || c === "^" ? "" : "\\" + c));
+  const tx = (src, plain) => (window.katex ? katex.renderToString(src, { throwOnError: false, strict: false }) : escapeHtml(plain));
+  const surface = !!d.quality?.anchors;
+  const when = fcFmtDate(new Date(d.expiry + "T12:00:00"));
+  const whenWhy = surface ? `${f2(T)} years from now, read off the options’ surface`
+    : `the day the stock’s options expire, ${f2(T)} years from now`;
+  const chg = (price / s0 - 1) * 100;
+
+  // --- header: the date, the price, both equations -------------------------
+  const termA = on ? String.raw` + {\color{${col.alpha}}\alpha}` : "";
+  const valA = on ? String.raw` ${aP >= 0 ? "+" : "-"} {\color{${col.alpha}}${kx(pc(Math.abs(aP)))}}` : "";
+  const eqP = String.raw`P_T = S_0\,e^{\mu T} = \text{${kx(money(s0))}} \times e^{\,${kx(pc(muP))} \times ${f2(T)}} = \textbf{${kx(money(price))}}`;
+  const eqMu = String.raw`\mu = {\color{${col.rf}}r_f} + {\color{${col.beta}}\beta}\cdot{\color{${col.erp}}\text{ERP}}${termA} = {\color{${col.rf}}${kx(pc(rfP))}} + {\color{${col.beta}}${m.beta < 0 ? `(${f2(m.beta)})` : f2(m.beta)}}\times{\color{${col.erp}}${kx(pc(r2(m.erp)))}}${valA} = \textbf{${kx(pc(muP))}}`;
+  const head = `<div class="mp-hero"><div class="mp-when">Model price on ${when}${on ? "" : " · CAPM"}<small>${whenWhy}</small></div>
+    <div><span class="mp-big">${money(price)}</span> <span class="${chg >= 0 ? "pos" : "neg"}">${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%</span> <span class="mp-sub">vs ${money(s0)} today</span></div></div>
+    <div class="mp-eqs">
+      <div class="mp-eqr"><div class="mp-eq">${tx(eqP, `P_T = S0·e^(μT) = ${money(price)}`)}</div><div class="mp-eqn">${pc(muP)} a year for ${f2(T)} years: ${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%</div></div>
+      <div class="mp-eqr"><div class="mp-eq">${tx(eqMu, `μ = ${pc(muP)}`)}</div><div class="mp-eqn">μ: the yearly return assumed</div></div>
+    </div>`;
+
+  // --- the sentence and the bar ---------------------------------------------
+  const verb = (v, up, down) => (v >= 0 ? up : down);
+  const aClause = !on ? ` and the analysts’ view is left out (μ off)`
+    : am.reason === "no_targets" ? ` and there are no analyst targets to add`
+    : ` and analysts ${verb(aP, "add", "take off")} <b class="mp-c-alpha">${pc(Math.abs(aP))}</b>`;
+  const sentence = `Cash pays <b class="mp-c-rf">${sgnP(rfP)}</b>, market risk ${verb(bP, "adds", "takes off")} <b class="mp-c-beta">${pc(Math.abs(bP))}</b> <span class="mp-m">(${f2(m.beta)} × ${pc(r2(m.erp))})</span>${aClause}: <b>${pc(muP)} a year</b>, which over the ${f2(T)} years to ${when} takes ${money(s0)} to <b>${money(price)}</b>.`;
+  const parts = [["rf", "cash", rfP, gRf], ["beta", "market risk (β · ERP)", bP, gB]];
+  if (on && aP !== 0) parts.push(["alpha", "analysts", aP, gA]);
+  const bar = mpBarSvg(parts, muP, gain, money, sgnM, pc);
+
+  // --- the four cards ---------------------------------------------------------
+  const row = (k, v) => `<span>${k}</span><span>${v}</span>`;
+  const rfCard = (() => {
+    const src = m.rf_source || "";
+    const usBill = /^US 3-month bill$/.test(src);
+    const chart = usBill ? mpRfSvg(MODEL_AUX.rf, m.rf) : mpRateLadder(src);
+    const why = `Every investment has to beat it, risk or not.${/no local/.test(src) ? ` <span class="mp-m">No local rate for ${escapeHtml(ccy || "this currency")}, so the US bill stands in.</span>` : usBill ? ` <span class="mp-m">A euro stock would use euro rates.</span>` : ""}`;
+    return mpCard("rf", "r<sub>f</sub> · risk-free rate", pc(rfP),
+      `What you earn with no risk, in the stock’s currency (${escapeHtml(ccy || "")}).`, chart,
+      row("Why", why) + row("Used", `${escapeHtml(src)}: <b>${pc(rfP)}</b>`)
+      + row("What if", `1 point higher (${pc(rfP + 1)}) → ${money(at(mu + 0.01))}`));
+  })();
+  const betaCard = (() => {
+    const prior = bm.method === "prior";
+    const freq = bm.method === "weekly" ? "weekly" : "daily";
+    const yrs = bm.method === "weekly" ? Math.max(bm.years || 3, 2) : bm.method === "ols1y" ? 1 : (bm.years || 3);
+    const w = bm.shrink_eff ?? bm.shrink ?? 0.9;
+    const def = prior ? `Too little history against ${escapeHtml(bm.proxy_name || "its market")} (under 151 trading days), so the prior: β = 1.`
+      : `Moves per 1% of the ${escapeHtml(bm.proxy_name || "market")}, from ${yrs} year${yrs > 1 ? "s" : ""} of ${freq} returns${bm.via ? ` (on ${escapeHtml(bm.via)}, the company’s home line)` : ""}.`;
+    const chart = prior ? "" : mpBetaSvg(MODEL_AUX.scatter[d.symbol], +bm.raw, m.beta, freq, bm.proxy_name);
+    let why = "Swings you can’t diversify away are paid for; extreme betas drift back toward 1.";
+    if (bm.zero > 0.01 && w < (bm.shrink ?? 0.9) - 0.005) why += ` <span class="mp-m">Unchanged on ${(bm.zero * 100).toFixed(0)}% of days, which reads low, so it is pulled harder.</span>`;
+    else if (bm.method === "weekly" && bm.fit_r2 == null) why += ` <span class="mp-m">No home index here: the S&amp;P 500 on weekly returns, pulled harder.</span>`;
+    else if (bm.fit_r2 != null) why += ` <span class="mp-m">A fund: measured against the index that explains it best.</span>`;
+    const used = prior ? "β = 1 (prior)" : `1 + ${f2(w)} × (${f2(+bm.raw)} − 1) = <b>${f2(m.beta)}</b>`;
+    const wi = `β = 1${on && aP ? ", analysts kept" : ""} → ${money(at(mu - (m.beta - 1) * m.erp))}`;
+    return mpCard("beta", "β · market beta", f2(m.beta), def, chart, row("Why", why) + row("Used", used) + row("What if", wi));
+  })();
+  const erpCard = (() => {
+    const hist = em.mode === "historical";
+    const chart = mpErpSvg(MODEL_AUX.erp, m.erp, hist ? em.market : null);
+    const why = hist ? `The long-run premium of ${escapeHtml(em.pooled ? (em.proxy_name || "these markets") : em.market)}${em.fallback ? " (no long record of its own: the pooled one)" : ""}, the choice in Settings.`
+      : "A flat 5% beat each market’s own history at forecasting its next 10–20 years.";
+    const used = hist ? `${escapeHtml(erpSourceTxt(m))}: <b>${pc(r2(m.erp))}</b>` : `Assumed <b>${pc(r2(m.erp))}</b> (Settings)`;
+    const lo = Math.max(0, m.erp - 0.01), hi = m.erp + 0.01;
+    const wi = `${pc(r2(lo))} → ${money(at(mu - m.beta * (m.erp - lo)))} · ${pc(r2(hi))} → ${money(at(mu + m.beta * (hi - m.erp)))}`;
+    return mpCard("erp", "ERP · equity premium", pc(r2(m.erp)), "What stocks as a whole earn a year above cash.", chart,
+      row("Why", why) + row("Used", used) + row("What if", wi));
+  })();
+  const alphaCard = (() => {
+    if (!on) return mpCard("alpha", "α · analyst tilt", "off", "Left out: μ is off, so this is pure CAPM.", "",
+      row("Used", `0 (the analysts’ tilt would add ${sgnP(r2(m.alpha))})`) + row("What if", `μ on → ${money(at(m.mu))}`));
+    if (am.reason === "no_targets") return mpCard("alpha", "α · analyst tilt", "0", "No analyst targets for this listing, so no tilt.", "",
+      row("Why", "Only analysts’ relative optimism enters, and there is none to measure."));
+    const z = +am.z, ic = +am.ic, sx = +(am.sigma_xs ?? 0.42), cap = +(am.z_cap ?? 3);
+    const mk = fcMarks(d);
+    const chart = mpZSvg(z, cap, am.upside, am.ref_upside, mk ? money(mk.mean) : null);
+    const icTxt = am.ic_source === "measured" ? "measured" : am.ic_source === "set" ? "set in Settings" : "a prior until measured";
+    return mpCard("alpha", "α · analyst tilt", sgnP(aP), `A small ${z >= 0 ? "extra: analysts are more" : "cut: analysts are less"} upbeat than usual.`, chart,
+      row("Why", `Targets barely predict returns, so even an unusual one adds little. <span class="mp-m">Skill ${ic.toFixed(3)} (${icTxt}); ${Math.round(sx * 100)}%: stocks’ return spread.</span>`)
+      + row("Used", `${ic.toFixed(3)} × ${Math.round(sx * 100)}% × ${z.toFixed(2)} sd = <b>${sgnP(aP)}</b>`)
+      + row("What if", `no analyst view → ${money(at(m.mu_capm))}`));
+  })();
+
+  // --- footer ---------------------------------------------------------------
+  const via = d.chain_symbol && d.chain_symbol !== d.symbol ? ` The options are ${escapeHtml(d.chain_symbol)}’s, scaled to this listing.` : "";
+  const foot = `<div class="mp-facts">
+    <span>Prices</span><span>${ccy && FX_QUOTE !== ccy ? `The stock trades in ${escapeHtml(ccy)}; every price here is in ${escapeHtml(FX_QUOTE)} at today’s rate.` : `In ${escapeHtml(ccy || "the listing’s currency")}, the stock’s own currency.`} r<sub>f</sub> is the ${escapeHtml(ccy || "listing’s")} rate.${via}</span>
+    <span>Not a forecast</span><span>A yardstick on the same rules for every stock, the centre of this window’s price-range chart; nobody has shown it beats the market. Inputs: Settings → Model price.</span>
+  </div>`;
+  return `<div class="mp-card">
+    <div class="mp-sec">${head}</div>
+    <div class="mp-sec"><div class="mp-sent">${sentence}</div>${bar}</div>
+    <div class="mp-sec"><div class="mp-cards">${rfCard}${betaCard}${erpCard}${alphaCard}</div></div>
+    <div class="mp-sec mp-foot">${foot}</div>
+  </div>`;
+}
+
+function mpCard(key, title, value, def, chart, rows) {
+  return `<div class="mp-in"><div class="mp-t"><b class="mp-c-${key}">${title}</b><span class="mp-c-${key}">${value}</span></div>
+    <div class="mp-d">${def}</div>${chart || ""}<div class="mp-rows">${rows}</div></div>`;
+}
+
+const _mpSvg = (w, h, body) => `<svg class="mp-svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${body}</svg>`;
+const _mpT = (x, y, s, o = {}) => `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" font-size="${o.fs || 10}" text-anchor="${o.a || "start"}"${o.w ? ` font-weight="${o.w}"` : ""} class="${o.c || "mp-fm"}">${s}</text>`;
+
+/* μ as one bar: positive parts stack right of zero, negative parts left of
+ * it (a stock with a negative beta), each labelled with its % and its share
+ * of the money gain. */
+function mpBarSvg(parts, muP, gain, money, sgnM, pc) {
+  const W = 650, lx = 0, rx = 560, h = 24, y = 18;
+  const pos = parts.filter(p => p[2] > 0).reduce((s, p) => s + p[2], 0);
+  const neg = parts.filter(p => p[2] < 0).reduce((s, p) => s - p[2], 0);
+  const span = pos + neg || 1, X = (v) => lx + (rx - lx) * (v + neg) / span;
+  let up = 0, dn = 0, out = "";
+  for (const [k, label, v, g] of parts) {
+    if (!v) continue;
+    const a = v > 0 ? up : -dn - Math.abs(v), b = v > 0 ? up + v : -dn;
+    if (v > 0) up += v; else dn += -v;
+    const x0 = X(a), x1 = X(b), cx = (x0 + x1) / 2, wide = x1 - x0 > 46;
+    out += `<rect x="${x0.toFixed(1)}" y="${y}" width="${Math.max(1, x1 - x0 - 1).toFixed(1)}" height="${h}" rx="2" class="mp-f-${k}${v < 0 ? " mp-neg" : ""}"/>`;
+    out += _mpT(cx, y - 6, label, { a: "middle", c: `mp-c-${k}`, w: 600, fs: 10.5 });
+    if (wide) out += _mpT(cx, y + 16, `${v < 0 ? "−" : ""}${pc(Math.abs(v))}`, { a: "middle", c: "mp-on", w: 600, fs: 11 });
+    out += _mpT(cx, y + h + 15, sgnM(g), { a: "middle", c: `mp-c-${k}`, w: 600, fs: 11 });
+  }
+  // With a negative part, zero and the net μ are marked on the bar.
+  if (neg) {
+    out += `<line x1="${X(0)}" y1="${y - 3}" x2="${X(0)}" y2="${y + h + 3}" class="mp-axis-strong"/>`;
+    out += `<path d="M${X(muP).toFixed(1)} ${y + h + 1} l-4 6 h8 z" class="mp-net"/>`;
+  }
+  // Totals at the far right, clear of a thin last segment's own labels.
+  out += _mpT(W, y + 16, pc(muP), { a: "end", c: "mp-ft", w: 600, fs: 12.5 });
+  out += _mpT(W, y + h + 15, `= ${sgnM(gain)}`, { a: "end", c: "mp-ft", w: 600, fs: 11.5 });
+  return _mpSvg(W, 62, out);
+}
+
+/* The US bill's past year (frontier._risk_free_history), today's dot. */
+function mpRfSvg(hist, rf) {
+  const W = 296, H = 52;
+  // ^IRX is quoted in percent: [date, 4.03].
+  const pts = (hist?.series || []).map(p => +(Array.isArray(p) ? p[1] : p) / 100).filter(Number.isFinite);
+  if (pts.length < 10) return "";
+  const vals = pts.concat([rf]);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = Math.max(0.0015, (hi - lo) * 0.15); lo -= pad; hi += pad;
+  const X = (i) => 34 + (W - 120) * i / (vals.length - 1), Y = (v) => 4 + (H - 18) * (hi - v) / (hi - lo);
+  const path = vals.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+  const g = [hi - pad, lo + pad].map(v => `<line x1="34" y1="${Y(v).toFixed(1)}" x2="${W - 86}" y2="${Y(v).toFixed(1)}" class="mp-grid"/>` + _mpT(30, Y(v) + 3, `${(v * 100).toFixed(1)}%`, { a: "end", fs: 9.5 })).join("");
+  return _mpSvg(W, H, g + `<polyline points="${path}" class="mp-l-rf" fill="none"/>`
+    + `<circle cx="${X(vals.length - 1).toFixed(1)}" cy="${Y(rf).toFixed(1)}" r="3.2" class="mp-f-rf"/>`
+    + _mpT(X(vals.length - 1) + 7, Y(rf) + 4, `today ${(rf * 100).toFixed(2)}%`, { c: "mp-c-rf", w: 600, fs: 10.5 })
+    + _mpT(34, H - 2, "US 3-month Treasury bill yield, past 12 months", { fs: 9.5 }));
+}
+
+/* Where a non-USD rate comes from: the app's chain, the used step lit. */
+function mpRateLadder(src) {
+  const steps = [["CME futures", /CME/], ["central bank policy rate", /policy rate/], ["euro rate", /euro rate/], ["US bill, said so", /US 3-month bill/]];
+  return `<div class="mp-ladder">${steps.map(([l, re]) => `<span class="${re.test(src) ? "on" : ""}">${l}</span>`).join("<i>→</i>")}</div>`;
+}
+
+/* The beta: the return pairs it was measured on with its fitted slope and a
+ * β = 1 guide, then the shrink on a number line (raw → used, market = 1). */
+function mpBetaSvg(sc, raw, beta, freq, proxyName) {
+  const W = 296, H = 72, gx = 150, gy = 58;
+  let out = "";
+  if (sc && sc.x?.length) {
+    const xs = sc.x, ys = sc.y;
+    const q = (a, p) => { const s = [...a].map(Math.abs).sort((x, y) => x - y); return s[Math.floor(p * (s.length - 1))] || 0.01; };
+    const ax = q(xs, 0.97) * 1.1 || 0.02, ay = q(ys, 0.97) * 1.1 || 0.02;
+    const X = (v) => gx / 2 + (gx / 2 - 4) * Math.max(-1, Math.min(1, v / ax)), Y = (v) => gy / 2 + (gy / 2 - 4) * Math.max(-1, Math.min(1, -v / ay));
+    out += `<line x1="0" y1="${gy / 2}" x2="${gx}" y2="${gy / 2}" class="mp-grid"/><line x1="${gx / 2}" y1="2" x2="${gx / 2}" y2="${gy - 2}" class="mp-grid"/>`;
+    xs.forEach((x, i) => { out += `<circle cx="${X(x).toFixed(1)}" cy="${Y(ys[i]).toFixed(1)}" r="1.2" class="mp-dot"/>`; });
+    const L = (b, cls) => `<line x1="${X(-ax).toFixed(1)}" y1="${Y(-ax * b).toFixed(1)}" x2="${X(ax).toFixed(1)}" y2="${Y(ax * b).toFixed(1)}" class="${cls}"/>`;
+    out += L(1, "mp-guide") + L(raw, "mp-l-beta");
+    out += _mpT(2, 9, "stock ↑", { fs: 9.5 }) + _mpT(gx - 2, gy / 2 + 11, `${escapeHtml(proxyName || "market")} →`, { a: "end", fs: 9.5 });
+    out += _mpT(0, H - 2, `dot = one ${freq === "weekly" ? "week" : "day"} · dashed = β 1`, { fs: 9.5 });
+  }
+  const x0 = sc && sc.x?.length ? gx + 14 : 10, x1 = W - 8;
+  const lo = Math.min(0, raw, beta, 1) - 0.15, hi = Math.max(2, raw, beta, 1) + 0.15;
+  const N = (v) => x0 + (x1 - x0) * (v - lo) / (hi - lo), y = 30;
+  out += `<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" class="mp-axis"/>`;
+  out += `<line x1="${N(1).toFixed(1)}" y1="${y - 6}" x2="${N(1).toFixed(1)}" y2="${y + 6}" class="mp-tick"/>` + _mpT(N(1), y - 10, "market = 1", { a: "middle", fs: 9.5 });
+  out += `<line x1="${N(raw).toFixed(1)}" y1="${y - 6}" x2="${N(raw).toFixed(1)}" y2="${y + 6}" class="mp-tick"/>` + _mpT(N(raw), y - 10 - (Math.abs(N(raw) - N(1)) < 52 ? 10 : 0), `raw ${raw.toFixed(2)}`, { a: "middle", fs: 9.5 });
+  out += `<line x1="${N(beta).toFixed(1)}" y1="${y - 7}" x2="${N(beta).toFixed(1)}" y2="${y + 7}" class="mp-l-beta" stroke-width="2.6"/>` + _mpT(N(beta), y + 19, `used ${beta.toFixed(2)}`, { a: "middle", c: "mp-c-beta", w: 600, fs: 10 });
+  out += _mpT(x0, H - 2, `pulled ${Math.round((1 - (raw === 1 ? 1 : (beta - 1) / (raw - 1))) * 100)}% toward 1`, { fs: 9.5 });
+  return _mpSvg(W, H, out);
+}
+
+/* The premium: each market's 1870-2020 average (data/erp_history.json) as a
+ * dot, the one in use as a tick; in historical mode, its market lit. */
+function mpErpSvg(h, erp, market) {
+  const mk = h?.markets;
+  if (!mk) return "";
+  const W = 296, H = 54, vals = Object.entries(mk).map(([k, v]) => [k, +v.erp]);
+  const lo = 0.03, hi = Math.max(0.10, ...vals.map(v => v[1]), erp) + 0.003, X = (v) => 8 + (W - 16) * (Math.max(lo, v) - lo) / (hi - lo), y = 26;
+  let out = `<line x1="${X(lo)}" y1="${y}" x2="${X(hi)}" y2="${y}" class="mp-axis"/>`;
+  // Axis labels below, except where the "in use" label goes.
+  for (const t of [3, 5, 7, 9]) {
+    out += `<line x1="${X(t / 100).toFixed(1)}" y1="${y + 3}" x2="${X(t / 100).toFixed(1)}" y2="${y + 6}" class="mp-tick"/>`;
+    if (Math.abs(t / 100 - erp) > 0.011) out += _mpT(X(t / 100), y + 16, `${t}%`, { a: "middle", fs: 9 });
+  }
+  // dots that would sit on top of each other stack upward
+  const seen = [];
+  vals.sort((a, b) => a[1] - b[1]).forEach(([k, v]) => {
+    const x = X(v); let lvl = 0;
+    while (seen.some(s => Math.abs(s[0] - x) < 5 && s[1] === lvl)) lvl++;
+    seen.push([x, lvl]);
+    const lit = k === market || (!market && k === "USA");
+    out += `<circle cx="${x.toFixed(1)}" cy="${(y - lvl * 5).toFixed(1)}" r="${lit ? 3.4 : 2.3}" class="${lit ? "mp-dot-lit" : "mp-dot"}"/>`;
+  });
+  const first = vals[0], last = vals[vals.length - 1], hl = market && mk[market] ? [market, +mk[market].erp] : mk.USA ? ["US", +mk.USA.erp] : null;
+  out += _mpT(X(first[1]), y - 14, `${first[0]} ${(first[1] * 100).toFixed(1)}`, { a: "start", fs: 9.5 });
+  out += _mpT(X(last[1]), y - 14, `${last[0]} ${(last[1] * 100).toFixed(1)}`, { a: "end", fs: 9.5 });
+  if (hl) out += _mpT(X(hl[1]), y - 20, `${hl[0] === "USA" ? "US" : hl[0]} ${(hl[1] * 100).toFixed(2)}%`, { a: "middle", c: "mp-ft", fs: 9.5 });
+  out += `<line x1="${X(erp).toFixed(1)}" y1="${y - 9}" x2="${X(erp).toFixed(1)}" y2="${y + 9}" class="mp-l-erp" stroke-width="2.4"/>`;
+  out += _mpT(X(erp), y + 16, `${+(erp * 100).toFixed(2)}% in use`, { a: "middle", c: "mp-c-erp", w: 600, fs: 9.5 });
+  out += _mpT(8, H - 1, "dot = one of 16 markets’ 1870–2020 average premium", { fs: 9.5 });
+  return _mpSvg(W, H, out);
+}
+
+/* How unusual the analysts are: z on a −cap..+cap scale, 0 = a usual
+ * stock's upside, the stock's target named above its marker. */
+function mpZSvg(z, cap, upside, ref, target) {
+  const W = 296, H = 52, X = (v) => 10 + (W - 20) * (Math.max(-cap, Math.min(cap, v)) + cap) / (2 * cap), y = 22;
+  let out = `<rect x="${X(-cap)}" y="${y - 4}" width="${X(cap) - X(-cap)}" height="8" rx="4" class="mp-ztrack"/>`;
+  out += `<rect x="${Math.min(X(0), X(z)).toFixed(1)}" y="${y - 4}" width="${Math.abs(X(z) - X(0)).toFixed(1)}" height="8" class="mp-f-alpha mp-soft"/>`;
+  for (let t = -cap; t <= cap; t++) out += `<line x1="${X(t).toFixed(1)}" y1="${y + 5}" x2="${X(t).toFixed(1)}" y2="${y + 8}" class="mp-tick"/>`;
+  out += _mpT(X(-cap), y + 18, `−${cap}`, { fs: 9.5 }) + _mpT(X(cap), y + 18, `+${cap}`, { a: "end", fs: 9.5 });
+  out += _mpT(X(0), y + 18, `0 = usual (${ref != null ? `+${(ref * 100).toFixed(1)}%` : "usual"})`, { a: "middle", fs: 9.5 });
+  out += `<line x1="${X(z).toFixed(1)}" y1="${y - 9}" x2="${X(z).toFixed(1)}" y2="${y + 9}" class="mp-l-alpha" stroke-width="2.6"/>`;
+  const lbl = `${target ? `target ${target} ` : ""}(${upside >= 0 ? "+" : ""}${(upside * 100).toFixed(1)}%), ${Math.abs(z).toFixed(2)} sd ${z >= 0 ? "above" : "below"} usual`;
+  out += _mpT(Math.max(80, Math.min(W - 80, X(z))), y - 12, lbl, { a: X(z) > W - 80 ? "end" : X(z) < 80 ? "start" : "middle", c: "mp-c-alpha", w: 600, fs: 10 });
+  out += _mpT(10, H - 1, `how unusual, in standard deviations (sd), capped at ±${cap}`, { fs: 9.5 });
+  return _mpSvg(W, H, out);
+}
+
+RICH_TIPS["model-price"] = () => {
+  const d = DETAIL.fc[DETAIL.fcH];
+  return d && d.ok && d.model ? modelCardHtml(d) : "";
+};
+
 /* The readouts box under the chart (it replaces the range strip while σ or μ
  * is on) and the assumptions footnote. */
 function renderFcReadouts() {
@@ -4513,7 +4818,8 @@ function renderFcReadouts() {
   const d = DETAIL.fc[DETAIL.fcH], ccy = DETAIL.data.currency;
   // Hovering a cell with a band lights that part of the curve (fcDraw); its
   // tip leads with the formula (`texSrc`, typeset by the shared tooltip).
-  const cell = (k, v, cls, tip, band, texSrc) => `<div${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}${texSrc ? ` data-tip-tex="${escapeHtml(texSrc)}"` : ""}${band ? ` data-fc-band="${band}" tabindex="0"` : ""}>` +
+  // A `{rich}` tip is a RICH_TIPS card (the model price's), not text.
+  const cell = (k, v, cls, tip, band, texSrc) => `<div${tip?.rich ? ` data-rich-tip="${tip.rich}"` : tip ? ` data-tip="${escapeHtml(tip)}"` : ""}${texSrc ? ` data-tip-tex="${escapeHtml(texSrc)}"` : ""}${band ? ` data-fc-band="${band}" tabindex="0"` : ""}>` +
     `<span>${k}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
   const pct = (v) => (v * 100).toFixed(0) + "%";
   const sgn = (v) => (v >= 0 ? "+" : "") + v.toFixed(0) + "%";
@@ -4569,23 +4875,19 @@ function renderFcReadouts() {
   const fitTxt = bm.fit_r2 != null ? `A fund: measured against the index that explains it best, ${bm.proxy_name} (R² ${(+bm.fit_r2).toFixed(2)} of weekly returns), out of its home market, the S&P 500, STOXX Europe 600, MSCI ACWI and Emerging Markets. `
     : bm.fit_best_r2 != null ? `A fund no market index explains (best R² ${(+bm.fit_best_r2).toFixed(2)} of weekly returns), like gold or bonds: measured against its home market with plain OLS — Welch’s winsorising is built for stocks and pulls a weakly correlated asset toward 1. ` : "";
   const viaTxt = bm.via ? ` · via ${escapeHtml(bm.via)}` : "";
+  const bW = bm.shrink_eff ?? bm.shrink ?? 0.9;
+  const zeroTxt = bm.zero > 0.01 && bW < (bm.shrink ?? 0.9) - 0.005 ? ` It closed unchanged on ${(bm.zero * 100).toFixed(1)}% of days (thin trading or a coarse tick), which reads a daily beta too low, so the shrink is ${Math.round((1 - bW / (bm.shrink ?? 0.9)) * 100)}% stronger than usual.` : "";
   const betaCell = !m ? "" : cell("Beta", `${m.beta.toFixed(2)} <small>${bm.method === "prior" ? "prior · too little history" : `vs ${escapeHtml(bm.proxy_name || "")} · ${bHow}`}${viaTxt}</small>`, "",
     (bm.via ? `Measured on ${bm.via}, the company’s home line: a secondary listing trades the same company, and its venue’s index is not its market. ` : "") + fitTxt + (bm.method === "prior"
       ? `Under 151 trading days of history against ${bm.proxy_name || "its market"}, so the prior: β = 1.`
       : bm.method === "weekly" && bm.fit_r2 != null
-      ? `Friday-to-Friday returns in the index’s currency over ${Math.max(bm.years || 3, 2)} years, with one week’s lag (the fund closes hours from that market, which makes daily returns read a beta too low), raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.`
+      ? `Friday-to-Friday returns in the index’s currency over ${Math.max(bm.years || 3, 2)} years, with one week’s lag (the fund closes hours from that market, which makes daily returns read a beta too low), raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - bW) * 100)}% toward 1.`
       : bm.method === "weekly"
-      ? `No home index for this exchange, so the S&P 500 stands in: Friday-to-Friday returns in USD over ${Math.max(bm.years || 3, 2)} years with one week’s lag (its close is hours from New York’s, which makes daily returns read a beta near zero), raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.`
-      : bm.method === "ols" ? `${bm.n_days} joint trading days of daily returns against ${bm.proxy_name}, plain OLS, raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.`
-      : `The app’s beta: ${bm.n_days} joint trading days of daily returns against ${bm.proxy_name} in local currency, slope-winsorised and age-weighted (Welch’s BSWA)${bm.method === "ols1y" ? " — under a year of history, so a plain 1-year OLS" : ""}, raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - (bm.shrink ?? 0.9)) * 100)}% toward 1.${bm.backtested === false ? " This market's index was not in the backtest." : ""}`),
-    null, String.raw`\beta = 1 + ${(bm.shrink ?? 0.9).toFixed(2)}\,(\hat\beta - 1) = ${m.beta.toFixed(2)}`);
+      ? `No home index for this exchange, so the S&P 500 stands in: Friday-to-Friday returns in USD over ${Math.max(bm.years || 3, 2)} years (its close is hours from New York’s, which makes daily returns read a beta near zero), raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - bW) * 100)}% toward 1, harder than a daily beta: the fit to a market in another session is weak.`
+      : bm.method === "ols" ? `${bm.n_days} joint trading days of daily returns against ${bm.proxy_name}, plain OLS, raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - bW) * 100)}% toward 1.`
+      : `The app’s beta: ${bm.n_days} joint trading days of daily returns against ${bm.proxy_name} in local currency, slope-winsorised and age-weighted (Welch’s BSWA)${bm.method === "ols1y" ? " — under a year of history, so a plain 1-year OLS" : ""}, raw ${(+bm.raw).toFixed(2)}, shrunk ${Math.round((1 - bW) * 100)}% toward 1.${bm.backtested === false ? " This market's index was not in the backtest." : ""}${zeroTxt}`),
+    null, String.raw`\beta = 1 + ${bW.toFixed(2)}\,(\hat\beta - 1) = ${m.beta.toFixed(2)}`);
   const am = m ? m.alpha_meta || {} : {};
-  const aTxt = !m ? "" : am.reason === "no_targets" ? "no analyst targets, so α = 0"
-    : `α ${m.alpha >= 0 ? "+" : ""}${pp(m.alpha)} = IC ${(+am.ic).toFixed(3)} (${am.ic_source === "measured" ? "measured" : am.ic_source === "set" ? "set in Settings" : "prior"}) × 0.42 × z ${(+am.z).toFixed(2)}`;
-  const decTex = !m ? "" : DETAIL.showMu
-    ? String.raw`\mu = r_f + \beta\,\text{ERP} + \alpha = ${kx(pp(m.rf))} + ${m.beta.toFixed(2)} \times ${kx(pp(m.erp))} ${m.alpha >= 0 ? "+" : "-"} ${kx(pp(Math.abs(m.alpha)))} = ${kx(pp(m.mu))}`
-    : String.raw`\mu = r_f + \beta\,\text{ERP} = ${kx(pp(m.rf))} + ${m.beta.toFixed(2)} \times ${kx(pp(m.erp))} = ${kx(pp(m.mu_capm))}`;
-  const modelTip = !m ? "" : `${DETAIL.showMu ? "CAPM in the listing’s currency plus the analysts’ small tilt" : "μ off: pure CAPM, the analysts’ tilt left out"}: r_f ${pp(m.rf)} (${m.rf_source}), β ${m.beta.toFixed(2)}, equity premium ${pp(m.erp, 1)} (${erpSourceTxt(m)})${DETAIL.showMu ? `, ${aTxt}` : ""}. The price is S₀·e^(μT) at the options’ expiry (${expTxt}): μ on ${fmtMoney(d.s0 * Math.exp(m.mu * d.T), ccy)}, μ off ${fmtMoney(d.s0 * Math.exp(m.mu_capm * d.T), ccy)}; over exactly one year (the grid’s Model 12M) ${fmtMoney(d.s0 * Math.exp((DETAIL.showMu ? m.mu : m.mu_capm)), ccy)}. The drawn curve is the options’ shape, tilted once to this mean. A model, not a forecast with an edge.`;
   const muTxt = mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
     : !m ? ""
     : DETAIL.showMu ? ` Model price: CAPM in ${escapeHtml(ccy || "")}, ${pp(m.rf)} (${escapeHtml(m.rf_source)}) + β ${m.beta.toFixed(2)} × ${pp(m.erp, 1)} premium${am.reason === "no_targets" ? "; no analyst targets, so no tilt" : `, plus the analysts’ tilt α ${m.alpha >= 0 ? "+" : ""}${pp(m.alpha)}`}; S₀·e^(μT) at the expiry.`
@@ -4596,7 +4898,7 @@ function renderFcReadouts() {
   if (mode.kind === "mu") {
     if (!mdl) { el.innerHTML = `<div class="m-fc-foot">No model price for this listing.${link}</div>`; return; }
     el.innerHTML = `<div class="m-fc-grid">
-      ${cell(modelLabel(), `${money(mdl.price)} <small>${sgn((mdl.price / d.s0 - 1) * 100)} · μ ${pp(mdl.mu, 1)}</small>`, "", modelTip, "mean", decTex)}
+      ${cell(modelLabel(), `${money(mdl.price)} <small>${sgn((mdl.price / d.s0 - 1) * 100)} · μ ${pp(mdl.mu, 1)}</small>`, "", { rich: "model-price" }, "mean")}
       ${cell("Model price · 1 year", `${money(d.s0 * Math.exp(mdl.mu))} <small>${sgn((Math.exp(mdl.mu) - 1) * 100)}</small>`, "", "The same μ over exactly one year: S₀·e^μ, the grid’s and the export’s Model 12M.")}
       ${betaCell}
       ${cell("Street target (12M)", mk ? `${money(mk.mean)} <small>${mk.n ? `${mk.n} firms · ` : ""}not a forecast</small>` : "—", "amb",
@@ -4644,7 +4946,7 @@ function renderFcReadouts() {
     ? cell("Forward · risk-neutral mean", `${money(sim.mean)} <small>${sgn((sim.mean / d.s0 - 1) * 100)}</small>`, "",
       "The mean under the options’ own (risk-neutral) measure: the forward price.", "mean", String.raw`\mathbb{E}^{Q}[${S_}] = ${M(sim.mean)}`)
     : cell(modelLabel(), `${money(mdl ? mdl.price : sim.mean)} <small>${sgn(((mdl ? mdl.price : sim.mean) / d.s0 - 1) * 100)}${mdl ? ` · μ ${pp(mdl.mu, 1)}` : ""}</small>`, "",
-      `${modelTip} The dashed line is the mean path from today’s price to it.`, "mean", decTex);
+      { rich: "model-price" }, "mean");
   el.innerHTML = `<div class="m-fc-grid">
     ${cell(prTex(">", d.s0), pct(pUp), "pos", `The chance the price is above today’s (${money(d.s0)}) on ${expTxt}. Shaded green on the chart.`,
       "up", String.raw`\Pr[${S_} > S_0] = ${P(pUp)}`)}
@@ -13935,7 +14237,8 @@ async function renderSettingsModel(el) {
       <li>A backtest of 164 names (US, Europe, UK, Japan and 25 European banks), one forecast a year from 2008 to 2025, scored against the realised beta over the next 3 and 12 months: the mean squared error falls <b>51% at 12M and 57% at 3M</b> against Yahoo’s 5-year monthly beta vs the S&amp;P 500.</li>
       <li>The home index explains far more of a stock than the S&amp;P 500: European banks R² .52 vs .29; Japan’s daily beta vs the S&amp;P reads 0.25 against 1.02 vs TOPIX, since Tokyo closes before New York opens.</li>
       <li>Welch’s slope-winsorised, age-weighted beta (BSWA): ${tx(String.raw`r_i \in [-2\,r_m,\ 4\,r_m]`, "r_i clipped to [−2r_m, 4r_m]")}, weights ${tx(String.raw`e^{-2\,\text{age}/252}`, "e^(−2·age/252)")} (a half-life of about 87 trading days), a weighted OLS slope; ${tx(String.raw`\beta = 1 + w(\hat\beta - 1)`, "β = 1 + w(β̂ − 1)")} with w = 0.9, optimal within 0.001 in every group (Blume’s 0.67 is 7% worse here). Under a year of history: a 1-year OLS; under 151 days: β = 1, “prior”.</li>
-      <li>A fund is measured against the market it holds, not its listing’s: the best fit (weekly R²) of its home index, the S&amp;P 500, STOXX Europe 600, MSCI ACWI and Emerging Markets. An S&amp;P 500 tracker on London read 0.47 against the FTSE and 0.99 against the S&amp;P. A fund no index explains (gold, bonds: R² under 0.3) stays on its home market with plain OLS, since BSWA’s band pulls a weakly correlated asset toward 1 (gold 0.74, OLS 0.28). Weekly returns, for an index that closes hours from the listing, carry one week’s lag (Dimson).</li>
+      <li>A fund is measured against the market it holds, not its listing’s: the best fit (weekly R²) of its home index, the S&amp;P 500, STOXX Europe 600, MSCI ACWI and Emerging Markets. An S&amp;P 500 tracker on London read 0.47 against the FTSE and 0.99 against the S&amp;P. A fund no index explains (gold, bonds: R² under 0.3) stays on its home market with plain OLS, since BSWA’s band pulls a weakly correlated asset toward 1 (gold 0.74, OLS 0.28). Weekly returns, for an index that closes hours from the listing, carry one week’s lag for a fund (Dimson); a stock’s weekly beta is plain and shrunk harder (0.6 × w), which scored better out of sample.</li>
+      <li>A stock that often closes unchanged (thin trading, or a coarse tick) reads too low a daily beta, so w falls with its share of zero-return days, to 0 at 25%. A 2026 check of 172 names in 30 markets, one forecast a quarter 2018–2025: daily BSWA won or tied in every group, against weekly, monthly and β = 1.</li>
       <li>Levi &amp; Welch (2017), <i>Best practice for cost-of-capital estimates</i>; Hollstein &amp; Prokopczuk (2016), <i>Estimating beta</i>; Welch (2022), <i>Simply better market betas</i>.</li>
     </ul></details>
     <details class="model-why"><summary>Why analysts get only a small α</summary><ul>

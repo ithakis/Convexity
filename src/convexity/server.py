@@ -730,6 +730,25 @@ class Handler(BaseHTTPRequestHandler):
 
             self._send_json(200, load_prefs())
             return
+        if parsed.path == "/api/beta-scatter":
+            # The model card's beta chart: the return pairs the beta was
+            # measured on (capm.scatter; detail path, one cached bulk read).
+            from convexity import capm
+            from convexity.persistence import load_prefs
+
+            q = parse_qs(parsed.query)
+            sym = (q.get("symbol") or [""])[0].strip().upper()
+            ccy = (q.get("ccy") or [""])[0].strip() or None
+            if not sym:
+                self._send_json(400, {"error": "symbol required"})
+                return
+            try:
+                out = capm.scatter(sym, load_prefs(), ccy)
+            except Exception as exc:
+                print(f"[beta-scatter] {type(exc).__name__}: {exc}")
+                out = None
+            self._send_json(200, out or {"x": [], "y": []})
+            return
         if parsed.path == "/api/erp-history":
             # Settings -> Model price: each market's historical premium and the
             # evidence behind the default (package data, no network).

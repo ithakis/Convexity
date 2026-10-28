@@ -531,6 +531,25 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   claim, the open window's own numbers, and the parameters). Every model and
   distribution save goes through `wireModelPrefs`, which clears `DETAIL.fc`
   and re-prices the grid (`requestModelPrices(true)`).
+- **The model price card** (2026-10-28, the owner's pick after four rounds of
+  first-time-user critique): hovering the window's "Model price" readout opens
+  `RICH_TIPS["model-price"]` → `modelCardHtml(d)`, not a text tip. Top: both
+  equations filled in (P_T = S0·e^(μT), then μ coloured by input), a sentence
+  and one bar building μ in % and in money; then a 2×2 of input cards (r_f,
+  β, ERP, α), each a chart plus Why / Used / What if rows; footer: the
+  display currency and "not a forecast". One colour per input, `--mp-*`
+  (fill) and `--mp-*-ink` (text) in all three themes; KaTeX `\color` needs a
+  literal, so `mpColor()` reads the ink at hover time. The parts are rounded
+  so the equation adds up as written; the price uses the unrounded μ. A
+  negative part (a negative beta) stacks left of zero with the net μ marked.
+  The charts read `MODEL_AUX`, filled once per window by `loadModelAux` when
+  a density lands: `/api/risk-free-history` (the US bill only; other
+  currencies show the rate chain with the used step lit), `/api/erp-history`
+  and `/api/beta-scatter` (`capm.scatter`: the last 250 pairs the beta was
+  measured on, weeks for a weekly beta). A chart whose data has not arrived
+  is left out; the numbers never depend on it. Money goes through `fmtMoney`,
+  so prices are in the display currency, and the footer says so when it is
+  not the listing's.
 - **The grid's Beta / Model 12M / Model μ** come from `POST /api/model-prices`
   (`requestModelPrices`, called with every analytics request, keyed on the
   rows' symbols and prices): never on the streaming path, merged into DATA,

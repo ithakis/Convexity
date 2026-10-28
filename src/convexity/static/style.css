@@ -48,6 +48,10 @@
     --warn-rgb: 191, 135, 0;
     --amber: #a86a00;         /* analysts' targets on the σ/μ chart */
     --amber-rgb: 168, 106, 0;
+    /* The model price card (modelCardHtml): one colour per input of μ, a
+       fill for bars and an ink for text; THEME-SYNC with dark and bloomberg. */
+    --mp-rf: #c3ccd6; --mp-beta: #6fb3e0; --mp-erp: #a9d4ef; --mp-alpha: #f0c46a; --mp-on: #0b2239;
+    --mp-rf-ink: #587089; --mp-beta-ink: #187aba; --mp-erp-ink: #2f86bd; --mp-alpha-ink: #a86a00;
     --on-amber: #ffffff;
     --row-alt: #f6f9fc;
     --rev-head-bg: #eaf1f8;  /* the import review's header band */
@@ -91,6 +95,8 @@
     --warn: #d29922;
     --warn-rgb: 210, 153, 34;
     --amber: #e9b955;
+    --mp-rf: #a7b4c4; --mp-beta: #4ba3e3; --mp-erp: #7cc4f5; --mp-alpha: #e9b955; --mp-on: #06121e;
+    --mp-rf-ink: #a7b4c4; --mp-beta-ink: #4ba3e3; --mp-erp-ink: #7cc4f5; --mp-alpha-ink: #e9b955;
     --amber-rgb: 233, 185, 85;
     --on-amber: #1a1306;
     --row-alt: #0f151e;
@@ -147,6 +153,8 @@
     --warn: #f5b301;
     --warn-rgb: 245, 179, 1;
     --amber: #ffb000;
+    --mp-rf: #a7b4c4; --mp-beta: #4ba3e3; --mp-erp: #7cc4f5; --mp-alpha: #ffb000; --mp-on: #050505;
+    --mp-rf-ink: #c9d1db; --mp-beta-ink: #5cb3f0; --mp-erp-ink: #8fd0fb; --mp-alpha-ink: #ffb000;
     --amber-rgb: 255, 176, 0;
     --on-amber: #000000;
     --row-alt: #0e0e0e;
@@ -1024,6 +1032,69 @@
   }
   .rich-tip-float.show { opacity: 1; }
   .rich-tip-float .pf-metric-tip { display: block; position: static; width: 360px; max-width: calc(100vw - 16px); }
+  /* The model price card (app.js modelCardHtml, RICH_TIPS["model-price"]):
+     the tooltip plus one level of box (the equation panel and the four input
+     cards), the owner's two-box rule. */
+  .m-fc-grid [data-rich-tip] { text-decoration: none; }
+  .rich-tip-float .mp-card {
+    width: 680px; max-width: calc(100vw - 16px); padding: 12px 15px;
+    background: var(--tip-bg); border: 1px solid var(--tip-border); border-radius: var(--r-lg);
+    box-shadow: var(--tip-shadow); color: var(--text); font-size: 12.5px; line-height: 1.45;
+  }
+  .mp-card .mp-sec { padding: 8px 0; border-top: 1px solid var(--tip-border); }
+  .mp-card .mp-sec:first-child { border-top: 0; padding-top: 0; }
+  .mp-card .mp-sec:last-child { padding-bottom: 0; }
+  .mp-card .mp-m { color: var(--muted); }
+  .mp-card .pos { color: var(--pos); } .mp-card .neg { color: var(--neg); }
+  .mp-hero { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 7px; }
+  .mp-when { font-size: 12.5px; font-weight: 600; line-height: 1.3; }
+  .mp-when small { display: block; font-size: 11.5px; font-weight: 400; color: var(--muted); }
+  .mp-big { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .mp-sub { color: var(--muted); font-size: 12px; }
+  .mp-eqs { background: var(--surface-sunk); border: 1px solid var(--tip-border); border-radius: var(--r-md); padding: 6px 11px; }
+  .mp-eqr { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .mp-eqr + .mp-eqr { margin-top: 3px; }
+  .mp-eq { font-size: 14px; white-space: nowrap; }
+  .mp-eqn { font-size: 11px; color: var(--muted); text-align: right; min-width: 0; line-height: 1.25; }
+  .mp-sent { font-size: 14px; line-height: 1.5; margin-bottom: 6px; }
+  .mp-sent b { font-weight: 600; }
+  .mp-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .mp-in { background: var(--surface-sunk); border: 1px solid var(--tip-border); border-radius: var(--r-md); padding: 8px 10px 9px; }
+  .mp-t { display: flex; justify-content: space-between; align-items: baseline; }
+  .mp-t b { font-size: 13px; font-weight: 600; }
+  .mp-t span { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .mp-d { color: var(--muted); font-size: 11.5px; line-height: 1.4; margin-top: 1px; }
+  .mp-svg { display: block; margin-top: 4px; overflow: visible; }
+  .mp-rows { display: grid; grid-template-columns: 50px 1fr; gap: 2px 7px; font-size: 11.5px; line-height: 1.45; margin-top: 4px; }
+  .mp-rows > span:nth-child(odd) { color: var(--muted); font-size: 11px; font-weight: 600; padding-top: 0.5px; }
+  .mp-ladder { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; margin: 6px 0 2px; font-size: 11px; color: var(--muted); }
+  .mp-ladder span.on { color: var(--mp-rf-ink); font-weight: 600; }
+  .mp-ladder i { font-style: normal; opacity: 0.6; }
+  .mp-facts { display: grid; grid-template-columns: 96px 1fr; gap: 2px 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+  .mp-facts > span:nth-child(odd) { color: var(--text); font-weight: 600; }
+  .mp-c-rf { color: var(--mp-rf-ink); } .mp-c-beta { color: var(--mp-beta-ink); }
+  .mp-c-erp { color: var(--mp-erp-ink); } .mp-c-alpha { color: var(--mp-alpha-ink); }
+  .mp-svg text { fill: var(--muted); font-family: inherit; }
+  .mp-svg text.mp-c-rf { fill: var(--mp-rf-ink); } .mp-svg text.mp-c-beta { fill: var(--mp-beta-ink); }
+  .mp-svg text.mp-c-erp { fill: var(--mp-erp-ink); } .mp-svg text.mp-c-alpha { fill: var(--mp-alpha-ink); }
+  .mp-svg text.mp-ft { fill: var(--text); } .mp-svg text.mp-on { fill: var(--mp-on); }
+  .mp-svg .mp-f-rf { fill: var(--mp-rf); } .mp-svg .mp-f-beta { fill: var(--mp-beta); }
+  .mp-svg .mp-f-erp { fill: var(--mp-erp); } .mp-svg .mp-f-alpha { fill: var(--mp-alpha); }
+  .mp-svg .mp-neg { opacity: 0.55; }
+  .mp-svg .mp-soft { opacity: 0.5; }
+  .mp-svg .mp-l-rf { stroke: var(--mp-rf-ink); stroke-width: 1.6; }
+  .mp-svg .mp-l-beta { stroke: var(--mp-beta-ink); stroke-width: 1.6; }
+  .mp-svg .mp-l-erp { stroke: var(--mp-erp-ink); }
+  .mp-svg .mp-l-alpha { stroke: var(--mp-alpha-ink); }
+  .mp-svg .mp-guide { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 3 2; }
+  .mp-svg .mp-grid { stroke: var(--tip-border); stroke-width: 1; }
+  .mp-svg .mp-axis { stroke: var(--tip-border); stroke-width: 2; }
+  .mp-svg .mp-axis-strong { stroke: var(--text); stroke-width: 1; }
+  .mp-svg .mp-net { fill: var(--text); }
+  .mp-svg .mp-tick { stroke: var(--muted); stroke-width: 1.2; }
+  .mp-svg .mp-dot { fill: var(--muted); opacity: 0.7; }
+  .mp-svg .mp-dot-lit { fill: var(--text); }
+  .mp-svg .mp-ztrack { fill: var(--tip-border); }
   [data-rich-tip] {
     cursor: default;  /* never cursor: help: the user dislikes it (frontend.md) */
     text-decoration: underline dotted rgba(125, 125, 125, 0.75);

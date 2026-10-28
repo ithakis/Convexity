@@ -312,7 +312,9 @@ def test_weekly_fixes_the_closing_time_bias():
 
 @pytest.mark.parametrize(
     "sym,proxy", [("EQNR.OL", "OSEBX.OL"), ("D05.SI", "^STI"), ("2330.TW", "^TWII"),
-                  ("CRH.IR", "^ISEQ"), ("EDP.LS", "PSI20.LS"), ("PTT.BK", "^GSPC")],
+                  ("CRH.IR", "^ISEQ"), ("EDP.LS", "PSI20.LS"), ("PTT.BK", "^GSPC"),
+                  ("600519.SS", "000001.SS"), ("000858.SZ", "399001.SZ"),
+                  ("THYAO.IS", "XU100.IS"), ("247540.KQ", "^KQ11")],
 )  # fmt: skip
 def test_more_home_markets(sym, proxy):
     assert capm.home_proxy(sym)["proxy"] == proxy
@@ -613,3 +615,50 @@ def test_the_mode_is_in_the_density_cache_key():
     a = sorted(capm.settings({}).items())
     b = sorted(capm.settings({"model_erp_mode": "historical"}).items())
     assert a != b
+
+
+def test_thin_trading_shrinks_toward_one():
+    """A stock with a fifth of its days unchanged: w_scale 1 - 0.2/0.25."""
+    stock, mkt = _series(800, 1.5, seed=21)
+    flat = stock.copy()
+    v = flat.values.copy()
+    for i in range(5, len(v), 5):  # every fifth day repeats the last close
+        v[i] = v[i - 1]
+    flat = pd.Series(v, index=stock.index)
+    liquid, thin = capm.estimate(stock, mkt), capm.estimate(flat, mkt)
+    assert liquid["zero"] == 0 and liquid["w_scale"] == 1
+    assert thin["zero"] == pytest.approx(0.2, abs=0.01)
+    assert thin["w_scale"] == pytest.approx(1 - thin["zero"] / capm.LIQ_Z0, abs=1e-3)
+    st = capm.settings({})
+    bm = capm.finish(thin, capm.home_proxy("X"), st)
+    assert bm["shrink_eff"] == pytest.approx(0.9 * thin["w_scale"], abs=1e-3)
+    assert bm["beta"] == pytest.approx(1 + bm["shrink_eff"] * (thin["raw"] - 1), abs=1e-3)
+
+
+def test_a_stock_weekly_beta_is_plain_and_shrunk_harder():
+    rng = np.random.default_rng(3)
+    idx = pd.bdate_range("2023-01-02", periods=800)
+    m = rng.normal(0, 0.01, 800)
+    s = 1.1 * m + rng.normal(0, 0.004, 800)
+    stock = pd.Series(100 * np.exp(np.cumsum(s)), index=idx)
+    mkt = pd.Series(4000 * np.exp(np.cumsum(m)), index=idx)
+    plain = capm.estimate(stock, mkt, weekly=True, lag=False)
+    lagged = capm.estimate(stock, mkt, weekly=True)
+    assert plain["method"] == "weekly" and plain["w_scale"] == capm.WEEKLY_W
+    assert "w_scale" not in lagged  # a fund's lagged weekly keeps the full weight
+    assert plain["raw"] != lagged["raw"]
+    bm = capm.finish(plain, capm.home_proxy("PTT.BK"), capm.settings({}))
+    assert bm["shrink_eff"] == pytest.approx(0.9 * capm.WEEKLY_W)
+
+
+def test_scatter_returns_the_pairs_the_beta_was_measured_on(monkeypatch):
+    """The model card's chart: the last 250 daily pairs against the proxy the
+    beta used, and nothing for a symbol without data (a prior beta)."""
+    stock, spx = _series(800, 1.5, seed=31, noise=0.004)
+    frame = pd.DataFrame({"XUS": stock, "^GSPC": spx})
+    _fund_env(monkeypatch, frame, set())
+    sc = capm.scatter("XUS", {}, "USD")
+    assert sc["proxy"] == "^GSPC" and sc["freq"] == "daily"
+    assert len(sc["x"]) == len(sc["y"]) == capm.SCATTER_N
+    assert capm.ols(np.array(sc["y"]), np.array(sc["x"])) == pytest.approx(1.5, abs=0.15)
+    assert capm.scatter("NODATA", {}, "USD") is None
