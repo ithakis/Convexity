@@ -782,6 +782,7 @@ const _RICH_TIP = (() => {
   }
   function render(html) {
     if (katexCache.has(html)) return katexCache.get(html);
+    if (katexCache.size > 40) katexCache.clear();   // keys can be large (the model card's SVGs)
     const tmp = document.createElement("div");
     tmp.innerHTML = html;
     if (!window.renderMathInElement) return html;  // KaTeX not loaded yet: don't cache raw $$
@@ -826,12 +827,18 @@ const _RICH_TIP = (() => {
     if (!sticky || host !== current) return hide(host);
     if (to && el && el.contains(to)) return;
     clearTimeout(graceT);
-    graceT = setTimeout(() => hide(host), 250);
+    graceT = setTimeout(() => hide(host), 120);
+  }
+  // Typeset a card ahead of its first hover, when the browser is idle, so a
+  // heavy one (the model price's) opens as fast as any other tip.
+  function warm(key) {
+    const idle = window.requestIdleCallback || ((f) => setTimeout(f, 50));
+    idle(() => { try { const html = RICH_TIPS[key]?.(); if (html) render(html); } catch (_) {} });
   }
   const inside = (node) => !!(sticky && el && node && el.contains(node));
   // The mouse is on a sticky card or its host (a click in the card blurs the host).
   const held = () => !!(sticky && el && (el.matches(":hover") || current?.matches(":hover")));
-  return {show, hide, leave, inside, held};
+  return {show, hide, leave, inside, held, warm};
 })();
 document.addEventListener("mouseover", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
@@ -4558,18 +4565,18 @@ function loadModelAux(d) {
   if (!m) return;
   if (!MODEL_AUX.erp && !MODEL_AUX.erpPending) {
     MODEL_AUX.erpPending = fetch("/api/erp-history").then(r => (r.ok ? r.json() : null))
-      .then(j => { MODEL_AUX.erp = j; }).catch(() => {}).finally(() => { MODEL_AUX.erpPending = null; });
+      .then(j => { MODEL_AUX.erp = j; }).catch(() => {}).finally(() => { MODEL_AUX.erpPending = null; _RICH_TIP.warm("model-price"); });
   }
   if (/^US 3-month bill$/.test(m.rf_source || "") && !MODEL_AUX.rf && !MODEL_AUX.rfPending) {
     MODEL_AUX.rfPending = fetch("/api/risk-free-history?ccy=USD&lookback=1Y").then(r => (r.ok ? r.json() : null))
-      .then(j => { MODEL_AUX.rf = j; }).catch(() => {}).finally(() => { MODEL_AUX.rfPending = null; });
+      .then(j => { MODEL_AUX.rf = j; }).catch(() => {}).finally(() => { MODEL_AUX.rfPending = null; _RICH_TIP.warm("model-price"); });
   }
   const sym = d.symbol, bm = m.beta_meta || {};
   if (sym && bm.method !== "prior" && !(sym in MODEL_AUX.scatter)) {
     MODEL_AUX.scatter[sym] = null;   // one request per symbol per page
     const ccy = DETAIL.data?.currency || "";
     fetch(`/api/beta-scatter?symbol=${encodeURIComponent(sym)}&ccy=${encodeURIComponent(ccy)}`)
-      .then(r => (r.ok ? r.json() : null)).then(j => { if (j && j.x && j.x.length) MODEL_AUX.scatter[sym] = j; })
+      .then(r => (r.ok ? r.json() : null)).then(j => { if (j && j.x && j.x.length) MODEL_AUX.scatter[sym] = j; _RICH_TIP.warm("model-price"); })
       .catch(() => { delete MODEL_AUX.scatter[sym]; });
   }
 }
@@ -4676,13 +4683,13 @@ function modelCardHtml(d) {
       row("Why", "Only analysts’ relative optimism enters, and there is none to measure."));
     const z = +am.z, ic = +am.ic, sx = +(am.sigma_xs ?? 0.42), cap = +(am.z_cap ?? 3);
     const chart = mpUpsideSvg(z, cap, +am.upside, +am.ref_upside, +(am.upside_sd ?? 0.125), d.symbol || "this stock");
-    const icTxt = am.ic_source === "measured" ? "the app’s own record" : am.ic_source === "set" ? "set in Settings" : "the studies’ figure until the app has its own";
+    const icTxt = am.ic_source === "measured" ? "the app’s own record" : am.ic_source === "set" ? "set in Settings" : "published studies, until the app has its own";
     const n = Math.round(mpNormCdf(z) * 100), rank = z >= 0 ? `above ${Math.min(n, 99)} in 100` : `below ${Math.min(100 - n, 99)} in 100`;
     const perSd = r2(ic * sx);
     return mpCard("alpha", "α · analyst tilt", sgnP(aP), `Where ${escapeHtml(d.symbol || "this stock")}’s target sits among large caps’ targets.`, chart
-      + `<div class="mp-m mp-note">Upside to target (with dividends) across US large caps: ${escapeHtml(d.symbol || "this stock")}’s is ${rank}.${Math.abs(z) >= cap ? ` Capped at ±${cap} sd.` : ""}</div>`
+      + `<div class="mp-m mp-note">Upside to target across US large caps: ${escapeHtml(d.symbol || "this stock")}’s is ${rank}.${Math.abs(z) >= cap ? ` Capped at ±${cap} sd.` : ""}</div>`
       + `<div class="mp-eq">α = IC × spread × z = ${ic.toFixed(3)} × ${Math.round(sx * 100)}% × <span class="mp-c-alpha">${z.toFixed(2)}</span> = <b class="mp-c-alpha">${sgnP(aP)}</b></div>`,
-      row("Why", `A forecast counts as much as its record. IC: how well targets have ranked the next year’s returns (a correlation; ${icTxt}). Returns spread ±${Math.round(sx * 100)}% a year, so each sd adds ${pc(perSd)}.`)
+      row("Why", `A forecast counts as much as its record. IC (information coefficient): the correlation of target upside with the next year’s return, ${ic.toFixed(3)} (${icTxt}). Returns spread ±${Math.round(sx * 100)}% a year: each sd adds ${pc(perSd)}.`)
       + row("What if", `no analyst view → ${money(at(m.mu_capm))}`));
   })();
 
@@ -4690,7 +4697,7 @@ function modelCardHtml(d) {
   const via = d.chain_symbol && d.chain_symbol !== d.symbol ? ` The options are ${escapeHtml(d.chain_symbol)}’s, scaled to this listing.` : "";
   const foot = `<div class="mp-facts">
     <span>Prices</span><span>${ccy && FX_QUOTE !== ccy ? `The stock trades in ${escapeHtml(ccy)}; every price here is in ${escapeHtml(FX_QUOTE)} at today’s rate.` : `In ${escapeHtml(ccy || "the listing’s currency")}, the stock’s own currency.`} r<sub>f</sub> is the ${escapeHtml(ccy || "listing’s")} rate.${via}</span>
-    <span>Not a forecast</span><span>A yardstick on the same rules for every stock, the centre of this window’s price-range chart; nobody has shown it beats the market. Inputs: Settings → Model price.</span>
+    <span>Not a forecast</span><span>One yardstick for every stock, not a prediction: it isn’t shown to beat the market. Inputs: Settings → Model price.</span>
   </div>`;
   return `<div class="mp-card">
     <div class="mp-sec">${head}</div>
@@ -5019,6 +5026,7 @@ function renderFcReadouts() {
       String.raw`\sigma_{\text{hist}} = ${kx(vpct(vo.hist))} \quad \sigma_{\text{imp}} = ${kx(vpct(vo.implied))}`)}
   </div><div class="m-fc-foot">${srcTxt}${sigTxt}${muTxt}${auto}
     Paths: bridges to this curve${hist ? "" : " with earnings jumps"}.${via}${asofTxt} A chance, not a prediction.${qual}${dyTxt}${link}</div>`;
+  if (mode.mu !== "options") _RICH_TIP.warm("model-price");
 }
 
 /* The chart's own summary line: range return, benchmark returns, bar frequency,

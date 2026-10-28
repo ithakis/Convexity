@@ -1049,7 +1049,7 @@
      cards), the owner's two-box rule. */
   .m-fc-grid [data-rich-tip] { text-decoration: none; }
   .rich-tip-float .mp-card {
-    width: 680px; max-width: calc(100vw - 16px); padding: 12px 15px;
+    width: 860px; max-width: calc(100vw - 16px); padding: 12px 15px;
     background: var(--tip-bg); border: 1px solid var(--tip-border); border-radius: var(--r-lg);
     box-shadow: var(--tip-shadow); color: var(--text); font-size: 12.5px; line-height: 1.45;
   }
