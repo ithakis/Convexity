@@ -690,6 +690,14 @@ def _listings(group: int) -> list[tuple]:
     return [r for r in rows if not relisting(r[0], r[3])]
 
 
+def company_lines(group: int) -> list[Hit]:
+    """A company's real listings (no re-listing venues), most traded first,
+    with each one's region and traded value (capm's home-country rule)."""
+    if group == YAHOO_GROUP:
+        return []
+    return [_hit(r, 100.0) for r in _listings(group)]
+
+
 def listings(group: int) -> list[Hit]:
     """Every listing of a company, re-listing venues included, most traded
     first (an import's proxy may need a Frankfurt line)."""

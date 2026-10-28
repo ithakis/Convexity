@@ -482,8 +482,10 @@ _LINES_DISK: dict[str, str] | None = None
 
 def beta_line(symbol: str) -> str:
     """See ``_pack_line``; plus what ``learn_line`` found by name for a
-    listing the pack doesn't know (a US company's Milan line -> its US line),
-    this process or, for a week, on disk (``state/beta_lines.json``)."""
+    listing the pack doesn't know (a US company's Milan line -> its US line)
+    and what ``learn_country_line`` decided by the company's country (Shell's
+    receipt -> SHEL.L), this process or, for a week, on disk
+    (``state/beta_lines.json``)."""
     s = (symbol or "").upper()
     return _LINE_LEARNED.get(s) or _saved_lines().get(s) or _pack_line(s)
 
@@ -600,6 +602,102 @@ def learn_line(symbol: str, name: str | None) -> str | None:
     return None
 
 
+# Yahoo's profile country -> the pack's listing regions that count as home.
+# A Chinese company's Hong Kong line is home too (Alibaba, Tencent): A and H
+# shares are different securities, so either one keeps its own line.
+COUNTRY_REGIONS: dict[str, tuple[str, ...]] = {
+    "United States": ("us",), "Canada": ("ca",), "United Kingdom": ("gb",),
+    "Germany": ("de",), "France": ("fr",), "Netherlands": ("nl",), "Italy": ("it",),
+    "Spain": ("es",), "Switzerland": ("ch",), "Sweden": ("se",), "Denmark": ("dk",),
+    "Norway": ("no",), "Finland": ("fi",), "Belgium": ("be",), "Austria": ("at",),
+    "Ireland": ("ie",), "Portugal": ("pt",), "Greece": ("gr",), "Poland": ("pl",),
+    "Czech Republic": ("cz",), "Czechia": ("cz",), "Hungary": ("hu",), "Romania": ("ro",),
+    "Iceland": ("is",), "Lithuania": ("lt",), "Latvia": ("lv",), "Estonia": ("ee",),
+    "Turkey": ("tr",), "Türkiye": ("tr",), "Israel": ("il",), "Japan": ("jp",),
+    "China": ("cn", "hk"), "Hong Kong": ("hk",), "Taiwan": ("tw",), "South Korea": ("kr",),
+    "India": ("in",), "Singapore": ("sg",), "Malaysia": ("my",), "Thailand": ("th",),
+    "Indonesia": ("id",), "Vietnam": ("vn",), "Australia": ("au",), "New Zealand": ("nz",),
+    "Brazil": ("br",), "Mexico": ("mx",), "Argentina": ("ar",), "Chile": ("cl",),
+    "Colombia": ("co",), "South Africa": ("za",), "Saudi Arabia": ("sa",), "Qatar": ("qa",),
+    "Kuwait": ("kw",), "United Arab Emirates": ("ae",), "Egypt": ("eg",),
+}  # fmt: skip
+# A line in the company's country must trade at least this share of the most
+# traded line's value to carry the beta (the pack's own liquidity floor): a
+# token line stays out. scripts/audit_beta_lines.py (264 companies listed in
+# 2+ countries, 2026-10-28): the line it picks explains its home index as well
+# as the best candidate (weekly R² within 0.05) for 79%, the pack's 69%; a
+# floor of 5%, 10% or 25% changes one company.
+COUNTRY_SHARE = 0.10
+_COUNTRY_DONE: dict[int, str] = {}  # pack group -> its company's country, this process
+
+
+def _country(ticker: str) -> str | None:
+    """The company's country from Yahoo's profile (network: batch path only)."""
+    try:
+        import yfinance as yf
+
+        c = (yf.Ticker(ticker).info or {}).get("country")
+        return c if isinstance(c, str) and c else None
+    except Exception as e:
+        print(f"[beta] {ticker}: country {type(e).__name__}")
+        return None
+
+
+def learn_country_line(symbol: str) -> str | None:
+    """The pack's home line, checked against the company's country (1.29.1).
+    The pack picks a home by reporting currency, then traded value, so a
+    company that reports in another currency than its market's landed on its
+    US receipt (Shell, Infosys: USD) or an old venue (Unilever: EUR, Amsterdam,
+    though London has been its main line since 2020). Here the company's
+    country from Yahoo's profile decides: the listing itself when it trades
+    there, else the most traded line there (``COUNTRY_SHARE`` of the top line
+    at least), else the pack's choice (Spotify, Arm: only a US line).
+
+    Asked only when it could change something: two or more regions among the
+    company's liquid lines (or the listing's own). The answer is kept a week
+    in ``state/beta_lines.json`` (a failed lookup is not kept). Network: the
+    batch path (``ensure``), never the streaming one."""
+    s = (symbol or "").upper()
+    if s in _LINE_LEARNED or s in _saved_lines() or s.startswith("^"):
+        return None
+    try:
+        from convexity import symbol_db as sdb
+
+        me = sdb.get(s)
+        if me is None or me.type != "stock" or me.group == sdb.YAHOO_GROUP:
+            return None
+        if _ETC.search(me.name or "") and not _COMPANY.search(me.name or ""):
+            return None
+        lines = [h for h in sdb.company_lines(me.group) if h.type == "stock" and h.region]
+        if not lines:
+            return None
+        top = max(h.adv_usd or 0.0 for h in lines)
+        big = [h for h in lines if (h.adv_usd or 0.0) >= COUNTRY_SHARE * top]
+        own = next((h for h in lines if h.ticker == s), None)
+        if len({h.region for h in big + ([own] if own else [])}) < 2:
+            return None  # one market only: the pack's home is the country's
+        country = _COUNTRY_DONE.get(me.group)
+        if country is None:
+            home = sdb.home(me.group)
+            country = _country(home.ticker if home else s)
+            if country is None:
+                return None  # ask again next time
+            _COUNTRY_DONE[me.group] = country
+        regions = COUNTRY_REGIONS.get(country, ())
+        if own and own.region in regions:
+            line = s
+        else:
+            there = [h for h in big if h.region in regions]
+            line = there[0].ticker.upper() if there else _pack_line(s)
+        _save_line(s, line)
+        if line != _pack_line(s):
+            print(f"[beta] {s}: {country} company, measured on {line} (pack: {_pack_line(s)})")
+        return line
+    except Exception as e:
+        print(f"[beta] {s}: country line {type(e).__name__}")
+        return None
+
+
 @lru_cache(maxsize=8192)
 def _pack_line(symbol: str) -> str:
     """The listing whose returns carry the company's beta: its home line when
@@ -682,6 +780,12 @@ def ensure(
     syms = [s.upper() for s in dict.fromkeys(symbols or []) if s]
     for s, n in (names or {}).items():
         learn_line(s, n)
+    todo = [s for s in syms if s not in _LINE_LEARNED and s not in _saved_lines()]
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(6, len(todo))) as ex:
+            list(ex.map(learn_country_line, todo))
     lines = {s: beta_line(s) for s in syms}
     # A caller's currency belongs to its own listing, never to the home line.
     hints = {k.upper(): v for k, v in (ccy or {}).items()}

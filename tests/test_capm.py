@@ -662,3 +662,100 @@ def test_scatter_returns_the_pairs_the_beta_was_measured_on(monkeypatch):
     assert len(sc["x"]) == len(sc["y"]) == capm.SCATTER_N
     assert capm.ols(np.array(sc["y"]), np.array(sc["x"])) == pytest.approx(1.5, abs=0.15)
     assert capm.scatter("NODATA", {}, "USD") is None
+
+
+def _country_env(monkeypatch, lines, home, country, tmp=None):
+    """A synthetic company in the pack: ``lines`` as (ticker, region, traded
+    USD), ``home`` the pack's home line, ``country`` Yahoo's answer (None: the
+    lookup failed). Returns the list of tickers the lookup was asked for."""
+    from convexity import symbol_db as sdb
+
+    hits = {
+        t: sdb.Hit(t, "Example plc", "stock", "X", r, None, None, 1e11, 7, 100.0, adv)
+        for t, r, adv in lines
+    }
+    monkeypatch.setattr(sdb, "get", lambda t: hits.get(t.upper()))
+    monkeypatch.setattr(
+        sdb, "company_lines", lambda g: sorted(hits.values(), key=lambda h: -(h.adv_usd or 0))
+    )
+    monkeypatch.setattr(sdb, "home", lambda g: hits[home])
+    asked = []
+
+    def look(t):
+        asked.append(t)
+        return country
+
+    monkeypatch.setattr(capm, "_country", look)
+    monkeypatch.setattr(capm, "_LINE_LEARNED", {})
+    monkeypatch.setattr(capm, "_COUNTRY_DONE", {})
+    monkeypatch.setattr(capm, "_LINES_DISK", {})
+    if tmp is not None:
+        monkeypatch.setattr(capm, "_lines_path", lambda: tmp / "beta_lines.json")
+    capm._pack_line.cache_clear()
+    return asked
+
+
+def test_a_company_reporting_in_dollars_is_measured_in_its_own_country(monkeypatch, tmp_path):
+    """Shell reports in USD, so the pack took its most traded line, the New
+    York receipt. Every Shell line is measured on London, against the FTSE."""
+    _country_env(
+        monkeypatch,
+        [("SHEL", "us", 700e6), ("SHEL.L", "gb", 520e6), ("SHELL.AS", "nl", 230e6)],
+        "SHEL",
+        "United Kingdom",
+        tmp_path,
+    )
+    for s in ("SHEL", "SHEL.L", "SHELL.AS"):
+        assert capm.learn_country_line(s) == "SHEL.L"
+        assert capm.beta_line(s) == "SHEL.L"
+    assert capm.home_proxy(capm.beta_line("SHEL"))["name"] == "FTSE All-Share"
+    capm._LINES_DISK = None  # a restart: the answer comes back from disk
+    assert capm.beta_line("SHELL.AS") == "SHEL.L"
+
+
+def test_a_token_line_in_the_home_country_does_not_carry_the_beta(monkeypatch):
+    """A London line trading 4% of Nasdaq's value is too thin: Nasdaq stays."""
+    _country_env(monkeypatch, [("CCX", "us", 200e6), ("CCX.L", "gb", 8e6)], "CCX", "United Kingdom")
+    assert capm.learn_country_line("CCX") is None  # one liquid market: nothing to decide
+    assert capm.beta_line("CCX") == "CCX"
+
+
+def test_a_us_company_bought_in_germany_stays_on_its_us_line(monkeypatch):
+    _country_env(
+        monkeypatch, [("WMT", "us", 2.8e9), ("WMT.DE", "de", 0.5e6)], "WMT", "United States"
+    )
+    assert capm.learn_country_line("WMT.DE") == "WMT"
+    assert capm.home_proxy(capm.beta_line("WMT.DE"))["name"] == "S&P 500"
+
+
+def test_a_company_listed_only_abroad_keeps_the_packs_line(monkeypatch):
+    """Spotify (Luxembourg) trades only in New York; a country with no liquid
+    line, or one the map lacks, leaves the pack's choice."""
+    _country_env(monkeypatch, [("SPX1", "us", 9e8), ("SPX1.DE", "de", 2e6)], "SPX1", "Luxembourg")
+    assert capm.learn_country_line("SPX1.DE") == "SPX1"
+
+
+def test_a_chinese_h_share_keeps_its_own_line(monkeypatch):
+    """A and H shares are different securities: a Hong Kong holding of a
+    Chinese company is measured on Hong Kong, the A share on Shanghai."""
+    _country_env(
+        monkeypatch, [("601111.SS", "cn", 600e6), ("1111.HK", "hk", 400e6)], "601111.SS", "China"
+    )
+    assert capm.learn_country_line("1111.HK") == "1111.HK"
+    assert capm.learn_country_line("601111.SS") == "601111.SS"
+
+
+def test_one_market_only_never_asks_yahoo(monkeypatch):
+    asked = _country_env(
+        monkeypatch, [("ONE.PA", "fr", 9e7), ("ONE.MC", "fr", 1e5)], "ONE.PA", "France"
+    )
+    assert capm.learn_country_line("ONE.PA") is None and asked == []
+
+
+def test_a_failed_country_lookup_is_not_kept(monkeypatch):
+    asked = _country_env(
+        monkeypatch, [("SHEL", "us", 700e6), ("SHEL.L", "gb", 520e6)], "SHEL", None
+    )
+    assert capm.learn_country_line("SHEL") is None
+    assert capm.beta_line("SHEL") == "SHEL"
+    assert capm.learn_country_line("SHEL") is None and len(asked) == 2  # asked again

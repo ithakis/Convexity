@@ -253,8 +253,10 @@ Each of these has cost real debugging time; the link goes to the full story.
   [frontend.md → σ/μ](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
 - **One beta, one model price** (capm.py, 1.29): every surface (grid,
   window, export, portfolio beta, the optimizer's alpha settings, the news
-  Track record, the reference pack) reads `capm`'s beta (home index in local
-  currency, Welch BSWA on 3Y daily, 1 + 0.9(b − 1); 1Y OLS under 252 days, 1
+  Track record, the reference pack) reads `capm`'s beta (the company's line in
+  its own country, `learn_country_line`, then that market's index in local
+  currency; re-run `scripts/audit_beta_lines.py` after any change to the line
+  rules or `HOME`, Welch BSWA on 3Y daily, 1 + 0.9(b − 1); 1Y OLS under 252 days, 1
   "prior" under 151) and mu = rf_local + beta·ERP + alpha (ERP assumed 5% by default, or each market's history, `model_erp_mode`, `docs/erp_research.md`; alpha =
   `relative_alpha` of the name's total upside, 0 without targets). Yahoo's
   `info["beta"]` is never read; a saved row's old one is dropped on load. Never
@@ -401,7 +403,7 @@ overrides it):
 │   ├── events.json             ← held shares' next earnings / ex-dividend dates from Yahoo (a cache, market data only)
 │   ├── betas.json              ← the app's beta per symbol and window, recomputed daily (capm.py; a cache, market data only)
 │   ├── policy_rates.json       ← central-bank policy rates from the BIS, refreshed daily: rf for currencies without a CME future (options_density.py; market data only)
-│   ├── beta_lines.json         ← home lines found by name for listings the pack lacks (a US company's Milan line → its US line), a week (capm.py; market data only)
+│   ├── beta_lines.json         ← home lines found by name (a US company's Milan line → its US line) or by the company's country (SHEL → SHEL.L), a week (capm.py; market data only)
 │   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
 │   ├── recaps.json             ← My Investments' weekly recaps, last 12 (derived from the computed page: a cache)

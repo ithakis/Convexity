@@ -1371,7 +1371,23 @@ CAPM and the per-firm analyst mixture with its trust control:
   again, never cached as a miss, and until the line is known (`unresolved`)
   the listing's own-line beta is shown but not cached (a timed-out lookup
   after a restart put a US company's Milan line on the FTSE MIB for the
-  day, 2026-10-24). Funds keep
+  day, 2026-10-24). **The company's country checks the pack's home**
+  (`learn_country_line`, 2026-10-28): the pack picks a home by reporting
+  currency, then traded value, so companies reporting in another currency
+  than their market's landed on a US receipt (Shell, Infosys, BP: USD) or an
+  old venue (Unilever: EUR, Amsterdam). Yahoo's profile country now decides:
+  the listing itself when it trades there (A and H shares are different
+  securities), else the most traded line there trading 10%+ of the top
+  line's value (`COUNTRY_SHARE`), else the pack's line (Spotify, Arm: US
+  only). Asked only when the company's liquid lines span two regions, from
+  `ensure` (batch path, 6 threads), kept a week in `state/beta_lines.json`, a
+  failed lookup never kept. `scripts/audit_beta_lines.py` checks it live: a
+  44-listing golden set, unmapped exchanges (2.1% of home-listed cap: Saudi,
+  Thai, Qatari, Romanian, TSX-V, Argentine, CSE lines fall back to the S&P
+  500), every index's history, and for 264 companies listed in 2+ countries
+  the weekly R² of each country's line on its own index: the rule's line is
+  within 0.05 of the best for 79%, the pack's for 69%. Re-run it after any
+  change to the line rules, `HOME` or the pack. Funds keep
   their own line. `beta_meta.via` names the line; the window, the grid tip and
   the export say "via MU". More home indices, all probed live: Oslo
   (OSEBX.OL), Dublin, Lisbon, Singapore, Taiwan, NZ, Jakarta, KL, Mexico,
