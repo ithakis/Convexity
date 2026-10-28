@@ -749,10 +749,16 @@ document.addEventListener("keydown", (ev) => {
  * (overflow-y: auto) and the control row cut it off. Providers run at hover
  * time, so a tip can read live state (α, bootstrap count) without re-rendering
  * the host. KaTeX output is cached per HTML string.
+ *
+ * A key in STICKY_TIPS opens a card you can move into (owner, 2026-10-28: the
+ * model price card is long to read): it stays while the mouse is over the
+ * host or the card, its text can be selected, and it closes once the mouse
+ * leaves both. A short grace covers the gap between host and card.
  * --------------------------------------------------------------------------- */
 const RICH_TIPS = Object.create(null);
+const STICKY_TIPS = new Set(["model-price"]);
 const _RICH_TIP = (() => {
-  let el = null, current = null;
+  let el = null, current = null, sticky = false, graceT = 0;
   const katexCache = new Map();
   function ensure() {
     if (el && document.body.contains(el)) return el;
@@ -760,6 +766,17 @@ const _RICH_TIP = (() => {
     el.className = "rich-tip-float";
     el.id = "rich-tip-float";
     el.setAttribute("role", "tooltip");
+    el.addEventListener("mouseenter", () => clearTimeout(graceT));
+    el.addEventListener("mouseleave", (ev) => {
+      if (!sticky) return;
+      if (current && ev.relatedTarget && current.contains(ev.relatedTarget)) return;
+      // A text selection dragged past the edge: close once the button is up.
+      if (ev.buttons & 1) {
+        document.addEventListener("mouseup", (u) => { if (!el.contains(u.target)) hide(); }, { once: true, capture: true });
+        return;
+      }
+      hide();
+    });
     document.body.appendChild(el);
     return el;
   }
@@ -779,8 +796,12 @@ const _RICH_TIP = (() => {
     const html = fn ? fn(host) : "";
     if (!html) return;
     const tip = ensure();
+    clearTimeout(graceT);
+    if (current === host && sticky && tip.classList.contains("show")) return;  // keep a selection
     if (current && current !== host) current.removeAttribute("aria-describedby");
     current = host;
+    sticky = STICKY_TIPS.has(host.getAttribute("data-rich-tip"));
+    tip.classList.toggle("sticky", sticky);
     host.setAttribute("aria-describedby", tip.id);
     tip.innerHTML = render(html);
     tip.classList.add("show");
@@ -794,11 +815,23 @@ const _RICH_TIP = (() => {
   }
   function hide(host) {
     if (host && current && host !== current) return;
-    if (el) el.classList.remove("show");
+    clearTimeout(graceT);
+    if (el) el.classList.remove("show", "sticky");
     if (current) current.removeAttribute("aria-describedby");
     current = null;
+    sticky = false;
   }
-  return {show, hide};
+  // The host was left: a sticky card waits a moment for the mouse to reach it.
+  function leave(host, to) {
+    if (!sticky || host !== current) return hide(host);
+    if (to && el && el.contains(to)) return;
+    clearTimeout(graceT);
+    graceT = setTimeout(() => hide(host), 250);
+  }
+  const inside = (node) => !!(sticky && el && node && el.contains(node));
+  // The mouse is on a sticky card or its host (a click in the card blurs the host).
+  const held = () => !!(sticky && el && (el.matches(":hover") || current?.matches(":hover")));
+  return {show, hide, leave, inside, held};
 })();
 document.addEventListener("mouseover", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
@@ -808,7 +841,7 @@ document.addEventListener("mouseout", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
   if (!t) return;
   if (ev.relatedTarget && t.contains(ev.relatedTarget)) return;
-  _RICH_TIP.hide(t);
+  _RICH_TIP.leave(t, ev.relatedTarget);
 }, true);
 document.addEventListener("focusin", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
@@ -816,11 +849,11 @@ document.addEventListener("focusin", (ev) => {
 }, true);
 document.addEventListener("focusout", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
-  if (t) _RICH_TIP.hide(t);
+  if (t && !_RICH_TIP.held()) _RICH_TIP.hide(t);
 }, true);
-document.addEventListener("scroll", () => _RICH_TIP.hide(), true);
+document.addEventListener("scroll", (ev) => { if (!_RICH_TIP.inside(ev.target)) _RICH_TIP.hide(); }, true);
 window.addEventListener("resize", () => _RICH_TIP.hide());
-document.addEventListener("mousedown", () => _RICH_TIP.hide(), true);
+document.addEventListener("mousedown", (ev) => { if (!_RICH_TIP.inside(ev.target)) _RICH_TIP.hide(); }, true);
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") _RICH_TIP.hide();
 }, true);
@@ -4642,12 +4675,14 @@ function modelCardHtml(d) {
     if (am.reason === "no_targets") return mpCard("alpha", "α · analyst tilt", "0", "No analyst targets for this listing, so no tilt.", "",
       row("Why", "Only analysts’ relative optimism enters, and there is none to measure."));
     const z = +am.z, ic = +am.ic, sx = +(am.sigma_xs ?? 0.42), cap = +(am.z_cap ?? 3);
-    const mk = fcMarks(d);
-    const chart = mpZSvg(z, cap, am.upside, am.ref_upside, mk ? money(mk.mean) : null);
-    const icTxt = am.ic_source === "measured" ? "measured" : am.ic_source === "set" ? "set in Settings" : "a prior until measured";
-    return mpCard("alpha", "α · analyst tilt", sgnP(aP), `A small ${z >= 0 ? "extra: analysts are more" : "cut: analysts are less"} upbeat than usual.`, chart,
-      row("Why", `Targets barely predict returns, so even an unusual one adds little. <span class="mp-m">Skill ${ic.toFixed(3)} (${icTxt}); ${Math.round(sx * 100)}%: stocks’ return spread.</span>`)
-      + row("Used", `${ic.toFixed(3)} × ${Math.round(sx * 100)}% × ${z.toFixed(2)} sd = <b>${sgnP(aP)}</b>`)
+    const chart = mpUpsideSvg(z, cap, +am.upside, +am.ref_upside, +(am.upside_sd ?? 0.125), d.symbol || "this stock");
+    const icTxt = am.ic_source === "measured" ? "the app’s own record" : am.ic_source === "set" ? "set in Settings" : "the studies’ figure until the app has its own";
+    const n = Math.round(mpNormCdf(z) * 100), rank = z >= 0 ? `above ${Math.min(n, 99)} in 100` : `below ${Math.min(100 - n, 99)} in 100`;
+    const perSd = r2(ic * sx);
+    return mpCard("alpha", "α · analyst tilt", sgnP(aP), `Where ${escapeHtml(d.symbol || "this stock")}’s target sits among large caps’ targets.`, chart
+      + `<div class="mp-m mp-note">Upside to target (with dividends) across US large caps: ${escapeHtml(d.symbol || "this stock")}’s is ${rank}.${Math.abs(z) >= cap ? ` Capped at ±${cap} sd.` : ""}</div>`
+      + `<div class="mp-eq">α = IC × spread × z = ${ic.toFixed(3)} × ${Math.round(sx * 100)}% × <span class="mp-c-alpha">${z.toFixed(2)}</span> = <b class="mp-c-alpha">${sgnP(aP)}</b></div>`,
+      row("Why", `A forecast counts as much as its record. IC: how well targets have ranked the next year’s returns (a correlation; ${icTxt}). Returns spread ±${Math.round(sx * 100)}% a year, so each sd adds ${pc(perSd)}.`)
       + row("What if", `no analyst view → ${money(at(m.mu_capm))}`));
   })();
 
@@ -4787,20 +4822,38 @@ function mpErpSvg(h, erp, market) {
   return _mpSvg(W, H, out);
 }
 
-/* How unusual the analysts are: z on a −cap..+cap scale, 0 = a usual
- * stock's upside, the stock's target named above its marker. */
-function mpZSvg(z, cap, upside, ref, target) {
-  const W = 296, H = 52, X = (v) => 10 + (W - 20) * (Math.max(-cap, Math.min(cap, v)) + cap) / (2 * cap), y = 22;
-  let out = `<rect x="${X(-cap)}" y="${y - 4}" width="${X(cap) - X(-cap)}" height="8" rx="4" class="mp-ztrack"/>`;
-  out += `<rect x="${Math.min(X(0), X(z)).toFixed(1)}" y="${y - 4}" width="${Math.abs(X(z) - X(0)).toFixed(1)}" height="8" class="mp-f-alpha mp-soft"/>`;
-  for (let t = -cap; t <= cap; t++) out += `<line x1="${X(t).toFixed(1)}" y1="${y + 5}" x2="${X(t).toFixed(1)}" y2="${y + 8}" class="mp-tick"/>`;
-  out += _mpT(X(-cap), y + 18, `−${cap}`, { fs: 9.5 }) + _mpT(X(cap), y + 18, `+${cap}`, { a: "end", fs: 9.5 });
-  out += _mpT(X(0), y + 18, `0 = usual (${ref != null ? `+${(ref * 100).toFixed(1)}%` : "usual"})`, { a: "middle", fs: 9.5 });
-  out += `<line x1="${X(z).toFixed(1)}" y1="${y - 9}" x2="${X(z).toFixed(1)}" y2="${y + 9}" class="mp-l-alpha" stroke-width="2.6"/>`;
-  const lbl = `${target ? `target ${target} ` : ""}(${upside >= 0 ? "+" : ""}${(upside * 100).toFixed(1)}%), ${Math.abs(z).toFixed(2)} sd ${z >= 0 ? "above" : "below"} usual`;
-  out += _mpT(Math.max(80, Math.min(W - 80, X(z))), y - 12, lbl, { a: X(z) > W - 80 ? "end" : X(z) < 80 ? "start" : "middle", c: "mp-c-alpha", w: 600, fs: 10 });
-  out += _mpT(10, H - 1, `how unusual, in standard deviations (sd), capped at ±${cap}`, { fs: 9.5 });
+/* Where this target sits among large caps' (owner, 2026-10-28): the
+ * cross-section of target upside is about normal in log terms (centre `ref`,
+ * sd `usd`, analyst_targets.UPSIDE_SD), so the curve is drawn in sd and
+ * labelled in upside %. The tail past the stock is shaded: z is read off it. */
+function mpUpsideSvg(z, cap, upside, ref, usd, label) {
+  const W = 296, H = 80, base = 54, h = 40, lo = -3.4, hi = 3.4;
+  const X = (v) => 10 + (W - 20) * (Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo);
+  const Y = (v) => base - Math.exp(-v * v / 2) * h;
+  const path = (a, b) => { let d = ""; for (let v = a; v <= b + 1e-9; v += 0.05) d += `${d ? "L" : "M"}${X(v).toFixed(1)} ${Y(v).toFixed(1)}`; return d; };
+  const zc = Math.max(-cap, Math.min(cap, z)), up = z >= 0;
+  const pctOf = (k) => { const v = (Math.exp(Math.log1p(ref) + k * usd) - 1) * 100; return `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(0)}%`; };
+  // The shaded tail: past the stock on the side it leans to.
+  const [a, b] = up ? [zc, hi] : [lo, zc];
+  let out = `<path d="${path(a, b)}L${X(b).toFixed(1)} ${base}L${X(a).toFixed(1)} ${base}Z" class="mp-f-alpha mp-soft"/>`;
+  out += `<path d="${path(lo, hi)}" fill="none" class="mp-tick"/><line x1="${X(lo)}" y1="${base}" x2="${X(hi)}" y2="${base}" class="mp-grid"/>`;
+  out += `<line x1="${X(0).toFixed(1)}" y1="12" x2="${X(0).toFixed(1)}" y2="${base}" class="mp-guide"/>`
+    + (Math.abs(X(zc) - X(0)) > 70 ? _mpT(X(0), 9, "usual", { a: "middle", fs: 9.5 }) : "");
+  for (let k = -2; k <= 3; k++) {
+    if (k !== 0 && Math.abs(X(k) - X(zc)) < 16) continue;   // keep the stock's own label readable
+    out += `<line x1="${X(k).toFixed(1)}" y1="${base}" x2="${X(k).toFixed(1)}" y2="${base + 3}" class="mp-tick"/>` + _mpT(X(k), base + 14, pctOf(k), { a: "middle", fs: 9.5, c: k === 0 ? "mp-ft" : "mp-fm" });
+  }
+  out += `<line x1="${X(zc).toFixed(1)}" y1="14" x2="${X(zc).toFixed(1)}" y2="${base}" class="mp-l-alpha" stroke-width="2"/>`;
+  const ax = Math.max(40, Math.min(W - 40, X(zc)));
+  out += _mpT(ax, 9, `${escapeHtml(label)} ${upside >= 0 ? "+" : "−"}${Math.abs(upside * 100).toFixed(0)}%`, { a: "middle", fs: 10, w: 600, c: "mp-c-alpha" });
+  out += _mpT(X(zc), base + 27, `${Math.abs(z).toFixed(2)} sd`, { a: "middle", fs: 9.5, w: 600, c: "mp-c-alpha" });
   return _mpSvg(W, H, out);
+}
+/* The share of a normal below z, for "above N in 100". */
+function mpNormCdf(z) {
+  const t = 1 / (1 + 0.3275911 * Math.abs(z) / Math.SQRT2);
+  const e = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-z * z / 2);
+  return 0.5 * (1 + (z >= 0 ? e : -e));
 }
 
 RICH_TIPS["model-price"] = () => {

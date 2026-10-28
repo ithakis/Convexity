@@ -986,7 +986,7 @@ def alpha_for(upside: float | None, st: dict) -> tuple[float, dict]:
     else:
         ic, src = at.view_ic()
     meta = {"ic": ic, "ic_source": src, "z": None, "upside": upside, "ref_upside": None,
-            "z_cap": st["z_cap"], "sigma_xs": at.SIGMA_XS}  # fmt: skip
+            "z_cap": st["z_cap"], "sigma_xs": at.SIGMA_XS, "upside_sd": at.UPSIDE_SD}  # fmt: skip
     if upside is None or not math.isfinite(upside):
         meta["reason"] = "no_targets"
         return 0.0, meta

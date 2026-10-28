@@ -1041,6 +1041,8 @@
     opacity: 0; transition: opacity 0.12s ease;
   }
   .rich-tip-float.show { opacity: 1; }
+  /* A sticky card (STICKY_TIPS in app.js) takes the mouse: its text can be selected. */
+  .rich-tip-float.sticky.show { pointer-events: auto; user-select: text; -webkit-user-select: text; cursor: auto; }
   .rich-tip-float .pf-metric-tip { display: block; position: static; width: 360px; max-width: calc(100vw - 16px); }
   /* The model price card (app.js modelCardHtml, RICH_TIPS["model-price"]):
      the tooltip plus one level of box (the equation panel and the four input
@@ -1105,6 +1107,8 @@
   .mp-svg .mp-dot { fill: var(--muted); opacity: 0.7; }
   .mp-svg .mp-dot-lit { fill: var(--text); }
   .mp-svg .mp-ztrack { fill: var(--tip-border); }
+  .mp-card .mp-note { font-size: 11px; line-height: 1.35; margin: 2px 0 4px; }
+  .mp-card .mp-eq { font-family: "KaTeX_Main", Georgia, serif; font-size: 13.5px; color: var(--text); margin: 2px 0 2px; }
   [data-rich-tip] {
     cursor: default;  /* never cursor: help: the user dislikes it (frontend.md) */
     text-decoration: underline dotted rgba(125, 125, 125, 0.75);

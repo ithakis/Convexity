@@ -18,6 +18,8 @@ launch); until then they have no tags or GitHub Releases of their own.
 - **Topbar time:** the portfolio's update time is a pill with a green dot when built today and amber when older, and reads "19:19", "Yesterday 19:19" or "Oct 26 19:19" (no seconds). Cached portfolios use the same pill.
 - **Constituent tickers** sit on a red badge with white letters in every theme, also before a Refresh: a pill whose row isn't built yet takes the company name from the local symbol pack (new `GET /api/symbol-names`), and an unknown ticker is a badge on its own.
 - **Risk & return header:** "vs", the benchmark pill and a separate currency tag sit on one line at the right of the title, evenly spaced; the pill and the tag share one height and shape; the benchmark menu opens leftwards so it stays on screen.
+- **The model price card stays open** while the mouse is on it, so it can be read at leisure and its text selected; it closes once the mouse leaves the card.
+- **α, shown not told:** the analyst-tilt card draws where the stock's target upside sits on large caps' bell curve (its percentile and z), then α = IC × spread × z, then why it is small: targets' IC (their correlation with the next year's return) is about 0.02.
 
 ## 1.29.0 — 2026-10-24
 
