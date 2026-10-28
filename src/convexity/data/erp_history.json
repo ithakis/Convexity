@@ -1,0 +1,188 @@
+{
+ "source": "Jordà-Schularick-Taylor Macrohistory Database R6",
+ "citation": "Jordà, Ò., Knoll, K., Kuvshinov, D., Schularick, M. and Taylor, A. M. (2019), 'The Rate of Return on Everything, 1870-2015', Quarterly Journal of Economics 134(3), 1225-1298. Data: Jordà-Schularick-Taylor Macrohistory Database, release 6, https://www.macrohistory.net/database/",
+ "license": "CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/); derived from the dataset above, shared under the same terms",
+ "consulted": "2026-10-26",
+ "definition": "ERP = ln E[(1+R_eq)/(1+R_bill)], annual total returns in local currency, each market's full sample; se = sd/sqrt(n)/mean. geometric = mean ln((1+R_eq)/(1+R_bill)).",
+ "markets": {
+  "Australia": {
+   "erp": 0.06008,
+   "geometric": 0.04974,
+   "se": 0.01145,
+   "from": 1870,
+   "to": 2020,
+   "years": 148
+  },
+  "Belgium": {
+   "erp": 0.0542,
+   "geometric": 0.03334,
+   "se": 0.01736,
+   "from": 1870,
+   "to": 2020,
+   "years": 147
+  },
+  "Denmark": {
+   "erp": 0.04887,
+   "geometric": 0.03611,
+   "se": 0.01335,
+   "from": 1875,
+   "to": 2020,
+   "years": 146
+  },
+  "Finland": {
+   "erp": 0.09515,
+   "geometric": 0.06458,
+   "se": 0.02348,
+   "from": 1896,
+   "to": 2020,
+   "years": 125
+  },
+  "France": {
+   "erp": 0.04331,
+   "geometric": 0.0247,
+   "se": 0.01653,
+   "from": 1870,
+   "to": 2020,
+   "years": 144
+  },
+  "Germany": {
+   "erp": 0.07799,
+   "geometric": 0.05252,
+   "se": 0.01999,
+   "from": 1870,
+   "to": 2020,
+   "years": 144
+  },
+  "Italy": {
+   "erp": 0.06669,
+   "geometric": 0.03406,
+   "se": 0.02399,
+   "from": 1870,
+   "to": 2020,
+   "years": 131
+  },
+  "Japan": {
+   "erp": 0.08634,
+   "geometric": 0.06122,
+   "se": 0.02025,
+   "from": 1886,
+   "to": 2020,
+   "years": 133
+  },
+  "Netherlands": {
+   "erp": 0.06431,
+   "geometric": 0.04414,
+   "se": 0.01886,
+   "from": 1900,
+   "to": 2020,
+   "years": 121
+  },
+  "Norway": {
+   "erp": 0.04907,
+   "geometric": 0.03237,
+   "se": 0.01537,
+   "from": 1881,
+   "to": 2020,
+   "years": 140
+  },
+  "Portugal": {
+   "erp": 0.03757,
+   "geometric": 0.01049,
+   "se": 0.01988,
+   "from": 1880,
+   "to": 2020,
+   "years": 141
+  },
+  "Spain": {
+   "erp": 0.06091,
+   "geometric": 0.04401,
+   "se": 0.01727,
+   "from": 1900,
+   "to": 2020,
+   "years": 117
+  },
+  "Sweden": {
+   "erp": 0.06263,
+   "geometric": 0.04653,
+   "se": 0.01448,
+   "from": 1871,
+   "to": 2020,
+   "years": 150
+  },
+  "Switzerland": {
+   "erp": 0.05663,
+   "geometric": 0.04197,
+   "se": 0.01555,
+   "from": 1900,
+   "to": 2020,
+   "years": 121
+  },
+  "UK": {
+   "erp": 0.05549,
+   "geometric": 0.04223,
+   "se": 0.01376,
+   "from": 1871,
+   "to": 2020,
+   "years": 150
+  },
+  "USA": {
+   "erp": 0.06064,
+   "geometric": 0.04631,
+   "se": 0.01343,
+   "from": 1872,
+   "to": 2020,
+   "years": 149
+  }
+ },
+ "pools": {
+  "world": {
+   "erp": 0.06477,
+   "geometric": 0.05585,
+   "se": 0.01169,
+   "from": 1900,
+   "to": 2020,
+   "years": 121
+  },
+  "europe": {
+   "erp": 0.06324,
+   "geometric": 0.05304,
+   "se": 0.01257,
+   "from": 1900,
+   "to": 2020,
+   "years": 121
+  }
+ },
+ "evidence": {
+  "10y": {
+   "cases": 976,
+   "origins": "1950-2010",
+   "mse_vs_assumed": {
+    "local": 0.139,
+    "world": -0.018
+   },
+   "p_better_than_assumed": {
+    "local": 0.03,
+    "world": 0.7
+   },
+   "rank_corr_local_future": -0.122
+  },
+  "20y": {
+   "cases": 816,
+   "origins": "1950-2000",
+   "mse_vs_assumed": {
+    "local": 0.33,
+    "world": -0.047
+   },
+   "p_better_than_assumed": {
+    "local": 0.04,
+    "world": 0.75
+   },
+   "rank_corr_local_future": -0.164
+  },
+  "homogeneity": {
+   "cochran_q": 8.6,
+   "df": 15,
+   "p": 0.898
+  }
+ }
+}

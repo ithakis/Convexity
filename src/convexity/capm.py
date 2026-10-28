@@ -14,7 +14,9 @@ SPY. Now every surface reads this module:
   (``options_density._local_rate``: ^IRX for USD, CME futures for the majors).
   A home-index beta implies a local CAPM, so the rate is local too.
 * ``beta`` is estimated here (below), cached per symbol per day.
-* ``ERP`` is the owner's ``dist_erp`` (5% by default).
+* ``ERP`` is the owner's ``dist_erp`` (5% by default), or with
+  ``model_erp_mode`` "historical" the long-run premium of the market the beta
+  is measured against (``erp_for``, below).
 * ``alpha`` is the analysts' small relative tilt,
   ``analyst_targets.relative_alpha`` (IC x 0.42 x z of relative upside, z
   capped at +/-3): at most about +/-2.5% a year. It is 0 with no targets, or
@@ -38,6 +40,10 @@ beta; ``scripts/backtest_beta.py`` on the research branch):**
    beta is no fallback: for European banks it did worse than beta = 1.
 3. Shrink: beta = 1 + 0.9 (beta_hat - 1); 0.9 was the optimum within 0.001
    in every group (Blume's 0.67 is +7% MSE for this estimator).
+   The weight is scaled down (``w_scale``, 2026-10-27 study of 172 names in
+   30 markets, 5,247 quarterly forecasts 2018-2025): to 0 as the share of
+   zero-return days reaches 25% (thin trading reads a beta too low), and to
+   0.6x for a stock's weekly beta on an index in another session.
 
 Result: MSE vs the realised beta -51% at 12M and -57% at 3M against Yahoo's.
 Levi & Welch (2017), Hollstein & Prokopczuk (2016) and Welch (2022) agree
@@ -109,6 +115,14 @@ HOME: dict[str, tuple[str, str, str]] = {
     "MX": ("^MXX", "S&P/BMV IPC", "MXN"),
     "TA": ("^TA125.TA", "TA-125", "ILS"),
     "JO": ("^J203.JO", "FTSE/JSE All Share", "ZAR"),
+    # 2026-10-27: these four sat on the S&P 500 (weekly USD), where a stock
+    # explains ~1-5% of its weekly variance against 20-57% on its own index
+    # (Moutai R² .01 vs .27, Turkish Airlines .02 vs .54, 16 names). Saudi,
+    # Thai, Polish and Chilean indices answer on Yahoo with today's quote only.
+    "SS": ("000001.SS", "SSE Composite", "CNY"),
+    "SZ": ("399001.SZ", "SZSE Component", "CNY"),
+    "IS": ("XU100.IS", "BIST 100", "TRY"),
+    "KQ": ("^KQ11", "KOSDAQ", "KRW"),
 }
 BACKTESTED = {"PA", "DE", "MC", "MI", "AS", "BR", "HE", "VI", "SW", "ST", "CO", "L", "T"}
 # European listings with no mapped country index: the region.
@@ -133,6 +147,10 @@ MIN_OLS = 151  # ... for the 1-year daily OLS below that; fewer = prior
 GLITCH = 1.0  # |log return| above this is a data glitch, not a move
 SPIKE = 0.15  # ... and one this big that the next bar undoes (a bad print)
 TTL_DAYS = 1  # a beta is recomputed once a day
+# Shrink scales (2026-10-27 study, below ``finish``): the effective weight is
+# shrink x LIQ x WEEKLY, recorded per estimate as ``w_scale``.
+LIQ_Z0 = 0.25  # zero-return share at which a daily beta is all prior
+WEEKLY_W = 0.6  # a stock's weekly beta against an index in another session
 
 _LOCK = threading.Lock()
 # One computation at a time: the grid, the analytics and a stock window ask
@@ -302,7 +320,12 @@ def dimson(y: np.ndarray, x: np.ndarray) -> float:
 
 
 def estimate(
-    stock, market, years: int = WINDOW_YEARS, weekly: bool = False, plain: bool = False
+    stock,
+    market,
+    years: int = WINDOW_YEARS,
+    weekly: bool = False,
+    plain: bool = False,
+    lag: bool = True,
 ) -> dict:
     """Raw beta of a stock's closes on its market's closes (pandas Series
     indexed by date, same currency): ``{raw, method, n_days, asof}`` where
@@ -321,7 +344,22 @@ def estimate(
     ``plain``: daily OLS instead of BSWA (method "ols"), for a fund no market
     index explains (gold, bonds): Welch's winsorising is built for stocks,
     and its band around the market's move pulls a weakly correlated asset
-    toward 1 (gold 0.74 against the S&P, OLS 0.28)."""
+    toward 1 (gold 0.74 against the S&P, OLS 0.28).
+
+    ``lag=False`` (a stock, ``_compute_lines``): weekly OLS without the lag,
+    and ``w_scale`` ``WEEKLY_W``. Out of sample (46 non-US names against the
+    S&P in USD, quarterly 2018-2024, 1,210 forecasts) the lag added more
+    noise than the closing gap's bias: MSE 0.336 vs 0.366 against the next
+    year's lagged weekly beta, 0.242 vs 0.277 against the next two years'
+    fortnightly one, and both wanted a shrink near 0.5, not 0.9 (R² is low).
+    A fund fitted to its index keeps the lag: its R² is high, so the noise
+    is small and the bias is what is left (London S&P tracker 0.86 -> 0.99).
+
+    Daily methods record ``zero``, the share of the stock's daily returns
+    that are exactly 0 (no trade, or a coarse tick: TSMC 8%), and ``w_scale``
+    falls linearly to 0 at ``LIQ_Z0``: a price that does not move on the
+    market's day reads a beta too low (-0.38 against the weekly beta over 10%
+    zero days), and there every estimator lost to beta = 1."""
     import pandas as pd
 
     if stock is None or market is None:
@@ -343,10 +381,13 @@ def estimate(
                 "asof": asof,
             }
         y, x = np.expm1(np.diff(_log_index(wk["s"]))), np.expm1(np.diff(_log_index(wk["m"])))
-        b = dimson(y, x)
+        b = dimson(y, x) if lag else ols(y, x)
         ok = math.isfinite(b)
-        return {"raw": b if ok else None, "method": "weekly" if ok else "prior",
-                "n_days": len(df.iloc[-(252 * int(years) + 1) :]), "asof": asof}  # fmt: skip
+        out = {"raw": b if ok else None, "method": "weekly" if ok else "prior",
+               "n_days": len(df.iloc[-(252 * int(years) + 1) :]), "asof": asof}  # fmt: skip
+        if ok and not lag:
+            out["w_scale"] = WEEKLY_W
+        return out
     n_win = 252 * int(years) + 1
     d = df.iloc[-n_win:]
     asof = str(d.index[-1].date()) if len(d) else None
@@ -361,7 +402,9 @@ def estimate(
         return {"raw": None, "method": "prior", "n_days": len(d), "asof": asof}
     if not math.isfinite(b):
         return {"raw": None, "method": "prior", "n_days": len(d), "asof": asof}
-    return {"raw": b, "method": method, "n_days": len(d), "asof": asof}
+    zero = float(np.mean(np.abs(y) < 1e-12))
+    return {"raw": b, "method": method, "n_days": len(d), "asof": asof,
+            "zero": round(zero, 4), "w_scale": round(max(0.0, 1.0 - zero / LIQ_Z0), 4)}  # fmt: skip
 
 
 def settings(prefs: dict | None = None) -> dict:
@@ -373,6 +416,7 @@ def settings(prefs: dict | None = None) -> dict:
     years = p.get("model_beta_years", WINDOW_YEARS)
     return {
         "erp": float(p.get("dist_erp", options_density.ERP_DEFAULT)),
+        "erp_mode": p.get("model_erp_mode") if p.get("model_erp_mode") in ERP_MODES else "assumed",
         "shrink": float(p.get("model_beta_shrink", SHRINK)),
         "years": int(years) if years in (1, 2, 3, 1.0, 2.0, 3.0) else WINDOW_YEARS,
         "ic": float(p["model_ic"]) if isinstance(p.get("model_ic"), int | float) else None,
@@ -384,7 +428,8 @@ def finish(raw: dict, proxy: dict, st: dict) -> dict:
     """A cached raw estimate as the payload's ``beta_meta``: shrunk with the
     current setting (a shrink change never needs a recompute)."""
     r = raw.get("raw")
-    beta = 1.0 if r is None else shrink(float(r), st["shrink"])
+    w = st["shrink"] * float(raw.get("w_scale", 1.0))
+    beta = 1.0 if r is None else shrink(float(r), w)
     return {
         "beta": round(beta, 4),
         "raw": None if r is None else round(float(r), 4),
@@ -399,6 +444,8 @@ def finish(raw: dict, proxy: dict, st: dict) -> dict:
         "fit_best_r2": raw.get("fit_best_r2"),
         "years": st["years"],
         "shrink": st["shrink"],
+        "shrink_eff": round(w, 4),
+        "zero": raw.get("zero"),
     }
 
 
@@ -420,8 +467,9 @@ def _load() -> dict:
 
 
 def _key(symbol: str, years: int) -> str:
-    # "f": funds fitted to their benchmark (2026-10-24); older entries recompute.
-    return f"{(symbol or '').upper()}|{int(years)}|f"
+    # "f": funds fitted to their benchmark (2026-10-24); "w": shrink scales
+    # (2026-10-27). Older entries recompute.
+    return f"{(symbol or '').upper()}|{int(years)}|fw"
 
 
 def _fresh(ent) -> bool:
@@ -719,7 +767,7 @@ def _compute_lines(
             top = max(scored, key=lambda t: t[0], default=None)
             if top and top[0] >= FUND_MIN_R2:
                 fit, px, pm = top
-                best = (estimate(*pm, st["years"], weekly=_weekly(px, s)), px)
+                best = (estimate(*pm, st["years"], weekly=_weekly(px, s), lag=True), px)
             elif top:
                 low = top[0]
         if best is None:
@@ -729,7 +777,13 @@ def _compute_lines(
                     complete = False
                     continue
                 best = (
-                    estimate(*pm, st["years"], weekly=_weekly(px, s), plain=low is not None),
+                    estimate(
+                        *pm,
+                        st["years"],
+                        weekly=_weekly(px, s),
+                        plain=low is not None,
+                        lag=s in funds,
+                    ),
                     px,
                 )
                 complete &= px["proxy"] == chains[s][0]["proxy"]
@@ -780,6 +834,141 @@ def beta_for(
     )[(symbol or "").upper()]
 
 
+SCATTER_N = 250
+
+
+def scatter(
+    symbol: str, prefs: dict | None = None, ccy: str | None = None, n: int = SCATTER_N
+) -> dict | None:
+    """The return pairs behind a symbol's beta, for the model card's chart
+    (``GET /api/beta-scatter``): its beta line against the proxy it was
+    measured on, in the proxy's currency, glitch-cleaned like ``estimate``,
+    the last ``n`` days (weeks for a weekly beta). ``{x, y, freq, proxy,
+    proxy_name, raw}``, or None for a prior beta or missing data. Detail
+    path only: one cached bulk read, never on ``fetch_one``'s."""
+    from convexity import analytics, fx
+    from convexity.helpers import major_ccy
+
+    bm = beta_for(symbol, prefs, ccy)
+    if not bm or bm.get("raw") is None or bm.get("method") == "prior":
+        return None
+    line = beta_line(symbol)
+    st = settings(prefs)
+    ent = _MEM.get(_key(line, st["years"])) or _load()["items"].get(_key(line, st["years"]))
+    px = (ent or {}).get("proxy") or {}
+    if px.get("proxy") != bm["proxy"]:
+        return None
+    period = {1: "2y", 2: "5y", 3: "5y"}[st["years"]]
+    closes = analytics._bulk_close([line, px["proxy"]], period)
+    if line not in closes.columns or px["proxy"] not in closes.columns:
+        return None
+    stock, mkt = closes[line].dropna(), closes[px["proxy"]].dropna()
+    c_s = major_ccy(ccy) if ccy and line == (symbol or "").upper() else home_proxy(line)["ccy"]
+    if c_s != px["ccy"]:
+        need = {c for c in (c_s, px["ccy"]) if c != "USD"}
+        stock = _to_ccy(stock, c_s, px["ccy"], {c: fx._fx_usd_series(c, period) for c in need})
+        if stock is None:
+            return None
+    import pandas as pd
+
+    df = pd.concat([stock.rename("s"), mkt.rename("m")], axis=1, join="inner").dropna()
+    df = df[(df["s"] > 0) & (df["m"] > 0)]
+    weekly = bm["method"] == "weekly"
+    if weekly:
+        df = df.iloc[-(252 * max(st["years"], 2) + 1) :].resample("W-FRI").last().dropna()
+    else:
+        df = df.iloc[-(n + 1) :]
+    y, x = np.expm1(np.diff(_log_index(df["s"]))), np.expm1(np.diff(_log_index(df["m"])))
+    if len(x) < 20:
+        return None
+    return {
+        "x": [round(float(v), 5) for v in x[-n:]],
+        "y": [round(float(v), 5) for v in y[-n:]],
+        "freq": "weekly" if weekly else "daily",
+        "proxy": px["proxy"],
+        "proxy_name": px.get("name"),
+        "raw": bm["raw"],
+    }
+
+
+# --------------------------- the equity premium ---------------------------
+# Two ways to set it (Settings -> Model price, prefs ``model_erp_mode``):
+#
+# * "assumed" (the default): one premium for every market, the owner's
+#   ``dist_erp``, 5% unless changed.
+# * "historical": the long-run premium of the market the beta is measured
+#   against, from data/erp_history.json (JST Macrohistory, 16 markets,
+#   1870-2020, scripts/build_erp_history.py). A market without a long record
+#   of its own (Hong Kong, Canada, Korea...) and a world fund take the pooled
+#   16-market premium; STOXX Europe 600 the pooled European one.
+#
+# Why assumed is the default (the build script's evidence, 2026-10-26): out of
+# sample a market's own history forecast its next 10-20 years worse than a
+# flat 5% (MSE +14% / +33%), and the gaps between markets are noise (Cochran's
+# Q p = 0.90). The premium is the arithmetic-mean one the model price needs:
+# S0 * exp(mu T) is a mean, so ERP = ln E[(1 + R_eq) / (1 + R_bill)].
+ERP_MODES = ("assumed", "historical")
+HIST_MARKET = {
+    "^GSPC": "USA", "^FCHI": "France", "^GDAXI": "Germany", "^IBEX": "Spain",
+    "FTSEMIB.MI": "Italy", "^AEX": "Netherlands", "^BFX": "Belgium", "^OMXH25": "Finland",
+    "^SSMI": "Switzerland", "^OMX": "Sweden", "^OMXC25": "Denmark", "^FTAS": "UK",
+    "1306.T": "Japan", "^AXJO": "Australia", "OSEBX.OL": "Norway", "PSI20.LS": "Portugal",
+    "^STOXX": "europe",
+}  # fmt: skip
+POOL_NAMES = {"world": "16 developed markets", "europe": "13 European markets"}
+# World funds are measured against these: the pooled premium is their own.
+_WORLD_PROXIES = {"ACWI", "EEM"}
+
+
+@lru_cache(maxsize=1)
+def erp_history() -> dict | None:
+    """The shipped table (data/erp_history.json), or None when it is missing
+    or malformed: the historical mode then falls back to the assumed premium
+    and says so (``erp_meta.reason``)."""
+    from importlib import resources
+
+    try:
+        doc = json.loads(
+            resources.files("convexity").joinpath("data/erp_history.json").read_text("utf-8")
+        )
+        if isinstance(doc.get("markets"), dict) and isinstance(doc.get("pools"), dict):
+            return doc
+    except Exception as exc:
+        print(f"[capm] erp_history.json unreadable: {type(exc).__name__}: {exc}", flush=True)
+    return None
+
+
+def erp_for(beta_meta: dict | None, st: dict) -> tuple[float, dict]:
+    """The premium for one name and what it is: ``(erp, erp_meta)``. In the
+    historical mode the market is the beta's own proxy, so beta and premium
+    describe the same market (a London S&P tracker: the S&P's beta and the US
+    premium)."""
+    if st.get("erp_mode") != "historical":
+        return st["erp"], {"mode": "assumed"}
+    h = erp_history()
+    if h is None:
+        return st["erp"], {"mode": "assumed", "reason": "no_history"}
+    proxy = (beta_meta or {}).get("proxy") or US[0]
+    key = HIST_MARKET.get(proxy, "world")
+    pooled = key in h["pools"]
+    row = h["pools"][key] if pooled else h["markets"].get(key) or h["pools"]["world"]
+    meta = {
+        "mode": "historical",
+        "market": POOL_NAMES.get(key, key),
+        "pooled": pooled,
+        # A home market with no long record of its own, as opposed to a
+        # world fund whose market IS the pool.
+        "fallback": key == "world" and proxy not in _WORLD_PROXIES,
+        "proxy_name": (beta_meta or {}).get("proxy_name"),
+        "from": row["from"],
+        "to": row["to"],
+        "years": row["years"],
+        "se": row["se"],
+        "geometric": row["geometric"],
+    }
+    return float(row["erp"]), meta
+
+
 # ------------------------------- the model --------------------------------
 
 
@@ -823,8 +1012,8 @@ def model(
     name: str | None = None,
 ) -> dict:
     """THE model block at horizon ``T`` (years) for a listing at price ``s0``:
-    ``{mu, mu_capm, rf, rf_source, beta, beta_meta, erp, alpha, alpha_meta,
-    capm_price, model_price, T, s0}``. ``mu``/``model_price`` include the
+    ``{mu, mu_capm, rf, rf_source, beta, beta_meta, erp, erp_meta, alpha,
+    alpha_meta, capm_price, model_price, T, s0}``. ``mu``/``model_price`` include the
     analysts' alpha (mu on), ``mu_capm``/``capm_price`` are pure CAPM (mu
     off), so the page's toggle needs no refetch. ``target`` is the 12-month
     mean target in the same currency and units as ``s0``."""
@@ -838,7 +1027,8 @@ def model(
         dy = div_yield if isinstance(div_yield, int | float) and 0 <= div_yield < 0.5 else 0.0
         upside = target / s0 - 1.0 + dy
     alpha, am = alpha_for(upside, st)
-    mu_capm = rf + bm["beta"] * st["erp"]
+    erp, em = erp_for(bm, st)
+    mu_capm = rf + bm["beta"] * erp
     mu = mu_capm + alpha
     return {
         "mu": round(mu, 6),
@@ -847,7 +1037,8 @@ def model(
         "rf_source": rsrc,
         "beta": bm["beta"],
         "beta_meta": bm,
-        "erp": st["erp"],
+        "erp": round(erp, 6),
+        "erp_meta": em,
         "alpha": round(alpha, 6),
         "alpha_meta": am,
         "T": round(float(T), 6),

@@ -6,6 +6,7 @@ with that vol, so every tilt can be checked against its targets."""
 
 import datetime as dt
 import math
+import time
 
 import numpy as np
 import pytest
@@ -682,3 +683,107 @@ def test_local_rate_compares_the_futures_on_the_same_days(monkeypatch):
     r, src = od._local_rate("EUR")
     assert src == "CME futures" and r == pytest.approx(0.024, abs=0.002)
     od._RATE.pop("EUR", None)
+
+
+# ------------------------------------------- local rates without a CME future
+
+_BIS_CSV = """FREQ,REF_AREA,TIME_PERIOD,OBS_VALUE
+D,BR,2026-10-20,13.75
+D,NO,2026-10-13,4.5
+D,IN,2026-10-19,5.5
+D,PH,2026-10-18,NaN
+D,AR,2025-07-10,29
+"""
+
+
+@pytest.fixture
+def bis(monkeypatch):
+    """BIS answers from a stub; counts the calls."""
+    import io
+    import urllib.request
+
+    calls = []
+
+    def fake(req, timeout=None):
+        calls.append(req.full_url)
+        if isinstance(fake.body, Exception):
+            raise fake.body
+        return io.BytesIO(fake.body.encode())
+
+    fake.body = _BIS_CSV
+    monkeypatch.setenv("CONVEXITY_POLICY_RATES", "1")
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(od, "_POLICY", {"t": 0.0, "failed_at": 0.0, "rates": None})
+    monkeypatch.setattr(od, "_rate", lambda: 0.04)
+    monkeypatch.setattr(od, "_spawn", lambda fn: fn())  # the background refresh, inline
+    fake.calls = calls
+    return fake
+
+
+def test_bis_rows_are_parsed_and_stale_or_missing_ones_dropped():
+    got = od._parse_bis(_BIS_CSV, today=dt.date(2026, 10, 26))
+    assert got["BR"] == {"rate": 0.1375, "asof": "2026-10-20"}
+    assert "PH" not in got  # NaN
+    assert "AR" not in got  # a discontinued series
+
+
+def test_a_currency_without_a_future_gets_its_central_banks_rate(bis):
+    assert od._local_rate("BRL") == (pytest.approx(0.1375), "Selic policy rate")
+    assert od._local_rate("NOK") == (pytest.approx(0.045), "Norges Bank policy rate")
+    assert od._local_rate("INR")[0] == pytest.approx(0.055)
+    assert len(bis.calls) == 1  # one request for every currency, cached
+
+
+def test_no_bis_series_falls_back_as_before(bis, monkeypatch):
+    # TWD has no BIS series: the US bill, said so
+    assert od._local_rate("TWD") == (0.04, "US 3-month bill (no local rate)")
+    # a European currency BIS does not answer for: the euro's rate
+    monkeypatch.setattr(od, "_POLICY", {"t": time.time(), "failed_at": 0.0, "rates": {}})
+    od._RATE["EUR"] = (time.time(), 0.024, "CME futures")
+    try:
+        assert od._local_rate("SEK") == (0.024, "euro rate (no local quote)")
+    finally:
+        od._RATE.pop("EUR", None)
+
+
+def test_a_failed_fetch_keeps_the_last_good_rates_and_waits(bis, monkeypatch):
+    od._local_rate("BRL")
+    od._POLICY["t"] = 0.0  # a day later: refreshed in the background, the old table answers
+    bis.body = OSError("BIS down")
+    assert od._local_rate("BRL")[0] == pytest.approx(0.1375)  # last good, not the US bill
+    n = len(bis.calls)
+    od._local_rate("BRL")
+    assert len(bis.calls) == n  # no retry storm inside POLICY_RETRY
+
+
+def test_policy_rates_survive_a_restart_on_disk(bis, monkeypatch):
+    from convexity import paths
+
+    od._local_rate("BRL")
+    assert paths.state_file("policy_rates").exists()
+    monkeypatch.setattr(od, "_POLICY", {"t": 0.0, "failed_at": 0.0, "rates": None})
+    bis.body = OSError("offline")
+    assert od._local_rate("BRL")[0] == pytest.approx(0.1375)  # read back from disk
+
+
+def test_majors_keep_the_cme_rate(bis, monkeypatch):
+    od._RATE["GBP"] = (time.time(), 0.037, "CME futures")
+    try:
+        assert od._local_rate("GBP") == (0.037, "CME futures")
+        assert not bis.calls  # a major never asks BIS
+    finally:
+        od._RATE.pop("GBP", None)
+
+
+def test_a_stale_table_answers_while_the_refresh_runs(bis, monkeypatch):
+    od._local_rate("BRL")
+    od._POLICY["t"] = 0.0
+    spawned = []
+    monkeypatch.setattr(od, "_spawn", spawned.append)  # the refresh never finishes
+    bis.body = _BIS_CSV.replace("13.75", "14.25")
+    assert od._local_rate("BRL")[0] == pytest.approx(0.1375)  # no wait on BIS
+    assert len(spawned) == 1
+    od._local_rate("BRL")
+    assert len(spawned) == 1  # one refresh in flight, not one per request
+    spawned[0]()
+    assert od._local_rate("BRL")[0] == pytest.approx(0.1425)

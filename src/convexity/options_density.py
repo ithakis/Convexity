@@ -978,8 +978,141 @@ def _lock(key: str) -> threading.Lock:
 _FX_FUT = {"EUR": "6E", "GBP": "6B", "CHF": "6S", "JPY": "6J", "CAD": "6C", "AUD": "6A"}
 # Currency -> US-listed currency ETF with options (its implied vol is the pair's).
 _FX_ETF = {"EUR": "FXE", "GBP": "FXB", "CHF": "FXF", "JPY": "FXY", "CAD": "FXC", "AUD": "FXA"}
-# European currencies without a futures quote: the euro's rate stands in.
+# European currencies without a futures quote: the euro's rate stands in when
+# their own policy rate (below) is unavailable.
 _EUROPE = {"DKK", "SEK", "NOK", "PLN", "CZK", "HUF", "ISK", "RON"}
+
+# Currencies without a CME future: the central bank's policy rate from the BIS
+# (WS_CBPOL, daily, official, no key; 2026-10-26). Before this every one of
+# them used the US bill or the euro's rate, so a Brazilian stock grew at 4% in
+# reais against a 13.75% Selic, and Norway's 4.5% read as the euro's 2%. A
+# policy rate is overnight, not 3-month, so it can lead the bill by a cut or a
+# hike; labelled as such. No BIS series: TWD, SGD (US bill, said so).
+_BIS_AREA = {
+    "DKK": "DK", "SEK": "SE", "NOK": "NO", "PLN": "PL", "CZK": "CZ", "HUF": "HU",
+    "ISK": "IS", "RON": "RO", "HKD": "HK", "KRW": "KR", "INR": "IN", "BRL": "BR",
+    "MXN": "MX", "ZAR": "ZA", "NZD": "NZ", "IDR": "ID", "MYR": "MY", "ILS": "IL",
+    "CNY": "CN", "TRY": "TR", "THB": "TH", "PHP": "PH", "CLP": "CL", "COP": "CO",
+    "PEN": "PE", "SAR": "SA",
+}  # fmt: skip
+_BIS_NAME = {
+    "DK": "Danmarks Nationalbank", "SE": "Riksbank", "NO": "Norges Bank", "PL": "NBP",
+    "CZ": "CNB", "HU": "MNB", "IS": "Central Bank of Iceland", "RO": "NBR", "HK": "HKMA",
+    "KR": "Bank of Korea", "IN": "RBI", "BR": "Selic", "MX": "Banxico", "ZA": "SARB",
+    "NZ": "RBNZ", "ID": "Bank Indonesia", "MY": "BNM", "IL": "Bank of Israel",
+    "CN": "PBoC LPR", "TR": "CBRT", "TH": "Bank of Thailand", "PH": "BSP", "CL": "BCCh",
+    "CO": "BanRep", "PE": "BCRP", "SA": "SAMA",
+}  # fmt: skip
+_BIS_URL = (
+    "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL/1.0/D.{areas}"
+    "?lastNObservations=1&format=csv"
+)
+POLICY_TTL = 86400.0  # one fetch a day: policy rates move a few times a year
+POLICY_RETRY = 600.0  # after a failure, the last good table is used and retried in 10 min
+POLICY_MAX_AGE_DAYS = (
+    60  # an older observation is a discontinued series (Argentina's stops in 2025)
+)
+_POLICY: dict = {"t": 0.0, "failed_at": 0.0, "rates": None, "busy": False}
+_POLICY_LOCK = threading.Lock()
+
+
+def _parse_bis(text: str, today: dt.date | None = None) -> dict[str, dict]:
+    """BIS CSV -> ``{area: {"rate": fraction, "asof": "yyyy-mm-dd"}}``: finite,
+    plausible and recent observations only."""
+    import csv
+    import io
+
+    today = today or dt.date.today()
+    out = {}
+    for row in csv.DictReader(io.StringIO(text)):
+        try:
+            v, d = float(row["OBS_VALUE"]) / 100, dt.date.fromisoformat(row["TIME_PERIOD"][:10])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(v) and -0.02 < v < 1.0 and (today - d).days <= POLICY_MAX_AGE_DAYS:
+            out[row.get("REF_AREA", "")] = {"rate": v, "asof": d.isoformat()}
+    return out
+
+
+def _spawn(fn) -> None:
+    """A daily refresh in the background (tests run it inline)."""
+    threading.Thread(target=fn, name="cx-policy-rates", daemon=True).start()
+
+
+def _fetch_policy() -> None:
+    """One BIS request for every mapped central bank; on success the table
+    replaces the last one in memory and on disk, on failure the last good one
+    stays and the next try waits ``POLICY_RETRY``. Never raises."""
+    import json
+    import urllib.request
+
+    from convexity import paths
+
+    try:
+        url = _BIS_URL.format(areas="+".join(sorted(set(_BIS_AREA.values()))))
+        req = urllib.request.Request(url, headers={"User-Agent": "Convexity"})
+        # 2-8 s measured (2026-10-26), occasionally more: off the request path
+        # except on a first launch with no table at all.
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            rates = _parse_bis(resp.read().decode("utf-8"))
+        if not rates:
+            raise ValueError("no rates in the response")
+        now = time.time()
+        with _POLICY_LOCK:
+            _POLICY.update(t=now, rates=rates)
+        path = paths.state_file("policy_rates")
+        with contextlib.suppress(Exception):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"t": now, "rates": rates}), encoding="utf-8")
+            tmp.replace(path)
+    except Exception as e:
+        with _POLICY_LOCK:
+            _POLICY["failed_at"] = time.time()
+        print(f"[density] BIS policy rates: {type(e).__name__}: {e}", flush=True)
+    finally:
+        with _POLICY_LOCK:
+            _POLICY["busy"] = False
+
+
+def _policy_rates() -> dict[str, dict]:
+    """Every mapped central bank's latest policy rate: memory, then the disk
+    copy (``state/policy_rates.json``, market data only), refreshed once a day
+    in the background while the last good table keeps answering. Only with no
+    table at all (a first launch) does a caller wait for BIS. Never cached as
+    empty."""
+    import json
+    import os
+
+    from convexity import paths
+
+    if os.environ.get("CONVEXITY_POLICY_RATES") == "0":  # tests: no network
+        return {}
+    with _POLICY_LOCK:
+        if _POLICY["rates"] is None:
+            with contextlib.suppress(Exception):
+                disk = json.loads(paths.state_file("policy_rates").read_text(encoding="utf-8"))
+                if isinstance(disk.get("rates"), dict):
+                    _POLICY.update(t=float(disk.get("t") or 0), rates=disk["rates"])
+        now = time.time()
+        have = _POLICY["rates"] is not None
+        due = not (have and now - _POLICY["t"] < POLICY_TTL)
+        due = due and now - _POLICY["failed_at"] >= POLICY_RETRY and not _POLICY.get("busy")
+        if due:
+            _POLICY["busy"] = True
+    if due and have:
+        _spawn(_fetch_policy)
+    elif due:
+        _fetch_policy()
+    return _POLICY["rates"] or {}
+
+
+def warm_policy_rates() -> None:
+    """Server start: load or fetch the table off the request path."""
+    with contextlib.suppress(Exception):
+        _policy_rates()
+
+
 # The market proxy for the history estimate: an index ETF with long options,
 # by listing suffix (FEZ: Euro Stoxx 50; VGK lists nothing past 5 months).
 _PROXY = {
@@ -1051,11 +1184,17 @@ def _close(sym: str, period: str = "5d"):
 
 def _local_rate(ccy: str) -> tuple[float, str]:
     """(rate, source) for a currency: ^IRX for USD, the CME futures spread
-    for majors, the euro's for other European currencies, else the US bill
-    (said so). Cached an hour."""
+    for majors, else the central bank's policy rate (BIS), else the euro's
+    for other European currencies, else the US bill (said so). Cached an
+    hour."""
     ccy = _norm_ccy(ccy)
     if ccy in ("", "USD"):
         return _rate(), "US 3-month bill"
+    if ccy not in _FX_FUT:
+        area = _BIS_AREA.get(ccy)
+        hit = _policy_rates().get(area) if area else None
+        if hit:
+            return float(hit["rate"]), f"{_BIS_NAME.get(area, area)} policy rate"
     if ccy in _EUROPE:
         r, _ = _local_rate("EUR")
         return r, "euro rate (no local quote)"

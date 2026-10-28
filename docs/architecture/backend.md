@@ -1374,7 +1374,9 @@ CAPM and the per-firm analyst mixture with its trust control:
   their own line. `beta_meta.via` names the line; the window, the grid tip and
   the export say "via MU". More home indices, all probed live: Oslo
   (OSEBX.OL), Dublin, Lisbon, Singapore, Taiwan, NZ, Jakarta, KL, Mexico,
-  Tel Aviv, Johannesburg (Equinor read −0.52 vs STOXX 600, 1.82 vs OSEBX). An
+  Tel Aviv, Johannesburg (Equinor read −0.52 vs STOXX 600, 1.82 vs OSEBX), and
+  (2026-10-27) Shanghai, Shenzhen, Istanbul and KOSDAQ (weekly R² vs the S&P
+  .01–.11, vs the home index .19–.57). An
   exchange with no home index here uses the S&P 500 on **weekly** USD
   returns (`method: "weekly"`): daily returns across a closing-time gap read
   a beta near zero (DBS 0.14). Every home index answers on Yahoo, so a beta
@@ -1390,16 +1392,41 @@ CAPM and the per-firm analyst mixture with its trust control:
   Below 0.3 (gold, bonds; `fit_best_r2`) it stays on its home market with
   plain daily OLS (`method: "ols"`): BSWA's [−2 r_m, 4 r_m] band pulls a
   weakly correlated asset toward 1 (GLD 0.74 BSWA, 0.28 OLS). Weekly
-  returns (`_weekly`: any proxy outside the listing's session) use one lag,
-  Dimson 1979 (`dimson`): plain weekly still read a London S&P tracker 0.86,
-  0.99 with the lag. A fund fitted without every candidate's download is
+  returns (`_weekly`: any proxy outside the listing's session) use one lag
+  for a fund, Dimson 1979 (`dimson`): plain weekly still read a London S&P
+  tracker 0.86, 0.99 with the lag. A stock's weekly beta is plain OLS shrunk
+  0.6× harder (`WEEKLY_W`): out of sample the lag cost more in noise than it
+  fixed (below).
+- **Shrink scales** (`w_scale`, `beta_meta.shrink_eff`, 2026-10-27): a study
+  of 172 names in 30 markets (large, small and thin caps, ADRs, funds, IPOs,
+  unmapped exchanges), one forecast a quarter 2018–2025 (5,247), scored
+  against the next year's daily *and* lagged-weekly beta (the weekly target
+  is immune to thin trading, the daily one is not). Daily BSWA won or tied
+  in every group on both targets (all 0.217 vs daily OLS 0.231, weekly
+  Dimson 0.270, monthly 0.321, β = 1 0.298 on the weekly target), so the
+  frequency stands. Two weak spots: a stock with many zero-return days
+  (thin trading, or a coarse tick: TSMC 8%, Samsung 5%) reads low (−0.38 vs
+  the weekly beta over 10% zero days, where every estimator lost to β = 1),
+  so the weight falls linearly to 0 at `LIQ_Z0` = 25% zero days (weekly
+  target 0.217 → 0.214, over 5% zero days 0.326 → 0.304, daily target
+  unchanged); and cross-session weekly betas (46 non-US names on the S&P in
+  USD, 1,210 forecasts) were best as plain OLS shrunk ~0.5 (0.336 vs the
+  lagged 0.366). The cache key carries `|fw`. A fund fitted without every candidate's download is
   shown, not cached. The cache key carries `|f`, so betas from before the
   fund rule recompute. Weekly estimates always read at least two years
   (W104): a 1Y window has ~52 weeks, under the 53 needed. Concurrent callers
   compute once (`_COMPUTE`: a page load asked from three places and
   downloaded the same 27 names three times).
 - **rf_local** is `options_density._local_rate` (a home-index beta is a local
-  CAPM). The CME spread is read on the two contracts' joint days, median of
+  CAPM): ^IRX for USD, the CME futures spread for EUR/GBP/CHF/JPY/CAD/AUD,
+  else the central bank's policy rate from the BIS (`_policy_rates`,
+  2026-10-26: one request a day for 26 central banks, `state/policy_rates.json`,
+  refreshed in the background while the last good table answers, a series
+  older than 60 days dropped), else the euro's rate for a European currency,
+  else the US bill, said so (TWD, SGD: no BIS series). Before, every
+  non-futures currency used the US bill or the euro's rate (Selic 13.75%
+  read as 4%). A policy rate is overnight, so it can lead the 3-month bill by
+  a move. Tests set `CONVEXITY_POLICY_RATES=0` (conftest). The CME spread is read on the two contracts' joint days, median of
   the last five: the thin far contract's last close was a day older than the
   near one's and EUR read 1.48% instead of ~2.4% (2026-10-24). **alpha** is `analyst_targets.relative_alpha` on the name's total
   upside (mean target / price − 1 + dividend yield, like the optimizer's
@@ -1420,6 +1447,26 @@ CAPM and the per-firm analyst mixture with its trust control:
   so every caller falls through to the research line, scaled. The window's dividend
   yield is computed with the row's rule, currencies included (HSBA.L read
   0.04% with a pence price).
+- **ERP** (`capm.erp_for`, prefs `model_erp_mode`, 2026-10-26): "assumed" (the
+  default: `dist_erp`, 5%, one number for every market) or "historical" (the
+  long-run premium of the market the beta is measured against, from
+  `data/erp_history.json`: JST Macrohistory R6, 16 markets, built by
+  `scripts/build_erp_history.py`; no long local record → the 16-market pool,
+  STOXX 600 → the European pool). The premium is ln E[(1+R_eq)/(1+R_bill)],
+  arithmetic, because the model price is a mean. Assumed is the default
+  because a market's own history forecast its next 10-20 years worse than a
+  flat 5% out of sample (MSE +14% / +33%) and the cross-market differences are
+  noise (Cochran's Q p = 0.90): `docs/erp_research.md`. The block carries
+  `erp_meta` (mode, market, years, se, fallback); a missing table falls back
+  to assumed with `reason: "no_history"`. `GET /api/erp-history` serves the
+  table to Settings; the export writes `model_erp` + `model_erp_src`.
+  `erp_mode` is in `capm.settings`, hence in the density cache key.
+- **`GET /api/beta-scatter?symbol=&ccy=`** (`capm.scatter`, 2026-10-28): the
+  return pairs behind a symbol's beta for the window's model card: its beta
+  line against the proxy it was measured on, converted and glitch-cleaned as
+  in `estimate`, the last `SCATTER_N` = 250 days (weeks for a weekly beta).
+  Detail path only (one cached bulk read); a prior beta or missing data gives
+  `{x: [], y: []}`.
 - **Portfolio beta**: `stats.beta` is the weighted sum of the holdings' app
   betas (`beta_coverage` says how much weight had one); `benchmarks[*].rel.beta`
   stays the basket's regression on the chosen benchmark.
@@ -1428,7 +1475,7 @@ CAPM and the per-firm analyst mixture with its trust control:
   against SPY on 5Y of closes (its universe is the S&P 500). Neither is a
   Market read feature: only the forward idiosyncratic return reads it.
 - **Settings** (prefs.json, bounded in `persistence._clean_prefs`):
-  `model_beta_shrink` 0–1, `model_beta_years` 1|2|3, `model_ic` 0–0.1 (unset =
+  `model_erp_mode` assumed|historical, `model_beta_shrink` 0–1, `model_beta_years` 1|2|3, `model_ic` 0–0.1 (unset =
   auto), `model_z_cap` 0.5–5, `dist_mu` (the window's μ toggle, default on);
   `dist_trust` / `dist_haircut` are dropped on read. All are in the density's
   cache key; the beta window and shrink are in the analytics'.
