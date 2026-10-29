@@ -851,7 +851,9 @@ const _RICH_TIP = (() => {
     const idle = window.requestIdleCallback || ((f) => setTimeout(f, 50));
     idle(() => { try { const html = RICH_TIPS[key]?.(); if (html) render(html); } catch (_) {} });
   }
-  const inside = (node) => !!(sticky && el && node && el.contains(node));
+  // A sticky card's host counts too: the model price is a button, and
+  // clicking it must not close the card it opened.
+  const inside = (node) => !!(sticky && el && node && (el.contains(node) || current?.contains(node)));
   // The mouse is on a sticky card or its host (a click in the card blurs the host).
   const held = () => !!(sticky && el && (el.matches(":hover") || current?.matches(":hover")));
   return {show, hide, leave, inside, held, warm};
