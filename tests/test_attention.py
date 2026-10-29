@@ -687,3 +687,18 @@ def test_prune_drops_snoozes_past_their_day():
     attention._save_state(st)
     attention.prune(set(), set())
     assert list(attention.load_state()["snoozed"]) == ["review|AAPL|160"]
+
+
+def test_events_read_the_report_date_from_the_primary_line(monkeypatch):
+    """WMT.DE's own calendar is empty on Yahoo: the report date is Walmart's.
+    The listing's own ex-dividend date wins when it has one."""
+    from convexity import capm
+
+    monkeypatch.setattr(capm, "primary_line", lambda s: "WMT" if s == "WMT.DE" else s)
+    cals = {"WMT.DE": {"earnings": None, "ex_div": "2026-12-05"},
+            "WMT": {"earnings": "2026-11-19", "ex_div": "2026-12-04"}}  # fmt: skip
+    monkeypatch.setattr(attention, "_calendar", lambda s: cals.get(s))
+    assert REAL_FETCH("WMT.DE") == {"earnings": "2026-11-19", "ex_div": "2026-12-05"}
+    assert REAL_FETCH("WMT") == cals["WMT"]
+    cals["WMT.DE"] = None  # the own call failed: the company's dates still answer
+    assert REAL_FETCH("WMT.DE") == {"earnings": "2026-11-19", "ex_div": "2026-12-04"}

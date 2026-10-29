@@ -1398,6 +1398,31 @@ CAPM and the per-firm analyst mixture with its trust control:
   returns (`method: "weekly"`): daily returns across a closing-time gap read
   a beta near zero (DBS 0.14). Every home index answers on Yahoo, so a beta
   on a fallback proxy means a failed download: shown, never cached.
+- **One primary line for every company fact** (`capm.primary_line`,
+  2026-10-29, the owner's rule: Europeans buy US companies on German
+  venues). The beta's line is the company's primary line, and every other
+  fact about the company reads it too; what the owner holds (price, returns,
+  P&L, the optimizer's correlations) stays on their own listing.
+  - **Rate:** `capm.rate_ccy`: the primary line's currency (WMT.DE takes the
+    US bill, 4.0%, not the euro's 2.4%). Beta, premium and the FX layer
+    describe the company at home with no expected currency move; the euro
+    rate would assume the dollar falls by the rate gap every year. A primary
+    line on an exchange with no market here keeps the listing's currency.
+    The model block carries `rf_ccy` and `rf_line`; the card says which.
+  - **Analysts:** `fetcher.analyst_line`: the primary line when it has
+    `PRIMARY_MIN_ANALYSTS` (3) analysts, then it replaces a listing's own
+    (the SHEL receipt reads SHEL.L's, TSM 2330.TW's), scaled by the two
+    prices; a thinner primary line leaves the old rule (own, else the
+    most-covered line). `research_line` returns it first, so the row, the
+    window, σ/μ and the model's alpha agree.
+  - **Options:** `_resolve_chain` probes the primary line first; a receipt
+    keeps its own chain when the primary line lists none (SHEL).
+  - **Report dates:** `attention.fetch_events` takes the earnings date from
+    the primary line, the ex-dividend date from the listing when it has one.
+  - News already goes to the US line (`symbol_db.us_line`, Finnhub's free
+    plan). `scripts/audit_beta_lines.py` check 4 asserts, for the golden set,
+    that rate, analysts, options and beta all use the primary line (44/44
+    live, 2026-10-29).
 - **Funds** (`is_fund` from the symbol pack's type, or an ETC/ETN/physical-metal
   name Yahoo types "stock" — never a name ending in a company suffix; an ETC
   also keeps its own line, never its group's; `fund_candidates`,

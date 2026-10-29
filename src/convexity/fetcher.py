@@ -351,6 +351,36 @@ _RESEARCH_FILL = (
     "fcf_yield", "market_cap_usd", "dividend_yield",
 )  # fmt: skip
 _RESEARCH_TARGETS = ("target_mean_price", "target_low", "target_high", "target_median")
+# The target block's unitless fields, copied with the prices.
+_RESEARCH_TARGET_META = ("target_n_firms", "target_source", "target_age_days", "target_n_stale",
+                         "target_raised_90d", "target_lowered_90d")  # fmt: skip
+# The company's primary line wins over a listing's own analysts when it has
+# at least this many (2026-10-29): WMT's 40 for WMT.DE, SHEL.L's for the SHEL
+# receipt. A thinner primary line leaves the old rule (own, else the most).
+PRIMARY_MIN_ANALYSTS = 3
+
+
+def _primary(symbol: str) -> str:
+    """capm.primary_line: pack and learned lines only, no network."""
+    from convexity import capm
+
+    try:
+        return capm.primary_line(symbol)
+    except Exception:
+        return (symbol or "").upper()
+
+
+def analyst_line(symbol: str) -> str | None:
+    """The primary line when it is not ``symbol`` and has
+    ``PRIMARY_MIN_ANALYSTS`` analysts: then every analyst number a listing
+    shows (row, window, σ/μ, the model's alpha) is that line's, scaled. None
+    otherwise. Network only on a cold ``_research_info``."""
+    s = (symbol or "").upper()
+    p = _primary(s)
+    if not p or p == s:
+        return None
+    n = _safe_num(_research_info(p).get("numberOfAnalystOpinions")) or 0.0
+    return p if n >= PRIMARY_MIN_ANALYSTS else None
 
 
 def _research_info(line: str) -> dict:
@@ -383,13 +413,17 @@ def _research_load() -> dict:
 
 
 def research_line(symbol: str) -> str | None:
-    """The listing of the same company with the most analysts, when it isn't
+    """The company's primary line when it has analysts (``analyst_line``),
+    else the listing of the same company with the most analysts, when it isn't
     ``symbol`` itself; None when the pack knows no other line, or none of
     them has analysts. Network only on a cache miss (two .info reads at
     most), so `fetch_one` may call it."""
     from convexity import symbol_db
 
     s = (symbol or "").upper()
+    primary = analyst_line(s)
+    if primary:
+        return primary
     hit = _research_load().get(s)
     if isinstance(hit, list) and len(hit) == 2:
         ttl = _RESEARCH_TTL if hit[1] else _RESEARCH_MISS_TTL
@@ -459,10 +493,16 @@ def _apply_research(out: dict, symbol: str) -> None:
     """Fill a row's analysts (when it has none) and its fundamental gaps
     from the research line. Writes ``research_symbol`` / ``research_ratio`` /
     ``research_n`` so the page can say where they came from. A listing with
-    its own analysts and a sector is left alone (no network)."""
-    needs_an = not (out.get("n_analysts") or out.get("target_mean_price"))
+    its own analysts and a sector is left alone (no network), unless it is
+    not the company's primary line: then the primary line's analysts replace
+    its own (``analyst_line``)."""
+    if out.get("quote_type") in ("ETF", "MUTUALFUND", "INDEX"):
+        return
+    own_an = bool(out.get("n_analysts") or out.get("target_mean_price"))
+    secondary = _primary(symbol) != (symbol or "").upper()
+    needs_an = not own_an or secondary
     needs_fill = not out.get("sector") or out.get("market_cap_usd") is None
-    if not (needs_an or needs_fill) or out.get("quote_type") in ("ETF", "MUTUALFUND", "INDEX"):
+    if not (needs_an or needs_fill):
         return
     try:
         got = _research_row(symbol, out.get("price"))
@@ -473,11 +513,16 @@ def _apply_research(out: dict, symbol: str) -> None:
         return
     line, row, ratio = got
     used = False
+    # Own analysts give way only to the primary line, never to a fallback.
+    if own_an and line != _primary(symbol):
+        needs_an = False
     if needs_an and ratio and row.get("n_analysts"):
         for k in _RESEARCH_TARGETS:
             out[k] = row[k] * ratio if row.get(k) is not None else None
-        for k in ("recommendation_mean", "rec_key", "n_analysts"):
+        for k in ("recommendation_mean", "rec_key", "n_analysts", *_RESEARCH_TARGET_META):
             out[k] = row.get(k)
+        if own_an:  # the primary line's rating split, not the listing's own
+            out["rating_dist"] = None
         if not out.get("rating_dist") or not out.get("rec_trend_fh"):
             trend = _research_recs(line)
             if trend and not out.get("rating_dist"):
@@ -523,10 +568,11 @@ def _apply_research_detail(out: dict, symbol: str) -> None:
     the analyst block, the ratings trend, the next report and the gaps.
     Runs before the sector benchmark is picked, so a filled sector gets its
     ETF too."""
-    needs_an = not (out.get("num_analysts") or out.get("target_mean"))
-    if not (needs_an or not out.get("sector") or out.get("market_cap_usd") is None):
-        return
     if out.get("quote_type") in ("ETF", "MUTUALFUND", "INDEX"):
+        return
+    own_an = bool(out.get("num_analysts") or out.get("target_mean"))
+    needs_an = not own_an or _primary(symbol) != (symbol or "").upper()
+    if not (needs_an or not out.get("sector") or out.get("market_cap_usd") is None):
         return
     try:
         got = _research_row(symbol, out.get("price"))
@@ -537,11 +583,17 @@ def _apply_research_detail(out: dict, symbol: str) -> None:
         return
     line, row, ratio = got
     used = False
+    if own_an and line != _primary(symbol):  # own analysts give way to the primary line only
+        needs_an = False
     if needs_an and ratio and row.get("n_analysts"):
+        if own_an:
+            out["recommendations_trend"] = None
         for dk, rk in (("target_mean", "target_mean_price"), ("target_high", "target_high"),
                        ("target_low", "target_low"), ("target_median", "target_median")):  # fmt: skip
             out[dk] = row[rk] * ratio if row.get(rk) is not None else None
         out["num_analysts"] = row.get("n_analysts")
+        for k in _RESEARCH_TARGET_META:
+            out[k] = row.get(k)
         out["recommendation_mean"] = row.get("recommendation_mean")
         out["recommendation_key"] = row.get("rec_key") or ""
         if not out.get("recommendations_trend"):

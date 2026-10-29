@@ -1023,7 +1023,34 @@ def _iso(v) -> str | None:
 
 def fetch_events(symbol: str) -> dict | None:
     """Yahoo's next earnings and ex-dividend dates, or None when the call
-    failed (an empty calendar, a fund's, is an answer: both dates None)."""
+    failed (an empty calendar, a fund's, is an answer: both dates None).
+
+    The report date is the company's: a listing that is not its primary
+    line (capm.primary_line: WMT for WMT.DE, whose own calendar Yahoo
+    leaves empty) reads it there. The ex-dividend date is the listing's own
+    when Yahoo has one, the primary line's otherwise."""
+    from convexity import capm
+
+    s = (symbol or "").upper()
+    own = _calendar(s)
+    try:
+        prim = capm.primary_line(s)
+    except Exception:
+        prim = s
+    if not prim or prim == s:
+        return own
+    home = _calendar(prim)
+    if home is None:
+        return own
+    own = own or {"earnings": None, "ex_div": None}
+    return {
+        "earnings": home["earnings"] or own["earnings"],
+        "ex_div": own["ex_div"] or home["ex_div"],
+    }
+
+
+def _calendar(symbol: str) -> dict | None:
+    """One ticker's calendar: see ``fetch_events``."""
     import yfinance as yf
 
     try:

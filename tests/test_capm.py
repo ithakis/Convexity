@@ -759,3 +759,41 @@ def test_a_failed_country_lookup_is_not_kept(monkeypatch):
     assert capm.learn_country_line("SHEL") is None
     assert capm.beta_line("SHEL") == "SHEL"
     assert capm.learn_country_line("SHEL") is None and len(asked) == 2  # asked again
+
+
+# --------------------------------------- the rate is the primary line's (1.29)
+
+
+def test_the_rate_is_in_the_primary_lines_currency(monkeypatch):
+    """WMT.DE: beta on WMT, so the US bill, not the euro rate. A listing that
+    is its own primary line, or whose primary line has no market in the app
+    (Riyadh), keeps its own currency."""
+    lines = {"WMT.DE": "WMT", "SAP": "SAP.DE", "2222X.DE": "2222.SR"}
+    monkeypatch.setattr(capm, "primary_line", lambda s: lines.get(s.upper(), s.upper()))
+    assert capm.rate_ccy("WMT.DE", "EUR") == ("USD", "WMT")
+    assert capm.rate_ccy("SAP", "USD") == ("EUR", "SAP.DE")
+    assert capm.rate_ccy("SHEL.L", "GBp") == ("GBp", None)
+    assert capm.rate_ccy("2222X.DE", "EUR") == ("EUR", None)
+    # beta_meta's "via" is the line the beta used, and wins
+    assert capm.rate_ccy("XYZ.DE", "EUR", {"via": "XYZ"}) == ("USD", "XYZ")
+
+
+def test_model_takes_the_primary_lines_rate(monkeypatch):
+    from convexity import options_density
+
+    monkeypatch.setattr(capm, "primary_line", lambda s: "WMT" if s.upper() == "WMT.DE" else s)
+    asked = []
+
+    def rate(c):
+        asked.append(c)
+        return {"USD": (0.04, "US 3-month bill"), "EUR": (0.024, "CME futures")}[c or "USD"]
+
+    monkeypatch.setattr(options_density, "_local_rate", rate)
+    bm = {"beta": 0.5, "via": "WMT", "proxy": "^GSPC"}
+    rates: dict = {}
+    m = capm.model("WMT.DE", 1.0, s0=100.0, ccy="EUR", beta_meta=bm, rates=rates)
+    assert m["rf"] == 0.04 and m["rf_ccy"] == "USD" and m["rf_line"] == "WMT"
+    capm.model("WMT.DE", 1.0, s0=100.0, ccy="EUR", beta_meta=bm, rates=rates)
+    assert asked == ["USD"]  # one rate per currency across a batch
+    own = capm.model("SAP.DE", 1.0, s0=100.0, ccy="EUR", beta_meta={"beta": 1.0, "via": None})
+    assert own["rf"] == 0.024 and own["rf_line"] is None

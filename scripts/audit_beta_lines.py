@@ -1,7 +1,7 @@
 """Live audit of the line and index each listing's beta is measured on
 (capm.beta_line, capm.home_proxy, capm.learn_country_line).
 
-Four checks, all against the installed symbol pack and Yahoo:
+Five checks, all against the installed symbol pack and Yahoo:
 
 0. Golden set: hand-checked listings and the line their beta must use.
 1. Coverage: every primary stock exchange in the pack, by suffix, with the
@@ -13,6 +13,8 @@ Four checks, all against the installed symbol pack and Yahoo:
    its returns on its own home index (3 years). The line the rule picks
    should explain its market about as well as the best candidate; the
    pack's old choice is scored the same way, and each loss is printed.
+4. Surfaces: for every golden listing, the rate's currency, the analysts,
+   the options chain and the beta all come from its primary line.
 
 Needs a temp CONVEXITY_HOME with the symbol pack installed (CLAUDE.md §3).
 Re-run after any change to the home-line rules, the HOME map or the pack:
@@ -62,6 +64,45 @@ def golden() -> int:
     print(f"0. Golden set: {len(GOLDEN) - len(bad)}/{len(GOLDEN)} on the expected line")
     for s, got, want in bad:
         print(f"   FAIL {s}: {got}, expected {want}")
+    return len(bad)
+
+
+def surfaces() -> int:
+    """Every company fact a golden listing shows comes from its primary line:
+    the rate's currency (capm.rate_ccy), the analysts (fetcher.analyst_line,
+    when the primary line has PRIMARY_MIN_ANALYSTS), the options chain
+    (options_density._resolve_chain, when the primary line lists options)
+    and the beta. Prints each listing where a surface uses another line."""
+    from convexity import fetcher, options_density
+
+    def one(s):
+        want = GOLDEN[s]
+        got = {"beta": capm.beta_line(s)}
+        hp = capm.home_proxy(want)
+        got["rate"] = capm.rate_ccy(s, None)[1] or s
+        if hp["kind"] not in ("home", "us"):
+            got["rate"] = want  # no market for the primary line: own currency, by rule
+        n = fetcher._safe_num(fetcher._research_info(want).get("numberOfAnalystOpinions")) or 0
+        got["analysts"] = (
+            (fetcher.analyst_line(s) or s) if n >= fetcher.PRIMARY_MIN_ANALYSTS else want
+        )
+
+        def chain(t):
+            try:
+                return options_density._resolve_chain(t)[0]
+            except options_density.DensityError:
+                return None
+
+        got["options"] = chain(s) if chain(want) == want else want
+        return s, want, {k: v for k, v in got.items() if v != want}
+
+    with ThreadPoolExecutor(6) as ex:
+        res = list(ex.map(one, GOLDEN))
+    bad = [(s, w, g) for s, w, g in res if g]
+    print(f"\n4. Surfaces: {len(GOLDEN) - len(bad)}/{len(GOLDEN)} listings read every company "
+          "fact from the primary line")  # fmt: skip
+    for s, w, g in bad:
+        print(f"   FAIL {s} (primary {w}): " + ", ".join(f"{k} on {v}" for k, v in g.items()))
     return len(bad)
 
 
@@ -215,9 +256,12 @@ def choice(top: int) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--top", type=int, default=300)
+    ap.add_argument("--surfaces-only", action="store_true")
     a = ap.parse_args()
     failed = golden()
-    coverage()
-    indices()
-    choice(a.top)
+    failed += surfaces()
+    if not a.surfaces_only:
+        coverage()
+        indices()
+        choice(a.top)
     sys.exit(1 if failed else 0)

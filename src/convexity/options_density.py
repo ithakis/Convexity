@@ -813,9 +813,18 @@ def _own_analysts(
     the row), put in the chain's units (the page multiplies by ``ratio``
     back), the chain line's only when neither has one. The flag says whether
     the block is the listing's own (or its research line's), the rule its
-    grid row uses: only then does it set the model's alpha."""
-    from convexity import analyst_targets
+    grid row uses: only then does it set the model's alpha. A listing that is
+    not its company's primary line reads the primary line's block first."""
+    from convexity import analyst_targets, fetcher
 
+    # The company's primary line first (WMT's for WMT.DE, SHEL.L's for the
+    # SHEL receipt), the rule its row uses.
+    if fetcher.analyst_line(symbol):
+        prim = None
+        with contextlib.suppress(Exception):
+            prim = _research_analysts(symbol, s0)
+        if prim:
+            return analyst_targets.scaled(prim, 1.0 / ratio), True
     if chain_sym != symbol:
         own = analyst_targets.consensus(symbol)
         if not own:
@@ -851,7 +860,8 @@ def _research_analysts(symbol: str, S0: float) -> dict | None:
 def _resolve_chain(symbol: str):
     """(chain ticker, its yfinance Ticker, expiries).
 
-    A listing with its own chain is used as is. Otherwise (Yahoo has no
+    The company's primary line's chain when it lists options, else a
+    listing's own chain as is. Otherwise (Yahoo has no
     Eurex or Euronext chains) every US line of the company stands in: the
     pack's, plus Yahoo's Lookup by name. When more than one lists options
     (an ADR and a pink-sheet line), the one with the most open interest
@@ -877,6 +887,18 @@ def _resolve_chain(symbol: str):
         except Exception:
             return cand, tk, []
 
+    # The company's primary line first (capm.primary_line, no network): a
+    # receipt or second listing with a chain of its own still reads the
+    # company's main market when that one lists options.
+    with contextlib.suppress(Exception):
+        from convexity import capm
+
+        prim = capm.primary_line(symbol)
+        if prim and prim != symbol.upper():
+            got = probe(prim)
+            if got[2]:
+                cache._cache_put(key, got[0], LINE_TTL)
+                return got
     own = probe(symbol)
     if own[2]:
         return own
@@ -1925,7 +1947,11 @@ def _history(symbol: str, horizon: int, st: dict) -> dict:
 
     an = None
     try:
-        an = _analysts(tk) or _research_analysts(symbol, S0)
+        from convexity import fetcher
+
+        an = (_research_analysts(symbol, S0) if fetcher.analyst_line(symbol) else None) or (
+            _analysts(tk) or _research_analysts(symbol, S0)
+        )
     except Exception as e:
         print(f"[density] analysts {symbol}: {type(e).__name__}")
     mcurves, mdl = _model_curves(symbol, rn, ccy, 1.0, an, st, 1.0, _dividend_yield(info, S0, ccy),

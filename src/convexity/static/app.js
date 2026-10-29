@@ -4643,9 +4643,12 @@ function modelCardHtml(d) {
     const src = m.rf_source || "";
     const usBill = /^US 3-month bill$/.test(src);
     const chart = usBill ? mpRfSvg(MODEL_AUX.rf, m.rf) : mpRateLadder(src);
-    const why = `Every investment has to beat it, risk or not.${/no local/.test(src) ? ` <span class="mp-m">No local rate for ${escapeHtml(ccy || "this currency")}, so the US bill stands in.</span>` : usBill ? ` <span class="mp-m">A euro stock would use euro rates.</span>` : ""}`;
+    const rCcy = m.rf_ccy || ccy || "";
+    const home = m.rf_line && rCcy !== (ccy || "");
+    const why = `Every investment has to beat it, risk or not.${/no local/.test(src) ? ` <span class="mp-m">No local rate for ${escapeHtml(rCcy || "this currency")}, so the US bill stands in.</span>` : home ? ` <span class="mp-m">This line trades in ${escapeHtml(ccy)}, but β, the premium and the FX risk all describe the company on ${escapeHtml(m.rf_line)} with no expected currency move, so the cash rate is ${escapeHtml(rCcy)} too.</span>` : usBill ? ` <span class="mp-m">A euro stock would use euro rates.</span>` : ""}`;
     return mpCard("rf", "r<sub>f</sub> · risk-free rate", pc(rfP),
-      `What you earn with no risk, in the stock’s currency (${escapeHtml(ccy || "")}).`, chart,
+      home ? `What you earn with no risk, in the company’s home currency (${escapeHtml(rCcy)}, ${escapeHtml(m.rf_line)}).`
+        : `What you earn with no risk, in the stock’s currency (${escapeHtml(rCcy)}).`, chart,
       row("Why", why) + row("Used", `${escapeHtml(src)}: <b>${pc(rfP)}</b>`)
       + row("What if", `1 point higher (${pc(rfP + 1)}) → ${money(at(mu + 0.01))}`));
   })();
@@ -4696,7 +4699,7 @@ function modelCardHtml(d) {
   // --- footer ---------------------------------------------------------------
   const via = d.chain_symbol && d.chain_symbol !== d.symbol ? ` The options are ${escapeHtml(d.chain_symbol)}’s, scaled to this listing.` : "";
   const foot = `<div class="mp-facts">
-    <span>Prices</span><span>${ccy && FX_QUOTE !== ccy ? `The stock trades in ${escapeHtml(ccy)}; every price here is in ${escapeHtml(FX_QUOTE)} at today’s rate.` : `In ${escapeHtml(ccy || "the listing’s currency")}, the stock’s own currency.`} r<sub>f</sub> is the ${escapeHtml(ccy || "listing’s")} rate.${via}</span>
+    <span>Prices</span><span>${ccy && FX_QUOTE !== ccy ? `The stock trades in ${escapeHtml(ccy)}; every price here is in ${escapeHtml(FX_QUOTE)} at today’s rate.` : `In ${escapeHtml(ccy || "the listing’s currency")}, the stock’s own currency.`} r<sub>f</sub> is the ${escapeHtml(m.rf_ccy || ccy || "listing’s")} rate${m.rf_line && (m.rf_ccy || "") !== (ccy || "") ? ` (the company’s home line, ${escapeHtml(m.rf_line)})` : ""}.${via}</span>
     <span>Not a forecast</span><span>One yardstick for every stock, not a prediction: it isn’t shown to beat the market. Inputs: Settings → Model price.</span>
   </div>`;
   return `<div class="mp-card">
@@ -4950,7 +4953,7 @@ function renderFcReadouts() {
   const am = m ? m.alpha_meta || {} : {};
   const muTxt = mode.mu === "options" ? "μ from the options: the risk-neutral curve, mean = forward (it includes the risk premium)."
     : !m ? ""
-    : DETAIL.showMu ? ` Model price: CAPM in ${escapeHtml(ccy || "")}, ${pp(m.rf)} (${escapeHtml(m.rf_source)}) + β ${m.beta.toFixed(2)} × ${pp(m.erp, 1)} premium${am.reason === "no_targets" ? "; no analyst targets, so no tilt" : `, plus the analysts’ tilt α ${m.alpha >= 0 ? "+" : ""}${pp(m.alpha)}`}; S₀·e^(μT) at the expiry.`
+    : DETAIL.showMu ? ` Model price: CAPM in ${escapeHtml(m.rf_ccy || ccy || "")}, ${pp(m.rf)} (${escapeHtml(m.rf_source)}) + β ${m.beta.toFixed(2)} × ${pp(m.erp, 1)} premium${am.reason === "no_targets" ? "; no analyst targets, so no tilt" : `, plus the analysts’ tilt α ${m.alpha >= 0 ? "+" : ""}${pp(m.alpha)}`}; S₀·e^(μT) at the expiry.`
     : ` μ off: pure CAPM, ${pp(m.rf)} (${escapeHtml(m.rf_source)}) + β ${m.beta.toFixed(2)} × ${pp(m.erp, 1)} premium = ${pp(m.mu_capm)} a year${am.reason === "no_targets" ? "" : `; the analysts’ tilt (α ${m.alpha >= 0 ? "+" : ""}${pp(m.alpha)}) is left out`}.`;
   // Named by its date: the expiry is rarely exactly 3 or 12 months out, and
   // the grid's "Model 12M" is the same μ over exactly one year.
@@ -14354,7 +14357,7 @@ async function renderSettingsModel(el) {
   const theory = `<div class="settings-row model-theory" data-item="model-theory"><div class="settings-row-main">
     <div class="settings-row-label">How it is built</div>
     <div class="model-formula">${tx(String.raw`\mu = r_{f,\text{local}} + \beta\cdot\text{ERP} + \alpha`, "μ = r_f + β·ERP + α")}<span></span>${tx(String.raw`P_T = S_0\,e^{\mu T}`, "P_T = S_0 e^{μT}")}</div>
-    <div class="settings-row-help">r<sub>f</sub> is the short rate in the asset’s own currency; β is measured against its home market (a secondary listing: the company’s home line; a fund: the index it tracks); α is the analysts’ small relative tilt, 0 without targets. μ off in a stock window is pure CAPM (α = 0). The options shape the distribution only: their curve, widened by κ, is tilted once so its mean is P<sub>T</sub>.</div>
+    <div class="settings-row-help">r<sub>f</sub> is the short rate in the currency of the company’s primary line (WMT.DE: the US bill), the asset’s own for a fund; β is measured against its home market (a secondary listing: the company’s home line; a fund: the index it tracks); α is the analysts’ small relative tilt, 0 without targets. μ off in a stock window is pure CAPM (α = 0). The options shape the distribution only: their curve, widened by κ, is tilted once so its mean is P<sub>T</sub>.</div>
     <details class="model-why" open><summary>Why the home index, three years of daily returns and a 0.9 shrink</summary><ul>
       <li>A backtest of 164 names (US, Europe, UK, Japan and 25 European banks), one forecast a year from 2008 to 2025, scored against the realised beta over the next 3 and 12 months: the mean squared error falls <b>51% at 12M and 57% at 3M</b> against Yahoo’s 5-year monthly beta vs the S&amp;P 500.</li>
       <li>The home index explains far more of a stock than the S&amp;P 500: European banks R² .52 vs .29; Japan’s daily beta vs the S&amp;P reads 0.25 against 1.02 vs TOPIX, since Tokyo closes before New York opens.</li>

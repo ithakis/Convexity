@@ -265,6 +265,13 @@ Each of these has cost real debugging time; the link goes to the full story.
   curves `model` (mu on) and `market` (mu off); the window's alpha uses the
   listing's own or research-line targets only, like its row, so the numbers
   agree. [backend.md → model price](docs/architecture/backend.md#the-model-price-capmpy-129)
+- **One primary line for every company fact** (`capm.primary_line`,
+  2026-10-29): beta, the rate's currency (`capm.rate_ccy`: WMT.DE takes the
+  US bill), analysts (`fetcher.analyst_line`, primary line with 3+ analysts
+  wins over a listing's own), the options chain and report dates all read
+  the company's primary line; price, returns, P&L and correlations stay on
+  the listing held. `scripts/audit_beta_lines.py` check 4 asserts it.
+  [backend.md → model price](docs/architecture/backend.md#the-model-price-capmpy-129)
 - **A secondary listing borrows its research** (2026-10-18): Yahoo has no
   analysts on NOV.DE or CCC3.DE. `fetcher.research_line` (home or US
   line, the most analysts, a week in `state/research_lines.json`) fills them,

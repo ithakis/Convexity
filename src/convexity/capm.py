@@ -480,14 +480,27 @@ _LINE_LEARNED: dict[str, str] = {}
 _LINES_DISK: dict[str, str] | None = None
 
 
-def beta_line(symbol: str) -> str:
-    """See ``_pack_line``; plus what ``learn_line`` found by name for a
+def primary_line(symbol: str) -> str:
+    """THE company's primary listing, the one line every fact about the
+    company is read from (beta, the rate's currency, analyst targets, the
+    options chain, report dates), wherever the owner bought it: WMT for
+    WMT.DE, SHEL.L for SHEL. What the owner holds (price, returns, P&L, the
+    optimizer's correlations) stays on their own listing. A listing that is
+    its own primary line, a fund and an index return themselves.
+
+    See ``_pack_line``; plus what ``learn_line`` found by name for a
     listing the pack doesn't know (a US company's Milan line -> its US line)
     and what ``learn_country_line`` decided by the company's country (Shell's
     receipt -> SHEL.L), this process or, for a week, on disk
-    (``state/beta_lines.json``)."""
+    (``state/beta_lines.json``). No network: before the country is learned
+    (``ensure``, in the background) it is the pack's home line."""
     s = (symbol or "").upper()
     return _LINE_LEARNED.get(s) or _saved_lines().get(s) or _pack_line(s)
+
+
+def beta_line(symbol: str) -> str:
+    """The line a beta is measured on: the primary line."""
+    return primary_line(symbol)
 
 
 LINES_TTL_DAYS = 7
@@ -1102,6 +1115,28 @@ def alpha_for(upside: float | None, st: dict) -> tuple[float, dict]:
     return float(al["x"]["alpha"]), meta
 
 
+def rate_ccy(symbol: str, ccy: str | None, beta_meta: dict | None = None) -> tuple[str, str | None]:
+    """The currency of a name's risk-free rate and the line it comes from:
+    ``(ccy, line)``, line None when it is the listing's own.
+
+    The rate is the primary line's currency, not the listing's (2026-10-29):
+    beta, premium and the FX layer all describe the company on its home
+    market with no expected currency move, so WMT.DE takes the US bill, not
+    the euro rate. Taking the euro rate there would assume the dollar falls
+    by the rate gap every year, which the FX layer says it does not (and
+    forwards forecast currencies worse than a random walk). A primary line on
+    an exchange the app has no market for keeps the listing's currency."""
+    own = (ccy or "").strip()
+    s = (symbol or "").upper()
+    line = (beta_meta or {}).get("via") or primary_line(s)
+    if not line or line.upper() == s:
+        return own, None
+    hp = home_proxy(line)
+    if hp["kind"] not in ("home", "us"):
+        return own, None
+    return hp["ccy"], line.upper()
+
+
 def model(
     symbol: str,
     T: float,
@@ -1112,7 +1147,7 @@ def model(
     div_yield: float | None = None,
     prefs: dict | None = None,
     beta_meta: dict | None = None,
-    rate: tuple[float, str] | None = None,
+    rates: dict[str, tuple[float, str]] | None = None,
     name: str | None = None,
 ) -> dict:
     """THE model block at horizon ``T`` (years) for a listing at price ``s0``:
@@ -1120,12 +1155,18 @@ def model(
     alpha_meta, capm_price, model_price, T, s0}``. ``mu``/``model_price`` include the
     analysts' alpha (mu on), ``mu_capm``/``capm_price`` are pure CAPM (mu
     off), so the page's toggle needs no refetch. ``target`` is the 12-month
-    mean target in the same currency and units as ``s0``."""
+    mean target in the same currency and units as ``s0``. The rate is in
+    ``rate_ccy``'s currency (``rf_ccy``; ``rf_line`` names the primary line
+    when it is not the listing); ``rates`` caches one rate per currency
+    across a batch."""
     from convexity import options_density
 
     st = settings(prefs)
     bm = beta_meta or beta_for(symbol, prefs, ccy, name)
-    rf, rsrc = rate or options_density._local_rate(ccy or "")
+    rccy, rline = rate_ccy(symbol, ccy, bm)
+    rf, rsrc = (rates.get(rccy) if rates is not None else None) or options_density._local_rate(rccy)
+    if rates is not None:
+        rates[rccy] = (rf, rsrc)
     upside = None
     if target and s0 and target > 0 and s0 > 0:
         dy = div_yield if isinstance(div_yield, int | float) and 0 <= div_yield < 0.5 else 0.0
@@ -1139,6 +1180,8 @@ def model(
         "mu_capm": round(mu_capm, 6),
         "rf": round(rf, 6),
         "rf_source": rsrc,
+        "rf_ccy": rccy or None,
+        "rf_line": rline,
         "beta": bm["beta"],
         "beta_meta": bm,
         "erp": round(erp, 6),
@@ -1161,7 +1204,6 @@ def for_rows(rows: list[dict], prefs: dict | None = None, T: float = 1.0) -> dic
     """The model block at ``T`` for every row (grid, export): one batch beta,
     the row's own price, currency, mean target and dividend yield, one rate per
     currency."""
-    from convexity import options_density
 
     def num(v):
         return float(v) if isinstance(v, int | float) and math.isfinite(v) else None
@@ -1178,9 +1220,7 @@ def for_rows(rows: list[dict], prefs: dict | None = None, T: float = 1.0) -> dic
         if not (px and px > 0):
             continue
         c = r.get("currency") if isinstance(r.get("currency"), str) else ""
-        if c not in rates:
-            rates[c] = options_density._local_rate(c)
         out[s] = model(s, T, s0=px, ccy=c, target=num(r.get("target_mean_price")),
                        div_yield=num(r.get("dividend_yield")), prefs=prefs, beta_meta=bm.get(s),
-                       rate=rates[c])  # fmt: skip
+                       rates=rates)  # fmt: skip
     return out
