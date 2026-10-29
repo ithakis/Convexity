@@ -754,11 +754,16 @@ document.addEventListener("keydown", (ev) => {
  * model price card is long to read): it stays while the mouse is over the
  * host or the card, its text can be selected, and it closes once the mouse
  * leaves both. A short grace covers the gap between host and card.
+ *
+ * TIP_MOTION[key] = {open(tip, host), close(tip)} animates a card in and out
+ * (the model price's, 2026-10-29). close returns its Animation, and the card
+ * is hidden when that finishes; a show() meanwhile cancels it.
  * --------------------------------------------------------------------------- */
 const RICH_TIPS = Object.create(null);
 const STICKY_TIPS = new Set(["model-price"]);
+const TIP_MOTION = Object.create(null);
 const _RICH_TIP = (() => {
-  let el = null, current = null, sticky = false, graceT = 0;
+  let el = null, current = null, sticky = false, graceT = 0, closing = null;
   const katexCache = new Map();
   function ensure() {
     if (el && document.body.contains(el)) return el;
@@ -799,6 +804,7 @@ const _RICH_TIP = (() => {
     const tip = ensure();
     clearTimeout(graceT);
     if (current === host && sticky && tip.classList.contains("show")) return;  // keep a selection
+    if (closing) { const a = closing; closing = null; a.cancel(); }
     if (current && current !== host) current.removeAttribute("aria-describedby");
     current = host;
     sticky = STICKY_TIPS.has(host.getAttribute("data-rich-tip"));
@@ -808,6 +814,7 @@ const _RICH_TIP = (() => {
     tip.classList.add("show");
     const place = () => placeTip(tip, host.getBoundingClientRect(), {preferred: "below", offset: 6, gap: 8});
     place();
+    TIP_MOTION[host.getAttribute("data-rich-tip")]?.open?.(tip, host);
     // KaTeX's fonts load on the first formula shown; until then the glyphs
     // are blank and narrower, so measure again once they are in.
     if (document.fonts && document.fonts.status !== "loaded") {
@@ -817,10 +824,19 @@ const _RICH_TIP = (() => {
   function hide(host) {
     if (host && current && host !== current) return;
     clearTimeout(graceT);
-    if (el) el.classList.remove("show", "sticky");
+    const motion = el?.classList.contains("show") && current ? TIP_MOTION[current.getAttribute("data-rich-tip")] : null;
     if (current) current.removeAttribute("aria-describedby");
     current = null;
     sticky = false;
+    if (!el) return;
+    el.classList.remove("sticky");
+    const a = closing ? null : motion?.close?.(el);
+    if (!a) { if (!closing) el.classList.remove("show"); return; }
+    closing = a;
+    const done = () => { if (closing === a) { closing = null; el.classList.remove("show"); } };
+    a.finished.then(done, () => {});
+    // A page that isn't drawing (a minimised window) never finishes an animation.
+    setTimeout(done, 400);
   }
   // The host was left: a sticky card waits a moment for the mouse to reach it.
   function leave(host, to) {
@@ -4621,7 +4637,7 @@ function modelCardHtml(d) {
   const eqP = String.raw`P_T = S_0\,e^{\mu T} = \text{${kx(money(s0))}} \times e^{\,${kx(pc(muP))} \times ${f2(T)}} = \textbf{${kx(money(price))}}`;
   const eqMu = String.raw`\mu = {\color{${col.rf}}r_f} + {\color{${col.beta}}\beta}\cdot{\color{${col.erp}}\text{ERP}}${termA} = {\color{${col.rf}}${kx(pc(rfP))}} + {\color{${col.beta}}${m.beta < 0 ? `(${f2(m.beta)})` : f2(m.beta)}}\times{\color{${col.erp}}${kx(pc(r2(m.erp)))}}${valA} = \textbf{${kx(pc(muP))}}`;
   const head = `<div class="mp-hero"><div class="mp-when">Model price on ${when}${on ? "" : " · CAPM"}<small>${whenWhy}</small></div>
-    <div><span class="mp-big">${money(price)}</span> <span class="${chg >= 0 ? "pos" : "neg"}">${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%</span> <span class="mp-sub">vs ${money(s0)} today</span></div></div>
+    <div><span class="mp-big" data-from="${s0}" data-to="${price}" data-ccy="${escapeHtml(ccy || "")}">${money(price)}</span> <span class="${chg >= 0 ? "pos" : "neg"}">${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%</span> <span class="mp-sub">vs ${money(s0)} today</span></div></div>
     <div class="mp-eqs">
       <div class="mp-eqr"><div class="mp-eq">${tx(eqP, `P_T = S0·e^(μT) = ${money(price)}`)}</div><div class="mp-eqn">${pc(muP)} a year for ${f2(T)} years: ${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%</div></div>
       <div class="mp-eqr"><div class="mp-eq">${tx(eqMu, `μ = ${pc(muP)}`)}</div><div class="mp-eqn">μ: the yearly return assumed</div></div>
@@ -4760,7 +4776,7 @@ function mpRfSvg(hist, rf) {
   const X = (i) => 34 + (W - 120) * i / (vals.length - 1), Y = (v) => 4 + (H - 18) * (hi - v) / (hi - lo);
   const path = vals.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
   const g = [hi - pad, lo + pad].map(v => `<line x1="34" y1="${Y(v).toFixed(1)}" x2="${W - 86}" y2="${Y(v).toFixed(1)}" class="mp-grid"/>` + _mpT(30, Y(v) + 3, `${(v * 100).toFixed(1)}%`, { a: "end", fs: 9.5 })).join("");
-  return _mpSvg(W, H, g + `<polyline points="${path}" class="mp-l-rf" fill="none"/>`
+  return _mpSvg(W, H, g + `<polyline points="${path}" class="mp-l-rf" fill="none" pathLength="1"/>`
     + `<circle cx="${X(vals.length - 1).toFixed(1)}" cy="${Y(rf).toFixed(1)}" r="3.2" class="mp-f-rf"/>`
     + _mpT(X(vals.length - 1) + 7, Y(rf) + 4, `today ${(rf * 100).toFixed(2)}%`, { c: "mp-c-rf", w: 600, fs: 10.5 })
     + _mpT(34, H - 2, "US 3-month Treasury bill yield, past 12 months", { fs: 9.5 }));
@@ -4783,9 +4799,13 @@ function mpBetaSvg(sc, raw, beta, freq, proxyName) {
     const ax = q(xs, 0.97) * 1.1 || 0.02, ay = q(ys, 0.97) * 1.1 || 0.02;
     const X = (v) => gx / 2 + (gx / 2 - 4) * Math.max(-1, Math.min(1, v / ax)), Y = (v) => gy / 2 + (gy / 2 - 4) * Math.max(-1, Math.min(1, -v / ay));
     out += `<line x1="0" y1="${gy / 2}" x2="${gx}" y2="${gy / 2}" class="mp-grid"/><line x1="${gx / 2}" y1="2" x2="${gx / 2}" y2="${gy - 2}" class="mp-grid"/>`;
-    xs.forEach((x, i) => { out += `<circle cx="${X(x).toFixed(1)}" cy="${Y(ys[i]).toFixed(1)}" r="1.2" class="mp-dot"/>`; });
-    const L = (b, cls) => `<line x1="${X(-ax).toFixed(1)}" y1="${Y(-ax * b).toFixed(1)}" x2="${X(ax).toFixed(1)}" y2="${Y(ax * b).toFixed(1)}" class="${cls}"/>`;
-    out += L(1, "mp-guide") + L(raw, "mp-l-beta");
+    // Six interleaved layers, each scaled out of the origin on open (mpOpen):
+    // a burst in waves for the price of six animations, not one per day.
+    const origin = `style="transform-origin:${gx / 2}px ${gy / 2}px"`, layers = [[], [], [], [], [], []];
+    xs.forEach((x, i) => { layers[i % 6].push(`<circle cx="${X(x).toFixed(1)}" cy="${Y(ys[i]).toFixed(1)}" r="1.2" class="mp-dot"/>`); });
+    out += `<g class="mpa-dots">${layers.map(l => `<g ${origin}>${l.join("")}</g>`).join("")}</g>`;
+    const L = (b, cls, extra = "") => `<line x1="${X(-ax).toFixed(1)}" y1="${Y(-ax * b).toFixed(1)}" x2="${X(ax).toFixed(1)}" y2="${Y(ax * b).toFixed(1)}" class="${cls}" ${extra}/>`;
+    out += L(1, "mp-guide") + L(raw, "mp-l-beta mpa-fit", origin);
     out += _mpT(2, 9, "stock ↑", { fs: 9.5 }) + _mpT(gx - 2, gy / 2 + 11, `${escapeHtml(proxyName || "market")} →`, { a: "end", fs: 9.5 });
     out += _mpT(0, H - 2, `dot = one ${freq === "weekly" ? "week" : "day"} · dashed = β 1`, { fs: 9.5 });
   }
@@ -4795,7 +4815,7 @@ function mpBetaSvg(sc, raw, beta, freq, proxyName) {
   out += `<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" class="mp-axis"/>`;
   out += `<line x1="${N(1).toFixed(1)}" y1="${y - 6}" x2="${N(1).toFixed(1)}" y2="${y + 6}" class="mp-tick"/>` + _mpT(N(1), y - 10, "market = 1", { a: "middle", fs: 9.5 });
   out += `<line x1="${N(raw).toFixed(1)}" y1="${y - 6}" x2="${N(raw).toFixed(1)}" y2="${y + 6}" class="mp-tick"/>` + _mpT(N(raw), y - 10 - (Math.abs(N(raw) - N(1)) < 52 ? 10 : 0), `raw ${raw.toFixed(2)}`, { a: "middle", fs: 9.5 });
-  out += `<line x1="${N(beta).toFixed(1)}" y1="${y - 7}" x2="${N(beta).toFixed(1)}" y2="${y + 7}" class="mp-l-beta" stroke-width="2.6"/>` + _mpT(N(beta), y + 19, `used ${beta.toFixed(2)}`, { a: "middle", c: "mp-c-beta", w: 600, fs: 10 });
+  out += `<g class="mpa-used"><line x1="${N(beta).toFixed(1)}" y1="${y - 7}" x2="${N(beta).toFixed(1)}" y2="${y + 7}" class="mp-l-beta" stroke-width="2.6"/>` + _mpT(N(beta), y + 19, `used ${beta.toFixed(2)}`, { a: "middle", c: "mp-c-beta", w: 600, fs: 10 }) + "</g>";
   out += _mpT(x0, H - 2, `pulled ${Math.round((1 - (raw === 1 ? 1 : (beta - 1) / (raw - 1))) * 100)}% toward 1`, { fs: 9.5 });
   return _mpSvg(W, H, out);
 }
@@ -4826,8 +4846,9 @@ function mpErpSvg(h, erp, market) {
   out += _mpT(X(first[1]), y - 14, `${first[0]} ${(first[1] * 100).toFixed(1)}`, { a: "start", fs: 9.5 });
   out += _mpT(X(last[1]), y - 14, `${last[0]} ${(last[1] * 100).toFixed(1)}`, { a: "end", fs: 9.5 });
   if (hl) out += _mpT(X(hl[1]), y - 20, `${hl[0] === "USA" ? "US" : hl[0]} ${(hl[1] * 100).toFixed(2)}%`, { a: "middle", c: "mp-ft", fs: 9.5 });
-  out += `<line x1="${X(erp).toFixed(1)}" y1="${y - 9}" x2="${X(erp).toFixed(1)}" y2="${y + 9}" class="mp-l-erp" stroke-width="2.4"/>`;
-  out += _mpT(X(erp), y + 16, `${+(erp * 100).toFixed(2)}% in use`, { a: "middle", c: "mp-c-erp", w: 600, fs: 9.5 });
+  // The marker slides in from the axis's start on open (mpOpen): data-from is that distance.
+  out += `<g class="mpa-tick" data-from="${(X(lo) - X(erp)).toFixed(1)}" data-x="${X(erp).toFixed(1)}" data-y="${y}"><line x1="${X(erp).toFixed(1)}" y1="${y - 9}" x2="${X(erp).toFixed(1)}" y2="${y + 9}" class="mp-l-erp" stroke-width="2.4"/></g>`;
+  out += _mpT(X(erp), y + 16, `${+(erp * 100).toFixed(2)}% in use`, { a: "middle", c: "mp-c-erp mpa-inuse", w: 600, fs: 9.5 });
   out += _mpT(8, H - 1, "dot = one of 16 markets’ 1870–2020 average premium", { fs: 9.5 });
   return _mpSvg(W, H, out);
 }
@@ -4845,18 +4866,19 @@ function mpUpsideSvg(z, cap, upside, ref, usd, label) {
   const pctOf = (k) => { const v = (Math.exp(Math.log1p(ref) + k * usd) - 1) * 100; return `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(0)}%`; };
   // The shaded tail: past the stock on the side it leans to.
   const [a, b] = up ? [zc, hi] : [lo, zc];
-  let out = `<path d="${path(a, b)}L${X(b).toFixed(1)} ${base}L${X(a).toFixed(1)} ${base}Z" class="mp-f-alpha mp-soft"/>`;
-  out += `<path d="${path(lo, hi)}" fill="none" class="mp-tick"/><line x1="${X(lo)}" y1="${base}" x2="${X(hi)}" y2="${base}" class="mp-grid"/>`;
+  // The curve and its tail grow out of the baseline on open (mpOpen).
+  let out = `<g class="mpa-bloom" style="transform-origin:0 ${base}px"><path d="${path(a, b)}L${X(b).toFixed(1)} ${base}L${X(a).toFixed(1)} ${base}Z" class="mp-f-alpha mp-soft"/>`;
+  out += `<path d="${path(lo, hi)}" fill="none" class="mp-tick"/></g><line x1="${X(lo)}" y1="${base}" x2="${X(hi)}" y2="${base}" class="mp-grid"/>`;
   out += `<line x1="${X(0).toFixed(1)}" y1="12" x2="${X(0).toFixed(1)}" y2="${base}" class="mp-guide"/>`
     + (Math.abs(X(zc) - X(0)) > 70 ? _mpT(X(0), 9, "usual", { a: "middle", fs: 9.5 }) : "");
   for (let k = -2; k <= 3; k++) {
     if (k !== 0 && Math.abs(X(k) - X(zc)) < 16) continue;   // keep the stock's own label readable
     out += `<line x1="${X(k).toFixed(1)}" y1="${base}" x2="${X(k).toFixed(1)}" y2="${base + 3}" class="mp-tick"/>` + _mpT(X(k), base + 14, pctOf(k), { a: "middle", fs: 9.5, c: k === 0 ? "mp-ft" : "mp-fm" });
   }
-  out += `<line x1="${X(zc).toFixed(1)}" y1="14" x2="${X(zc).toFixed(1)}" y2="${base}" class="mp-l-alpha" stroke-width="2"/>`;
+  out += `<g class="mpa-mark"><line x1="${X(zc).toFixed(1)}" y1="14" x2="${X(zc).toFixed(1)}" y2="${base}" class="mp-l-alpha" stroke-width="2"/>`;
   const ax = Math.max(40, Math.min(W - 40, X(zc)));
   out += _mpT(ax, 9, `${escapeHtml(label)} ${upside >= 0 ? "+" : "−"}${Math.abs(upside * 100).toFixed(0)}%`, { a: "middle", fs: 10, w: 600, c: "mp-c-alpha" });
-  out += _mpT(X(zc), base + 27, `${Math.abs(z).toFixed(2)} sd`, { a: "middle", fs: 9.5, w: 600, c: "mp-c-alpha" });
+  out += _mpT(X(zc), base + 27, `${Math.abs(z).toFixed(2)} sd`, { a: "middle", fs: 9.5, w: 600, c: "mp-c-alpha" }) + "</g>";
   return _mpSvg(W, H, out);
 }
 /* The share of a normal below z, for "above N in 100". */
@@ -4870,6 +4892,165 @@ RICH_TIPS["model-price"] = () => {
   const d = DETAIL.fc[DETAIL.fcH];
   return d && d.ok && d.model ? modelCardHtml(d) : "";
 };
+
+/* The model price card's motion (the owner's picks, 2026-10-29). The window
+ * unfolds from the edge next to the price and folds back into it. Inside,
+ * the μ bar assembles part by part while the price counts up from today's to
+ * the model's, then each input plays in turn: r_f's year draws itself to
+ * today's dot (which ripples) as its value counts up, β's days burst out of
+ * the origin before the slope grows and the used β drops onto its line, the
+ * premium's marker slides in from 3% and snaps onto the one in use (pulsing
+ * each market it passes), and α's distribution blooms out of its baseline.
+ *
+ * Web Animations only, mostly fill "backwards": when they end, the card is
+ * exactly the static markup, so a selection, a re-render or a close never
+ * meets a half-animated state. The hooks are mpa-* classes and data-* in the
+ * SVG builders above. prefers-reduced-motion keeps the plain fade. */
+const MP_EASE = (() => {
+  const ok = window.CSS?.supports?.("transition-timing-function", "linear(0, 1)");
+  // A damped spring sampled into CSS linear(): z = damping ratio, w = stiffness.
+  const spring = (z, w) => {
+    const wd = w * Math.sqrt(1 - z * z), pts = [];
+    for (let i = 0; i <= 40; i++) {
+      const t = i / 40;
+      pts.push((1 - Math.exp(-z * w * t) * (Math.cos(wd * t) + z * w / wd * Math.sin(wd * t))).toFixed(3));
+    }
+    return `linear(${pts.join(",")})`;
+  };
+  return {
+    spring: ok ? spring(0.45, 13) : "cubic-bezier(.34,1.56,.64,1)",
+    soft: ok ? spring(0.62, 11) : "cubic-bezier(.34,1.3,.64,1)",
+    out: "cubic-bezier(.2,.8,.2,1)",
+    in: "cubic-bezier(.6,0,.8,.4)",
+  };
+})();
+const mpReduced = () => !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+// Clip boxes 30px outside the card so its shadow shows while it unfolds.
+const MP_CLIP = { open: "inset(-30px -30px -30px -30px)", top: "inset(-30px -30px 100% -30px)", bottom: "inset(100% -30px -30px -30px)" };
+
+/* Count a number up inside its own text ("4.00%", "$124.78"), then put the
+ * exact text back. fmt turns a value into the text; the default keeps the
+ * prefix, suffix and decimals of the original. */
+function mpCount(node, from, to, dur, delay, fmt) {
+  if (!node) return;
+  const orig = node.textContent;
+  if (!fmt) {
+    const m = orig.match(/^([^\d−-]*)([−-]?)(\d+(?:\.(\d+))?)(.*)$/);
+    if (!m) return;
+    const dec = (m[4] || "").length, sign = m[2] ? -1 : 1;
+    to = sign * +m[3];
+    fmt = (v) => `${m[1]}${v < 0 ? "−" : ""}${Math.abs(v).toFixed(dec)}${m[5]}`;
+  }
+  const t0 = performance.now() + delay;
+  node.textContent = fmt(from);
+  const step = (now) => {
+    if (!node.isConnected) return;
+    const p = Math.min(1, Math.max(0, (now - t0) / dur));
+    if (p >= 1) { node.textContent = orig; return; }
+    node.textContent = fmt(from + (to - from) * (1 - Math.pow(1 - p, 3)));
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+// A circle drawn over an SVG point that grows and fades, then removes itself.
+function mpRing(svg, x, y, r, cls, delay, scale) {
+  const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  c.setAttribute("cx", x); c.setAttribute("cy", y); c.setAttribute("r", r);
+  c.setAttribute("class", cls);
+  Object.assign(c.style, { fill: "none", strokeWidth: 1.4, opacity: 0, transformBox: "fill-box", transformOrigin: "center" });
+  svg.appendChild(c);
+  c.animate([{ transform: "scale(1)", opacity: 0.75 }, { transform: `scale(${scale})`, opacity: 0 }], { duration: 850, delay, easing: MP_EASE.out })
+    .finished.then(() => c.remove(), () => c.remove());
+}
+
+function mpOpen(tip, host) {
+  const card = tip.querySelector(".mp-card");
+  if (!card || mpReduced()) return;
+  const E = MP_EASE, B = { fill: "backwards" };
+  // Unfold from the edge nearest the price: down when the card sits below it.
+  const below = tip.getBoundingClientRect().top >= host.getBoundingClientRect().top;
+  card.dataset.from = below ? "top" : "bottom";
+  card.animate([{ clipPath: MP_CLIP[card.dataset.from], transform: `translateY(${below ? -6 : 6}px)` }, { clipPath: MP_CLIP.open, transform: "none" }],
+    { duration: 440, easing: E.out });
+  card.querySelectorAll(":scope > .mp-sec").forEach((s, i) => s.animate(
+    [{ opacity: 0, transform: `translateY(${below ? 10 : -10}px)` }, { opacity: 1, transform: "none" }],
+    { ...B, duration: 420, delay: 90 + i * 75, easing: E.out }));
+
+  // Assemble: the bar's parts grow one after another while the price counts.
+  const segs = [...card.querySelectorAll(".mp-sent + .mp-svg rect")];
+  segs.forEach((r, i) => {
+    r.style.transformBox = "fill-box";
+    r.style.transformOrigin = r.classList.contains("mp-neg") ? "right center" : "left center";
+    r.animate([{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], { ...B, duration: 560, delay: 180 + i * 230, easing: E.spring });
+  });
+  card.querySelectorAll(".mp-sent + .mp-svg text").forEach((t) => t.animate([{ opacity: 0 }, { opacity: 1 }], { ...B, duration: 300, delay: 260 + segs.length * 230 }));
+  const big = card.querySelector(".mp-big");
+  if (big?.dataset.to) {
+    const ccy = big.dataset.ccy || undefined;
+    mpCount(big, +big.dataset.from, +big.dataset.to, 260 + segs.length * 230, 180, (v) => fmtMoney(v, ccy));
+  }
+
+  const [rf, beta, erp, alpha] = card.querySelectorAll(".mp-in");
+  // r_f: the year draws itself, today's dot pops and ripples, the value counts.
+  if (rf) {
+    const d = 380, line = rf.querySelector("polyline"), dot = rf.querySelector("circle.mp-f-rf");
+    mpCount(rf.querySelector(".mp-t > span"), 0, 0, 800, d);
+    if (line && dot) {
+      line.animate([{ strokeDasharray: "1 1", strokeDashoffset: 1 }, { strokeDasharray: "1 1", strokeDashoffset: 0 }],
+        { ...B, duration: 800, delay: d, easing: "cubic-bezier(.65,0,.35,1)" });
+      Object.assign(dot.style, { transformBox: "fill-box", transformOrigin: "center" });
+      dot.animate([{ transform: "scale(0)" }, { transform: "scale(1)" }], { ...B, duration: 520, delay: d + 740, easing: E.spring });
+      [0, 220].forEach((k) => mpRing(dot.ownerSVGElement, dot.getAttribute("cx"), dot.getAttribute("cy"), 3.2, "mp-l-rf", d + 780 + k, 5.5));
+      rf.querySelector("text.mp-c-rf")?.animate([{ opacity: 0, transform: "translateX(-6px)" }, { opacity: 1, transform: "none" }],
+        { ...B, duration: 380, delay: d + 820, easing: E.out });
+    }
+    rf.querySelectorAll(".mp-ladder > *").forEach((s, i) => s.animate([{ opacity: 0 }, { opacity: 1 }], { ...B, duration: 260, delay: d + i * 90 }));
+  }
+  // β: the days burst out of the origin in six waves, the slope grows out of
+  // it, then the used β drops onto the number line.
+  if (beta) {
+    const d = 460;
+    beta.querySelectorAll(".mpa-dots > g").forEach((g, i) => g.animate(
+      [{ transform: "scale(0)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }],
+      { ...B, duration: 640, delay: d + i * 60, easing: E.spring }));
+    beta.querySelector(".mpa-fit")?.animate([{ transform: "scale(0)" }, { transform: "scale(1)" }], { ...B, duration: 560, delay: d + 420, easing: E.spring });
+    beta.querySelector(".mpa-used")?.animate([{ transform: "translateY(-16px)", opacity: 0 }, { transform: "none", opacity: 1 }],
+      { ...B, duration: 560, delay: d + 760, easing: E.spring });
+  }
+  // ERP: the marker slides in from 3% and springs onto the premium in use;
+  // each market it passes pulses, and a ring marks where it lands.
+  const tick = erp?.querySelector(".mpa-tick");
+  if (tick) {
+    const d = 540, from = +tick.dataset.from, x = +tick.dataset.x, y = +tick.dataset.y;
+    tick.animate([{ transform: `translateX(${from}px)` }, { transform: "none" }], { ...B, duration: 1150, delay: d, easing: E.spring });
+    erp.querySelectorAll("circle.mp-dot, circle.mp-dot-lit").forEach((c) => {
+      const f = 1 - (x - +c.getAttribute("cx")) / -from;
+      if (!(f >= 0 && f <= 1.02)) return;
+      Object.assign(c.style, { transformBox: "fill-box", transformOrigin: "center" });
+      c.animate([{ transform: "scale(1)" }, { transform: "scale(1.9)" }, { transform: "scale(1)" }], { duration: 320, delay: d + f * 300 });
+    });
+    mpRing(tick.ownerSVGElement, x, y, 5, "mp-l-erp", d + 370, 4);
+    erp.querySelector(".mpa-inuse")?.animate([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }],
+      { ...B, duration: 320, delay: d + 400, easing: E.out });
+  }
+  // α: the distribution blooms out of its baseline, then the stock's marker drops in.
+  if (alpha) {
+    const d = 620;
+    alpha.querySelector(".mpa-bloom")?.animate([{ transform: "scaleY(0)" }, { transform: "scaleY(1)" }], { ...B, duration: 760, delay: d, easing: E.soft });
+    alpha.querySelector(".mpa-mark")?.animate([{ transform: "translateY(-14px)", opacity: 0 }, { transform: "none", opacity: 1 }],
+      { ...B, duration: 520, delay: d + 480, easing: E.spring });
+  }
+}
+
+// Fold back into the price: everything inside jumps to rest, the clip closes.
+function mpClose(tip) {
+  const card = tip.querySelector(".mp-card");
+  if (!card || mpReduced()) return null;
+  card.getAnimations({ subtree: true }).forEach((a) => a.finish());
+  return card.animate([{ clipPath: MP_CLIP.open, opacity: 1 }, { clipPath: MP_CLIP[card.dataset.from || "top"], opacity: 0.6 }],
+    { duration: 240, easing: MP_EASE.in, fill: "forwards" });
+}
+TIP_MOTION["model-price"] = { open: mpOpen, close: mpClose };
 
 /* The readouts box under the chart (it replaces the range strip while σ or μ
  * is on) and the assumptions footnote. */

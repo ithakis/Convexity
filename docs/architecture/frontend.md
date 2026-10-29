@@ -550,6 +550,20 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   is left out; the numbers never depend on it. Money goes through `fmtMoney`,
   so prices are in the display currency, and the footer says so when it is
   not the listing's.
+- **The model price card's motion** (2026-10-29, the owner's picks from
+  chat demos): `TIP_MOTION["model-price"]` = `mpOpen` / `mpClose`, a hook in
+  `_RICH_TIP` any rich tip can use. The card unfolds from the edge next to
+  the price (down when it sits below it) and folds back into it; the bar
+  assembles while the price counts up; then r_f draws its year to a
+  rippling dot, β's days burst out of the origin in six layers (six
+  animations, not one per day), ERP's marker slides in from 3% and snaps,
+  and α's curve blooms. The hooks are `mpa-*` classes and `data-*` in the
+  SVG builders. Web Animations with fill "backwards", so a finished card is
+  exactly the static markup (selection, re-render and close never meet a
+  half-animated state); `hide()` waits for the fold, a `show()` meanwhile
+  cancels it, and a 400 ms timer hides it anyway on a page that isn't
+  drawing (a minimised window never finishes an animation).
+  `prefers-reduced-motion` keeps the plain fade.
 - **The grid's Beta / Model 12M / Model μ** come from `POST /api/model-prices`
   (`requestModelPrices`, called with every analytics request, keyed on the
   rows' symbols and prices): never on the streaming path, merged into DATA,
