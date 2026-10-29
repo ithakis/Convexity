@@ -552,10 +552,10 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   not the listing's.
 - **The model price button** (2026-10-29, the owner's pick from eight
   variants shot in the real window): the readout that opens the card is the
-  constituents' badge red (`#e05f5f`, fixed in every theme) as text on a 16%
-  fill of itself, 4px corners, hugging its text (`justify-self: start`), its
+  constituents' badge red (`#e05f5f`, fixed in every theme) as a solid fill with
+  white text (the owner, same day), 4px corners, hugging its text (`justify-self: start`), its
   margin pulling the box out by its padding so the text keeps the row's line;
-  26% while hovered or open (`[aria-describedby]`). A click on a sticky
+  `#c94848` while hovered or open (`[aria-describedby]`). A click on a sticky
   card's host keeps the card (`_RICH_TIP.inside` counts the host).
 - **The model price card's motion** (2026-10-29, the owner's picks from
   chat demos): `TIP_MOTION["model-price"]` = `mpOpen` / `mpClose`, a hook in

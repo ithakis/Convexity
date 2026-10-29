@@ -12,7 +12,7 @@ launch); until then they have no tags or GitHub Releases of their own.
 ## 1.29.1 — 2026-10-28
 
 - **Model price, explained.** The stock window's "Model price" hover is a card: both equations filled in, μ built up in % and in money, then one card per input (r_f, β, ERP, α) with its chart and Why / Used / What if rows, all on real data (new `GET /api/beta-scatter`).
-- **The model price is a button**: a soft red box in the constituents' badge red that opens the card; clicking it keeps the card open.
+- **The model price is a button**: a solid box in the constituents' badge red, white text, that opens the card; clicking it keeps the card open.
 - **The model price card moves.** It unfolds from the price and folds back into it; inside, μ's bar assembles while the price counts up, the risk-free year draws itself, β's days burst out of the origin, the premium's marker slides into place and the analysts' curve blooms. Reduced motion keeps the fade.
 - **Equity premium: assumed or historical.** Settings → Model price chooses a flat 5% (the default: out of sample it forecast better) or each market's long-run premium over bills (16 markets, JST Macrohistory 1870-2020, `docs/erp_research.md`). The export adds the premium and its source.
 - **Local risk-free rates.** Currencies without a CME future use their central bank's policy rate from the BIS, once a day (Selic read as 13.75%, not 4%).

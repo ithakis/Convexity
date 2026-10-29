@@ -2861,18 +2861,18 @@
   .m-fc-grid > div[data-fc-band]:hover { background: rgba(var(--accent-rgb), 0.07); }
   .m-fc-grid b.pos { color: var(--pos); } .m-fc-grid b.neg { color: var(--neg); } .m-fc-grid b.amb { color: var(--amber); }
   /* The model price is a button (owner, 2026-10-29): the constituents'
-     badge red (#e05f5f, fixed in every theme) as text on a soft fill of
-     itself, hugging its text. It opens the model card (RICH_TIPS["model-price"]);
+     badge red (#e05f5f, fixed in every theme) as a solid fill with white
+     text, like the badges, hugging its text. It opens the model card (RICH_TIPS["model-price"]);
      the margin pulls the box out by its padding so the text keeps the row's line. */
   .m-fc-grid > div[data-rich-tip="model-price"] {
     justify-self: start; cursor: pointer; border-radius: var(--r-md); margin: -6px -11px; padding: 6px 11px;
-    background: rgba(224, 95, 95, 0.16);
+    background: #e05f5f;
   }
   .m-fc-grid > div[data-rich-tip="model-price"]:hover,
-  .m-fc-grid > div[data-rich-tip="model-price"][aria-describedby] { background: rgba(224, 95, 95, 0.26); }
+  .m-fc-grid > div[data-rich-tip="model-price"][aria-describedby] { background: #c94848; }
   .m-fc-grid > div[data-rich-tip="model-price"] > span,
   .m-fc-grid > div[data-rich-tip="model-price"] b,
-  .m-fc-grid > div[data-rich-tip="model-price"] b small { color: #e05f5f; }
+  .m-fc-grid > div[data-rich-tip="model-price"] b small { color: #fff; }
   .m-fc-grid > div[data-rich-tip="model-price"] > span { font-weight: 500; }
   .m-fc-wait { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
   .m-fc-foot { color: var(--muted); font-size: 12.5px; line-height: 1.6; margin: 8px 4px 0; }
