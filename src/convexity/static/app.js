@@ -761,9 +761,14 @@ document.addEventListener("keydown", (ev) => {
  * --------------------------------------------------------------------------- */
 const RICH_TIPS = Object.create(null);
 const STICKY_TIPS = new Set(["model-price"]);
+// Opened by a click and kept until its ✕, Escape or a click elsewhere (the
+// owner, 2026-10-30: the model price is a button). Until the first click a
+// hover says "Click" (.click-hint, remembered in localStorage.mp_clicked).
+const CLICK_TIPS = new Set(["model-price"]);
+const clickHinted = () => { try { return !localStorage.getItem("mp_clicked"); } catch (_) { return false; } };
 const TIP_MOTION = Object.create(null);
 const _RICH_TIP = (() => {
-  let el = null, current = null, sticky = false, graceT = 0, closing = null;
+  let el = null, current = null, sticky = false, pinned = false, graceT = 0, closing = null;
   const katexCache = new Map();
   function ensure() {
     if (el && document.body.contains(el)) return el;
@@ -773,7 +778,7 @@ const _RICH_TIP = (() => {
     el.setAttribute("role", "tooltip");
     el.addEventListener("mouseenter", () => clearTimeout(graceT));
     el.addEventListener("mouseleave", (ev) => {
-      if (!sticky) return;
+      if (!sticky || pinned) return;
       if (current && ev.relatedTarget && current.contains(ev.relatedTarget)) return;
       // A text selection dragged past the edge: close once the button is up.
       if (ev.buttons & 1) {
@@ -808,6 +813,7 @@ const _RICH_TIP = (() => {
     if (current && current !== host) current.removeAttribute("aria-describedby");
     current = host;
     sticky = STICKY_TIPS.has(host.getAttribute("data-rich-tip"));
+    pinned = CLICK_TIPS.has(host.getAttribute("data-rich-tip"));
     tip.classList.toggle("sticky", sticky);
     host.setAttribute("aria-describedby", tip.id);
     tip.innerHTML = render(html);
@@ -827,7 +833,7 @@ const _RICH_TIP = (() => {
     const motion = el?.classList.contains("show") && current ? TIP_MOTION[current.getAttribute("data-rich-tip")] : null;
     if (current) current.removeAttribute("aria-describedby");
     current = null;
-    sticky = false;
+    sticky = pinned = false;
     if (!el) return;
     el.classList.remove("sticky");
     const a = closing ? null : motion?.close?.(el);
@@ -840,6 +846,7 @@ const _RICH_TIP = (() => {
   }
   // The host was left: a sticky card waits a moment for the mouse to reach it.
   function leave(host, to) {
+    if (pinned && host === current) return;
     if (!sticky || host !== current) return hide(host);
     if (to && el && el.contains(to)) return;
     clearTimeout(graceT);
@@ -855,12 +862,22 @@ const _RICH_TIP = (() => {
   // clicking it must not close the card it opened.
   const inside = (node) => !!(sticky && el && node && (el.contains(node) || current?.contains(node)));
   // The mouse is on a sticky card or its host (a click in the card blurs the host).
-  const held = () => !!(sticky && el && (el.matches(":hover") || current?.matches(":hover")));
-  return {show, hide, leave, inside, held, warm};
+  const held = () => !!(pinned || (sticky && el && (el.matches(":hover") || current?.matches(":hover"))));
+  const isOpen = (host) => current === host && !!el?.classList.contains("show");
+  return {show, hide, leave, inside, held, warm, isOpen};
 })();
+const clickTip = (t) => CLICK_TIPS.has(t.getAttribute("data-rich-tip"));
 document.addEventListener("mouseover", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
-  if (t) _RICH_TIP.show(t);
+  if (t && !clickTip(t)) _RICH_TIP.show(t);
+}, true);
+document.addEventListener("click", (ev) => {
+  const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
+  if (!t || !clickTip(t)) return;
+  if (_RICH_TIP.isOpen(t)) return _RICH_TIP.hide(t);
+  _RICH_TIP.show(t);
+  try { localStorage.setItem("mp_clicked", "1"); } catch (_) {}
+  document.querySelectorAll(".click-hint").forEach(n => n.classList.remove("click-hint"));
 }, true);
 document.addEventListener("mouseout", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
@@ -870,7 +887,7 @@ document.addEventListener("mouseout", (ev) => {
 }, true);
 document.addEventListener("focusin", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
-  if (t) _RICH_TIP.show(t);
+  if (t && !clickTip(t)) _RICH_TIP.show(t);
 }, true);
 document.addEventListener("focusout", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
@@ -881,6 +898,8 @@ window.addEventListener("resize", () => _RICH_TIP.hide());
 document.addEventListener("mousedown", (ev) => { if (!_RICH_TIP.inside(ev.target)) _RICH_TIP.hide(); }, true);
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") _RICH_TIP.hide();
+  const t = (ev.key === "Enter" || ev.key === " ") && ev.target.closest?.("[data-rich-tip]");
+  if (t && clickTip(t)) { ev.preventDefault(); t.click(); }
 }, true);
 
 /* ---------------------------------------------------------------------------
@@ -4695,7 +4714,7 @@ function modelCardHtml(d) {
   const eqP = String.raw`P_T = S_0\,e^{\mu T} = \text{${kx(money(s0))}} \times e^{\,${kx(pc(muP))} \times ${f2(T)}} = \textbf{${kx(money(price))}}`;
   const eqMu = String.raw`\mu = {\color{${col.rf}}r_f} + {\color{${col.beta}}\beta}\cdot{\color{${col.erp}}\text{ERP}}${termA} = {\color{${col.rf}}${kx(pc(rfP))}} + {\color{${col.beta}}${m.beta < 0 ? `(${f2(m.beta)})` : f2(m.beta)}}\times{\color{${col.erp}}${kx(pc(r2(m.erp)))}}${valA} = \textbf{${kx(pc(muP))}}`;
   const head = `<div class="mp-hero"><div class="mp-when">Model price on ${when}${on ? "" : " · CAPM"}<small>${whenWhy}</small></div>
-    <div><span class="mp-big" data-from="${s0}" data-to="${price}" data-ccy="${escapeHtml(ccy || "")}">${money(price)}</span> <span class="${chg >= 0 ? "pos" : "neg"}">${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%</span> <span class="mp-sub">vs ${money(s0)} today</span></div></div>
+    <div><span class="mp-big" data-from="${s0}" data-to="${price}" data-ccy="${escapeHtml(ccy || "")}">${money(price)}</span> <span class="${chg >= 0 ? "pos" : "neg"}">${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%</span></div><button type="button" class="x-close mp-x" aria-label="Close" onclick="_RICH_TIP.hide()"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button></div>
     <div class="mp-eqs">
       <div class="mp-eqr"><div class="mp-eq">${tx(eqP, `P_T = S0·e^(μT) = ${money(price)}`)}</div><div class="mp-eqn">${pc(muP)} a year for ${f2(T)} years: ${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%</div></div>
       <div class="mp-eqr"><div class="mp-eq">${tx(eqMu, `μ = ${pc(muP)}`)}</div><div class="mp-eqn">μ: the yearly return assumed</div></div>
@@ -5117,7 +5136,7 @@ function renderFcReadouts() {
   // Hovering a cell with a band lights that part of the curve (fcDraw); its
   // tip leads with the formula (`texSrc`, typeset by the shared tooltip).
   // A `{rich}` tip is a RICH_TIPS card (the model price's), not text.
-  const cell = (k, v, cls, tip, band, texSrc) => `<div${tip?.rich ? ` data-rich-tip="${tip.rich}"` : tip ? ` data-tip="${escapeHtml(tip)}"` : ""}${texSrc ? ` data-tip-tex="${escapeHtml(texSrc)}"` : ""}${band ? ` data-fc-band="${band}" tabindex="0"` : ""}>` +
+  const cell = (k, v, cls, tip, band, texSrc) => `<div${tip?.rich ? ` data-rich-tip="${tip.rich}"${CLICK_TIPS.has(tip.rich) ? ` role="button"${clickHinted() ? ' class="click-hint"' : ""}` : ""}` : tip ? ` data-tip="${escapeHtml(tip)}"` : ""}${texSrc ? ` data-tip-tex="${escapeHtml(texSrc)}"` : ""}${band ? ` data-fc-band="${band}" tabindex="0"` : ""}>` +
     `<span>${k}</span><b${cls ? ` class="${cls}"` : ""}>${v}</b></div>`;
   const pct = (v) => (v * 100).toFixed(0) + "%";
   const sgn = (v) => (v >= 0 ? "+" : "") + v.toFixed(0) + "%";
