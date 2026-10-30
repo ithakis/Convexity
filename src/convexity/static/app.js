@@ -3719,15 +3719,22 @@ function renderEventMarkers() {
     ...(ev.earnings || []).filter(e => e.date <= today).map(e => ({ kind: "E", e, day: e.date })),
     ...(ev.dividends || []).map(e => ({ kind: "D", e, day: e.date })),
   ];
-  const last = { E: -1e9, D: -1e9 }, shown = [];
-  for (const it of items.sort((a, b) => a.day.localeCompare(b.day))) {
+  // Newest first, so thinning drops the older flag of a crowded pair: the
+  // latest report is the one people look for. A report from yesterday sits
+  // within a pixel of the right edge on 5Y/MAX (a day is ~0.6 px there), so
+  // the edge no longer rejects it; its flag is pulled inside the plot instead
+  // (`fx`) while its rule stays on the true date.
+  const last = { E: 1e9, D: 1e9 }, shown = [];
+  for (const it of items.sort((a, b) => b.day.localeCompare(a.day))) {
     const t = Date.parse(it.day + "T12:00:00Z");
     if (t < g.t0 || t > g.t1 + 864e5) continue;
     const x = g.xScale(Math.min(t, g.t1));
-    if (x < g.padL + 4 || x > xMax - 2 || x - last[it.kind] < 16) continue;
-    last[it.kind] = x;
-    shown.push({ ...it, x });
+    const fx = Math.min(x, xMax - 9);
+    if (x < g.padL + 4 || last[it.kind] - fx < 16) continue;
+    last[it.kind] = fx;
+    shown.push({ ...it, x, fx });
   }
+  shown.reverse();
   if (!shown.length) return;
   const bot = g.padT + g.chartH;
   const rules = shown.map(it => `<line x1="${it.x.toFixed(1)}" x2="${it.x.toFixed(1)}" y1="${g.padT + EV_LANE[it.kind] + 17}" y2="${bot}" class="m-ev-rule ${it.kind === "E" ? "e" : "d"}"/>`).join("");
@@ -3736,7 +3743,7 @@ function renderEventMarkers() {
     const sur = it.e.surprise_pct;
     const cls = it.kind === "D" ? "d" : sur == null ? "e" : sur >= 0 ? "e beat" : "e miss";
     const what = it.kind === "E" ? `Earnings ${fcFmtDate(new Date(it.day + "T12:00:00"))}` : `Dividend, ex-date ${fcFmtDate(new Date(it.day + "T12:00:00"))}`;
-    return `<button class="m-ev ${cls}" data-ev="${i}" style="left:${it.x.toFixed(1)}px;top:${g.padT + EV_LANE[it.kind]}px" aria-label="${escapeHtml(what)}">${it.kind}</button>`;
+    return `<button class="m-ev ${cls}" data-ev="${i}" style="left:${it.fx.toFixed(1)}px;top:${g.padT + EV_LANE[it.kind]}px" aria-label="${escapeHtml(what)}">${it.kind}</button>`;
   }).join(""));
   DETAIL.evShown = shown;
   wrap.querySelectorAll(".m-ev").forEach(b => b.addEventListener("click", (e) => {
@@ -4004,6 +4011,14 @@ function fcCurveQ(sim, q) {
   const t = q * sim.total;
   for (let i = 0; i < sim.cdf.length; i++) if (sim.cdf[i] >= t) return sim.px[i];
   return sim.px[sim.px.length - 1];
+}
+/* The curve's density per unit price at K (sim.pp), interpolated on its grid. */
+function fcCurveAt(sim, K) {
+  const px = sim.px;
+  if (K <= px[0] || K >= px[px.length - 1]) return 0;
+  let lo = 0, hi = px.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (px[m] <= K) lo = m; else hi = m; }
+  return sim.pp[lo] + (sim.pp[hi] - sim.pp[lo]) * (K - px[lo]) / (px[hi] - px[lo]);
 }
 function fcCurveAbove(sim, K) {
   let s = 0; for (let i = 0; i < sim.px.length; i++) if (sim.px[i] >= K) s += sim.p[i] * sim.dx;
@@ -4359,6 +4374,19 @@ function fcDraw() {
       ctx.font = font(700, 11); ctx.fillStyle = e.estimated ? col.muted : col.text; ctx.globalAlpha = e.estimated ? 0.6 : 1;
       ctx.fillText("E", xe - 3.5, top + 13); ctx.globalAlpha = 1;
     });
+    // The strip's hovered cell (renderFcReadouts): [from, to] in price, null
+    // = the edge. It spotlights the paths that end there and that slice of
+    // the curve (option A, owner 2026-10-30).
+    const hb = DETAIL.fcBand;
+    const bands = {
+      "50": [fcCurveQ(sim, 0.25), fcCurveQ(sim, 0.75), col.acc],
+      "90": [fcCurveQ(sim, 0.05), fcCurveQ(sim, 0.95), col.acc],
+      "20": [null, d.s0 * 0.8, col.negRgb],
+      up: [d.s0, null, col.posRgb],
+      p20: [d.s0 * 1.2, null, col.posRgb],
+      cons: mk ? [mk.mean, null, col.amberRgb] : null,
+    };
+    const bd = hb && bands[hb];
     if (n > 0) {
       const band = (a, b, al) => {
         ctx.fillStyle = `rgba(${col.acc},${al})`; ctx.beginPath();
@@ -4366,17 +4394,39 @@ function fcDraw() {
         for (let j = n; j >= 0; j--) ctx.lineTo(X(j), y(Math.exp(fcQ(sim.cols[j], b))));
         ctx.fill();
       };
-      band(0.05, 0.95, 0.06); band(0.25, 0.75, 0.09);
-      ctx.lineWidth = 0.8; ctx.strokeStyle = `rgba(${col.acc},0.16)`;
-      for (let r = 0; r < FC_ZONE.draw; r++) {
+      if (!bd) { band(0.05, 0.95, 0.06); band(0.25, 0.75, 0.09); }
+      const path = (r) => {
         const o = r * (S + 1); ctx.beginPath();
         for (let j = 0; j <= n; j++) { const yy = y(Math.exp(sim.P[o + j])); j ? ctx.lineTo(X(j), yy) : ctx.moveTo(X(j), yy); }
         ctx.stroke();
+      };
+      ctx.lineWidth = 0.8;
+      if (!bd) {
+        ctx.strokeStyle = `rgba(${col.acc},0.16)`;
+        for (let r = 0; r < FC_ZONE.draw; r++) path(r);
+      } else {
+        // Paths ending in the band in its colour, the rest a faint grey. On
+        // the −20% band, a path that traded there and recovered shows faintly
+        // (the readout's "at some point").
+        const [a, b, rgb] = bd, la = a == null ? -Infinity : Math.log(a), lb = b == null ? Infinity : Math.log(b);
+        const kind = new Uint8Array(FC_ZONE.draw);
+        for (let r = 0; r < FC_ZONE.draw; r++) {
+          const o = r * (S + 1), e = sim.P[o + S];
+          if (e >= la && e <= lb) kind[r] = 2;
+          else if (hb === "20") { for (let j = 1; j < S; j++) if (sim.P[o + j] <= lb) { kind[r] = 1; break; } }
+        }
+        ctx.strokeStyle = col.muted; ctx.globalAlpha = 0.09;
+        for (let r = 0; r < FC_ZONE.draw; r++) if (!kind[r]) path(r);
+        ctx.strokeStyle = `rgb(${rgb})`; ctx.globalAlpha = 0.22;
+        for (let r = 0; r < FC_ZONE.draw; r++) if (kind[r] === 1) path(r);
+        ctx.globalAlpha = 0.5;
+        for (let r = 0; r < FC_ZONE.draw; r++) if (kind[r] === 2) path(r);
+        ctx.globalAlpha = 1;
       }
       // The mean path, today → the curve's mean (with μ on at 100% trust,
       // the analysts' target at expiry: the solid diamond it lands on).
       const hiM = DETAIL.fcBand === "mean";
-      ctx.strokeStyle = col.text; ctx.globalAlpha = hiM ? 1 : 0.85; ctx.lineWidth = hiM ? 2.2 : 1.6; ctx.setLineDash([6, 4]); ctx.beginPath();
+      ctx.strokeStyle = col.text; ctx.globalAlpha = hiM ? 1 : bd ? 0.35 : 0.85; ctx.lineWidth = hiM ? 2.2 : 1.6; ctx.setLineDash([6, 4]); ctx.beginPath();
       for (let j = 0; j <= n; j++) ctx.lineTo(X(j), y(sim.meanPath[j]));
       ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
     }
@@ -4392,33 +4442,29 @@ function fcDraw() {
         ctx.setLineDash(mode.curve === "rn" ? [5, 4] : []); ctx.stroke(); ctx.setLineDash([]);
       };
       const ys0 = y(d.s0);
-      ctx.save(); ctx.beginPath(); ctx.rect(xH, top, Wd + 8, ys0 - top); ctx.clip(); curve(`rgba(${col.posRgb},0.2)`, col.pos); ctx.restore();
-      ctx.save(); ctx.beginPath(); ctx.rect(xH, ys0, Wd + 8, bot - ys0); ctx.clip(); curve(`rgba(${col.negRgb},0.2)`, col.neg); ctx.restore();
-      // The strip's hovered band (renderFcReadouts): a level band across the zone and that slice of the curve.
-      // The strip's hovered cell (renderFcReadouts): a level band across the
-      // zone and that slice of the curve. [from, to] in price, null = the edge.
-      const hb = DETAIL.fcBand;
-      const bands = {
-        "50": [fcCurveQ(sim, 0.25), fcCurveQ(sim, 0.75), col.acc],
-        "90": [fcCurveQ(sim, 0.05), fcCurveQ(sim, 0.95), col.acc],
-        "20": [null, d.s0 * 0.8, col.negRgb],
-        up: [d.s0, null, col.posRgb],
-        p20: [d.s0 * 1.2, null, col.posRgb],
-        cons: mk ? [mk.mean, null, col.amberRgb] : null,
-      };
-      const bd = hb && bands[hb];
-      if (bd) {
+      if (!bd) {
+        ctx.save(); ctx.beginPath(); ctx.rect(xH, top, Wd + 8, ys0 - top); ctx.clip(); curve(`rgba(${col.posRgb},0.2)`, col.pos); ctx.restore();
+        ctx.save(); ctx.beginPath(); ctx.rect(xH, ys0, Wd + 8, bot - ys0); ctx.clip(); curve(`rgba(${col.negRgb},0.2)`, col.neg); ctx.restore();
+      } else {
+        // The band's slice in its colour, the rest of the curve neutral, and
+        // its levels drawn only from the spine to the curve.
         const [a, b, rgb] = bd;
+        ctx.globalAlpha = 0.1; curve(col.muted, "transparent");
+        ctx.globalAlpha = 0.5; curve("transparent", col.muted); ctx.globalAlpha = 1;
         // Clamped to the plot: a level past the axis (a -20% below a calm
         // 3M range) painted over the volume and date rows.
         const cl = (v) => Math.min(bot, Math.max(top, v));
         const yt = b == null ? top : cl(y(b)), yb = a == null ? bot : cl(y(a));
         if (yb > yt) {
-          ctx.fillStyle = `rgba(${rgb},0.12)`; ctx.fillRect(xT, yt, xR - xT, yb - yt);
-          ctx.save(); ctx.beginPath(); ctx.rect(xH, yt, Wd + 8, yb - yt); ctx.clip(); curve(`rgba(${rgb},0.45)`, `rgb(${rgb})`); ctx.restore();
-          ctx.strokeStyle = `rgb(${rgb})`; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.beginPath();
-          for (const v of [a, b]) if (v != null) { const yy = cl(y(v)); ctx.moveTo(xT, yy); ctx.lineTo(xR, yy); }
-          ctx.stroke(); ctx.setLineDash([]);
+          ctx.save(); ctx.beginPath(); ctx.rect(xH, yt, Wd + 8, yb - yt); ctx.clip(); curve(`rgba(${rgb},0.42)`, `rgb(${rgb})`); ctx.restore();
+          ctx.strokeStyle = `rgb(${rgb})`; ctx.lineWidth = 1.2; ctx.beginPath();
+          for (const v of [a, b]) {
+            if (v == null) continue;
+            const yy = y(v);
+            if (yy < top || yy > bot) continue;
+            ctx.moveTo(xH, yy); ctx.lineTo(xH + fcCurveAt(sim, v) / mx * Wd * grow, yy);
+          }
+          ctx.stroke();
         }
       }
       // The axis shows the fan's 90% band (fcYRange), so the tails run past
@@ -4442,15 +4488,25 @@ function fcDraw() {
   if (mk && long && grow > 0) {
     const ym = y(mk.mean), x12 = Math.min(xR - 12, Math.max(xT + 12, xT + (xH - xT) * 365 / d.days));
     const hiT = DETAIL.fcBand === "cons";
-    ctx.globalAlpha = grow;
-    ctx.beginPath(); ctx.moveTo(x12, ym - 7); ctx.lineTo(x12 + 7, ym); ctx.lineTo(x12, ym + 7); ctx.lineTo(x12 - 7, ym); ctx.closePath();
-    ctx.fillStyle = col.bg; ctx.strokeStyle = col.amber; ctx.lineWidth = hiT ? 2.4 : 1.8; ctx.fill(); ctx.stroke();
+    // One label line (key quiet, price bold) right-aligned on the spine, and
+    // a dotted hairline leading to the diamond (option A, owner 2026-10-30).
     const ccy = DETAIL.data.currency, yl = Math.min(bot - 20, Math.max(top + 14, ym));
+    const lr = Math.min(xH, x12 - 9) - 10;   // the label's right edge, clear of the diamond
+    ctx.globalAlpha = grow;
+    if (x12 - 8 > lr + 4) {
+      ctx.strokeStyle = `rgba(${col.amberRgb},0.55)`; ctx.lineWidth = 1; ctx.setLineDash([1, 3]);
+      ctx.beginPath(); ctx.moveTo(lr + 4, ym); ctx.lineTo(x12 - 8, ym); ctx.stroke(); ctx.setLineDash([]);
+    }
+    const r = hiT ? 6.5 : 5.5;
+    ctx.beginPath(); ctx.moveTo(x12, ym - r); ctx.lineTo(x12 + r, ym); ctx.lineTo(x12, ym + r); ctx.lineTo(x12 - r, ym); ctx.closePath();
+    ctx.fillStyle = col.bg; ctx.strokeStyle = col.amber; ctx.lineWidth = hiT ? 2.2 : 1.6; ctx.fill(); ctx.stroke();
     // A canvas-coloured halo: the label sits over the paths.
     const halo = (t, x, yy) => { ctx.lineWidth = 4; ctx.lineJoin = "round"; ctx.strokeStyle = col.bg; ctx.strokeText(t, x, yy); ctx.fillText(t, x, yy); };
     ctx.textAlign = "right"; ctx.fillStyle = col.amber;
-    ctx.font = font(600, 12); halo(`Street target (12M) ${fmtMoney(mk.mean, ccy)}`, xH - 10, yl - 2);
-    ctx.font = font(500, 11); ctx.globalAlpha = grow * 0.85; halo("not a forecast", xH - 10, yl + 12);
+    const v = fmtMoney(mk.mean, ccy);
+    ctx.font = font(700, 13); const vw = ctx.measureText(v).width; halo(v, lr, yl + 4.5);
+    ctx.font = font(500, 11.5); ctx.globalAlpha = grow * 0.75; halo("Street target 12M", lr - vw - 6, yl + 4);
+    ctx.fillStyle = col.muted; ctx.globalAlpha = grow; ctx.font = font(500, 10.5); halo("not a forecast", lr, yl + 18);
     ctx.textAlign = "left"; ctx.globalAlpha = 1;
   }
   // The model price, named: one pill where the mean path ends, right of the
