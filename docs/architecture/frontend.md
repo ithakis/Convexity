@@ -557,6 +557,14 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   margin pulling the box out by its padding so the text keeps the row's line;
   `#c94848` while hovered or open (`[aria-describedby]`). A click on a sticky
   card's host keeps the card (`_RICH_TIP.inside` counts the host).
+- **The model price card's layout** (2026-10-30): one inset, `--mp-pad`
+  (`clamp(12px, 1.6vw, 18px)`), on all four sides and scaling the section
+  gaps, so top, bottom and left read the same at any zoom (the footer's
+  `-2px` evens out its taller leading); `max-height: 100vh − 16px` with
+  `overflow-y: auto`. The input charts are centred (`margin: auto`,
+  `max-width: 100%`). μ's bar is HTML (`mpBarHtml`, flex parts sized by
+  share) so it fills the card's width; a negative part keeps the zero line
+  and the net μ marker.
 - **The model price card's motion** (2026-10-29, the owner's picks from
   chat demos): `TIP_MOTION["model-price"]` = `mpOpen` / `mpClose`, a hook in
   `_RICH_TIP` any rich tip can use. The card unfolds from the edge next to
