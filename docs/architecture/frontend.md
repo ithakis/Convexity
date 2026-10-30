@@ -564,7 +564,9 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   `overflow-y: auto`. The input charts are centred (`margin: auto`,
   `max-width: 100%`). μ's bar is HTML (`mpBarHtml`, flex parts sized by
   share) so it fills the card's width; a negative part keeps the zero line
-  and the net μ marker.
+  and the net μ marker. It ends in "=" and the total as a capsule in the
+  text colour (`.mp-sum`), μ in it and the money gain below (the owner's
+  pick A of four mockups).
 - **The model price card's motion** (2026-10-29, the owner's picks from
   chat demos): `TIP_MOTION["model-price"]` = `mpOpen` / `mpClose`, a hook in
   `_RICH_TIP` any rich tip can use. The card unfolds from the edge next to

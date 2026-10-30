@@ -4653,7 +4653,7 @@ function modelCardHtml(d) {
   const sentence = `Cash pays <b class="mp-c-rf">${sgnP(rfP)}</b>, market risk ${verb(bP, "adds", "takes off")} <b class="mp-c-beta">${pc(Math.abs(bP))}</b> <span class="mp-m">(${f2(m.beta)} × ${pc(r2(m.erp))})</span>${aClause}: <b>${pc(muP)} a year</b>, which over the ${f2(T)} years to ${when} takes ${money(s0)} to <b>${money(price)}</b>.`;
   const parts = [["rf", "cash", rfP, gRf], ["beta", "market risk (β · ERP)", bP, gB]];
   if (on && aP !== 0) parts.push(["alpha", "analysts", aP, gA]);
-  const bar = mpBarHtml(parts, muP, sgnM, pc);
+  const bar = mpBarHtml(parts, muP, gain, sgnM, pc);
 
   // --- the four cards ---------------------------------------------------------
   const row = (k, v) => `<span>${k}</span><span>${v}</span>`;
@@ -4739,8 +4739,9 @@ const _mpT = (x, y, s, o = {}) => `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}"
 /* μ as one bar across the card's width: positive parts stack right of zero,
  * negative parts left of it (a stock with a negative beta), each labelled
  * with its % and its share of the money gain. HTML, not SVG, so the bar
- * fills whatever width the card has (the owner, 2026-10-30). */
-function mpBarHtml(parts, muP, sgnM, pc) {
+ * fills whatever width the card has; it ends in "=" and the total as a
+ * solid capsule, μ in it and the money below (the owner's pick A, 2026-10-30). */
+function mpBarHtml(parts, muP, gain, sgnM, pc) {
   const shown = parts.filter(p => p[2]);
   const pos = shown.filter(p => p[2] > 0).reduce((s, p) => s + p[2], 0);
   const neg = shown.filter(p => p[2] < 0).reduce((s, p) => s - p[2], 0);
@@ -4757,7 +4758,9 @@ function mpBarHtml(parts, muP, sgnM, pc) {
   // With a negative part, zero and the net μ are marked on the bar.
   const at = (v) => `${((v + neg) / span * 100).toFixed(2)}%`;
   const marks = neg ? `<i class="mp-zero" style="left:${at(0)}"></i><i class="mp-netm" style="left:${at(muP)}"></i>` : "";
-  return `<div class="mp-bar">${segs}${marks}</div>`;
+  const sum = `<span class="mp-eqsign">=</span><div class="mp-sum"><span class="mp-seg-l">μ a year</span>`
+    + `<div class="mp-sum-b"><span>${muP < 0 ? "−" : ""}${pc(Math.abs(muP))}</span></div><span class="mp-seg-l mp-seg-g">${sgnM(gain)}</span></div>`;
+  return `<div class="mp-bar"><div class="mp-parts">${segs}${marks}</div>${sum}</div>`;
 }
 
 /* The US bill's past year (frontier._risk_free_history), today's dot. */
@@ -4978,7 +4981,7 @@ function mpOpen(tip, host) {
     r.style.transformOrigin = r.parentElement.classList.contains("mp-neg") ? "right center" : "left center";
     r.animate([{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], { ...B, duration: 560, delay: 180 + i * 230, easing: E.spring });
   });
-  card.querySelectorAll(".mp-bar .mp-seg-l, .mp-bar .mp-seg-b > span, .mp-bar i").forEach((t) => t.animate([{ opacity: 0 }, { opacity: 1 }], { ...B, duration: 300, delay: 260 + segs.length * 230 }));
+  card.querySelectorAll(".mp-bar .mp-seg-l, .mp-bar .mp-seg-b > span, .mp-bar i, .mp-eqsign, .mp-sum-b").forEach((t) => t.animate([{ opacity: 0 }, { opacity: 1 }], { ...B, duration: 300, delay: 260 + segs.length * 230 }));
   const big = card.querySelector(".mp-big");
   if (big?.dataset.to) {
     const ccy = big.dataset.ccy || undefined;

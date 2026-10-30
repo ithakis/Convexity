@@ -1090,7 +1090,14 @@
   /* Charts sit centred in their card and shrink with it (viewBox keeps their shape). */
   .mp-svg { display: block; margin: 6px auto 2px; overflow: visible; max-width: 100%; height: auto; }
   /* The μ bar (mpBarHtml): its parts share the card's full width by size. */
-  .mp-bar { position: relative; display: flex; gap: 2px; }
+  .mp-bar { display: flex; align-items: flex-start; }
+  .mp-parts { position: relative; flex: 1; min-width: 0; display: flex; gap: 2px; }
+  /* The total: "=" and a solid capsule in the text colour, flush with the bar. */
+  .mp-eqsign { flex: 0 0 auto; height: 24px; margin-top: 16px; padding: 0 9px; display: flex; align-items: center; color: var(--muted); font-size: 15px; }
+  .mp-sum { flex: 0 0 auto; display: flex; flex-direction: column; }
+  .mp-sum .mp-seg-l { color: var(--text); }
+  .mp-sum-b { height: 24px; display: flex; align-items: center; padding: 0 12px; border-radius: 12px;
+    background: var(--text); color: var(--tip-bg); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .mp-seg { display: flex; flex-direction: column; min-width: 0; }
   .mp-seg-l { display: flex; justify-content: center; height: 16px; white-space: nowrap; font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .mp-seg-g { font-size: 11px; height: auto; margin-top: 4px; }
@@ -1099,8 +1106,8 @@
   .mp-neg .mp-seg-b { opacity: 0.55; }
   .mp-bg-rf { background: var(--mp-rf); } .mp-bg-beta { background: var(--mp-beta); }
   .mp-bg-erp { background: var(--mp-erp); } .mp-bg-alpha { background: var(--mp-alpha); }
-  .mp-bar .mp-zero { position: absolute; top: 13px; height: 30px; width: 1px; margin-left: -0.5px; background: var(--text); }
-  .mp-bar .mp-netm { position: absolute; top: 41px; margin-left: -4px; border: 4px solid transparent; border-bottom: 6px solid var(--text); border-top: 0; }
+  .mp-parts .mp-zero { position: absolute; top: 13px; height: 30px; width: 1px; margin-left: -0.5px; background: var(--text); }
+  .mp-parts .mp-netm { position: absolute; top: 41px; margin-left: -4px; border: 4px solid transparent; border-bottom: 6px solid var(--text); border-top: 0; }
   .mp-rows { display: grid; grid-template-columns: 50px 1fr; gap: 2px 7px; font-size: 11.5px; line-height: 1.45; margin-top: 4px; }
   .mp-rows > span:nth-child(odd) { color: var(--muted); font-size: 11px; font-weight: 600; padding-top: 0.5px; }
   .mp-ladder { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; margin: 6px 0 2px; font-size: 11px; color: var(--muted); }
