@@ -9,6 +9,12 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.29.2 — 2026-10-30
+
+- **The newest earnings flag shows on every range.** A report from the last day or two was dropped at the chart's right edge on 1Y, 5Y and MAX; it now always shows, and crowded flags thin out from the oldest.
+- **Hover a forecast readout to see its paths.** The 50% and 90% ranges, "Falls 20% or more", the Street target and "above today" light the simulated paths that end there in the band's colour (blue, red, gold, green) and fade the rest; on −20%, paths that touched it and recovered show faintly. That slice of the density fills in the same colour, and its levels run only from the density's spine to its curve.
+- **A cleaner Street target label:** "Street target 12M" and the price on one line, "not a forecast" beneath, a smaller diamond and a dotted leader to it.
+
 ## 1.29.1 — 2026-10-28
 
 - **Model price, explained.** The stock window's "Model price" hover is a card: both equations filled in, μ built up in % and in money, then one card per input (r_f, β, ERP, α) with its chart and Why / Used / What if rows, all on real data (new `GET /api/beta-scatter`).
