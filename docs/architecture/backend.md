@@ -338,6 +338,52 @@ over NVO.
 - **OID lines.** `_us_lines` also counts OID-board lines whose `region` is
   empty (1,029 OTC ADRs such as NSRGY, ISNPY and SCGLY were invisible to it).
 
+### Yahoo answers without fundamentals (2026-10-30)
+
+Yahoo sometimes answers a share's `quoteSummary` without its `financialData`
+module for a few minutes: identity and multiples arrive, but no revenue,
+margins, FCF, financial currency, analyst targets or count. yfinance turns
+that into an `.info` with those keys missing and an `analyst_price_targets`
+of `{}`, the same shape as "this listing has no analysts". On MU (45
+analysts) the stock window then showed "no analyst targets, so no tilt", n/a
+fundamentals and no coverage card, and σ/μ cached a model price without the
+analysts' α for 15 minutes, while the saved row (built the night before)
+had all of it.
+
+The two cases are separable. A share always carries `financialData`: all
+121 equities in the owner's portfolios did, and a secondary line with no
+targets of its own (NVD.DE, WMT.DE, CCC3.DE) still answers it with its
+`current` price and revenue. A fund never has it. So:
+
+- `helpers.fundamentals_missing(info)`: an `EQUITY` with neither
+  `financialCurrency` nor `totalRevenue`.
+- `fetcher._safe_info` asks once more on a **fresh** `yf.Ticker` (yfinance
+  keeps the first answer on the object) after 0.4 s; an answer that stays
+  degraded carries `_fundamentals_missing`. The hot path pays the extra
+  request only when Yahoo misbehaves.
+- `analyst_targets.consensus`: degraded `.info` is not read as "no targets";
+  `financialData` is asked alone. An empty answer for a share is an
+  **unknown** miss (`{"v": None, "unknown": True}`, `UNKNOWN_TTL` 2 min,
+  `analyst_targets.unknown(*symbols)`); `{"current": ...}` with no targets
+  stays a real miss (`MISS_TTL`). A cached miss never outranks a caller
+  holding a healthy `.info` with a target.
+- σ/μ (`options_density`): `analysts_unknown` on the payload (both the
+  options and the history paths) when a share's block is missing because of
+  an unknown miss on any line it was looked up on; such a payload is cached
+  `UNKNOWN_TTL` (1 min), not `TTL`.
+- `fetch_detail` and `_research_info` keep a degraded answer `_DEGRADED_TTL`
+  (1 min); `research_line` does not count a degraded candidate as an
+  answer, so it never writes "no research line" to disk for a day.
+- `fetch_one`: a row still degraded after the retry keeps the **last saved
+  row's** fundamentals and analysts for its gaps
+  (`fetcher._carry_fundamentals`, `persistence.last_saved_row`), with
+  `fundamentals_asof` saying when they are from; price and technicals are
+  always this fetch's. `xlsx_export` skips both bookkeeping keys.
+
+`tests/test_degraded_info.py` pins every rule. A new cache of analyst or
+fundamental data must treat `_fundamentals_missing` / an unknown miss the
+same way.
+
 ### Analytics (`/api/portfolio-analytics-multi`)
 `analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
 Returns either `{set_name: analytics_dict | {"error": ...}}` OR

@@ -282,6 +282,18 @@ Each of these has cost real debugging time; the link goes to the full story.
   zeroed chain falls back to `state/chains/<line>.json`.
   [backend.md → research line](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson) ·
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity)
+- **A share's `.info` without `financialData` is a degraded answer, never
+  "no analysts"** (MU, 2026-10-30: 45 analysts, but the window cached "no
+  analyst targets", n/a fundamentals and a model price with no α).
+  `helpers.fundamentals_missing` detects it (a share always has the module,
+  even NVD.DE; a fund never does); `_safe_info` asks once more on a fresh
+  Ticker, then marks it `_fundamentals_missing`. Every cache keyed off those
+  fields keeps it briefly only: `consensus` caches an **unknown** miss 2 min
+  (`analyst_targets.unknown`), σ/μ a payload built on it 1 min, the detail
+  and research info 1 min, `research_line` never records it, and a row keeps
+  the last saved row's fundamentals (`fundamentals_asof`). A new cache of
+  analyst or fundamental data must follow the same rule.
+  [backend.md → degraded answers](docs/architecture/backend.md#yahoo-answers-without-fundamentals-2026-10-30)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---

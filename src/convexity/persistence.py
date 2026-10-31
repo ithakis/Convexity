@@ -163,6 +163,32 @@ def save_view(name: str, entries: str, rows: list, *, set_last: bool = True) -> 
     return payload
 
 
+def last_saved_row(symbol: str) -> tuple[dict, str] | None:
+    """The most recently saved row of ``symbol`` in any portfolio, with its
+    view's ``saved_at``; None when no saved view holds it. Read only when
+    Yahoo withholds a share's fundamentals (fetcher._carry_fundamentals)."""
+    sym = (symbol or "").upper()
+    if not sym:
+        return None
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+    views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+    best: tuple[dict, str] | None = None
+    for view in views_map.values():
+        if not isinstance(view, dict):
+            continue
+        at = str(view.get("saved_at") or "")
+        for row in view.get("rows") or []:
+            if (
+                isinstance(row, dict)
+                and str(row.get("symbol") or "").upper() == sym
+                and not row.get("error")
+                and (best is None or at > best[1])
+            ):
+                best = (row, at)
+    return best
+
+
 def mark_view_stale(name: str, entries: str) -> bool:
     clean_name = (name or "").strip()
     if not clean_name:

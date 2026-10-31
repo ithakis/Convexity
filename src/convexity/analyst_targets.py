@@ -48,6 +48,10 @@ TARGET_STALE = 182  # days: older than this is flagged (drawn faded in σ/μ)
 BAND = 4.0  # a target further than 4x from the price either way is another line's
 TTL = 6 * 3600.0
 MISS_TTL = 1800.0  # Yahoo answered nothing: ask again sooner (§9: never cache a failure long)
+# Yahoo sent no financialData at all for a share (helpers.fundamentals_missing):
+# we do not know whether it has analysts, so the miss is kept two minutes only
+# and marked, and σ/μ does not keep a model price built on it (MU, 2026-10-30).
+UNKNOWN_TTL = 120.0
 _KEEP_ACTIONS = ("main", "reit")  # actions that leave the firm's previous target standing
 
 
@@ -205,33 +209,78 @@ def summary_from_info(info: dict | None) -> dict:
     }
 
 
+def _price_targets(tk) -> tuple[dict, bool]:
+    """Yahoo's target summary from ``financialData`` and whether the answer
+    is unknown. A share always answers with the module (its ``current``
+    price at least, even NVD.DE with no targets of its own); an empty dict
+    is a failed or degraded answer, or a fund, which has no module."""
+    try:
+        s = tk.analyst_price_targets or {}
+    except Exception:
+        s = {}
+    summary = {
+        "mean": s.get("mean"),
+        "median": s.get("median"),
+        "low": s.get("low"),
+        "high": s.get("high"),
+        "price": s.get("current"),
+        "n_opinions": None,
+    }
+    return summary, not s
+
+
+def _is_fund(symbol: str) -> bool:
+    """capm.is_fund (the symbol pack, no network); False on any failure."""
+    try:
+        from convexity import capm
+
+        return capm.is_fund(symbol)
+    except Exception:
+        return False
+
+
+def unknown(*symbols: str) -> bool:
+    """Whether the cached block of any of ``symbols`` is an unknown miss
+    (Yahoo sent no financialData): a caller that bakes the block into a
+    longer cache keeps that one short too."""
+    for sym in symbols:
+        hit = _cache_get(f"analyst_targets|{(sym or '').upper()}") if sym else None
+        if hit is not None and hit.get("unknown"):
+            return True
+    return False
+
+
 def consensus(symbol: str, tk=None, info: dict | None = None, splits=None, price=None):
     """The consensus block for ``symbol`` (see the module docstring), cached
     for ``TTL``. ``tk``/``info``/``splits``/``price`` are optional: pass what
     the caller already fetched and nothing is asked twice. None when Yahoo
-    has no target at all (a fund)."""
+    has no target at all (a fund), or did not say (an unknown miss, see
+    :func:`unknown`)."""
+    from convexity.helpers import fundamentals_missing
+
     key = f"analyst_targets|{(symbol or '').upper()}" if symbol else None
+    degraded = bool(info) and (info.get("_fundamentals_missing") or fundamentals_missing(info))
     hit = _cache_get(key) if key else None
-    if hit is not None:
+    # A cached miss never outranks a caller holding a healthy answer with a
+    # target (the miss may be a degraded answer from minutes ago).
+    if hit is not None and not (
+        hit.get("v") is None
+        and info
+        and not degraded
+        and (_num(info.get("targetMeanPrice")) or _num(info.get("numberOfAnalystOpinions")))
+    ):
         return hit.get("v")
     import yfinance as yf
 
     tk = tk or yf.Ticker(symbol)
-    if info is None:
-        try:
-            s = tk.analyst_price_targets or {}
-        except Exception:
-            s = {}
-        summary = {
-            "mean": s.get("mean"),
-            "median": s.get("median"),
-            "low": s.get("low"),
-            "high": s.get("high"),
-            "price": s.get("current"),
-            "n_opinions": None,
-        }
+    if info is not None and not degraded:
+        summary, unsure = summary_from_info(info), False
     else:
-        summary = summary_from_info(info)
+        # No .info, or one without its fundamentals: ask financialData alone.
+        summary, unsure = _price_targets(tk)
+        qt = ((info or {}).get("quoteType") or "").upper()
+        if unsure and (qt and qt != "EQUITY" or not qt and _is_fund(symbol)):
+            unsure = False  # a fund: no module by design, a real "none"
     if all(summary.get(k) is None for k in ("mean", "median", "low", "high")) and not summary.get(
         "n_opinions"
     ):
@@ -241,8 +290,13 @@ def consensus(symbol: str, tk=None, info: dict | None = None, splits=None, price
         # euros, ~11% high, while its grid row (fetch_one skips such a listing
         # and scales the research line's targets) said EUR 84.09. None here,
         # so every caller falls through to the research line the same way.
+        # Unless Yahoo said nothing at all: then it is unknown, not none.
         if key:
-            _cache_put(key, {"v": None}, MISS_TTL)
+            if unsure:
+                print(f"[targets] {symbol}: Yahoo sent no financialData, asking again in 2 min")
+                _cache_put(key, {"v": None, "unknown": True}, UNKNOWN_TTL)
+            else:
+                _cache_put(key, {"v": None}, MISS_TTL)
         return None
     px = _num(price) or _num(summary.get("price"))
     try:

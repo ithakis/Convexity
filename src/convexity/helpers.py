@@ -298,6 +298,25 @@ def finite_num(v) -> float | None:
 MINOR_UNIT_CCY = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ZAC": "ZAR", "ILA": "ILS"}
 
 
+def fundamentals_missing(info: dict | None) -> bool:
+    """True when Yahoo's ``.info`` for a share came back without its
+    ``financialData`` module: no revenue, margins, FCF, financial currency,
+    analysts' targets or count. A share always has that module (121 of 121
+    equities in the owner's portfolios, 2026-10-30, even secondary lines like
+    NVD.DE, which carry it without targets); a fund never does. So a share
+    without it is a degraded answer, never "this company has no analysts".
+
+    On 2026-10-30 Yahoo dropped it for MU for a few minutes. The stock window
+    then cached "no analyst targets" and n/a fundamentals and σ/μ lost the
+    analysts' α, although MU has 45 analysts. Every cache that keys off these
+    fields must treat this answer as unknown (short TTL, never on disk)."""
+    if not isinstance(info, dict) or not info:
+        return False
+    if (info.get("quoteType") or "").upper() != "EQUITY":
+        return False
+    return not info.get("financialCurrency") and info.get("totalRevenue") is None
+
+
 def major_ccy(ccy: str | None) -> str:
     """The major-unit ISO code for a Yahoo currency ("GBp" -> "GBP")."""
     c = (ccy or "USD").strip()

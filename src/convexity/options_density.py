@@ -63,6 +63,7 @@ GRID = 4001
 GRID_SD = 10  # the log-strike grid spans +-GRID_SD ATM standard deviations
 OUT_POINTS = 401
 TTL = 900.0
+UNKNOWN_TTL = 60.0  # a payload whose analysts Yahoo withheld (analysts_unknown)
 RATE_TTL = 3600.0
 HORIZONS = (91, 365)
 # The expiry a horizon may use. Small caps list nothing past 5-7 months
@@ -794,18 +795,18 @@ def _earnings(
     return out
 
 
-def _analysts(tk) -> dict | None:
+def _analysts(tk, info: dict | None = None) -> dict | None:
     """The app's one analyst block for this ticker (analyst_targets.consensus:
     each firm's latest 12-month target, split-adjusted; Yahoo's summary as the
     fallback), in the chain's currency. The same cached block the grid row and
     the coverage card read, so σ/μ can never show another number."""
     from convexity import analyst_targets
 
-    return analyst_targets.consensus(getattr(tk, "ticker", None), tk=tk)
+    return analyst_targets.consensus(getattr(tk, "ticker", None), tk=tk, info=info)
 
 
 def _own_analysts(
-    symbol: str, chain_sym: str, tk, ratio: float, s0: float
+    symbol: str, chain_sym: str, tk, ratio: float, s0: float, info: dict | None = None
 ) -> tuple[dict | None, bool]:
     """Analysts for a window whose options are another line's (a non-US name
     on its US chain): the listing's OWN block, the number its row shows (its
@@ -832,8 +833,24 @@ def _own_analysts(
                 own = _research_analysts(symbol, s0)
         if own:
             return analyst_targets.scaled(own, 1.0 / ratio), True
-        return _analysts(tk), False
-    return _analysts(tk), True
+        return _analysts(tk, info), False
+    return _analysts(tk, info), True
+
+
+def _analysts_unknown(symbol: str, chain_sym: str) -> bool:
+    """Whether a share's window has no analysts only because Yahoo did not
+    say (analyst_targets.unknown on every line the block was looked up on):
+    then the payload, whose model price has no α, is not cached for ``TTL``.
+    Lines already resolved by ``_own_analysts``, so no network here."""
+    from convexity import analyst_targets, fetcher
+
+    lines = [symbol, chain_sym]
+    with contextlib.suppress(Exception):
+        lines.append(fetcher.analyst_line(symbol) or "")
+    if chain_sym != symbol:
+        with contextlib.suppress(Exception):
+            lines.append(fetcher.research_line(symbol) or "")
+    return analyst_targets.unknown(*lines)
 
 
 def _research_analysts(symbol: str, S0: float) -> dict | None:
@@ -1630,7 +1647,9 @@ def density(symbol: str, horizon: int = 365, prefs: dict | None = None) -> dict:
             f"[density] {symbol} {horizon}d {out.get('source', 'options')} via {out.get('chain_symbol')}"
             f" in {time.time() - t0:.1f}s"
         )
-        cache._cache_put(key, out, TTL)
+        # A model price built while Yahoo withheld the analysts is kept a
+        # minute: the next open asks again instead of showing no α for 15.
+        cache._cache_put(key, out, UNKNOWN_TTL if out.get("analysts_unknown") else TTL)
         return out
 
 
@@ -1791,7 +1810,9 @@ def _compute(symbol: str, horizon: int, st: dict) -> dict:
         print(f"[density] fx {chain_sym}: {type(e).__name__}")
     an, own = None, True
     try:
-        an, own = _own_analysts(symbol, chain_sym, tk, ratio, S0 * ratio)
+        # cinfo (the chain line's .info, already fetched) tells a fund from
+        # a share whose analysts Yahoo withheld (analyst_targets.unknown).
+        an, own = _own_analysts(symbol, chain_sym, tk, ratio, S0 * ratio, cinfo)
     except Exception as e:
         print(f"[density] analysts {chain_sym}: {type(e).__name__}")
     info = cinfo
@@ -1813,6 +1834,9 @@ def _compute(symbol: str, horizon: int, st: dict) -> dict:
         name=info.get("longName") or info.get("shortName"),
     )
     curves = _payload_curves(rn, {"rn": (rn["q"], "Q"), **mcurves}, fx)
+    unsure = False
+    if an is None and ((info or {}).get("quoteType") or qtype).upper() == "EQUITY":
+        unsure = _analysts_unknown(symbol, chain_sym)
     try:
         earnings = _earnings(
             tk, chain_sym, exps, S0, rf, days, dt.date.fromisoformat(meta["session"])
@@ -1825,6 +1849,7 @@ def _compute(symbol: str, horizon: int, st: dict) -> dict:
         "fx": fx,
         "curves": curves,
         "analysts": an,
+        "analysts_unknown": unsure,
         "model": mdl,
         "earnings": earnings,
     }
@@ -1950,7 +1975,7 @@ def _history(symbol: str, horizon: int, st: dict) -> dict:
         from convexity import fetcher
 
         an = (_research_analysts(symbol, S0) if fetcher.analyst_line(symbol) else None) or (
-            _analysts(tk) or _research_analysts(symbol, S0)
+            _analysts(tk, info) or _research_analysts(symbol, S0)
         )
     except Exception as e:
         print(f"[density] analysts {symbol}: {type(e).__name__}")
@@ -2010,6 +2035,9 @@ def _history(symbol: str, horizon: int, st: dict) -> dict:
         "vol": {"implied": None, "implied_days": None, "hist": _hist_vol(symbol), "symbol": symbol},
         "curves": curves,
         "analysts": an,
+        "analysts_unknown": an is None
+        and (info.get("quoteType") or "").upper() == "EQUITY"
+        and _analysts_unknown(symbol, symbol),
         "model": mdl,
         "earnings": earnings,
     }

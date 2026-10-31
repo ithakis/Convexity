@@ -159,6 +159,10 @@ HOLDINGS_SKIP_EXTRAS = {
     "sparkline",
     "rs_rank",
     "error",
+    # Bookkeeping for a row Yahoo sent without fundamentals (fetcher
+    # _carry_fundamentals), not data.
+    "fundamentals_missing",
+    "fundamentals_asof",
     # Pass D — these now ride on every row (via fetch_one) but are also
     # rendered in the dedicated ANALYST_COLS block; skip the auto-extras
     # pass so they don't duplicate.

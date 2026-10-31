@@ -31,6 +31,7 @@ from convexity.helpers import (
     _series_to_points,
     _ytd_change,
     by_trading_date,
+    fundamentals_missing,
     major_ccy,
     price_in_major,
 )
@@ -58,14 +59,37 @@ _SECTOR_ETF = {
 }
 
 
-def _safe_info(tk: yf.Ticker) -> dict:
-    info: dict = {}
+# A detail or research answer Yahoo sent without its fundamentals is kept
+# this long only (helpers.fundamentals_missing): the next open asks again.
+_DEGRADED_TTL = 60.0
+
+
+def _raw_info(tk: yf.Ticker) -> dict:
     try:
         raw = tk.info
-        if isinstance(raw, dict):
-            info = raw
+        return raw if isinstance(raw, dict) else {}
     except Exception:
-        info = {}
+        return {}
+
+
+def _safe_info(tk: yf.Ticker) -> dict:
+    """``.info`` plus fast_info's gaps. A share's answer without its
+    fundamentals (helpers.fundamentals_missing: Yahoo dropped MU's for a few
+    minutes on 2026-10-30) is asked once more on a fresh Ticker (yfinance
+    keeps the first answer on the object); one that stays degraded carries
+    ``_fundamentals_missing`` so no cache keeps it as the truth. The retry
+    costs the hot path a request only when Yahoo misbehaves."""
+    info = _raw_info(tk)
+    if fundamentals_missing(info):
+        time.sleep(0.4)
+        again = _raw_info(yf.Ticker(tk.ticker))
+        if again and not fundamentals_missing(again):
+            print(f"[info] {tk.ticker}: fundamentals missing, recovered on retry")
+            info = again
+        else:
+            print(f"[info] {tk.ticker}: Yahoo sent no fundamentals (financialData)")
+            info = dict(info)
+            info["_fundamentals_missing"] = True
     try:
         fi = tk.fast_info
         if fi is not None:
@@ -279,8 +303,10 @@ def _apply_targets(out: dict, symbol: str, tk, info: dict, splits) -> None:
     with the app's one analyst number (analyst_targets.consensus): the same
     block the stock window, σ/μ and the analytics read. A fund (no target at
     all) is not asked: its summary is already empty."""
-    if _safe_num(info.get("targetMeanPrice")) is None and not _safe_num(
-        info.get("numberOfAnalystOpinions")
+    if (
+        _safe_num(info.get("targetMeanPrice")) is None
+        and not _safe_num(info.get("numberOfAnalystOpinions"))
+        and not info.get("_fundamentals_missing")
     ):
         return
     try:
@@ -289,6 +315,41 @@ def _apply_targets(out: dict, symbol: str, tk, info: dict, splits) -> None:
         print(f"[targets] {symbol}: {type(e).__name__}")
         return
     _targets.apply_to_row(out, block)
+
+
+# The row fields that come from Yahoo's financialData module, which it
+# sometimes withholds (helpers.fundamentals_missing): fundamentals, analysts.
+_FUNDAMENTAL_FIELDS = (
+    "operating_margin", "debt_equity", "current_ratio", "quick_ratio", "roe", "roa",
+    "gross_margin", "profit_margin", "revenue_growth", "earnings_growth", "payout_ratio",
+    "financial_currency", "fcf_yield", "ps_ratio", "ev_ebitda", "ev_revenue",
+    "recommendation_mean", "rec_key", "n_analysts", "target_mean_price", "target_low",
+    "target_high", "target_median", "target_n_firms", "target_source", "target_age_days",
+    "target_n_stale", "target_raised_90d", "target_lowered_90d",
+)  # fmt: skip
+
+
+def _carry_fundamentals(out: dict, symbol: str) -> None:
+    """A row whose ``.info`` came back without fundamentals even on retry
+    keeps the last saved row's values for the gaps, never blanks: a Refresh
+    while Yahoo misbehaves would otherwise save MU with no analysts and no
+    margins until the next one. ``fundamentals_asof`` says when they are
+    from (that view's save); prices and technicals are always this fetch's."""
+    from convexity import persistence
+
+    try:
+        hit = persistence.last_saved_row(symbol)
+    except Exception:
+        hit = None
+    if not hit:
+        return
+    prior, at = hit
+    filled = [k for k in _FUNDAMENTAL_FIELDS if out.get(k) is None and prior.get(k) is not None]
+    for k in filled:
+        out[k] = prior[k]
+    if filled:
+        out["fundamentals_asof"] = prior.get("fundamentals_asof") or at
+        print(f"[info] {symbol}: {len(filled)} fundamentals kept from the row saved {at[:16]}")
 
 
 def _yf_rec_trend(tk) -> list[dict]:
@@ -392,9 +453,10 @@ def _research_info(line: str) -> dict:
         return hit.get("v") or {}
     info = _safe_info(yf.Ticker(line))
     ok = bool(info.get("longName") or info.get("shortName"))
-    _cache_put(
-        key, {"v": info if ok else {}}, _CACHE_TTL_ANALYTICS if ok else _RESEARCH_INFO_MISS_TTL
-    )
+    # An answer without fundamentals has no analyst count either: it would
+    # read as "no research line" (0 analysts), so it is kept briefly only.
+    ttl = _CACHE_TTL_ANALYTICS if ok and not info.get("_fundamentals_missing") else _DEGRADED_TTL
+    _cache_put(key, {"v": info if ok else {}}, ttl if ok else _RESEARCH_INFO_MISS_TTL)
     return info if ok else {}
 
 
@@ -436,7 +498,9 @@ def research_line(symbol: str) -> str | None:
     best, n_best, answered = None, 0.0, not cands
     for c in cands:
         info = _research_info(c)
-        answered = answered or bool(info)
+        # A degraded answer is not an answer: recording "no research line"
+        # on its 0 analysts would stick for a day (_RESEARCH_MISS_TTL).
+        answered = answered or bool(info and not info.get("_fundamentals_missing"))
         n = _safe_num(info.get("numberOfAnalystOpinions")) or 0.0
         if n > n_best:
             best, n_best = c, n
@@ -709,6 +773,9 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             info = _safe_info(tk)
             _row_fields(info, last, out)
             _apply_targets(out, symbol, tk, info, splits)
+            if info.get("_fundamentals_missing"):
+                out["fundamentals_missing"] = True
+                _carry_fundamentals(out, symbol)
 
             out["earnings_surprise"] = _earnings_surprise_yf(tk, symbol)
 
@@ -1130,6 +1197,8 @@ def fetch_detail(symbol: str) -> dict:
     out["atl"] = float(close.min())
 
     info = _safe_info(tk)
+    # Yahoo's answer without fundamentals: shown as it is, kept a minute only.
+    out["fundamentals_missing"] = bool(info.get("_fundamentals_missing"))
     out["name"] = info.get("longName") or info.get("shortName") or symbol
     out["currency"] = info.get("currency") or "USD"
     out["exchange"] = info.get("exchange") or info.get("fullExchangeName") or ""
@@ -1407,7 +1476,7 @@ def fetch_detail(symbol: str) -> dict:
         out["beta_sector"] = beta_sec
         out["correlation_sector"] = corr_sec
 
-    _cache_put(cache_key, out)
+    _cache_put(cache_key, out, _DEGRADED_TTL if out["fundamentals_missing"] else None)
     return out
 
 
