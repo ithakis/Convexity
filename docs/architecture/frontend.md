@@ -47,6 +47,33 @@ dependency (loaded from CDN, used only for column-guide formulas).
   `invBench()` (the KPI sub-line, the legend, the brush, `inv:twr`,
   `inv:risk`). The line is red and dashed (`.inv-l-bench`, `var(--neg)`), the
   money put in stays a gray dash.
+- **Drivers (owner's picks from mockups, 2026-11-02).** The Drivers button
+  between Columns and + Add swaps the holdings table for four tabs
+  (`INV_DRV_TABS`, `invDriversPaint`), kept per browser (`inv_drivers`,
+  `inv_drv_tab`, `inv_drv_risk`); Columns is disabled while it shows. Every tab
+  follows the period pill. Waterfall is the Portfolio tab's chart beside one
+  switchable risk figure (`INV_RISKS`: Risk share, Bad month, Worst fall, Below
+  high, Recovery). Value for risk ranks each holding's share of the period's
+  **gross** gains and losses against its risk share: a share of the net flips
+  or explodes when the return is near zero, so the sentence above it speaks in
+  points. Map (`drawInvDrvMap`, redrawn on resize) plots contribution against
+  the chosen risk, both axes square-root scaled so one extreme holding can't
+  flatten the rest. Distribution draws how far below its high each holding
+  sits (median to 95th percentile, worst, today) and its recovery times.
+  Contributions and risk share come with the page; the rest arrives from
+  `GET /api/investments/risk` (`invRiskLoad`, once per holdings set and
+  currency), so those cells show a dash until it answers, with a Try again if
+  it fails. One hover card, `inv:drv`, serves every tab.
+- **The + Add button** (owner, 2026-11-02): cut corner to corner, the model
+  price red above, `#2c9c5c` below (white text measures 3.5:1 on it, 2.5:1 on
+  the table's dark-mode green), fixed in every theme. The cut is a gradient
+  with a tiny soft stop, never a drawn line; `border-box` keeps the same 22 px
+  height as Columns.
+- **⌘/Ctrl+1-4** switch the topbar's tabs left to right (the global keydown
+  handler, by `e.code`, so a non-US layout still works). A key never toggles a
+  tab shut, ⌘4 opens Optimize (from My Investments it goes through Portfolio
+  first, where the optimizer's portfolio lives), and the keys leave Optimize but
+  are ignored over any other overlay.
 - **Performance: the top of the page (owner's layout A1, 2026-10-11).** The
   value, then last month's change on its own line ("▼ $2,326 (−1.0%) past
   month", the 1M window). Four KPIs: **Total profit** (lifetime, "not
@@ -97,11 +124,13 @@ dependency (loaded from CDN, used only for column-guide formulas).
   `cell`). On by default (owner, 2026-10-11): today's eight plus
   Contribution and Risk; News read, Market read, Dividends, Yield on cost
   and Analyst Δ start off. The Columns button beside "+ Add" opens a
-  checklist (`invColsMenu`, kept per browser in `inv_cols`). `risk` is
-  `merged`: it draws risk share as a blue bar under the gray weight bar in
-  the Weight cell (`invWeightCell`, scaled to the biggest of either; risk
-  blue is a fixed data colour, never the theme accent), exact figures in
-  `inv:risk_share`. Contribution follows the period pill (`invContrib`),
+  checklist (`invColsMenu`, kept per browser in `inv_cols`). Weight and
+  Risk are separate columns, each a number over a bar filling its cell
+  (`invBarCell`, gray and blue, both scaled to the biggest of either; risk
+  blue is a fixed data colour, never the theme accent), the explanation in
+  `inv:risk_share`. A negative risk share (a holding that lowers the book's
+  risk) has no bar. Holding names stop at 232 px with an ellipsis, or the two
+  columns push Contribution off a 1440 px window. Contribution follows the period pill (`invContrib`),
   shown as points; its colour uses the rounded figure (`invPtsCls`).
   The `<tfoot>` holds Cash (with the "Cash and fees" contribution), a bold
   Total (value, 100%, Total profit, the period's Return as the

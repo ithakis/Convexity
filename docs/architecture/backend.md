@@ -526,6 +526,7 @@ before that (and never for a row with no mean target: no coverage, a fund).
 - `/api/watchlists`                — `{name: entries_string}` map
 - `/api/investments`               — My Investments page payload (`investments.book(ccy)`, `?ccy=` the display currency; the benchmark comes from `prefs.json`), computed by replaying the ledger. Never writes the book file. See "My Investments" below
 - `/api/prefs`                     — the saved preferences (`persistence.load_prefs`), allow-listed
+- `/api/investments/risk?ccy=`     — each holding's own risk for the Drivers view and the export (`investments.holding_risk`): ten years of closes per holding, so never on the page's path
 - `/api/investments/symbols`       — open positions only, no network (the Portfolio tab's pinned book pill)
 - `/api/investments/lookup?q=…`    — company typeahead for the Add popover (symbol pack)
 - `/api/symbol-names?s=A,B`         — company names for constituent pills not built yet (local symbol pack only, unknown tickers left out)
@@ -851,6 +852,23 @@ return; an oversell is refused; an edit that breaks a later sell is refused.
   in its own currency, with its cash effect) after Overview, in the page's
   display currency (`/api/export-xlsx?ccy=`). A book alone is enough to
   export.
+
+### My Investments holding risk (`investments.holding_risk`, 2026-11-02)
+
+Each holding on its own, in the display currency with dividends reinvested, over
+`RISK_SPAN` (10 years; under 20 s cold for a book of about 30 names, cached 30
+minutes, failures not cached). A short listing goes through `extend_history` (Yahoo
+can answer a young secondary line with **one** close), and every series through
+`_xray_clean` (old glitches otherwise read as a 30-year fall). `_total_closes`
+must keep its `retry` argument: without it `extend_history` falls back to the
+retrying fetch for stand-ins, and a cold read went from 18 s to 99 s. `_risk_stats`:
+Bad month is `mpt.var_cvar_horizon` at 95% on the last `RISK_VAR_DAYS` (the
+optimizer's 10-day estimator scaled to 30, reported negative); the drawdown
+figures are percent, negative. Recovery times span high to next high for falls
+of `RISK_MIN_FALL` or more; **the unfinished fall is kept apart (`open_days`)**,
+because dropping it makes the holding that never came back look the quickest
+(a young listing's small dips recover in days while its one big fall still
+runs). The Positions sheet carries the same figures.
 
 ### My Investments page speed (2026-10-12)
 - **`investments.page(ccy)`** is what the route, the export and every change

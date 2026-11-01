@@ -3850,8 +3850,8 @@
   /* Headers (owner's "kicker" pick, 2026-10-12): caps, tracked, a step
      brighter than --muted. Every label ends on its numbers' right edge: the
      sort arrow hangs in the cell's right padding instead of pushing it. */
-  .inv-tbl th { color: var(--th-ink); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; text-align: right; vertical-align: bottom; padding: 8px 8px 7px; border-bottom: 1px solid var(--border); white-space: nowrap; position: relative; }
-  .inv-tbl td { text-align: right; padding: 4px 8px; height: 26px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .inv-tbl th { color: var(--th-ink); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; text-align: right; vertical-align: bottom; padding: 8px 6px 7px; border-bottom: 1px solid var(--border); white-space: nowrap; position: relative; }
+  .inv-tbl td { text-align: right; padding: 4px 6px; height: 26px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .inv-tbl .left { text-align: left; }
   .inv-tbl tbody tr:hover td { background: var(--hover); }
   /* Sortable headers (owner, 2026-10-11): the whole label is the button. */
@@ -3867,14 +3867,16 @@
   .inv-tbl tr.dragging td { opacity: 0.45; }
   .inv-tbl tr.drop-before td { box-shadow: inset 0 2px 0 var(--accent); }
   .inv-cash td { color: var(--muted); }
-  /* Phase 4: weight and risk share as two thin bars (weight gray, risk a
-     classic data blue, the same in every theme: never brand-tinted). */
-  .inv-wr { display: inline-flex; align-items: center; gap: 8px; border-radius: var(--r-sm); padding: 1px 0; }
-  .inv-wr-bars { display: inline-flex; flex-direction: column; gap: 2px; width: 56px; }
-  .inv-wr-bars i, .inv-wr-key { display: block; height: 4px; border-radius: var(--r-xs); }
-  .inv-wr-bars i.w, .inv-wr-key.w { background: var(--ns-flat); }
-  .inv-wr-bars i.r, .inv-wr-key.r { background: #3b7ddd; }
-  .inv-wr-key { display: inline-block; width: 12px; margin-right: 6px; vertical-align: middle; }
+  /* Weight and risk share: the number over a bar filling the cell, which runs
+     into the cell's padding so the number keeps the column's edge. Weight gray,
+     risk a classic data blue, the same in every theme: never brand-tinted. */
+  .inv-bar { position: relative; isolation: isolate; display: block; min-width: 54px; margin: -2px -5px; padding: 2px 5px; border-radius: var(--r-xs); }
+  .inv-bar i { position: absolute; left: 0; top: 0; bottom: 0; z-index: -1; border-radius: var(--r-xs); }
+  .inv-bar.w i { background: rgba(125, 133, 144, 0.32); }
+  .inv-bar.r i { background: rgba(59, 125, 221, 0.42); }
+  .inv-wr-key { display: inline-block; width: 12px; height: 4px; margin-right: 6px; vertical-align: middle; border-radius: var(--r-xs); }
+  .inv-wr-key.w { background: var(--ns-flat); }
+  .inv-wr-key.r { background: #3b7ddd; }
   .inv-tbl tfoot td { border-bottom: 1px solid var(--border); }
   .inv-tbl tr.inv-total td { font-weight: 700; color: var(--text); border-top: 1px solid var(--text); }
   .inv-closed-btn { border: none; background: none; padding: 1px 3px; font: inherit; color: var(--muted); cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
@@ -3889,6 +3891,8 @@
   .inv-div-amt { font-variant-numeric: tabular-nums; }
   .inv-div-foot { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding-top: 4px; }
   .inv-tipped { display: inline-flex; align-items: center; gap: 8px; border-radius: var(--r-sm); padding: 1px 3px; }
+  .inv-tbl td.left .inv-tipped { max-width: 232px; }
+  .inv-tbl td.left .inv-tipped > span:last-child { overflow: hidden; text-overflow: ellipsis; }
   .inv-rail { border-left: 1px solid var(--border); padding-left: 18px; min-height: 200px; }
   .inv-rail-anchor { margin: 4px 0 8px; }
   .inv-rail-anchor ~ .inv-rail-anchor { margin-top: 20px; }
@@ -4257,6 +4261,68 @@
     border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text);
   }
   .inv-add:hover { border-color: var(--accent); }
+  /* The page's one call to action (owner, 2026-11-02): cut corner to corner,
+     the model price button's red above, a green of equal weight below, the
+     same in every theme. The soft stop only anti-aliases the cut; no line. */
+  .inv-add.inv-add-go {
+    --add-r: #d65555; --add-g: #2c9c5c; padding-left: 14px; padding-right: 14px; color: #fff; border-color: transparent;
+    background: linear-gradient(to bottom right, var(--add-r) 49.7%, var(--add-g) 50.3%) border-box;
+  }
+  .inv-add.inv-add-go:hover { --add-r: #bf4343; --add-g: #248650; border-color: transparent; }
+  .inv-add.inv-add-go:active { --add-r: #9a3333; --add-g: #1d7043; }
+  .inv-add:disabled { opacity: 0.45; cursor: default; }
+  .inv-add.inv-cols-btn[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg-canvas); }
+
+  /* Drivers: the holdings table's other view. Rows are a grid per tab,
+     bars keep the classic data colours, risk the same fixed blue as the table. */
+  .inv-drv-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 2px 0 10px; font-size: 12px; color: var(--muted); }
+  .inv-drv-bar .pf-contrib-toggle { margin-left: 0; }
+  .inv-drv-bar .sp { flex: 1; }
+  .inv-drv { font-size: 12px; font-variant-numeric: tabular-nums; }
+  .inv-drv-hd, .inv-drv-row { display: grid; align-items: center; column-gap: 10px; grid-template-columns: var(--drv-cols); }
+  .inv-drv-hd { color: var(--th-ink); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .inv-drv-hd .r { text-align: right; }
+  .inv-drv-row { height: 26px; border-bottom: 1px solid var(--border); }
+  .inv-drv-row[data-sym]:hover { background: var(--hover); }
+  .inv-drv-row.tot { height: 28px; font-weight: 700; border-top: 1px solid var(--text); border-bottom: 0; }
+  .inv-drv-row.minor { color: var(--muted); }
+  .inv-drv-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .inv-drv-name > span:last-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .inv-drv-name img, .inv-drv-name .logo-fallback { flex: none; }
+  .inv-drv-tr { position: relative; display: block; height: 13px; }
+  .inv-drv-tr .z { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--muted); opacity: 0.55; }
+  .inv-drv-tr .b { position: absolute; top: 1px; bottom: 1px; border-radius: 2px; }
+  .inv-drv-tr .pos { background: var(--pos); }
+  .inv-drv-tr .neg { background: var(--neg); }
+  .inv-drv-tr .tot { background: var(--accent); top: 0; bottom: 0; }
+  .inv-drv-tr .rk { background: #3b7ddd; }
+  .inv-drv-tr.thin { height: 6px; }
+  .inv-drv-tr.thin .b { top: 0; bottom: 0; }
+  .inv-drv-two { display: flex; flex-direction: column; gap: 2px; }
+  .inv-drv-v { text-align: right; white-space: nowrap; }
+  .inv-drv-v.pos, .inv-drv-sent .pos { color: var(--pos); }
+  .inv-drv-v.neg, .inv-drv-sent .neg { color: var(--neg); }
+  .inv-drv-sent { font-size: 14px; margin: 0 0 10px; }
+  .inv-drv-sent b { font-weight: 600; }
+  .inv-drv-note { margin-top: 8px; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+  .inv-drv-map { display: block; }
+  .inv-drv-map text { font-family: inherit; font-variant-numeric: tabular-nums; fill: var(--muted); font-size: 11.5px; }
+  .inv-drv-map text.nm { fill: var(--text); font-size: 11px; }
+  .inv-drv-map .gl { stroke: var(--border); }
+  .inv-drv-map .ax { stroke: var(--muted); }
+  .inv-drv-map .md { stroke: var(--muted); stroke-dasharray: 3 3; }
+  .inv-drv-map circle { fill-opacity: 0.38; stroke-width: 1.2; }
+  .inv-drv-map .pos circle { fill: var(--pos); stroke: var(--pos); }
+  .inv-drv-map .neg circle { fill: var(--neg); stroke: var(--neg); }
+  .inv-drv-map g[data-sym]:hover circle { fill-opacity: 0.7; }
+  .inv-drv-axis { display: flex; justify-content: space-between; font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 10.5px; color: var(--muted); }
+  .inv-ds .line { position: absolute; top: 6px; height: 1px; background: var(--muted); opacity: 0.7; }
+  .inv-ds .box { position: absolute; top: 2px; bottom: 2px; background: rgba(59, 125, 221, 0.55); border-radius: 2px; }
+  .inv-ds .now, .inv-ds .open { position: absolute; top: 2px; width: 9px; height: 9px; margin-left: -4.5px; box-shadow: 0 0 0 1.5px var(--bg-canvas); }
+  .inv-ds .now { border-radius: 50%; background: var(--text); }
+  .inv-ds .open { transform: rotate(45deg); background: var(--amber); }
+  .inv-ds-lg { display: inline-flex; align-items: center; gap: 5px; margin-right: 10px; }
+  .inv-ds-lg .inv-ds { display: inline-block; height: 13px; }
   .inv-rail-head { display: flex; margin: 0 0 10px; }
   .inv-rail-head .pf-contrib-toggle { margin-left: 0; }
   .inv-act-bar { display: flex; align-items: center; gap: 4px; margin: 0 0 6px; }

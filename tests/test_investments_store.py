@@ -751,11 +751,16 @@ def test_the_export_has_positions_and_ledger_sheets(srv, monkeypatch):
     # persistence binds views.json at import, so earlier tests' portfolios
     # are still listed: exporting them ran live analytics on real Yahoo.
     monkeypatch.setattr(server, "list_views", lambda: {"views": {}})
+    monkeypatch.setattr(inv, "holding_risk", lambda ccy=None: {"NVDA": {"mdd_pct": -60.0, "recmax": 300, "open_days": 12}})
     _seed()
     with urllib.request.urlopen(srv + "/api/export-xlsx?ccy=USD") as r:
         wb = load_workbook(io.BytesIO(r.read()))
     assert wb.sheetnames[:4] == ["Read me", "Overview", "Positions", "Ledger"]
     pos = wb["Positions"]
+    heads = [c.value for c in pos[4]]
+    nvda = next(r for r in pos.iter_rows(min_row=5, values_only=True) if r[1] == "NVDA")
+    assert nvda[heads.index("Worst fall (10y)")] == pytest.approx(-0.6)
+    assert nvda[heads.index("Longest recovery (trading days)")] == 300
     names = [pos.cell(row=k, column=1).value for k in range(5, pos.max_row + 1)]
     assert "Cash" in names and "Total" in names and "NVIDIA" in " ".join(n or "" for n in names)
     led = wb["Ledger"]

@@ -314,6 +314,14 @@ def _closes(symbols: list[str], period: str, retry: bool = True):
     return _bulk_close(symbols, period, adjusted=False, retry=retry)
 
 
+def _total_closes(symbols: list[str], period: str, retry: bool = True):
+    """Daily closes with dividends reinvested, quote unit: what holding the
+    share earned, for its own risk figures (``holding_risk``)."""
+    from convexity.analytics import _bulk_close
+
+    return _bulk_close(symbols, period, retry=retry)
+
+
 def _bench_closes(period: str, ticker: str):
     """A benchmark's total-return closes (dividends reinvested), in its
     quote currency."""
@@ -1666,6 +1674,78 @@ def _risk_share(syms, vps, qty_s, traded, i0: int) -> dict[str, float]:
         return {}
     out = {s: float(w[k] * sw[k] / var) for k, s in enumerate(held)}
     return out if all(math.isfinite(v) for v in out.values()) else {}
+
+
+RISK_SPAN = "10y"
+RISK_VAR_DAYS = 756  # three years of daily returns, like the optimizer's lookback
+RISK_MIN_FALL = 0.10  # a smaller dip isn't a recovery worth timing
+RISK_MIN_DAYS = 60
+
+
+def _risk_stats(px: np.ndarray) -> dict:
+    """One holding's own risk from its total-return closes, oldest first:
+    the 95% VaR over 30 days (the optimizer's 10-day estimator, scaled), the
+    worst fall, where it stands against its high, the median and 95th
+    percentile of its days below a high, and the trading days each fall of
+    ``RISK_MIN_FALL`` took to get back to it. ``open_days`` is the unfinished
+    one, kept apart: a fall still running hasn't recovered, and leaving it out
+    would make the holding that never came back look the quickest."""
+    from convexity import mpt
+
+    if len(px) < RISK_MIN_DAYS:
+        return {}
+    var = mpt.var_cvar_horizon((px[1:] / px[:-1] - 1)[-RISK_VAR_DAYS:], 0.95)[0]
+    dd = px / np.maximum.accumulate(px) - 1
+    highs = np.flatnonzero(dd == 0)
+    days = [int(b - a) for a, b in zip(highs, highs[1:], strict=False) if dd[a:b].min() <= -RISK_MIN_FALL]
+    last = int(highs[-1])
+    open_days = len(px) - 1 - last if dd[last:].min() <= -RISK_MIN_FALL else None
+    out = {"var_pct": -var * 100, "mdd_pct": dd.min() * 100, "now_pct": dd[-1] * 100,
+           "dd50_pct": np.quantile(dd, 0.5) * 100, "dd95_pct": np.quantile(dd, 0.05) * 100}  # fmt: skip
+    out = {k: round(float(v), 2) if math.isfinite(v) else None for k, v in out.items()}
+    return {**out, "rec50": float(np.median(days)) if days else None,
+            "rec90": float(np.quantile(days, 0.9)) if days else None,
+            "recmax": max(days, default=None), "open_days": open_days}  # fmt: skip
+
+
+def holding_risk(ccy: str | None = None) -> dict:
+    """{symbol: risk figures} for the holdings on the last page, each in the
+    display currency over ``RISK_SPAN``, for the Drivers view and the export.
+    Never on the page's path: ten years of closes per holding is a fetch of
+    its own. A short listing's history is the same company elsewhere
+    (``proxy``), and Yahoo's glitches are dropped as for the rail. A failed
+    fetch isn't cached."""
+    from convexity import cache
+    from convexity.analytics import extend_history
+    from convexity.fx import _apply_fx_to_closes
+
+    last = _LAST_PAGE["v"][1] or page(ccy)
+    held = [p for p in last.get("positions") or [] if not p.get("pending")]
+    disp = ccy or last.get("ccy") or "USD"
+    syms = [p["symbol"] for p in held]
+    key = f"inv_risk|{disp}|{','.join(sorted(syms))}"
+    hit = cache._cache_get(key)
+    if hit is not None:
+        return hit
+    if not syms:
+        return {}
+    qccy = {p["symbol"]: p.get("quote_ccy") or "USD" for p in held}
+    closes = _total_closes(syms, RISK_SPAN)
+    closes, proxied = extend_history(closes, syms, qccy, {p["symbol"]: p.get("name") for p in held},
+                                     RISK_SPAN, fetch=_total_closes)  # fmt: skip
+    closes = _apply_fx_to_closes(closes, {s: {"currency": c} for s, c in qccy.items()}, disp, RISK_SPAN)
+    out = {}
+    for s in syms:
+        if s not in getattr(closes, "columns", ()):
+            continue
+        ser = closes[s].dropna()
+        pts = _xray_clean([(str(d), float(v)) for d, v in ser.items() if v > 0 and math.isfinite(v)])
+        stats = _risk_stats(np.array([v for _, v in pts]))
+        if stats:
+            out[s] = {**stats, "since": pts[0][0][:10], **({"proxy": proxied[s][0]} if s in proxied else {})}
+    if out:
+        cache._cache_put(key, out, 1800.0)
+    return out
 
 
 def book(ccy: str | None = None) -> dict:

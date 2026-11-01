@@ -1708,7 +1708,9 @@ def _write_positions(ws, book: dict, period: str) -> None:
             ("Weight", _PCT), ("Risk share", _PCT), ("Month", _PCT), (f"Profit ({ccy})", _MONEY),
             ("On what you hold", _MONEY), ("On what you sold", _MONEY), ("Dividends", _MONEY),
             ("Dividends, estimated", _MONEY), ("Return", _PCT), (f"Contribution {period} (pts)", "0.00"),
-            ("Yield on cost", _PCT), ("Analyst upside", _PCT)]  # fmt: skip
+            ("Yield on cost", _PCT), ("Analyst upside", _PCT), ("Bad month (95%, 30 days)", _PCT),
+            ("Worst fall (10y)", _PCT), ("Below its high (10y)", _PCT), ("Longest recovery (trading days)", "0")]  # fmt: skip
+    risk = book.get("risk") or {}
     rows = []
     for x in book.get("positions") or []:
         if x.get("pending"):
@@ -1716,12 +1718,15 @@ def _write_positions(ws, book: dict, period: str) -> None:
                         + [None] * (len(cols) - 5) + ["waiting for Yahoo's split history"])  # fmt: skip
             continue
         rs = _maybe_num(x.get("risk_share"))
+        rk = risk.get(x.get("symbol")) or {}
         rows.append([x.get("name"), x.get("symbol"), x.get("exchange"), x.get("quote_ccy"),
                      x.get("shares"), x.get("avg_price"), x.get("price"), x.get("value"),
                      _pct(x.get("weight")), rs, _pct(x.get("month_pct")), x.get("profit"),
                      x.get("profit_held"), x.get("profit_sold"), x.get("dividends"),
                      x.get("dividends_est"), _pct(x.get("return_pct")), contrib.get(x.get("symbol")),
-                     _pct(x.get("yoc")), _pct(x.get("upside_pct"))])  # fmt: skip
+                     _pct(x.get("yoc")), _pct(x.get("upside_pct")), _pct(rk.get("var_pct")),
+                     _pct(rk.get("mdd_pct")), _pct(rk.get("now_pct")),
+                     max(rk.get("recmax") or 0, rk.get("open_days") or 0) or None])  # fmt: skip
     labels = [c[0] for c in cols]
 
     def line(**by_label):

@@ -492,3 +492,24 @@ def test_a_young_listing_has_no_risk_share_and_the_rest_still_do(monkeypatch):
     ], dict.fromkeys(("AAA", "BBB", "NEW"), USD_INST))  # fmt: skip
     rs = {x["symbol"]: x["risk_share"] for x in inv.book()["positions"]}
     assert rs["NEW"] is None and rs["AAA"] + rs["BBB"] == pytest.approx(1.0)
+
+
+def test_risk_stats_times_finished_and_running_falls_apart():
+    # Up to 100, -20% and back over 40 days, a 5% dip that isn't timed, then
+    # -50% and still down 10 days on.
+    px = np.concatenate([
+        np.linspace(80, 100, 60), np.linspace(99, 80, 20), np.linspace(81, 100, 20),
+        np.linspace(99, 95, 2), np.linspace(96, 100, 2), np.linspace(90, 50, 10),
+    ])  # fmt: skip
+    r = inv._risk_stats(px)
+    assert r["mdd_pct"] == pytest.approx(-50.0)
+    assert r["now_pct"] == pytest.approx(-50.0)
+    assert r["recmax"] == r["rec50"] == 40
+    assert r["open_days"] == 10
+    assert r["var_pct"] < 0 and r["dd95_pct"] <= r["dd50_pct"] <= 0
+
+
+def test_risk_stats_at_a_high_and_with_too_little_history():
+    r = inv._risk_stats(np.linspace(50, 100, 300))
+    assert r["now_pct"] == 0 and r["recmax"] is None and r["open_days"] is None
+    assert inv._risk_stats(np.linspace(50, 100, 30)) == {}

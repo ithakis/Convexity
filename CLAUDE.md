@@ -187,6 +187,10 @@ Each of these has cost real debugging time; the link goes to the full story.
   weekly recap is built from a computed page only, never a fetch.
   [backend.md → notifications](docs/architecture/backend.md#my-investments-notifications-and-the-weekly-recap-phase-9-notifypy) ·
   [desktop.md → Gotchas](docs/architecture/desktop.md#gotchas-discovered-during-implementation)
+- **A holding's own risk is never on the page's path** (`holding_risk`, the
+  Drivers view): ten years of closes per holding, fetched only when Drivers or
+  the export asks. A running fall stays apart from finished recoveries.
+  [backend.md → holding risk](docs/architecture/backend.md#my-investments-holding-risk-investmentsholding_risk-2026-11-02)
 - **Holding contributions add up to the TWR exactly** (Phase 4): a new
   entry type that moves money into or out of a holding must land in
   `ledger.Day.flows`, or "Cash and fees" silently absorbs it.

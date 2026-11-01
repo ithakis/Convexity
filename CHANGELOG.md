@@ -9,6 +9,13 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## Unreleased
+
+- **Drivers.** A button beside Columns swaps the holdings table for what drove your return and the risk taken to get it, in four tabs: Waterfall, Value for risk, Map and Distribution. Risk can read as risk share, a bad month (VaR), the worst fall, how far below its high, or the time to recover, and the Excel export's Positions sheet carries the same figures.
+- **Weight and Risk are separate columns**, each a number over a bar filling its cell. Long holding names now stop with an ellipsis so the table fits.
+- **The + Add button** is cut corner to corner in red and green.
+- **⌘/Ctrl+1-4** switch between My Investments, Portfolios, News and Optimize.
+
 ## 1.29.2 — 2026-10-30
 
 - **The newest earnings flag shows on every range.** A report from the last day or two was dropped at the chart's right edge on 1Y, 5Y and MAX; it now always shows, and crowded flags thin out from the oldest.

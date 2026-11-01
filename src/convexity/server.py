@@ -835,6 +835,12 @@ class Handler(BaseHTTPRequestHandler):
                     print(f"[export] book skipped: {type(exc).__name__}", file=sys.stderr)
                     book = None
                 has_book = bool(book and not book.get("empty") and book.get("headline"))
+                if has_book:
+                    xlsx_export.PROGRESS.update(step="reading your holdings' history", done=0, total=0)
+                    try:
+                        book = {**book, "risk": _investments.holding_risk(ccy)}
+                    except Exception as exc:  # the rest of the sheet still exports
+                        print(f"[export] holding risk skipped: {type(exc).__name__}", file=sys.stderr)
                 if not full and not has_book:
                     self._send_json(404, {"error": "no saved portfolios to export"})
                     return
@@ -1003,6 +1009,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(200, _investments.cached_page(ccy) or {"nocache": True})
                 else:
                     self._send_json(200, _investments.page(ccy))
+            elif parsed.path == "/api/investments/risk":
+                # The Drivers view: ten years of closes per holding, on demand.
+                self._send_json(200, {"risk": _investments.holding_risk((q.get("ccy") or [None])[0])})
             elif parsed.path == "/api/investments/attention":
                 # The topbar badge: from the computed page only, never a compute.
                 self._send_json(200, _investments.attention_now((q.get("ccy") or [None])[0]))
