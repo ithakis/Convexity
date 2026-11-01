@@ -1053,11 +1053,12 @@
      cards), the owner's two-box rule. */
   .m-fc-grid [data-rich-tip] { text-decoration: none; }
   /* One inset on every side (--mp-pad), the sections spaced by it too, so
-     top, bottom and left read the same at any zoom; a short window scrolls
-     the card instead of cutting it (the owner, 2026-10-30). */
+     top, bottom and left read the same at any zoom. A fixed width and inset:
+     a window too small for it scales the whole card down (fitTip in app.js,
+     the owner 2026-11-01), so nothing reflows and nothing scrolls. */
   .rich-tip-float .mp-card {
-    --mp-pad: clamp(12px, 1.6vw, 18px);
-    width: 860px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto;
+    --mp-pad: 18px;
+    width: 860px; overflow-y: auto;
     padding: var(--mp-pad); box-sizing: border-box;
     background: var(--tip-bg); border: 1px solid var(--tip-border); border-radius: var(--r-lg);
     box-shadow: var(--tip-shadow); color: var(--text); font-size: 12.5px; line-height: 1.45;
@@ -1085,7 +1086,6 @@
   .mp-sent { font-size: 14px; line-height: 1.5; margin-bottom: calc(var(--mp-pad) * 0.6); }
   .mp-sent b { font-weight: 600; }
   .mp-cards { display: grid; grid-template-columns: 1fr 1fr; gap: calc(var(--mp-pad) * 0.6); }
-  @media (max-width: 640px) { .mp-cards { grid-template-columns: 1fr; } }
   .mp-in { background: var(--surface-sunk); border: 1px solid var(--tip-border); border-radius: var(--r-md); padding: calc(var(--mp-pad) * 0.7); min-width: 0; }
   .mp-t { display: flex; justify-content: space-between; align-items: baseline; }
   .mp-t b { font-size: 13px; font-weight: 600; }

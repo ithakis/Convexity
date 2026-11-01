@@ -818,7 +818,7 @@ const _RICH_TIP = (() => {
     host.setAttribute("aria-describedby", tip.id);
     tip.innerHTML = render(html);
     tip.classList.add("show");
-    const place = () => placeTip(tip, host.getBoundingClientRect(), {preferred: "below", offset: 6, gap: 8});
+    const place = () => placeTip(tip, host.getBoundingClientRect(), {preferred: "below", offset: 6, gap: fitTip(tip)});
     place();
     TIP_MOTION[host.getAttribute("data-rich-tip")]?.open?.(tip, host);
     // KaTeX's fonts load on the first formula shown; until then the glyphs
@@ -864,8 +864,34 @@ const _RICH_TIP = (() => {
   // The mouse is on a sticky card or its host (a click in the card blurs the host).
   const held = () => !!(pinned || (sticky && el && (el.matches(":hover") || current?.matches(":hover"))));
   const isOpen = (host) => current === host && !!el?.classList.contains("show");
-  return {show, hide, leave, inside, held, warm, isOpen};
+  // The window changed size (or its zoom): a clicked-open card is fitted and
+  // placed again, anything else just closes.
+  function relayout() {
+    if (!pinned || !current || !el?.classList.contains("show")) return hide();
+    placeTip(el, current.getBoundingClientRect(), {preferred: "below", offset: 6, gap: fitTip(el)});
+  }
+  return {show, hide, leave, inside, held, warm, isOpen, relayout};
 })();
+/* The model price card always fits the window, whatever its size or zoom
+ * (the owner, 2026-11-01: no scrolling). It is laid out at its full 860px
+ * and, when that is too big, scaled down as a whole with CSS zoom, so its
+ * two-column layout never reflows. The margin it keeps from the window's
+ * edges grows with the window: 3% of its short side, 12-32px. Below half
+ * size the text would be unreadable, so there it stops shrinking and
+ * scrolls instead. Returns the margin, for placeTip's gap. */
+function fitTip(tip) {
+  const card = tip.querySelector(".mp-card");
+  if (!card) return 8;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const m = Math.round(Math.max(12, Math.min(32, Math.min(vw, vh) * 0.03)));
+  card.style.zoom = ""; card.style.maxHeight = "";
+  tip.style.left = "0px"; tip.style.top = "0px";
+  const r = tip.getBoundingClientRect();   // the card at full size
+  let z = Math.min(1, (vw - 2 * m) / r.width, (vh - 2 * m) / r.height);
+  if (z < 0.5) { z = 0.5; card.style.maxHeight = `${(vh - 2 * m) / z}px`; }
+  if (z < 1) card.style.zoom = z.toFixed(4);
+  return m;
+}
 const clickTip = (t) => CLICK_TIPS.has(t.getAttribute("data-rich-tip"));
 document.addEventListener("mouseover", (ev) => {
   const t = ev.target.closest && ev.target.closest("[data-rich-tip]");
@@ -894,7 +920,7 @@ document.addEventListener("focusout", (ev) => {
   if (t && !_RICH_TIP.held()) _RICH_TIP.hide(t);
 }, true);
 document.addEventListener("scroll", (ev) => { if (!_RICH_TIP.inside(ev.target)) _RICH_TIP.hide(); }, true);
-window.addEventListener("resize", () => _RICH_TIP.hide());
+window.addEventListener("resize", () => _RICH_TIP.relayout());
 document.addEventListener("mousedown", (ev) => { if (!_RICH_TIP.inside(ev.target)) _RICH_TIP.hide(); }, true);
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") _RICH_TIP.hide();
