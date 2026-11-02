@@ -2907,6 +2907,7 @@ function renderModalSkeleton() {
         <button class="m-toolbar-btn m-greek active" id="m-toggle-sigma" title="σ — the spread of prices in 3 or 12 months, from the listed options">σ</button>
         <button class="m-toolbar-btn m-greek" id="m-toggle-mu" title="μ — the model price with the analysts' small tilt (CAPM + α). Off: pure CAPM">μ</button>
       </div>
+      <div class="m-standin" id="m-standin" style="display:none;"></div>
       <div class="m-chart" id="m-chart">
         <div id="m-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">${lcHtml("fetching detail and options", {bar: true})}</div>
       </div>
@@ -3006,6 +3007,35 @@ async function ensureIntraday(range) {
   }
 }
 
+/* A listing Yahoo has barely any prices for draws on the same company's other
+ * listing (analytics.window_stand_in). The window says so above the chart, in
+ * the words My Investments uses, and marks the join on the chart. */
+function standInPlace(si) {
+  const pl = EXCHANGE_PLACES[(si.exchange || "").toUpperCase()];
+  return pl ? pl[0] : si.exchange;
+}
+function renderStandIn() {
+  const d = DETAIL.data, el = $("#m-standin"), si = d && d.stand_in;
+  if (!el) return;
+  el.style.display = si ? "" : "none";
+  if (!si) return;
+  const place = standInPlace(si);
+  el.innerHTML = `<b>Before ${fmtDateMDY(si.since)}, priced from ${escapeHtml(si.symbol)}</b>, `
+    + `the same company on another exchange${place ? ` (${escapeHtml(place)})` : ""}: `
+    + `converted to ${escapeHtml(d.currency)} and scaled to meet this listing's first close. `
+    + `The returns, 52-week range and all-time high read it too; volume is this listing's own.`;
+}
+/* The join, when it falls inside the window: a dashed rule, the stand-in's
+ * ticker to its left. */
+function standInJoinSvg(stock, xScale, padT, chartH) {
+  const si = DETAIL.data.stand_in;
+  if (!si || !stock.length || evDay(stock[0][0]) >= si.since) return "";
+  const at = stock[Math.min(evIdx(stock, si.since), stock.length - 1)][0];
+  const x = xScale(at).toFixed(1), y = padT + chartH;
+  return `<line class="m-standin-join" x1="${x}" x2="${x}" y1="${padT}" y2="${y}"/>`
+    + `<text class="m-standin-tag" x="${x - 5}" y="${y - 6}" text-anchor="end">${escapeHtml(si.symbol)}</text>`;
+}
+
 function renderModalFull() {
   if (!DETAIL.data) return;
   // Update toolbar active states
@@ -3025,6 +3055,7 @@ function renderModalFull() {
   } else {
     $("#m-toggle-sec").title = "Compare to " + (DETAIL.data.sector_etf || "sector ETF");
   }
+  renderStandIn();
   renderModalPriceBlock();
   renderChart();
   renderSections();
@@ -3741,6 +3772,7 @@ function renderChart() {
       ${xTicks.filter((t, i) => !FC || i < xTicks.length - 1).map((t, i) => `<text x="${t.x}" y="${H - 7}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtTickDate(t.t)}</text>`).join("")}
       ${volSvg}
       ${gaugeSvg}
+      ${standInJoinSvg(stock, xScale, padT, chartH)}
       ${priceSvg}
       ${spyPath ? `<path d="${spyPath}" fill="none" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
       ${secPath ? `<path d="${secPath}" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85"/>` : ""}
@@ -5822,6 +5854,7 @@ function renderSections() {
         </tr></thead>
         <tbody>${perfRows}</tbody>
       </table>
+      ${d.stand_in ? `<div class="m-standin-foot">${escapeHtml(d.symbol)}'s returns reaching before ${fmtDateMDY(d.stand_in.since)} are ${escapeHtml(d.stand_in.symbol)}'s, in ${escapeHtml(d.currency)}.</div>` : ""}
     </div>
     ${analystHtml}
     <div class="m-sec">

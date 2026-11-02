@@ -1233,6 +1233,57 @@ on 2026-10-09 (Yahoo then answers only "1d"/"5d" for it).
 - **Notes:** every splice, late start or ignored glitch inside the period is
   a warning, shown folded under the Portfolio chart ("About these prices")
   and in My Investments' rail.
+- **The same company's shares only** (`symbol_db.not_the_share`, 2026-11-02):
+  the pack types preferreds, warrants, rights and units as plain stocks, and
+  Lookup returns them under the company's name, so a warrant once stood in for
+  a young share at +181% in three months. `_proxy_candidates` drops them by
+  ticker (`FITB-PM`, `ACHR-WT`, `AAC-UN`, Nasdaq's five-letter `RGTIW`, `BTSGU`,
+  `GENVR`; `BRK-B`, `GOOGL`, `REI-UN.TO` stay), `known_proxies` drops them from
+  an older `proxies.json`, and one of them gets no stand-in itself.
+  `same_company` refuses a differing series numeral (Acquisition Corp II is not
+  Corp III). A stand-in with no close in the 92 days before the join has
+  stopped trading and is not used.
+- **As traded only when that reaches further back** (2026-11-02): the fallback
+  for a broken dividend-adjusted history used to win whenever no line reached
+  the frame's start, so a line merely younger than the frame lost its dividends
+  (a listed-2023 stand-in read 40.7% over a year instead of 49.2%).
+
+### The stock window's stand-in (`analytics.window_stand_in`, 2026-11-02)
+Yahoo has one close, ever, for many secondary lines: a Xetra, Mexican, Swiss or
+London line of a big company (`J4D.DE`, `KDP.MX`, `SANP.L`). The window then said
+"No data for 1Y" with an empty Performance table and 52-week high = low = ATH,
+while My Investments priced the same line from the company's other listing.
+- **When:** own closes start under a year ago (`_WINDOW_YOUNG_DAYS`; the default
+  1Y chart, the 52-week range and the 1-year return all need a year), or fewer
+  than `_SHORT_ROWS` of them. An older line is left alone, holes included.
+- **What:** the book's splice (`_splice_one`: same candidates, cleaning, FX and
+  scale at the join), MAX long. `extend_history` can't be called directly: it
+  compares lines inside a frame already spanning the period, and it returns
+  early on a frame of a few rows. So the frame comes from the candidates' dates,
+  and the rows only another candidate traded on are dropped afterwards. A line
+  is taken in `_proxy_candidates`' order if it reaches five years back
+  (`_WINDOW_REACH_YEARS`), else the one reaching furthest.
+- **What reads it:** `fetch_detail` swaps its `close` before everything computed
+  from it: chart, `ohlc` (the stand-in's cached bars, scaled like its closes),
+  1-day change, 52-week range, ATH, Performance, β(SPY). `price` stays the
+  listing's last close, and volume stays its own: another line's volume is not
+  this listing's. The payload's `stand_in` is `{symbol, since, name, exchange}`.
+- **A heavy path:** a download of up to six candidates, about 3 s on top of
+  `fetch_detail`. Never `fetch_one`; the grid's row is unchanged.
+- **Intraday:** a young listing's own bars don't fill 1M/3M/6M, so
+  `range_history` answers `fallback` when they fall a week short of the range and
+  `known_proxies` has a line, and the chart stays on the daily series. An
+  established line, and a young one with no stand-in, keep their bars.
+- **Label:** `renderStandIn` says so above the chart in the book's words, the join
+  is a dashed rule with the stand-in's ticker on its left (`standInJoinSvg`), and
+  a line under Performance repeats it. No stand-in: "No data", as before.
+- **Yahoo's refusals:** `max` is empty for some of these lines while `10y`
+  answers one close, and a ticker renamed yesterday answers only a month, so
+  `fetch_detail` tries `max`, `10y`, `1mo`.
+- **Checked against Yahoo directly:** 1M, 6M and 1Y of `J4D.DE`, `KDP.MX` and
+  `SANP.L` recomputed from the stand-in's closes and Yahoo's FX agree within
+  0.02 points. The scale is not checked: `SANP.L` stands at 5.5x Sanofi's price in
+  pounds, which is that line's own unit as far as the app can tell.
 
 ### Real-world price distribution (`options_density.py`, `GET /api/density`)
 

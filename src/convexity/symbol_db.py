@@ -509,17 +509,23 @@ _GENERIC = frozenset(
 )
 
 
+_SERIES = frozenset({"ii", "iii", "iv", "vi", "vii", "viii", "ix"})  # not i, v, x: N.V., Class X
+
+
 def same_company(a: str | None, b: str | None) -> bool:
     """Do two listing names name one company? Equal once legal forms are
     dropped ("Iberdrola, S.A." / "Iberdrola"), or the shorter, of two words or
     more, inside the longer ("Richter Gedeon" / "Richter Gedeon Chemical
     Factory"), or the same first two words. One word inside a longer name
-    is not enough: Apple is not Apple Hospitality REIT."""
+    is not enough: Apple is not Apple Hospitality REIT. A numbered series is
+    one company per number: Acme Acquisition Corp II is not Corp III."""
     ka, kb = name_key(a or "").split(), name_key(b or "").split()
     if not ka or not kb:
         return False
     if ka == kb:
         return True
+    if _SERIES.intersection(ka) != _SERIES.intersection(kb):
+        return False
     small, big = sorted((ka, kb), key=len)
     if len(small) < 2:
         return False
@@ -676,6 +682,22 @@ BDR = re.compile(r"^[A-Z0-9]{4}3[1-9]\.SA$")
 
 def relisting(ticker: str, exchange: str | None) -> bool:
     return exchange in SECONDARY or bool(IOB.match(ticker) or BDR.match(ticker))
+
+
+# A company's other instruments, which the pack types as plain stocks: Yahoo's
+# preferreds, warrants, rights (FITB-PM, ACHR-WT, XYZ-RI, ABC-PR-A.TO) and US
+# units (AAC-UN; a Canadian -UN.TO is a trust's actual share), and Nasdaq's
+# five-letter warrants, units and rights (RGTIW, BRRWW, BTSGU, GENVR). Share
+# classes stay: BRK-B, HEI-A, GOOGL, FWONK.
+_NOT_SHARE = re.compile(
+    r"-(?:P[A-Z]?|PR(?:-[A-Z0-9]+)?|WTS?|WS|RI|RT)(?:\.[A-Z]+)?$|-UN$|^[A-Z]{4,}(?:W|U|R)$"
+)
+
+
+def not_the_share(ticker: str) -> bool:
+    """Is this a preferred, warrant, right or unit rather than a share? It
+    moves on its own terms, so it never stands in for one, nor a share for it."""
+    return bool(_NOT_SHARE.search(ticker or ""))
 
 
 def _listings(group: int) -> list[tuple]:

@@ -2790,6 +2790,13 @@
   }
   .m-range-info b { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
 
+  /* A young listing's stand-in (renderStandIn): said above the chart, the join marked on it. */
+  .m-standin { margin: 8px 0 2px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+  .m-standin b { color: var(--text); font-weight: 600; }
+  .m-standin-foot { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+  .m-chart .m-standin-join { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.7; }
+  .m-chart .m-standin-tag { font-size: 10px; fill: var(--muted); }
+
   /* σ/μ: the real-world price distribution drawn into the chart (owner,
      mockup v7). The canvas paints the future zone; the hit layer above it
      takes the hover (the history keeps its own crosshair underneath). */

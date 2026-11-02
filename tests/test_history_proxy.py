@@ -208,7 +208,10 @@ def test_a_good_pack_match_does_not_ask_yahoo(monkeypatch):
      ("Apple Inc.", "Apple Hospitality REIT, Inc.", False), ("Airbus SE", "Airbus", True),
      ("Shell plc", "Shell plc", True), ("", "Shell", False),
      ("Richter Gedeon Vegyeszeti Gyar", "Richter Gedeon Chemical Factory", True),
-     ("First Citizens BancShares", "First Republic Bank", False)],
+     ("First Citizens BancShares", "First Republic Bank", False),
+     ("Acme Acquisition Corp II", "Acme Acquisition Corp. III", False),
+     ("Acme Acquisition Corp II", "Acme Acquisition Corp. II", True),
+     ("Acme Acquisition Corp", "Acme Acquisition Corp. III", False)],
 )  # fmt: skip
 def test_same_company(a, b, same):
     assert sdb.same_company(a, b) is same
@@ -294,3 +297,235 @@ def test_found_stand_ins_are_kept_across_launches(monkeypatch):
     assert A.known_proxies("YNG.DE") == ("YNG", "YNG.F")  # from disk, no lookup
     monkeypatch.setattr(A, "_PROXY_DISK_TTL_S", -1.0)
     assert A.known_proxies("YNG.DE") == ()  # too old: looked up again
+
+
+# ---- The stock window: a listing Yahoo has barely any prices for
+
+
+@pytest.fixture
+def young_window(monkeypatch):
+    """YNG.DE (EUR) has one close, at EUR = 1.10 USD; YNG (USD) trades all
+    along, with bars; OLD stopped trading long ago; AAA is another line of
+    the same company that trades on days YNG doesn't."""
+    idx = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=800)
+    home = pd.Series(_walk_n(11, len(idx)), index=idx)
+    other = (
+        pd.Series(_walk_n(12, len(idx)), index=idx).iloc[::-1].set_axis(idx + pd.Timedelta(days=1))
+    )
+    wide = pd.DataFrame({"YNG": home}).join(other.rename("YNA"), how="outer")
+    wide["OLD"] = pd.Series(_walk_n(13, 200), index=idx[:200])
+    bars = pd.DataFrame({"Open": home * 0.99, "High": home * 1.02, "Low": home * 0.98,
+                         "Close": home, "Volume": 1000.0})  # fmt: skip
+
+    def bulk(syms, period, adjusted=True, retry=True):
+        return wide[[s for s in syms if s in wide]]
+
+    monkeypatch.setattr(A, "_bulk_close", bulk)
+    monkeypatch.setattr(A, "_bulk_bars_get", lambda s, p: bars if s == "YNG" else None)
+    monkeypatch.setattr(
+        fx,
+        "fx_multipliers",
+        lambda ccys, base, dates: {
+            c: np.full(len(dates), 1 / 1.10 if base == "EUR" else 1.0) for c in ccys
+        },
+    )
+    monkeypatch.setattr(investments, "_fetch_quote_ccy", lambda s: "USD" if "." not in s else "EUR")
+    monkeypatch.setattr(A, "_proxy_candidates", lambda s, n: ("OLD", "YNG", "YNA"))
+    last = idx[-1]
+    tz = "Europe/Berlin"
+    own = pd.Series([float(home.iloc[-1] / 1.10)], index=pd.DatetimeIndex([last]).tz_localize(tz))
+    return home, own
+
+
+def _walk_n(seed, n):
+    rng = np.random.default_rng(seed)
+    return 100.0 * np.cumprod(1 + rng.normal(0.0004, 0.01, n))
+
+
+def test_window_one_close_gets_the_company_history(young_window):
+    home, own = young_window
+    got = A.window_stand_in("YNG.DE", own, "EUR")
+    assert got["proxy"] == "YNG"  # OLD stopped trading long before the join
+    assert got["since"] == str(home.index[-1])[:10]
+    close = got["close"]
+    # The listing's own close is untouched, on its own stamp, last.
+    assert close.iloc[-1] == own.iloc[0] and close.index[-1] == own.index[0]
+    assert str(close.index.tz) == "Europe/Berlin" and close.index.is_monotonic_increasing
+    # Only the stand-in's own trading days: no flat steps from the other line.
+    assert len(close) == len(home)
+    # At a constant rate the scale is exact: the returns are the company's.
+    naive = close.tz_localize(None)
+    assert naive.iloc[0] == pytest.approx(home.iloc[0] / 1.10)
+    r = naive.iloc[-1] / naive.iloc[-253]
+    assert r == pytest.approx(home.iloc[-1] / home.iloc[-253])
+
+
+def test_window_stand_in_bars_scale_like_its_closes(young_window):
+    home, own = young_window
+    got = A.window_stand_in("YNG.DE", own, "EUR")
+    day = got["ohlc"].iloc[10]
+    assert day["High"] == pytest.approx(home.iloc[10] * 1.02 / 1.10)
+    assert day["Low"] == pytest.approx(home.iloc[10] * 0.98 / 1.10)
+    assert got["ohlc"].index[10] == got["close"].index[10]  # the chart joins them by stamp
+
+
+def test_window_leaves_an_established_line_alone(young_window):
+    home, _ = young_window
+    assert A.window_stand_in("YNG", home.tz_localize("America/New_York"), "USD") is None
+
+
+def test_window_young_line_without_a_stand_in_stays_as_it_is(young_window, monkeypatch):
+    _, own = young_window
+    monkeypatch.setattr(A, "_proxy_candidates", lambda s, n: ())
+    assert A.window_stand_in("YNG.DE", own, "EUR") is None
+    monkeypatch.setattr(A, "_proxy_candidates", lambda s, n: ("OLD",))  # stopped: not a stand-in
+    assert A.window_stand_in("YNG.DE", own, "EUR") is None
+
+
+def test_window_needs_the_listing_currency(young_window):
+    _, own = young_window
+    assert A.window_stand_in("YNG.DE", own, None) is None
+
+
+def test_window_stand_in_younger_than_the_reach_keeps_its_dividends(monkeypatch):
+    """A line that simply doesn't reach back five years isn't broken: the
+    as-traded fallback must not take its dividend adjustment away."""
+    idx = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=600)  # about 2.3 years
+    adj = pd.Series(_walk_n(21, len(idx)), index=idx)
+    raw = adj * np.linspace(1.3, 1.0, len(idx))  # adjusted closes sit below as traded
+
+    def bulk(syms, period, adjusted=True, retry=True):
+        return (adj if adjusted else raw).to_frame("YNG")[[s for s in syms if s == "YNG"]]
+
+    monkeypatch.setattr(A, "_bulk_close", bulk)
+    monkeypatch.setattr(A, "_bulk_bars_get", lambda s, p: None)
+    monkeypatch.setattr(fx, "fx_multipliers", lambda c, b, d: {x: np.ones(len(d)) for x in c})
+    monkeypatch.setattr(investments, "_fetch_quote_ccy", lambda s: "USD")
+    monkeypatch.setattr(A, "_proxy_candidates", lambda s, n: ("YNG",))
+    own = pd.Series([float(adj.iloc[-1])], index=idx[-1:])
+    close = A.window_stand_in("YNG.DE", own, "USD")["close"]
+    assert close.iloc[0] == pytest.approx(adj.iloc[0])  # not raw.iloc[0]
+
+
+@pytest.mark.parametrize(
+    "ticker", ["FITB-PM", "BAC-PL", "ACHR-WT", "XYZ-WS", "AAC-UN", "XYZ-RI", "ABC-PR-A.TO", "ABC-WT.TO",
+               "RGTIW", "BRRWW", "BTSGU", "GENVR"],
+)  # fmt: skip
+def test_preferreds_warrants_rights_and_units_are_not_the_share(ticker):
+    assert sdb.not_the_share(ticker)
+
+
+@pytest.mark.parametrize(
+    "ticker", ["AAPL", "SNOW", "BRK-B", "HEI-A", "BF-B", "PBR-A", "MOG-A", "GOOGL", "FWONK", "VOW3.DE",
+               "SAN.PA", "REI-UN.TO", "AMZN-USD.SW", "0TDF.L", "RIGHT.DE", "SHOP.TO"],
+)  # fmt: skip
+def test_shares_and_their_classes_are_the_share(ticker):
+    assert not sdb.not_the_share(ticker)
+
+
+def test_a_warrant_never_stands_in_for_a_share_nor_the_share_for_it(monkeypatch):
+    A._PROXY.clear()
+    grp = [Hit(t, "Young Co, Inc.", "stock", "NMS", "us", None, None, None, 7, 1.0)
+           for t in ("YOUNG", "YOUNGW", "YOUN-PA", "YNG.DE")]  # fmt: skip
+    monkeypatch.setattr(sdb, "get", lambda t: next((h for h in grp if h.ticker == t), None))
+    monkeypatch.setattr(sdb, "listings", lambda g: grp)
+    monkeypatch.setattr(sdb, "relisting", lambda t, e: False)
+    monkeypatch.setattr(A, "_proxy_disk_put", lambda *a: None)
+    monkeypatch.setattr(A, "_proxy_disk", dict)
+    assert A._proxy_candidates("YOUNG", None) == ("YNG.DE",)
+    assert A._proxy_candidates("YOUNGW", None) == ()
+
+
+def test_saved_stand_ins_lose_their_warrants_on_read(monkeypatch):
+    import time
+
+    A._PROXY.clear()
+    monkeypatch.setattr(A, "_proxy_disk", lambda: {"YNG.DE": [time.time(), ["YOUNGW", "YNG"]]})
+    assert A.known_proxies("YNG.DE") == ("YNG",)
+
+
+class _FakeTicker:
+    """What fetch_detail reads from a Ticker, for one close of a young line."""
+
+    recommendations = calendar = balance_sheet = quarterly_balance_sheet = None
+    income_stmt = quarterly_income_stmt = None
+    news = ()
+
+    def __init__(self, frame):
+        self.frame = frame
+
+    def history(self, period=None, **k):
+        return self.frame if period != "max" else self.frame.iloc[:0]  # as Yahoo answers them
+
+
+def _detail(monkeypatch, own, info=None):
+    from convexity import fetcher
+
+    c = own.to_numpy()
+    frame = pd.DataFrame(
+        {"Open": c, "High": c, "Low": c, "Close": c, "Volume": 500.0}, index=own.index
+    )
+    monkeypatch.setattr(fetcher.yf, "Ticker", lambda s: _FakeTicker(frame))
+    monkeypatch.setattr(fetcher, "_safe_info", lambda tk: {"currency": "EUR", **(info or {})})
+    monkeypatch.setattr(fetcher, "_set_beta", lambda out, s: None)
+    monkeypatch.setattr(fetcher, "_apply_research_detail", lambda out, s: None)
+    monkeypatch.setattr(fetcher, "_fetch_bench_history", lambda s, p="10y": None)
+    monkeypatch.setattr(fetcher._targets, "consensus", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sdb,
+        "get",
+        lambda t: Hit(t, "Young Co, Inc.", "stock", "NMS", "us", None, None, None, 7, 1.0),
+    )
+    return fetcher
+
+
+def test_detail_window_draws_and_measures_through_the_stand_in(young_window, monkeypatch):
+    home, own = young_window
+    d = _detail(monkeypatch, own).fetch_detail("YNG.DE")
+    assert d["stand_in"]["symbol"] == "YNG" and d["stand_in"]["exchange"] == "NMS"
+    assert "close" not in d["stand_in"] and "ohlc" not in d["stand_in"]  # plain JSON only
+    assert len(d["history"]) == len(home) and d["history"][-1][1] == own.iloc[0]
+    assert len(d["volume"]) == 1  # a stand-in's volume isn't this listing's
+    assert d["price"] == own.iloc[0]
+    assert d["pct_1d"] == pytest.approx((home.iloc[-1] / home.iloc[-2] - 1) * 100)
+    year = home.iloc[-260:]
+    assert d["w52_high"] == pytest.approx(
+        year[year.index >= home.index[-1] - pd.Timedelta(days=365)].max() / 1.10
+    )
+    assert d["w52_high"] != d["w52_low"]
+    base = home[home.index <= home.index[-1] - pd.Timedelta(days=365)].iloc[-1]
+    assert d["performance"]["1y"]["stock"] == pytest.approx((home.iloc[-1] / base - 1) * 100)
+
+
+def test_detail_window_without_a_stand_in_still_has_no_chart(young_window, monkeypatch):
+    _, own = young_window
+    monkeypatch.setattr(A, "_proxy_candidates", lambda s, n: ())
+    d = _detail(monkeypatch, own).fetch_detail("YNG.DE")
+    assert "stand_in" not in d
+    assert len(d["history"]) == 1  # what the chart's "No data" branch reads
+    assert d["w52_high"] == d["w52_low"] == d["ath"]
+
+
+def _intraday(monkeypatch, days):
+    from convexity import fetcher
+
+    start = 1_700_000_000_000
+    bars = {"history": [[start, 1.0], [start + days * 86_400_000, 2.0]], "volume": []}
+    monkeypatch.setattr(fetcher, "intraday_history", lambda s, i, p: bars)
+    return fetcher
+
+
+def test_intraday_tab_falls_back_to_the_daily_stand_in(monkeypatch):
+    fetcher = _intraday(monkeypatch, 2)
+    monkeypatch.setattr(A, "known_proxies", lambda s: ("YNG",))
+    got = fetcher.range_history("YNG.DE", "1M")
+    assert got["fallback"] is True and "history" not in got
+    monkeypatch.setattr(A, "known_proxies", lambda s: ())
+    assert fetcher.range_history("YNG.DE", "1M")["fallback"] is False  # nothing better to draw
+
+
+def test_intraday_tab_stays_when_the_listing_fills_the_range(monkeypatch):
+    fetcher = _intraday(monkeypatch, 60)
+    monkeypatch.setattr(A, "known_proxies", lambda s: ("YNG",))
+    assert fetcher.range_history("YNG.DE", "1M")["fallback"] is False
+    assert fetcher.range_history("YNG.DE", "6M")["fallback"] is True

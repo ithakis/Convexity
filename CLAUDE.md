@@ -224,7 +224,13 @@ Each of these has cost real debugging time; the link goes to the full story.
   (`symbol_db.yahoo_lookup`). **A short listing never cuts a basket's
   history**: the same company elsewhere stands in (clean, trading data only:
   Yahoo's old data has negative and x52 glitches), else the basket starts
-  without it. [backend.md → Short listings' history](docs/architecture/backend.md#short-listings-history-analyticsextend_history-2026-10-09)
+  without it. **The stock window does the same** for a line whose closes start
+  under a year ago (`analytics.window_stand_in`, labelled, a detail path, never
+  `fetch_one`). **A stand-in is the same company's share**: never a preferred,
+  warrant, right or unit (`symbol_db.not_the_share`: the pack types them as
+  stocks), and check any new stand-in's returns against Yahoo directly.
+  [backend.md → Short listings' history](docs/architecture/backend.md#short-listings-history-analyticsextend_history-2026-10-09) ·
+  [backend.md → stock window](docs/architecture/backend.md#the-stock-windows-stand-in-analyticswindow_stand_in-2026-11-02)
 - **Finnhub's free plan answers US listings only** (403 for REP.MC, TTE.PA,
   CCC3.DE…): every Finnhub call goes to the company's US line
   (`symbol_db.us_line`, from the pack's company group). MSPR is SEC Form 4,

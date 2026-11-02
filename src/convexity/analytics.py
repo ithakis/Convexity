@@ -765,6 +765,12 @@ _SHORT_ROWS = 5  # a line starting this many rows into the frame is "short"
 # Yahoo's data, not a quiet market: Novartis's Xetra line (NOT.DE) has none
 # from Sep 2019 to Jan 2025, which ffill drew as five flat years.
 _GAP_ROWS = 60
+_STALE_DAYS = 92  # a stand-in with no close this long before the join has stopped
+# The stock window (window_stand_in): a listing whose own closes start less
+# than a year ago can't fill the default 1Y chart, its 52-week range or its
+# 1-year return; a line is taken in order if it reaches this many years back.
+_WINDOW_YOUNG_DAYS = 365
+_WINDOW_REACH_YEARS = 5
 
 
 def _after_gap(col: pd.Series):
@@ -817,13 +823,22 @@ def known_proxies(symbol: str) -> tuple[str, ...]:
     if (isinstance(row, list) and len(row) == 2 and isinstance(row[0], int | float)
             and time.time() - row[0] < _PROXY_DISK_TTL_S
             and isinstance(row[1], list) and all(isinstance(t, str) for t in row[1])):  # fmt: skip
-        return tuple(row[1])
+        from convexity.symbol_db import not_the_share
+
+        # Saved before warrants and preferreds were left out, they read clean.
+        return tuple(t for t in row[1] if not not_the_share(t))
     return ()
 
 
 def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
     """The same company's other listings: its pack group, else Yahoo's live
-    Lookup by name (cached a day in memory, a week on disk)."""
+    Lookup by name (cached a day in memory, a week on disk). Shares only: a
+    warrant's return is not the company's (a warrant stood in for a young
+    share at +181% in three months), and a warrant gets no stand-in itself."""
+    from convexity.symbol_db import not_the_share
+
+    if not_the_share(symbol):
+        return ()
     hit = _PROXY.get(symbol)
     if hit and time.time() - hit[0] < _PROXY_TTL_S:
         return hit[1]
@@ -850,6 +865,7 @@ def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
             out = [x for x in hits if x.ticker != symbol and sdb.same_company(x.name, ref)]
     except Exception as e:
         print(f"[analytics] no history proxy for {symbol}: {type(e).__name__}", flush=True)
+    out = [x for x in out if not not_the_share(x.ticker)]
     # Exchange lines first, then re-listing venues; OTC and order-book lines
     # (GEDSF, 0QFP.IL) last: they trade on few days.
     thin = {"PNK", "OQB", "OQX", "IOB", "DXE", "CXE", "AQS"}
@@ -937,9 +953,11 @@ def extend_history(
     return out, done
 
 
-def _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch) -> None:
+def _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch, reach=None) -> None:
     """Extend ``out[s]`` back from ``fv`` with the best stand-in (see
-    extend_history); records it in ``done`` when it did."""
+    extend_history); records it in ``done`` when it did. ``reach`` is how far
+    back a line must go to be taken in _proxy_candidates' order (default: the
+    frame's start)."""
     from convexity import fx
     from convexity.investments import _QCCY, _fetch_quote_ccy
 
@@ -953,7 +971,7 @@ def _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch) -> Non
             pw = fetch(list(cands), period)
     except Exception:
         return
-    start = out.index[0] + pd.Timedelta(days=7)
+    start = reach if reach is not None else out.index[0] + pd.Timedelta(days=7)
 
     def usable(frame):
         clean = {}
@@ -962,8 +980,11 @@ def _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch) -> Non
                 col = _clean_tail(frame[c].loc[:fv])
                 # A stand-in must trade: a new price on at least half its
                 # days (Gedeon Richter's London order-book line moved six
-                # times in five years: a flat line, not the company).
-                if len(col) > 1 and col.index[0] < fv and (col.diff() != 0).mean() >= 0.5:
+                # times in five years: a flat line, not the company). And it
+                # must still trade at the join: a line that stopped years ago
+                # would be carried flat up to it.
+                if (len(col) > 1 and col.index[0] < fv and (col.diff() != 0).mean() >= 0.5
+                        and fv - col.index[-1] <= pd.Timedelta(days=_STALE_DAYS)):  # fmt: skip
                     clean[c] = col
         return clean
 
@@ -978,7 +999,15 @@ def _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch) -> Non
                 raw = _bulk_close(list(cands), period, adjusted=False, retry=False)
             except TypeError:  # tests' stubs take no ``retry``
                 raw = _bulk_close(list(cands), period, adjusted=False)
-            clean = usable(raw) or clean
+            # Only when that reaches further back: a line merely younger than
+            # the frame isn't broken, and as traded would lose its dividends.
+            as_traded = usable(raw)
+            reached = min((c.index[0] for c in clean.values()), default=None)
+            if as_traded and (
+                reached is None
+                or min(c.index[0] for c in as_traded.values()) < reached - pd.Timedelta(days=7)
+            ):
+                clean = as_traded
     if not clean:
         return
     # The first line (in _proxy_candidates' order: exchanges before OTC)
@@ -1006,6 +1035,80 @@ def _splice_one(out, done, s, fv, names, ccy_of, period, adjusted, fetch) -> Non
     back = (conv * (out.at[fv, s] / at)).loc[idx < fv]
     out.loc[back.index, s] = out.loc[back.index, s].fillna(back)
     done[s] = (best, str(fv)[:10])
+
+
+def window_stand_in(symbol: str, close: pd.Series, ccy: str | None, name: str | None = None):
+    """The stock window's history for a listing Yahoo has barely any prices
+    for: ``close`` (one line's closes, as ``Ticker.history`` stamps them)
+    extended back by the same company's other listing, the book's stand-in
+    (_splice_one: same candidates, cleaning, FX and scale at the join). Or
+    None: an established line, no usable stand-in, a failed fetch.
+
+    extend_history itself can't serve this: it compares lines inside a frame
+    that already spans the period, and here the frame is the one line, which
+    may be a single close. So the frame is built from the candidates' dates,
+    MAX long (the window's longest tab), and the rows only another candidate
+    traded on are dropped afterwards, which would draw as flat steps.
+
+    Returns {"close", "ohlc", "proxy", "since"}: closes in the listing's
+    unit and on its stamps (own rows untouched), the stand-in's bars scaled
+    like its closes (empty when none are cached; the chart draws a flat bar),
+    and where the listing's own prices begin. A detail path, never fetch_one:
+    the candidates are a download of their own."""
+    from convexity.helpers import by_trading_date
+
+    if close is None or close.empty or not ccy:
+        return None
+    own = by_trading_date(close)
+    fv = own.index[0]
+    now = pd.Timestamp.now().normalize()
+    if len(own) >= _SHORT_ROWS and fv < now - pd.Timedelta(days=_WINDOW_YOUNG_DAYS):
+        return None
+    cands = _proxy_candidates(symbol, name)
+    if not cands:
+        return None
+    try:
+        pw = _bulk_close(list(cands), "max", retry=False)
+    except Exception as e:
+        print(f"[analytics] window stand-in {symbol}: {type(e).__name__}", flush=True)
+        return None
+    if pw is None or pw.empty:
+        return None
+    pw = pw.set_axis(pd.DatetimeIndex(pw.index).normalize())
+    pw = pw[~pw.index.duplicated(keep="last")]
+    idx = pw.index.union(own.index)
+    out = pd.DataFrame({symbol: own.reindex(idx)}, index=idx)
+    done: dict[str, tuple[str, str]] = {}
+    _splice_one(out, done, symbol, fv, {symbol: name}, {symbol: ccy}, "max", True,
+                lambda syms, period, retry=True: pw,
+                reach=now - pd.DateOffset(years=_WINDOW_REACH_YEARS))  # fmt: skip
+    if symbol not in done:
+        return None
+    best, since = done[symbol]
+    back = out[symbol].loc[idx < fv].dropna()
+    if best in pw.columns:
+        back = back[back.index.isin(pw[best].dropna().index)]
+    if back.empty:
+        return None
+    tz = getattr(close.index, "tz", None)
+    stamps = back.index
+    if tz is not None:  # a midnight lost to a clock change moves, never raises
+        stamps = stamps.tz_localize(
+            tz, nonexistent="shift_forward", ambiguous=np.ones(len(back), bool)
+        )
+    ohlc = pd.DataFrame()
+    bars = _bulk_bars_get(best, "max")
+    if bars is not None and not bars.empty:
+        bars = bars.set_axis(pd.DatetimeIndex(bars.index).normalize())
+        bars = bars[~bars.index.duplicated(keep="last")].reindex(back.index)
+        scale = back / bars["Close"].where(bars["Close"] > 0)
+        ohlc = bars[["Open", "High", "Low"]].mul(scale, axis=0).set_axis(stamps)
+    return {
+        "close": pd.concat([back.set_axis(stamps), close]),
+        "ohlc": ohlc,
+        "proxy": best,
+        "since": since,
+    }
 
 
 def _known_listing(symbol: str) -> bool:

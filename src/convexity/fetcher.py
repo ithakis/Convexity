@@ -898,6 +898,7 @@ _RANGE_INTRADAY = {
     "3M": ("1h", "1y"),
     "6M": ("1h", "1y"),
 }
+_RANGE_DAYS = {"1M": 30, "3M": 91, "6M": 182}  # what each range shows
 
 
 # Suffix -> days. Longest first: "mo" and "wk" must be tested before "d"/"y"
@@ -1001,6 +1002,20 @@ def range_history(symbol: str, rng: str, benchmarks: list[str] | None = None) ->
             "fallback": True,
             "reason": "no intraday data",
         }
+    # A young listing's own bars don't fill the range; the daily payload does,
+    # through the same stand-in (analytics.window_stand_in). known_proxies is
+    # never a fetch: /api/detail has already looked by the time a tab is picked.
+    if main["history"][-1][0] - main["history"][0][0] < (_RANGE_DAYS[rng.upper()] - 7) * 86_400_000:
+        from convexity.analytics import known_proxies
+
+        if known_proxies(symbol):
+            return {
+                "symbol": symbol,
+                "range": rng,
+                "interval": interval,
+                "fallback": True,
+                "reason": "young listing: the daily series has its stand-in",
+            }
 
     out = {
         "symbol": symbol,
@@ -1140,6 +1155,34 @@ def _ttm_statement_value(df: pd.DataFrame | None, labels: list[str]) -> float | 
     return None
 
 
+def _window_stand_in(symbol: str, close: pd.Series, info: dict) -> dict | None:
+    """analytics.window_stand_in for the stock window, with what the label
+    needs about the line standing in. Never raises: at worst the window shows
+    the listing's own prices, as it did."""
+    from convexity import analytics
+    from convexity import symbol_db as sdb
+    from convexity.investments import _fetch_quote_ccy
+
+    try:
+        ccy = info.get("currency") or _fetch_quote_ccy(symbol)
+        name = info.get("longName") or info.get("shortName")
+        got = analytics.window_stand_in(symbol, close, ccy, name)
+        if not got:
+            return None
+        hit = sdb.get(got["proxy"])
+    except Exception as e:
+        print(f"[detail] stand-in {symbol}: {type(e).__name__}", flush=True)
+        return None
+    return {
+        "close": got["close"],
+        "ohlc": got["ohlc"],
+        "symbol": got["proxy"],
+        "since": got["since"],
+        "name": hit.name if hit else None,
+        "exchange": hit.exchange if hit else None,
+    }
+
+
 def fetch_detail(symbol: str) -> dict:
     cache_key = f"detail|{symbol}"
     cached = _cache_get(cache_key)
@@ -1153,19 +1196,32 @@ def fetch_detail(symbol: str) -> dict:
         hist = tk.history(period="max", auto_adjust=True, actions=False)
     except Exception:
         hist = None
-    if hist is None or hist.empty:
-        try:
-            hist = tk.history(period="10y", auto_adjust=True, actions=False)
-        except Exception:
-            hist = None
+    # Yahoo refuses long periods for some young lines ("max" empty, "10y" one
+    # close; a ticker renamed yesterday answers only a month).
+    for period in ("10y", "1mo"):
+        if hist is None or hist.empty:
+            try:
+                hist = tk.history(period=period, auto_adjust=True, actions=False)
+            except Exception:
+                hist = None
     if hist is None or hist.empty:
         out["error"] = "no history"
         return out
 
     close = hist["Close"].dropna()
     vol = hist["Volume"] if "Volume" in hist else pd.Series(dtype=float)
+    ohlc = _ohlc_to_points(hist.loc[close.index])
+    info = _safe_info(tk)
+    # A listing Yahoo has barely any prices for: the same company elsewhere
+    # stands in before its first close, for everything below that reads
+    # `close` (chart, returns, 52-week range, betas). Volume stays its own.
+    stand_in = _window_stand_in(symbol, close, info)
+    if stand_in:
+        close = stand_in.pop("close")
+        ohlc = _ohlc_to_points(stand_in.pop("ohlc")) + ohlc
+        out["stand_in"] = stand_in
     out["history"] = _series_to_points(close)
-    out["ohlc"] = _ohlc_to_points(hist.loc[close.index])
+    out["ohlc"] = ohlc
     out["volume"] = _series_to_points(vol.dropna()) if not vol.empty else []
 
     last = float(close.iloc[-1])
@@ -1196,7 +1252,6 @@ def fetch_detail(symbol: str) -> dict:
     out["ath"] = float(close.max())
     out["atl"] = float(close.min())
 
-    info = _safe_info(tk)
     # Yahoo's answer without fundamentals: shown as it is, kept a minute only.
     out["fundamentals_missing"] = bool(info.get("_fundamentals_missing"))
     out["name"] = info.get("longName") or info.get("shortName") or symbol
