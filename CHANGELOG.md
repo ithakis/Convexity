@@ -9,7 +9,7 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
-## Unreleased
+## 1.31.0 — 2026-11-03
 
 - **Holdings and Drivers are tabs.** They head the section with a red + Add and a larger Columns (the owner's pick from mockups). Switching doesn't move the page.
 - **A holding's risk reads in plain words.** The hover says what it means ("Steadied your holdings", "More risk than its size") and gives its share as "4% of your money, about 0% of your holdings' ups and downs". Shares are whole percents everywhere, with "about 0" for a negative or very small one, because a study of this measure showed that is all it can support: a share's 90% range is about 2 points wide for a mid-sized holding and 5.5 for a large one. One rule decides the words on every screen; three different ones did before. Sizes compared with a share leave out cash, as the share does.
