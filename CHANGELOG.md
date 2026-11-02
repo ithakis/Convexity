@@ -11,6 +11,10 @@ launch); until then they have no tags or GitHub Releases of their own.
 
 ## Unreleased
 
+- **Attention, full screen, fits at every zoom.** The table no longer scrolls sideways: long reasons and names wrap, and as its column narrows the Reports and Below high columns give way. Checked from 480 to 2880 px wide, which covers 67% to 200% on any usual window.
+- **A row's dismiss is the app's red ✕, a row's size,** in the rail and on the full screen. The full screen's Esc chip is gone (Esc still closes it), its settings gear is a real button a step under the red ✕, and the Desk / Charts / Map pill is a little bigger. On its Map view the money and the weight sit centred against their rows.
+- **Zooming shows the level.** Cmd + / − / 0 in the desktop window show a small bubble with the percentage, as a browser does.
+- **Drivers no longer jumps the page.** Switching between the table and Drivers, or between Drivers' tabs, changes only that block; the page stays where it is, the chart above isn't redrawn.
 - **A leveraged or single-stock product no longer shows its company's history.** A fund filed under a company's name took that company's chart, returns and highs, which could show a rise on a day it fell a quarter. A fund now only borrows from lines of the same fund, and a share never from a fund.
 - **A failed Yahoo answer no longer reads as "no analysts".** The stock window dropped the analysts from the model price for 15 minutes, and a refresh while Yahoo was throttling could save a holding with no analysts or fundamentals over its good row. It now keeps the last good ones. And one line that didn't answer can no longer record "no research line" for a day while the line with the analysts recovers.
 - **Lines that never carry fundamentals stop costing time.** They are asked once, not twice, and are recognised after some hours instead of being retried every two minutes.

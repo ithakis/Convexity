@@ -3776,6 +3776,10 @@
     z-index: 100; box-shadow: 0 4px 14px rgba(0,0,0,0.10); color: var(--text);
   }
   .toast.show { opacity: 1; }
+  #zoom-hud { position: fixed; top: 62px; right: 14px; z-index: 2147483000; display: flex; align-items: baseline; gap: 8px; padding: 7px 12px; border-radius: var(--r-md); border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text); font-size: 14px; box-shadow: 0 6px 20px rgba(0, 0, 0, .28); font-variant-numeric: tabular-nums; pointer-events: none; opacity: 0; transition: opacity .14s ease; }
+  #zoom-hud.show { opacity: 1; }
+  #zoom-hud b { font-weight: 600; }
+  #zoom-hud span { color: var(--muted); font-size: 11.5px; }
   .toast:not(.show) { pointer-events: none; }  /* a faded toast's Undo must not take clicks */
 
   /* My Investments (rules: docs/architecture/frontend.md). Box budget: the
@@ -3917,9 +3921,9 @@
   .inv-att[data-sev="high"] .inv-att-main > span:first-child { font-weight: 600; }
   .inv-att-group.high { color: var(--neg); }
   .inv-att-main { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-  .inv-att-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; opacity: .45; flex: none; }
-  .inv-att:hover .inv-att-x, .inv-att-x:focus-visible { opacity: 1; }
-  .inv-att-x:hover { color: var(--text); }
+  /* A row's dismiss: the app's red x-close, a row's size (owner, 2026-11-02). */
+  button.x-close.inv-att-x { width: 18px; height: 18px; }
+  button.x-close.inv-att-x svg { width: 8px; height: 8px; }
   /* Notifications (Phase 9): a click lands on the item and flashes it once. */
   @keyframes inv-att-flash { 0%, 40% { background: rgba(var(--accent-rgb), 0.16); } 100% { background: transparent; } }
   .inv-att-flash { animation: inv-att-flash 1.8s ease-out; }
@@ -3937,30 +3941,33 @@
   .att-fs-sub { color: var(--muted); font-size: 11.5px; font-weight: 400; }
   .att-fs-head { flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: 12px 22px; border-bottom: 1px solid var(--border); }
   .att-fs-head-l { display: flex; align-items: baseline; gap: 12px; min-width: 0; white-space: nowrap; }
-  .att-fs-head-r { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
-  .att-fs-views button { min-width: 62px; }
-  .att-fs-gear { order: 0; }
-  .att-fs-esc { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: var(--r-xs); padding: 1px 5px; }
+  .att-fs-head-l .att-fs-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .att-fs-head-r { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+  .att-fs-views button { min-width: 72px; font-size: 13px; padding: 5px 16px; }
+  button.att-fs-gear { width: 26px; height: 26px; padding: 0; flex: none; border: 0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; background: rgba(var(--accent-rgb), 0.10); color: var(--muted); transition: background .16s ease, color .16s ease; }
+  button.att-fs-gear svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  button.att-fs-gear:hover, button.att-fs-gear:focus-visible { background: rgba(var(--accent-rgb), 0.20); color: var(--text); outline: none; }
   .att-fs-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) clamp(340px, 30vw, 440px); }
-  .att-fs-main { padding: 18px 22px; overflow: auto; min-width: 0; }
+  .att-fs-main { padding: 18px 22px; overflow: hidden auto; min-width: 0; container-type: inline-size; }
   .att-fs-main.map { display: flex; flex-direction: column; overflow: hidden; }
-  .att-fs-side { padding: 14px 22px; border-left: 1px solid var(--border); overflow: auto; min-width: 0; }
+  .att-fs-side { padding: 14px 22px; border-left: 1px solid var(--border); overflow: hidden auto; min-width: 0; }
   .att-fs-lede { padding: 2px 0 14px; }
   .att-fs-big { font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
   .att-fs-big-sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
   .att-fs-err { color: var(--neg); font-size: 12.5px; margin-top: 6px; }
   .att-fs-name { font-weight: 600; }
   .att-fs .pos { color: var(--pos); } .att-fs .neg { color: var(--neg); }
-  .att-fs-holding { display: inline-flex; align-items: center; gap: 8px; }
+  .att-fs-holding { display: flex; align-items: center; gap: 8px; }
+  .att-fs-holding .logo { flex: none; }
   .att-fs-holding > span:last-child { display: flex; flex-direction: column; }
   .att-fs-whys { display: flex; flex-direction: column; gap: 1px; align-items: flex-start; }
   .att-fs-whys.row { flex-direction: row; flex-wrap: wrap; gap: 2px 12px; margin-top: 3px; }
-  .att-fs-why { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
-  .att-fs-why > i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
+  .att-fs-why { display: inline-flex; align-items: baseline; gap: 5px; font-size: 12px; }
+  .att-fs-why > i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; position: relative; top: -1px; }
   .att-fs-why > i.o { background: none; box-shadow: inset 0 0 0 1px var(--muted); }
   .att-fs-why.high > i { background: var(--neg); } .att-fs-why.good > i { background: var(--pos); } .att-fs-why.up > i { background: var(--accent); }
-  .att-fs-why .inv-att-x { opacity: 0; font-size: 10px; }
-  .att-fs-why:hover .inv-att-x, .att-fs-why .inv-att-x:focus-visible { opacity: 1; }
+  .att-fs-why button.x-close.inv-att-x { width: 16px; height: 16px; opacity: 0; align-self: center; }
+  .att-fs-why:hover button.x-close.inv-att-x, .att-fs-why button.x-close.inv-att-x:focus-visible { opacity: 1; }
   .att-fs-bar { display: block; height: 3px; background: var(--border); margin: 3px 0 0 auto; width: 56px; }
   .att-fs-bar i { display: block; height: 100%; background: var(--muted); }
   .att-fs-bar i.r { background: rgb(59, 125, 221); }
@@ -3972,6 +3979,8 @@
   .att-fs-tbl th { position: sticky; top: 0; background: var(--bg-canvas); z-index: 1; font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--th-ink, var(--muted)); text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .att-fs-tbl td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; white-space: nowrap; }
   .att-fs-tbl .left { text-align: left; }
+  .att-fs-tbl td.left { white-space: normal; }
+  .att-fs-tbl th:first-child { width: 24%; } .att-fs-tbl th:nth-child(2) { width: 27%; }
   .att-fs-tbl tbody tr[data-full-sym] { cursor: pointer; }
   .att-fs-tbl tbody tr[data-full-sym]:hover td { background: var(--surface-sunk); }
   .att-fs-tbl tr.sel td, .att-fs-tbl tr.sel:hover td { background: rgba(var(--accent-rgb), .12); }
@@ -3980,7 +3989,7 @@
   .att-fs-tbl td .att-fs-holding .att-fs-sub, .att-fs-tbl td > .att-fs-sub { display: block; }
   .att-fs-tbl tr.att-fs-grp td { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--th-ink, var(--muted)); padding: 12px 10px 4px; }
   .att-fs-tbl tr.att-fs-grp td.high { color: var(--neg); }
-  .att-fs-xc { width: 18px; padding-left: 0 !important; }
+  .att-fs-xc { width: 18px; padding-left: 2px !important; padding-right: 0 !important; }
   .att-fs-foot { color: var(--muted); font-size: 11.5px; padding: 10px 0; }
   /* Charts: a hairline grid, the left edge says why it is here */
   .att-fs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); margin: 0 -22px -18px; border-top: 1px solid var(--border); overflow: hidden; }
@@ -4016,19 +4025,19 @@
   .att-fs-tile .f.high { background: var(--neg); color: #fff; }
   /* The right column */
   .att-fs-anchor-note { order: 3; }
-  .att-fs-ev { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); align-items: start; cursor: pointer; }
+  .att-fs-ev { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); align-items: center; cursor: pointer; }
   .att-fs-ev-d { text-align: center; line-height: 1.1; }
   .att-fs-ev-d b { display: block; font-size: 16px; font-weight: 600; }
   .att-fs-ev-d span { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
-  .att-fs-ev-w { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .att-fs-ev-w { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .att-fs-lim { padding: 7px 0; }
   .att-fs-lim-t { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; }
   .att-fs-lim-t b { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .att-fs-track { height: 3px; background: var(--border); margin-top: 5px; }
   .att-fs-track i { display: block; height: 100%; background: var(--muted); }
   .att-fs-track i.close { background: var(--amber); } .att-fs-track i.over { background: var(--neg); }
-  .att-fs-flag { padding: 8px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
-  .att-fs-flag-t { display: flex; justify-content: space-between; gap: 8px; font-variant-numeric: tabular-nums; }
+  .att-fs-flag { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .att-fs-flag-v { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .att-fs-back { display: block; font-size: 12px; margin-bottom: 10px; }
   .att-fs-det-h { display: flex; align-items: baseline; gap: 8px; }
   .att-fs-det-n { font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
@@ -4043,16 +4052,24 @@
   .att-fs-det-a { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
   .inv-att-full { order: 4; border: none; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; margin-left: 2px; line-height: 1; display: inline-flex; }
   .inv-att-full:hover { color: var(--text); }
-  @media (max-width: 1320px) {
+  /* The column's own width, not the window's: zoom and the rail both change it,
+     and the table must never scroll sideways. Least needed goes first: Reports
+     is also in Upcoming, the depth line is a detail of the number above it. */
+  @container (max-width: 900px) {
     .att-fs-tbl th, .att-fs-tbl td { padding-left: 6px; padding-right: 6px; }
-    .att-fs-tbl .att-fs-why { white-space: normal; align-items: baseline; }
-    .att-fs-tbl td.left { white-space: normal; }
-    .att-fs-holding .logo { display: none; }
-    .att-fs-holding .att-fs-name { display: block; max-width: 148px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .att-fs-bar { width: 44px; } .att-fs-dd { width: 56px; }
   }
+  @container (max-width: 760px) {
+    .att-fs-holding .logo { display: none; }
+    .att-fs-tbl tr:not(.att-fs-grp) > :nth-child(8) { display: none; }
+  }
+  @container (max-width: 620px) {
+    .att-fs-dd, .att-fs-bar { display: none; }
+    .att-fs-tbl th, .att-fs-tbl td { padding-left: 4px; padding-right: 4px; }
+    .att-fs-tbl tr:not(.att-fs-grp) > :nth-child(7) { display: none; }
+  }
   /* Stacked, no row has a height of its own to give the map: it needs one. */
-  @media (max-width: 1100px) { .att-fs-body { grid-template-columns: 1fr; overflow: auto; } .att-fs-main, .att-fs-side { overflow: visible; } .att-fs-main.map { height: 72vh; min-height: 420px; } .att-fs-side { border-left: none; border-top: 1px solid var(--border); } }
+  @media (max-width: 1100px) { .att-fs-body { grid-template-columns: 1fr; align-content: start; overflow: auto; } .att-fs-main, .att-fs-side { overflow: visible; } .att-fs-main.map { height: 72vh; min-height: 420px; } .att-fs-side { border-left: none; border-top: 1px solid var(--border); } }
   .inv-recap { width: min(460px, 94vw); margin-top: 8vh; padding: 18px 22px 16px; }
   .inv-recap-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
   .inv-recap-title { font-size: 17px; font-weight: 600; margin-top: 2px; }

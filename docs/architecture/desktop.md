@@ -190,6 +190,8 @@ install): `CONVEXITY_SOURCE` (local checkout or archive URL; `-Source`),
 
 ### Gotchas discovered during implementation
 
+- **Zoom shows its level through the page**: `_apply_zoom` calls `window.cxZoomLevel(pct)` (`app.js`), a bubble drawn at one size whatever the zoom, under the header so it never covers a close button. Browser mode has the browser's own. Verified by `QTest.keySequence` on `_MainWindow`, offscreen.
+
 - **Qt 6's default web profile is off-the-record** (found 2026-10-11): the
   window kept no localStorage between launches, so every per-window choice
   (My Investments' sort and row order, chart period, hidden line, theme) was

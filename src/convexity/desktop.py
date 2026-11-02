@@ -373,7 +373,10 @@ class _MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+0"), self, activated=self._reset_zoom)
 
     def _apply_zoom(self) -> None:
-        self.view.setZoomFactor(_ZOOM_LADDER[self._zoom_idx])
+        z = _ZOOM_LADDER[self._zoom_idx]
+        self.view.setZoomFactor(z)
+        # No browser chrome here: the page shows the level (app.js cxZoomLevel).
+        self.view.page().runJavaScript(f"window.cxZoomLevel?.({round(z * 100)})")
 
     def _step_zoom(self, delta: int) -> None:
         self._zoom_idx = max(0, min(len(_ZOOM_LADDER) - 1, self._zoom_idx + delta))

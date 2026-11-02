@@ -2702,6 +2702,7 @@ const RANGES = ["1M","3M","6M","YTD","1Y","5Y","MAX"];
 
 // The one close mark (.x-close). An SVG, not a × glyph: a glyph's size and baseline vary by font.
 const X_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>';
+const GEAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 4.3c.4-1.8 3-1.8 3.4 0a1.7 1.7 0 0 0 2.6 1.1c1.5-.9 3.3.8 2.4 2.4a1.7 1.7 0 0 0 1 2.5c1.8.4 1.8 3 0 3.4a1.7 1.7 0 0 0-1 2.6c.9 1.5-.9 3.3-2.4 2.4a1.7 1.7 0 0 0-2.6 1c-.4 1.8-3 1.8-3.4 0a1.7 1.7 0 0 0-2.5-1c-1.6.9-3.3-.9-2.4-2.4a1.7 1.7 0 0 0-1.1-2.6c-1.8-.4-1.8-3 0-3.4a1.7 1.7 0 0 0 1.1-2.5c-.9-1.6.8-3.3 2.4-2.4a1.7 1.7 0 0 0 2.5-1.1z"/><circle cx="12" cy="12" r="3"/></svg>';
 
 function openModal(r) {
   if (r.error) return;
@@ -8722,6 +8723,24 @@ function updatePeriodButtons() {
 
 /* action = {label, fn}: a button in the toast (My Investments' Undo); the
  * toast then stays a little longer so there is time to reach it. */
+/* The desktop window has no browser chrome to show its zoom, so Cmd + / − / 0
+ * (desktop._apply_zoom) ask for this bubble, where a browser puts its own. It
+ * stays one size whatever the zoom. Browser mode has the browser's own. */
+let _zoomHudT = 0;
+window.cxZoomLevel = (pct) => {
+  let el = $("#zoom-hud");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "zoom-hud";
+    el.setAttribute("role", "status");
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `<b>${pct}%</b>${pct === 100 ? "" : `<span>${/Mac/.test(navigator.platform) ? "⌘" : "Ctrl+"}0 resets</span>`}`;
+  el.style.zoom = String(100 / pct);
+  el.classList.add("show");
+  clearTimeout(_zoomHudT);
+  _zoomHudT = setTimeout(() => el.classList.remove("show"), 1400);
+};
 function toast(msg, action) {
   const t = $("#toast"); t.textContent = msg;
   if (action) {
@@ -15132,19 +15151,40 @@ function invRender() {
     host.querySelectorAll("[data-inv-comp-text]").forEach(invCompFit);
     return;
   }
+  const y = window.scrollY;
   host.innerHTML = `
     <div class="inv-grid">
       <div class="inv-main">
         ${b.broken ? `<div class="inv-broken">Your investments can't be totalled: ${escapeHtml(b.broken)} Fix or delete that entry in Activity.</div>`
           : b.waiting ? `<div class="inv-waiting">${escapeHtml(b.waiting)}</div>` : invHeroHtml(b)}
         <div class="section-anchor inv-anchor"><span class="sa-kicker">Holdings<span class="inv-count">${b.positions.length}</span></span>${b.broken || b.waiting ? "" : `<button type="button" class="inv-add inv-cols-btn" data-inv-cols aria-haspopup="menu"${INV.drivers ? " disabled" : ""}>Columns</button><button type="button" class="inv-add inv-cols-btn" data-inv-drivers aria-pressed="${!!INV.drivers}" data-tip="What drove your return, and the risk taken to get it.">Drivers</button>`}<button type="button" class="inv-add inv-add-go" data-inv-add>+ Add</button></div>
-        ${b.broken || b.waiting ? "" : INV.drivers ? '<div id="inv-drv"></div>' : invHoldingsHtml(b)}
+        <div id="inv-hold">${invHoldRegion(b)}</div>
       </div>
       <aside class="inv-rail" aria-label="Attention">${invRailHtml(b)}</aside>
     </div>`;
   drawInvChart();
   invDriversPaint();
   wireBenchSelect($("#inv-bench"), invPickBench);
+  // Drawing the chart forces a layout while the page is still short, which
+  // would pull the scroll up.
+  if (window.scrollY !== y) window.scrollTo({ top: y, behavior: "instant" });
+}
+const invHoldRegion = (b) => b.broken || b.waiting ? "" : INV.drivers ? '<div id="inv-drv"></div>' : invHoldingsHtml(b);
+/* Table to chart, or one tab to another: only that block changes. The page
+ * stays where it is, even when the new block is shorter than the old one and
+ * the page would otherwise have to shrink past the scroll position. */
+function invHoldStill(fn) {
+  const el = $("#inv-hold"), y = window.scrollY;
+  if (el) el.style.minHeight = "";
+  fn();
+  // scrollHeight never reads under the window, so a page shorter than that
+  // takes more than one pass to measure.
+  for (let i = 0; el && i < 4; i++) {
+    const short = y + window.innerHeight - document.documentElement.scrollHeight;
+    if (short <= 0) break;
+    el.style.minHeight = `${el.offsetHeight + short}px`;
+  }
+  window.scrollTo({ top: y, behavior: "instant" });
 }
 
 /* The benchmark's name, as the server priced it (S&P 500 unless picked). */
@@ -15595,8 +15635,8 @@ function invAttentionHtml(b) {
   const full = `<button type="button" class="inv-att-full" data-inv-att-full aria-label="Open Attention full screen" data-tip="Open full screen"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7.5 1H11v3.5M11 1 7 5M4.5 11H1V7.5M1 11l4-4"/></svg></button>`;
   // A plan item's ✕ is a menu (Phase 8): dismiss, snooze, or edit the plan.
   const x = (it) => it.plan
-    ? `<button type="button" class="inv-att-x" data-inv-att-menu="${escapeHtml(it.key)}" aria-haspopup="menu" aria-label="Dismiss or snooze: ${escapeHtml(it.text)}" data-tip="Dismiss or snooze">✕</button>`
-    : `<button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button>`;
+    ? `<button type="button" class="x-close inv-att-x" data-inv-att-menu="${escapeHtml(it.key)}" aria-haspopup="menu" aria-label="Dismiss or snooze: ${escapeHtml(it.text)}" data-tip="Dismiss or snooze">${X_SVG}</button>`
+    : `<button type="button" class="x-close inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">${X_SVG}</button>`;
   const link = (it) => it.plan
     ? ` <button type="button" class="inv-link inv-att-limit" data-inv-plan-open="${escapeHtml(it.symbols[0])}">Your plan</button>`
     : it.rule ? ` <button type="button" class="inv-link inv-att-limit" data-inv-att-rules="${it.rule}">Change limit</button>` : "";
@@ -15898,8 +15938,8 @@ function invFullReason(r, it) {
   t = t.charAt(0).toUpperCase() + t.slice(1) + (it.rule === "move" ? ` · ${Math.abs(it.value).toFixed(1)}σ` : "");
   const tone = it.rule === "target" || (it.rule === "move" && it.pct > 0) ? "good" : it.severity;
   const x = it.plan
-    ? `<button type="button" class="inv-att-x" data-inv-att-menu="${escapeHtml(it.key)}" aria-haspopup="menu" aria-label="Dismiss or snooze: ${escapeHtml(it.text)}" data-tip="Dismiss or snooze">✕</button>`
-    : `<button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button>`;
+    ? `<button type="button" class="x-close inv-att-x" data-inv-att-menu="${escapeHtml(it.key)}" aria-haspopup="menu" aria-label="Dismiss or snooze: ${escapeHtml(it.text)}" data-tip="Dismiss or snooze">${X_SVG}</button>`
+    : `<button type="button" class="x-close inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">${X_SVG}</button>`;
   return `<span class="att-fs-why ${tone}"><i></i>${it.ai ? '<span class="inv-att-ai" aria-label="AI">✦</span> ' : ""}<span>${escapeHtml(t)}</span>${x}</span>`;
 }
 const invFullNearWhy = (n) => `<span class="att-fs-why"><i class="o"></i><span>${escapeHtml(n.text)}</span></span>`;
@@ -15928,13 +15968,13 @@ function invFullDeskRow(r, m, nearRow) {
     <td><div class="${invCls(r.p.return_pct)}">${invPct(r.p.return_pct)}</div><div class="att-fs-sub ${invCls(r.p.profit_held)}">${invMoney(r.p.profit_held, true)}</div></td>
     <td><div>${invOk(r.x.peak_pct) ? invPct(r.x.peak_pct, 0) : invFullDash}</div>${invFullDepth(r)}</td>
     <td>${rep}</td>
-    <td class="att-fs-xc">${nearRow ? "" : `<button type="button" class="inv-att-x" data-full-dismiss="${escapeHtml(r.sym)}" aria-label="Dismiss everything for ${escapeHtml(r.p.name)}" data-tip="Dismiss all of these. Each comes back if it gets worse.">✕</button>`}</td></tr>`;
+    <td class="att-fs-xc">${nearRow ? "" : `<button type="button" class="x-close inv-att-x" data-full-dismiss="${escapeHtml(r.sym)}" aria-label="Dismiss everything for ${escapeHtml(r.p.name)}" data-tip="Dismiss all of these. Each comes back if it gets worse.">${X_SVG}</button>`}</td></tr>`;
 }
 function invFullBookRow(it) {
   const name = it.rule === "sector" ? it.text.split(" is ")[0] : it.text.split(" in ").pop();
   return `<tr><td class="left"><span class="att-fs-name">${escapeHtml(name)}</span><span class="att-fs-sub">Across your book</span></td>
     <td class="left" colspan="7"><div class="att-fs-whys"><span class="att-fs-why ${it.severity}"><i></i><span>${escapeHtml(it.text)}</span></span><span class="att-fs-sub">${escapeHtml(it.sub)}</span></div></td>
-    <td class="att-fs-xc"><button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button></td></tr>`;
+    <td class="att-fs-xc"><button type="button" class="x-close inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">${X_SVG}</button></td></tr>`;
 }
 function invFullDesk(m) {
   const grp = (t, cls = "") => `<tr class="att-fs-grp"><td colspan="9" class="left ${cls}">${t}</td></tr>`;
@@ -16071,7 +16111,7 @@ function invFullEvents(m) {
       : paid && invOk(r.p.price) && r.p.price > 0 ? `Last paid ${invQuotePrice(paid.per_share, r.p.quote_ccy)} a share, about ${invMoney(paid.per_share * r.p.value / r.p.price)} gross` : "";
     return `<div class="att-fs-ev inv-att" data-full-sym="${escapeHtml(u.symbol)}" tabindex="0"><div class="att-fs-ev-d"><b>${when.getDate()}</b><span>${when.toLocaleDateString("en-GB", { month: "short" })}</span></div>
       <div class="att-fs-ev-b"><div><span class="att-fs-name">${escapeHtml(u.name)}</span> <span class="att-fs-sub">${earn ? "Earnings" : "Ex-dividend"} · ${d <= 0 ? "today" : d === 1 ? "tomorrow" : `in ${d} days`}</span></div>${stake ? `<div class="att-fs-sub">${stake}</div>` : ""}</div>
-      <div class="att-fs-ev-w">${r ? r.p.weight.toFixed(1) + "%" : ""}<button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(u.key)}" data-level="${u.level}" aria-label="Dismiss: ${escapeHtml(`${u.name} ${u.what}`)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button></div></div>`;
+      <div class="att-fs-ev-w">${r ? r.p.weight.toFixed(1) + "%" : ""}<button type="button" class="x-close inv-att-x" data-inv-dismiss="${escapeHtml(u.key)}" data-level="${u.level}" aria-label="Dismiss: ${escapeHtml(`${u.name} ${u.what}`)}" data-tip="Dismiss. It comes back if it gets worse.">${X_SVG}</button></div></div>`;
   }).join("");
   const body = days && !days.on ? `<div class="inv-calm">Event dates are switched off.</div>` : rows || `<div class="inv-calm">No earnings or ex-dividend dates in the next ${days ? days.value : 14} days.</div>`;
   return `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">Upcoming</span><span class="att-fs-sub att-fs-anchor-note">next ${days ? days.value : 14} days</span></div>${body}`;
@@ -16090,7 +16130,7 @@ function invFullTidy(m) {
   return divs || warn ? `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">To tidy</span></div>${divs}${warn}` : "";
 }
 function invFullFlagged(m) {
-  const li = (r) => `<div class="att-fs-flag" data-full-sym="${escapeHtml(r.sym)}" tabindex="0"><div class="att-fs-flag-t"><span class="att-fs-name">${escapeHtml(r.p.name)}</span><span class="${invCls(r.p.profit_held)}">${invMoney(r.p.profit_held, true)}</span></div><div class="att-fs-whys row">${r.its.map(i => invFullReason(r, i)).join("")}</div></div>`;
+  const li = (r) => `<div class="att-fs-flag" data-full-sym="${escapeHtml(r.sym)}" tabindex="0"><div class="att-fs-flag-b"><span class="att-fs-name">${escapeHtml(r.p.name)}</span><div class="att-fs-whys row">${r.its.map(i => invFullReason(r, i)).join("")}</div></div><span class="att-fs-flag-v ${invCls(r.p.profit_held)}">${invMoney(r.p.profit_held, true)}</span></div>`;
   return (m.hi.length ? `<div class="inv-att-group high">Needs a look</div>${m.hi.map(li).join("")}` : "")
     + (m.fy.length ? `<div class="inv-att-group">For your information</div>${m.fy.map(li).join("")}` : "");
 }
@@ -16178,7 +16218,7 @@ function invFullPaint() {
   host.innerHTML = `<div class="att-fs-head">
       <div class="att-fs-head-l"><span class="sa-kicker">Attention</span><span class="att-fs-sub">${escapeHtml(now)}${asOf ? ` · prices as of ${asOf}` : ""}${m.b.stale ? " · refreshing…" : ""}</span></div>
       <span class="pf-contrib-toggle att-fs-views" role="group" aria-label="View">${pills}</span>
-      <div class="att-fs-head-r"><button type="button" class="inv-att-gear att-fs-gear" data-full-rules data-tip="Change what the rail watches for, and the limits">⚙</button><span class="att-fs-esc">Esc</span><button type="button" class="x-close" data-full-close aria-label="Close">${X_SVG}</button></div>
+      <div class="att-fs-head-r"><button type="button" class="att-fs-gear" data-full-rules aria-label="Attention settings" data-tip="Change what the rail watches for, and the limits">${GEAR_SVG}</button><button type="button" class="x-close" data-full-close aria-label="Close">${X_SVG}</button></div>
     </div>
     <div class="att-fs-body">
       <div class="att-fs-main${view === "map" ? " map" : ""}" data-full-scroll="main-${view}">${main}</div>
@@ -16372,7 +16412,7 @@ function invPlanHtml(x) {
   const track = pl.target || pl.review ? `<div class="inv-plan-big">${invPlanTrack(x.price, pl.review, pl.target, true)}
       <div class="inv-plan-ends"><span>${pl.review ? `Review ${q(pl.review)}` : ""}</span><span>${pl.target ? `Target ${q(pl.target)}${x.price >= pl.target ? " · reached" : ""}` : ""}</span></div></div>` : "";
   const alerts = (pl.alerts || []).map(a => `<div class="inv-plan-alert"><span>${a.side === "above" ? "Above" : "Below"} ${q(a.level)}${a.fired_on ? ` <em>· crossed ${invDate(a.fired_on)}</em>` : ""}</span>
-      <button type="button" class="inv-att-x" data-inv-alert-rm="${escapeHtml(a.id)}" aria-label="Remove the alert at ${escapeHtml(q(a.level))}">✕</button></div>`).join("");
+      <button type="button" class="x-close inv-att-x" data-inv-alert-rm="${escapeHtml(a.id)}" aria-label="Remove the alert at ${escapeHtml(q(a.level))}">${X_SVG}</button></div>`).join("");
   const hasPlan = ["target", "review", "max_weight", "why"].some(k => pl[k] != null);
   return `<form class="inv-plan" data-plan-sym="${escapeHtml(x.symbol)}" novalidate>
     <div class="inv-form-head"><span class="inv-form-title">Your plan for ${escapeHtml(x.name)}</span>
@@ -17768,13 +17808,17 @@ $("#inv-page").addEventListener("click", (e) => {
   else if (e.target.closest("[data-inv-drivers]")) {
     INV.drivers = !INV.drivers;
     try { localStorage.setItem("inv_drivers", INV.drivers ? "1" : ""); } catch (e2) {}
-    invRender();
+    invMenuClose();
+    e.target.closest("[data-inv-drivers]").setAttribute("aria-pressed", String(INV.drivers));
+    const cols = $("#inv-page [data-inv-cols]");
+    if (cols) cols.disabled = INV.drivers;
+    invHoldStill(() => { $("#inv-hold").innerHTML = invHoldRegion(INV.book); invDriversPaint(); });
   }
   else if (e.target.closest("[data-inv-drv], [data-inv-risk]")) {
     const d = e.target.closest("[data-inv-drv]"), k = e.target.closest("[data-inv-risk]");
     if (d) INV.drvTab = d.dataset.invDrv; else INV.drvRisk = k.dataset.invRisk;
     try { localStorage.setItem(d ? "inv_drv_tab" : "inv_drv_risk", d ? INV.drvTab : INV.drvRisk); } catch (e2) {}
-    invDriversPaint();
+    invHoldStill(invDriversPaint);
   }
   else if (e.target.closest("[data-inv-risk-retry]")) { INV.risk = null; invDriversPaint(); }
   else if (e.target.closest("[data-inv-sma]")) invSmaToggle(+e.target.closest("[data-inv-sma]").dataset.invSma);
