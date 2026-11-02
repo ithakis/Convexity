@@ -1030,9 +1030,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(200, _investments.page(ccy))
             elif parsed.path == "/api/investments/risk":
                 # The Drivers view: ten years of closes per holding, on demand.
-                self._send_json(
-                    200, {"risk": _investments.holding_risk((q.get("ccy") or [None])[0])}
-                )
+                self._send_json(200, _investments.holding_risk_payload((q.get("ccy") or [None])[0]))
             elif parsed.path == "/api/investments/attention/extras":
                 # Attention full screen: charts and past results, asked for
                 # once the screen is open, never on the page's path.

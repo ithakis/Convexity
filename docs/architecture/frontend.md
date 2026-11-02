@@ -63,7 +63,9 @@ dependency (loaded from CDN, used only for column-guide formulas).
   Contributions and risk share come with the page; the rest arrives from
   `GET /api/investments/risk` (`invRiskLoad`, once per holdings set and
   currency), so those cells show a dash until it answers, with a Try again if
-  it fails. One hover card, `inv:drv`, serves every tab.
+  it fails or names holdings it couldn't read (`missing`). A missing risk share or
+  contribution is a dash everywhere, never 0, and a holding without both is left
+  out of Value for risk's best and worst. One hover card, `inv:drv`, serves every tab.
 - **The + Add button** (owner, 2026-11-02): cut corner to corner, the model
   price red above, `#2c9c5c` below (white text measures 3.5:1 on it, 2.5:1 on
   the table's dark-mode green), fixed in every theme. The cut is a gradient

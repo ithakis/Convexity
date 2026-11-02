@@ -350,19 +350,25 @@ fundamentals and no coverage card, and σ/μ cached a model price without the
 analysts' α for 15 minutes, while the saved row (built the night before)
 had all of it.
 
-The two cases are separable. A share always carries `financialData`: all
+The two cases are separable. A share almost always carries `financialData`: all
 121 equities in the owner's portfolios did, and a secondary line with no
 targets of its own (NVD.DE, WMT.DE, CCC3.DE) still answers it with its
-`current` price and revenue. A fund never has it. So:
+`current` price and revenue. A fund never has it. The exception is a line that
+never does (`KDP.MX`: EQUITY, "No fundamentals data found", on every call), which
+only time can tell from a lapse. So:
 
 - `helpers.fundamentals_missing(info)`: an `EQUITY` with neither
   `financialCurrency` nor `totalRevenue`.
 - `fetcher._safe_info` asks once more on a **fresh** `yf.Ticker` (yfinance
   keeps the first answer on the object) after 0.4 s; an answer that stays
-  degraded carries `_fundamentals_missing`. The hot path pays the extra
-  request only when Yahoo misbehaves.
-- `analyst_targets.consensus`: degraded `.info` is not read as "no targets";
-  `financialData` is asked alone. An empty answer for a share is an
+  degraded carries `_fundamentals_missing`. Only the first answer of a run is
+  asked twice, or a line with no module pays 1.3 s on every fetch.
+  `helpers.thin_line`: three or more such answers over half an hour, with no
+  good one between, is the line itself. The flag then stops and its "no
+  analysts" is cached as the truth. In memory only, so a restart starts over.
+- `analyst_targets.consensus`: degraded `.info` is not read as "no targets",
+  and neither is one that said nothing: `{}` (`.info` raised, σ/μ passes that)
+  or fast_info's gaps alone (no `quoteType`, no target). `financialData` is asked alone. An empty answer for a share is an
   **unknown** miss (`{"v": None, "unknown": True}`, `UNKNOWN_TTL` 2 min,
   `analyst_targets.unknown(*symbols)`); `{"current": ...}` with no targets
   stays a real miss (`MISS_TTL`). A cached miss never outranks a caller
@@ -858,7 +864,12 @@ return; an oversell is refused; an edit that breaks a later sell is refused.
 
 Each holding on its own, in the display currency with dividends reinvested, over
 `RISK_SPAN` (10 years; under 20 s cold for a book of about 30 names, cached 30
-minutes, failures not cached). A short listing goes through `extend_history` (Yahoo
+minutes). Only a whole answer is cached: a holding Yahoo left out, or one whose
+currency has no rate (it would stay unconverted, or be converted as if it quoted
+in USD), is left out of the figures and named in `missing` on the route, and the
+page offers Try again. Too little history (`RISK_MIN_DAYS`) is no figure, not a
+failure. `ccy` goes through `_display_ccy`, so junk shares the page's cache entry.
+A short listing goes through `extend_history` (Yahoo
 can answer a young secondary line with **one** close), and every series through
 `_xray_clean` (old glitches otherwise read as a 30-year fall). `_total_closes`
 must keep its `retry` argument: without it `extend_history` falls back to the
@@ -1250,7 +1261,7 @@ on 2026-10-09 (Yahoo then answers only "1d"/"5d" for it).
 
 ### The stock window's stand-in (`analytics.window_stand_in`, 2026-11-02)
 Yahoo has one close, ever, for many secondary lines: a Xetra, Mexican, Swiss or
-London line of a big company (`J4D.DE`, `KDP.MX`, `SANP.L`). The window then said
+London line of a big company (`J4D.DE`, `KDP.MX`). The window then said
 "No data for 1Y" with an empty Performance table and 52-week high = low = ATH,
 while My Investments priced the same line from the company's other listing.
 - **When:** own closes start under a year ago (`_WINDOW_YOUNG_DAYS`; the default
@@ -1280,10 +1291,16 @@ while My Investments priced the same line from the company's other listing.
 - **Yahoo's refusals:** `max` is empty for some of these lines while `10y`
   answers one close, and a ticker renamed yesterday answers only a month, so
   `fetch_detail` tries `max`, `10y`, `1mo`.
-- **Checked against Yahoo directly:** 1M, 6M and 1Y of `J4D.DE`, `KDP.MX` and
-  `SANP.L` recomputed from the stand-in's closes and Yahoo's FX agree within
-  0.02 points. The scale is not checked: `SANP.L` stands at 5.5x Sanofi's price in
-  pounds, which is that line's own unit as far as the app can tell.
+- **Checked against Yahoo directly:** 1M, 6M and 1Y of `J4D.DE` and `KDP.MX`
+  recomputed from the stand-in's closes and Yahoo's FX agree within 0.02 points.
+- **Never a fund for a share, nor a share for a fund** (`symbol_db.may_stand_in`,
+  the same for every stand-in path). `SANP.L` is a GraniteShares single-stock ETP
+  filed in the pack under Sanofi's group and name: it took Sanofi's history back
+  to 2000, +4.57% on a day it fell 26.9%. The pack's fund type alone isn't enough
+  either (`SNY.TO`, also "Sanofi", is typed etf), so a fund takes only lines that
+  name themselves a fund. Too strict costs history, never a wrong number. The
+  pack can't flag a product typed as a share (`SANP.XC`); order-book lines like
+  that sort last among candidates. Disk entries saved earlier read clean.
 
 ### Real-world price distribution (`options_density.py`, `GET /api/density`)
 

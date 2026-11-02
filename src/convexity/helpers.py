@@ -304,7 +304,8 @@ def fundamentals_missing(info: dict | None) -> bool:
     analysts' targets or count. A share always has that module (121 of 121
     equities in the owner's portfolios, 2026-10-30, even secondary lines like
     NVD.DE, which carry it without targets); a fund never does. So a share
-    without it is a degraded answer, never "this company has no analysts".
+    without it is a degraded answer, never "this company has no analysts",
+    until it has lasted long enough to be the line itself (``thin_line``).
 
     On 2026-10-30 Yahoo dropped it for MU for a few minutes. The stock window
     then cached "no analyst targets" and n/a fundamentals and σ/μ lost the
@@ -315,6 +316,38 @@ def fundamentals_missing(info: dict | None) -> bool:
     if (info.get("quoteType") or "").upper() != "EQUITY":
         return False
     return not info.get("financialCurrency") and info.get("totalRevenue") is None
+
+
+# Each line's unbroken run of answers without financialData this process:
+# [when it began, answers]. Yahoo's lapses last minutes (MU's did); some real
+# shares never carry the module (KDP.MX: EQUITY, "No fundamentals data found",
+# on every call).
+_THIN_RUN: dict[str, list[float]] = {}
+_THIN_AFTER_S = 1800.0
+_THIN_AFTER_N = 3  # two lapses hours apart, no fetch between, aren't a pattern
+
+
+def note_fundamentals(symbol: str | None, missing: bool) -> None:
+    """Record whether ``symbol``'s latest ``.info`` carried its fundamentals."""
+    s = (symbol or "").upper()
+    if not missing:
+        _THIN_RUN.pop(s, None)
+    elif s:
+        _THIN_RUN.setdefault(s, [time.time(), 0])[1] += 1
+
+
+def fundamentals_retry_due(symbol: str | None) -> bool:
+    """The second ask is for a passing lapse: only the first answer of a run
+    earns it, or a line that never has the module pays for it on every fetch."""
+    return (symbol or "").upper() not in _THIN_RUN
+
+
+def thin_line(symbol: str | None) -> bool:
+    """A line that has answered without its fundamentals repeatedly for over
+    half an hour, with no good answer between: that is the line, not a lapse,
+    so its "no analysts" is the truth and nothing keeps re-asking."""
+    run = _THIN_RUN.get((symbol or "").upper())
+    return bool(run) and run[1] >= _THIN_AFTER_N and time.time() - run[0] > _THIN_AFTER_S
 
 
 def major_ccy(ccy: str | None) -> str:

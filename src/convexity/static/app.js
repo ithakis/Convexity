@@ -870,7 +870,7 @@ const _RICH_TIP = (() => {
     if (!pinned || !current || !el?.classList.contains("show")) return hide();
     placeTip(el, current.getBoundingClientRect(), {preferred: "below", offset: 6, gap: fitTip(el)});
   }
-  return {show, hide, leave, inside, held, warm, isOpen, relayout};
+  return {show, hide, leave, inside, held, warm, isOpen, relayout, pinned: () => pinned};
 })();
 /* The model price card always fits the window, whatever its size or zoom
  * (the owner, 2026-11-01: no scrolling). It is laid out at its full 860px
@@ -923,7 +923,13 @@ document.addEventListener("scroll", (ev) => { if (!_RICH_TIP.inside(ev.target)) 
 window.addEventListener("resize", () => _RICH_TIP.relayout());
 document.addEventListener("mousedown", (ev) => { if (!_RICH_TIP.inside(ev.target)) _RICH_TIP.hide(); }, true);
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") _RICH_TIP.hide();
+  if (ev.key === "Escape") {
+    // A card opened by a click is the top thing: Esc closes it and stops there
+    // (the global pass would take the stock window under it too).
+    const top = _RICH_TIP.pinned();
+    _RICH_TIP.hide();
+    if (top) { ev.stopImmediatePropagation(); return; }
+  }
   const t = (ev.key === "Enter" || ev.key === " ") && ev.target.closest?.("[data-rich-tip]");
   if (t && clickTip(t)) { ev.preventDefault(); t.click(); }
 }, true);
@@ -2763,6 +2769,9 @@ document.addEventListener("keydown", (e) => {
   const tab = /^Digit([1-4])$/.exec(e.code)?.[1];
   if (tab && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
     e.preventDefault();
+    // Text being typed stays: the Add box loses what's in it on a page change.
+    const typed = e.target?.closest?.("input, textarea, [contenteditable]");
+    if (typed && (typed.value ?? typed.textContent ?? "").trim()) return;
     const mpt = $("#pf-mpt-bg").classList.contains("show");
     if (SCROLL_LOCK.depth > (mpt ? 1 : 0)) return;
     if (tab === "4") {
@@ -15373,7 +15382,8 @@ const INV_CASH_BUCKET = "_cash";  // investments.CASH_BUCKET
  * and those figures fill in when it answers. */
 const INV_DRV_TABS = { waterfall: "Waterfall", value: "Value for risk", map: "Map", dist: "Distribution" };
 const invYears = (d) => d >= 252 ? (d / 252).toFixed(1) + " y" : Math.max(1, Math.round(d / 21)) + " mo";
-const invLoss = (v, dp = 0) => "−" + v.toFixed(dp) + "%";
+// A T-bill fund's bad month is still a small gain (var_pct above 0).
+const invLoss = (v, dp = 0) => (v < 0 ? "+" : "−") + Math.abs(v).toFixed(dp) + "%";
 const INV_RISKS = {
   share: { label: "Risk share", note: "its share of the book's ups and downs, at today's weights, over the last year",
     get: (x) => invOk(x.risk_share) ? x.risk_share * 100 : null, fmt: (v) => v.toFixed(1) + "%", ticks: [1, 2, 5, 10, 15, 20, 30, 40, 60] },
@@ -15389,7 +15399,7 @@ const INV_RISKS = {
 const invDrvRisk = () => INV_RISKS[INV.drvRisk] || INV_RISKS.var;
 const invRiskOf = (x) => INV.risk?.data?.[x.symbol];
 function invDrvRows(b) {
-  return b.positions.filter(x => !x.pending).map(x => ({ x, c: invContrib(x) || 0, r: invRiskOf(x) })).sort((p, q) => q.c - p.c);
+  return b.positions.filter(x => !x.pending).map(x => ({ x, c: invContrib(x) || 0, noC: !invOk(invContrib(x)), r: invRiskOf(x) })).sort((p, q) => q.c - p.c);
 }
 const invDrvName = (x) => `<span class="inv-drv-name">${logoImg(x.symbol)}<span>${escapeHtml(x.name)}</span></span>`;
 const invDrvAttrs = (x) => `data-rich-tip="inv:drv" data-sym="${escapeHtml(x.symbol)}" tabindex="0"`;
@@ -15402,7 +15412,7 @@ function invRiskLoad() {
   if (INV.risk?.key === key) return;
   INV.risk = { key, loading: true };
   fetch("/api/investments/risk?ccy=" + encodeURIComponent(FX_QUOTE)).then(r => r.ok ? r.json() : Promise.reject())
-    .then(d => { if (INV.risk?.key === key) INV.risk = { key, data: d.risk || {} }; })
+    .then(d => { if (INV.risk?.key === key) INV.risk = { key, data: d.risk || {}, missing: d.missing || [] }; })
     .catch(() => { if (INV.risk?.key === key) INV.risk = { key, failed: true }; })
     .finally(() => { if (INV.risk?.key === key) { invDriversPaint(); invFullPaint(); } });
 }
@@ -15411,8 +15421,9 @@ function invDriversPaint() {
   if (!el || !b) return;
   invRiskLoad();
   const tab = INV_DRV_TABS[INV.drvTab] ? INV.drvTab : "waterfall";
-  const status = INV.risk?.loading ? lcHtml("Reading 10 years of prices") : INV.risk?.failed
-    ? `Couldn't read the price history. <button type="button" class="inv-link" data-inv-risk-retry>Try again</button>` : "";
+  const miss = INV.risk?.missing?.length || 0, heldN = b.positions.filter(x => !x.pending).length;
+  const status = INV.risk?.loading ? lcHtml("Reading 10 years of prices") : INV.risk?.failed || miss
+    ? `${INV.risk?.failed || miss >= heldN ? "Couldn't read the price history." : `Couldn't read ${miss} of ${heldN} holdings.`} <button type="button" class="inv-link" data-inv-risk-retry>Try again</button>` : "";
   const picker = tab === "waterfall" || tab === "map"
     ? `<span>Risk as</span>${invPills("inv-risk", Object.entries(INV_RISKS).map(([k, m]) => [k, m.label]), INV_RISKS[INV.drvRisk] ? INV.drvRisk : "var")}` : "";
   el.innerHTML = `<div class="inv-drv-bar">${invPills("inv-drv", Object.entries(INV_DRV_TABS), tab)}<span class="sp"></span>${status}${picker}</div>
@@ -15427,8 +15438,9 @@ function invDrvWaterfall(b) {
   const h = b.headline, p = INV.period, M = invDrvRisk(), rows = invDrvRows(b);
   const closed = (b.closed || []).reduce((t, x) => t + (invContrib(x) || 0), 0), cash = h.contrib?.[p]?.[INV_CASH_BUCKET] || 0;
   const steps = [...rows.map(r => ({ ...r, label: invDrvName(r.x) })),
-    ...(Math.abs(closed) >= 0.05 ? [{ c: closed, label: `Closed (${b.closed.length})`, minor: true }] : []),
-    ...(Math.abs(cash) >= 0.05 ? [{ c: cash, label: "Cash and fees", minor: true }] : [])];
+    // Shown down to what rounds away, or the steps stop adding up to the total.
+    ...(Math.abs(closed) >= 0.005 ? [{ c: closed, label: `Closed (${b.closed.length})`, minor: true }] : []),
+    ...(Math.abs(cash) >= 0.005 ? [{ c: cash, label: "Cash and fees", minor: true }] : [])];
   let cum = 0;
   for (const s of steps) { s.from = cum; cum += s.c; s.to = cum; }
   const total = invOk(h.twr?.[p]) ? h.twr[p] : cum;
@@ -15438,7 +15450,7 @@ function invDrvWaterfall(b) {
   const row = (s) => {
     const v = s.x ? M.get(s.x, s.r) : null;
     return `<div class="inv-drv-row${s.minor ? " minor" : ""}" ${s.x ? invDrvAttrs(s.x) : ""}>${s.label}
-      <span class="inv-drv-tr">${zero}${invDrvBar(P(Math.min(s.from, s.to)), Math.abs(s.c) / span * 100, invPtsCls(s.c) || "pos")}</span>${invDrvPts(s.c)}
+      <span class="inv-drv-tr">${zero}${s.noC ? "" : invDrvBar(P(Math.min(s.from, s.to)), Math.abs(s.c) / span * 100, invPtsCls(s.c) || "pos")}</span>${invDrvPts(s.noC ? null : s.c)}
       <span class="inv-drv-tr">${v > 0 ? invDrvBar(0, v / mx * 100, "rk") : ""}</span>
       <span class="inv-drv-v">${s.x ? (v == null ? na() : M.fmt(v)) : ""}</span></div>`;
   };
@@ -15446,7 +15458,7 @@ function invDrvWaterfall(b) {
     <div class="inv-drv-hd"><span>Holding</span><span>Contribution to ${escapeHtml(p)} return, running total</span><span></span><span>${M.label}</span><span></span></div>
     ${steps.map(row).join("")}
     <div class="inv-drv-row tot"><span>Total</span><span class="inv-drv-tr">${zero}${invDrvBar(P(Math.min(0, total)), Math.abs(total) / span * 100, "tot")}</span>${invDrvPts(total)}<span></span><span></span></div>
-    <div class="inv-drv-note">${M.label}: ${M.note}. Contributions add up to your ${escapeHtml(p)} return exactly.</div></div>`;
+    <div class="inv-drv-note">${M.label}: ${M.note}. ${rows.some(r => r.noC) ? "A holding with no contribution figure is left out of the running total." : `Contributions add up to your ${escapeHtml(p)} return exactly.`}</div></div>`;
 }
 
 /* Who pays for their risk: each holding's share of all the period's gains and
@@ -15456,20 +15468,22 @@ function invDrvWaterfall(b) {
 function invDrvValue(b) {
   const gross = invDrvRows(b).reduce((t, r) => t + Math.abs(r.c), 0) || 1;
   const rows = invDrvRows(b).map(r => {
-    const ret = r.c / gross * 100, risk = (r.x.risk_share || 0) * 100;
-    return { ...r, ret, risk, gap: ret - risk };
+    const ret = r.c / gross * 100, risk = invOk(r.x.risk_share) ? r.x.risk_share * 100 : null;
+    return { ...r, ret, risk, gap: risk == null ? -Infinity : ret - risk };
   }).sort((p, q) => q.gap - p.gap);
+  // Only a holding with both figures can be judged for its risk.
+  const judged = rows.filter(r => r.risk != null && !r.noC);
   const hi = Math.max(1e-9, ...rows.map(r => Math.max(r.ret, r.risk))), lo = Math.min(0, ...rows.map(r => r.ret)), span = hi - lo;
   const P = (v) => (v - lo) / span * 100, zero = `<span class="z" style="left:${P(0).toFixed(2)}%"></span>`;
-  const sum = (a, f) => a.reduce((t, r) => t + f(r), 0), n = Math.min(5, Math.floor(rows.length / 2));
-  const best = rows.slice(0, n), worst = rows.slice(-n), pt = (v) => invPct(v, 1, " pts");
+  const sum = (a, f) => a.reduce((t, r) => t + f(r), 0), n = Math.min(5, Math.floor(judged.length / 2));
+  const best = judged.slice(0, n), worst = judged.slice(-n), pt = (v) => invPct(v, 1, " pts");
   const say = (a) => `<b class="${invPtsCls(sum(a, r => r.c))}">${pt(sum(a, r => r.c))}</b> on <b>${sum(a, r => r.risk).toFixed(0)}%</b> of the risk`;
   return `<div style="--drv-cols:minmax(150px,1.3fr) minmax(240px,2.6fr) 62px 54px">
     ${n ? `<p class="inv-drv-sent">Your best ${n} for their risk made ${say(best)}. Your worst ${n} made ${say(worst)}.</p>` : ""}
     <div class="inv-drv-hd"><span>Holding</span><span><i class="inv-wr-key" style="background:var(--pos)"></i>Share of gains and losses<i class="inv-wr-key r" style="margin-left:14px"></i>Share of risk</span><span class="r">${escapeHtml(INV.period)}</span><span class="r">Risk</span></div>
     ${rows.map(r => `<div class="inv-drv-row" ${invDrvAttrs(r.x)}>${invDrvName(r.x)}
-      <span class="inv-drv-two"><span class="inv-drv-tr thin">${zero}${invDrvBar(P(Math.min(0, r.ret)), Math.abs(r.ret) / span * 100, r.c < 0 ? "neg" : "pos")}</span><span class="inv-drv-tr thin">${zero}${r.risk > 0 ? invDrvBar(P(0), r.risk / span * 100, "rk") : ""}</span></span>
-      ${invDrvPts(r.c)}<span class="inv-drv-v">${invOk(r.x.risk_share) ? invPct(r.risk, 0).replace("+", "") : na()}</span></div>`).join("")}</div>`;
+      <span class="inv-drv-two"><span class="inv-drv-tr thin">${zero}${r.noC ? "" : invDrvBar(P(Math.min(0, r.ret)), Math.abs(r.ret) / span * 100, r.c < 0 ? "neg" : "pos")}</span><span class="inv-drv-tr thin">${zero}${r.risk > 0 ? invDrvBar(P(0), r.risk / span * 100, "rk") : ""}</span></span>
+      ${invDrvPts(r.noC ? null : r.c)}<span class="inv-drv-v">${invOk(r.x.risk_share) ? invPct(r.risk, 0).replace("+", "") : na()}</span></div>`).join("")}</div>`;
 }
 
 /* The whole book at once: risk across, contribution up, bubble by weight. Both
@@ -15477,7 +15491,7 @@ function invDrvValue(b) {
 function drawInvDrvMap() {
   const host = $("#inv-drv-map");
   if (!host) return;
-  const M = invDrvRisk(), all = invDrvRows(INV.book), rows = all.filter(r => M.get(r.x, r.r) != null);
+  const M = invDrvRisk(), all = invDrvRows(INV.book), rows = all.filter(r => !r.noC && M.get(r.x, r.r) != null);
   if (!rows.length) { host.innerHTML = `<div class="inv-calm">No figures yet.</div>`; return; }
   const W = host.clientWidth, H = 560, L = 56, R = 18, T = 16, B = 40;
   const val = (r) => Math.max(0, M.get(r.x, r.r)), root = (v) => Math.sign(v) * Math.sqrt(Math.abs(v));
@@ -15531,7 +15545,7 @@ function invDrvDist(b) {
     <div style="--drv-cols:minmax(140px,1.15fr) 96px 54px minmax(170px,1.5fr) minmax(170px,1.5fr)">
     <div class="inv-drv-hd"><span>Holding</span><span>${escapeHtml(INV.period)} return</span><span></span><span>How far below its high${ax(["0%", "−50%", "−100%"])}</span><span>Time to recover${ax(["0", invYears(recMax / 2), invYears(recMax)])}</span></div>
     ${rows.map(r => `<div class="inv-drv-row" ${invDrvAttrs(r.x)}>${invDrvName(r.x)}
-      <span class="inv-drv-tr"><span class="z" style="left:${P(0).toFixed(2)}%"></span>${invDrvBar(P(Math.min(0, r.c)), Math.abs(r.c) / (cHi - cLo) * 100, r.c < 0 ? "neg" : "pos")}</span>${invDrvPts(r.c)}
+      <span class="inv-drv-tr"><span class="z" style="left:${P(0).toFixed(2)}%"></span>${r.noC ? "" : invDrvBar(P(Math.min(0, r.c)), Math.abs(r.c) / (cHi - cLo) * 100, r.c < 0 ? "neg" : "pos")}</span>${invDrvPts(r.noC ? null : r.c)}
       ${r.r ? depth(r.r) : "<span></span>"}${r.r ? back(r.r) : "<span></span>"}</div>`).join("")}
     <div class="inv-drv-note">Total return in ${escapeHtml(INV.book.ccy)} over the last 10 years; recovery counts falls of 10% or more.${proxied ? ` ${proxied} short ${proxied === 1 ? "listing is" : "listings are"} extended by the same company on another exchange.` : ""}</div></div>`;
 }
@@ -15855,7 +15869,7 @@ function invFullModel() {
   const held = (b.positions || []).filter(p => !p.pending && invOk(p.weight));
   const rows = held.map(p => {
     const its = items.filter(i => perHolding(i) && i.symbols[0] === p.symbol);
-    return { p, sym: p.symbol, x: p.xray || {}, its, high: its.some(i => i.severity === "high"), rs: (p.risk_share || 0) * 100,
+    return { p, sym: p.symbol, x: p.xray || {}, its, high: its.some(i => i.severity === "high"), rs: invOk(p.risk_share) ? p.risk_share * 100 : null,
       near: (a.near || []).filter(n => n.symbol === p.symbol), ev: (a.upcoming || []).filter(u => u.symbol === p.symbol),
       nextE: a.next?.[p.symbol]?.earnings || null };
   });
@@ -15951,7 +15965,10 @@ function invFullSpark(r, W, H) {
   const id = "afs" + r.sym.replace(/\W/g, "") + W, last = ys[ys.length - 1], yLast = yv(last), water = paid != null ? yv(paid) : H;
   const lastY = paid != null && Math.abs(yLast - water) < 13 ? (yLast < water ? water - 13 : water + 13) : yLast;
   const pk = raw.findIndex(q => q[0] >= (r.x.peak_date || "9"));
-  const when = new Date(raw[0][0] + "T12:00:00").toLocaleDateString("en-GB", { month: "short", year: "2-digit" });
+  const mon = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-GB", { month: "short", year: "2-digit" });
+  // Before a young listing's own prices the line is its company's other line.
+  const joinAt = e.proxy && e.proxy_until ? raw.findIndex(q => q[0] >= e.proxy_until) : -1;
+  const when = mon(raw[0][0]) + (joinAt > 0 ? ` · ${e.proxy} until ${mon(e.proxy_until)}` : "");
   const area = paid != null ? `<path d="${line}L${xs(ys.length - 1).toFixed(1)} ${water.toFixed(1)}L0 ${water.toFixed(1)}Z" fill="var(--pos)" opacity=".13" clip-path="url(#${id}a)"></path><path d="${line}L${xs(ys.length - 1).toFixed(1)} ${water.toFixed(1)}L0 ${water.toFixed(1)}Z" fill="var(--neg)" opacity=".13" clip-path="url(#${id}b)"></path>` : "";
   return `<svg width="${W}" height="${H}" role="img" aria-label="${escapeHtml(r.p.name)}: price against what you paid">
     <defs><clipPath id="${id}a"><rect width="${W}" height="${water.toFixed(1)}"></rect></clipPath><clipPath id="${id}b"><rect y="${water.toFixed(1)}" width="${W}" height="${H}"></rect></clipPath></defs>
@@ -15961,6 +15978,7 @@ function invFullSpark(r, W, H) {
     ${pk >= 0 ? `<circle cx="${xs(pk)}" cy="${yv(ys[pk])}" r="2.4" fill="var(--bg-canvas)" stroke="var(--text)"></circle><text x="${Math.min(Math.max(xs(pk), 12), iw - 12)}" y="${Math.max(yv(ys[pk]) - 5, 8)}" text-anchor="middle" class="att-fs-sv">peak</text>` : ""}
     <circle cx="${iw}" cy="${yLast}" r="2.6" fill="${paid == null || last >= paid ? "var(--pos)" : "var(--neg)"}"></circle>
     <text x="${iw + 5}" y="${lastY + 3.5}" class="att-fs-sv b">${n(last)}</text>
+    ${joinAt > 0 ? `<line x1="${xs(joinAt)}" x2="${xs(joinAt)}" y1="${T}" y2="${T + ih}" stroke="var(--muted)" stroke-dasharray="2 3"></line>` : ""}
     <text y="${H - 3}" class="att-fs-sv">${escapeHtml(when)}</text>
     ${r.nextE ? `<text x="${iw}" y="${H - 3}" text-anchor="end" class="att-fs-sv">E ${escapeHtml(invDay(r.nextE).replace(/^\w+ /, ""))}</text>` : ""}
   </svg>`;
@@ -16136,7 +16154,7 @@ function invFullLede(m) {
   const week = r && age <= 7 && invOk(r.return_pct) ? `Your book ${r.return_pct >= 0 ? "rose" : "fell"} ${Math.abs(r.return_pct).toFixed(1)}% last week. ` : "";
   const head = n ? `${n} holding${n > 1 ? "s need" : " needs"} a look.` : m.fy.length ? "Nothing needs a look." : "Nothing needs you today.";
   const parts = [];
-  if (n) parts.push(`${n > 1 ? "They are" : "It is"} ${sum(x => x.p.weight).toFixed(1)}% of your book and ${sum(x => x.rs).toFixed(1)}% of its risk.`);
+  if (n) parts.push(`${n > 1 ? "They are" : "It is"} ${sum(x => x.p.weight).toFixed(1)}% of your book${m.hi.every(x => x.rs != null) ? ` and ${sum(x => x.rs).toFixed(1)}% of its risk` : ""}.`);
   parts.push(`${m.quiet} of your ${m.rows.length} holdings have nothing to say.`);
   const err = m.a.plans_error ? `<div class="att-fs-err">${escapeHtml(m.a.plans_error)}. Your plans are paused until it is fixed or removed.</div>` : "";
   return `<div class="att-fs-lede"><div class="att-fs-big">${week}${head}</div><div class="att-fs-big-sub">${parts.join(" ")}</div>${err}</div>`;
@@ -16171,6 +16189,8 @@ function invFullPaint() {
     if (res.length) el.innerHTML = invFullResultsChart(res, el.clientWidth, 96);
   });
   if (view === "map") invFullMapDraw(m);
+  // A refresh or a changed rule can flag a holding after the screen opened.
+  invFullExtras(invFullWanted());
 }
 /* Charts and past results for what the screen shows, a few holdings at a time
  * so it fills in as they answer. A failure shows Try again, never "no data". */
@@ -16616,7 +16636,7 @@ RICH_TIPS["inv:drv"] = (host) => {
       ${line(`Contribution, ${escapeHtml(INV.period)}`, invPts(invContrib(x)))}
       ${line("Weight", invPct(x.weight, 1).replace("+", ""))}
       ${line("Risk share", val(INV_RISKS.share))}
-      ${line("Bad month", vr == null ? na() : `${INV_RISKS.var.fmt(vr)} · about −${invMoney(x.value * vr / 100)}`)}
+      ${line("Bad month", vr == null ? na() : `${INV_RISKS.var.fmt(vr)} · about ${vr < 0 ? "+" : "−"}${invMoney(x.value * Math.abs(vr) / 100)}`)}
       ${line("Worst fall", val(INV_RISKS.fall))}
       ${line("Below its high", val(INV_RISKS.below))}
       ${line("Longest recovery", val(INV_RISKS.rec))}

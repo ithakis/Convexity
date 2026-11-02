@@ -823,10 +823,14 @@ def known_proxies(symbol: str) -> tuple[str, ...]:
     if (isinstance(row, list) and len(row) == 2 and isinstance(row[0], int | float)
             and time.time() - row[0] < _PROXY_DISK_TTL_S
             and isinstance(row[1], list) and all(isinstance(t, str) for t in row[1])):  # fmt: skip
-        from convexity.symbol_db import not_the_share
+        from convexity import symbol_db as sdb
 
-        # Saved before warrants and preferreds were left out, they read clean.
-        return tuple(t for t in row[1] if not not_the_share(t))
+        # Saved before warrants, preferreds and funds were left out, they
+        # read clean.
+        me = sdb.get(symbol)
+        kind = me.type if me else None
+        return tuple(t for t in row[1]
+                     if not sdb.not_the_share(t) and (not kind or sdb.may_stand_in(kind, sdb.get(t))))  # fmt: skip
     return ()
 
 
@@ -834,7 +838,8 @@ def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
     """The same company's other listings: its pack group, else Yahoo's live
     Lookup by name (cached a day in memory, a week on disk). Shares only: a
     warrant's return is not the company's (a warrant stood in for a young
-    share at +181% in three months), and a warrant gets no stand-in itself."""
+    share at +181% in three months), and a warrant gets no stand-in itself.
+    A fund only ever takes the same fund's other lines (``may_stand_in``)."""
     from convexity.symbol_db import not_the_share
 
     if not_the_share(symbol):
@@ -848,10 +853,13 @@ def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
     from convexity import symbol_db as sdb
 
     out: list[str] = []
+    kind = None
     try:
         h = sdb.get(symbol)
+        kind = h.type if h is not None else None
         if h is not None and h.group != sdb.YAHOO_GROUP:
-            out = [x for x in sdb.listings(h.group) if x.ticker != symbol]
+            out = [x for x in sdb.listings(h.group)
+                   if x.ticker != symbol and sdb.may_stand_in(kind, x)]  # fmt: skip
             name = name or h.name
         if not out:
             # By the bare ticker, then by name: Lookup finds Gedeon Richter's
@@ -860,12 +868,13 @@ def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
             # stored name ("Richter").
             hits = [x for q in dict.fromkeys([symbol.split(".")[0], name or ""]) if q
                     for x in sdb.yahoo_lookup(q, limit=10)]  # fmt: skip
+            kind = kind or next((x.type for x in hits if x.ticker == symbol), None)
             me = [x.name for x in hits if x.ticker == symbol] + [name or ""]
             ref = max(me, key=lambda n: len(n.split()))
             out = [x for x in hits if x.ticker != symbol and sdb.same_company(x.name, ref)]
     except Exception as e:
         print(f"[analytics] no history proxy for {symbol}: {type(e).__name__}", flush=True)
-    out = [x for x in out if not not_the_share(x.ticker)]
+    out = [x for x in out if not not_the_share(x.ticker) and sdb.may_stand_in(kind, x)]
     # Exchange lines first, then re-listing venues; OTC and order-book lines
     # (GEDSF, 0QFP.IL) last: they trade on few days.
     thin = {"PNK", "OQB", "OQX", "IOB", "DXE", "CXE", "AQS"}

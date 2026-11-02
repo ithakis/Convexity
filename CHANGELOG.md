@@ -11,6 +11,16 @@ launch); until then they have no tags or GitHub Releases of their own.
 
 ## Unreleased
 
+- **A leveraged or single-stock product no longer shows its company's history.** A fund filed under a company's name took that company's chart, returns and highs, which could show a rise on a day it fell a quarter. A fund now only borrows from lines of the same fund, and a share never from a fund.
+- **A failed Yahoo answer no longer reads as "no analysts"** in the stock window, which dropped the analysts from the model price for 15 minutes. And one line that didn't answer can no longer record "no research line" for a day while the line with the analysts recovers.
+- **Lines that never carry fundamentals stop costing time.** They are asked once, not twice, and are recognised after half an hour instead of being retried every two minutes.
+- **Drivers tells you what it couldn't read.** A holding missing from Yahoo's answer, or with no exchange rate, is named with a Try again rather than left blank for half an hour, and an empty answer offers the same.
+- **A missing figure is a dash, never 0.** A missing risk share read as 0.0% in Drivers and in Attention, and in sentences like "0.0% of its risk". Value for risk now judges only holdings with both figures.
+- **A T-bill fund's bad month reads +0.2%**, not −-0.2%: a 1-in-20 month can still be a small gain.
+- **Waterfall's steps add up on screen:** small Closed and Cash steps are no longer hidden.
+- **Attention, full screen:** the Map fills the screen on a narrow window, a holding flagged while it is open gets its chart rather than spinning, and a chart built from another line says which, and where it joins.
+- **Esc closes the model price card only**, leaving the stock window under it. **⌘1-4 no longer throw away text** you are typing.
+- **Preferreds are not the share** in more forms (BN-PFA.TO, GOOGM), and the risk route ignores a currency the app doesn't support.
 - **A brand-new listing has a chart.** Yahoo has a single close for many secondary lines of big companies, and their window said "No data" with empty returns. It now draws from the same company's other listing, as My Investments does, and says so above the chart ("Before Oct 30, 2026, priced from KVUE, the same company on another exchange"), with the join marked on it. A line with no other listing still says no data.
 - **A stand-in is always the company's share.** A warrant, unit or preferred could stand in for a young share on the Portfolio and My Investments charts, and a warrant's moves are not the company's. Only shares stand in now, and a numbered company (Corp II) is no longer taken for its sibling (Corp III).
 - **A young stand-in keeps its dividends.** One listed more recently than the period shown lost its dividend adjustment on the Portfolio chart for no reason, understating its return.

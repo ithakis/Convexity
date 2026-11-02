@@ -8,7 +8,7 @@ well-known public tickers (CLAUDE.md §18); no network."""
 import pytest
 
 from convexity import analyst_targets as at
-from convexity import cache, fetcher, options_density, persistence
+from convexity import cache, fetcher, helpers, options_density, persistence
 from convexity.helpers import fundamentals_missing
 
 HEALTHY = {"quoteType": "EQUITY", "longName": "Micron Technology, Inc.", "currency": "USD",
@@ -166,3 +166,132 @@ def test_a_fund_known_only_to_the_pack_is_never_unknown(monkeypatch):
     monkeypatch.setattr(capm, "is_fund", lambda s: s == "SPY")
     at.consensus("SPY", tk=Tk("SPY", {}))
     assert not at.unknown("SPY")
+
+
+# --------------------------------------------------- an .info that said nothing
+FULL_TARGETS = {"current": 100.0, "mean": 130.0, "median": 128.0, "low": 90.0, "high": 170.0}
+
+
+@pytest.mark.parametrize("info", [{}, {"market_cap": 1e9, "currency": "USD", "last_price": 100.0}])
+def test_a_failed_info_is_never_read_as_no_analysts(info):
+    # tk.info raised, so σ/μ passes {} (or _safe_info's fast_info gaps): the
+    # targets are still asked for, not recorded as "none" for half an hour.
+    block = at.consensus("MU", tk=Tk("MU", FULL_TARGETS), info=info)
+    assert block and block["mean"] == 130.0
+    cache._CACHE.pop("analyst_targets|MU", None)
+    assert at.consensus("MU", tk=Tk("MU", {}), info=info) is None
+    assert at.unknown("MU")
+
+
+def test_a_real_answer_without_targets_is_still_a_real_none():
+    info = {"quoteType": "EQUITY", "financialCurrency": "USD", "totalRevenue": 1e9}
+    assert at.consensus("MU", tk=Tk("MU", {}), info=info) is None
+    assert not at.unknown("MU")
+
+
+# ------------------------------------------------------- the research line
+def _research(monkeypatch, infos):
+    from convexity import symbol_db as sdb
+
+    monkeypatch.setattr(fetcher, "analyst_line", lambda s: None)
+    monkeypatch.setattr(sdb, "research_candidates", lambda s: list(infos))
+    monkeypatch.setattr(fetcher, "_research_info", lambda line: infos[line])
+
+
+def test_one_degraded_line_blocks_the_no_research_line_record(monkeypatch):
+    # MU has the analysts but didn't say; its other line said it has none.
+    _research(monkeypatch, {"MU": {**DEGRADED, "_fundamentals_missing": True},
+                            "MU.MX": {**HEALTHY, "numberOfAnalystOpinions": 0}})  # fmt: skip
+    assert fetcher.research_line("MTE1.DE") is None
+    assert "MTE1.DE" not in fetcher._research_load()
+    # Yahoo recovers: the answer is there at once, not a day later.
+    _research(monkeypatch, {"MU": HEALTHY, "MU.MX": {**HEALTHY, "numberOfAnalystOpinions": 0}})
+    assert fetcher.research_line("MTE1.DE") == "MU"
+    assert fetcher._research_load()["MTE1.DE"][1] == "MU"
+
+
+def test_a_healthy_line_with_fewer_analysts_is_used_but_not_recorded(monkeypatch):
+    _research(monkeypatch, {"MU": {**DEGRADED, "_fundamentals_missing": True},
+                            "MU.MX": {**HEALTHY, "numberOfAnalystOpinions": 3}})  # fmt: skip
+    assert fetcher.research_line("MTE2.DE") == "MU.MX"
+    assert "MTE2.DE" not in fetcher._research_load()
+
+
+def test_an_empty_answer_blocks_the_record_too(monkeypatch):
+    _research(monkeypatch, {"MU": {}, "MU.MX": {**HEALTHY, "numberOfAnalystOpinions": 0}})
+    assert fetcher.research_line("MTE3.DE") is None
+    assert "MTE3.DE" not in fetcher._research_load()
+
+
+# ---------------------------------------- a line that never carries the module
+class Info:
+    """A yf.Ticker with a fixed .info and nothing else."""
+
+    answers: list = []
+
+    def __init__(self, ticker):
+        self.ticker = ticker
+        self.fast_info = None
+
+    @property
+    def info(self):
+        Info.asks += 1
+        return dict(Info.answers[min(Info.asks - 1, len(Info.answers) - 1)])
+
+
+@pytest.fixture
+def info_ticker(monkeypatch):
+    monkeypatch.setattr(fetcher.yf, "Ticker", Info)
+    monkeypatch.setattr(fetcher.time, "sleep", lambda s: None)
+    helpers._THIN_RUN.clear()
+    Info.asks = 0
+    Info.answers = [DEGRADED]
+    yield
+    helpers._THIN_RUN.clear()
+
+
+def test_only_the_first_answer_of_a_run_is_asked_twice(info_ticker):
+    assert fetcher._safe_info(Info("KDP.MX"))["_fundamentals_missing"]
+    assert Info.asks == 2  # the retry
+    assert fetcher._safe_info(Info("KDP.MX"))["_fundamentals_missing"]
+    assert Info.asks == 3  # no second retry, no sleep on every fetch
+
+
+def test_a_line_stays_degraded_until_it_has_been_so_for_half_an_hour(info_ticker, monkeypatch):
+    t = [1000.0]
+    monkeypatch.setattr(helpers.time, "time", lambda: t[0])
+    for _ in range(3):
+        assert fetcher._safe_info(Info("KDP.MX")).get("_fundamentals_missing")
+    t[0] += helpers._THIN_AFTER_S + 1
+    assert helpers.thin_line("KDP.MX")
+    # Now it is the line: no flag, so its "no analysts" is cached as the truth.
+    assert not fetcher._safe_info(Info("KDP.MX")).get("_fundamentals_missing")
+    assert at.consensus("KDP.MX", tk=Tk("KDP.MX", {}), info=DEGRADED) is None
+    assert not at.unknown("KDP.MX")
+    cache._CACHE.pop("analyst_targets|KDP.MX", None)
+    assert at.consensus("KDP.MX", tk=Tk("KDP.MX", {})) is None
+    assert not at.unknown("KDP.MX")
+
+
+def test_one_lapse_long_ago_is_not_a_thin_line(info_ticker, monkeypatch):
+    t = [1000.0]
+    monkeypatch.setattr(helpers.time, "time", lambda: t[0])
+    fetcher._safe_info(Info("MU"))
+    t[0] += 86_400
+    assert not helpers.thin_line("MU")
+
+
+def test_a_good_answer_ends_the_run(info_ticker, monkeypatch):
+    t = [1000.0]
+    monkeypatch.setattr(helpers.time, "time", lambda: t[0])
+    for _ in range(3):
+        fetcher._safe_info(Info("MU"))
+    t[0] += helpers._THIN_AFTER_S + 1
+    Info.asks, Info.answers = 0, [HEALTHY]
+    assert not fetcher._safe_info(Info("MU")).get("_fundamentals_missing")
+    assert not helpers.thin_line("MU") and helpers.fundamentals_retry_due("MU")
+
+
+def test_the_analysts_unknown_miss_is_kept_briefly_in_the_window():
+    # Mutation check: the window's payload must not outlive an unknown miss.
+    assert at.UNKNOWN_TTL < at.MISS_TTL < at.TTL

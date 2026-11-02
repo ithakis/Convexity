@@ -914,3 +914,18 @@ def test_chart_points_reach_back_to_an_old_peak_and_keep_it():
     pts = inv._chart_points(ser, peak, today)
     assert pts[0][0] < peak and peak in [p[0] for p in pts]
     assert len(pts) <= inv.EXTRAS_POINTS + 2 and pts[-1][0] == "2026-10-09"
+
+
+def test_extras_name_a_stand_ins_prices(_extras):
+    # Another line's prices drawn against what you paid must say so.
+    _extras.setattr("convexity.analytics.extend_history",
+                    lambda wide, *a, **k: (wide, {"NVDA": ("NVD.DE", "2026-06-01")}))  # fmt: skip
+    row = inv.attention_extras(["NVDA"], "USD", today=date(2026, 10, 15))["NVDA"]
+    assert row["proxy"] == "NVD.DE" and row["proxy_until"] == "2026-06-01"
+
+
+def test_near_a_limit_starts_at_85_percent_of_it():
+    limit = attention.RULES["holding"]["value"]
+    near = lambda w: _ev(_page([_pos("MSFT", w)]))["near"]  # noqa: E731
+    assert [n["rule"] for n in near(limit * 0.86)] == ["holding"]
+    assert near(limit * 0.80) == []

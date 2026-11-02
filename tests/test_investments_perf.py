@@ -513,3 +513,133 @@ def test_risk_stats_at_a_high_and_with_too_little_history():
     r = inv._risk_stats(np.linspace(50, 100, 300))
     assert r["now_pct"] == 0 and r["recmax"] is None and r["open_days"] is None
     assert inv._risk_stats(np.linspace(50, 100, 30)) == {}
+
+
+def test_risk_stats_percentiles_describe_the_usual_and_the_bad_day():
+    # A series spending most of its time just under its high, rarely far under.
+    px = np.array([100.0] + [99.0] * 90 + [60.0] * 9 + [100.0], dtype=float)
+    r = inv._risk_stats(px)
+    assert r["dd50_pct"] == pytest.approx(-1.0)  # the median day
+    assert r["dd95_pct"] == pytest.approx(-40.0)  # the 95th worst, not the best
+    assert r["mdd_pct"] == pytest.approx(-40.0)
+
+
+# ------------------------------------------------------------- holding_risk
+@pytest.fixture
+def risk_book(monkeypatch):
+    """Two holdings on the last page, 300 days of closes, nothing fetched."""
+    from convexity import analytics, cache, fx
+
+    idx = pd.bdate_range(end=TODAY, periods=300)
+    state = {"fetches": 0, "closes": {"AAPL": np.linspace(50.0, 100.0, 300),
+                                      "SAP.DE": np.linspace(100.0, 120.0, 300)}}  # fmt: skip
+
+    def fetch(syms, period, retry=True):
+        state["fetches"] += 1
+        return pd.DataFrame(
+            {s: state["closes"][s] for s in syms if s in state["closes"]}, index=idx
+        )
+
+    page = {"ccy": "USD", "positions": [
+        {"symbol": "AAPL", "name": "Apple", "quote_ccy": "USD"},
+        {"symbol": "SAP.DE", "name": "SAP", "quote_ccy": "EUR"},
+    ]}  # fmt: skip
+    monkeypatch.setitem(inv._LAST_PAGE, "v", (None, page))
+    monkeypatch.setattr(inv, "_total_closes", fetch)
+    monkeypatch.setattr(
+        analytics, "extend_history", lambda c, s, q, n, p, fetch=None: (c, state.get("proxied", {}))
+    )
+    monkeypatch.setattr(fx, "prefetch_usd_series", lambda need, period: None)
+    state["rate"] = pd.Series(1.10, index=idx)
+    monkeypatch.setattr(fx, "_fx_usd_series", lambda c, p: state["rate"] if c == "EUR" else None)
+    for k in [k for k in cache._CACHE if k.startswith("inv_risk|")]:
+        cache._CACHE.pop(k)
+    yield state
+    for k in [k for k in cache._CACHE if k.startswith("inv_risk|")]:
+        cache._CACHE.pop(k)
+
+
+def test_holding_risk_whole_answer_is_cached(risk_book):
+    first = inv.holding_risk_payload("USD")
+    assert set(first["risk"]) == {"AAPL", "SAP.DE"} and first["missing"] == []
+    assert inv.holding_risk_payload("USD") == first
+    assert risk_book["fetches"] == 1
+
+
+def test_holding_risk_partial_answer_is_not_cached(risk_book):
+    # One holding missing from Yahoo's answer: named, and asked again.
+    gone = risk_book["closes"].pop("AAPL")
+    got = inv.holding_risk_payload("USD")
+    assert set(got["risk"]) == {"SAP.DE"} and got["missing"] == ["AAPL"]
+    risk_book["closes"]["AAPL"] = gone
+    assert set(inv.holding_risk_payload("USD")["risk"]) == {"AAPL", "SAP.DE"}
+    assert risk_book["fetches"] == 2
+
+
+def test_holding_risk_empty_answer_names_every_holding(risk_book):
+    risk_book["closes"].clear()
+    assert inv.holding_risk_payload("USD") == {"risk": {}, "missing": ["AAPL", "SAP.DE"]}
+    inv.holding_risk_payload("USD")
+    assert risk_book["fetches"] == 2
+
+
+def test_holding_risk_converts_to_the_display_currency(risk_book):
+    # SAP flat in euros, the euro halving: a 50% fall for a dollar holder.
+    n = 300
+    risk_book["closes"]["SAP.DE"] = np.full(n, 100.0)
+    idx = pd.bdate_range(end=TODAY, periods=n)
+    risk_book["rate"] = pd.Series(np.linspace(2.0, 1.0, n), index=idx)
+    got = inv.holding_risk("USD")["SAP.DE"]
+    assert got["mdd_pct"] == pytest.approx(-50.0, abs=0.01)
+
+
+def test_holding_risk_with_no_rate_is_missing_not_unconverted(risk_book):
+    # Without EURUSD the closes would stay in euros and be called dollars.
+    risk_book["rate"] = None
+    got = inv.holding_risk_payload("USD")
+    assert set(got["risk"]) == {"AAPL"} and got["missing"] == ["SAP.DE"]
+    risk_book["rate"] = pd.Series(1.10, index=pd.bdate_range(end=TODAY, periods=300))
+    assert set(inv.holding_risk_payload("USD")["risk"]) == {"AAPL", "SAP.DE"}
+
+
+@pytest.mark.parametrize(
+    "junk", ["ZZZ", "x" * 300, "", None], ids=["code", "long", "empty", "none"]
+)
+def test_holding_risk_junk_currency_is_the_pages_and_shares_its_cache(risk_book, junk):
+    from convexity import cache
+
+    want = inv.holding_risk("USD")
+    assert inv.holding_risk(junk) == want
+    assert risk_book["fetches"] == 1
+    assert [k.split("|")[1] for k in cache._CACHE if k.startswith("inv_risk|")] == ["USD"]
+
+
+def test_holding_risk_drops_a_yahoo_glitch(risk_book):
+    # One x52 print (Yahoo's old data has them) isn't a 98% fall.
+    px = np.linspace(100.0, 120.0, 300)
+    px[150] = px[150] * 52
+    risk_book["closes"]["AAPL"] = px
+    assert inv.holding_risk("USD")["AAPL"]["mdd_pct"] > -5
+
+
+def test_holding_risk_too_young_is_no_figure_and_no_failure(risk_book):
+    px = np.full(300, np.nan)
+    px[-30:] = 100.0
+    risk_book["closes"]["AAPL"] = px
+    got = inv.holding_risk_payload("USD")
+    assert "AAPL" not in got["risk"] and got["missing"] == []
+
+
+def test_holding_risk_names_a_stand_in(risk_book):
+    risk_book["proxied"] = {"AAPL": ("APC.DE", "2026-01-01")}
+    assert inv.holding_risk("USD")["AAPL"]["proxy"] == "APC.DE"
+
+
+def test_a_result_with_no_close_within_three_days_is_left_out():
+    idx = pd.to_datetime(["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-20", "2026-01-21"])
+    closes = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0], index=idx)
+    rows = [{"date": "2026-01-07", "actual": 1.0, "surprise_pct": 2.0},
+            {"date": "2026-01-10", "actual": 1.0}]  # fmt: skip
+    got = inv._reactions(rows, closes)
+    assert [r["date"] for r in got] == ["2026-01-07"]
+    assert got[0]["pct"] == pytest.approx(0.99, abs=0.01)

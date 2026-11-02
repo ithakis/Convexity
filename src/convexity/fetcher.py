@@ -32,8 +32,11 @@ from convexity.helpers import (
     _ytd_change,
     by_trading_date,
     fundamentals_missing,
+    fundamentals_retry_due,
     major_ccy,
+    note_fundamentals,
     price_in_major,
+    thin_line,
 )
 from convexity.fx import convert_amount, usd_per_unit
 from convexity.resolver import _ordered_resolve
@@ -78,18 +81,27 @@ def _safe_info(tk: yf.Ticker) -> dict:
     minutes on 2026-10-30) is asked once more on a fresh Ticker (yfinance
     keeps the first answer on the object); one that stays degraded carries
     ``_fundamentals_missing`` so no cache keeps it as the truth. The retry
-    costs the hot path a request only when Yahoo misbehaves."""
+    costs the hot path a request only at the start of a lapse, and a line that
+    never carries the module stops being flagged (helpers.thin_line)."""
     info = _raw_info(tk)
-    if fundamentals_missing(info):
-        time.sleep(0.4)
-        again = _raw_info(yf.Ticker(tk.ticker))
+    if not fundamentals_missing(info):
+        if info:
+            note_fundamentals(tk.ticker, False)
+    else:
+        again = {}
+        if fundamentals_retry_due(tk.ticker):
+            time.sleep(0.4)
+            again = _raw_info(yf.Ticker(tk.ticker))
         if again and not fundamentals_missing(again):
             print(f"[info] {tk.ticker}: fundamentals missing, recovered on retry")
             info = again
+            note_fundamentals(tk.ticker, False)
         else:
-            print(f"[info] {tk.ticker}: Yahoo sent no fundamentals (financialData)")
-            info = dict(info)
-            info["_fundamentals_missing"] = True
+            note_fundamentals(tk.ticker, True)
+            if not thin_line(tk.ticker):
+                print(f"[info] {tk.ticker}: Yahoo sent no fundamentals (financialData)")
+                info = dict(info)
+                info["_fundamentals_missing"] = True
     try:
         fi = tk.fast_info
         if fi is not None:
@@ -495,17 +507,20 @@ def research_line(symbol: str) -> str | None:
         cands = symbol_db.research_candidates(s)
     except Exception:
         cands = []
-    best, n_best, answered = None, 0.0, not cands
+    best, n_best, unsure = None, 0.0, False
     for c in cands:
         info = _research_info(c)
-        # A degraded answer is not an answer: recording "no research line"
-        # on its 0 analysts would stick for a day (_RESEARCH_MISS_TTL).
-        answered = answered or bool(info and not info.get("_fundamentals_missing"))
+        # A degraded or empty answer is not an answer. The line that has the
+        # analysts may be the one that didn't say, so one such line blocks the
+        # record, whatever the others said: "no research line" on its 0
+        # analysts would stick for a day (_RESEARCH_MISS_TTL), and a healthy
+        # line with fewer analysts for a week (_RESEARCH_TTL).
+        unsure = unsure or not info or bool(info.get("_fundamentals_missing"))
         n = _safe_num(info.get("numberOfAnalystOpinions")) or 0.0
         if n > n_best:
             best, n_best = c, n
-    if not answered:  # Yahoo didn't answer: ask again next time, don't record a miss
-        return None
+    if unsure:  # the best of what answered, asked again next time
+        return best
     from convexity.persistence import _atomic_write
 
     with _RESEARCH_LOCK:

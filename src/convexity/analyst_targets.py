@@ -256,10 +256,20 @@ def consensus(symbol: str, tk=None, info: dict | None = None, splits=None, price
     the caller already fetched and nothing is asked twice. None when Yahoo
     has no target at all (a fund), or did not say (an unknown miss, see
     :func:`unknown`)."""
-    from convexity.helpers import fundamentals_missing
+    from convexity.helpers import fundamentals_missing, thin_line
 
     key = f"analyst_targets|{(symbol or '').upper()}" if symbol else None
-    degraded = bool(info) and (info.get("_fundamentals_missing") or fundamentals_missing(info))
+    degraded = bool(info) and (
+        info.get("_fundamentals_missing") or (fundamentals_missing(info) and not thin_line(symbol))
+    )
+    # An .info that failed reaches here as {} or as fast_info's gaps alone: it
+    # said nothing about analysts, so it must not read as "none" (the failure
+    # the unknown miss below exists for). A real answer always has quoteType.
+    said = bool(info) and bool(
+        info.get("quoteType")
+        or _num(info.get("targetMeanPrice"))
+        or _num(info.get("numberOfAnalystOpinions"))
+    )
     hit = _cache_get(key) if key else None
     # A cached miss never outranks a caller holding a healthy answer with a
     # target (the miss may be a degraded answer from minutes ago).
@@ -273,14 +283,14 @@ def consensus(symbol: str, tk=None, info: dict | None = None, splits=None, price
     import yfinance as yf
 
     tk = tk or yf.Ticker(symbol)
-    if info is not None and not degraded:
+    if said and not degraded:
         summary, unsure = summary_from_info(info), False
     else:
         # No .info, or one without its fundamentals: ask financialData alone.
         summary, unsure = _price_targets(tk)
         qt = ((info or {}).get("quoteType") or "").upper()
-        if unsure and (qt and qt != "EQUITY" or not qt and _is_fund(symbol)):
-            unsure = False  # a fund: no module by design, a real "none"
+        if unsure and (qt and qt != "EQUITY" or not qt and _is_fund(symbol) or thin_line(symbol)):
+            unsure = False  # a fund or a thin line: no module by design, a real "none"
     if all(summary.get(k) is None for k in ("mean", "median", "low", "high")) and not summary.get(
         "n_opinions"
     ):

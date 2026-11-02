@@ -228,7 +228,9 @@ Each of these has cost real debugging time; the link goes to the full story.
   under a year ago (`analytics.window_stand_in`, labelled, a detail path, never
   `fetch_one`). **A stand-in is the same company's share**: never a preferred,
   warrant, right or unit (`symbol_db.not_the_share`: the pack types them as
-  stocks), and check any new stand-in's returns against Yahoo directly.
+  stocks), never a fund for a share or the reverse (`symbol_db.may_stand_in`: a
+  single-stock ETP sits in its underlying's group, SANP.L among Sanofi's lines),
+  and check any new stand-in's returns against Yahoo directly.
   [backend.md → Short listings' history](docs/architecture/backend.md#short-listings-history-analyticsextend_history-2026-10-09) ·
   [backend.md → stock window](docs/architecture/backend.md#the-stock-windows-stand-in-analyticswindow_stand_in-2026-11-02)
 - **Finnhub's free plan answers US listings only** (403 for REP.MC, TTE.PA,
@@ -308,12 +310,14 @@ Each of these has cost real debugging time; the link goes to the full story.
 - **A share's `.info` without `financialData` is a degraded answer, never
   "no analysts"** (MU, 2026-10-30: 45 analysts, but the window cached "no
   analyst targets", n/a fundamentals and a model price with no α).
-  `helpers.fundamentals_missing` detects it (a share always has the module,
-  even NVD.DE; a fund never does); `_safe_info` asks once more on a fresh
-  Ticker, then marks it `_fundamentals_missing`. Every cache keyed off those
+  `helpers.fundamentals_missing` detects it (a share has the module, even
+  NVD.DE; a fund never does); `_safe_info` asks once more on a fresh
+  Ticker, then marks it `_fundamentals_missing`, until half an hour of such
+  answers says it is the line itself (`helpers.thin_line`: KDP.MX). An `.info`
+  that failed (`{}`, fast_info's gaps) said nothing either: never "none". Every cache keyed off those
   fields keeps it briefly only: `consensus` caches an **unknown** miss 2 min
   (`analyst_targets.unknown`), σ/μ a payload built on it 1 min, the detail
-  and research info 1 min, `research_line` never records it, and a row keeps
+  and research info 1 min, `research_line` records nothing while any candidate didn't answer, and a row keeps
   the last saved row's fundamentals (`fundamentals_asof`). A new cache of
   analyst or fundamental data must follow the same rule.
   [backend.md → degraded answers](docs/architecture/backend.md#yahoo-answers-without-fundamentals-2026-10-30)

@@ -685,12 +685,14 @@ def relisting(ticker: str, exchange: str | None) -> bool:
 
 
 # A company's other instruments, which the pack types as plain stocks: Yahoo's
-# preferreds, warrants, rights (FITB-PM, ACHR-WT, XYZ-RI, ABC-PR-A.TO) and US
-# units (AAC-UN; a Canadian -UN.TO is a trust's actual share), and Nasdaq's
-# five-letter warrants, units and rights (RGTIW, BRRWW, BTSGU, GENVR). Share
-# classes stay: BRK-B, HEI-A, GOOGL, FWONK.
+# preferreds, warrants, rights (FITB-PM, BN-PFA.TO, ACHR-WT, XYZ-RI,
+# ABC-PR-A.TO) and US units (AAC-UN; a Canadian -UN.TO is a trust's actual
+# share), and Nasdaq's five-letter warrants, units and rights (RGTIW, BRRWW,
+# BTSGU, GENVR) and preferreds (GOOGM, FCNCN, CHTRP, AGNCO; every such line in
+# the pack is one, 2026-11-02). Share classes stay: BRK-B, HEI-A, GOOGL, FWONK.
 _NOT_SHARE = re.compile(
-    r"-(?:P[A-Z]?|PR(?:-[A-Z0-9]+)?|WTS?|WS|RI|RT)(?:\.[A-Z]+)?$|-UN$|^[A-Z]{4,}(?:W|U|R)$"
+    r"-(?:P[A-Z]?|PF[A-Z]|PR(?:-[A-Z0-9]+)?|WTS?|WS|RI|RT)(?:\.[A-Z]+)?$|-UN$"
+    r"|^[A-Z]{4,}(?:W|U|R)$|^[A-Z]{4}[MNOP]$"
 )
 
 
@@ -698,6 +700,30 @@ def not_the_share(ticker: str) -> bool:
     """Is this a preferred, warrant, right or unit rather than a share? It
     moves on its own terms, so it never stands in for one, nor a share for it."""
     return bool(_NOT_SHARE.search(ticker or ""))
+
+
+_FUND_TYPES = ("etf", "fund")
+_FUND_NAME = re.compile(
+    r"\b(?:ETFs?|ETPs?|ETCs?|ETNs?|UCITS|SICAV|Funds?|Trust|Index|Physical|iShares|Vanguard|SPDR"
+    r"|Xtrackers|Amundi|Invesco|WisdomTree|VanEck|Lyxor|\w*Shares)\b",
+    re.IGNORECASE,
+)
+
+
+def may_stand_in(kind: str | None, other: Hit | None) -> bool:
+    """May a line of pack type ``kind`` borrow ``other``'s history? A
+    single-stock ETP sits in its underlying's group under its underlying's name
+    (SANP.L, a GraniteShares product, among Sanofi's lines) and moves on its
+    own terms: 504 to 368 in a day, while Sanofi rose 4.6%. So a share never
+    takes a fund's history, nor a fund a share's. And the pack's fund type alone
+    doesn't make two lines one product (SNY.TO, also "Sanofi", is typed etf):
+    a fund takes only lines that name themselves a fund. Too strict costs
+    history, never a wrong number. An unknown type or line isn't judged."""
+    if not kind or other is None or not other.type:
+        return True
+    if (kind in _FUND_TYPES) != (other.type in _FUND_TYPES):
+        return False
+    return kind not in _FUND_TYPES or bool(_FUND_NAME.search(other.name or ""))
 
 
 def _listings(group: int) -> list[tuple]:

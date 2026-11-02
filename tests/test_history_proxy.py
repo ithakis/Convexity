@@ -409,7 +409,7 @@ def test_window_stand_in_younger_than_the_reach_keeps_its_dividends(monkeypatch)
 
 @pytest.mark.parametrize(
     "ticker", ["FITB-PM", "BAC-PL", "ACHR-WT", "XYZ-WS", "AAC-UN", "XYZ-RI", "ABC-PR-A.TO", "ABC-WT.TO",
-               "RGTIW", "BRRWW", "BTSGU", "GENVR"],
+               "RGTIW", "BRRWW", "BTSGU", "GENVR", "BN-PFA.TO", "MET-PF", "GOOGM", "FCNCN", "AGNCO", "CHTRP"],
 )  # fmt: skip
 def test_preferreds_warrants_rights_and_units_are_not_the_share(ticker):
     assert sdb.not_the_share(ticker)
@@ -417,7 +417,8 @@ def test_preferreds_warrants_rights_and_units_are_not_the_share(ticker):
 
 @pytest.mark.parametrize(
     "ticker", ["AAPL", "SNOW", "BRK-B", "HEI-A", "BF-B", "PBR-A", "MOG-A", "GOOGL", "FWONK", "VOW3.DE",
-               "SAN.PA", "REI-UN.TO", "AMZN-USD.SW", "0TDF.L", "RIGHT.DE", "SHOP.TO"],
+               "SAN.PA", "REI-UN.TO", "AMZN-USD.SW", "0TDF.L", "RIGHT.DE", "SHOP.TO", "MSFT", "AMGN", "NVDA", "COMP",
+               "PFE", "BATRK", "LBTYK"],
 )  # fmt: skip
 def test_shares_and_their_classes_are_the_share(ticker):
     assert not sdb.not_the_share(ticker)
@@ -529,3 +530,48 @@ def test_intraday_tab_stays_when_the_listing_fills_the_range(monkeypatch):
     monkeypatch.setattr(A, "known_proxies", lambda s: ("YNG",))
     assert fetcher.range_history("YNG.DE", "1M")["fallback"] is False
     assert fetcher.range_history("YNG.DE", "6M")["fallback"] is True
+
+
+# ------------------------------------------- a fund is never the company's share
+def _group(monkeypatch, tmp_path, **types):
+    """A pack group of {ticker: type}. An ETP sits in its underlying's group."""
+    name = "Example Core UCITS ETF" if "FND_L" in types else "Example SA"
+    hits = {t.replace("_", "."): Hit(t.replace("_", "."), name, ty, "PAR", "fr", None, None, None, 9, 100.0)
+            for t, ty in types.items()}  # fmt: skip
+    monkeypatch.setattr(sdb, "get", lambda t: hits.get(t))
+    monkeypatch.setattr(sdb, "listings", lambda g: list(hits.values()) if g == 9 else [])
+    monkeypatch.setattr(sdb, "yahoo_lookup", lambda q, **k: [])
+    monkeypatch.setattr(A, "_proxy_disk", dict)
+    monkeypatch.setattr(A, "_proxy_disk_put", lambda s, f: None)
+    A._PROXY.clear()
+
+
+def test_a_single_stock_etp_takes_no_history_from_its_underlying(monkeypatch, tmp_path):
+    _group(monkeypatch, tmp_path, ETP_L="etf", SHR_PA="stock", SHR_DE="stock")
+    assert A._proxy_candidates("ETP.L", None) == ()
+
+
+def test_a_share_takes_no_history_from_a_fund_on_it(monkeypatch, tmp_path):
+    _group(monkeypatch, tmp_path, ETP_L="etf", SHR_PA="stock", SHR_DE="stock")
+    assert A._proxy_candidates("SHR.DE", None) == ("SHR.PA",)
+
+
+def test_a_fund_still_takes_its_own_other_lines(monkeypatch, tmp_path):
+    _group(monkeypatch, tmp_path, FND_L="etf", FND_AS="etf", FND_DE="fund")
+    assert set(A._proxy_candidates("FND.L", None)) == {"FND.AS", "FND.DE"}
+
+
+def test_two_fund_typed_lines_under_a_companys_name_are_not_one_product(monkeypatch, tmp_path):
+    # SANP.L and SNY.TO: both typed etf, both named "Sanofi" in the pack.
+    _group(monkeypatch, tmp_path, ETP_L="etf", CDR_TO="etf", SHR_PA="stock")
+    assert A._proxy_candidates("ETP.L", None) == ()
+
+
+def test_a_stand_in_saved_before_this_rule_reads_clean(monkeypatch, tmp_path):
+    import time as _time
+
+    _group(monkeypatch, tmp_path, ETP_L="etf", SHR_PA="stock", CDR_TO="etf")
+    monkeypatch.setattr(
+        A, "_proxy_disk", lambda: {"ETP.L": [_time.time(), ["SHR.PA", "CDR.TO", "NOT.IN"]]}
+    )
+    assert A.known_proxies("ETP.L") == ("NOT.IN",)

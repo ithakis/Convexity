@@ -1737,27 +1737,23 @@ def _risk_stats(px: np.ndarray) -> dict:
             "recmax": max(days, default=None), "open_days": open_days}  # fmt: skip
 
 
-def holding_risk(ccy: str | None = None) -> dict:
-    """{symbol: risk figures} for the holdings on the last page, each in the
-    display currency over ``RISK_SPAN``, for the Drivers view and the export.
-    Never on the page's path: ten years of closes per holding is a fetch of
-    its own. A short listing's history is the same company elsewhere
-    (``proxy``), and Yahoo's glitches are dropped as for the rail. A failed
-    fetch isn't cached."""
+def _holding_risk(ccy: str | None = None) -> tuple[dict, list[str]]:
+    """(figures per holding, holdings it couldn't read). Only a whole answer
+    is cached, so a retry really asks Yahoo again."""
     from convexity import cache
     from convexity.analytics import extend_history
-    from convexity.fx import _apply_fx_to_closes
+    from convexity.fx import _apply_fx_to_closes, _fx_usd_series
 
     last = _LAST_PAGE["v"][1] or page(ccy)
     held = [p for p in last.get("positions") or [] if not p.get("pending")]
-    disp = ccy or last.get("ccy") or "USD"
+    disp = _display_ccy(ccy, last.get("ccy") or "USD")
     syms = [p["symbol"] for p in held]
     key = f"inv_risk|{disp}|{','.join(sorted(syms))}"
     hit = cache._cache_get(key)
     if hit is not None:
-        return hit
+        return hit, []
     if not syms:
-        return {}
+        return {}, []
     qccy = {p["symbol"]: p.get("quote_ccy") or "USD" for p in held}
     closes = _total_closes(syms, RISK_SPAN)
     closes, proxied = extend_history(closes, syms, qccy, {p["symbol"]: p.get("name") for p in held},
@@ -1765,24 +1761,53 @@ def holding_risk(ccy: str | None = None) -> dict:
     closes = _apply_fx_to_closes(
         closes, {s: {"currency": c} for s, c in qccy.items()}, disp, RISK_SPAN
     )
-    out = {}
+
+    # A rate Yahoo didn't send leaves a holding unconverted (or converted as
+    # if it quoted in USD): not "in the display currency", so not a figure.
+    def no_rate(c: str) -> bool:
+        ser = _fx_usd_series(c, RISK_SPAN) if c != "USD" else True
+        return ser is None or getattr(ser, "empty", False)
+
+    out, missing = {}, []
     for s in syms:
-        if s not in getattr(closes, "columns", ()):
+        c = major_ccy(qccy[s])
+        if s not in getattr(closes, "columns", ()) or (c != disp and (no_rate(c) or no_rate(disp))):
+            missing.append(s)
             continue
         ser = closes[s].dropna()
         pts = _xray_clean(
             [(str(d), float(v)) for d, v in ser.items() if v > 0 and math.isfinite(v)]
         )
+        if not pts:
+            missing.append(s)
+            continue
         stats = _risk_stats(np.array([v for _, v in pts]))
-        if stats:
+        if stats:  # under RISK_MIN_DAYS of history has no figures, and isn't a failure
             out[s] = {
                 **stats,
                 "since": pts[0][0][:10],
                 **({"proxy": proxied[s][0]} if s in proxied else {}),
             }
-    if out:
+    if not missing:
         cache._cache_put(key, out, 1800.0)
-    return out
+    return out, missing
+
+
+def holding_risk(ccy: str | None = None) -> dict:
+    """{symbol: risk figures} for the holdings on the last page, each in the
+    display currency over ``RISK_SPAN``, for the Drivers view and the export.
+    Never on the page's path: ten years of closes per holding is a fetch of
+    its own. A short listing's history is the same company elsewhere
+    (``proxy``), and Yahoo's glitches are dropped as for the rail. A failed
+    fetch isn't cached."""
+    return _holding_risk(ccy)[0]
+
+
+def holding_risk_payload(ccy: str | None = None) -> dict:
+    """GET /api/investments/risk: the figures, and which holdings have none
+    because Yahoo didn't answer, so the page can offer to ask again."""
+    out, missing = _holding_risk(ccy)
+    return {"risk": out, "missing": missing}
 
 
 # ------------------------------------------------- Attention, full screen
@@ -1891,8 +1916,8 @@ def attention_extras(symbols, ccy: str | None = None, today: date | None = None)
     qccy = {s: pos[s].get("quote_ccy") or "USD" for s in need}
     from convexity.analytics import extend_history
 
-    closes, _ = extend_history(closes, need, qccy, {s: pos[s].get("name") for s in need}, EXTRAS_SPAN,
-                               fetch=lambda ss, period: _closes(ss, period, retry=False))  # fmt: skip
+    closes, proxied = extend_history(closes, need, qccy, {s: pos[s].get("name") for s in need}, EXTRAS_SPAN,
+                                     fetch=lambda ss, period: _closes(ss, period, retry=False))  # fmt: skip
     cols = getattr(closes, "columns", ())
     for s in need:
         peak = (pos[s].get("xray") or {}).get("peak_date")
@@ -1907,6 +1932,9 @@ def attention_extras(symbols, ccy: str | None = None, today: date | None = None)
             "results": results,
             "via": via[s] if via[s] != s else None,
             "last_div": paid,
+            # A stand-in's prices are drawn against what was paid here, so the
+            # chart has to say whose they are.
+            **({"proxy": proxied[s][0], "proxy_until": proxied[s][1]} if s in proxied else {}),
         }
         out[s] = row
         if pts:
