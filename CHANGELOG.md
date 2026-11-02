@@ -9,6 +9,12 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## Unreleased
+
+- **A brand-new listing has a chart.** Yahoo has a single close for many secondary lines of big companies, and their window said "No data" with empty returns. It now draws from the same company's other listing, as My Investments does, and says so above the chart ("Before Oct 30, 2026, priced from KVUE, the same company on another exchange"), with the join marked on it. A line with no other listing still says no data.
+- **A stand-in is always the company's share.** A warrant, unit or preferred could stand in for a young share on the Portfolio and My Investments charts, and a warrant's moves are not the company's. Only shares stand in now, and a numbered company (Corp II) is no longer taken for its sibling (Corp III).
+- **A young stand-in keeps its dividends.** One listed more recently than the period shown lost its dividend adjustment on the Portfolio chart for no reason, understating its return.
+
 ## 1.30.0 — 2026-11-02
 
 - **Drivers.** A button beside Columns swaps the holdings table for what drove your return and the risk taken to get it, in four tabs: Waterfall, Value for risk, Map and Distribution. Risk can read as risk share, a bad month (VaR), the worst fall, how far below its high, or the time to recover, and the Excel export's Positions sheet carries the same figures.
@@ -18,9 +24,6 @@ launch); until then they have no tags or GitHub Releases of their own.
 - **Attention, full screen.** The ⤢ in the rail's Attention and Upcoming headers opens a whole-screen view of what needs a look, in three views on a pill: Desk (one row per holding, every reason beside the numbers, sorted by share of the book's risk), Charts (one price chart per holding, with what you paid, the peak and the next report) and Map (the whole book by weight, coloured by the last day, the week, cost, peak or risk). Beside them: Upcoming with what each date could mean in money (a report's usual move, a dividend's last payout), your limits, and what is left to tidy. A new group, "Close to a limit", shows what is within 15% of one before it fires. Click any holding for its page: what its figures say in plain sentences, its chart, its last results. Esc steps back one level.
 - **A big day move stays for five trading days.** A 3σ Friday used to leave the rail as soon as Monday's session opened. It stays until you dismiss it or the week passes, in the rail and full screen.
 - **Logos belong to the right company.** A European listing could show the logo of whichever US company owns its short ticker (SU.PA, Schneider Electric, showed Suncor's). Logos now come from the company's US line, then the listing's own full ticker, then the initials tile.
-- **A brand-new listing has a chart.** Yahoo has a single close for many secondary lines of big companies, and their window said "No data" with empty returns. It now draws from the same company's other listing, as My Investments does, and says so above the chart ("Before Oct 30, 2026, priced from KVUE, the same company on another exchange"), with the join marked on it. A line with no other listing still says no data.
-- **A stand-in is always the company's share.** A warrant, unit or preferred could stand in for a young share on the Portfolio and My Investments charts, and a warrant's moves are not the company's. Only shares stand in now, and a numbered company (Corp II) is no longer taken for its sibling (Corp III).
-- **A young stand-in keeps its dividends.** One listed more recently than the period shown lost its dividend adjustment on the Portfolio chart for no reason, understating its return.
 
 ## 1.29.2 — 2026-10-30
 
