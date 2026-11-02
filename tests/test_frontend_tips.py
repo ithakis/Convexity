@@ -84,3 +84,14 @@ def test_budget_tip_matches_the_backend_budgets():
     assert f"at least {frontier._BOOT_MIN}" in tip
     # n_boot grows in whole chunks, so the cap can be overshot by a chunk.
     assert f"up to about {frontier._BOOT_CAP:,}" in tip
+
+
+def test_a_logo_is_never_asked_for_by_a_cut_off_ticker():
+    """The logo hosts key on the exact ticker, so a stripped suffix shows
+    another company's logo. logoImg takes the full symbol and only its own
+    block may name a host (symbol_db.logo_tickers picks the tickers)."""
+    calls = re.findall(r"logoImg\(([^)]*\)?)\)", _APP_JS)
+    assert calls and not [c for c in calls if "split" in c or "slice" in c or "replace" in c]
+    block = _block(_APP_JS, "const LOGO_HOSTS = [", "\n];")
+    for host in ("financialmodelingprep.com", "assets.parqet.com"):
+        assert host in block and _APP_JS.count(host) == 1

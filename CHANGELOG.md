@@ -15,6 +15,7 @@ launch); until then they have no tags or GitHub Releases of their own.
 - **Weight and Risk are separate columns**, each a number over a bar filling its cell. Long holding names now stop with an ellipsis so the table fits.
 - **The + Add button** is cut corner to corner in red and green.
 - **⌘/Ctrl+1-4** switch between My Investments, Portfolios, News and Optimize.
+- **Logos belong to the right company.** A European listing could show the logo of whichever US company owns its short ticker (SU.PA, Schneider Electric, showed Suncor's). Logos now come from the company's US line, then the listing's own full ticker, then the initials tile.
 
 ## 1.29.2 — 2026-10-30
 

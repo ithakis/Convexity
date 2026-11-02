@@ -174,7 +174,7 @@ const COLS = [
    Long-form versions with formulas live in the About / Column Guide modal. */
 const COL_INFO = {
   symbol:        "Exchange ticker symbol (e.g. AAPL, NVDA, XLK).",
-  logo:          "Brand logo for the company or fund (resolved from Yahoo's website field). Purely visual — no data column behind it.",
+  logo:          "Brand logo for the company or fund, found through the company's US line when it has one. Initials when no logo is found. Purely visual — no data column behind it.",
   name:          "Full company or fund name from Yahoo Finance.",
   price:         "Last available closing price, converted to the selected display currency (see FX selector in the top bar).",
   market_cap:    "Total market value of all outstanding shares (Price × Shares Outstanding), converted to the display currency.",
@@ -1491,20 +1491,6 @@ function returnColor(pct, anchor = 6) {
 /* ===========================================================================
  * Visual primitives
  * --------------------------------------------------------------------------- */
-/* A secondary listing (a young Xetra line of a US company) often has no logo
-   of its own; its research line (fetcher._apply_research) does. Learned from
-   the rows as they render and kept per browser, so My Investments knows it
-   too. Used as a fallback only: a listing's own logo still wins. */
-const LOGO_ALIAS = (() => { try { return JSON.parse(localStorage.getItem("logo_alias") || "{}") || {}; } catch (e) { return {}; } })();
-function logoAliasLearn(rows) {
-  let changed = false;
-  for (const r of rows || []) {
-    if (r && r.symbol && r.research_symbol && LOGO_ALIAS[r.symbol] !== r.research_symbol) {
-      LOGO_ALIAS[r.symbol] = r.research_symbol; changed = true;
-    }
-  }
-  if (changed) try { localStorage.setItem("logo_alias", JSON.stringify(LOGO_ALIAS)); } catch (e) {}
-}
 /* Analysts borrowed from the company's research line (fetcher._apply_research):
    the value is unchanged, the hover says where it came from (owner's choice,
    2026-10-18: tooltips only, no marker). */
@@ -1517,30 +1503,60 @@ function viaTip(r, html, scaled) {
   return `<span data-tip="${escapeHtml(viaTipTxt(r.symbol, r.research_symbol, r.research_n, scaled))}">${html}</span>`;
 }
 
-function logoImg(ticker) {
-  const t = encodeURIComponent(ticker);
-  return `<img class="logo" loading="lazy" alt=""
-    src="https://financialmodelingprep.com/image-stock/${t}.png"
-    onerror="logoFallback(this, '${t.replace(/'/g,"\\'")}')">`;
+/* A logo is the company's, not the ticker's: the hosts key on the exact ticker,
+   and a cut-off suffix asks about whoever owns the short one (SU.PA is
+   Schneider, SU is Suncor; NOV.DE is Novo Nordisk, NOV is NOV Inc.). So the
+   tickers come from the symbol pack (symbol_db.logo_tickers) and everything
+   goes through logoImg with the row's full symbol. An <img> rendered before
+   the answer has no src yet; logoLinesFetch fills it. */
+const LOGO_TICKERS = {};
+const LOGO_WAITING = new Set();
+const LOGO_HOSTS = [
+  (t) => `https://financialmodelingprep.com/image-stock/${encodeURIComponent(t)}.png`,
+  (t) => `https://assets.parqet.com/logos/symbol/${encodeURIComponent(t)}?format=png`,
+];
+function logoUrl(symbol, step) {
+  const t = LOGO_TICKERS[symbol][Math.floor(step / LOGO_HOSTS.length)];
+  return t ? LOGO_HOSTS[step % LOGO_HOSTS.length](t) : "";
 }
-window.logoFallback = function(img, ticker) {
-  const alias = LOGO_ALIAS[decodeURIComponent(ticker)];
-  if (alias && !img.dataset.tried) {
-    img.dataset.tried = "alias";
-    img.src = `https://financialmodelingprep.com/image-stock/${encodeURIComponent(alias)}.png`;
+async function logoLinesFetch() {
+  const asked = [...LOGO_WAITING];
+  LOGO_WAITING.clear();
+  for (let i = 0; i < asked.length; i += 100) {
+    const batch = asked.slice(i, i + 100);
+    let found = {};
+    try {
+      const r = await fetch(`/api/logo-tickers?s=${encodeURIComponent(batch.join(","))}`);
+      if (r.ok) found = (await r.json()).tickers || {};
+    } catch (e) { /* the listing's own ticker is still the right company */ }
+    for (const s of batch) LOGO_TICKERS[s] = found[s] && found[s].length ? found[s] : [s];
+    document.querySelectorAll("img.logo[data-logo-sym]:not([src])").forEach(img => {
+      if (LOGO_TICKERS[img.dataset.logoSym]) img.src = logoUrl(img.dataset.logoSym, 0);
+    });
+  }
+}
+function logoImg(symbol) {
+  const known = !!LOGO_TICKERS[symbol];
+  if (!known) {
+    if (!LOGO_WAITING.size) setTimeout(logoLinesFetch, 0);
+    LOGO_WAITING.add(symbol);
+  }
+  return `<img class="logo" loading="lazy" alt="" data-logo-sym="${escapeHtml(symbol)}"
+    ${known ? `src="${logoUrl(symbol, 0)}"` : ""} onerror="logoFallback(this)">`;
+}
+window.logoFallback = function(img) {
+  const symbol = img.dataset.logoSym, step = Number(img.dataset.logoStep || 0) + 1;
+  const next = logoUrl(symbol, step);
+  if (next) {
+    img.dataset.logoStep = step;
+    img.src = next;
     return;
   }
-  if (img.dataset.tried === "parqet") {
-    img.onerror = null;
-    const span = document.createElement("span");
-    span.className = "logo-fallback";
-    const sym = String(ticker).replace(/^\^/, "").replace(/[^A-Za-z0-9]/g, "");
-    span.textContent = sym.slice(0, 2) || "?";
-    img.replaceWith(span);
-    return;
-  }
-  img.dataset.tried = "parqet";
-  img.src = `https://assets.parqet.com/logos/symbol/${ticker}?format=png`;
+  img.onerror = null;
+  const span = document.createElement("span");
+  span.className = "logo-fallback";
+  span.textContent = String(symbol).replace(/^\^/, "").replace(/[^A-Za-z0-9]/g, "").slice(0, 2) || "?";
+  img.replaceWith(span);
 };
 
 function triangle(v) {
@@ -2551,7 +2567,6 @@ function renderHeader(scale = 1) {
 }
 
 function render() {
-  logoAliasLearn(DATA);
   ensureSortKey();
   const cols = getActiveColumns();
   const scale = applyTableFitMode(cols);
@@ -11770,7 +11785,7 @@ function mptRenderBounds() {
   if (!grid) return;
   const syms = mptBoundsSymbols();
   // Company names come straight off the rendered rows — no extra fetch. Paired
-  // with logoImg()'s existing FMP → parqet → initials chain, a row is
+  // with logoImg()'s company logo (or its initials tile), a row is
   // identifiable at a glance instead of being a bare ticker.
   const nameBySym = {};
   for (const r of (DATA || [])) if (r && r.symbol) nameBySym[r.symbol] = r.name || "";
@@ -15264,12 +15279,12 @@ function invHoldingsHtml(b) {
   const td = (c, html) => `<td${c.k === "name" ? ' class="left"' : ""}>${html ?? ""}</td>`;
   const rows = invOrdered(b.positions).map(x => x.pending ? `
     <tr data-inv-sym="${escapeHtml(x.symbol)}" class="inv-pending"${drag ? ' draggable="true"' : ""}>
-      <td class="left">${grip}<span class="inv-tipped">${logoImg(LOGO_ALIAS[x.symbol] ? x.symbol : x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span></td>
+      <td class="left">${grip}<span class="inv-tipped">${logoImg(x.symbol)}<span>${escapeHtml(x.name)}</span></span></td>
       <td colspan="${cols.length - 1}" class="left inv-pending-note">Left out of the totals: waiting for Yahoo's split history</td>
     </tr>` : `
     <tr data-inv-sym="${escapeHtml(x.symbol)}"${drag ? ' draggable="true"' : ""}>
       ${cols.map(c => c.k === "name"
-        ? td(c, grip + invTipped("pos", x.symbol, `${logoImg(LOGO_ALIAS[x.symbol] ? x.symbol : x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span>`))
+        ? td(c, grip + invTipped("pos", x.symbol, `${logoImg(x.symbol)}<span>${escapeHtml(x.name)}</span>`))
         : td(c, c.cell(x, ctx))).join("")}
     </tr>`).join("");
   const head = cols.map(c => {
@@ -15302,7 +15317,7 @@ function invHoldingsHtml(b) {
       profit: `<span class="${invCls(cp)}">${invMoney(cp, true)}</span>`,
       contrib: `<span class="${invPtsCls(cc)}">${invPts(cc)}</span>`,
     }) + (open ? closed.map(x => foot("inv-closed", {
-      name: `<span class="inv-tipped">${logoImg(LOGO_ALIAS[x.symbol] ? x.symbol : x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span>`,
+      name: `<span class="inv-tipped">${logoImg(x.symbol)}<span>${escapeHtml(x.name)}</span></span>`,
       profit: `<span class="${invCls(x.profit)}">${invMoney(x.profit, true)}</span>`,
       contrib: `<span class="${invPtsCls(invContrib(x))}">${invPts(invContrib(x))}</span>`,
       divs: invMoney((x.dividends || 0) + (x.dividends_est || 0)),
@@ -15342,7 +15357,7 @@ const invRiskOf = (x) => INV.risk?.data?.[x.symbol];
 function invDrvRows(b) {
   return b.positions.filter(x => !x.pending).map(x => ({ x, c: invContrib(x) || 0, r: invRiskOf(x) })).sort((p, q) => q.c - p.c);
 }
-const invDrvName = (x) => `<span class="inv-drv-name">${logoImg(LOGO_ALIAS[x.symbol] ? x.symbol : x.symbol.split(".")[0])}<span>${escapeHtml(x.name)}</span></span>`;
+const invDrvName = (x) => `<span class="inv-drv-name">${logoImg(x.symbol)}<span>${escapeHtml(x.name)}</span></span>`;
 const invDrvAttrs = (x) => `data-rich-tip="inv:drv" data-sym="${escapeHtml(x.symbol)}" tabindex="0"`;
 const invDrvBar = (left, width, cls) => `<span class="b ${cls}" style="left:${left.toFixed(2)}%;width:${Math.max(0.3, width).toFixed(2)}%"></span>`;
 const invDrvPts = (v) => `<span class="inv-drv-v ${invPtsCls(v)}">${invPts(v)}</span>`;

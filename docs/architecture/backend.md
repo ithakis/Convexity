@@ -529,6 +529,7 @@ before that (and never for a row with no mean target: no coverage, a fund).
 - `/api/investments/risk?ccy=`     — each holding's own risk for the Drivers view and the export (`investments.holding_risk`): ten years of closes per holding, so never on the page's path
 - `/api/investments/symbols`       — open positions only, no network (the Portfolio tab's pinned book pill)
 - `/api/investments/lookup?q=…`    — company typeahead for the Add popover (symbol pack)
+- `/api/logo-tickers?s=A,B`         — `{tickers: {symbol: [ticker, ...]}}`, which tickers name each symbol's company at the logo hosts, best first (`symbol_db.logo_tickers`; local symbol pack only)
 - `/api/symbol-names?s=A,B`         — company names for constituent pills not built yet (local symbol pack only, unknown tickers left out)
 - `/api/investments/price?symbol=…&date=…` — that day's close as traded (Yahoo's split adjustment undone), for the price auto-fill
 - `/api/fx-rates?base=USD`         — spot rates

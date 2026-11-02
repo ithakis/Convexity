@@ -659,6 +659,28 @@ pill on hover) runs `coClear()` and empties the box.
 Tickers already in the portfolio show as "In this portfolio" and cannot be
 picked.
 
+### Company logos (`logoImg`, `symbol_db.logo_tickers`)
+
+Every logo goes through `logoImg(symbol)` with the row's **full** symbol. Never
+cut the suffix off: FMP and Parqet key on the exact ticker, so `SU` is Suncor
+while `SU.PA` is Schneider, `NOV` is NOV Inc. while `NOV.DE` is Novo Nordisk,
+`GIS` is General Mills while `GIS.DE` is Gilead.
+
+`/api/logo-tickers` answers from the symbol pack, with no network:
+`symbol_db.logo_tickers` returns the company's US line, then the listing itself,
+then its home line. `logoImg` walks those tickers across both hosts on `onerror`
+and ends on the initials tile, built from the row's own symbol. The US line comes
+first because a listing's own image can be an old brand (TTE.PA still shows
+Total) or a tiny icon (AIR.PA). The listing's full ticker stays in the chain since
+it names the same company: Philogen and UCITS ETFs have no US line, and both
+hosts have them.
+
+`logoImg` is synchronous. A symbol not yet known renders an `<img>` with no `src`,
+and `logoLinesFetch` fills every such image when the batched answer lands (100
+symbols a request). If the route fails, the chain is the listing's own ticker.
+The `LOGO_HOSTS` block is the only place that may name a host
+(`test_a_logo_is_never_asked_for_by_a_cut_off_ticker`).
+
 ### Key UI behaviours added in Passes A/B/C
 - **Overlapping builds**: `build()` (now only the new-column rebuild on a
   tab switch) can still overlap a refresh job or another tab's build. `BUILD_GEN` means only the newest build writes `DATA`, saves and

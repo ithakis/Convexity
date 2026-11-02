@@ -237,6 +237,23 @@ def test_same_origin_requests_still_work(srv):
     )
 
 
+def test_logo_tickers_route_answers_per_symbol(srv):
+    from convexity import symbol_db
+    from tests.test_symbol_db import install
+
+    install()
+    try:
+        code, body = _req(srv, "GET", "/api/logo-tickers?s=NOV.DE,NVDA,ZZZZ.F,,")
+        assert code == 200
+        assert json.loads(body)["tickers"] == {
+            "NOV.DE": ["NVO", "NOV.DE", "NOVO-B.CO"],
+            "NVDA": ["NVDA"],
+            "ZZZZ.F": ["ZZZZ.F"],
+        }
+    finally:
+        symbol_db._invalidate()
+
+
 def test_prefs_route_saves_only_allowed_values(srv):
     """Settings -> Default currency and My Investments' benchmark."""
     same = {"Content-Type": "application/json", "Origin": srv}
