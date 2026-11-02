@@ -27,6 +27,7 @@ os.environ.pop("CONVEXITY_REFERENCE_URL", None)
 # Nor the notification scheduler (notify.py): its passes are jobs, and a
 # stray one would race test_jobs.py's single-flight assertions.
 os.environ["CONVEXITY_NOTIFY"] = "0"
+os.environ["CONVEXITY_LONGRUN"] = "0"
 # Nor the central-bank policy rates (options_density._policy_rates, BIS);
 # test_options_density.py stubs urlopen and turns it on.
 os.environ["CONVEXITY_POLICY_RATES"] = "0"

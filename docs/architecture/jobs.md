@@ -117,6 +117,12 @@ research reload (`rfFinish` checks `touchedViews` for the book view).
 
 ### Background jobs (Phase 9, `notify.py`)
 
+The monthly long-history pass is a job too (`phases=["longrun"]`, `long_run.py`,
+`context={"background": True}`): hidden from the chip, superseded by the owner's
+Refresh, and the scheduler only submits when nothing else is running, so it runs
+after everything else. Its own limits: four symbols a request, a pause between,
+`retry=False`, two silent chunks end the pass for an hour.
+
 The notification scheduler's pass is a job too (`phases=["watch"]`,
 `context={"background": True}` → `Job.background`), so it is single-flight
 with every refresh: they share Yahoo and the page. Three rules: the

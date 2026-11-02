@@ -199,6 +199,15 @@ Each of these has cost real debugging time; the link goes to the full story.
   Drivers view): ten years of closes per holding, fetched only when Drivers or
   the export asks. A running fall stays apart from finished recoveries.
   [backend.md → holding risk](docs/architecture/backend.md#my-investments-holding-risk-investmentsholding_risk-2026-11-02)
+- **`long_run.py` is the monthly long view, and it never fetches on the page's
+  path**: max-history recoveries and the three-year covariance live in
+  `state/long_run.json`, filled by a hidden `longrun` job only when nothing else runs,
+  a few symbols at a time. A share of the risk reads through `invShareText` /
+  `invRiskVerdict` on every surface (whole percent, "about 0", holdings without cash).
+  A running fall is `from_here`, never a ratio of the curve; no GPD (tested, not worth
+  it). After a constant changes: `scripts/study_recovery.py`, then bump `VERSION`.
+  [backend.md → long view](docs/architecture/backend.md#my-investments-long-view-long_runpy-2026-11-02) ·
+  [docs/recovery_research.md](docs/recovery_research.md)
 - **Holding contributions add up to the TWR exactly** (Phase 4): a new
   entry type that moves money into or out of a holding must land in
   `ledger.Day.flows`, or "Cash and fees" silently absorbs it.
@@ -393,6 +402,7 @@ sub-decision.
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
 │   ├── investments.py           ← My Investments (the real book): the book file, undo/redo, prices/FX, page payload — §4 "My Investments"
 │   ├── ledger.py                ← My Investments ledger engine: pure replay (average cost, implied deposits, splits), TWR/MWR
+│   ├── long_run.py              ← My Investments' monthly long view: max-history recoveries + 3-year covariance, a background job, read by the page as algebra
 │   ├── attention.py             ← My Investments' Attention rail: X-ray rules, events cache, dismiss/unread (Phase 7)
 │   ├── notify.py                ← My Investments notifications (Phase 9): scheduler (a background job), dedup via attention.py, quiet hours, outbox, weekly recap
 │   ├── importer.py              ← My Investments import: text, screenshots, PDFs, CSV/Excel → rows to review (NIM vision + text, symbol-pack checks)
@@ -452,6 +462,7 @@ overrides it):
 │   ├── policy_rates.json       ← central-bank policy rates from the BIS, refreshed daily: rf for currencies without a CME future (options_density.py; market data only)
 │   ├── beta_lines.json         ← home lines found by name (a US company's Milan line → its US line) or by the company's country (SHEL → SHEL.L), a week (capm.py; market data only)
 │   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
+│   ├── long_run.json           ← each holding's recoveries from max history and the 3-year covariance, monthly (long_run.py; a cache, market data only)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
 │   ├── recaps.json             ← My Investments' weekly recaps, last 12 (derived from the computed page: a cache)
 │   └── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)

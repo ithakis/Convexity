@@ -3858,7 +3858,15 @@
   .inv-count { margin-left: 8px; color: var(--muted); letter-spacing: 0; font-weight: 600; }
   .pf-book-note { font-size: 11px; color: var(--muted); line-height: 1.45; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
   .pf-book-note b { font-weight: 600; }
-  .inv-tbl-wrap { overflow-x: auto; }  /* a narrow window scrolls the table, never the page */
+  /* The table reads its own width (zoom and the rail both change it) and gives
+     way before it scrolls: the name shrinks, then what is least needed goes. */
+  #inv-hold { container-type: inline-size; }
+  .inv-tbl-wrap { overflow-x: auto; }
+  @container (max-width: 1000px) { #inv-hold .inv-tbl td.left .inv-tipped { max-width: clamp(90px, 19cqw, 232px); } #inv-hold .inv-tbl th, #inv-hold .inv-tbl td { padding-left: 4px; padding-right: 4px; } }
+  @container (max-width: 800px) { .inv-tbl [data-k="avg"] { display: none; } }
+  @container (max-width: 720px) { .inv-tbl [data-k="shares"] { display: none; } }
+  @container (max-width: 640px) { .inv-tbl [data-k="price"] { display: none; } }
+  @container (max-width: 560px) { .inv-tbl [data-k="month"], .inv-tbl [data-k="contrib"] { display: none; } }
   .inv-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
   /* Headers (owner's "kicker" pick, 2026-10-12): caps, tracked, a step
      brighter than --muted. Every label ends on its numbers' right edge: the
@@ -3914,8 +3922,6 @@
   .inv-rail-sub { color: var(--muted); font-size: 11px; margin-top: 1px; }
   /* Attention rail (Phase 7): grouped by severity, no boxes; the group
      label is the only severity mark ("Needs a look" in the data red). */
-  .inv-att-gear { order: 3; border: none; background: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 0 2px; line-height: 1; }
-  .inv-att-gear:hover { color: var(--text); }
   .inv-att-group { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--th-ink, var(--muted)); margin: 10px 0 0; }
   .inv-att-group:first-of-type { margin-top: 2px; }
   .inv-att[data-sev="high"] .inv-att-main > span:first-child { font-weight: 600; }
@@ -4050,8 +4056,12 @@
   .att-fs-st b { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .att-fs-det-k { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 16px 0 6px; }
   .att-fs-det-a { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
-  .inv-att-full { order: 4; border: none; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; margin-left: 2px; line-height: 1; display: inline-flex; }
-  .inv-att-full:hover { color: var(--text); }
+  .inv-att-tools { order: 3; flex: none; display: inline-flex; border-radius: var(--r-md); background: rgba(var(--accent-rgb), .14); }
+  button.inv-att-btn { width: 32px; height: 28px; padding: 0; border: 0; background: none; color: var(--text); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--r-md); transition: background .14s ease; }
+  button.inv-att-btn + button.inv-att-btn { box-shadow: inset 1px 0 0 rgba(var(--accent-rgb), .3); border-radius: 0 var(--r-md) var(--r-md) 0; }
+  button.inv-att-btn:first-child:not(:last-child) { border-radius: var(--r-md) 0 0 var(--r-md); }
+  button.inv-att-btn:hover, button.inv-att-btn:focus-visible { background: rgba(var(--accent-rgb), .22); outline: none; }
+  button.inv-att-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
   /* The column's own width, not the window's: zoom and the rail both change it,
      and the table must never scroll sideways. Least needed goes first: Reports
      is also in Upcoming, the depth line is a detail of the number above it. */
@@ -4139,6 +4149,14 @@
   }
   .rich-tip-float .pf-metric-tip.inv-tip { width: 320px; }
   .inv-tip-table th { text-align: left; font-weight: 500 !important; }
+  .inv-rs-chip { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 9px; margin: 0 0 6px; }
+  .inv-rs-chip.low { background: rgba(var(--pos-rgb), .16); color: var(--pos); }
+  .inv-rs-chip.mid { background: rgba(var(--accent-rgb), .16); color: var(--text); }
+  .inv-rs-chip.hi { background: rgba(var(--neg-rgb), .16); color: var(--neg); }
+  .inv-rs-b { display: grid; grid-template-columns: 76px 1fr 38px; gap: 6px; align-items: center; font-size: 12px; padding: 2px 0; }
+  .inv-rs-b i { display: block; height: 9px; border-radius: 2px; background: var(--muted); }
+  .inv-rs-b i.r { background: rgb(59, 125, 221); }
+  .inv-rs-b b { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
   .inv-tip-tech { margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.45; }
   .inv-tip .mt-formula { margin: 8px 0 2px; }
   /* Volatility's card (mockup C): five fixed bands, classic data colours
@@ -4414,15 +4432,24 @@
     border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text);
   }
   .inv-add:hover { border-color: var(--accent); }
-  /* The page's one call to action (owner, 2026-11-02): cut corner to corner,
-     the model price button's red above, a green of equal weight below, the
-     same in every theme. The soft stop only anti-aliases the cut; no line. */
-  .inv-add.inv-add-go {
-    --add-r: #d65555; --add-g: #2c9c5c; padding-left: 14px; padding-right: 14px; color: #fff; border-color: transparent;
-    background: linear-gradient(to bottom right, var(--add-r) 49.7%, var(--add-g) 50.3%) border-box;
-  }
-  .inv-add.inv-add-go:hover { --add-r: #bf4343; --add-g: #248650; border-color: transparent; }
-  .inv-add.inv-add-go:active { --add-r: #9a3333; --add-g: #1d7043; }
+  /* The page's one call to action: the model price button's red, a step under
+     the tabs' size (owner's pick from mockups, 2026-11-02). */
+  .inv-add.inv-add-go { height: 26px; padding: 0 14px; font-size: 12.5px; font-weight: 700; border-color: transparent; background: #d65555; color: #fff; }
+  .inv-add.inv-add-go:hover { background: #bf4343; border-color: transparent; }
+  .inv-add.inv-add-go:active { background: #9a3333; }
+  /* Holdings and Drivers head the section as tabs (TradingView's pattern). */
+  .inv-hold-head { display: flex; align-items: flex-end; gap: 8px; margin: 14px 0 8px; border-bottom: 1px solid var(--border); }
+  .inv-hold-head .sp { flex: 1; }
+  .inv-hold-head > button { margin-bottom: 7px; }
+  .inv-htabs { display: inline-flex; gap: 22px; }
+  .inv-htab { display: inline-flex; align-items: baseline; gap: 5px; padding: 6px 2px 9px; margin-bottom: -1px; border: 0; border-bottom: 2.5px solid transparent; background: none; color: var(--muted); font-size: 15px; font-weight: 600; cursor: pointer; }
+  span.inv-htab { cursor: default; }
+  .inv-htab.on { color: var(--text); border-bottom-color: var(--accent); }
+  .inv-htab:hover:not(.on) { color: var(--text); }
+  .inv-htab small { font-size: 12px; font-weight: 500; color: var(--muted); }
+  .inv-htool { height: 26px; padding: 0 12px; font-size: 12.5px; font-weight: 600; border-radius: var(--r-md); border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text); cursor: pointer; }
+  .inv-htool:hover:not(:disabled) { border-color: var(--accent); }
+  .inv-htool:disabled { opacity: .45; cursor: default; }
   .inv-add:disabled { opacity: 0.45; cursor: default; }
   .inv-add.inv-cols-btn[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg-canvas); }
 
@@ -4436,6 +4463,23 @@
   .inv-drv-hd { color: var(--th-ink); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
   .inv-drv-hd .r { text-align: right; }
   .inv-drv-row { height: 26px; border-bottom: 1px solid var(--border); }
+  .inv-drv-dist .inv-drv-hd > :last-child, .inv-drv-dist .inv-drv-row > :last-child { position: relative; margin-left: 12px; }
+  .inv-drv-dist .inv-drv-hd > :last-child::before, .inv-drv-dist .inv-drv-row > :last-child::before { content: ""; position: absolute; left: -11px; top: -8px; bottom: -8px; width: 1px; background: var(--border); }
+  .inv-rec { border-top: 2px solid var(--border); margin-top: 8px; padding-top: 8px; }
+  .inv-rec-k { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); margin-bottom: 3px; }
+  .inv-rec p { margin: 0 0 6px; font-size: 12.5px; line-height: 1.42; }
+  .inv-rec-chart { display: block; }
+  .inv-rec-chart text { font-size: 9.5px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+  .inv-rec-sk { margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+  .inv-rec-depth { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 3px; border: 1px solid var(--border); border-radius: var(--r-xs); }
+  .inv-rec-depth span { padding: 3px 0; text-align: center; font-size: 10.5px; color: var(--muted); }
+  .inv-rec-depth span + span { border-left: 1px solid var(--border); }
+  .inv-rec-depth b { display: block; font-size: 12px; font-weight: 600; color: var(--text); }
+  .inv-rec-depth span.on { background: rgba(var(--neg-rgb), .14); color: var(--neg); }
+  .inv-rec-depth span.on b { color: var(--neg); }
+  /* High zoom: the card gives way before it runs off the window, footnotes first. */
+  @media (max-height: 720px) { .inv-rec .inv-tip-tech, .inv-rec ~ .inv-tip-tech { display: none; } }
+  @media (max-height: 600px) { .inv-rec-sk, .inv-rec-depth { display: none; } }
   .inv-drv-row[data-sym]:hover { background: var(--hover); }
   .inv-drv-row.tot { height: 28px; font-weight: 700; border-top: 1px solid var(--text); border-bottom: 0; }
   .inv-drv-row.minor { color: var(--muted); }

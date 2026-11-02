@@ -302,10 +302,10 @@ def watch(cancel=None) -> str:
 _STATE: dict = {"last": None, "quiet": False, "thread": None, "stop": threading.Event()}
 
 
-def _submit():
+def _submit(on_conflict: str = "reject"):
     from convexity import jobs
 
-    return jobs.submit(scope="current", phases=["watch"], days=7,
+    return jobs.submit(scope="current", phases=["watch"], days=7, on_conflict=on_conflict,
                        entries_by_view={jobs.BOOK_VIEW: ""}, context={"background": True})  # fmt: skip
 
 
@@ -355,7 +355,13 @@ def run_now() -> tuple[object, str]:
     """Settings -> "Check now": a pass at once (still a job, still single-flight)."""
     if not settings()["notify_on"]:
         return None, "off"
-    job, outcome = _submit()
+    from convexity import jobs
+
+    # The monthly long-history pass is hidden and can wait; "a refresh is running"
+    # would be untrue, and the owner asked now.
+    running = jobs.current()
+    longrun = running is not None and running.phases == ("longrun",)
+    job, outcome = _submit("supersede") if longrun else _submit()
     if outcome == "created":
         _STATE["last"] = datetime.now(UTC)
     return job, outcome

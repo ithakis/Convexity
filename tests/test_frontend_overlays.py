@@ -137,7 +137,8 @@ def test_contribution_header_is_sticky_and_opaque():
 
 
 def test_attention_full_screen_opens_from_both_rail_headers_through_the_helpers():
-    assert 'kicker("Attention", gear + full)' in _APP_JS and 'kicker("Upcoming", full)' in _APP_JS
+    assert 'kicker("Attention", tools(gear, full))' in _APP_JS
+    assert 'kicker("Upcoming", tools(full))' in _APP_JS
     start = _APP_JS.index("function invFullOpen")
     assert "showOverlay(bg)" in _APP_JS[start : start + 400]
     start = _APP_JS.index("function invFullClose")

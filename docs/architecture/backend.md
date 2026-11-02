@@ -881,12 +881,45 @@ can answer a young secondary line with **one** close), and every series through
 must keep its `retry` argument: without it `extend_history` falls back to the
 retrying fetch for stand-ins, and a cold read went from 18 s to 99 s. `_risk_stats`:
 Bad month is `mpt.var_cvar_horizon` at 95% on the last `RISK_VAR_DAYS` (the
-optimizer's 10-day estimator scaled to 30, reported negative); the drawdown
+optimizer's 10-day estimator scaled to a 21-day month, reported negative); the drawdown
 figures are percent, negative. Recovery times span high to next high for falls
 of `RISK_MIN_FALL` or more; **the unfinished fall is kept apart (`open_days`)**,
 because dropping it makes the holding that never came back look the quickest
 (a young listing's small dips recover in days while its one big fall still
 runs). The Positions sheet carries the same figures.
+
+### My Investments' long view (`long_run.py`, 2026-11-02)
+
+What the page needs from more history than the page ever fetches, kept once a month
+in `state/long_run.json`: results only, never closes (about 30 KB), a cache of market
+data, a malformed file reads as empty and is rebuilt. **Nothing here fetches on the
+page's path**; what isn't there is left out of the page.
+
+- **Per holding, from max history in the quote currency:** the falls and the fitted
+  curve (`recovery_fit`), behind a data gate (`usable_start`, because `_xray_clean`
+  removes nothing at this length and a fake fall reads as one that never recovered).
+  Merged into `/api/investments/risk` as `rec` at the time of asking, since those
+  figures are cached 30 minutes. `_risk_stats`' ten-year figures stand in until then,
+  and whenever they show a running fall the record doesn't (`_long_record`): a card
+  calling a falling holding unfallen is the worst answer.
+- **The running fall** has its own closed-form estimate (`from_here`). Never a ratio of
+  the curve: the curve doesn't know how far the price has to go. The models and why,
+  with the owner's POT/GPD test: [docs/recovery_research.md](../recovery_research.md).
+  After changing a constant run `scripts/study_recovery.py` and bump `long_run.VERSION`.
+- **Three-year covariance per display currency** (`weekly_cov`): weekly returns over
+  five weekday anchors, pairwise, shrunk, floored. `book_view` does algebra on it at
+  response time (`investments._with_long_run`, like the rail): each holding's
+  `risk_share_3y` and the holdings' `bad_month`, the 1-in-20 month (1.645 σ √(21/252),
+  zero drift). Closes go through `_xray_clean` first (one x52 day read as a 521% bad
+  month for a whole month in review). Left out under 95% of the value measured or above
+  `MAX_BOOK_VOL`. It stays apart from
+  `risk_share` (one year, daily), which is what the page reads first: its next-year
+  error is the lowest of the windows tried (1.00 points against 1.06).
+- **When:** `tick` (a thread, a minute) submits a `longrun` job when a held symbol has
+  no record or an earlier month's and **nothing else is running**. The owner's Refresh
+  supersedes it. Limits: 4 symbols per request, 4 s pause, `retry=False`, two silent
+  chunks end the pass for an hour, a symbol not answered waits 6 hours. A shorter answer
+  than the one kept (`KEEP_FRACTION`) is degraded and the old record stays.
 
 ### My Investments page speed (2026-10-12)
 - **`investments.page(ccy)`** is what the route, the export and every change

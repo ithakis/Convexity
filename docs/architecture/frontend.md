@@ -115,7 +115,19 @@ dependency (loaded from CDN, used only for column-guide formulas).
   screen, not behind Activity or folded under "n more"); leaving the page
   badges what wasn't read. An answer with `page: false` updates the rules
   only, never blanks the rail. The divergence item carries the ✦ in `--ai`.
-- **The full screen's table never scrolls sideways** (owner, 2026-11-02). `.att-fs-main` is a size container and the table's rules are `@container` on the column's width, not `@media`: zoom and the rail both change it. Text wraps first, then Reports goes (760 px, it is also in Upcoming), then the bars and Below high (620 px). Verify at 480-2880 px wide with `scrollWidth` on main, side and head; under 768 px the Browser pane emulates a phone at 980, so test those in a same-origin iframe.
+- **The full screen's table never scrolls sideways** (owner, 2026-11-02). `.att-fs-main` is a size container and the table's rules are `@container` on the column's width, not `@media`: zoom and the rail both change it. Text wraps first, then Reports goes (760 px, it is also in Upcoming), then the bars and Below peak (620 px). Verify at 480-2880 px wide with `scrollWidth` on main, side and head; under 768 px the Browser pane emulates a phone at 980, so test those in a same-origin iframe.
+- **Holdings and Drivers are tabs (D1, owner's pick from mockups, 2026-11-02).**
+  `.inv-hold-head` replaces the section kicker on this section only; `[data-inv-view]`
+  sets `INV.drivers` through `invHoldStill`. + Add is solid red everywhere
+  (`.inv-add-go`, the model price button's red); Columns is `.inv-htool`, greyed in
+  Drivers. `#inv-hold` is a size container: `@container` rules shorten names, then
+  hide `avg`, `shares`, `price`, `month` + `contrib` (`td`/`th` carry `data-k`).
+- **One reading of a risk share** (`invShareText`, `invRiskVerdict`, `invHeldWeight`,
+  risk study 2026-11-02): whole percent, "about 0%" / "≈0%" when negative or under
+  a quarter of its size, verdict at ¼, .75 and 1.3 of its size, sizes measured on
+  holdings without cash because the share is. Every surface goes through these; the
+  export keeps exact values. Do not add a "when your book falls 1%" beta sentence:
+  median R² .16 on this kind of book.
 - **The holdings block swaps alone** (`#inv-hold`, `invHoldStill`): table to Drivers, or tab to tab, never `invRender` (it forces a layout while the page is short, which pulled the scroll up). A shorter block gets just enough `min-height` to hold the scroll position.
 - **Attention, full screen (owner's picks from mockups, 2026-11-02).** The ⤢ in
   the rail's Attention and Upcoming headers opens `#inv-att-bg` through

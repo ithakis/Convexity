@@ -36,7 +36,7 @@ from datetime import UTC, date, datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from convexity import ledger, paths
+from convexity import ledger, long_run, paths
 from convexity.helpers import SUPPORTED_FX, major_ccy, price_in_major
 
 SCHEMA_VERSION = 1
@@ -1705,38 +1705,37 @@ def _risk_share(syms, vps, qty_s, traded, i0: int) -> dict[str, float]:
 
 RISK_SPAN = "10y"
 RISK_VAR_DAYS = 756  # three years of daily returns, like the optimizer's lookback
-RISK_MIN_FALL = 0.10  # a smaller dip isn't a recovery worth timing
+RISK_MIN_FALL = long_run.MIN_FALL
+RISK_MONTH_DAYS = 21  # a month, in trading days
 RISK_MIN_DAYS = 60
 
 
 def _risk_stats(px: np.ndarray) -> dict:
     """One holding's own risk from its total-return closes, oldest first:
-    the 95% VaR over 30 days (the optimizer's 10-day estimator, scaled), the
+    the 95% VaR over a month (the optimizer's 10-day estimator, scaled), the
     worst fall, where it stands against its high, the median and 95th
     percentile of its days below a high, and the trading days each fall of
-    ``RISK_MIN_FALL`` took to get back to it. ``open_days`` is the unfinished
-    one, kept apart: a fall still running hasn't recovered, and leaving it out
-    would make the holding that never came back look the quickest."""
+    ``RISK_MIN_FALL`` took to get back to it (``long_run.episodes``). The
+    card's recovery curve prefers the longer ``long_run`` record; this is what
+    it shows until that record is there."""
     from convexity import mpt
 
     if len(px) < RISK_MIN_DAYS:
         return {}
-    var = mpt.var_cvar_horizon((px[1:] / px[:-1] - 1)[-RISK_VAR_DAYS:], 0.95)[0]
+    rets = (px[1:] / px[:-1] - 1)[-RISK_VAR_DAYS:]
+    var = mpt.var_cvar_horizon(rets, 0.95, h_target=RISK_MONTH_DAYS)[0]
     dd = px / np.maximum.accumulate(px) - 1
-    highs = np.flatnonzero(dd == 0)
-    days = [
-        int(b - a)
-        for a, b in zip(highs, highs[1:], strict=False)
-        if dd[a:b].min() <= -RISK_MIN_FALL
-    ]
-    last = int(highs[-1])
-    open_days = len(px) - 1 - last if dd[last:].min() <= -RISK_MIN_FALL else None
+    eps = long_run.episodes(px)
+    days, open_days = eps["days"], eps["open_days"]
     out = {"var_pct": -var * 100, "mdd_pct": dd.min() * 100, "now_pct": dd[-1] * 100,
            "dd50_pct": np.quantile(dd, 0.5) * 100, "dd95_pct": np.quantile(dd, 0.05) * 100}  # fmt: skip
     out = {k: round(float(v), 2) if math.isfinite(v) else None for k, v in out.items()}
     return {**out, "rec50": float(np.median(days)) if days else None,
             "rec90": float(np.quantile(days, 0.9)) if days else None,
-            "recmax": max(days, default=None), "open_days": open_days}  # fmt: skip
+            "recmax": max(days, default=None), "open_days": open_days,
+            "open_depth": eps["open_depth"], "open_now": eps["open_now"], "falls": len(days),
+            "from_here": long_run.from_here(eps["open_now"], open_days, eps["open_depth"]),
+            "rec_fit": long_run.recovery_fit(days, open_days)}  # fmt: skip
 
 
 def _holding_risk(ccy: str | None = None) -> tuple[dict, list[str]]:
@@ -1805,10 +1804,23 @@ def holding_risk(ccy: str | None = None) -> dict:
     return _holding_risk(ccy)[0]
 
 
+def _long_record(symbol: str, stats: dict) -> dict | None:
+    """The monthly record, unless the fresher ten years say a fall is running and it
+    says none: it can be weeks old, and a crash cuts what came before it from the
+    record's history. A card calling that holding unfallen is the worst answer."""
+    rec = long_run.recovery(symbol)
+    if rec and not rec.get("open_days") and stats.get("open_days"):
+        return None
+    return rec
+
+
 def holding_risk_payload(ccy: str | None = None) -> dict:
     """GET /api/investments/risk: the figures, and which holdings have none
     because Yahoo didn't answer, so the page can offer to ask again."""
     out, missing = _holding_risk(ccy)
+    # The monthly record, read at the time of asking: the figures above are
+    # cached for half an hour, and it may have arrived since.
+    out = {s: {**v, **({"rec": r} if (r := _long_record(s, v)) else {})} for s, v in out.items()}
     return {"risk": out, "missing": missing}
 
 
@@ -2208,6 +2220,23 @@ def page(ccy: str | None = None, *, fresh: bool = False) -> dict:
         return with_attention(out, fresh=key is not None and _healthy(out))
 
 
+def _with_long_run(out: dict) -> dict:
+    """The page with what the monthly pass keeps: each holding's three-year share
+    of the risk and the holdings' 1-in-20 month. Algebra on a kept matrix at the
+    time of asking, never a fetch; left out while the matrix isn't there."""
+    try:
+        view = long_run.book_view(out["positions"], out.get("ccy") or "")
+    except Exception as exc:  # extra, like the rail: never lose the page over it
+        print(f"[long_run] book view failed: {type(exc).__name__}")
+        return out
+    if not view:
+        return out
+    shares = view["shares"]
+    held = [{**p, "risk_share_3y": shares[p["symbol"]]} if p["symbol"] in shares else p
+            for p in out["positions"]]  # fmt: skip
+    return {**out, "positions": held, "bad_month": view["bad_month"]}
+
+
 def with_attention(out: dict, *, fresh: bool = False) -> dict:
     """The page with its Attention rail (``attention.evaluate``), a copy:
     the memo and the cached page never hold the rail, which follows the
@@ -2218,6 +2247,7 @@ def with_attention(out: dict, *, fresh: bool = False) -> dict:
 
     if out.get("empty") or not out.get("positions"):
         return out
+    out = _with_long_run(out)
     try:
         # Sector and fund come from the symbol pack when asked, not when the
         # page was computed: a first launch computes before the pack has

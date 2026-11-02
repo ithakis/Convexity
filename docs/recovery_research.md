@@ -1,0 +1,128 @@
+# How long does a fall take to recover?
+
+Research behind the Time to recover card in My Investments (2026-11-02/03). The
+owner proposed peaks-over-threshold (POT) with a generalized Pareto tail, with
+benchmarks from Brownian motion. This note records the test and what shipped.
+
+`scripts/study_recovery.py` recomputes every shipped constant from public tickers,
+and was checked to reproduce them exactly. The panel is 40 large caps (AAPL, MSFT,
+NVDA, SPY, JPM, ...), Yahoo max history from 1962, total return: 1,520 falls of 10%
+or more from a high, 31 still running. The study also ran on one private book;
+those figures are not recorded here beyond the summary below.
+
+## What shipped
+
+| Piece | Model | Why |
+|---|---|---|
+| The card's curve | Inverse Gaussian, shape and scale pooled (φ .31, μ 261 days), each holding's scale shrunk by 12 falls | Best calibrated and most stable. One holding's falls can't carry two parameters. |
+| Falls of each depth | Pooled Kaplan-Meier table, median days 60 / 150 / 391 / 1223 for 10-20 / 20-30 / 30-50 / 50%+ | A table held up out of time. Curves conditioned on depth did not. |
+| A fall still running | ln(days left) = 5.224 + 1.297 ln a + 0.301 ln t − 0.582 ln w, σ 1.204 | Knows how far the price still has to go. Nothing else came close. |
+| Data | `long_run.usable_start` | The existing glitch filter removed nothing on max history. |
+
+No GPD anywhere.
+
+## The owner's benchmarks
+
+Verified by simulation at daily closes with a censored likelihood.
+
+- **Zero log drift, ξ = 2: correct** (fitted 2.01). The drift is the log drift,
+  m − σ²/2, so a share with +4.5% arithmetic drift at 30% vol is this case.
+- **Positive drift, ξ = 0: only asymptotically.** The exponential tail sets in past
+  σ²/ν² (7.6 years at the panel's median, 30 years at 10% drift and 30% vol). Fitted
+  at the panel's median drift and vol: .87 at 3 months, .56 at 1 year, .35 at 3 years,
+  .15 at 10. So a bare ξ can't say "GBM-like": it has to be read against a simulated
+  twin with the same drift, vol and length.
+
+## ξ against each ticker's GBM twin
+
+| | threshold | ξ | profile 90% | two-way bootstrap | GBM twin |
+|---|---|---|---|---|---|
+| log depth | 10% | .63 | .56, .71 | .50, .75 | .45 [.39, .51] |
+| log depth | 30% | .25 | .13, .40 | .04, .51 | .29 [.17, .41] |
+| duration | 6 months | .72 | .60, .86 | .41, .97 | .72 [.62, .83] |
+| duration | 1 year | .54 | .39, .72 | .23, .84 | .57 [.43, .71] |
+| duration | 3 years | .15 | −.04, .39 | −.35, .48 | .39 [.18, .64] |
+
+Duration matches GBM from 6 months to 2 years and is thinner past 3 (survivors or
+real reversion; this data can't separate them). ξ falls steadily with the threshold,
+from .78 at 3 months to .02 at 6 years, so there is no one number. A GPD is defensible
+only from about 3 years (118 falls), and there it is close to exponential, scale about
+1,000 days: past 3 years, about 20% of what is left recovers per year.
+
+## Depth
+
+T scales with depth to the power 1.80 [1.65, 1.94], but a GBM twin gives 2.04: this is
+mostly Brownian scaling, not an empirical discovery. Given depth, the tail index is
+about 0 (−.03 to .06). **The heavy tail is a mixture over depth**, so once depth is
+known a GPD has no job. Simple depth is bounded at 100%, so its ξ is negative by
+construction; use log depth.
+
+## Out of sample
+
+Each fall scored from other tickers' constants and the holding's own earlier falls.
+Depth unknown, because a fall's final depth is unknown while it matters.
+
+| Model | Δ log score vs chosen (se by ticker) | within median / 90% (.50 / .90) | P > 5y (seen .046) |
+|---|---|---|---|
+| **Inverse Gaussian refit** | 0 | .514 / .907 | .037 |
+| Inverse Gaussian + depth slope | +.011 (.005) | .467 / .895 | .035 |
+| Lognormal + GPD, u = 1y | +.008 (.006) | .487 / .895 | .040 |
+| Lognormal + depth slope | +.013 (.005) | .472 / .895 | .036 |
+| Pooled Kaplan-Meier | −.031 (.011) | .490 / .904 | .051 |
+
+The GPD's gain doesn't clear its noise, and the card claims only the median and 90th
+percentile, where it is less calibrated. With u = 3 years it fails out of time (P > 3y
+.133 against .085 seen). The depth-slope models look much better (+.57) only when the
+final depth is known, and their calibration falls to .28 / .69 when fitted before 2005.
+On one real book the GPD's gain was larger (+.034) and every model understated the tail:
+"9 of 10" reads about 87% there.
+
+## A running fall
+
+Every fall at 12 checkpoints from 3 months to 10 years, 2,812 rows, on held-out
+tickers. MAE is the gap to Kaplan-Meier's share still not back.
+
+| Model | Conditional log score | MAE |
+|---|---|---|
+| Ratio of the inverse Gaussian, S(t+h)/S(t) | −.961 | .100 |
+| Ratio of lognormal + GPD | −.936 | .086 |
+| Lognormal + depth, depth so far plugged in | −1.332 | .125 |
+| **The formula above** | **−.684** | **.034** |
+
+Share still not back, worst fall 50% or more, 2.4 years in (86 falls):
+
+| | 1 year | 3 years | 5 years |
+|---|---|---|---|
+| Seen | .84 | .50 | .30 |
+| Formula | .74 | .48 | .34 |
+| Ratio of the curve | .63 | .30 | .17 |
+
+The ratio tells a holding 50% down right now that 6 in 10 are still out after a year,
+when 96% were. The formula errs the other way past 3 years on a thin sample (27 falls),
+and it moves with the price (median 22% a month), so the card rounds it.
+
+## Data
+
+The panel's longest falls are real (GE 2000-2024, CSCO 2000-2021). What isn't: MCD's two
+unadjusted 2:1 splits of 1968-69, and on secondary and thin lines, a big merger's share
+exchange, ×40 jumps, multi-year holes, and whipsaws that read as a fall running for decades.
+
+The gate cuts history after the last of: a hole over 30 days, a year with over half its
+returns zero, or three moves over 30% undone within 10 rows in a year. More than five years
+ago it also cuts a day over +100% or under −75%, and a fall to an exact split ratio among
+calm days (within 3 points of ½, ⅓, ¼, ⅕, neighbours under 5%). On the panel that last rule
+finds MCD's two splits and nothing else: AAPL's −52% in 2000 had a loud day beside it.
+
+The five-year limit exists because a recent crash is what the card is for, and cutting it
+would call that holding unfallen. Should a record and the fresher ten-year figures disagree
+about whether a fall is running, the ten years win (`investments._long_record`).
+
+False cuts on the panel: 3 of 40, all before 1984. Constants barely move with the window
+(from 1990: φ .314, μ 267), except from 2000 (φ .288, μ 343, one lost decade), so all of it
+is used.
+
+## What it can't say
+
+Yahoo keeps no delisted names: a share that never came back is absent, every recovery
+figure is flattered, and the size of that can't be measured. The card says so. C at −98%
+since 2006 is the panel's closest case.

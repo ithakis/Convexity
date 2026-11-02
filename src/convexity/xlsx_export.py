@@ -1708,7 +1708,7 @@ def _write_positions(ws, book: dict, period: str) -> None:
             ("Weight", _PCT), ("Risk share", _PCT), ("Month", _PCT), (f"Profit ({ccy})", _MONEY),
             ("On what you hold", _MONEY), ("On what you sold", _MONEY), ("Dividends", _MONEY),
             ("Dividends, estimated", _MONEY), ("Return", _PCT), (f"Contribution {period} (pts)", "0.00"),
-            ("Yield on cost", _PCT), ("Analyst upside", _PCT), ("Bad month (95%, 30 days)", _PCT),
+            ("Yield on cost", _PCT), ("Analyst upside", _PCT), ("Bad month, on its own (95%, 21 days)", _PCT),
             ("Worst fall (10y)", _PCT), ("Below its high (10y)", _PCT), ("Longest recovery (trading days)", "0")]  # fmt: skip
     risk = book.get("risk") or {}
     rows = []

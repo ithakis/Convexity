@@ -388,6 +388,10 @@ def _run(job: Job) -> None:
             _run_watch_phase(job)
             _finish(job, "cancelled" if job.cancel.is_set() else "done")
             return
+        if job.phases == ("longrun",):
+            _run_longrun_phase(job)
+            _finish(job, "cancelled" if job.cancel.is_set() else "done")
+            return
         if job.phases == ("book",):
             _run_book_phase(job)
             _finish(job, "cancelled" if job.cancel.is_set() else "done")
@@ -565,6 +569,17 @@ def _run_watch_phase(job: Job) -> None:
     job.emit("phase", phase="watch", state="start", view=BOOK_VIEW)
     outcome = notify.watch(job.cancel)
     job.emit("phase", phase="watch", state="end", view=BOOK_VIEW, outcome=outcome)
+
+
+def _run_longrun_phase(job: Job) -> None:
+    """The monthly long-history pass (long_run.run_pass): a job for the same
+    reason as the watch pass, and the owner's refresh supersedes it too."""
+    from convexity import long_run
+
+    job.phase = "longrun"
+    job.emit("phase", phase="longrun", state="start", view=BOOK_VIEW)
+    outcome = long_run.run_pass(job.cancel)
+    job.emit("phase", phase="longrun", state="end", view=BOOK_VIEW, outcome=outcome)
 
 
 def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
