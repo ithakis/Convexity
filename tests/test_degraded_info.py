@@ -257,12 +257,19 @@ def test_only_the_first_answer_of_a_run_is_asked_twice(info_ticker):
     assert Info.asks == 3  # no second retry, no sleep on every fetch
 
 
-def test_a_line_stays_degraded_until_it_has_been_so_for_half_an_hour(info_ticker, monkeypatch):
+def _thin_run(monkeypatch, symbol, answers=5, every=2 * 3600.0):
+    """``answers`` answers without the module, ``every`` seconds apart."""
     t = [1000.0]
     monkeypatch.setattr(helpers.time, "time", lambda: t[0])
-    for _ in range(3):
-        assert fetcher._safe_info(Info("KDP.MX")).get("_fundamentals_missing")
-    t[0] += helpers._THIN_AFTER_S + 1
+    for i in range(answers):
+        if i:
+            t[0] += every
+        got = fetcher._safe_info(Info(symbol))
+    return t, got
+
+
+def test_a_line_answering_so_for_hours_is_the_line(info_ticker, monkeypatch):
+    _thin_run(monkeypatch, "KDP.MX")
     assert helpers.thin_line("KDP.MX")
     # Now it is the line: no flag, so its "no analysts" is cached as the truth.
     assert not fetcher._safe_info(Info("KDP.MX")).get("_fundamentals_missing")
@@ -273,23 +280,70 @@ def test_a_line_stays_degraded_until_it_has_been_so_for_half_an_hour(info_ticker
     assert not at.unknown("KDP.MX")
 
 
-def test_one_lapse_long_ago_is_not_a_thin_line(info_ticker, monkeypatch):
-    t = [1000.0]
-    monkeypatch.setattr(helpers.time, "time", lambda: t[0])
-    fetcher._safe_info(Info("MU"))
-    t[0] += 86_400
+@pytest.mark.parametrize(("answers", "every"), [
+    (3, 1800.0),  # half an hour: a long lapse
+    (20, 300.0),  # 95 minutes of asking: a very long lapse
+    (2, 8 * 3600.0),  # two lapses a working day apart
+    (6, 7 * 3600.0),  # a name asked rarely: each gap starts over
+])  # fmt: skip
+def test_a_lapse_is_not_a_thin_line(info_ticker, monkeypatch, answers, every):
+    _, got = _thin_run(monkeypatch, "MU", answers, every)
+    assert got.get("_fundamentals_missing")
     assert not helpers.thin_line("MU")
 
 
+def test_a_stale_thin_verdict_expires(info_ticker, monkeypatch):
+    t, _ = _thin_run(monkeypatch, "MU")
+    t[0] += helpers._THIN_GAP_S + 1
+    assert not helpers.thin_line("MU") and helpers.fundamentals_retry_due("MU")
+
+
 def test_a_good_answer_ends_the_run(info_ticker, monkeypatch):
-    t = [1000.0]
-    monkeypatch.setattr(helpers.time, "time", lambda: t[0])
-    for _ in range(3):
-        fetcher._safe_info(Info("MU"))
-    t[0] += helpers._THIN_AFTER_S + 1
+    _thin_run(monkeypatch, "MU")
     Info.asks, Info.answers = 0, [HEALTHY]
     assert not fetcher._safe_info(Info("MU")).get("_fundamentals_missing")
     assert not helpers.thin_line("MU") and helpers.fundamentals_retry_due("MU")
+
+
+# ------------------------------------------------- an .info that raised (a 429)
+class Raises(Info):
+    @property
+    def info(self):
+        Info.asks += 1
+        raise RuntimeError("Too Many Requests")
+
+
+@pytest.mark.parametrize("cls", [Raises])
+def test_a_failed_info_is_flagged_not_a_row_with_no_analysts(info_ticker, cls):
+    got = fetcher._safe_info(cls("MU"))
+    assert got["_fundamentals_missing"]
+    assert Info.asks == 1  # a throttled ask isn't repeated at once
+
+
+def test_failed_infos_never_add_up_to_a_thin_line(info_ticker, monkeypatch):
+    t = [1000.0]
+    monkeypatch.setattr(helpers.time, "time", lambda: t[0])
+    for _ in range(10):
+        t[0] += 3600.0
+        assert fetcher._safe_info(Raises("MU"))["_fundamentals_missing"]
+    assert not helpers.thin_line("MU") and "MU" not in helpers._THIN_RUN
+
+
+def test_a_failed_info_keeps_the_saved_rows_fundamentals(info_ticker, monkeypatch):
+    persistence.save_view("Test", "MU", [{"symbol": "MU", "price": 90.0, "n_analysts": 45.0,
+                                          "target_mean_price": 150.0, "operating_margin": 0.3}],
+                          set_last=False)  # fmt: skip
+    info = fetcher._safe_info(Raises("MU"))
+    out = {"symbol": "MU", "price": 100.0, "n_analysts": None, "target_mean_price": None,
+           "operating_margin": None}  # fmt: skip
+    if info.get("_fundamentals_missing"):
+        fetcher._carry_fundamentals(out, "MU")
+    assert out["n_analysts"] == 45.0 and out["operating_margin"] == 0.3 and out["price"] == 100.0
+
+
+def test_a_fund_answering_normally_is_not_flagged(info_ticker):
+    Info.answers = [{"quoteType": "ETF", "longName": "SPDR S&P 500 ETF Trust"}]
+    assert not fetcher._safe_info(Info("SPY")).get("_fundamentals_missing")
 
 
 def test_the_analysts_unknown_miss_is_kept_briefly_in_the_window():

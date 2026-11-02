@@ -828,9 +828,8 @@ def known_proxies(symbol: str) -> tuple[str, ...]:
         # Saved before warrants, preferreds and funds were left out, they
         # read clean.
         me = sdb.get(symbol)
-        kind = me.type if me else None
         return tuple(t for t in row[1]
-                     if not sdb.not_the_share(t) and (not kind or sdb.may_stand_in(kind, sdb.get(t))))  # fmt: skip
+                     if not sdb.not_the_share(t) and (not me or sdb.may_stand_in(me, sdb.get(t))))  # fmt: skip
     return ()
 
 
@@ -853,13 +852,13 @@ def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
     from convexity import symbol_db as sdb
 
     out: list[str] = []
-    kind = None
+    own = None
     try:
         h = sdb.get(symbol)
-        kind = h.type if h is not None else None
+        own = h
         if h is not None and h.group != sdb.YAHOO_GROUP:
             out = [x for x in sdb.listings(h.group)
-                   if x.ticker != symbol and sdb.may_stand_in(kind, x)]  # fmt: skip
+                   if x.ticker != symbol and sdb.may_stand_in(own, x)]  # fmt: skip
             name = name or h.name
         if not out:
             # By the bare ticker, then by name: Lookup finds Gedeon Richter's
@@ -868,13 +867,13 @@ def _proxy_candidates(symbol: str, name: str | None) -> tuple[str, ...]:
             # stored name ("Richter").
             hits = [x for q in dict.fromkeys([symbol.split(".")[0], name or ""]) if q
                     for x in sdb.yahoo_lookup(q, limit=10)]  # fmt: skip
-            kind = kind or next((x.type for x in hits if x.ticker == symbol), None)
+            own = own or next((x for x in hits if x.ticker == symbol), None)
             me = [x.name for x in hits if x.ticker == symbol] + [name or ""]
             ref = max(me, key=lambda n: len(n.split()))
             out = [x for x in hits if x.ticker != symbol and sdb.same_company(x.name, ref)]
     except Exception as e:
         print(f"[analytics] no history proxy for {symbol}: {type(e).__name__}", flush=True)
-    out = [x for x in out if not not_the_share(x.ticker) and sdb.may_stand_in(kind, x)]
+    out = [x for x in out if not not_the_share(x.ticker) and sdb.may_stand_in(own, x)]
     # Exchange lines first, then re-listing venues; OTC and order-book lines
     # (GEDSF, 0QFP.IL) last: they trade on few days.
     thin = {"PNK", "OQB", "OQX", "IOB", "DXE", "CXE", "AQS"}

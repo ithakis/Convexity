@@ -643,3 +643,15 @@ def test_a_result_with_no_close_within_three_days_is_left_out():
     got = inv._reactions(rows, closes)
     assert [r["date"] for r in got] == ["2026-01-07"]
     assert got[0]["pct"] == pytest.approx(0.99, abs=0.01)
+
+
+def test_a_holding_that_never_moved_has_no_risk_share():
+    # Delisted, its last close carried forward: no measurement, not 0%.
+    n = 60
+    rng = np.random.default_rng(0)
+    moving = 100 * np.cumprod(1 + rng.normal(0, 0.01, n))
+    other = 50 * np.cumprod(1 + rng.normal(0, 0.02, n))
+    vps = {"AAPL": moving, "MSFT": other, "DEAD": np.full(n, 10.0)}
+    qty = {s: np.full(n, 10.0) for s in vps}
+    got = inv._risk_share(list(vps), vps, qty, np.ones(n, dtype=bool), 0)
+    assert set(got) == {"AAPL", "MSFT"} and sum(got.values()) == pytest.approx(1.0)

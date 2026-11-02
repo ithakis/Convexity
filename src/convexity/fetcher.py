@@ -82,11 +82,18 @@ def _safe_info(tk: yf.Ticker) -> dict:
     keeps the first answer on the object); one that stays degraded carries
     ``_fundamentals_missing`` so no cache keeps it as the truth. The retry
     costs the hot path a request only at the start of a lapse, and a line that
-    never carries the module stops being flagged (helpers.thin_line)."""
+    never carries the module stops being flagged (helpers.thin_line).
+
+    An ``.info`` that raised (yfinance turns Yahoo's 429 into an exception) or
+    came back with no identity said nothing at all, so it is flagged the same
+    way, or the row is saved with no analysts over a good one. It isn't asked
+    again (a throttled ask fails again) and never counts towards a thin line:
+    that takes a real answer, from Yahoo, without the module."""
     info = _raw_info(tk)
-    if not fundamentals_missing(info):
-        if info:
-            note_fundamentals(tk.ticker, False)
+    if not (info.get("quoteType") or info.get("longName") or info.get("shortName")):
+        info = {**info, "_fundamentals_missing": True}
+    elif not fundamentals_missing(info):
+        note_fundamentals(tk.ticker, False)
     else:
         again = {}
         if fundamentals_retry_due(tk.ticker):

@@ -1683,8 +1683,10 @@ def _risk_share(syms, vps, qty_s, traded, i0: int) -> dict[str, float]:
     px = pd.DataFrame({s: vps[s][days] for s in held})
     rets = px.pct_change(fill_method=None).iloc[1:]
     # A listing younger than a month (an IPO) is left out rather than
-    # cutting everyone's window to its few days; it shows no figure.
-    held = [s for s in held if rets[s].notna().sum() >= 20]
+    # cutting everyone's window to its few days; it shows no figure. So is one
+    # that never moved (delisted, its last close carried forward): 0% of the
+    # risk is what it would read, and that is no measurement.
+    held = [s for s in held if rets[s].notna().sum() >= 20 and rets[s].abs().sum() > 0]
     rets = rets[held].dropna(how="any")
     w = np.array([qty_s[s][-1] * vps[s][-1] for s in held])
     if len(held) == 1:

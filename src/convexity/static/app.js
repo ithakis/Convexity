@@ -2769,9 +2769,10 @@ document.addEventListener("keydown", (e) => {
   const tab = /^Digit([1-4])$/.exec(e.code)?.[1];
   if (tab && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
     e.preventDefault();
-    // Text being typed stays: the Add box loses what's in it on a page change.
-    const typed = e.target?.closest?.("input, textarea, [contenteditable]");
-    if (typed && (typed.value ?? typed.textContent ?? "").trim()) return;
+    // Text being typed in the Add box stays: a page change loses it there.
+    // Other boxes keep their text across pages, so they don't hold the key.
+    const typed = e.target?.closest?.("#inv-pop input, #inv-pop textarea, [data-inv-comp-text]");
+    if (typed && (typed.value ?? "").trim()) return;
     const mpt = $("#pf-mpt-bg").classList.contains("show");
     if (SCROLL_LOCK.depth > (mpt ? 1 : 0)) return;
     if (tab === "4") {
@@ -15386,7 +15387,7 @@ const invYears = (d) => d >= 252 ? (d / 252).toFixed(1) + " y" : Math.max(1, Mat
 const invLoss = (v, dp = 0) => (v < 0 ? "+" : "−") + Math.abs(v).toFixed(dp) + "%";
 const INV_RISKS = {
   share: { label: "Risk share", note: "its share of the book's ups and downs, at today's weights, over the last year",
-    get: (x) => invOk(x.risk_share) ? x.risk_share * 100 : null, fmt: (v) => v.toFixed(1) + "%", ticks: [1, 2, 5, 10, 15, 20, 30, 40, 60] },
+    get: (x) => invOk(x.risk_share) ? x.risk_share * 100 : null, fmt: (v) => invPct(v).replace("+", ""), ticks: [1, 2, 5, 10, 15, 20, 30, 40, 60] },
   var: { label: "Bad month", note: "a 1-in-20 30-day fall, on the last 3 years (Optimize's 10-day estimate, scaled)",
     get: (x, r) => invOk(r?.var_pct) ? -r.var_pct : null, fmt: (v) => invLoss(v, 1) },
   fall: { label: "Worst fall", note: "its biggest drop from a high, over the last 10 years",
@@ -15421,9 +15422,10 @@ function invDriversPaint() {
   if (!el || !b) return;
   invRiskLoad();
   const tab = INV_DRV_TABS[INV.drvTab] ? INV.drvTab : "waterfall";
-  const miss = INV.risk?.missing?.length || 0, heldN = b.positions.filter(x => !x.pending).length;
-  const status = INV.risk?.loading ? lcHtml("Reading 10 years of prices") : INV.risk?.failed || miss
-    ? `${INV.risk?.failed || miss >= heldN ? "Couldn't read the price history." : `Couldn't read ${miss} of ${heldN} holdings.`} <button type="button" class="inv-link" data-inv-risk-retry>Try again</button>` : "";
+  const miss = INV.risk?.missing || [], heldN = b.positions.filter(x => !x.pending).length;
+  const missed = miss.slice(0, 3).map(escapeHtml).join(", ") + (miss.length > 3 ? ` and ${miss.length - 3} more` : "");
+  const status = INV.risk?.loading ? lcHtml("Reading 10 years of prices") : INV.risk?.failed || miss.length
+    ? `${INV.risk?.failed || miss.length >= heldN ? "Couldn't read the price history." : `Couldn't read ${missed}.`} <button type="button" class="inv-link" data-inv-risk-retry>Try again</button>` : "";
   const picker = tab === "waterfall" || tab === "map"
     ? `<span>Risk as</span>${invPills("inv-risk", Object.entries(INV_RISKS).map(([k, m]) => [k, m.label]), INV_RISKS[INV.drvRisk] ? INV.drvRisk : "var")}` : "";
   el.innerHTML = `<div class="inv-drv-bar">${invPills("inv-drv", Object.entries(INV_DRV_TABS), tab)}<span class="sp"></span>${status}${picker}</div>

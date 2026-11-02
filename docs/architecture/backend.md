@@ -363,9 +363,15 @@ only time can tell from a lapse. So:
   keeps the first answer on the object) after 0.4 s; an answer that stays
   degraded carries `_fundamentals_missing`. Only the first answer of a run is
   asked twice, or a line with no module pays 1.3 s on every fetch.
-  `helpers.thin_line`: three or more such answers over half an hour, with no
-  good one between, is the line itself. The flag then stops and its "no
-  analysts" is cached as the truth. In memory only, so a restart starts over.
+  `helpers.thin_line`: five or more such answers spanning six hours, none more
+  than six hours apart and no good one between, is the line itself. The flag
+  then stops and its "no analysts" is cached as the truth. The bar is high on
+  purpose: a lapse mistaken for this loses a big name's analysts, the reverse
+  only re-asks. In memory only, so a restart starts over.
+- An `.info` that raised (yfinance turns a 429 into an exception, `_raw_info`
+  into `{}`) or has no identity said nothing. `_safe_info` flags it the same way,
+  so the row keeps the saved fundamentals and the window its 60 s, doesn't ask
+  again, and never counts towards a thin line.
 - `analyst_targets.consensus`: degraded `.info` is not read as "no targets",
   and neither is one that said nothing: `{}` (`.info` raised, σ/μ passes that)
   or fast_info's gaps alone (no `quoteType`, no target). `financialData` is asked alone. An empty answer for a share is an
@@ -867,7 +873,7 @@ Each holding on its own, in the display currency with dividends reinvested, over
 minutes). Only a whole answer is cached: a holding Yahoo left out, or one whose
 currency has no rate (it would stay unconverted, or be converted as if it quoted
 in USD), is left out of the figures and named in `missing` on the route, and the
-page offers Try again. Too little history (`RISK_MIN_DAYS`) is no figure, not a
+page names it with a Try again. Too little history (`RISK_MIN_DAYS`) is no figure, not a
 failure. `ccy` goes through `_display_ccy`, so junk shares the page's cache entry.
 A short listing goes through `extend_history` (Yahoo
 can answer a young secondary line with **one** close), and every series through
@@ -1296,10 +1302,11 @@ while My Investments priced the same line from the company's other listing.
 - **Never a fund for a share, nor a share for a fund** (`symbol_db.may_stand_in`,
   the same for every stand-in path). `SANP.L` is a GraniteShares single-stock ETP
   filed in the pack under Sanofi's group and name: it took Sanofi's history back
-  to 2000, +4.57% on a day it fell 26.9%. The pack's fund type alone isn't enough
-  either (`SNY.TO`, also "Sanofi", is typed etf), so a fund takes only lines that
-  name themselves a fund. Too strict costs history, never a wrong number. The
-  pack can't flag a product typed as a share (`SANP.XC`); order-book lines like
+  to 2000, +4.57% on a day it fell 26.9%. A fund-typed line in a company's group
+  (a share-typed line there without a fund's name: `SNY.TO` is typed etf and named
+  "Sanofi" too) takes nobody's; a real fund's own lines stay, whatever they're
+  called, even when the pack mistypes some as stocks. Too strict costs history,
+  never a wrong number. The pack can't flag a product typed as a share (`SANP.XC`); order-book lines like
   that sort last among candidates. Disk entries saved earlier read clean.
 
 ### Real-world price distribution (`options_density.py`, `GET /api/density`)

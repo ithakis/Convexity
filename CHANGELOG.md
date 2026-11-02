@@ -12,10 +12,10 @@ launch); until then they have no tags or GitHub Releases of their own.
 ## Unreleased
 
 - **A leveraged or single-stock product no longer shows its company's history.** A fund filed under a company's name took that company's chart, returns and highs, which could show a rise on a day it fell a quarter. A fund now only borrows from lines of the same fund, and a share never from a fund.
-- **A failed Yahoo answer no longer reads as "no analysts"** in the stock window, which dropped the analysts from the model price for 15 minutes. And one line that didn't answer can no longer record "no research line" for a day while the line with the analysts recovers.
-- **Lines that never carry fundamentals stop costing time.** They are asked once, not twice, and are recognised after half an hour instead of being retried every two minutes.
+- **A failed Yahoo answer no longer reads as "no analysts".** The stock window dropped the analysts from the model price for 15 minutes, and a refresh while Yahoo was throttling could save a holding with no analysts or fundamentals over its good row. It now keeps the last good ones. And one line that didn't answer can no longer record "no research line" for a day while the line with the analysts recovers.
+- **Lines that never carry fundamentals stop costing time.** They are asked once, not twice, and are recognised after some hours instead of being retried every two minutes.
 - **Drivers tells you what it couldn't read.** A holding missing from Yahoo's answer, or with no exchange rate, is named with a Try again rather than left blank for half an hour, and an empty answer offers the same.
-- **A missing figure is a dash, never 0.** A missing risk share read as 0.0% in Drivers and in Attention, and in sentences like "0.0% of its risk". Value for risk now judges only holdings with both figures.
+- **A missing figure is a dash, never 0.** A missing risk share read as 0.0% in Drivers and in Attention, and in sentences like "0.0% of its risk". A delisted holding that no longer moves has no share either. Value for risk now judges only holdings with both figures.
 - **A T-bill fund's bad month reads +0.2%**, not −-0.2%: a 1-in-20 month can still be a small gain.
 - **Waterfall's steps add up on screen:** small Closed and Cash steps are no longer hidden.
 - **Attention, full screen:** the Map fills the screen on a narrow window, a holding flagged while it is open gets its chart rather than spinning, and a chart built from another line says which, and where it joins.

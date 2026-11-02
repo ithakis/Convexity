@@ -312,9 +312,10 @@ Each of these has cost real debugging time; the link goes to the full story.
   analyst targets", n/a fundamentals and a model price with no α).
   `helpers.fundamentals_missing` detects it (a share has the module, even
   NVD.DE; a fund never does); `_safe_info` asks once more on a fresh
-  Ticker, then marks it `_fundamentals_missing`, until half an hour of such
-  answers says it is the line itself (`helpers.thin_line`: KDP.MX). An `.info`
-  that failed (`{}`, fast_info's gaps) said nothing either: never "none". Every cache keyed off those
+  Ticker, then marks it `_fundamentals_missing`, until hours of such answers say
+  it is the line itself (`helpers.thin_line`: KDP.MX). An `.info` that failed
+  (a 429 reaches here as `{}`) said nothing: flagged too, never "none", never
+  towards a thin line. Every cache keyed off those
   fields keeps it briefly only: `consensus` caches an **unknown** miss 2 min
   (`analyst_targets.unknown`), σ/μ a payload built on it 1 min, the detail
   and research info 1 min, `research_line` records nothing while any candidate didn't answer, and a row keeps

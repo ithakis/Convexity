@@ -696,34 +696,45 @@ _NOT_SHARE = re.compile(
 )
 
 
+# The one listing in the pack whose -P is a real share class: Grifols' class B.
+_P_SHARE_CLASSES = {"GRF-P.MC"}
+
+
 def not_the_share(ticker: str) -> bool:
     """Is this a preferred, warrant, right or unit rather than a share? It
     moves on its own terms, so it never stands in for one, nor a share for it."""
-    return bool(_NOT_SHARE.search(ticker or ""))
+    return ticker not in _P_SHARE_CLASSES and bool(_NOT_SHARE.search(ticker or ""))
 
 
 _FUND_TYPES = ("etf", "fund")
 _FUND_NAME = re.compile(
     r"\b(?:ETFs?|ETPs?|ETCs?|ETNs?|UCITS|SICAV|Funds?|Trust|Index|Physical|iShares|Vanguard|SPDR"
-    r"|Xtrackers|Amundi|Invesco|WisdomTree|VanEck|Lyxor|\w*Shares)\b",
+    r"|Xtrackers|Amundi|Invesco|WisdomTree|VanEck|Lyxor|\w*Shares)",
     re.IGNORECASE,
 )
 
 
-def may_stand_in(kind: str | None, other: Hit | None) -> bool:
-    """May a line of pack type ``kind`` borrow ``other``'s history? A
-    single-stock ETP sits in its underlying's group under its underlying's name
-    (SANP.L, a GraniteShares product, among Sanofi's lines) and moves on its
-    own terms: 504 to 368 in a day, while Sanofi rose 4.6%. So a share never
-    takes a fund's history, nor a fund a share's. And the pack's fund type alone
-    doesn't make two lines one product (SNY.TO, also "Sanofi", is typed etf):
-    a fund takes only lines that name themselves a fund. Too strict costs
-    history, never a wrong number. An unknown type or line isn't judged."""
-    if not kind or other is None or not other.type:
+def _a_companys_group(group: int) -> bool:
+    """Does a line typed as a share, and not named like a fund, sit in this
+    group? The pack mistypes plenty of real funds' lines as stocks, but those
+    carry the fund's name. Sanofi's carry Sanofi's."""
+    return any(x[2] == "stock" and not _FUND_NAME.search(x[1] or "") for x in _listings(group))
+
+
+def may_stand_in(me: Hit | None, other: Hit | None) -> bool:
+    """May line ``me`` borrow ``other``'s history? A single-stock ETP sits in
+    its underlying's group under its underlying's name (SANP.L, a GraniteShares
+    product, among Sanofi's lines) and moves on its own terms: 504 to 368 in a
+    day, while Sanofi rose 4.6%. So a share never takes a fund's history, nor a
+    fund a share's, and a fund-typed line in a company's group takes nobody's
+    (SNY.TO is typed etf and named "Sanofi" too: two such lines aren't one
+    product). Too strict costs history, never a wrong number. An unknown type
+    or line isn't judged."""
+    if me is None or other is None or not me.type or not other.type:
         return True
-    if (kind in _FUND_TYPES) != (other.type in _FUND_TYPES):
+    if (me.type in _FUND_TYPES) != (other.type in _FUND_TYPES):
         return False
-    return kind not in _FUND_TYPES or bool(_FUND_NAME.search(other.name or ""))
+    return me.type not in _FUND_TYPES or not _a_companys_group(me.group)
 
 
 def _listings(group: int) -> list[tuple]:

@@ -418,7 +418,7 @@ def test_preferreds_warrants_rights_and_units_are_not_the_share(ticker):
 @pytest.mark.parametrize(
     "ticker", ["AAPL", "SNOW", "BRK-B", "HEI-A", "BF-B", "PBR-A", "MOG-A", "GOOGL", "FWONK", "VOW3.DE",
                "SAN.PA", "REI-UN.TO", "AMZN-USD.SW", "0TDF.L", "RIGHT.DE", "SHOP.TO", "MSFT", "AMGN", "NVDA", "COMP",
-               "PFE", "BATRK", "LBTYK"],
+               "PFE", "BATRK", "LBTYK", "GRF-P.MC"],
 )  # fmt: skip
 def test_shares_and_their_classes_are_the_share(ticker):
     assert not sdb.not_the_share(ticker)
@@ -533,44 +533,57 @@ def test_intraday_tab_stays_when_the_listing_fills_the_range(monkeypatch):
 
 
 # ------------------------------------------- a fund is never the company's share
-def _group(monkeypatch, tmp_path, **types):
-    """A pack group of {ticker: type}. An ETP sits in its underlying's group."""
-    name = "Example Core UCITS ETF" if "FND_L" in types else "Example SA"
-    hits = {t.replace("_", "."): Hit(t.replace("_", "."), name, ty, "PAR", "fr", None, None, None, 9, 100.0)
-            for t, ty in types.items()}  # fmt: skip
+def _group(monkeypatch, **lines):
+    """A pack group of {ticker: (type, name)}. An ETP sits in its underlying's."""
+    hits = {t.replace("_", "."): Hit(t.replace("_", "."), n, ty, "PAR", "fr", None, None, None, 9, 100.0)
+            for t, (ty, n) in lines.items()}  # fmt: skip
+    rows = [(h.ticker, h.name, h.type) for h in hits.values()]
     monkeypatch.setattr(sdb, "get", lambda t: hits.get(t))
     monkeypatch.setattr(sdb, "listings", lambda g: list(hits.values()) if g == 9 else [])
+    monkeypatch.setattr(sdb, "_listings", lambda g: rows if g == 9 else [])
     monkeypatch.setattr(sdb, "yahoo_lookup", lambda q, **k: [])
     monkeypatch.setattr(A, "_proxy_disk", dict)
     monkeypatch.setattr(A, "_proxy_disk_put", lambda s, f: None)
     A._PROXY.clear()
 
 
-def test_a_single_stock_etp_takes_no_history_from_its_underlying(monkeypatch, tmp_path):
-    _group(monkeypatch, tmp_path, ETP_L="etf", SHR_PA="stock", SHR_DE="stock")
+COMPANY = {"ETP_L": ("etf", "Example"), "CDR_TO": ("etf", "Example"),
+           "SHR_PA": ("stock", "Example"), "SHR_DE": ("stock", "Example SA")}  # fmt: skip
+
+
+def test_a_single_stock_etp_takes_no_history_from_its_underlying(monkeypatch):
+    _group(monkeypatch, **COMPANY)
     assert A._proxy_candidates("ETP.L", None) == ()
 
 
-def test_a_share_takes_no_history_from_a_fund_on_it(monkeypatch, tmp_path):
-    _group(monkeypatch, tmp_path, ETP_L="etf", SHR_PA="stock", SHR_DE="stock")
+def test_two_fund_typed_lines_in_a_companys_group_are_not_one_product(monkeypatch):
+    # SANP.L and SNY.TO: both typed etf, both named "Sanofi" in the pack.
+    _group(monkeypatch, **COMPANY)
+    assert "CDR.TO" not in A._proxy_candidates("ETP.L", None)
+
+
+def test_a_share_takes_no_history_from_a_fund_on_it(monkeypatch):
+    _group(monkeypatch, **COMPANY)
     assert A._proxy_candidates("SHR.DE", None) == ("SHR.PA",)
 
 
-def test_a_fund_still_takes_its_own_other_lines(monkeypatch, tmp_path):
-    _group(monkeypatch, tmp_path, FND_L="etf", FND_AS="etf", FND_DE="fund")
+def test_a_fund_takes_its_own_lines_whatever_they_are_called(monkeypatch):
+    # An issuer's name need not say "fund" (UBS MSCI World ex USA I-A3 acc).
+    _group(monkeypatch, FND_L=("etf", "Example World I-A3 acc"), FND_AS=("etf", "Example World"),
+           FND_DE=("fund", "Example World I"))  # fmt: skip
     assert set(A._proxy_candidates("FND.L", None)) == {"FND.AS", "FND.DE"}
 
 
-def test_two_fund_typed_lines_under_a_companys_name_are_not_one_product(monkeypatch, tmp_path):
-    # SANP.L and SNY.TO: both typed etf, both named "Sanofi" in the pack.
-    _group(monkeypatch, tmp_path, ETP_L="etf", CDR_TO="etf", SHR_PA="stock")
-    assert A._proxy_candidates("ETP.L", None) == ()
+def test_a_funds_lines_mistyped_as_stocks_dont_make_it_a_company(monkeypatch):
+    _group(monkeypatch, FND_L=("etf", "Example Core S&P 500 UCITS ETF"), FND_AS=("etf", "Example Core S&P 500 UCITS ETF"),
+           FND_F=("stock", "Example Core S&P 500 UCITS ETF"))  # fmt: skip
+    assert A._proxy_candidates("FND.L", None) == ("FND.AS",)
 
 
-def test_a_stand_in_saved_before_this_rule_reads_clean(monkeypatch, tmp_path):
+def test_a_stand_in_saved_before_this_rule_reads_clean(monkeypatch):
     import time as _time
 
-    _group(monkeypatch, tmp_path, ETP_L="etf", SHR_PA="stock", CDR_TO="etf")
+    _group(monkeypatch, **COMPANY)
     monkeypatch.setattr(
         A, "_proxy_disk", lambda: {"ETP.L": [_time.time(), ["SHR.PA", "CDR.TO", "NOT.IN"]]}
     )
