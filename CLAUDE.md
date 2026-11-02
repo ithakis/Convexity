@@ -231,6 +231,11 @@ Each of these has cost real debugging time; the link goes to the full story.
   so a foreign company never has one. **yfinance `get_news` returns `[]` for
   every ticker** (Yahoo 404, 2026-10-11); search news backs it up for US lines.
   [backend.md → Finnhub supplemental columns](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
+- **A logo is the company's, not the ticker's**: the hosts key on the exact
+  ticker, so a cut-off suffix shows another company (SU.PA is Schneider, SU is
+  Suncor). Always `logoImg(fullSymbol)`; `symbol_db.logo_tickers` picks the US
+  line, then the listing itself, then initials.
+  [frontend.md → Company logos](docs/architecture/frontend.md#company-logos-logoimg-symbol_dblogo_tickers)
 - **σ/μ (the price distribution) is a detail path, never `fetch_one`**:
   the rate is ^IRX (never parity: American chains), quotes are OTM only, the
   SVI wing is Lee-capped and trusted only inside the quoted strikes (GEV tails

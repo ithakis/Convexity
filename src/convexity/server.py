@@ -513,6 +513,21 @@ class Handler(BaseHTTPRequestHandler):
                     exchanges[tk] = hit.exchange
             self._send_json(200, {"names": names, "exchanges": exchanges})
             return
+        if parsed.path == "/api/logo-tickers":
+            # Which tickers name each symbol's company at the logo hosts
+            # (symbol_db.logo_tickers). The local pack only, no network.
+            from convexity import symbol_db
+
+            q = parse_qs(parsed.query)
+            raw = (q.get("s") or [""])[0][:4000]
+            tickers = {}
+            for tk in {t.strip() for t in raw.split(",") if t.strip()}:
+                try:
+                    tickers[tk] = symbol_db.logo_tickers(tk[:32])
+                except Exception:
+                    tickers[tk] = [tk[:32]]
+            self._send_json(200, {"tickers": tickers})
+            return
         if parsed.path == "/api/events":
             # The stock window's E and D chart markers (fetcher.fetch_events).
             q = parse_qs(parsed.query)

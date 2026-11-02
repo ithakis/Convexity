@@ -776,6 +776,21 @@ def research_candidates(symbol: str) -> list[str]:
     return out
 
 
+def logo_tickers(symbol: str) -> list[str]:
+    """Which tickers to ask the logo hosts for, best first: the company's US
+    line, the listing itself, then its other lines (research_candidates).
+    Always this company's: the logo hosts key on the exact ticker, so cutting
+    the suffix off asks about whoever owns the short one (SU.PA is Schneider,
+    SU is Suncor). A US line usually beats the listing's own image, which can
+    be an old brand (TTE.PA) or a tiny icon (AIR.PA). Pack only, never the
+    network; without a pack it is just the symbol."""
+    s = (symbol or "").strip().upper()
+    if not s:
+        return []
+    out = [us_line(s) or s, s, *research_candidates(s)]
+    return list(dict.fromkeys(out))
+
+
 def get(ticker: str) -> Hit | None:
     con = _connect()
     if con is None:

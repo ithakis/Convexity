@@ -224,3 +224,29 @@ def test_an_otc_adr_with_no_region_is_a_us_line(db):
 )
 def test_research_candidates(db, symbol, cands):
     assert sdb.research_candidates(symbol) == cands
+
+
+@pytest.mark.parametrize(
+    "symbol, tickers",
+    [
+        ("NOV.DE", ["NVO", "NOV.DE", "NOVO-B.CO"]),  # never NOV, a different company
+        ("TTE.PA", ["TTE", "TTE.PA"]),
+        ("REP.MC", ["REPYY", "REP.MC"]),
+        ("MSF.DE", ["MSFT", "MSF.DE"]),
+        ("BNP.PA", ["BNP.PA"]),  # no US line: its own full ticker, nothing shorter
+        ("IWDA.AS", ["IWDA.AS"]),
+        ("NVDA", ["NVDA"]),
+        ("BRK-B", ["BRK-B"]),
+        ("ZZZZ", ["ZZZZ"]),
+        ("ZZZZ.F", ["ZZZZ.F"]),  # not in the pack: still not cut to ZZZZ
+        ("", []),
+    ],
+)
+def test_logo_tickers_name_the_company(db, symbol, tickers):
+    assert sdb.logo_tickers(symbol) == tickers
+
+
+def test_logo_tickers_without_a_pack(tmp_path, monkeypatch):
+    monkeypatch.setattr(sdb, "db_path", lambda: tmp_path / "missing.sqlite")
+    assert sdb.logo_tickers("SU.PA") == ["SU.PA"]
+    assert sdb.logo_tickers("AAPL") == ["AAPL"]
