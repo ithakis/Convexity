@@ -170,6 +170,14 @@ Each of these has cost real debugging time; the link goes to the full story.
   dates come from `state/events.json` filled in the background. A dismissed
   item returns only a full step worse; `prune` runs on fresh, healthy pages
   only. [backend.md → Attention rail](docs/architecture/backend.md#my-investments-attention-rail-phase-7-attentionpy)
+- **Attention's full screen reads the rail, never a second rule set**
+  (`evaluate`'s `near`, `limits`, `next`), and its charts and past results come
+  from `/api/investments/attention/extras` once it is open, never on the page's
+  path. Its Esc handler is capture-phase on purpose (the global pass closes the
+  stock window first); it sits at z 85, under what opens over it. A big move
+  stays five trading days (`xray.big_days`), not until the next session opens.
+  [frontend.md → Attention, full screen](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv) ·
+  [backend.md → full screen](docs/architecture/backend.md#my-investments-attention-full-screen-attention_extras-2026-11-02)
 - **Plans are the owner's words, kept beside the book** (Phase 8,
   `state/plans.json`): never overwritten when malformed, untouched holdings
   written back verbatim; levels are quote-unit prices rescaled by later

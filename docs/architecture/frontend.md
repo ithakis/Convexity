@@ -113,6 +113,33 @@ dependency (loaded from CDN, used only for column-guide formulas).
   screen, not behind Activity or folded under "n more"); leaving the page
   badges what wasn't read. An answer with `page: false` updates the rules
   only, never blanks the rail. The divergence item carries the ✦ in `--ai`.
+- **Attention, full screen (owner's picks from mockups, 2026-11-02).** The ⤢ in
+  the rail's Attention and Upcoming headers opens `#inv-att-bg` through
+  `showOverlay` (z 85: under the plan popover, menus and Settings; the stock
+  window's `.modal-bg` is lifted over it with `body:has(...)`). Everything is
+  `invFull*`, and the page's own data paints at once. Three views on one pill,
+  kept per browser (`inv_att_view`): **Desk**, one row per holding with every
+  reason beside the numbers, in groups sorted by risk share, because the rail's
+  rule order put a 0.1% holding above a 9% risk; **Charts**, one price chart per
+  holding with what you paid as the waterline (green above, red below), the peak
+  and the next report, flagged first, then dated, then close to a limit; **Map**,
+  the whole book by weight, coloured by `INV_FULL_METRICS` (`inv_att_metric`),
+  with near-zero moves almost neutral so the map stays calm. The right column
+  stays: Upcoming with the stake (the median move over the last 8 results and
+  what that is in money; at least 3 results, or nothing is "usual"), Your limits
+  (`attention.limits`, amber within 15%, red past), To tidy (`invDivsHtml` and the
+  book's warnings); Map adds the flagged list above it. **A click on any holding
+  turns that column into its page** (`invFullDetail`): sentences written by plain
+  code from the figures, never a model and never a suggestion to trade, its chart,
+  six figures, the last results and Set a plan / Open stock window / Dismiss.
+  **Esc closes the top thing only** (a capture-phase handler: whatever is open
+  over it, then the holding, then the screen), because the global handler's pass
+  would otherwise have closed the stock window first and this screen with it.
+  Reasons reuse the rail's `data-inv-dismiss` and `data-inv-att-menu`, so dismiss
+  behaves as there; a row's ✕ dismisses all its items. Opening marks everything
+  read, nothing being folded. `invRender`, `invAttApply` and `invRiskLoad` repaint
+  it. `invFullPaint` rebuilds the screen, so it keeps each pane's scroll, and
+  charts and the map are drawn after it, at their measured size (redrawn on resize).
 - **Holdings order (owner, 2026-10-11).** A header click sorts (`INV_COLS`:
   biggest first, names A to Z), a second flips it, a third returns to "your
   order", where rows drag by a grip shown on hover (HTML5 drag on the `tr`,

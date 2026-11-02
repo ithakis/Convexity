@@ -15060,6 +15060,7 @@ function invRetrySchedule() {
 function invRender() {
   const b = INV.book, host = $("#inv-page");
   invRetrySchedule();
+  invFullPaint();
   if (!b || host.classList.contains("hidden")) return;
   // A background redraw (the import check) waits while a review menu is
   // open, or the picker would vanish under the owner's cursor.
@@ -15355,7 +15356,7 @@ function invRiskLoad() {
   fetch("/api/investments/risk?ccy=" + encodeURIComponent(FX_QUOTE)).then(r => r.ok ? r.json() : Promise.reject())
     .then(d => { if (INV.risk?.key === key) INV.risk = { key, data: d.risk || {} }; })
     .catch(() => { if (INV.risk?.key === key) INV.risk = { key, failed: true }; })
-    .finally(() => { if (INV.risk?.key === key) invDriversPaint(); });
+    .finally(() => { if (INV.risk?.key === key) { invDriversPaint(); invFullPaint(); } });
 }
 function invDriversPaint() {
   const el = $("#inv-drv"), b = INV.book;
@@ -15527,6 +15528,7 @@ function invAttentionHtml(b) {
   let html0 = "";
   const kicker = (t, extra = "") => `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">${t}</span>${extra}</div>`;
   const gear = `<button type="button" class="inv-att-gear" data-inv-att-rules data-tip="Change what the rail watches for, and the limits">⚙</button>`;
+  const full = `<button type="button" class="inv-att-full" data-inv-att-full aria-label="Open Attention full screen" data-tip="Open full screen"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M7.5 1H11v3.5M11 1 7 5M4.5 11H1V7.5M1 11l4-4"/></svg></button>`;
   // A plan item's ✕ is a menu (Phase 8): dismiss, snooze, or edit the plan.
   const x = (it) => it.plan
     ? `<button type="button" class="inv-att-x" data-inv-att-menu="${escapeHtml(it.key)}" aria-haspopup="menu" aria-label="Dismiss or snooze: ${escapeHtml(it.text)}" data-tip="Dismiss or snooze">✕</button>`
@@ -15543,7 +15545,7 @@ function invAttentionHtml(b) {
   const divs = invDivsHtml(b);
   const fyi = [...info.map(item), ...warn];
   const more = fyi.length - INV_ATT_FOLD;
-  let html = kicker("Attention", gear) + invRecapLineHtml() + html0;
+  let html = kicker("Attention", gear + full) + invRecapLineHtml() + html0;
   if (!high.length && !fyi.length && !divs) html += `<div class="inv-calm">Nothing needs you today.</div>`;
   if (high.length) html += `<div class="inv-att-group high">Needs a look</div>` + high.map(item).join("");
   if (fyi.length || divs) {
@@ -15553,7 +15555,7 @@ function invAttentionHtml(b) {
   }
   const days = (a.rules || []).find(r => r.key === "events");
   const up = a.upcoming || [];
-  html += kicker("Upcoming");
+  html += kicker("Upcoming", full);
   if (days && !days.on) html += `<div class="inv-calm">Event dates are switched off.</div>`;
   else if (!up.length) html += `<div class="inv-calm">No earnings or ex-dividend dates in the next ${days ? days.value : 14} days.</div>`;
   else html += up.map(u => `<div class="inv-rail-item inv-att"><div class="inv-att-main"><span>${escapeHtml(`${u.name} ${u.what}`)}</span>${x({ ...u, text: `${u.name} ${u.what}` })}</div><div class="inv-rail-sub">${invDate(u.date)}</div></div>`).join("");
@@ -15578,6 +15580,7 @@ function invAttApply(att) {
   invBadge(att);
   const aside = $("#inv-page .inv-rail");
   if (aside && INV.book && INV.rail === "attention") aside.innerHTML = invRailHtml(INV.book);
+  invFullPaint();
 }
 /* The unread badge on the topbar button (owner, 2026-10-13): a count, red
  * when an unread item is "Needs a look", gray otherwise; opening the page
@@ -15756,6 +15759,475 @@ document.addEventListener("click", (e) => { if (e.target.closest("[data-inv-reca
 setInterval(notifyPoll, 60000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) notifyPoll(); });
 notifyPoll();
+
+/* Attention, full screen (owner's picks from mockups, 2026-11-02). The rail
+ * says what fired; this says which holdings, how much it matters and what is
+ * next. Three views on one pill (Desk: one row per holding, Charts: one price
+ * chart per holding, Map: the whole book by weight), one right column
+ * (Upcoming, your limits, To tidy), and a click on any holding turns that
+ * column into its page. Sentences are written here from the figures, never
+ * by a model, and never suggest a trade (the alert research: backend.md). The
+ * page's own data draws everything at once; charts and past results arrive
+ * from /api/investments/attention/extras once the screen is open, never on the
+ * page's path. */
+const invFullPref = (k, d) => { try { return localStorage.getItem(k) || d; } catch (e) { return d; } };
+const invFullSave = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* per browser only */ } };
+const INV_FULL_VIEWS = [["desk", "Desk"], ["charts", "Charts"], ["map", "Map"]];
+const INV_FULL_RESULTS = 8;     // past results behind "usually moves it"
+const INV_FULL_USUAL_MIN = 3;   // fewer results than this say nothing "usual"
+const INV_FULL_CHUNK = 8;       // symbols per request: the screen fills in as they answer
+const INV_FULL_NEAR = 0.85;     // attention.NEAR_FRACTION, for the gauges' colour
+const INV_FULL_EXTRAS_AGE = 36e5;  // an hour, then a reopened screen asks again
+const INV_FULL = { view: invFullPref("inv_att_view", "desk"), metric: invFullPref("inv_att_metric", "day"), sel: null,
+  extras: {}, pending: new Set(), asked: 0 };
+
+/* A map metric: its pill, how far each tile leans (-1..1), the figures on the tile. */
+const INV_FULL_METRICS = {
+  day: { label: "Last day σ", legend: ["−3σ", "+3σ"], note: "Colour is the last day against its own usual day",
+    lean: (r) => (r.x.day_z ?? 0) / 3, big: (r) => invPct(r.x.day_pct), small: (r) => invOk(r.x.day_z) ? invPct(r.x.day_z, 1, "σ") : "" },
+  week: { label: "Week σ", legend: ["−3σ", "+3σ"], note: "Colour is the last five days against its own usual week",
+    lean: (r) => (r.x.week_z ?? 0) / 3, big: (r) => invPct(r.x.week_pct), small: (r) => invOk(r.x.week_z) ? invPct(r.x.week_z, 1, "σ") : "" },
+  cost: { label: "From cost", legend: ["−50%", "+50%"], note: "Colour is how far it is from what you paid",
+    lean: (r) => (r.p.return_pct ?? 0) / 50, big: (r) => invPct(r.p.return_pct), small: () => "" },
+  peak: { label: "From peak", legend: ["−50%", "0%"], note: "Colour is how far it is below its peak since you bought it",
+    lean: (r) => (r.x.peak_pct ?? 0) / 50, big: (r) => invPct(r.x.peak_pct), small: () => "" },
+  risk: { label: "Risk share", legend: ["0%", "15%+"], note: "Colour is its share of the book's risk", blue: true,
+    lean: (r) => Math.max(r.rs, 0) / 15, big: (r) => invPct(r.rs).replace("+", ""), small: () => "" },
+};
+
+const invFullDash = '<span class="na">—</span>';
+const invFullIsOpen = () => !!$("#inv-att-bg")?.classList.contains("show");
+const invFullMedian = (xs) => { const s = [...xs].sort((a, c) => a - c), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+
+/* One row per holding: what fired for it, how close it is, what is next. */
+function invFullModel() {
+  const b = INV.book, a = b.attention || {};
+  const items = [...(a.high || []), ...(a.info || [])];
+  const perHolding = (i) => (i.symbols || []).length === 1 && i.rule !== "sector" && i.rule !== "currency";
+  const held = (b.positions || []).filter(p => !p.pending && invOk(p.weight));
+  const rows = held.map(p => {
+    const its = items.filter(i => perHolding(i) && i.symbols[0] === p.symbol);
+    return { p, sym: p.symbol, x: p.xray || {}, its, high: its.some(i => i.severity === "high"), rs: (p.risk_share || 0) * 100,
+      near: (a.near || []).filter(n => n.symbol === p.symbol), ev: (a.upcoming || []).filter(u => u.symbol === p.symbol),
+      nextE: a.next?.[p.symbol]?.earnings || null };
+  });
+  const byRisk = (x, y) => y.rs - x.rs;
+  const hi = rows.filter(r => r.high).sort(byRisk), fy = rows.filter(r => r.its.length && !r.high).sort(byRisk);
+  const near = rows.filter(r => !r.its.length && r.near.length).sort(byRisk);
+  const quiet = rows.filter(r => !r.its.length && !r.near.length && !r.ev.length).length;
+  const by = Object.fromEntries(rows.map(r => [r.sym, r]));
+  const latest = held.reduce((m, p) => (p.xray?.day_date || "") > m ? p.xray.day_date : m, "");
+  return { b, a, rows, by, hi, fy, near, quiet, latest, bookItems: items.filter(i => !perHolding(i)) };
+}
+const invFullExtra = (sym) => INV_FULL.extras[sym];
+/* The usual move on results: the median absolute move, and the money it is. */
+function invFullUsual(r) {
+  const res = (invFullExtra(r.sym)?.results || []).slice(-INV_FULL_RESULTS);
+  if (res.length < INV_FULL_USUAL_MIN) return null;
+  const med = invFullMedian(res.map(m => Math.abs(m.pct)));
+  return { med, n: res.length, money: r.p.value * med / 100 };
+}
+/* An item's words inside a row that already names the holding. */
+function invFullReason(r, it) {
+  let t = it.text;
+  if (t.startsWith(r.p.name)) t = t.slice(r.p.name.length).replace(/^:?\s+/, "").replace(/^is /, "");
+  t = t.charAt(0).toUpperCase() + t.slice(1) + (it.rule === "move" ? ` · ${Math.abs(it.value).toFixed(1)}σ` : "");
+  const tone = it.rule === "target" || (it.rule === "move" && it.pct > 0) ? "good" : it.severity;
+  const x = it.plan
+    ? `<button type="button" class="inv-att-x" data-inv-att-menu="${escapeHtml(it.key)}" aria-haspopup="menu" aria-label="Dismiss or snooze: ${escapeHtml(it.text)}" data-tip="Dismiss or snooze">✕</button>`
+    : `<button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button>`;
+  return `<span class="att-fs-why ${tone}"><i></i>${it.ai ? '<span class="inv-att-ai" aria-label="AI">✦</span> ' : ""}<span>${escapeHtml(t)}</span>${x}</span>`;
+}
+const invFullNearWhy = (n) => `<span class="att-fs-why"><i class="o"></i><span>${escapeHtml(n.text)}</span></span>`;
+const invFullBar = (v, max, cls) => `<span class="att-fs-bar"><i class="${cls}" style="width:${(invOk(v) ? Math.max(0, Math.min(v / max, 1)) * 100 : 0).toFixed(1)}%"></i></span>`;
+/* Where it sits between its high (right) and its worst fall (left), the tick
+ * at the 95th percentile of its own falls. Empty until the risk figures land. */
+function invFullDepth(r) {
+  const q = INV.risk?.data?.[r.sym];
+  if (!q || !invOk(q.mdd_pct) || !q.mdd_pct) return `<span class="att-fs-dd"></span>`;
+  const w = Math.abs(q.mdd_pct), at = Math.min(Math.abs(r.x.peak_pct ?? q.now_pct ?? 0) / w, 1), t95 = Math.min(Math.abs(q.dd95_pct ?? 0) / w, 1);
+  return `<span class="att-fs-dd"><i style="right:${(t95 * 100).toFixed(1)}%"></i><b style="right:calc(${(at * 100).toFixed(1)}% - 3px)"></b></span>`;
+}
+
+/* ---- Desk ---- */
+function invFullDeskRow(r, m, nearRow) {
+  const why = nearRow ? r.near.map(invFullNearWhy).join("") : r.its.map(i => invFullReason(r, i)).join("");
+  const u = invFullUsual(r);
+  const rep = r.nextE ? `<b>${escapeHtml(invDay(r.nextE).replace(/^\w+ /, ""))}</b><div class="att-fs-sub">${u ? `±${u.med.toFixed(1)}%` : "earnings"}</div>` : invFullDash;
+  const dayNote = r.x.day_date && r.x.day_date !== m.latest ? ` · ${escapeHtml(invDay(r.x.day_date).split(" ")[0].replace(",", ""))}` : "";
+  return `<tr data-full-sym="${escapeHtml(r.sym)}" tabindex="0" class="${INV_FULL.sel === r.sym ? "sel" : ""}">
+    <td class="left"><span class="att-fs-holding">${logoImg(r.sym)}<span><span class="att-fs-name">${escapeHtml(r.p.name)}</span><span class="att-fs-sub">${escapeHtml(r.sym)}</span></span></span></td>
+    <td class="left"><div class="att-fs-whys">${why}</div></td>
+    <td><div>${r.p.weight.toFixed(1)}%</div>${invFullBar(r.p.weight, 15, "w")}</td>
+    <td><div>${invPct(r.rs).replace("+", "")}</div>${invFullBar(r.rs, 15, "r")}</td>
+    <td><div class="${invCls(r.x.day_pct)}">${invPct(r.x.day_pct)}</div><div class="att-fs-sub">${invOk(r.x.day_z) ? invPct(r.x.day_z, 1, "σ") : ""}${dayNote}</div></td>
+    <td><div class="${invCls(r.p.return_pct)}">${invPct(r.p.return_pct)}</div><div class="att-fs-sub ${invCls(r.p.profit_held)}">${invMoney(r.p.profit_held, true)}</div></td>
+    <td><div>${invOk(r.x.peak_pct) ? invPct(r.x.peak_pct, 0) : invFullDash}</div>${invFullDepth(r)}</td>
+    <td>${rep}</td>
+    <td class="att-fs-xc">${nearRow ? "" : `<button type="button" class="inv-att-x" data-full-dismiss="${escapeHtml(r.sym)}" aria-label="Dismiss everything for ${escapeHtml(r.p.name)}" data-tip="Dismiss all of these. Each comes back if it gets worse.">✕</button>`}</td></tr>`;
+}
+function invFullBookRow(it) {
+  const name = it.rule === "sector" ? it.text.split(" is ")[0] : it.text.split(" in ").pop();
+  return `<tr><td class="left"><span class="att-fs-name">${escapeHtml(name)}</span><span class="att-fs-sub">Across your book</span></td>
+    <td class="left" colspan="7"><div class="att-fs-whys"><span class="att-fs-why ${it.severity}"><i></i><span>${escapeHtml(it.text)}</span></span><span class="att-fs-sub">${escapeHtml(it.sub)}</span></div></td>
+    <td class="att-fs-xc"><button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button></td></tr>`;
+}
+function invFullDesk(m) {
+  const grp = (t, cls = "") => `<tr class="att-fs-grp"><td colspan="9" class="left ${cls}">${t}</td></tr>`;
+  const high = m.bookItems.filter(i => i.severity === "high"), info = m.bookItems.filter(i => i.severity !== "high");
+  let body = "";
+  if (high.length || m.hi.length) body += grp("Needs a look", "high") + high.map(invFullBookRow).join("") + m.hi.map(r => invFullDeskRow(r, m)).join("");
+  if (info.length || m.fy.length) body += grp("For your information") + info.map(invFullBookRow).join("") + m.fy.map(r => invFullDeskRow(r, m)).join("");
+  if (m.near.length) body += grp("Close to a limit") + m.near.map(r => invFullDeskRow(r, m, true)).join("");
+  if (!body) return `<div class="inv-calm">Nothing is near any of your limits.</div>`;
+  return `<table class="att-fs-tbl"><thead><tr><th class="left">Holding</th><th class="left">Why it's here</th><th>Weight</th><th>Risk</th><th>Last day</th><th>From cost</th><th data-tip="Below its peak since you bought it. The line runs from its high (right) to its worst fall in ten years (left); the tick is the 95th percentile of its falls.">Below high</th><th>Reports</th><th></th></tr></thead><tbody>${body}</tbody></table>
+    <div class="att-fs-foot">Each group is sorted by share of the book's risk. From cost is the share price against what you paid, without dividends. Close to a limit means within 15% of it. A ✕ holds until the item gets a full step worse.</div>`;
+}
+
+/* ---- Charts ---- */
+/* The price since a year ago (or just before the peak), with what you paid
+ * as the waterline: above it green, below it red. */
+function invFullSpark(r, W, H) {
+  const e = invFullExtra(r.sym);
+  if (!e || INV_FULL.pending.has(r.sym)) return `<div class="att-fs-chart-msg">${lcHtml("Reading prices")}</div>`;
+  const raw = e.closes || [];
+  if (raw.length < 5) return `<div class="att-fs-chart-msg"><span>Couldn't read the prices.</span> <button type="button" class="inv-link" data-full-retry="${escapeHtml(r.sym)}">Try again</button></div>`;
+  const ys = raw.map(q => q[1]);
+  if (invOk(r.p.price)) ys[ys.length - 1] = r.p.price;
+  const paid = invOk(r.p.avg_price) ? r.p.avg_price : null, gut = 58, T = 12, B = 16, iw = Math.max(W - gut, 40), ih = Math.max(H - T - B, 20);
+  let lo = Math.min(...ys, paid ?? Infinity), hi = Math.max(...ys, paid ?? -Infinity);
+  const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
+  const xs = (i) => i / (ys.length - 1) * iw, yv = (v) => T + (1 - (v - lo) / (hi - lo)) * ih;
+  const line = ys.map((v, i) => (i ? "L" : "M") + xs(i).toFixed(1) + " " + yv(v).toFixed(1)).join("");
+  const n = (v) => v >= 1000 ? Math.round(v).toLocaleString(NUM_LOCALE) : v.toFixed(v < 100 ? 2 : 0);
+  const id = "afs" + r.sym.replace(/\W/g, "") + W, last = ys[ys.length - 1], yLast = yv(last), water = paid != null ? yv(paid) : H;
+  const lastY = paid != null && Math.abs(yLast - water) < 13 ? (yLast < water ? water - 13 : water + 13) : yLast;
+  const pk = raw.findIndex(q => q[0] >= (r.x.peak_date || "9"));
+  const when = new Date(raw[0][0] + "T12:00:00").toLocaleDateString("en-GB", { month: "short", year: "2-digit" });
+  const area = paid != null ? `<path d="${line}L${xs(ys.length - 1).toFixed(1)} ${water.toFixed(1)}L0 ${water.toFixed(1)}Z" fill="var(--pos)" opacity=".13" clip-path="url(#${id}a)"></path><path d="${line}L${xs(ys.length - 1).toFixed(1)} ${water.toFixed(1)}L0 ${water.toFixed(1)}Z" fill="var(--neg)" opacity=".13" clip-path="url(#${id}b)"></path>` : "";
+  return `<svg width="${W}" height="${H}" role="img" aria-label="${escapeHtml(r.p.name)}: price against what you paid">
+    <defs><clipPath id="${id}a"><rect width="${W}" height="${water.toFixed(1)}"></rect></clipPath><clipPath id="${id}b"><rect y="${water.toFixed(1)}" width="${W}" height="${H}"></rect></clipPath></defs>
+    ${area}${paid != null ? `<line x2="${iw}" y1="${water}" y2="${water}" stroke="var(--muted)" stroke-dasharray="3 3"></line><text x="${iw + 5}" y="${water + 3.5}" class="att-fs-sv">paid ${n(paid)}</text>` : ""}
+    <path d="${line}" fill="none" stroke="var(--pos)" stroke-width="1.4" stroke-linejoin="round" clip-path="url(#${id}a)"></path>
+    <path d="${line}" fill="none" stroke="var(--neg)" stroke-width="1.4" stroke-linejoin="round" clip-path="url(#${id}b)"></path>
+    ${pk >= 0 ? `<circle cx="${xs(pk)}" cy="${yv(ys[pk])}" r="2.4" fill="var(--bg-canvas)" stroke="var(--text)"></circle><text x="${Math.min(Math.max(xs(pk), 12), iw - 12)}" y="${Math.max(yv(ys[pk]) - 5, 8)}" text-anchor="middle" class="att-fs-sv">peak</text>` : ""}
+    <circle cx="${iw}" cy="${yLast}" r="2.6" fill="${paid == null || last >= paid ? "var(--pos)" : "var(--neg)"}"></circle>
+    <text x="${iw + 5}" y="${lastY + 3.5}" class="att-fs-sv b">${n(last)}</text>
+    <text y="${H - 3}" class="att-fs-sv">${escapeHtml(when)}</text>
+    ${r.nextE ? `<text x="${iw}" y="${H - 3}" text-anchor="end" class="att-fs-sv">E ${escapeHtml(invDay(r.nextE).replace(/^\w+ /, ""))}</text>` : ""}
+  </svg>`;
+}
+function invFullCharts(m) {
+  const seen = new Set();
+  const show = [...m.hi, ...m.fy, ...m.rows.filter(r => r.ev.length && !r.its.length).sort((a, c) => a.ev[0].date.localeCompare(c.ev[0].date)), ...m.near]
+    .filter(r => !seen.has(r.sym) && seen.add(r.sym));
+  if (!show.length) return `<div class="inv-calm">Nothing to chart today.</div>`;
+  return `<div class="att-fs-grid">${show.map(r => {
+    const u = invFullUsual(r);
+    const why = r.its.map(i => invFullReason(r, i)).join("") + (r.its.length ? "" : r.ev.length ? "" : r.near.map(invFullNearWhy).join(""))
+      + r.ev.map(e => `<span class="att-fs-why up"><i></i><span>${e.what === "earnings" ? "Earnings" : "Ex-dividend"} ${escapeHtml(invDay(e.date).replace(/^\w+ /, ""))}${e.what === "earnings" && u ? ` ±${u.med.toFixed(1)}%` : ""}</span></span>`).join("");
+    return `<div class="att-fs-cell${INV_FULL.sel === r.sym ? " sel" : ""}" data-f="${r.high ? "high" : r.its.length ? "info" : r.ev.length ? "up" : ""}" data-full-sym="${escapeHtml(r.sym)}" tabindex="0">
+      <div class="att-fs-cell-top"><div class="att-fs-cell-n"><span class="att-fs-name">${escapeHtml(r.p.name)}</span> <span class="att-fs-sub">${r.p.weight.toFixed(1)}%</span></div>
+        <div class="att-fs-cell-d ${invCls(r.x.day_pct)}">${invPct(r.x.day_pct)}<span class="att-fs-sub"> ${invOk(r.x.day_z) ? invPct(r.x.day_z, 1, "σ") : ""}</span></div></div>
+      <div class="att-fs-chart" data-full-chart="${escapeHtml(r.sym)}"></div>
+      <div class="att-fs-whys row">${why}</div></div>`;
+  }).join("")}</div>`;
+}
+
+/* ---- Map ---- */
+function invFullTreemap(data, W, H) {
+  // Squarified (Bruls et al.): lay each row along the short side, biggest first.
+  const total = data.reduce((s, d) => s + d.v, 0) || 1, out = [];
+  const items = [...data].sort((a, c) => c.v - a.v).map(d => ({ ...d, a: d.v / total * W * H }));
+  let x = 0, y = 0, w = W, h = H, i = 0;
+  while (i < items.length) {
+    const side = Math.min(w, h);
+    let row = [], best = Infinity, j = i;
+    while (j < items.length) {
+      const nr = [...row, items[j]], s = nr.reduce((t, q) => t + q.a, 0), mx = Math.max(...nr.map(q => q.a)), mn = Math.min(...nr.map(q => q.a));
+      const ratio = Math.max(side * side * mx / (s * s), s * s / (side * side * mn));
+      if (ratio > best) break;
+      best = ratio; row = nr; j++;
+    }
+    const s = row.reduce((t, q) => t + q.a, 0), th = s / side;
+    let off = 0;
+    for (const q of row) {
+      const l = q.a / th;
+      out.push(w >= h ? { ...q, x, y: y + off, w: th, h: l } : { ...q, x: x + off, y, w: l, h: th });
+      off += l;
+    }
+    if (w >= h) { x += th; w -= th; } else { y += th; h -= th; }
+    i = j;
+  }
+  return out;
+}
+/* A tile's colour: classic red and green on the sunk surface, data blue for
+ * risk (the Risk column's), weak moves staying nearly neutral so the map is calm. */
+function invFullHeat(lean, blue) {
+  const a = Math.min(Math.abs(lean || 0), 1), pct = Math.round(8 + a * 80);
+  const c = blue ? "rgb(59, 125, 221)" : lean >= 0 ? "var(--pos)" : "var(--neg)";
+  return { bg: `color-mix(in srgb, ${c} ${pct}%, var(--surface-sunk))`, strong: pct >= 70 };
+}
+function invFullMap(metric) {
+  const met = INV_FULL_METRICS[metric] || INV_FULL_METRICS.day;
+  const pills = Object.entries(INV_FULL_METRICS).map(([k, v]) => `<button type="button" data-full-metric="${k}" class="${(INV_FULL_METRICS[metric] ? metric : "day") === k ? "active" : ""}" aria-pressed="${(INV_FULL_METRICS[metric] ? metric : "day") === k}">${v.label}</button>`).join("");
+  const stops = met.blue ? [0, .33, .66, 1] : [-1, -.5, 0, .5, 1];
+  const legend = stops.map(s => `<i style="background:${invFullHeat(s, met.blue).bg}"></i>`).join("");
+  return `<div class="att-fs-maptop"><span class="pf-contrib-toggle" role="group" aria-label="Colour the map by">${pills}</span><span class="att-fs-sub">Size is weight. ${met.note}:</span><span class="att-fs-leg">${legend}</span><span class="att-fs-sub">${met.legend.join(" to ")}</span></div>
+    <div class="att-fs-map" id="att-fs-map"></div>`;
+}
+function invFullMapDraw(m) {
+  const host = $("#att-fs-map");
+  if (!host) return;
+  const met = INV_FULL_METRICS[INV_FULL.metric] || INV_FULL_METRICS.day, W = host.clientWidth, H = host.clientHeight;
+  if (W < 10 || H < 10) return;
+  host.innerHTML = invFullTreemap(m.rows.map(r => ({ r, v: r.p.weight })), W, H).map(c => {
+    const r = c.r, heat = invFullHeat(met.lean(r), met.blue), f = r.high ? "high" : r.its.length ? "info" : "";
+    const fs = Math.min(11 + c.w / 22, 17), big = c.w > 72 && c.h > 46;
+    const label = r.p.name.length * fs * 0.56 > c.w - 26 ? r.sym.split(".")[0] : r.p.name, sm = met.small(r);
+    const tip = `${r.p.name}: ${r.p.weight.toFixed(1)}% of your book. ${r.its.length ? r.its.map(i => i.text).join(". ") : ""}`;
+    return `<button type="button" class="att-fs-tile${heat.strong ? " strong" : ""}${INV_FULL.sel === r.sym ? " sel" : ""}" data-f="${f}" data-full-sym="${escapeHtml(r.sym)}" data-tip="${escapeHtml(tip)}" style="left:${(c.x + 1).toFixed(1)}px;top:${(c.y + 1).toFixed(1)}px;width:${Math.max(c.w - 2, 1).toFixed(1)}px;height:${Math.max(c.h - 2, 1).toFixed(1)}px;background:${heat.bg}${c.w > 34 && c.h > 22 ? "" : ";padding:0"}">
+      ${big ? `<span class="n" style="font-size:${fs.toFixed(1)}px">${escapeHtml(label)}</span><span class="v" style="font-size:${Math.min(10 + c.w / 30, 14).toFixed(1)}px">${met.big(r)}${sm ? ` <small>${sm}</small>` : ""}</span>` : c.w > 34 && c.h > 22 ? `<span class="n" style="font-size:10px">${escapeHtml(r.sym.split(".")[0])}</span>` : ""}
+      ${f && c.w > 24 && c.h > 22 ? `<span class="f ${f}">${r.its.length}</span>` : ""}</button>`;
+  }).join("");
+}
+
+/* ---- The right column: the summary, or the holding clicked ---- */
+function invFullEvents(m) {
+  const days = (m.a.rules || []).find(r => r.key === "events"), up = m.a.upcoming || [];
+  const today = new Date(); today.setHours(12, 0, 0, 0);
+  const rows = up.map(u => {
+    const r = m.by[u.symbol], earn = u.what === "earnings", when = new Date(u.date + "T12:00:00"), d = Math.round((when - today) / 864e5);
+    const usual = r && earn ? invFullUsual(r) : null, paid = r && !earn ? invFullExtra(u.symbol)?.last_div : null;
+    const stake = usual ? `Results usually move it ±${usual.med.toFixed(1)}%, about ${invMoney(usual.money)}`
+      : paid && invOk(r.p.price) && r.p.price > 0 ? `Last paid ${invQuotePrice(paid.per_share, r.p.quote_ccy)} a share, about ${invMoney(paid.per_share * r.p.value / r.p.price)} gross` : "";
+    return `<div class="att-fs-ev inv-att" data-full-sym="${escapeHtml(u.symbol)}" tabindex="0"><div class="att-fs-ev-d"><b>${when.getDate()}</b><span>${when.toLocaleDateString("en-GB", { month: "short" })}</span></div>
+      <div class="att-fs-ev-b"><div><span class="att-fs-name">${escapeHtml(u.name)}</span> <span class="att-fs-sub">${earn ? "Earnings" : "Ex-dividend"} · ${d <= 0 ? "today" : d === 1 ? "tomorrow" : `in ${d} days`}</span></div>${stake ? `<div class="att-fs-sub">${stake}</div>` : ""}</div>
+      <div class="att-fs-ev-w">${r ? r.p.weight.toFixed(1) + "%" : ""}<button type="button" class="inv-att-x" data-inv-dismiss="${escapeHtml(u.key)}" data-level="${u.level}" aria-label="Dismiss: ${escapeHtml(`${u.name} ${u.what}`)}" data-tip="Dismiss. It comes back if it gets worse.">✕</button></div></div>`;
+  }).join("");
+  const body = days && !days.on ? `<div class="inv-calm">Event dates are switched off.</div>` : rows || `<div class="inv-calm">No earnings or ex-dividend dates in the next ${days ? days.value : 14} days.</div>`;
+  return `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">Upcoming</span><span class="att-fs-sub att-fs-anchor-note">next ${days ? days.value : 14} days</span></div>${body}`;
+}
+function invFullLimits(m) {
+  const lims = m.a.limits || [];
+  if (!lims.length) return "";
+  return `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">Your limits</span></div>` + lims.map(l => {
+    const over = l.value > l.limit, close = !over && l.value >= l.limit * INV_FULL_NEAR;
+    return `<div class="att-fs-lim"><div class="att-fs-lim-t"><span>${escapeHtml(l.label)} <span class="att-fs-sub">${escapeHtml(l.who)}</span></span><b>${l.value.toFixed(1)}% <span class="att-fs-sub">of ${l.limit}%</span></b></div>
+      <div class="att-fs-track"><i class="${over ? "over" : close ? "close" : ""}" style="width:${Math.min(l.value / l.limit, 1) * 100}%"></i></div></div>`;
+  }).join("");
+}
+function invFullTidy(m) {
+  const divs = invDivsHtml(m.b), warn = (m.b.warnings || []).map(t => `<div class="inv-rail-item">${escapeHtml(t)}</div>`).join("");
+  return divs || warn ? `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">To tidy</span></div>${divs}${warn}` : "";
+}
+function invFullFlagged(m) {
+  const li = (r) => `<div class="att-fs-flag" data-full-sym="${escapeHtml(r.sym)}" tabindex="0"><div class="att-fs-flag-t"><span class="att-fs-name">${escapeHtml(r.p.name)}</span><span class="${invCls(r.p.profit_held)}">${invMoney(r.p.profit_held, true)}</span></div><div class="att-fs-whys row">${r.its.map(i => invFullReason(r, i)).join("")}</div></div>`;
+  return (m.hi.length ? `<div class="inv-att-group high">Needs a look</div>${m.hi.map(li).join("")}` : "")
+    + (m.fy.length ? `<div class="inv-att-group">For your information</div>${m.fy.map(li).join("")}` : "");
+}
+/* The holding in words: only what its figures say, and never a suggestion. */
+function invFullSentence(r) {
+  const x = r.x, q = INV.risk?.data?.[r.sym], parts = [], name = escapeHtml(r.p.name);
+  const moves = r.its.filter(i => i.rule === "move"), has = (k) => r.its.some(i => i.rule === k);
+  for (const i of moves) {
+    const dv = r.p.value - r.p.value / (1 + i.pct / 100);
+    parts.push(`${name} ${i.pct > 0 ? "rose" : "fell"} ${Math.abs(i.pct).toFixed(1)}% on ${escapeHtml(invDay(i.day))}, ${Math.abs(i.value).toFixed(1)} times its usual day, about <span class="${invCls(dv)}">${invMoney(dv, true)}</span> on your position.`);
+  }
+  const start = parts.length ? "You are" : `${name} is`;
+  if (invOk(r.p.return_pct) && invOk(r.p.profit_held) && Math.abs(r.p.return_pct) >= 0.5) {
+    parts.push(`${start} ${Math.abs(r.p.return_pct).toFixed(0)}% ${r.p.return_pct < 0 ? "below" : "above"} what you paid (<span class="${invCls(r.p.profit_held)}">${invMoney(r.p.profit_held, true)}</span>).`);
+  } else if (!parts.length) parts.push(`${name} is about where you bought it.`);
+  if (invOk(x.peak_pct) && (has("from_peak") || x.peak_pct <= -10)) {
+    const deep = q && invOk(q.dd95_pct) && invOk(q.now_pct) && q.now_pct <= q.dd95_pct && Math.abs(q.now_pct - x.peak_pct) < 2;
+    parts.push(`It is ${Math.abs(x.peak_pct).toFixed(0)}% below its peak of ${escapeHtml(invDay(x.peak_date))}${deep ? `, deeper than 95% of its days since ${escapeHtml(String(q.since).slice(0, 4))}` : ""}.`);
+  }
+  for (const n of r.near) if (n.rule === "holding") parts.push(`It is ${n.value.toFixed(1)}% of your book, against your ${n.limit}% limit.`);
+  if (r.nextE) {
+    const u = invFullUsual(r);
+    parts.push(`It reports ${escapeHtml(invDay(r.nextE))}${u ? `; results have moved it a median ±${u.med.toFixed(1)}%, about ${invMoney(u.money)} for you` : ""}.`);
+  }
+  return parts.join(" ");
+}
+function invFullResultsChart(res, W, H) {
+  const mx = Math.max(...res.map(q => Math.abs(q.pct))) || 1, mid = H / 2 - 4, gap = W / res.length, bw = Math.min(gap - 10, 24);
+  const bars = res.map((q, i) => {
+    const h = Math.max(1, Math.abs(q.pct) / mx * (mid - 12)), x = i * gap + (gap - bw) / 2, y = q.pct >= 0 ? mid - h : mid;
+    return `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="var(--${q.pct >= 0 ? "pos" : "neg"})"></rect>
+      <text x="${x + bw / 2}" y="${q.pct >= 0 ? y - 3 : y + h + 10}" text-anchor="middle" class="att-fs-sv">${Math.abs(q.pct).toFixed(Math.abs(q.pct) >= 9.95 ? 0 : 1)}</text>
+      <text x="${x + bw / 2}" y="${H - 1}" text-anchor="middle" class="att-fs-sv">${new Date(q.date + "T12:00:00").toLocaleDateString("en-GB", { month: "short" })}</text>`;
+  }).join("");
+  return `<svg width="${W}" height="${H}" role="img" aria-label="Moves on the last ${res.length} results"><line x2="${W}" y1="${mid}" y2="${mid}" stroke="var(--border)"></line>${bars}</svg>`;
+}
+function invFullDetail(r) {
+  const q = INV.risk?.data?.[r.sym], e = invFullExtra(r.sym), plan = invPlan(r.sym), res = (e?.results || []).slice(-INV_FULL_RESULTS);
+  const st = (k, v, s = "") => `<div class="att-fs-st"><span class="att-fs-sub">${k}</span><b>${v}</b>${s ? `<span class="att-fs-sub">${s}</span>` : ""}</div>`;
+  const lv = [plan.target != null ? `Target ${invQuotePrice(plan.target, r.p.quote_ccy)}` : "", plan.review != null ? `Review ${invQuotePrice(plan.review, r.p.quote_ccy)}` : "", plan.max_weight != null ? `Max ${plan.max_weight}%` : ""].filter(Boolean).join(" · ");
+  const u = invFullUsual(r);
+  return `<button type="button" class="inv-link att-fs-back" data-full-back>‹ Back to the summary</button>
+    <div class="att-fs-det-h"><span class="att-fs-det-n">${escapeHtml(r.p.name)}</span><span class="att-fs-sub">${escapeHtml(r.sym)}</span></div>
+    <p class="att-fs-det-p">${invFullSentence(r)}</p>
+    ${lv || plan.why ? `<div class="att-fs-det-plan"><span class="att-fs-sub">Your plan</span> ${lv ? `<b>${lv}</b>` : ""}${plan.why ? `<div class="att-fs-sub">“${escapeHtml(plan.why)}”</div>` : ""}</div>` : ""}
+    <div class="att-fs-chart att-fs-det-chart" data-full-chart="${escapeHtml(r.sym)}"></div>
+    <div class="att-fs-stats">
+      ${st("Weight", r.p.weight.toFixed(1) + "%", invMoney(r.p.value))}
+      ${st("Risk share", invPct(r.rs).replace("+", ""), r.rs > r.p.weight * 1.3 ? "more than its weight" : "")}
+      ${st("Last day", `<span class="${invCls(r.x.day_pct)}">${invPct(r.x.day_pct)}</span>`, invOk(r.x.day_z) ? `${Math.abs(r.x.day_z).toFixed(1)}σ · usual ${(r.x.sigma_pct ?? 0).toFixed(1)}%` : "")}
+      ${st("Bad month", q && invOk(q.var_pct) ? invPct(q.var_pct, 0) : invFullDash, q && invOk(q.var_pct) ? `about ${invMoney(r.p.value * q.var_pct / 100)}` : "")}
+      ${st("Below high", invOk(r.x.peak_pct) ? invPct(r.x.peak_pct, 0) : invFullDash, q && invOk(q.dd95_pct) ? `95th pct ${invPct(q.dd95_pct, 0)}` : "")}
+      ${st("Worst fall", q && invOk(q.mdd_pct) ? invPct(q.mdd_pct, 0) : invFullDash, q?.since ? `since ${escapeHtml(String(q.since).slice(0, 4))}` : "")}
+    </div>
+    ${res.length ? `<div class="att-fs-det-k"><span class="sa-kicker">Last ${res.length} results</span><span class="att-fs-sub">${[u ? `median ±${u.med.toFixed(1)}%` : "", e.via ? `on ${escapeHtml(e.via)}` : ""].filter(Boolean).join(" · ")}</span></div><div data-full-results="${escapeHtml(r.sym)}"></div>` : ""}
+    <div class="att-fs-det-a"><button type="button" class="inv-add inv-cols-btn" data-inv-plan-open="${escapeHtml(r.sym)}">${lv || plan.why ? "Your plan" : "Set a plan"}</button>
+      <button type="button" class="inv-add inv-cols-btn" data-full-window="${escapeHtml(r.sym)}">Open stock window</button>
+      ${r.its.length ? `<button type="button" class="inv-add inv-cols-btn" data-full-dismiss="${escapeHtml(r.sym)}" data-tip="Dismiss all of these. Each comes back if it gets worse.">Dismiss</button>` : ""}</div>`;
+}
+function invFullLede(m) {
+  const n = m.hi.length, sum = (f) => m.hi.reduce((t, r) => t + f(r), 0), r = INV.recap;
+  const age = r ? (Date.now() - new Date(r.week_end + "T12:00:00").getTime()) / 864e5 : 99;
+  const week = r && age <= 7 && invOk(r.return_pct) ? `Your book ${r.return_pct >= 0 ? "rose" : "fell"} ${Math.abs(r.return_pct).toFixed(1)}% last week. ` : "";
+  const head = n ? `${n} holding${n > 1 ? "s need" : " needs"} a look.` : m.fy.length ? "Nothing needs a look." : "Nothing needs you today.";
+  const parts = [];
+  if (n) parts.push(`${n > 1 ? "They are" : "It is"} ${sum(x => x.p.weight).toFixed(1)}% of your book and ${sum(x => x.rs).toFixed(1)}% of its risk.`);
+  parts.push(`${m.quiet} of your ${m.rows.length} holdings have nothing to say.`);
+  const err = m.a.plans_error ? `<div class="att-fs-err">${escapeHtml(m.a.plans_error)}. Your plans are paused until it is fixed or removed.</div>` : "";
+  return `<div class="att-fs-lede"><div class="att-fs-big">${week}${head}</div><div class="att-fs-big-sub">${parts.join(" ")}</div>${err}</div>`;
+}
+function invFullPaint() {
+  const host = $("#inv-att-fs");
+  if (!invFullIsOpen() || !host) return;
+  if (!INV.book?.positions?.length) { invFullClose(); return; }
+  const m = invFullModel();
+  if (INV_FULL.sel && !m.by[INV_FULL.sel]) INV_FULL.sel = null;
+  const view = INV_FULL_VIEWS.some(([k]) => k === INV_FULL.view) ? INV_FULL.view : "desk";
+  const scroll = Object.fromEntries([...host.querySelectorAll("[data-full-scroll]")].map(el => [el.dataset.fullScroll, el.scrollTop]));
+  const pills = INV_FULL_VIEWS.map(([k, l]) => `<button type="button" data-full-view="${k}" class="${k === view ? "active" : ""}" aria-pressed="${k === view}">${l}</button>`).join("");
+  const asOf = m.b.computed_at ? new Date(m.b.computed_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
+  const now = new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).replace(",", "");
+  const sel = INV_FULL.sel ? m.by[INV_FULL.sel] : null;
+  const main = view === "desk" ? invFullLede(m) + invFullDesk(m) : view === "charts" ? invFullLede(m) + invFullCharts(m) : invFullMap(INV_FULL.metric);
+  const side = sel ? invFullDetail(sel) : (view === "map" ? invFullFlagged(m) : "") + invFullEvents(m) + invFullLimits(m) + invFullTidy(m);
+  host.innerHTML = `<div class="att-fs-head">
+      <div class="att-fs-head-l"><span class="sa-kicker">Attention</span><span class="att-fs-sub">${escapeHtml(now)}${asOf ? ` · prices as of ${asOf}` : ""}${m.b.stale ? " · refreshing…" : ""}</span></div>
+      <span class="pf-contrib-toggle att-fs-views" role="group" aria-label="View">${pills}</span>
+      <div class="att-fs-head-r"><button type="button" class="inv-att-gear att-fs-gear" data-full-rules data-tip="Change what the rail watches for, and the limits">⚙</button><span class="att-fs-esc">Esc</span><button type="button" class="x-close" data-full-close aria-label="Close">${X_SVG}</button></div>
+    </div>
+    <div class="att-fs-body">
+      <div class="att-fs-main${view === "map" ? " map" : ""}" data-full-scroll="main-${view}">${main}</div>
+      <div class="att-fs-side" data-full-scroll="${sel ? "det" : "side"}">${side}</div>
+    </div>`;
+  host.querySelectorAll("[data-full-scroll]").forEach(el => { el.scrollTop = scroll[el.dataset.fullScroll] || 0; });
+  host.querySelectorAll("[data-full-chart]").forEach(el => { const r = m.by[el.dataset.fullChart]; if (r) el.innerHTML = invFullSpark(r, el.clientWidth, el.clientHeight); });
+  host.querySelectorAll("[data-full-results]").forEach(el => {
+    const res = (invFullExtra(el.dataset.fullResults)?.results || []).slice(-INV_FULL_RESULTS);
+    if (res.length) el.innerHTML = invFullResultsChart(res, el.clientWidth, 96);
+  });
+  if (view === "map") invFullMapDraw(m);
+}
+/* Charts and past results for what the screen shows, a few holdings at a time
+ * so it fills in as they answer. A failure shows Try again, never "no data". */
+async function invFullExtras(symbols) {
+  const want = symbols.filter(s => !INV_FULL.extras[s] && !INV_FULL.pending.has(s));
+  if (!want.length) return;
+  want.forEach(s => INV_FULL.pending.add(s));
+  for (let i = 0; i < want.length; i += INV_FULL_CHUNK) {
+    const part = want.slice(i, i + INV_FULL_CHUNK);
+    let got = {};
+    try {
+      const r = await fetch(`/api/investments/attention/extras?ccy=${encodeURIComponent(FX_QUOTE)}&symbols=${part.map(encodeURIComponent).join(",")}`);
+      if (r.ok) got = (await r.json()).extras || {};
+    } catch (e) { /* each stays without closes: Try again */ }
+    part.forEach(s => { INV_FULL.pending.delete(s); INV_FULL.extras[s] = got[s] || { closes: [] }; });
+    invFullPaint();
+  }
+}
+function invFullWanted() {
+  const m = invFullModel(), seen = new Set(), out = [];
+  for (const r of [...m.hi, ...m.fy, ...m.rows.filter(x => x.ev.length), ...m.near]) if (!seen.has(r.sym)) { seen.add(r.sym); out.push(r.sym); }
+  if (INV_FULL.sel && !seen.has(INV_FULL.sel)) out.push(INV_FULL.sel);
+  return out;
+}
+function invFullOpen() {
+  const bg = $("#inv-att-bg"), b = INV.book;
+  if (!bg || !b?.positions?.length) return;
+  if (Date.now() - INV_FULL.asked > INV_FULL_EXTRAS_AGE) { INV_FULL.extras = {}; INV_FULL.asked = Date.now(); }
+  INV_FULL.sel = null;
+  if (!showOverlay(bg)) return;
+  invFullPaint();
+  invRiskLoad();
+  invFullExtras(invFullWanted());
+  if (!INV.recap) invRecapLoad().then(invFullPaint);
+  // Everything shows here, nothing folded: all of it is read now.
+  const a = b.attention;
+  if (a?.unread && !b.stale) invAttPost("seen", { items: [...(a.high || []), ...(a.info || [])].map(it => [it.key, it.level]) }).then(invAttApply).catch(() => {});
+}
+function invFullClose() {
+  invClosePop();
+  if (hideOverlay("#inv-att-bg")) INV_FULL.sel = null;
+}
+function invFullSelect(sym) {
+  INV_FULL.sel = INV_FULL.sel === sym ? null : sym;
+  invFullPaint();
+  if (INV_FULL.sel) invFullExtras([sym]);
+}
+async function invFullDismissAll(sym) {
+  const r = invFullModel().by[sym];
+  if (!r) return;
+  try {
+    let att = null;
+    for (const it of r.its) {
+      att = it.rule === "price_alert" ? await invAttPost("alert/remove", { symbol: sym, id: it.alert_id })
+        : await invAttPost("dismiss", { key: it.key, level: it.level });
+    }
+    if (INV_FULL.sel === sym) INV_FULL.sel = null;
+    if (att) invAttApply(att);
+  } catch (e) { toast(e.message); }
+}
+$("#inv-att-bg").addEventListener("click", (e) => {
+  const t = (sel) => e.target.closest(sel);
+  if (t("[data-full-close]")) invFullClose();
+  else if (t("[data-full-view]")) {
+    INV_FULL.view = t("[data-full-view]").dataset.fullView;
+    invFullSave("inv_att_view", INV_FULL.view);
+    invFullPaint();
+  } else if (t("[data-full-metric]")) {
+    INV_FULL.metric = t("[data-full-metric]").dataset.fullMetric;
+    invFullSave("inv_att_metric", INV_FULL.metric);
+    invFullPaint();
+  } else if (t("[data-full-back]")) { INV_FULL.sel = null; invFullPaint(); }
+  else if (t("[data-full-rules]")) { openSettings(); selectSettingsSection("attention"); }
+  else if (t("[data-inv-att-menu]")) invAttMenu(t("[data-inv-att-menu]"));
+  else if (t("[data-inv-plan-open]")) invPlanOpen(t("[data-inv-plan-open]").dataset.invPlanOpen, t("[data-inv-plan-open]"));
+  else if (t("[data-inv-dismiss]")) {
+    const d = t("[data-inv-dismiss]");
+    invAttPost("dismiss", { key: d.dataset.invDismiss, level: +d.dataset.level }).then(invAttApply).catch(err => toast(err.message));
+  } else if (t("[data-full-dismiss]")) invFullDismissAll(t("[data-full-dismiss]").dataset.fullDismiss);
+  else if (t("[data-inv-divs]")) { INV.divOpen = !INV.divOpen; invFullPaint(); }
+  else if (t("[data-inv-div-add]")) invAddDividends(t("[data-inv-div-add]").dataset.invDivAdd);
+  else if (t("[data-full-retry]")) { const s = t("[data-full-retry]").dataset.fullRetry; delete INV_FULL.extras[s]; invFullExtras([s]); invFullPaint(); }
+  else if (t("[data-full-window]")) {
+    const p = INV.book.positions.find(x => x.symbol === t("[data-full-window]").dataset.fullWindow);
+    if (p) openModal({ symbol: p.symbol, name: p.name, price: p.price, currency: p.quote_ccy });
+  } else if (t("[data-full-sym]") && !t("a, input")) invFullSelect(t("[data-full-sym]").dataset.fullSym);
+});
+$("#inv-att-bg").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.matches?.("[data-full-sym]")) { e.preventDefault(); invFullSelect(e.target.dataset.fullSym); }
+});
+/* Esc closes the top thing only: whatever is open over this screen first (its
+ * own handlers do that), then the holding's page, then the screen. In the
+ * capture phase, or the global handler's pass would already have closed the
+ * stock window by the time this looks. */
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !invFullIsOpen()) return;
+  if (_invMenu || $("#inv-pop")?.hidden === false || document.querySelector(".modal-bg.show, #settings-bg.show, #confirm-bg.show")) return;
+  if (INV_FULL.sel) { INV_FULL.sel = null; invFullPaint(); } else invFullClose();
+}, true);
+let _invFullResize = 0;
+window.addEventListener("resize", () => {
+  if (!invFullIsOpen()) return;
+  cancelAnimationFrame(_invFullResize);
+  _invFullResize = requestAnimationFrame(invFullPaint);
+});
 
 /* Suggested dividends (owner, 2026-10-11): payouts Yahoo knows about that
  * the ledger lacks, as ONE calm Attention item; Review lists them, newest
@@ -17254,6 +17726,7 @@ $("#inv-page").addEventListener("click", (e) => {
   }
   else if (e.target.closest("[data-inv-att-more]")) { INV.attMore = !INV.attMore; invAttApply(INV.book?.attention); invAttSeen(); }
   else if (e.target.closest("[data-inv-att-rules]")) { openSettings(); selectSettingsSection("attention"); }
+  else if (e.target.closest("[data-inv-att-full]")) invFullOpen();
   else if (e.target.closest("[data-inv-divs]")) { INV.divOpen = !INV.divOpen; const a = $("#inv-page .inv-rail"); if (a) a.innerHTML = invRailHtml(INV.book); }
   else if (e.target.closest("[data-inv-div-add]")) invAddDividends(e.target.closest("[data-inv-div-add]").dataset.invDivAdd);
   else if (e.target.closest("[data-inv-redo]")) invUndo(true);

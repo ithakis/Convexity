@@ -15,6 +15,8 @@ launch); until then they have no tags or GitHub Releases of their own.
 - **Weight and Risk are separate columns**, each a number over a bar filling its cell. Long holding names now stop with an ellipsis so the table fits.
 - **The + Add button** is cut corner to corner in red and green.
 - **⌘/Ctrl+1-4** switch between My Investments, Portfolios, News and Optimize.
+- **Attention, full screen.** The ⤢ in the rail's Attention and Upcoming headers opens a whole-screen view of what needs a look, in three views on a pill: Desk (one row per holding, every reason beside the numbers, sorted by share of the book's risk), Charts (one price chart per holding, with what you paid, the peak and the next report) and Map (the whole book by weight, coloured by the last day, the week, cost, peak or risk). Beside them: Upcoming with what each date could mean in money (a report's usual move, a dividend's last payout), your limits, and what is left to tidy. A new group, "Close to a limit", shows what is within 15% of one before it fires. Click any holding for its page: what its figures say in plain sentences, its chart, its last results. Esc steps back one level.
+- **A big day move stays for five trading days.** A 3σ Friday used to leave the rail as soon as Monday's session opened. It stays until you dismiss it or the week passes, in the rail and full screen.
 
 ## 1.29.2 — 2026-10-30
 

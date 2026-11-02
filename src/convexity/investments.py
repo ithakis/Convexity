@@ -22,6 +22,7 @@ leaves those keys empty (``None`` / no ``series``) and the page shows calm
 gaps: a real book is never shown made-up numbers.
 """
 
+import bisect
 import contextvars
 import json
 import math
@@ -29,6 +30,7 @@ import re
 import secrets
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
@@ -1499,6 +1501,8 @@ XRAY_SIGMA_FLOOR = 0.002
 XRAY_SPIKE = 4.0  # a run of closes this far off both sides' medians is a Yahoo glitch
 XRAY_SIDE = 10  # closes either side that the medians read
 XRAY_FLIP = (60.0, 140.0)  # off by about x100 with one side only: pence read as pounds
+XRAY_BIG_DAYS = 5  # trading days a big move stays on show
+XRAY_BIG_Z = 1.5  # the lowest the "move" rule's limit can be set (attention.RULES)
 
 
 def _xray_clean(pts: list[tuple[str, float]]) -> list[tuple[str, float]]:
@@ -1598,7 +1602,28 @@ def _xray(series, since: str, divs=None) -> dict:
     if held:
         k = held[0] + int(np.argmax(tr[held[0] :]))
         out["peak_date"], out["peak_pct"] = days[k], (tr[-1] / tr[k] - 1) * 100
-    return {k: (round(v, 6) if isinstance(v, float) else v) for k, v in out.items()}
+    out = {k: (round(v, 6) if isinstance(v, float) else v) for k, v in out.items()}
+    out["big_days"] = _big_days(days, gross, lr)
+    return out
+
+
+def _big_days(days: list[str], gross: np.ndarray, lr: np.ndarray) -> list[dict]:
+    """The last ``XRAY_BIG_DAYS`` trading days' moves of ``XRAY_BIG_Z`` sigmas
+    or more (the smallest limit the rule allows), each against the year
+    before it, oldest first. A big move stays on show for a week (owner,
+    2026-11-02): a 3-sigma Friday used to leave the rail the moment Monday's
+    session opened, unseen by anyone who took the weekend off."""
+    out = []
+    for i in range(max(len(lr) - XRAY_BIG_DAYS, 0), len(lr)):
+        hist = lr[max(i - 252, 0) : i]
+        if len(hist) < 60:
+            continue
+        sig = max(float(np.std(hist, ddof=1)), XRAY_SIGMA_FLOOR)
+        z = float(lr[i] / sig)
+        if math.isfinite(z) and abs(z) >= XRAY_BIG_Z:
+            out.append({"date": days[i + 1], "pct": round(float(gross[i] - 1) * 100, 6), "z": round(z, 6),
+                        "sigma_pct": round((math.exp(sig) - 1) * 100, 6)})  # fmt: skip
+    return out
 
 
 def _contrib_daily(syms, vps, qty_s, flow_s, open_s, est_s, value, perf_in, paid) -> pd.DataFrame:
@@ -1697,7 +1722,11 @@ def _risk_stats(px: np.ndarray) -> dict:
     var = mpt.var_cvar_horizon((px[1:] / px[:-1] - 1)[-RISK_VAR_DAYS:], 0.95)[0]
     dd = px / np.maximum.accumulate(px) - 1
     highs = np.flatnonzero(dd == 0)
-    days = [int(b - a) for a, b in zip(highs, highs[1:], strict=False) if dd[a:b].min() <= -RISK_MIN_FALL]
+    days = [
+        int(b - a)
+        for a, b in zip(highs, highs[1:], strict=False)
+        if dd[a:b].min() <= -RISK_MIN_FALL
+    ]
     last = int(highs[-1])
     open_days = len(px) - 1 - last if dd[last:].min() <= -RISK_MIN_FALL else None
     out = {"var_pct": -var * 100, "mdd_pct": dd.min() * 100, "now_pct": dd[-1] * 100,
@@ -1733,18 +1762,157 @@ def holding_risk(ccy: str | None = None) -> dict:
     closes = _total_closes(syms, RISK_SPAN)
     closes, proxied = extend_history(closes, syms, qccy, {p["symbol"]: p.get("name") for p in held},
                                      RISK_SPAN, fetch=_total_closes)  # fmt: skip
-    closes = _apply_fx_to_closes(closes, {s: {"currency": c} for s, c in qccy.items()}, disp, RISK_SPAN)
+    closes = _apply_fx_to_closes(
+        closes, {s: {"currency": c} for s, c in qccy.items()}, disp, RISK_SPAN
+    )
     out = {}
     for s in syms:
         if s not in getattr(closes, "columns", ()):
             continue
         ser = closes[s].dropna()
-        pts = _xray_clean([(str(d), float(v)) for d, v in ser.items() if v > 0 and math.isfinite(v)])
+        pts = _xray_clean(
+            [(str(d), float(v)) for d, v in ser.items() if v > 0 and math.isfinite(v)]
+        )
         stats = _risk_stats(np.array([v for _, v in pts]))
         if stats:
-            out[s] = {**stats, "since": pts[0][0][:10], **({"proxy": proxied[s][0]} if s in proxied else {})}
+            out[s] = {
+                **stats,
+                "since": pts[0][0][:10],
+                **({"proxy": proxied[s][0]} if s in proxied else {}),
+            }
     if out:
         cache._cache_put(key, out, 1800.0)
+    return out
+
+
+# ------------------------------------------------- Attention, full screen
+#
+# What the full screen shows beyond the page: a price chart, past results and
+# the last payout per holding. Never on the page's path (the rail's rule): the
+# screen asks for these once it is open, a few holdings at a time.
+
+EXTRAS_MAX = 60  # symbols in one request: more than any sane book's flags
+EXTRAS_SPAN = "5y"
+EXTRAS_RESULTS = 8  # past results read, for the "usual move"
+EXTRAS_POINTS = 420  # a chart is at most about this many pixels wide
+EXTRAS_TTL = 3600.0
+EXTRAS_RETRY_TTL = 300.0  # no past results at all: Yahoo may have hiccuped
+
+
+def _reactions(rows, closes) -> list[dict]:
+    """How the share moved on the session each reported result could first
+    reach (``fetch_events``' ``react``), newest last. ``closes`` is a dated
+    Series on the line the report belongs to; a result with no close within
+    three days (a holiday gap, a young listing) is left out."""
+    days, vals = _dated(closes) if closes is not None else ([], [])
+    pts = _xray_clean(
+        [(d, v) for d, v in zip(days, vals, strict=True) if v and math.isfinite(v) and v > 0]
+    )
+    if len(pts) < 2:
+        return []
+    days = [d for d, _ in pts]
+    out = []
+    for e in rows or []:
+        when = e.get("react") or e.get("date")
+        if e.get("actual") is None or not isinstance(when, str):
+            continue
+        i = bisect.bisect_left(days, when)
+        if 0 < i < len(days) and (date.fromisoformat(days[i]) - date.fromisoformat(when)).days <= 3:
+            out.append({"date": days[i], "pct": round((pts[i][1] / pts[i - 1][1] - 1) * 100, 3),
+                        "surprise": e.get("surprise_pct")})  # fmt: skip
+    return out[-EXTRAS_RESULTS:]
+
+
+def _chart_points(series, peak_date: str | None, today: date) -> list[list]:
+    """The last year of as-traded closes, reaching back to just before the
+    peak when that is older, thinned to what a chart can draw (the last close
+    and the peak always kept)."""
+    days, vals = _dated(series) if series is not None else ([], [])
+    pts = _xray_clean(
+        [(d, v) for d, v in zip(days, vals, strict=True) if v and math.isfinite(v) and v > 0]
+    )
+    if not pts:
+        return []
+    start = (today - timedelta(days=365)).isoformat()
+    if isinstance(peak_date, str) and peak_date < start:
+        start = (date.fromisoformat(peak_date) - timedelta(days=25)).isoformat()
+    pts = [p for p in pts if p[0] >= start]
+    step = max(1, math.ceil(len(pts) / EXTRAS_POINTS))
+    keep = [p for i, p in enumerate(pts) if i % step == 0 or i == len(pts) - 1 or p[0] == peak_date]
+    return [[d, round(v, 4)] for d, v in keep]
+
+
+def attention_extras(symbols, ccy: str | None = None, today: date | None = None) -> dict:
+    """{symbol: {closes, results, via, last_div}} for held symbols on the
+    computed page; never computes the book, and a symbol the page lacks is
+    left out. ``results`` are past results' moves on the company's reporting
+    line (``fetch_events``' ``earnings_via``), ``last_div`` the last payout
+    per share in the quote unit. A holding whose closes couldn't be read
+    answers no ``closes`` and isn't cached; the page offers Try again."""
+    from convexity import cache, capm
+    from convexity.fetcher import fetch_events
+
+    today = today or date.today()
+    last = computed_page(ccy) or {}
+    pos = {p["symbol"]: p for p in last.get("positions") or [] if not p.get("pending")}
+    syms = [s for s in dict.fromkeys(symbols or []) if s in pos][:EXTRAS_MAX]
+    out, need = {}, []
+    for s in syms:
+        hit = cache._cache_get(f"inv_att_x|{s}|{today}")
+        if hit is not None:
+            out[s] = hit
+        else:
+            need.append(s)
+    if not need:
+        return out
+
+    def events(s):
+        # A listing with no reporting history of its own reads its company's
+        # primary line, as every company fact does: fetch_events' research
+        # line needs a live answer from Yahoo, and a missed one is cached for
+        # hours.
+        reported = lambda rows: sum(e.get("actual") is not None for e in rows or [])  # noqa: E731
+        try:
+            e = fetch_events(s)
+            line = capm.primary_line(s)
+            if reported(e.get("earnings")) < 2 and line and line != s:
+                home = fetch_events(line)
+                if reported(home.get("earnings")) > reported(e.get("earnings")):
+                    e = {**e, "earnings": home["earnings"], "earnings_via": line}
+            return s, e
+        except Exception as exc:  # the chart can still show; no past results
+            print(f"[attention] events {s} failed: {type(exc).__name__}")
+            return s, {}
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        evs = dict(ex.map(events, need))
+    via = {s: e.get("earnings_via") or s for s, e in evs.items()}
+    closes = _closes(list(dict.fromkeys([*need, *via.values()])), EXTRAS_SPAN, retry=False)
+    qccy = {s: pos[s].get("quote_ccy") or "USD" for s in need}
+    from convexity.analytics import extend_history
+
+    closes, _ = extend_history(closes, need, qccy, {s: pos[s].get("name") for s in need}, EXTRAS_SPAN,
+                               fetch=lambda ss, period: _closes(ss, period, retry=False))  # fmt: skip
+    cols = getattr(closes, "columns", ())
+    for s in need:
+        peak = (pos[s].get("xray") or {}).get("peak_date")
+        pts = _chart_points(closes[s] if s in cols else None, peak, today)
+        results = _reactions(evs[s].get("earnings"), closes[via[s]] if via[s] in cols else None)
+        divs = _dividends(s)
+        paid = None
+        if divs is not None and len(divs):
+            paid = {"date": str(divs.index[-1])[:10], "per_share": round(float(divs.iloc[-1]), 6)}
+        row = {
+            "closes": pts,
+            "results": results,
+            "via": via[s] if via[s] != s else None,
+            "last_div": paid,
+        }
+        out[s] = row
+        if pts:
+            cache._cache_put(
+                f"inv_att_x|{s}|{today}", row, EXTRAS_TTL if results else EXTRAS_RETRY_TTL
+            )
     return out
 
 

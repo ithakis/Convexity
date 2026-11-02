@@ -42,6 +42,7 @@ _OVERLAY_IDS = [
     "ns-tape-fs-bg",
     "export-bg",
     "co-full-bg",
+    "inv-att-bg",
 ]
 
 
@@ -133,3 +134,28 @@ def test_contribution_header_is_sticky_and_opaque():
     assert "background:" in body, "a transparent sticky header shows rows through it"
     z = re.search(r"z-index:\s*(\d+)", body)
     assert z and 0 < int(z.group(1)) < 30, "must sit under the topbar (z 30)"
+
+
+def test_attention_full_screen_opens_from_both_rail_headers_through_the_helpers():
+    assert 'kicker("Attention", gear + full)' in _APP_JS and 'kicker("Upcoming", full)' in _APP_JS
+    start = _APP_JS.index("function invFullOpen")
+    assert "showOverlay(bg)" in _APP_JS[start : start + 400]
+    start = _APP_JS.index("function invFullClose")
+    assert 'hideOverlay("#inv-att-bg")' in _APP_JS[start : start + 200]
+
+
+def test_attention_full_screen_sits_under_what_opens_over_it():
+    """The plan popover (90), menus (95) and Settings (92) open from this
+    screen, and the stock window is lifted above it: under any of them it
+    would open out of sight."""
+    z = re.search(r"\.att-fs-bg \{[^}]*z-index:\s*(\d+)", _CSS)
+    assert z and int(z.group(1)) < 90
+    assert "body:has(#inv-att-bg.show) .modal-bg" in _CSS
+
+
+def test_attention_full_screen_escape_runs_before_the_global_pass():
+    """The global Escape handler closes the stock window; in the bubble phase
+    this one would then see nothing open and close the screen as well."""
+    start = _APP_JS.index("Esc closes the top thing only")
+    block = _APP_JS[start : start + 700]
+    assert "}, true);" in block and ".modal-bg.show" in block and "#inv-pop" in block

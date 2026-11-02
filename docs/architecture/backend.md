@@ -906,7 +906,8 @@ runs). The Positions sheet carries the same figures.
   some a day late and lists some twice), on the share's own trading days; the
   last day's move and its sigma against the 252 trading days before it, the
   5-day move against sigma x sqrt(5), the highest point since the holding
-  was bought). `_xray_clean` drops Yahoo glitches first (a close more than x4
+  was bought, and `big_days`: the last five trading days' moves of 1.5 sigma or
+  more, each against its own year). `_xray_clean` drops Yahoo glitches first (a close more than x4
   off the median of the 10 closes before it and of the 10 after: a run of bad
   days differs from both sides, a crash that stays matches the side after;
   at either end only a pence/pounds flip, about x100, so a real -96% last
@@ -924,8 +925,10 @@ runs). The Positions sheet carries the same figures.
   the rail; owner, 2026-10-13): one holding above 15%, one sector above 35%
   (two names or more), one currency other than the display currency above
   60% (uninvested cash counts in the base currency), down from cost by 20%,
-  a day move of 3 sigma (shown while it is the last trading day's, up to 4
-  calendar days) are "Needs a look" (`high`); down from its peak by 25% and
+  a day move of 3 sigma (each of `big_days`, so on show for five trading days,
+  capped at `MOVE_KEEP_DAYS`; owner, 2026-11-02: a Friday move used to leave the
+  moment Monday's session opened; a page saved before the field reads its last
+  day only) are "Needs a look" (`high`); down from its peak by 25% and
   the News read divergence (bullish while the week fell more than 1 sigma, or
   bearish while it rose; cache only, a read older than its window + 1 day or
   flagged stale is ignored) are "For your information" (`info`). Every
@@ -961,6 +964,30 @@ runs). The Positions sheet carries the same figures.
   exists, so the badge asks again every 10 s for two minutes) and JSON POSTs
   `/api/investments/attention/{dismiss,seen,rules}`; each answers the rail as
   it now reads and never touches the book file.
+
+### My Investments Attention, full screen (`attention_extras`, 2026-11-02)
+- **The rail's answer again, not a second rule set.** `evaluate` adds three
+  things the rail doesn't draw: `near` (a holding within `NEAR_FRACTION`, 15%, of
+  its weight, down-from-cost or down-from-peak limit, not past it; the same
+  figures and the plan's own max weight), `limits` (the biggest holding, sector
+  and other currency against theirs, read as the rules read them: funds don't
+  count, a sector needs two names, cash counts in the base currency) and `next`
+  (each share's next earnings and ex-dividend date, however far off). A rule
+  switched off has none of them.
+- **`GET /api/investments/attention/extras?ccy=&symbols=`**: a chart, past results
+  and the last payout per held symbol, asked for once the screen is open, a few
+  at a time, never on the page's path. It reads `computed_page` (never computes
+  the book), and a symbol the page lacks is left out. Closes are as traded, like
+  the book's, through `extend_history` and `_xray_clean`: the last year, reaching
+  back past an older peak, thinned to `EXTRAS_POINTS` with the peak kept.
+  **Results are moves on the company's reporting line** (`earnings_via`, else
+  `capm.primary_line` when the listing has fewer than two reports of its own:
+  `fetch_events`' research line needs a live answer, and a missed one is cached 6
+  hours), on the first session each report could reach, inside the 5 years
+  fetched: a 2003 report is not "usual". Cached an hour per symbol and day, 5
+  minutes with no results; no closes is never cached, and the page offers Try
+  again. `last_div` is per share in the quote unit, so the page converts it with
+  the position's own value / price (pence stay right).
 
 ### My Investments plans and price alerts (Phase 8: `attention.py`)
 - **`state/plans.json`** `{version, plans: {symbol: {target, review,

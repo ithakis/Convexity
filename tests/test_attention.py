@@ -702,3 +702,215 @@ def test_events_read_the_report_date_from_the_primary_line(monkeypatch):
     assert REAL_FETCH("WMT") == cals["WMT"]
     cals["WMT.DE"] = None  # the own call failed: the company's dates still answer
     assert REAL_FETCH("WMT.DE") == {"earnings": "2026-11-19", "ex_div": "2026-12-04"}
+
+
+# ---------------------------------------------------- the five-day big move
+
+
+def _big(day="2026-10-09", z=-3.2, pct=-13.0):
+    return {"date": day, "pct": pct, "z": z, "sigma_pct": 4.5}
+
+
+def test_a_big_move_stays_after_the_next_session_opens():
+    """A Friday's 3-sigma fall used to leave the rail the moment Monday's session
+    opened, unseen by anyone who took the weekend off (owner, 2026-11-02)."""
+    x = {
+        "day_date": "2026-10-12",
+        "day_pct": 2.0,
+        "day_z": 0.4,
+        "sigma_pct": 4.6,
+        "big_days": [_big()],
+    }
+    att = _ev(_page([_pos("AAPL", 10.0, xray=x)]))
+    assert _keys(att) == ["move|AAPL|2026-10-09"]
+    it = att["high"][0]
+    assert (
+        it["text"] == "Aapl fell 13% on Fri 9 Oct"
+        and it["sub"] == "3.2σ · its usual day moves 4.5%"
+    )
+    assert it["pct"] == -13.0 and it["day"] == "2026-10-09" and it["value"] == -3.2
+
+
+def test_a_big_move_goes_after_the_week_and_each_day_is_its_own_item():
+    x = {"day_date": "2026-10-12", "day_pct": 0.1, "day_z": 0.1, "sigma_pct": 2.0}
+    old = {**x, "big_days": [_big("2026-09-30")]}  # 13 days before TODAY in this file
+    assert _ev(_page([_pos("AAPL", 10.0, xray=old)]))["high"] == []
+    two = {**x, "big_days": [_big("2026-10-07", 3.5, 8.0), _big("2026-10-09")]}
+    assert sorted(_keys(_ev(_page([_pos("AAPL", 10.0, xray=two)])))) == [
+        "move|AAPL|2026-10-07", "move|AAPL|2026-10-09"]  # fmt: skip
+    low = {**x, "big_days": [_big(z=-2.0)]}  # recorded from 1.5 sigma, the rule's own limit decides
+    assert _ev(_page([_pos("AAPL", 10.0, xray=low)]))["high"] == []
+
+
+def test_a_page_saved_before_big_days_still_reads_its_last_day():
+    x = {"day_date": "2026-10-09", "day_pct": -7.9, "day_z": -3.4, "sigma_pct": 2.3}
+    assert _keys(_ev(_page([_pos("ASML.AS", 10.0, xray=x)]))) == ["move|ASML.AS|2026-10-09"]
+
+
+def test_dismissing_a_big_day_holds_while_it_stays_on_show():
+    x = {
+        "day_date": "2026-10-12",
+        "day_pct": 0.1,
+        "day_z": 0.1,
+        "sigma_pct": 2.0,
+        "big_days": [_big()],
+    }
+    attention.dismiss("move|AAPL|2026-10-09", 0.0)
+    att = attention.evaluate(
+        _page([_pos("AAPL", 10.0, xray=x)]), events={}, today=date(2026, 10, 12), plans={}
+    )
+    assert att["high"] == [] and att["hidden"] == 1
+
+
+def test_xray_keeps_the_last_five_days_big_moves():
+    days = pd.bdate_range("2025-10-01", periods=280).strftime("%Y-%m-%d").tolist()
+    px = [100.0 + (i % 2) * 0.5 for i in range(280)]
+    px[-3:] = [px[-4] * 0.90, px[-4] * 0.90 * 1.002, px[-4] * 0.90 * 1.001]  # a fall, then quiet
+    ser = pd.Series(px, index=pd.to_datetime(days))
+    x = inv._xray(ser, days[0])
+    assert [m["date"] for m in x["big_days"]] == [days[-3]]
+    m = x["big_days"][0]
+    assert m["pct"] == pytest.approx(-10.0, abs=1e-6) and m["z"] < -3 and m["sigma_pct"] > 0
+    assert abs(x["day_z"]) < 1.5  # the last day itself is quiet
+    calm = [100.0 + (i % 2) * 0.5 for i in range(280)]
+    assert inv._xray(pd.Series(calm, index=pd.to_datetime(days)), days[0])["big_days"] == []
+
+
+# ------------------------------------------------- the full screen's figures
+
+
+def test_close_to_a_limit_is_within_fifteen_percent_and_not_past_it():
+    near = {p: _pos(p, w, return_pct=r, xray={"peak_pct": pk, "peak_date": "2026-01-02"}) for p, w, r, pk in [
+        ("MSFT", 14.2, 5.0, -2.0),       # 14.2 of 15
+        ("JPM", 3.0, -17.5, -22.0),     # 17.5 of 20, and 22 of 25
+        ("AAA", 3.0, -5.0, -10.0),      # nowhere near
+        ("HOT", 16.0, 5.0, -2.0),       # past the limit: it fires, it isn't close
+    ]}  # fmt: skip
+    att = _ev(_page(list(near.values())))
+    got = {(n["symbol"], n["rule"]) for n in att["near"]}
+    assert got == {("MSFT", "holding"), ("JPM", "from_cost"), ("JPM", "from_peak")}
+    wmt = next(n for n in att["near"] if n["symbol"] == "MSFT")
+    assert wmt["text"] == "14.2% of your book, limit 15%" and wmt["limit"] == 15.0
+
+
+def test_a_fund_is_not_close_to_the_holding_limit_and_a_switched_off_rule_says_nothing():
+    fund = _pos("ETF", 14.5, fund=True)
+    assert _ev(_page([fund]))["near"] == []
+    attention.set_rules({"holding": {"on": False}})
+    assert _ev(_page([_pos("MSFT", 14.5)]))["near"] == []
+
+
+def test_a_plan_s_max_weight_replaces_the_limit_for_close_too():
+    p = _pos("ETF", 9.0, fund=True)
+    att = attention.evaluate(
+        _page([p]), events={}, today=date(2026, 10, 12), plans={"ETF": {"max_weight": 10.0}}
+    )
+    assert [(n["symbol"], n["limit"]) for n in att["near"]] == [("ETF", 10.0)]
+
+
+def test_limits_read_the_biggest_of_each_as_the_rules_do():
+    ps = [_pos("MSFT", 14.0, sector="Consumer", quote_ccy="USD"), _pos("KO", 6.0, sector="Consumer", quote_ccy="USD"),
+          _pos("SOLO", 30.0, sector="Energy", quote_ccy="EUR"), _pos("ETF", 40.0, fund=True, quote_ccy="EUR")]  # fmt: skip
+    pg = {**_page(ps), "ccy": "EUR"}
+    lim = {x["key"]: x for x in _ev(pg)["limits"]}
+    assert (
+        lim["holding"]["who"] == "Solo" and lim["holding"]["value"] == 30.0
+    )  # a fund doesn't count
+    assert (
+        lim["sector"]["who"] == "Consumer" and lim["sector"]["value"] == 20.0
+    )  # one name isn't a sector bet
+    assert lim["currency"]["who"] == "USD" and lim["currency"]["value"] == 20.0
+
+
+def test_next_dates_reach_past_the_rail_window_and_never_back():
+    ev = {"MSFT": {"earnings": "2026-11-19", "ex_div": "2026-01-02"}, "KO": {"earnings": "bad"}}
+    att = attention.evaluate(
+        _page([_pos("MSFT", 5.0), _pos("KO", 5.0)]), events=ev, today=date(2026, 10, 12), plans={}
+    )
+    assert att["next"] == {"MSFT": {"earnings": "2026-11-19"}} and att["upcoming"] == []
+
+
+# --------------------------------------------------- charts and past results
+
+
+def _closes_frame(symbols, n=400):
+    idx = pd.bdate_range(end="2026-10-09", periods=n)
+    return pd.DataFrame({s: 100.0 + np.arange(n) * 0.1 for s in symbols}, index=idx)
+
+
+def _extras_page(**kw):
+    return {"ccy": "USD", "positions": [{"symbol": "NVDA", "name": "NVIDIA", "quote_ccy": "USD", "weight": 10.0,
+                                         "xray": {"peak_date": "2026-09-01"}, **kw}]}  # fmt: skip
+
+
+@pytest.fixture
+def _extras(monkeypatch):
+    from convexity import fetcher
+
+    monkeypatch.setattr(inv, "computed_page", lambda ccy=None: _extras_page())
+    monkeypatch.setattr(inv, "_closes", lambda syms, period, retry=True: _closes_frame(syms))
+    monkeypatch.setattr(
+        inv, "_dividends", lambda s: pd.Series([0.25], index=pd.to_datetime(["2026-09-10"]))
+    )
+    monkeypatch.setattr("convexity.analytics.extend_history", lambda wide, *a, **k: (wide, {}))
+    monkeypatch.setattr(fetcher, "fetch_events", lambda s: {"earnings": [
+        {"date": "2026-08-20", "react": "2026-08-21", "actual": 1.0, "surprise_pct": 4.0},
+        {"date": "2026-11-20", "react": "2026-11-21", "actual": None},
+    ]})  # fmt: skip
+    return monkeypatch
+
+
+def test_extras_answer_a_chart_past_results_and_the_last_payout(_extras):
+    got = inv.attention_extras(["NVDA", "NOT_HELD"], "USD", today=date(2026, 10, 12))
+    assert list(got) == ["NVDA"]  # never reads what the book doesn't hold
+    row = got["NVDA"]
+    assert row["closes"][0][0] >= "2025-10-12" and row["closes"][-1][0] == "2026-10-09"
+    assert [r["date"] for r in row["results"]] == [
+        "2026-08-21"
+    ]  # a report not yet out is no result
+    assert row["results"][0]["pct"] == pytest.approx((1 + 0.1 / 136.0) * 100 - 100, abs=0.2)
+    assert row["last_div"] == {"date": "2026-09-10", "per_share": 0.25} and row["via"] is None
+
+
+def test_extras_failed_closes_are_not_cached(_extras):
+    calls = []
+
+    def closes(syms, period, retry=True):
+        calls.append(syms)
+        return pd.DataFrame() if len(calls) == 1 else _closes_frame(syms)
+
+    _extras.setattr(inv, "_closes", closes)
+    assert inv.attention_extras(["NVDA"], "USD", today=date(2026, 10, 13))["NVDA"]["closes"] == []
+    assert inv.attention_extras(["NVDA"], "USD", today=date(2026, 10, 13))["NVDA"][
+        "closes"
+    ]  # asked again
+
+
+def test_extras_never_compute_the_book(monkeypatch):
+    monkeypatch.setattr(inv, "computed_page", lambda ccy=None: None)
+    monkeypatch.setattr(inv, "page", lambda *a, **k: pytest.fail("the extras computed the page"))
+    assert inv.attention_extras(["NVDA"], "USD") == {}
+
+
+def test_a_secondary_listing_with_no_reports_reads_its_primary_line(_extras):
+    from convexity import capm, fetcher
+
+    rows = [{"react": "2026-08-21", "actual": 1.0}, {"react": "2026-05-21", "actual": 1.0}]
+    _extras.setattr(capm, "primary_line", lambda s: "XOM")
+    _extras.setattr(
+        fetcher,
+        "fetch_events",
+        lambda s: {"earnings": rows if s == "XOM" else [{"react": "2026-11-03", "actual": None}]},
+    )
+    got = inv.attention_extras(["NVDA"], "USD", today=date(2026, 10, 14))["NVDA"]
+    assert got["via"] == "XOM" and len(got["results"]) == 2
+
+
+def test_chart_points_reach_back_to_an_old_peak_and_keep_it():
+    ser = _closes_frame(["X"], 700)["X"]
+    today = date(2026, 10, 12)
+    assert inv._chart_points(ser, None, today)[0][0] >= "2025-10-12"
+    peak = ser.index[10].strftime("%Y-%m-%d")
+    pts = inv._chart_points(ser, peak, today)
+    assert pts[0][0] < peak and peak in [p[0] for p in pts]
+    assert len(pts) <= inv.EXTRAS_POINTS + 2 and pts[-1][0] == "2026-10-09"

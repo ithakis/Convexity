@@ -751,7 +751,11 @@ def test_the_export_has_positions_and_ledger_sheets(srv, monkeypatch):
     # persistence binds views.json at import, so earlier tests' portfolios
     # are still listed: exporting them ran live analytics on real Yahoo.
     monkeypatch.setattr(server, "list_views", lambda: {"views": {}})
-    monkeypatch.setattr(inv, "holding_risk", lambda ccy=None: {"NVDA": {"mdd_pct": -60.0, "recmax": 300, "open_days": 12}})
+    monkeypatch.setattr(
+        inv,
+        "holding_risk",
+        lambda ccy=None: {"NVDA": {"mdd_pct": -60.0, "recmax": 300, "open_days": 12}},
+    )
     _seed()
     with urllib.request.urlopen(srv + "/api/export-xlsx?ccy=USD") as r:
         wb = load_workbook(io.BytesIO(r.read()))
@@ -955,6 +959,17 @@ def test_attention_route_never_computes(srv, monkeypatch):
         # the rules still come (Settings works before the first page).
         a = json.loads(r.read())
         assert a["pending"] is True and a["unread"] == 0 and a["high"] == [] and a["rules"]
+    assert calls == []
+
+
+def test_attention_extras_route_never_computes(srv, monkeypatch):
+    _seed()
+    calls = []
+    monkeypatch.setattr(inv, "book", lambda ccy=None: calls.append(ccy) or {"empty": True})
+    with urllib.request.urlopen(
+        srv + "/api/investments/attention/extras?ccy=USD&symbols=NVDA,MSFT"
+    ) as r:
+        assert json.loads(r.read()) == {"extras": {}}  # no page yet: nothing, and no fetch
     assert calls == []
 
 

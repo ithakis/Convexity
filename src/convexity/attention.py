@@ -73,9 +73,12 @@ RULES: dict[str, dict] = {
                     "severity": "info", "note": "Each fires once. Set in a holding's plan."},
 }  # fmt: skip
 
-# A day move is news only while it is the last trading day's: a Friday move
-# still shows on Monday, last week's doesn't.
-MOVE_FRESH_DAYS = 4
+# A big day move stays on show for its last five trading days (the page's
+# ``xray.big_days``; owner, 2026-11-02: Friday's used to go when Monday's session
+# opened). This caps it in calendar days: five sessions, a weekend, a holiday.
+MOVE_KEEP_DAYS = 9
+# "Close to a limit": within 15% of it, before it fires (the full screen only).
+NEAR_FRACTION = 0.85
 STALE_READ_SLACK = 1.0  # days past its own window before a News read is too old
 
 _LOCK = threading.Lock()
@@ -826,21 +829,32 @@ def _items(page: dict, rules: dict, today: date, checked: set[str], plans: dict 
                 f"{p['name']} is {_pct(pk, lim['from_peak'])} below its peak",
                 f"Peak {_day(x['peak_date'])} · your limit is {lim['from_peak']:g}%", [p["symbol"]],
                 value=pk)  # fmt: skip
-        z, dp, dd = finite_num(x.get("day_z")), finite_num(x.get("day_pct")), x.get("day_date")
-        fresh = isinstance(dd, str) and (today - date.fromisoformat(dd)).days <= MOVE_FRESH_DAYS
-        if on("move") and z is not None:
+        if on("move") and finite_num(x.get("day_z")) is not None:
             checked.add(f"move|{p['symbol']}")
-        if on("move") and z is not None and dp is not None and fresh and abs(z) >= lim["move"]:
-            add("move", f"move|{p['symbol']}|{dd}", 0.0,
-                f"{p['name']} {'rose' if dp > 0 else 'fell'} {_pct(dp)} on {_day(dd)}",
-                f"{abs(z):.1f}σ · its usual day moves {x['sigma_pct']:.1f}%", [p["symbol"]],
-                value=z)  # fmt: skip
+        for m in _moves(x) if on("move") else ():
+            z, dp, dd = finite_num(m.get("z")), finite_num(m.get("pct")), m.get("date")
+            if z is None or dp is None or not _is_day(dd) or abs(z) < lim["move"]:
+                continue
+            if (today - date.fromisoformat(dd)).days <= MOVE_KEEP_DAYS:
+                add("move", f"move|{p['symbol']}|{dd}", 0.0,
+                    f"{p['name']} {'rose' if dp > 0 else 'fell'} {_pct(dp)} on {_day(dd)}",
+                    f"{abs(z):.1f}σ · its usual day moves {finite_num(m.get('sigma_pct')) or 0:.1f}%",
+                    [p["symbol"]], value=z, pct=dp, day=dd)  # fmt: skip
         if on("divergence") and _divergence(p, x, lim["divergence"], today, add):
             checked.add(f"divergence|{p['symbol']}")
     got = _plan_items(held, plans, on, today, checked, add)
     if fired is not None:
         fired.extend(got)
     return out
+
+
+def _moves(x: dict) -> list[dict]:
+    """A holding's recent big days; a page saved before ``big_days`` existed
+    (``book_cache.json``) knows its last day only."""
+    if isinstance(x.get("big_days"), list):
+        return [m for m in x["big_days"] if isinstance(m, dict)]
+    return [{"date": x.get("day_date"), "pct": x.get("day_pct"), "z": x.get("day_z"),
+             "sigma_pct": x.get("sigma_pct")}]  # fmt: skip
 
 
 _UP, _DOWN = {"bullish", "very_bullish"}, {"bearish", "very_bearish"}
@@ -885,6 +899,100 @@ def _divergence(p: dict, x: dict, limit: float, today: date, add) -> bool:
     return True
 
 
+def _close_to_limits(page: dict, rules: dict, plans: dict) -> tuple[list[dict], list[dict]]:
+    """For the full screen, from the same figures as the rules: ``near``, what
+    is within 15% of a holding's limit without having crossed it, and
+    ``limits``, how close the book's biggest holding, sector and other currency
+    are to theirs. A rule switched off has neither."""
+    held = [p for p in page.get("positions") or []
+            if not p.get("pending") and finite_num(p.get("weight"))]  # fmt: skip
+    near: list[dict] = []
+    limits: list[dict] = []
+    lim = {k: r["value"] for k, r in rules.items()}
+    on = lambda k: rules[k]["on"]  # noqa: E731
+
+    def close(symbol, rule, value, limit, text):
+        if NEAR_FRACTION * limit <= value <= limit:
+            near.append(
+                {"symbol": symbol, "rule": rule, "value": value, "limit": limit, "text": text}
+            )
+
+    for p in held:
+        x, sym = p.get("xray") or {}, p["symbol"]
+        own = (plans.get(sym) or {}).get("max_weight")
+        if own is not None or (on("holding") and not p.get("fund")):
+            cap = own if own is not None else lim["holding"]
+            close(
+                sym, "holding", p["weight"], cap, f"{p['weight']:.1f}% of your book, limit {cap:g}%"
+            )
+        r = finite_num(p.get("return_pct")) if not p.get("note") else None
+        if on("from_cost") and r is not None and r < 0:
+            close(
+                sym,
+                "from_cost",
+                -r,
+                lim["from_cost"],
+                f"{-r:.1f}% below what you paid, limit {lim['from_cost']:g}%",
+            )
+        pk = finite_num(x.get("peak_pct"))
+        if on("from_peak") and pk is not None and pk < 0:
+            close(
+                sym,
+                "from_peak",
+                -pk,
+                lim["from_peak"],
+                f"{-pk:.1f}% below its peak, limit {lim['from_peak']:g}%",
+            )
+    stocks = [p for p in held if not p.get("fund")]
+    if on("holding") and stocks:
+        top = max(stocks, key=lambda p: p["weight"])
+        limits.append({"key": "holding", "label": "Biggest holding", "who": top["name"],
+                       "value": top["weight"], "limit": lim["holding"]})  # fmt: skip
+    if on("sector"):
+        groups: dict[str, list[float]] = {}
+        for p in held:
+            if p.get("sector"):
+                groups.setdefault(p["sector"], []).append(p["weight"])
+        multi = {
+            k: sum(v) for k, v in groups.items() if len(v) > 1
+        }  # as the rule: two names or more
+        if multi:
+            sec = max(multi, key=multi.__getitem__)
+            limits.append({"key": "sector", "label": "Biggest sector", "who": sec, "value": multi[sec],
+                           "limit": lim["sector"]})  # fmt: skip
+    if on("currency"):
+        disp, hl = page.get("ccy") or "USD", page.get("headline") or {}
+        ccys: dict[str, float] = {}
+        for p in held:
+            c = major_ccy(p.get("quote_ccy") or disp)
+            if c != disp:
+                ccys[c] = ccys.get(c, 0.0) + p["weight"]
+        base, cash_w = page.get("base_ccy") or disp, finite_num(hl.get("cash_weight")) or 0.0
+        if base != disp and cash_w > 0:
+            ccys[base] = ccys.get(base, 0.0) + cash_w
+        if ccys:
+            c = max(ccys, key=ccys.__getitem__)
+            limits.append({"key": "currency", "label": "Biggest other currency", "who": c, "value": ccys[c],
+                           "limit": lim["currency"]})  # fmt: skip
+    return near, limits
+
+
+def _next_dates(page: dict, events: dict, today: date) -> dict[str, dict]:
+    """Every held share's next earnings and ex-dividend date, however far off,
+    from the events cache (the rail's Upcoming stops at the rule's window)."""
+    out = {}
+    for p in page.get("positions") or []:
+        ev = events.get(p.get("symbol")) or {}
+        got = {
+            k: ev[k]
+            for k in ("earnings", "ex_div")
+            if _is_day(ev.get(k)) and ev[k] >= today.isoformat()
+        }
+        if got:
+            out[p["symbol"]] = got
+    return out
+
+
 def _upcoming(page: dict, rules: dict, events: dict, today: date, checked: set[str]) -> list[dict]:
     if not rules["events"]["on"]:
         return []
@@ -909,7 +1017,8 @@ def _upcoming(page: dict, rules: dict, events: dict, today: date, checked: set[s
 def evaluate(page: dict, state: dict | None = None, events: dict | None = None,
              today: date | None = None, plans: dict | None = None) -> dict:  # fmt: skip
     """The rail for one page payload: {high, info, upcoming, unread,
-    unread_high, hidden, firing, checked, rules, plans, fired}. Pure: no I/O
+    unread_high, hidden, firing, checked, rules, plans, fired}, and for the
+    full screen {near, limits, next}. Pure: no I/O
     when ``state``, ``events`` and ``plans`` are given. ``firing`` is every
     item's key before dismissals and ``checked`` what the page could check
     (for ``prune``); ``fired`` the price alerts that crossed for the first
@@ -955,7 +1064,11 @@ def evaluate(page: dict, state: dict | None = None, events: dict | None = None,
     unread = [it for it in visible if _over(it, seen)]
     for it in unread:  # Phase 9: only an unread item is notified
         it["unread"] = True
+    near, limits = _close_to_limits(page, rules, plans) if page.get("positions") else ([], [])
     return {
+        "near": near,
+        "limits": limits,
+        "next": _next_dates(page, events, today),
         "high": [it for it in visible if it["severity"] == "high"],
         "info": [it for it in visible if it["severity"] == "info"],
         "upcoming": [u for u in upcoming if shown(u)],
