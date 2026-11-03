@@ -9,7 +9,7 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
-## Unreleased
+## 1.32.1 — 2026-11-03
 
 - **The app reads your holdings' news by itself** once a read is over 3 days old: quietly in the background, one share at a time, after anything else has finished and only with your NVIDIA and Finnhub keys set. Funds are left out, and your own Refresh always goes first. Opening the full screen on a page left open for a while brings it up to date.
 
