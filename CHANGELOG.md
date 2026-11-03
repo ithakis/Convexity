@@ -9,7 +9,7 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
-## Unreleased
+## 1.32.0 — 2026-11-03
 
 - **A News view in the full screen**: one square per holding, showing how it has done, its revenue and last results, and the News read lens by lens, on one colour scale you can scan. Sort by size, by what the news had most to say, or by the worst month. "Read again" reads the latest news for your holdings when you press it; the view says how old the reads are.
 - **An Analysis button on My Investments** opens the Map: it holds a tiny Map whose tiles fly out and become the real one, and it goes back into the button when closed. With motion switched off in the system, it simply opens. The full screen's views are now Desk, Map, Charts, News.
