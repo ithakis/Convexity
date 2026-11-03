@@ -9,7 +9,7 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
-## Unreleased
+## 1.32.2 — 2026-11-04
 
 - **The holding's hover card is written for a first-time reader.** Risk reads as what is left of every €100 (after a bad month, after its biggest drop in 10 years, today against its high), recovery as ten dots, and the chart and depth table say what they show, including that the depth figures come from 40 large companies.
 - **The running fall's gap matches the table**: it read the last long-record pass, so it could differ from today's figure (2% against 3%).
