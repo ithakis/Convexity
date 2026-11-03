@@ -1021,6 +1021,19 @@ page's path**; what isn't there is left out of the page.
   `/api/investments/attention/{dismiss,seen,rules}`; each answers the rail as
   it now reads and never touches the book file.
 
+### My Investments' background news read (`news_watch.py`, 2026-11-03)
+- The owner's call: the book is for someone who doesn't look every day, and its Refresh
+  only updates prices. A `newsread` job, hidden and superseded like `longrun`, started
+  by `tick` every 5 minutes (first 5 minutes after launch) only when nothing else is
+  running. **It spends real quota, so it stays small:** both keys or no pass, shares only
+  (`_pack_kind`: funds have no company news), only reads over 3 days old, `workers=1`,
+  no market-wide read. `state/news_watch.json` keeps when each share was last tried, or a
+  share with no news (no read to date) would be asked about on every launch; a failed read
+  tries again in 6 hours, a cancelled one isn't recorded. The context is what a refresh
+  sends (`_build_news_context` on the `__book__` rows, the page's weights), so these
+  reads are as good as a pressed one and count in the Track record. `forget_page` at the end.
+  `CONVEXITY_LONGRUN=0` switches it off, with `long_run`.
+
 ### My Investments Attention, full screen (`attention_extras`, 2026-11-02)
 - **The rail's answer again, not a second rule set.** `evaluate` adds three
   things the rail doesn't draw: `near` (a holding within `NEAR_FRACTION`, 15%, of

@@ -1864,11 +1864,13 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
     threading.Thread(target=_warm_book, name="cx-warm-book", daemon=True).start()
     # Phase 9: the notification scheduler (a minute tick; its passes are
     # background jobs, so single-flight with every refresh).
-    from convexity import long_run, notify
+    from convexity import long_run, news_watch, notify
 
     notify.start()
     # The monthly long-history pass: the same kind of job, and it waits its turn.
     long_run.start()
+    # The held shares' news, once their reads are days old: the same again.
+    news_watch.start()
     return server, port
 
 

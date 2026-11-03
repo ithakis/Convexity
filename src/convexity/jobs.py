@@ -392,6 +392,10 @@ def _run(job: Job) -> None:
             _run_longrun_phase(job)
             _finish(job, "cancelled" if job.cancel.is_set() else "done")
             return
+        if job.phases == ("newsread",):
+            _run_newsread_phase(job)
+            _finish(job, "cancelled" if job.cancel.is_set() else "done")
+            return
         if job.phases == ("book",):
             _run_book_phase(job)
             _finish(job, "cancelled" if job.cancel.is_set() else "done")
@@ -580,6 +584,17 @@ def _run_longrun_phase(job: Job) -> None:
     job.emit("phase", phase="longrun", state="start", view=BOOK_VIEW)
     outcome = long_run.run_pass(job.cancel)
     job.emit("phase", phase="longrun", state="end", view=BOOK_VIEW, outcome=outcome)
+
+
+def _run_newsread_phase(job: Job) -> None:
+    """The background read of the held shares' news (news_watch.run_pass): hidden
+    and superseded like the passes above."""
+    from convexity import news_watch
+
+    job.phase = "newsread"
+    job.emit("phase", phase="newsread", state="start", view=BOOK_VIEW)
+    outcome = news_watch.run_pass(job)
+    job.emit("phase", phase="newsread", state="end", view=BOOK_VIEW, outcome=outcome)
 
 
 def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:

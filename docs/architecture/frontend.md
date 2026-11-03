@@ -144,10 +144,12 @@ dependency (loaded from CDN, used only for column-guide formulas).
   growth from the page; the last results' surprise from the extras, within 200
   days) and the News read's five lenses, all on `nsScale`. Hollow means nothing to
   read; hover a line for what it is or what the news said. The extras are asked for
-  every holding only while this view is open. **"Read again" is the only thing here
-  that spends quota, and only when pressed** (`invNewsRead`: a normal `quotes` +
-  `news` job on `__book__`, which also refreshes the saved rows); the band says how
-  old the reads are. My Investments' Refresh stays prices only.
+  every holding only while this view is open. **The view itself spends no quota:
+  "Read again" reads when pressed** (`invNewsRead`: a normal `quotes` + `news` job on
+  `__book__`, which also refreshes the saved rows), and `news_watch.py` reads in the
+  background (backend.md); the band says how old the reads are. My Investments' Refresh
+  stays prices only. Opening the screen on a page over 15 minutes old reloads it, or
+  background reads wouldn't show in a window left open.
 - **Attention, full screen (owner's picks from mockups, 2026-11-02).** The ⤢ in
   the rail's Attention and Upcoming headers opens `#inv-att-bg` through
   `showOverlay` (z 85: under the plan popover, menus and Settings; the stock

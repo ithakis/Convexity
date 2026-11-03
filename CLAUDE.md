@@ -170,8 +170,11 @@ Each of these has cost real debugging time; the link goes to the full story.
   dates come from `state/events.json` filled in the background. A dismissed
   item returns only a full step worse; `prune` runs on fresh, healthy pages
   only. [backend.md → Attention rail](docs/architecture/backend.md#my-investments-attention-rail-phase-7-attentionpy)
-- **The full screen's News view is one square per holding; "Read again" is its only
-  quota spend, and only when pressed.** The Analysis button's tiles fly into the Map, so
+- **The full screen's News view is one square per holding.** It spends no quota itself:
+  "Read again" reads when pressed, and `news_watch.py` (a hidden `newsread` job,
+  superseded by any refresh, needs both keys, skips funds, one share at a time) reads what
+  is over 3 days old. **Any server with real keys and no `CONVEXITY_LONGRUN=0` will
+  spend the owner's quota by itself after 5 minutes.** The Analysis button's tiles fly into the Map, so
   `invFullPaint` waits while `INV_FULL.flying`, and motion respects
   `prefers-reduced-motion`.
   [frontend.md → Analysis, News](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv)
@@ -411,6 +414,7 @@ sub-decision.
 │   ├── investments.py           ← My Investments (the real book): the book file, undo/redo, prices/FX, page payload — §4 "My Investments"
 │   ├── ledger.py                ← My Investments ledger engine: pure replay (average cost, implied deposits, splits), TWR/MWR
 │   ├── long_run.py              ← My Investments' monthly long view: max-history recoveries + 3-year covariance, a background job, read by the page as algebra
+│   ├── news_watch.py            ← Reads the held shares' news by itself once reads are 3 days old: a hidden background job, one share at a time
 │   ├── attention.py             ← My Investments' Attention rail: X-ray rules, events cache, dismiss/unread (Phase 7)
 │   ├── notify.py                ← My Investments notifications (Phase 9): scheduler (a background job), dedup via attention.py, quiet hours, outbox, weekly recap
 │   ├── importer.py              ← My Investments import: text, screenshots, PDFs, CSV/Excel → rows to review (NIM vision + text, symbol-pack checks)
@@ -471,6 +475,7 @@ overrides it):
 │   ├── beta_lines.json         ← home lines found by name (a US company's Milan line → its US line) or by the company's country (SHEL → SHEL.L), a week (capm.py; market data only)
 │   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
 │   ├── long_run.json           ← each holding's recoveries from max history and the 3-year covariance, monthly (long_run.py; a cache, market data only)
+│   ├── news_watch.json         ← when each held share's news was last tried by the background read (news_watch.py; a cache)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
 │   ├── recaps.json             ← My Investments' weekly recaps, last 12 (derived from the computed page: a cache)
 │   └── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)

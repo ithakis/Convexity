@@ -15948,6 +15948,7 @@ const INV_FULL_USUAL_MIN = 3;   // fewer results than this say nothing "usual"
 const INV_FULL_CHUNK = 8;       // symbols per request: the screen fills in as they answer
 const INV_FULL_NEAR = 0.85;     // attention.NEAR_FRACTION, for the gauges' colour
 const INV_FULL_EXTRAS_AGE = 36e5;  // an hour, then a reopened screen asks again
+const INV_FULL_PAGE_AGE = 15 * 6e4;  // then opening the screen brings the page up to date
 const INV_FULL = { view: "desk", kicker: "Attention", metric: invFullPref("inv_att_metric", "day"), newsSort: invFullPref("inv_att_news_sort", "weight"), sel: null,
   extras: {}, pending: new Set(), asked: 0 };
 
@@ -16098,8 +16099,9 @@ function invNewsTile(r) {
     ${NS_LENSES.map(([k, label]) => { const L = n?.lenses?.[k]; return row(label, L ? L.fact || "What the news read found on this." : "Nothing on this in the news read.", L ? L.score : null, L ? fmtSig(L.score, 1) : invFullDash); }).join("")}
   </div>`;
 }
-/* Reading the news spends the owner's NVIDIA and Finnhub quota, so it happens
- * when asked, like the News tab's refresh, and says how old the reads are. */
+/* Reading the news spends the owner's NVIDIA and Finnhub quota. This is the
+ * read asked for, like the News tab's refresh; news_watch.py reads by itself,
+ * slowly, once they are days old. The band says how old they are. */
 function invNewsReadLabel(has) {
   const c = REFRESH.counts;
   if (!REFRESH.id) return has ? "Read again" : "Read the news";
@@ -16120,7 +16122,7 @@ function invFullNews(m) {
   const when = age == null ? "" : ` · most read ${age < 1 ? "today" : age === 1 ? "yesterday" : `${age} days ago`}`;
   const pills = INV_NEWS_SORTS.map(([k, l]) => `<button type="button" data-full-news-sort="${k}" class="${k === sort ? "active" : ""}" aria-pressed="${k === sort}">${l}</button>`).join("");
   return `<div class="att-fs-nw-band"><div><div class="att-fs-lede-t">What's going on with your ${m.rows.length === 1 ? "holding" : `${m.rows.length} holdings`}</div>
-      <div class="att-fs-sub">News: ${say("bullish", "very_bullish")} good, ${say("neutral")} mixed, ${say("bearish", "very_bearish")} bad, ${m.rows.length - reads.length} quiet${when} · <button type="button" class="inv-link" data-full-read-news data-has="${reads.length ? 1 : ""}"${REFRESH.id ? " disabled" : ""} data-tip="Reads the last ${NS.lookbackDays} days of news for your holdings, with your NVIDIA and Finnhub keys. It takes a few minutes.">${invNewsReadLabel(reads.length)}</button></div></div>
+      <div class="att-fs-sub">News: ${say("bullish", "very_bullish")} good, ${say("neutral")} mixed, ${say("bearish", "very_bearish")} bad, ${m.rows.length - reads.length} quiet${when} · <button type="button" class="inv-link" data-full-read-news data-has="${reads.length ? 1 : ""}"${REFRESH.id ? " disabled" : ""} data-tip="Reads the last ${NS.lookbackDays} days of news for your holdings now, with your NVIDIA and Finnhub keys. It takes a few minutes. The app also does this by itself, in the background, once they are over 3 days old.">${invNewsReadLabel(reads.length)}</button></div></div>
       <span class="pf-contrib-toggle" role="group" aria-label="Order the holdings">${pills}</span></div>
     <div class="att-fs-nw-grid">${[...m.rows].sort(INV_NEWS_ORDER[sort]).map(invNewsTile).join("")}</div>
     <div class="att-fs-foot">Each scale runs from bad on the left to good on the right, the colour on the step it reached. Hollow means nothing to read. Hover a line for what it is, or for what the news said.</div>`;
@@ -16436,6 +16438,8 @@ function invFullOpen(view = "desk", kicker = "Attention", from = null) {
   if (!showOverlay(bg)) return;
   invFullPaint();
   if (from) invFullFly(from);
+  // A window left open for hours: background reads and prices arrived since.
+  if (Date.now() - Date.parse(b.computed_at) > INV_FULL_PAGE_AGE && !INV.loading) invLoad();
   $("#inv-att-fs [data-full-close]")?.focus({ preventScroll: true });  // Enter must not press what's underneath
   invRiskLoad();
   invFullExtras(invFullWanted());
