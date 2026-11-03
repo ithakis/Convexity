@@ -170,6 +170,11 @@ Each of these has cost real debugging time; the link goes to the full story.
   dates come from `state/events.json` filled in the background. A dismissed
   item returns only a full step worse; `prune` runs on fresh, healthy pages
   only. [backend.md → Attention rail](docs/architecture/backend.md#my-investments-attention-rail-phase-7-attentionpy)
+- **The full screen's News view is one square per holding; "Read again" is its only
+  quota spend, and only when pressed.** The Analysis button's tiles fly into the Map, so
+  `invFullPaint` waits while `INV_FULL.flying`, and motion respects
+  `prefers-reduced-motion`.
+  [frontend.md → Analysis, News](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv)
 - **Attention's full screen reads the rail, never a second rule set**
   (`evaluate`'s `near`, `limits`, `next`), and its charts and past results come
   from `/api/investments/attention/extras` once it is open, never on the page's

@@ -9536,6 +9536,8 @@ function rfSave() {
 function rfRender() {
   const label = $("#rf-label"), bar = $("#rf-bar"), chip = $("#rf-chip");
   const text = $("#rf-chip-text"), btn = $("#refresh");
+  const readNews = $("[data-full-read-news]");
+  if (readNews) { readNews.textContent = invNewsReadLabel(readNews.dataset.has); readNews.disabled = !!REFRESH.id; }
   if (!label || !bar || !chip) return;
   const c = REFRESH.counts;
   const running = REFRESH.state === "quotes" || REFRESH.state === "news"
@@ -9675,7 +9677,7 @@ function rfHandle(msg) {
       if (msg.state === "end" && msg.phase === "news") REFRESH.newsEnd = msg;
       if (msg.state === "end" && msg.view) REFRESH.touchedViews.add(msg.view);
       if (msg.state === "end" && msg.reason === "degraded") {
-        toast(`${msg.view}: ${msg.failed} of ${msg.ok + msg.failed} symbols failed — kept the previous data.`);
+        toast(`${msg.view === BOOK_KEY ? "Your holdings" : msg.view}: ${msg.failed} of ${msg.ok + msg.failed} symbols failed — kept the previous data.`);
       }
       break;
     case "item":
@@ -9770,6 +9772,7 @@ async function rfFinish(state) {
     if (touched.size) await loadViews();
     REFRESH.touchedViews.clear();
     renderEditorMeta();
+    if (document.body.dataset.page === "investments") invLoad();  // the reads it finished were kept
     return;
   }
   if (state === "done") {
@@ -9804,6 +9807,8 @@ async function rfFinish(state) {
     }
     renderEditorMeta();
     await nsReloadTape();
+    // The News view's own reading, or a news refresh started before coming here.
+    if (document.body.dataset.page === "investments") invLoad();
   }
   REFRESH.touchedViews.clear();
 }
@@ -9845,13 +9850,13 @@ async function rfConfirmAll() {
   });
 }
 
-async function rfStart(scope) {
+async function rfStart(scope, job) {
   if (REFRESH.id) { toast("A refresh is already running."); return; }
-  const onBook = document.body.dataset.page === "investments";
-  const body = onBook ? {scope: "current", view: INV_BOOK_VIEW, phases: ["book"]}
-                      : {scope, days: NS.lookbackDays, phases: ["quotes", "news"]};
-  if (onBook) {
-    // My Investments refreshes the book only, whether pressed or held.
+  const onBook = !job && document.body.dataset.page === "investments";
+  const body = job || (onBook ? {scope: "current", view: INV_BOOK_VIEW, phases: ["book"]}
+                              : {scope, days: NS.lookbackDays, phases: ["quotes", "news"]});
+  if (onBook || job) {
+    // My Investments refreshes the book only, whether pressed or held; a caller's job is complete.
   } else if (scope === "all") {
     if (!await rfConfirmAll()) return;
     body.on_conflict = "supersede";
@@ -9934,7 +9939,8 @@ function setupRefreshControl() {
   // rather than a modal thrown up on every refresh.
   chip.addEventListener("click", () => {
     if (REFRESH.touchedViews.has(INV_BOOK_VIEW)) return;  // a book refresh has no per-ticker news view
-    openNsProgress({market: true, symbols: nsSymbols(), days: NS.lookbackDays});
+    const onBook = document.body.dataset.page === "investments";  // the News view's own reading
+    openNsProgress({market: true, symbols: onBook ? (INV.book?.positions || []).map(p => p.symbol) : nsSymbols(), days: NS.lookbackDays});
   });
 
   // Reattach after a reload: ask the server what's running, then resume from
@@ -15227,6 +15233,7 @@ function invHeroHtml(b) {
         <span class="inv-value">${invMoney(h.value)}</span>
         ${b.stale ? `<span class="inv-stale${b.refresh_failed ? " failed" : ""}" data-tip="${b.refresh_failed ? "Yahoo didn't answer, so these are the figures from your last visit. Try ↻ Refresh." : "The figures from your last visit, while today's prices load."}">Updated ${escapeHtml(invStaleWhen(b.computed_at))} · ${b.refresh_failed ? "couldn't refresh" : "refreshing…"}</span>` : ""}
         ${b.demo ? `<span class="inv-demo" data-tip="Made-up figures from the demo book, used while the page is being designed.">Demo data</span>` : ""}
+        ${b.positions?.length ? `<button type="button" class="inv-analysis-btn" data-inv-analysis><span class="inv-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Analysis</button>` : ""}
       </div>
       ${invOk(h.month_abs) ? `<div class="inv-month"><span class="${invCls(h.month_abs)}">${arrow}${invMoney(Math.abs(h.month_abs))}${invOk(h.month_pct) ? ` (${invPct(h.month_pct)})` : ""}</span> <span class="inv-month-w">past month</span></div>` : ""}
       <div class="inv-kpis">
@@ -15456,6 +15463,44 @@ const INV_RISKS = {
     get: (x, r) => Math.max(r?.recmax || 0, r?.open_days || 0) || null, fmt: invYears, ticks: [63, 126, 252, 504, 756, 1260, 1890, 2520] },
 };
 const invDrvRisk = () => INV_RISKS[INV.drvRisk] || INV_RISKS.var;
+/* What a Drivers column means and how it is worked out: a small sketch of the
+ * idea, one sentence, one line of how. Each sketch is the same 84 x 46 box: a
+ * price path in grey, the part the figure measures in colour. */
+const invColSketch = (body) => `<svg class="inv-col-sk" viewBox="0 0 84 46" aria-hidden="true">${body}</svg>`;
+const INV_COL_PATH = "M2 30 L12 22 L20 25 L30 8 L40 20 L48 32 L56 38 L64 28 L72 22 L82 16";
+const invColPath = `<path d="${INV_COL_PATH}" class="p"></path>`;
+const INV_COL_TIPS = {
+  contrib: () => ({ name: `Contribution to ${INV.period} return, running total`,
+    sk: `<line x1="2" x2="2" y1="1" y2="45" class="z"></line><rect x="2" y="3" width="30" height="8" class="pos"></rect><rect x="32" y="14" width="22" height="8" class="pos"></rect><rect x="44" y="25" width="10" height="8" class="neg"></rect><rect x="44" y="36" width="36" height="8" class="pos"></rect>`,
+    say: `How many points of your ${INV.period} return came from this holding. Each bar starts where the one above it ended, so the last one lands on your total.`,
+    how: "Each day: its gain or loss ÷ the book's value that morning. Days are linked, so the rows add up to your return exactly." }),
+  share: () => ({ name: "Risk share",
+    sk: `<rect x="2" y="17" width="44" height="12" class="rk"></rect><rect x="47" y="17" width="20" height="12" class="rk2"></rect><rect x="68" y="17" width="14" height="12" class="rk3"></rect>`,
+    say: "How much of your holdings' ups and downs comes from this one. A small holding that swings a lot can take more than its weight.",
+    how: "Its share of the holdings' variance: today's weights, daily returns over the last year. Cash is left out." }),
+  var: () => ({ name: "Bad month",
+    sk: `<path d="M2 42 C14 42 18 30 28 16 C34 6 40 4 46 8 C56 16 66 36 82 42 Z" class="d"></path><path d="M2 42 C8 42 12 39 17 33 L17 42 Z" class="neg"></path><line x1="17" x2="17" y1="26" y2="44" class="m"></line>`,
+    say: "If this holding had a bad month on its own, about what you would lose. 1 month in 20 goes this badly or worse.",
+    how: "Where the worst 5% of its 10-day moves begin, over the last 3 years, scaled up to 21 trading days." }),
+  fall: () => ({ name: "Worst fall",
+    sk: `${invColPath}<line x1="30" x2="56" y1="8" y2="8" class="h"></line><line x1="56" x2="56" y1="9" y2="37" class="m"></line>`,
+    say: "The biggest drop it has had from a high to the low that came after.",
+    how: "Lowest point ÷ the high before it − 1, on daily closes over the last 10 years, dividends included." }),
+  below: () => ({ name: "Below 10y high",
+    sk: `${invColPath}<line x1="30" x2="82" y1="8" y2="8" class="h"></line><line x1="82" x2="82" y1="9" y2="15" class="m"></line><circle cx="82" cy="16" r="2" class="dot"></circle>`,
+    say: "How far it is today under the highest point of the last 10 years. At its high means it is there now.",
+    how: "Today ÷ its highest close in 10 years − 1, dividends included." }),
+  rec: () => ({ name: "Recovery",
+    sk: `<path d="M2 30 L12 22 L20 25 L30 8 L40 20 L48 32 L56 38 L64 24 L72 12 L78 8 L82 4" class="p"></path><line x1="30" x2="78" y1="8" y2="8" class="h"></line><line x1="30" x2="78" y1="43" y2="43" class="m"></line><line x1="30" x2="30" y1="40" y2="46" class="m"></line><line x1="78" x2="78" y1="40" y2="46" class="m"></line>`,
+    say: "The longest it has taken to get back to a high after a fall of 10% or more. A fall still running counts for as long as it has lasted.",
+    how: "Trading days from the high until it is back there, over the last 10 years. 252 days is a year." }),
+};
+for (const k of Object.keys(INV_COL_TIPS)) RICH_TIPS["inv:col:" + k] = () => {
+  const t = INV_COL_TIPS[k]();
+  return `<div class="pf-metric-tip inv-tip inv-col-tip" role="tooltip"><div class="mt-name">${escapeHtml(t.name)}</div>
+    <div class="inv-col-body">${invColSketch(t.sk)}<div>${escapeHtml(t.say)}</div></div><div class="inv-tip-tech">${escapeHtml(t.how)}</div></div>`;
+};
+const invColHead = (k, label) => `<span class="inv-col-h" data-rich-tip="inv:col:${k}" tabindex="0">${label}</span>`;
 const invRiskOf = (x) => INV.risk?.data?.[x.symbol];
 function invDrvRows(b) {
   return b.positions.filter(x => !x.pending).map(x => ({ x, c: invContrib(x) || 0, noC: !invOk(invContrib(x)), r: invRiskOf(x) })).sort((p, q) => q.c - p.c);
@@ -15464,7 +15509,7 @@ const invDrvName = (x) => `<span class="inv-drv-name">${logoImg(x.symbol)}<span>
 const invDrvAttrs = (x) => `data-rich-tip="inv:drv" data-sym="${escapeHtml(x.symbol)}" tabindex="0"`;
 const invDrvBar = (left, width, cls) => `<span class="b ${cls}" style="left:${left.toFixed(2)}%;width:${Math.max(0.3, width).toFixed(2)}%"></span>`;
 const invDrvPts = (v) => `<span class="inv-drv-v ${invPtsCls(v)}">${invPts(v)}</span>`;
-const invPills = (attr, items, cur) => `<span class="pf-contrib-toggle" role="group">${items.map(([k, l]) => `<button type="button" data-${attr}="${k}" class="${k === cur ? "active" : ""}" aria-pressed="${k === cur}">${l}</button>`).join("")}</span>`;
+const invPills = (attr, items, cur, tip) => `<span class="pf-contrib-toggle" role="group">${items.map(([k, l]) => `<button type="button" data-${attr}="${k}"${tip ? ` data-rich-tip="${tip}${k}"` : ""} class="${k === cur ? "active" : ""}" aria-pressed="${k === cur}">${l}</button>`).join("")}</span>`;
 
 function invRiskLoad() {
   const b = INV.book, key = `${FX_QUOTE}|${b.positions.map(x => x.symbol).join()}`;
@@ -15485,7 +15530,7 @@ function invDriversPaint() {
   const status = INV.risk?.loading ? lcHtml("Reading 10 years of prices") : INV.risk?.failed || miss.length
     ? `${INV.risk?.failed || miss.length >= heldN ? "Couldn't read the price history." : `Couldn't read ${missed}.`} <button type="button" class="inv-link" data-inv-risk-retry>Try again</button>` : "";
   const picker = tab === "waterfall" || tab === "map"
-    ? `<span>Risk as</span>${invPills("inv-risk", Object.entries(INV_RISKS).map(([k, m]) => [k, m.label]), INV_RISKS[INV.drvRisk] ? INV.drvRisk : "var")}` : "";
+    ? `<span>Risk as</span>${invPills("inv-risk", Object.entries(INV_RISKS).map(([k, m]) => [k, m.label]), INV_RISKS[INV.drvRisk] ? INV.drvRisk : "var", "inv:col:")}` : "";
   el.innerHTML = `<div class="inv-drv-bar">${invPills("inv-drv", Object.entries(INV_DRV_TABS), tab)}<span class="sp"></span>${status}${picker}</div>
     <div class="inv-drv">${{ waterfall: invDrvWaterfall, value: invDrvValue, map: () => '<div id="inv-drv-map"></div>', dist: invDrvDist }[tab](b)}</div>`;
   drawInvDrvMap();
@@ -15515,7 +15560,7 @@ function invDrvWaterfall(b) {
       <span class="inv-drv-v">${s.x ? (v == null ? na() : M.fmt(v, s.x)) : ""}</span></div>`;
   };
   return `<div style="--drv-cols:minmax(150px,1.2fr) minmax(180px,2.2fr) 62px minmax(90px,.8fr) 66px">
-    <div class="inv-drv-hd"><span>Holding</span><span>Contribution to ${escapeHtml(p)} return, running total</span><span></span><span>${M.label}</span><span></span></div>
+    <div class="inv-drv-hd"><span>Holding</span><span>${invColHead("contrib", `Contribution to ${escapeHtml(p)} return, running total`)}</span><span></span><span>${invColHead(INV_RISKS[INV.drvRisk] ? INV.drvRisk : "var", M.label)}</span><span></span></div>
     ${steps.map(row).join("")}
     <div class="inv-drv-row tot"><span>Total</span><span class="inv-drv-tr">${zero}${invDrvBar(P(Math.min(0, total)), Math.abs(total) / span * 100, "tot")}</span>${invDrvPts(total)}<span></span><span></span></div>
     <div class="inv-drv-note">${M.label}: ${M.note}. ${rows.some(r => r.noC) ? "A holding with no contribution figure is left out of the running total." : `Contributions add up to your ${escapeHtml(p)} return exactly.`}</div></div>`;
@@ -15652,7 +15697,7 @@ function invAttentionHtml(b) {
   const gear = `<button type="button" class="inv-att-btn" data-inv-att-rules aria-label="Attention settings" data-tip="Change what the rail watches for, and the limits">${GEAR_SVG}</button>`;
   // One joined control (owner's pick from mockups, 2026-11-02); Upcoming has only the second part.
   const tools = (...b) => `<span class="inv-att-tools">${b.join("")}</span>`;
-  const full = `<button type="button" class="inv-att-btn" data-inv-att-full aria-label="Open Attention full screen" data-tip="Open full screen">${CORNERS_SVG}</button>`;
+  const full = `<button type="button" class="inv-att-btn blue" data-inv-att-full aria-label="Open Attention full screen" data-tip="Open full screen">${CORNERS_SVG}</button>`;
   // A plan item's ✕ is a menu (Phase 8): dismiss, snooze, or edit the plan.
   const x = (it) => it.plan
     ? `<button type="button" class="x-close inv-att-x" data-inv-att-menu="${escapeHtml(it.key)}" aria-haspopup="menu" aria-label="Dismiss or snooze: ${escapeHtml(it.text)}" data-tip="Dismiss or snooze">${X_SVG}</button>`
@@ -15886,8 +15931,9 @@ notifyPoll();
 
 /* Attention, full screen (owner's picks from mockups, 2026-11-02). The rail
  * says what fired; this says which holdings, how much it matters and what is
- * next. Three views on one pill (Desk: one row per holding, Charts: one price
- * chart per holding, Map: the whole book by weight), one right column
+ * next. Four views on one pill (Desk: one row per holding, Map: the whole book
+ * by weight, Charts: one price chart per holding, News: one square per holding
+ * of what is going on lately), one right column
  * (Upcoming, your limits, To tidy), and a click on any holding turns that
  * column into its page. Sentences are written here from the figures, never
  * by a model, and never suggest a trade (the alert research: backend.md). The
@@ -15896,13 +15942,13 @@ notifyPoll();
  * page's path. */
 const invFullPref = (k, d) => { try { return localStorage.getItem(k) || d; } catch (e) { return d; } };
 const invFullSave = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* per browser only */ } };
-const INV_FULL_VIEWS = [["desk", "Desk"], ["charts", "Charts"], ["map", "Map"]];
+const INV_FULL_VIEWS = [["desk", "Desk"], ["map", "Map"], ["charts", "Charts"], ["news", "News"]];
 const INV_FULL_RESULTS = 8;     // past results behind "usually moves it"
 const INV_FULL_USUAL_MIN = 3;   // fewer results than this say nothing "usual"
 const INV_FULL_CHUNK = 8;       // symbols per request: the screen fills in as they answer
 const INV_FULL_NEAR = 0.85;     // attention.NEAR_FRACTION, for the gauges' colour
 const INV_FULL_EXTRAS_AGE = 36e5;  // an hour, then a reopened screen asks again
-const INV_FULL = { view: invFullPref("inv_att_view", "desk"), metric: invFullPref("inv_att_metric", "day"), sel: null,
+const INV_FULL = { view: "desk", kicker: "Attention", metric: invFullPref("inv_att_metric", "day"), newsSort: invFullPref("inv_att_news_sort", "weight"), sel: null,
   extras: {}, pending: new Set(), asked: 0 };
 
 /* A map metric: its pill, how far each tile leans (-1..1), the figures on the tile. */
@@ -16006,6 +16052,78 @@ function invFullDesk(m) {
   if (!body) return `<div class="inv-calm">Nothing is near any of your limits.</div>`;
   return `<table class="att-fs-tbl"><thead><tr><th class="left">Holding</th><th class="left">Why it's here</th><th>Weight</th><th>Risk</th><th>Last day</th><th>From cost</th><th data-tip="Below its peak since you bought it. The line runs from its high (right) to its worst fall in ten years (left); the tick is the 95th percentile of its falls.">Below peak</th><th>Reports</th><th></th></tr></thead><tbody>${body}</tbody></table>
     <div class="att-fs-foot">Each group is sorted by share of the book's risk. From cost is the share price against what you paid, without dividends. Close to a limit means within 15% of it. A ✕ holds until the item gets a full step worse.</div>`;
+}
+
+/* ---- News ---- */
+/* One square per holding, for someone who doesn't look every day (mockup A,
+ * owner's pick, 2026-11-03): how it has done, its business, and the News read
+ * lens by lens, the same five-step scale throughout, so the colours can be
+ * scanned and the numbers are there when wanted. Hollow means nothing to read,
+ * never a guess. News and growth come from the page, cache only; the last
+ * results arrive with the extras once this view is open. */
+const INV_NEWS_SORTS = [["weight", "Biggest first"], ["say", "Most to say"], ["month", "Worst month"]];
+const INV_NEWS_RESULT_DAYS = 200;   // half-year reporters included; older isn't "lately"
+const invNewsStep = (v, oneStep) => invOk(v) ? Math.max(-2, Math.min(2, v / oneStep)) : null;
+/* The last results' surprise, if the results are recent. */
+function invNewsSurprise(r) {
+  const last = (invFullExtra(r.sym)?.results || []).slice(-1)[0];
+  return last && invOk(last.surprise) && Date.now() - Date.parse(last.date) < INV_NEWS_RESULT_DAYS * 864e5 ? last.surprise : null;
+}
+/* The month against this holding's usual month, so a calm share's +5% can read stronger than a wild share's. */
+function invNewsMonthStep(r) {
+  const usual = r.x.sigma_pct ? r.x.sigma_pct * Math.sqrt(21) : null;
+  return invOk(r.p.month_pct) && usual ? invNewsStep(r.p.month_pct / usual * 1.2, 1) : null;
+}
+const invNewsSaid = (r) => NS_LENSES.reduce((t, [k]) => t + Math.abs(r.p.news_sentiment?.news?.lenses?.[k]?.score || 0), 0);
+const INV_NEWS_ORDER = {
+  weight: (a, c) => c.p.weight - a.p.weight,
+  say: (a, c) => invNewsSaid(c) - invNewsSaid(a) || c.p.weight - a.p.weight,
+  month: (a, c) => (a.p.month_pct ?? Infinity) - (c.p.month_pct ?? Infinity),
+};
+function invNewsTile(r) {
+  const n = r.p.news_sentiment?.news, tier = nsNewsTier(n?.score), pct = (v) => invOk(v) ? invPct(v, 0) : invFullDash, cls = (v) => invOk(v) ? invCls(Math.round(v)) : "";
+  const row = (label, tip, step, val, c = "") => `<div class="att-fs-nw-r"><span data-tip="${escapeHtml(tip)}">${label}</span>${nsScale(step)}<b class="${c}">${val}</b></div>`;
+  const sec = (t) => `<div class="att-fs-nw-sec">${t}</div>`;
+  const rev = invOk(r.p.revenue_growth) ? r.p.revenue_growth * 100 : null, sur = invNewsSurprise(r);
+  const e = invFullExtra(r.sym), failed = e && !e.closes?.length && !INV_FULL.pending.has(r.sym);
+  return `<div class="att-fs-nw${INV_FULL.sel === r.sym ? " sel" : ""}" style="--edge:${tier ? NS_COLORS[tier] : "transparent"}" data-full-sym="${escapeHtml(r.sym)}" tabindex="0">
+    <div class="att-fs-nw-top">${logoImg(r.sym)}<span class="att-fs-name">${escapeHtml(shortName(r.p.name.replace(/\s+(Société anonyme|S\.E\.)$/i, "")))}</span><span class="att-fs-sub">${r.p.weight.toFixed(1)}%</span></div>
+    ${sec("Performance")}
+    ${row("Last month", "The Month figure from Holdings. The scale reads it against this holding's usual month.", invNewsMonthStep(r), invOk(r.p.month_pct) ? invPct(r.p.month_pct) : invFullDash, cls(r.p.month_pct))}
+    ${row("Since you bought", "The share price against what you paid, without dividends.", invNewsStep(r.p.return_pct, 25), pct(r.p.return_pct), cls(r.p.return_pct))}
+    ${sec("Financials")}
+    ${row("Revenue, a year", "Yahoo's revenue growth: the last quarter against a year earlier.", invNewsStep(rev, 10), pct(rev), cls(rev))}
+    ${row("Last results", "Earnings per share against what analysts expected, at the last results.", invNewsStep(sur, 10), invOk(sur) ? `${pct(sur)} vs est.` : failed ? `<button type="button" class="inv-link" data-full-retry="${escapeHtml(r.sym)}">Try again</button>` : invFullDash, cls(sur))}
+    ${sec("News")}
+    ${NS_LENSES.map(([k, label]) => { const L = n?.lenses?.[k]; return row(label, L ? L.fact || "What the news read found on this." : "Nothing on this in the news read.", L ? L.score : null, L ? fmtSig(L.score, 1) : invFullDash); }).join("")}
+  </div>`;
+}
+/* Reading the news spends the owner's NVIDIA and Finnhub quota, so it happens
+ * when asked, like the News tab's refresh, and says how old the reads are. */
+function invNewsReadLabel(has) {
+  const c = REFRESH.counts;
+  if (!REFRESH.id) return has ? "Read again" : "Read the news";
+  if (REFRESH.state !== "news") return "Updating prices…";
+  return c.news_total ? `Reading ${c.news_done} of ${c.news_total}…` : "Reading…";
+}
+function invNewsRead() {
+  // The mirror's own entries: any other string makes the Portfolio tab rebuild it.
+  const entries = bookEntries();
+  if (entries) rfStart("current", { scope: "current", view: BOOK_KEY, entries, days: NS.lookbackDays, phases: ["quotes", "news"] });
+}
+function invFullNews(m) {
+  const sort = INV_NEWS_ORDER[INV_FULL.newsSort] ? INV_FULL.newsSort : "weight";
+  const reads = m.rows.map(r => r.p.news_sentiment?.news).filter(n => n && invOk(n.score));
+  const say = (...tiers) => reads.filter(n => tiers.includes(nsNewsTier(n.score))).length;
+  const ages = reads.map(n => (Date.now() - Date.parse(n.assessed_at)) / 864e5).filter(Number.isFinite).sort((a, c) => a - c);
+  const age = ages.length ? Math.round(ages[ages.length >> 1]) : null;
+  const when = age == null ? "" : ` · most read ${age < 1 ? "today" : age === 1 ? "yesterday" : `${age} days ago`}`;
+  const pills = INV_NEWS_SORTS.map(([k, l]) => `<button type="button" data-full-news-sort="${k}" class="${k === sort ? "active" : ""}" aria-pressed="${k === sort}">${l}</button>`).join("");
+  return `<div class="att-fs-nw-band"><div><div class="att-fs-lede-t">What's going on with your ${m.rows.length === 1 ? "holding" : `${m.rows.length} holdings`}</div>
+      <div class="att-fs-sub">News: ${say("bullish", "very_bullish")} good, ${say("neutral")} mixed, ${say("bearish", "very_bearish")} bad, ${m.rows.length - reads.length} quiet${when} · <button type="button" class="inv-link" data-full-read-news data-has="${reads.length ? 1 : ""}"${REFRESH.id ? " disabled" : ""} data-tip="Reads the last ${NS.lookbackDays} days of news for your holdings, with your NVIDIA and Finnhub keys. It takes a few minutes.">${invNewsReadLabel(reads.length)}</button></div></div>
+      <span class="pf-contrib-toggle" role="group" aria-label="Order the holdings">${pills}</span></div>
+    <div class="att-fs-nw-grid">${[...m.rows].sort(INV_NEWS_ORDER[sort]).map(invNewsTile).join("")}</div>
+    <div class="att-fs-foot">Each scale runs from bad on the left to good on the right, the colour on the step it reached. Hollow means nothing to read. Hover a line for what it is, or for what the news said.</div>`;
 }
 
 /* ---- Charts ---- */
@@ -16224,6 +16342,7 @@ function invFullLede(m) {
 function invFullPaint() {
   const host = $("#inv-att-fs");
   if (!invFullIsOpen() || !host) return;
+  if (INV_FULL.flying) { INV_FULL.repaint = true; return; }
   if (!INV.book?.positions?.length) { invFullClose(); return; }
   const m = invFullModel();
   if (INV_FULL.sel && !m.by[INV_FULL.sel]) INV_FULL.sel = null;
@@ -16233,15 +16352,15 @@ function invFullPaint() {
   const asOf = m.b.computed_at ? new Date(m.b.computed_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
   const now = new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).replace(",", "");
   const sel = INV_FULL.sel ? m.by[INV_FULL.sel] : null;
-  const main = view === "desk" ? invFullLede(m) + invFullDesk(m) : view === "charts" ? invFullLede(m) + invFullCharts(m) : invFullMap(INV_FULL.metric);
+  const main = view === "desk" ? invFullLede(m) + invFullDesk(m) : view === "charts" ? invFullLede(m) + invFullCharts(m) : view === "news" ? invFullNews(m) : invFullMap(INV_FULL.metric);
   const side = sel ? invFullDetail(sel) : (view === "map" ? invFullFlagged(m) : "") + invFullEvents(m) + invFullLimits(m) + invFullTidy(m);
   host.innerHTML = `<div class="att-fs-head">
-      <div class="att-fs-head-l"><span class="sa-kicker">Attention</span><span class="att-fs-sub">${escapeHtml(now)}${asOf ? ` · prices as of ${asOf}` : ""}${m.b.stale ? " · refreshing…" : ""}</span></div>
+      <div class="att-fs-head-l"><span class="sa-kicker">${INV_FULL.kicker}</span><span class="att-fs-sub">${escapeHtml(now)}${asOf ? ` · prices as of ${asOf}` : ""}${m.b.stale ? " · refreshing…" : ""}</span></div>
       <span class="pf-contrib-toggle att-fs-views" role="group" aria-label="View">${pills}</span>
       <div class="att-fs-head-r"><button type="button" class="att-fs-gear" data-full-rules aria-label="Attention settings" data-tip="Change what the rail watches for, and the limits">${GEAR_SVG}</button><button type="button" class="x-close" data-full-close aria-label="Close">${X_SVG}</button></div>
     </div>
     <div class="att-fs-body">
-      <div class="att-fs-main${view === "map" ? " map" : ""}" data-full-scroll="main-${view}">${main}</div>
+      <div class="att-fs-main${view === "map" || view === "news" ? ` ${view}` : ""}" data-full-scroll="main-${view}">${main}</div>
       <div class="att-fs-side" data-full-scroll="${sel ? "det" : "side"}">${side}</div>
     </div>`;
   host.querySelectorAll("[data-full-scroll]").forEach(el => { el.scrollTop = scroll[el.dataset.fullScroll] || 0; });
@@ -16273,17 +16392,51 @@ async function invFullExtras(symbols) {
 }
 function invFullWanted() {
   const m = invFullModel(), seen = new Set(), out = [];
-  for (const r of [...m.hi, ...m.fy, ...m.rows.filter(x => x.ev.length), ...m.near]) if (!seen.has(r.sym)) { seen.add(r.sym); out.push(r.sym); }
+  for (const r of [...m.hi, ...m.fy, ...m.rows.filter(x => x.ev.length), ...m.near, ...(INV_FULL.view === "news" ? m.rows : [])]) if (!seen.has(r.sym)) { seen.add(r.sym); out.push(r.sym); }
   if (INV_FULL.sel && !seen.has(INV_FULL.sel)) out.push(INV_FULL.sel);
   return out;
 }
-function invFullOpen() {
+/* The Analysis button holds a tiny Map; pressed, its tiles leave the button and
+ * become the real one (owner's pick from mockups, 2026-11-03). A repaint would
+ * replace the tiles in flight, so paints wait until they land. Motion switched
+ * off in the system: it simply opens. */
+const INV_FLY_MS = 480, INV_FLY_SPREAD = 240;   // each tile's flight; the last one's head start
+const invFullStill = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+function invFullFly(from) {
+  const bg = $("#inv-att-bg"), tiles = [...bg.querySelectorAll(".att-fs-tile")];
+  const spots = [...from.querySelectorAll(".inv-glyph i")].map(el => el.getBoundingClientRect());
+  if (invFullStill() || !tiles.length || !spots.length || !bg.animate) return;
+  INV_FULL.flying = true;
+  bg.classList.add("flying");
+  bg.animate([{ backgroundColor: "transparent" }, { backgroundColor: getComputedStyle(bg).backgroundColor }], { duration: 300 });
+  bg.querySelectorAll(".att-fs-head, .att-fs-maptop, .att-fs-side").forEach(el =>
+    el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, delay: 160, fill: "backwards" }));
+  const flights = tiles.map((t, i) => {
+    const r = t.getBoundingClientRect(), at = spots[i % spots.length];
+    return t.animate([
+      { transformOrigin: "0 0", transform: `translate(${at.left - r.left}px,${at.top - r.top}px) scale(${at.width / r.width},${at.height / r.height})`, opacity: 0.9 },
+      { transformOrigin: "0 0", transform: "none", opacity: 1 },
+    ], { duration: INV_FLY_MS, delay: i / tiles.length * INV_FLY_SPREAD, easing: "cubic-bezier(.2,.9,.2,1)", fill: "backwards" }).finished;
+  });
+  Promise.allSettled(flights).then(() => {
+    INV_FULL.flying = false;
+    bg.classList.remove("flying");
+    if (INV_FULL.repaint) { INV_FULL.repaint = false; invFullPaint(); }
+  });
+}
+/* Every opening starts on the view its button names: Desk from Attention, the
+ * Map from Analysis (owner's call, 2026-11-03). */
+function invFullOpen(view = "desk", kicker = "Attention", from = null) {
   const bg = $("#inv-att-bg"), b = INV.book;
-  if (!bg || !b?.positions?.length) return;
+  if (!bg || !b?.positions?.length || invFullIsOpen()) return;
+  INV_FULL.view = view;
+  INV_FULL.kicker = kicker;
   if (Date.now() - INV_FULL.asked > INV_FULL_EXTRAS_AGE) { INV_FULL.extras = {}; INV_FULL.asked = Date.now(); }
   INV_FULL.sel = null;
   if (!showOverlay(bg)) return;
   invFullPaint();
+  if (from) invFullFly(from);
+  $("#inv-att-fs [data-full-close]")?.focus({ preventScroll: true });  // Enter must not press what's underneath
   invRiskLoad();
   invFullExtras(invFullWanted());
   if (!INV.recap) invRecapLoad().then(invFullPaint);
@@ -16293,7 +16446,21 @@ function invFullOpen() {
 }
 function invFullClose() {
   invClosePop();
-  if (hideOverlay("#inv-att-bg")) INV_FULL.sel = null;
+  if (INV_FULL.closing) return;
+  const bg = $("#inv-att-bg"), wasAnalysis = INV_FULL.kicker === "Analysis";
+  const done = () => {
+    INV_FULL.closing = false;
+    if (!hideOverlay("#inv-att-bg")) return;
+    INV_FULL.sel = null;
+    if (wasAnalysis) $("[data-inv-analysis]")?.focus({ preventScroll: true });
+  };
+  // Opened from Analysis, it goes back into the button, quicker than it came.
+  const b = wasAnalysis ? $("[data-inv-analysis]")?.getBoundingClientRect() : null;
+  if (!b?.width || b.bottom < 0 || invFullStill() || !invFullIsOpen() || !bg.animate) { done(); return; }
+  INV_FULL.closing = true;
+  const back = bg.animate([{ clipPath: "inset(0 0 0 0 round 0)" }, { clipPath: `inset(${b.top}px ${innerWidth - b.right}px ${innerHeight - b.bottom}px ${b.left}px round 5px)` }],
+    { duration: 220, easing: "cubic-bezier(.5,0,.8,.4)", fill: "forwards" });
+  back.finished.then(() => { done(); back.cancel(); }, done);
 }
 function invFullSelect(sym) {
   INV_FULL.sel = INV_FULL.sel === sym ? null : sym;
@@ -16316,9 +16483,13 @@ async function invFullDismissAll(sym) {
 $("#inv-att-bg").addEventListener("click", (e) => {
   const t = (sel) => e.target.closest(sel);
   if (t("[data-full-close]")) invFullClose();
-  else if (t("[data-full-view]")) {
+  else if (t("[data-full-read-news]")) invNewsRead();
+  else if (t("[data-full-news-sort]")) {
+    INV_FULL.newsSort = t("[data-full-news-sort]").dataset.fullNewsSort;
+    invFullSave("inv_att_news_sort", INV_FULL.newsSort);
+    invFullPaint();
+  } else if (t("[data-full-view]")) {
     INV_FULL.view = t("[data-full-view]").dataset.fullView;
-    invFullSave("inv_att_view", INV_FULL.view);
     invFullPaint();
   } else if (t("[data-full-metric]")) {
     INV_FULL.metric = t("[data-full-metric]").dataset.fullMetric;
@@ -16697,7 +16868,8 @@ RICH_TIPS["inv:drv"] = (host) => {
   const x = invPos(host); if (!x) return "";
   const r = invRiskOf(x), vr = invOk(r?.var_pct) ? -r.var_pct : null, line = (k, v) => `<tr><th>${k}</th><td>${v}</td></tr>`;
   const val = (M) => { const v = M.get(x, r); return v == null ? na() : M.fmt(v, x); };
-  return `<div class="pf-metric-tip inv-tip" role="tooltip"><div class="mt-name">${escapeHtml(x.name)}</div>
+  const proxy = r?.rec?.proxy || r?.proxy;
+  return `<div class="pf-metric-tip inv-tip inv-tip-wide" role="tooltip"><div class="mt-name">${escapeHtml(x.name)}</div>
     <table class="mt-table inv-tip-table"><tbody>
       ${line(`Contribution, ${escapeHtml(INV.period)}`, invPts(invContrib(x)))}
       ${line("Weight", invPct(x.weight, 1).replace("+", ""))}
@@ -16705,7 +16877,7 @@ RICH_TIPS["inv:drv"] = (host) => {
       ${line("Bad month, on its own", vr == null ? na() : `${INV_RISKS.var.fmt(vr)} · about ${vr < 0 ? "+" : "−"}${invMoney(x.value * Math.abs(vr) / 100)}`)}
       ${line("Worst fall, 10y", val(INV_RISKS.fall))}
       ${line("Below its 10y high", val(INV_RISKS.below))}
-    </tbody></table>${invRecCard(r)}<div class="inv-tip-tech">In ${escapeHtml(INV.book.ccy)}, dividends included.${r?.proxy ? ` Before its own listing, ${escapeHtml(r.proxy)} stands in: the same company elsewhere.` : ""}</div></div>`;
+    </tbody></table>${invRecCard(r)}<div class="inv-tip-tech">${r ? "The past, not a promise: companies that never came back aren't in it. " : ""}${r?.rec ? "The table in" : "In"} ${escapeHtml(INV.book.ccy)}, dividends included.${proxy ? ` Before its own listing, ${escapeHtml(proxy)} stands in.` : ""}</div></div>`;
 };
 /* Time to recover in the Drivers card: every stretch below its running all-time
  * high with the curve fitted to them, then the falls of 10% or more, and how long
@@ -16731,21 +16903,20 @@ function invRecCard(r) {
   const dips = D ? `Since ${escapeHtml(since)} it has gone below its ${high} ${times(D.n)} and come back. ${back}` : "";
   const running = L.open_days && !old;
   const chart = D ? `${invRecChart(D, running ? D.running : null)}<div class="inv-rec-key">Bars: each time below its high. Solid: falls of 10% or more.${running ? " Red: the one still running." : ""}</div>` : "";
-  if (!n) return `<div class="inv-rec">${head}<p>${D ? `${dips} None was a fall of 10% or more.` : `It hasn't fallen 10% or more from its high since ${escapeHtml(since)}.`}</p>${chart}${D ? `<div class="inv-tip-tech">The past, not a promise: companies that never came back aren't in it. The line is a lognormal fitted to the bars, leaning on 40 large stocks where it has few.</div>` : ""}</div>`;
+  if (!n) return `<div class="inv-rec">${head}<p>${D ? `${dips} None was a fall of 10% or more.` : `It hasn't fallen 10% or more from its high since ${escapeHtml(since)}.`}</p>${chart}</div>`;
   const left = !fh ? "" : fh.q50 == null ? " Few falls this deep have ever come back, so there is no fair estimate of when." : ` From there, half of falls like it took about ${invRecWords(fh.q50)} more${fh.beyond ? ", the rest longer still" : `, 9 in 10 about ${invRecWords(fh.q90)}`}.`;
   const open = L.open_days ? ` <span class="neg">${old ? `On ${escapeHtml(invDay(L.asof).replace(/^\w+ /, ""))} it was in one` : "It is in one now"}: ${invRecWords(L.open_days)} so far, ${Math.abs(L.open_now).toFixed(0)}% below its high.${left}</span>` : "";
   const said = `${D ? `${dips} It has had ${n === 1 ? "one fall" : `${n} falls`} of 10% or more.` : `It has fallen 10% or more from its high ${times(n)} since ${escapeHtml(since)}.`}${f ? ` Out of 10 falls like these, expect about 5 back within ${invRecWords(f.q50)} and 9 within ${invRecWords(f.q90)}.` : ""}${open}`;
   const depth = L.open_days ? Math.abs(L.open_depth ?? L.open_now) : null;
   const strip = INV_REC_DEPTH.map(([lo, hi, d]) => `<span class="${depth != null && depth >= lo && depth < hi ? "on" : ""}"><b>${invRecWords(d).replace(" months", " mo").replace(" month", " mo").replace(" years", " y").replace(" year", " y")}</b>${lo}${hi === 100 ? "%+" : `–${hi}%`}</span>`).join("");
   return `<div class="inv-rec">${head}<p>${said}</p>${chart}
-    <div class="inv-rec-sk">Deeper falls take longer: half of the falls this deep took</div><div class="inv-rec-depth">${strip}</div>
-    <div class="inv-tip-tech">The past, not a promise: companies that never came back aren't in it. ${D ? "The line is a lognormal fitted to the bars, leaning on 40 large stocks where it has few." : ""} For falls of 10% or more, an inverse Gaussian: how long comes from how much the share moves and its own falls${n < 5 ? ", of which it has few" : ""}, the shape and the depths from those 40 stocks since 1962.${r.rec ? " Each share in its own currency, from all the daily history Yahoo has." : ""}${r.rec?.proxy && r.rec.proxy !== r.proxy ? ` Before its own listing, ${escapeHtml(r.rec.proxy)} stands in: the same company elsewhere.` : ""}</div></div>`;
+    <div class="inv-rec-sk">Deeper falls take longer: half of the falls this deep took</div><div class="inv-rec-depth">${strip}</div></div>`;
 }
 /* Thirty bars on a log axis, two days to thirty years, every stretch below the
  * running high; the curve is in the bars' own unit (expected dips per bar), so it can
  * be read against them. A lone long fall still shows: nothing under 2 px. */
 function invRecChart(d, running) {
-  const W = 292, H = 86, B = 16, e = d.bins, n = e.length - 1, bw = W / n, floor = 2;
+  const W = 372, H = 92, B = 16, e = d.bins, n = e.length - 1, bw = W / n, floor = 2;
   const X = (x) => Math.log(x / e[0]) / Math.log(e[n] / e[0]) * W;
   const op = running ? Math.max(0, Math.min(n - 1, Math.floor(X(running) / bw))) : -1;
   const mx = Math.max(1, ...d.counts.map((c, i) => c + (i === op ? 1 : 0)), ...d.curve), Y = (v) => v ? Math.max(floor, v / mx * (H - B - 6)) : 0;
@@ -16754,7 +16925,7 @@ function invRecChart(d, running) {
   const run = op >= 0 ? `<rect x="${(op * bw + 1).toFixed(1)}" y="${(H - B - Y(d.counts[op]) - Math.max(4, Y(1)) + .75).toFixed(1)}" width="${(bw - 2).toFixed(1)}" height="${(Math.max(4, Y(1)) - 1.5).toFixed(1)}" fill="none" stroke="var(--neg)" stroke-width="1.5"></rect>` : "";
   const line = d.curve.map((v, i) => `${i ? "L" : "M"}${(i * bw + bw / 2).toFixed(1)} ${(H - B - v / mx * (H - B - 6)).toFixed(1)}`).join("");
   const ticks = [[2, "2 d"], [5, "1 wk"], [21, "1 mo"], [63, "3 mo"], [252, "1 y"], [756, "3 y"], [2520, "10 y"], [7560, "30 y"]];
-  return `<svg class="inv-rec-chart" width="${W}" height="${H}" role="img" aria-label="How long each time below its high took to recover"><line x2="${W}" y1="${H - B}" y2="${H - B}" stroke="var(--border)"></line>${bars}${run}<path d="${line}" fill="none" stroke="var(--text)" stroke-width="1.5"></path>
+  return `<svg class="inv-rec-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="How long each time below its high took to recover"><line x2="${W}" y1="${H - B}" y2="${H - B}" stroke="var(--border)"></line>${bars}${run}<path d="${line}" fill="none" stroke="var(--text)" stroke-width="1.5"></path>
     ${ticks.map(([x, l], i) => `<text x="${X(x).toFixed(1)}" y="${H - 3}" text-anchor="${i === 0 ? "start" : i === ticks.length - 1 ? "end" : "middle"}">${l}</text>`).join("")}</svg>`;
 }
 RICH_TIPS["inv:yoc"] = (host) => {
@@ -17916,6 +18087,7 @@ $("#inv-page").addEventListener("click", (e) => {
   else if (e.target.closest("[data-inv-att-more]")) { INV.attMore = !INV.attMore; invAttApply(INV.book?.attention); invAttSeen(); }
   else if (e.target.closest("[data-inv-att-rules]")) { openSettings(); selectSettingsSection("attention"); }
   else if (e.target.closest("[data-inv-att-full]")) invFullOpen();
+  else if (e.target.closest("[data-inv-analysis]")) invFullOpen("map", "Analysis", e.target.closest("[data-inv-analysis]"));
   else if (e.target.closest("[data-inv-divs]")) { INV.divOpen = !INV.divOpen; const a = $("#inv-page .inv-rail"); if (a) a.innerHTML = invRailHtml(INV.book); }
   else if (e.target.closest("[data-inv-div-add]")) invAddDividends(e.target.closest("[data-inv-div-add]").dataset.invDivAdd);
   else if (e.target.closest("[data-inv-redo]")) invUndo(true);

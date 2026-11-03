@@ -852,9 +852,10 @@ return; an oversell is refused; an edit that breaks a later sell is refused.
   not a 500, when a day loses everything (Carino has no log link at -100%).
 - **Yield on cost**: the last 12 months of Yahoo payouts per share x shares
   / the holding's cost, gross, at today's FX. **News / Market read and
-  analyst upside** come from caches only (`_research_extras`: the sentiment
-  cache, and the `__book__` rows, else any saved portfolio's row for the
-  share), never a fetch here. The export writes text that starts with "="
+  analyst upside and revenue growth** come from caches only (`_research_extras`:
+  the sentiment cache, and the `__book__` rows, else any saved portfolio's row
+  for the share), never a fetch here. A news refresh forgets the page's memo
+  (`forget_page`), since the page carries the reads. The export writes text that starts with "="
   as text, never a formula.
 - **Closed** holdings (`closed`) and **suggested dividends**
   (`suggested_dividends`, every estimate with its ex-date, shares and per
@@ -951,8 +952,8 @@ page's path**; what isn't there is left out of the page.
   `state/proxies.json` (market data only); candidate closes are fetched with
   `_bulk_close(retry=False)`, so a dead candidate costs nothing beyond the
   batch (the retries sleep up to ~5 s each).
-- `_research_extras` reads the saved portfolios' analyst rows once per
-  `views.json` change (`_analyst_rows`, keyed by path and mtime).
+- `_research_extras` reads the saved portfolios' analyst rows and revenue growth
+  once per `views.json` change (`_saved_rows`, keyed by path and mtime).
 
 ### My Investments Attention rail (Phase 7: `attention.py`)
 - **Metrics with the page, rules at response time.** `book()` adds each

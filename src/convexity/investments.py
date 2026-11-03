@@ -413,6 +413,11 @@ def refresh_symbols() -> list[str]:
     return [*syms, INV_BENCHMARKS[bench_key()][0]] if syms else []
 
 
+def forget_page() -> None:
+    """The next page recomputes: a news refresh changed what it carries."""
+    _PAGE_MEMO.clear()
+
+
 def refresh_market(symbols: list[str], *, progress=None, cancel=None, chunk: int = 4) -> None:
     """Drop the book's cached market data, then fetch it again in small
     chunks (the topbar Refresh on My Investments). Each chunk reports
@@ -2437,49 +2442,56 @@ def _yield_on_cost(symbol: str, qccy: str, qty: float, cost: float, mult: dict) 
     return ttm * qty * float(m[-1]) / cost * 100
 
 
-_ANALYST_ROWS: tuple = (None, {})  # (views.json mtime, {symbol: row}) - the file is MBs
+_SAVED_ROWS: tuple = (None, {}, {})  # (views.json mtime, targets, growth) - the file is MBs
 
 
-def _analyst_rows(persistence) -> dict:
-    """The saved portfolios' rows that carry an analyst target, the book's
-    mirror first; parsed again only when views.json changes."""
-    global _ANALYST_ROWS
+def _saved_rows(persistence) -> tuple[dict, dict]:
+    """From the saved portfolios' rows, the book's mirror first: ({symbol: row
+    that carries an analyst target}, {symbol: revenue growth, a fraction});
+    parsed again only when views.json changes."""
+    global _SAVED_ROWS
     try:
         vp = persistence._views_path()
         mtime = (str(vp), vp.stat().st_mtime_ns)
     except OSError:
         mtime = None
-    if mtime is not None and _ANALYST_ROWS[0] == mtime:
-        return _ANALYST_ROWS[1]
+    if mtime is not None and _SAVED_ROWS[0] == mtime:
+        return _SAVED_ROWS[1], _SAVED_ROWS[2]
     with persistence._VIEWS_LOCK:
         views = persistence._read_views_raw().get("views") or {}
     if not isinstance(views, dict):
         views = {}
     rows: dict = {}
+    growth: dict = {}
     for name in ["__book__", *(k for k in views if k != "__book__")]:
         view = views.get(name)
         for r in (view.get("rows") or []) if isinstance(view, dict) else []:
-            if isinstance(r, dict) and r.get("symbol") and r.get("target_mean_price") is not None:
+            if not isinstance(r, dict) or not r.get("symbol"):
+                continue
+            if r.get("target_mean_price") is not None:
                 rows.setdefault(r["symbol"], r)
-    _ANALYST_ROWS = (mtime, rows)
-    return rows
+            if _num_ok(r.get("revenue_growth")):
+                growth.setdefault(r["symbol"], r["revenue_growth"])
+    _SAVED_ROWS = (mtime, rows, growth)
+    return rows, growth
 
 
 def _research_extras(symbols: list[str]) -> dict[str, dict]:
     """What the research tabs already know about each holding, from cache
     only (never a fetch on this page): the News and Market reads, and the
-    analyst target from the Portfolios tab's mirror of the book, else from
-    any saved portfolio that holds the share."""
+    analyst target and revenue growth from the Portfolios tab's mirror of the
+    book, else from any saved portfolio that holds the share."""
     from convexity import news_sentiment as ns
     from convexity import persistence
 
-    rows = _analyst_rows(persistence)
+    rows, growth = _saved_rows(persistence)
     out = {}
     for s in symbols:
         r = rows.get(s) or {}
         t, px = r.get("target_mean_price"), r.get("price")
         up = (t / px - 1) * 100 if _num_ok(t) and _num_ok(px) and px > 0 else None
-        out[s] = {"news_sentiment": ns.get_cached_sentiment(s), "upside_pct": up}
+        out[s] = {"news_sentiment": ns.get_cached_sentiment(s), "upside_pct": up,
+                  "revenue_growth": growth.get(s)}  # fmt: skip
     return out
 
 

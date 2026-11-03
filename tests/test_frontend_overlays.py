@@ -140,9 +140,30 @@ def test_attention_full_screen_opens_from_both_rail_headers_through_the_helpers(
     assert 'kicker("Attention", tools(gear, full))' in _APP_JS
     assert 'kicker("Upcoming", tools(full))' in _APP_JS
     start = _APP_JS.index("function invFullOpen")
-    assert "showOverlay(bg)" in _APP_JS[start : start + 400]
+    assert "showOverlay(bg)" in _APP_JS[start : start + 500]
     start = _APP_JS.index("function invFullClose")
-    assert 'hideOverlay("#inv-att-bg")' in _APP_JS[start : start + 200]
+    assert 'hideOverlay("#inv-att-bg")' in _APP_JS[start : start + 400]
+
+
+def test_each_opening_starts_on_the_view_its_button_names():
+    start = _APP_JS.index("function invFullOpen")
+    assert 'view = "desk"' in _APP_JS[start : start + 80]
+    assert 'invFullOpen("map", "Analysis"' in _APP_JS
+    assert "inv_att_view" not in _APP_JS
+
+
+def test_a_repaint_waits_for_the_analysis_tiles_to_land():
+    start = _APP_JS.index("function invFullPaint")
+    assert "INV_FULL.flying" in _APP_JS[start : start + 200]
+    assert "prefers-reduced-motion" in _APP_JS
+    assert "prefers-reduced-motion" in _CSS
+
+
+def test_the_news_view_reads_only_when_asked_and_keeps_the_mirror_entries():
+    start = _APP_JS.index("function invNewsRead()")
+    assert "bookEntries()" in _APP_JS[start : start + 200]
+    start = _APP_JS.index("function invFullOpen")
+    assert "invNewsRead" not in _APP_JS[start : start + 900]
 
 
 def test_attention_full_screen_sits_under_what_opens_over_it():

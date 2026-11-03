@@ -854,6 +854,23 @@ def test_analyst_upside_comes_from_any_saved_portfolio_when_the_book_tab_hasnt_l
     assert b["positions"][0]["upside_pct"] == pytest.approx(25.0)
 
 
+def test_revenue_growth_comes_from_saved_rows_even_without_an_analyst_target():
+    from convexity import persistence
+
+    persistence.save_view(
+        "Tech", "AAPL", [{"symbol": "AAPL", "price": 200.0, "revenue_growth": 0.08}]
+    )
+    b = inv.add(BUY, 0)
+    assert b["positions"][0]["revenue_growth"] == pytest.approx(0.08)
+    assert b["positions"][0]["upside_pct"] is None
+
+
+def test_a_news_refresh_recomputes_the_page():
+    inv._PAGE_MEMO[("key",)] = (0.0, {"positions": []})
+    inv.forget_page()
+    assert not inv._PAGE_MEMO
+
+
 # ------------------------------------------------- the page, fast (2026-10-12)
 
 

@@ -583,6 +583,8 @@ def _run_longrun_phase(job: Job) -> None:
 
 
 def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
+    from convexity import investments
+
     job.phase = "news"
     # Every early return releases the planned reservation (_plan_totals seeded
     # it before we knew whether news would run at all): a phase that is skipped
@@ -651,6 +653,7 @@ def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:
     result = _ns.refresh_sentiment(
         symbols, context=context, progress_cb=_progress, cancel=job.cancel
     )
+    investments.forget_page()  # the book's page carries these reads
     st = result.get("status") or {}
     job.emit(
         "phase",

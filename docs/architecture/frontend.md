@@ -131,12 +131,30 @@ dependency (loaded from CDN, used only for column-guide formulas).
   export keeps exact values. Do not add a "when your book falls 1%" beta sentence:
   median R² .16 on this kind of book.
 - **The holdings block swaps alone** (`#inv-hold`, `invHoldStill`): table to Drivers, or tab to tab, never `invRender` (it forces a layout while the page is short, which pulled the scroll up). A shorter block gets just enough `min-height` to hold the scroll position.
+- **The Analysis button (owner's pick from mockups, 2026-11-03).** It and the ⤢
+  are `--cta`, deep blue in light and dark. It holds a tiny Map (`.inv-glyph`) whose
+  tiles reshuffle on hover; pressed, `invFullFly` sends the real Map's tiles out of
+  it. **A repaint would replace tiles in flight, so `invFullPaint` waits while
+  `INV_FULL.flying`** and runs once when they land; `.flying` lifts the overflow
+  clip, because they start outside the Map's box. Closing goes back into the button
+  (`invFullClose`, a clip-path). `prefers-reduced-motion`: it simply opens and closes.
+- **The News view (`invFullNews`, mockup A, 2026-11-03).** One square per holding,
+  for someone who doesn't look every day: Performance (the Month figure from
+  Holdings, read against its usual month; since you bought), Financials (revenue
+  growth from the page; the last results' surprise from the extras, within 200
+  days) and the News read's five lenses, all on `nsScale`. Hollow means nothing to
+  read; hover a line for what it is or what the news said. The extras are asked for
+  every holding only while this view is open. **"Read again" is the only thing here
+  that spends quota, and only when pressed** (`invNewsRead`: a normal `quotes` +
+  `news` job on `__book__`, which also refreshes the saved rows); the band says how
+  old the reads are. My Investments' Refresh stays prices only.
 - **Attention, full screen (owner's picks from mockups, 2026-11-02).** The ⤢ in
   the rail's Attention and Upcoming headers opens `#inv-att-bg` through
   `showOverlay` (z 85: under the plan popover, menus and Settings; the stock
   window's `.modal-bg` is lifted over it with `body:has(...)`). Everything is
-  `invFull*`, and the page's own data paints at once. Three views on one pill,
-  kept per browser (`inv_att_view`): **Desk**, one row per holding with every
+  `invFull*`, and the page's own data paints at once. Four views on one pill,
+  and every opening starts on the view its button names (the ⤢: Desk; **Analysis**
+  on the hero: Map, its kicker says so): **Desk**, one row per holding with every
   reason beside the numbers, in groups sorted by risk share, because the rail's
   rule order put a 0.1% holding above a 9% risk; **Charts**, one price chart per
   holding with what you paid as the waterline (green above, red below), the peak
