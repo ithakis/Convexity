@@ -205,7 +205,10 @@ Each of these has cost real debugging time; the link goes to the full story.
   a few symbols at a time. A share of the risk reads through `invShareText` /
   `invRiskVerdict` on every surface (whole percent, "about 0", holdings without cash).
   A running fall is `from_here`, never a ratio of the curve; no GPD (tested, not worth
-  it). After a constant changes: `scripts/study_recovery.py`, then bump `VERSION`.
+  it). **The histogram is every stretch below the running all-time high** (`dip_days`, the
+  owner's definition, no minimum size); only the 10%+ estimate (`recovery_fit`, scale from
+  the three-year volatility before each fall) and the depth strip are about big falls. After
+  a constant changes: `scripts/study_recovery.py`, then bump `VERSION`.
   [backend.md → long view](docs/architecture/backend.md#my-investments-long-view-long_runpy-2026-11-02) ·
   [docs/recovery_research.md](docs/recovery_research.md)
 - **Holding contributions add up to the TWR exactly** (Phase 4): a new

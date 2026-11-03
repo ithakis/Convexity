@@ -4470,6 +4470,7 @@
   .inv-rec p { margin: 0 0 6px; font-size: 12.5px; line-height: 1.42; }
   .inv-rec-chart { display: block; }
   .inv-rec-chart text { font-size: 9.5px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+  .inv-rec-key { margin-top: 1px; font-size: 10.5px; color: var(--muted); }
   .inv-rec-sk { margin-top: 8px; font-size: 11.5px; color: var(--muted); }
   .inv-rec-depth { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 3px; border: 1px solid var(--border); border-radius: var(--r-xs); }
   .inv-rec-depth span { padding: 3px 0; text-align: center; font-size: 10.5px; color: var(--muted); }

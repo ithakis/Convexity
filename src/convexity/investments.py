@@ -1735,7 +1735,8 @@ def _risk_stats(px: np.ndarray) -> dict:
             "recmax": max(days, default=None), "open_days": open_days,
             "open_depth": eps["open_depth"], "open_now": eps["open_now"], "falls": len(days),
             "from_here": long_run.from_here(eps["open_now"], open_days, eps["open_depth"]),
-            "rec_fit": long_run.recovery_fit(days, open_days)}  # fmt: skip
+            "rec_fit": long_run.recovery_fit(days, open_days, eps["vols"], eps["vol_now"]),
+            "rec_dips": long_run.dip_histogram(*long_run.dip_days(px), days)}  # fmt: skip
 
 
 def _holding_risk(ccy: str | None = None) -> tuple[dict, list[str]]:

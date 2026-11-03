@@ -2,11 +2,13 @@
 
 Research behind the Time to recover card in My Investments (2026-11-02/03). The
 owner proposed peaks-over-threshold (POT) with a generalized Pareto tail, with
-benchmarks from Brownian motion. This note records the test and what shipped.
+benchmarks from Brownian motion. This note records the test and what shipped, and the
+later change to the histogram and the volatility scale (below). Tables after "What
+shipped" are from the first study, on 1,520 falls and before those changes.
 
 `scripts/study_recovery.py` recomputes every shipped constant from public tickers,
 and was checked to reproduce them exactly. The panel is 40 large caps (AAPL, MSFT,
-NVDA, SPY, JPM, ...), Yahoo max history from 1962, total return: 1,520 falls of 10%
+NVDA, SPY, JPM, ...), Yahoo max history from 1962, total return: 1,528 falls of 10%
 or more from a high, 31 still running. The study also ran on one private book;
 those figures are not recorded here beyond the summary below.
 
@@ -14,12 +16,54 @@ those figures are not recorded here beyond the summary below.
 
 | Piece | Model | Why |
 |---|---|---|
-| The card's curve | Inverse Gaussian, shape and scale pooled (φ .31, μ 261 days), each holding's scale shrunk by 12 falls | Best calibrated and most stable. One holding's falls can't carry two parameters. |
-| Falls of each depth | Pooled Kaplan-Meier table, median days 60 / 150 / 391 / 1223 for 10-20 / 20-30 / 30-50 / 50%+ | A table held up out of time. Curves conditioned on depth did not. |
-| A fall still running | ln(days left) = 5.224 + 1.297 ln a + 0.301 ln t − 0.582 ln w, σ 1.204 | Knows how far the price still has to go. Nothing else came close. |
-| Data | `long_run.usable_start` | The existing glitch filter removed nothing on max history. |
+| The histogram | Every stretch below the running all-time high, 30 bars from 2 days to 30 years, with a lognormal truncated below 2 days, leaning on the panel by 100 dips | The owner's definition. A holding has dozens to hundreds, where it has about a dozen falls of 10% or more. |
+| Falls of 10% or more | Inverse Gaussian, shape pooled (φ .30, μ 269 days at 30% volatility), scale from the 3-year volatility before each fall (slope −1.02), adjusted by its own falls over 25 | Beats the old estimate after every date tested. One holding's falls can't carry two parameters. |
+| Falls of each depth | Pooled Kaplan-Meier table, median days 59 / 150 / 384 / 1223 for 10-20 / 20-30 / 30-50 / 50%+ | A table held up out of time. Curves conditioned on depth did not. |
+| A fall still running | ln(days left) = 5.165 + 1.300 ln a + 0.309 ln t − 0.597 ln w, σ 1.205 | Knows how far the price still has to go. Nothing else came close. |
+| Data | `long_run.repair_splits`, then `long_run.usable_start` | The existing glitch filter removed nothing on max history. |
 
 No GPD anywhere.
+
+## Every dip, not only the big ones
+
+Falls of 10% or more come about 0.7 times a year, so 30 bars over a holding's dozen falls
+stayed mostly empty, and more history can't fix that: the panel's median of 48 years and 39
+falls still fills about half.
+The owner's definition is the plain one: keep a running all-time high, count the days each
+stretch below it took to get back, and plot that. On the panel that is a median of 298 dips
+per stock, half back within 5 days, 9 in 10 within 55. The 10%+ falls are the solid part
+of each bar.
+
+Six two-parameter curves (lognormal, log-logistic, inverse Gaussian, inverse gamma, Lomax,
+Weibull) score the same out of sample, within .01 per dip. A lognormal truncated below two
+days holds the tail (share past 1 year: 2.8% seen, 2.8% curve; past 3 years: .9%, 1.0%). Its
+parameters (μ −5.08, σ 3.66) mean little alone: it is a bending power law, close to the first
+return of a random walk. One that begins at 2 days instead halves that tail. A holding's
+own later dips are told better by leaning on the panel, so its curve is blended with the
+panel's by n / (n + 100). The blend is of the curves: their parameters trade off along a ridge.
+
+## Volatility sets a fall's scale
+
+A holding's falls are about a dozen numbers, its volatility thousands. Out of sample the
+volatility over the three years before a fall tells more about that fall than the holding's
+earlier falls do. A calm share takes longer, since 10% is further for it.
+
+| fit on falls finished by, scored later | slope | log score | without volatility | gain |
+|---|---|---|---|---|
+| 1995, 896 falls | −1.26 | −1.562 | −1.567 | +.006 |
+| 2005, 521 falls | −1.13 | −1.426 | −1.507 | +.080 |
+| 2015, 349 falls | −1.01 | −1.397 | −1.451 | +.054 |
+
+Separately by period the slope is −1.13 (to 1999), −.70 (2000-12) and −.69 (2013 on): always
+well below zero, but flatter lately, so the size of the effect is less sure than its sign. It
+needs one number per fall: a single volatility over a stock's whole history against all its
+falls dilutes the slope and, after 2005, adds nothing. Clamped to the panel's 1st to 99th
+percentile (14% to 73%). A block bootstrap of each holding's own returns scored clearly
+worse than the shrunk curve (−.08 and −.04), whichever drift it used. Falls from any recent
+high, not only the all-time one, give four times as many but make the estimate no better,
+nor do 5% falls or drift. Volatility adds nothing the running-fall formula has not
+got already (+.005 and +.010 on the panel, 0 on the private book). The curves' comparison, the
+bootstrap and these alternatives were one-off runs, not in the script.
 
 ## The owner's benchmarks
 
@@ -107,11 +151,17 @@ The panel's longest falls are real (GE 2000-2024, CSCO 2000-2021). What isn't: M
 unadjusted 2:1 splits of 1968-69, and on secondary and thin lines, a big merger's share
 exchange, ×40 jumps, multi-year holes, and whipsaws that read as a fall running for decades.
 
-The gate cuts history after the last of: a hole over 30 days, a year with over half its
-returns zero, or three moves over 30% undone within 10 rows in a year. More than five years
-ago it also cuts a day over +100% or under −75%, and a fall to an exact split ratio among
-calm days (within 3 points of ½, ⅓, ¼, ⅕, neighbours under 5%). On the panel that last rule
+A fall to an exact split ratio among calm days, more than five years ago (within 3 points of
+½, ⅓, ¼, ⅕, neighbours under 5%), is repaired by rescaling what came before. On the panel that
 finds MCD's two splits and nothing else: AAPL's −52% in 2000 had a loud day beside it.
+
+The gate then cuts history after the last of: a hole over 30 days, a year with over half its
+returns zero, or three moves over 30% undone within 10 rows in a year. More than five years
+ago it also cuts a day over +100% or under −75%. A bad sign in a holding's own young line
+doesn't cost the stand-in's clean years before it: they are read as a stretch of their own.
+
+The repair has a cost: a real −50% day among calm days, years ago, reads as a split. Yahoo's
+split list can't tell them apart, since a split it knows is already in its closes.
 
 The five-year limit exists because a recent crash is what the card is for, and cutting it
 would call that holding unfallen. Should a record and the fresher ten-year figures disagree

@@ -9,6 +9,12 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## Unreleased
+
+- **Time to recover's histogram now counts every time a holding goes below its all-time high**, not only falls of 10% or more, which left its bars mostly empty and hid that about half of all dips are back within a week. Thirty bars from two days to thirty years; falls of 10% or more are the solid part of each bar. The line is fitted to all of it (a lognormal, leaning on 40 large stocks where a holding has few dips), and the card opens with the plain median and 90th percentile.
+- **A fall of 10% or more is now estimated from how much the share moves.** Its three-year volatility before each fall sets the scale, and its own falls adjust it. Out of sample, on falls after the fit, this beats the old estimate at every split tested (+.006 to +.080 log score); a calm share's estimate gets longer and a wild one's shorter. The running-fall estimate's form stays, volatility added nothing there. The monthly long view rebuilds in the background after updating, so its figures take a few minutes to return.
+- **More of Yahoo's history is kept.** An unadjusted split is repaired instead of cutting everything before it, and a thin young listing no longer discards the clean years of the same company's line standing in before it.
+
 ## 1.31.0 — 2026-11-03
 
 - **Holdings and Drivers are tabs.** They head the section with a red + Add and a larger Columns (the owner's pick from mockups). Switching doesn't move the page.

@@ -59,7 +59,9 @@ dependency (loaded from CDN, used only for column-guide formulas).
   points. Map (`drawInvDrvMap`, redrawn on resize) plots contribution against
   the chosen risk, both axes square-root scaled so one extreme holding can't
   flatten the rest. Distribution draws how far below its high each holding
-  sits (median to 95th percentile, worst, today) and its recovery times.
+  sits (median to 95th percentile, worst, today) and its recovery times. The
+  hover card's histogram (`invRecChart`) is every stretch below the running
+  all-time high, two days to thirty years, with falls of 10% or more solid.
   Contributions and risk share come with the page; the rest arrives from
   `GET /api/investments/risk` (`invRiskLoad`, once per holdings set and
   currency), so those cells show a dash until it answers, with a Try again if

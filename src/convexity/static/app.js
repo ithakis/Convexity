@@ -16707,46 +16707,55 @@ RICH_TIPS["inv:drv"] = (host) => {
       ${line("Below its 10y high", val(INV_RISKS.below))}
     </tbody></table>${invRecCard(r)}<div class="inv-tip-tech">In ${escapeHtml(INV.book.ccy)}, dividends included.${r?.proxy ? ` Before its own listing, ${escapeHtml(r.proxy)} stands in: the same company elsewhere.` : ""}</div></div>`;
 };
-/* Time to recover in the Drivers card: the falls, the curve fitted to them, and
- * how long falls of each depth took, which is what decides it. Words for a
- * retail reader: natural frequencies ("out of 10"). The figures by depth are the
+/* Time to recover in the Drivers card: every stretch below its running all-time
+ * high with the curve fitted to them, then the falls of 10% or more, and how long
+ * falls of each depth took, which is what decides it. Words for a retail reader:
+ * natural frequencies ("out of 10"). The figures by depth are the
  * panel's, Kaplan-Meier medians counting running falls: a table rather than a
  * curve, which held out of time when curves by depth didn't. A running fall has
  * its own estimate (long_run.from_here), because how far the price still has to
  * go decides it (docs/recovery_research.md). */
-const INV_REC_DEPTH = [[10, 20, 60], [20, 30, 150], [30, 50, 391], [50, 100, 1223]];
-const invRecWords = (d) => d >= 252 ? `${(d / 252).toFixed(d >= 2520 ? 0 : 1).replace(/\.0$/, "")} year${d >= 252 * 1.05 ? "s" : ""}` : `${Math.max(1, Math.round(d / 21))} month${Math.round(d / 21) > 1 ? "s" : ""}`;
+const INV_REC_DEPTH = [[10, 20, 59], [20, 30, 150], [30, 50, 384], [50, 100, 1223]];
+const invRecWords = (d) => d >= 252 ? `${(d / 252).toFixed(d >= 2520 ? 0 : 1).replace(/\.0$/, "")} year${d >= 252 * 1.05 ? "s" : ""}` : d >= 21 ? `${Math.round(d / 21)} month${Math.round(d / 21) > 1 ? "s" : ""}` : `${Math.max(1, Math.round(d))} day${Math.round(d) > 1 ? "s" : ""}`;
 function invRecCard(r) {
   if (!r) return "";
   // The monthly record's whole history when it is there, the ten years until then.
-  const L = r.rec || {fit: r.rec_fit, falls: r.falls, since: r.since, open_days: r.open_days, open_depth: r.open_depth, open_now: r.open_now, from_here: r.from_here};
-  const n = (L.falls || 0) + (L.open_days ? 1 : 0), since = String(L.since).slice(0, 4), f = L.fit;
-  const head = `<div class="inv-rec-k">Time to recover</div>`;
-  if (!n) return `<div class="inv-rec">${head}<p>It hasn't fallen 10% or more from a high since ${escapeHtml(since)}.</p></div>`;
+  const L = r.rec || {fit: r.rec_fit, dips: r.rec_dips, falls: r.falls, since: r.since, open_days: r.open_days, open_depth: r.open_depth, open_now: r.open_now, from_here: r.from_here};
+  const n = (L.falls || 0) + (L.open_days ? 1 : 0), since = String(L.since).slice(0, 4), f = L.fit, D = L.dips;
+  const head = `<div class="inv-rec-k">Time to recover</div>`, times = (k) => k === 1 ? "once" : `${k} times`;
   // The record is up to a month old, and a week's move can change this much.
   const old = L.asof && Date.now() - Date.parse(L.asof) > 7 * 864e5, fh = L.from_here;
+  // The ten years stand in until the record is there: their high is only ten years'.
+  const high = r.rec ? "all-time high" : "10-year high", many = D && D.n >= 5;
+  const back = !D ? "" : many ? `Half were back within ${invRecWords(D.q50)}, 9 in 10 within ${invRecWords(D.q90)}.` : D.n === 1 ? `It took ${invRecWords(D.lo)} to come back.` : `They took ${invRecWords(D.lo)} to ${invRecWords(D.hi)} to come back.`;
+  const dips = D ? `Since ${escapeHtml(since)} it has gone below its ${high} ${times(D.n)} and come back. ${back}` : "";
+  const running = L.open_days && !old;
+  const chart = D ? `${invRecChart(D, running ? D.running : null)}<div class="inv-rec-key">Bars: each time below its high. Solid: falls of 10% or more.${running ? " Red: the one still running." : ""}</div>` : "";
+  if (!n) return `<div class="inv-rec">${head}<p>${D ? `${dips} None was a fall of 10% or more.` : `It hasn't fallen 10% or more from its high since ${escapeHtml(since)}.`}</p>${chart}${D ? `<div class="inv-tip-tech">The past, not a promise: companies that never came back aren't in it. The line is a lognormal fitted to the bars, leaning on 40 large stocks where it has few.</div>` : ""}</div>`;
   const left = !fh ? "" : fh.q50 == null ? " Few falls this deep have ever come back, so there is no fair estimate of when." : ` From there, half of falls like it took about ${invRecWords(fh.q50)} more${fh.beyond ? ", the rest longer still" : `, 9 in 10 about ${invRecWords(fh.q90)}`}.`;
   const open = L.open_days ? ` <span class="neg">${old ? `On ${escapeHtml(invDay(L.asof).replace(/^\w+ /, ""))} it was in one` : "It is in one now"}: ${invRecWords(L.open_days)} so far, ${Math.abs(L.open_now).toFixed(0)}% below its high.${left}</span>` : "";
-  const said = `It has fallen 10% or more from a high ${n === 1 ? "once" : `${n} times`} since ${escapeHtml(since)}.${f ? ` Out of 10 falls like these, expect about 5 back within ${invRecWords(f.q50)} and 9 within ${invRecWords(f.q90)}.` : ""}${open}`;
+  const said = `${D ? `${dips} It has had ${n === 1 ? "one fall" : `${n} falls`} of 10% or more.` : `It has fallen 10% or more from its high ${times(n)} since ${escapeHtml(since)}.`}${f ? ` Out of 10 falls like these, expect about 5 back within ${invRecWords(f.q50)} and 9 within ${invRecWords(f.q90)}.` : ""}${open}`;
   const depth = L.open_days ? Math.abs(L.open_depth ?? L.open_now) : null;
   const strip = INV_REC_DEPTH.map(([lo, hi, d]) => `<span class="${depth != null && depth >= lo && depth < hi ? "on" : ""}"><b>${invRecWords(d).replace(" months", " mo").replace(" month", " mo").replace(" years", " y").replace(" year", " y")}</b>${lo}${hi === 100 ? "%+" : `–${hi}%`}</span>`).join("");
-  return `<div class="inv-rec">${head}<p>${said}</p>${f ? invRecChart(f, L.open_days) : ""}
+  return `<div class="inv-rec">${head}<p>${said}</p>${chart}
     <div class="inv-rec-sk">Deeper falls take longer: half of the falls this deep took</div><div class="inv-rec-depth">${strip}</div>
-    <div class="inv-tip-tech">The past, not a promise: companies that never came back aren't in it. ${f ? "Bars are its falls. The line is the pattern fitted to them, an inverse Gaussian with the running fall counted as unfinished." : ""} ${n < 5 ? " With so few falls of its own, this comes mostly from similar shares." : ""} The shape and the depths come from 40 large stocks since 1962.${r.rec ? " Each share in its own currency, from all the daily history Yahoo has." : ""}${r.rec?.proxy && r.rec.proxy !== r.proxy ? ` Before its own listing, ${escapeHtml(r.rec.proxy)} stands in: the same company elsewhere.` : ""}</div></div>`;
+    <div class="inv-tip-tech">The past, not a promise: companies that never came back aren't in it. ${D ? "The line is a lognormal fitted to the bars, leaning on 40 large stocks where it has few." : ""} For falls of 10% or more, an inverse Gaussian: how long comes from how much the share moves and its own falls${n < 5 ? ", of which it has few" : ""}, the shape and the depths from those 40 stocks since 1962.${r.rec ? " Each share in its own currency, from all the daily history Yahoo has." : ""}${r.rec?.proxy && r.rec.proxy !== r.proxy ? ` Before its own listing, ${escapeHtml(r.rec.proxy)} stands in: the same company elsewhere.` : ""}</div></div>`;
 }
-/* Thirty bars on a log axis, a week to thirty years; the curve is in the bars' own
- * unit (expected falls per bar), so it can be read against them. */
-function invRecChart(f, openDays) {
-  const W = 292, H = 86, B = 16, e = f.bins, n = e.length - 1, bw = W / n;
-  const bin = (d) => Math.max(0, Math.min(n - 1, Math.floor(Math.log(d / e[0]) / Math.log(e[n] / e[0]) * n)));
-  const op = openDays ? bin(openDays) : -1, mx = Math.max(1, ...f.counts.map((c, i) => c + (i === op ? 1 : 0)), ...f.curve), Y = (v) => v / mx * (H - B - 6);
-  const X = (d) => Math.log(d / e[0]) / Math.log(e[n] / e[0]) * W;
-  const bars = f.counts.map((c, i) => c ? `<rect x="${(i * bw + 1).toFixed(1)}" y="${(H - B - Y(c)).toFixed(1)}" width="${(bw - 2).toFixed(1)}" height="${Y(c).toFixed(1)}" fill="rgb(59,125,221)"></rect>` : "").join("");
-  const run = op >= 0 ? `<rect x="${(op * bw + 1.75).toFixed(1)}" y="${(H - B - Y(f.counts[op] + 1) + .75).toFixed(1)}" width="${(bw - 3.5).toFixed(1)}" height="${(Y(1) - 1.5).toFixed(1)}" fill="none" stroke="var(--neg)" stroke-width="1.5"></rect>` : "";
-  const line = f.curve.map((v, i) => `${i ? "L" : "M"}${(i * bw + bw / 2).toFixed(1)} ${(H - B - Y(v)).toFixed(1)}`).join("");
-  const ticks = [[5, "1 wk"], [21, "1 mo"], [63, "3 mo"], [252, "1 y"], [756, "3 y"], [2520, "10 y"], [7560, "30 y"]];
-  return `<svg class="inv-rec-chart" width="${W}" height="${H}" role="img" aria-label="How long its falls took to recover"><line x2="${W}" y1="${H - B}" y2="${H - B}" stroke="var(--border)"></line>${bars}${run}<path d="${line}" fill="none" stroke="var(--text)" stroke-width="1.5"></path>
-    ${ticks.map(([d, l], i) => `<text x="${X(d).toFixed(1)}" y="${H - 3}" text-anchor="${i === 0 ? "start" : i === ticks.length - 1 ? "end" : "middle"}">${l}</text>`).join("")}</svg>`;
+/* Thirty bars on a log axis, two days to thirty years, every stretch below the
+ * running high; the curve is in the bars' own unit (expected dips per bar), so it can
+ * be read against them. A lone long fall still shows: nothing under 2 px. */
+function invRecChart(d, running) {
+  const W = 292, H = 86, B = 16, e = d.bins, n = e.length - 1, bw = W / n, floor = 2;
+  const X = (x) => Math.log(x / e[0]) / Math.log(e[n] / e[0]) * W;
+  const op = running ? Math.max(0, Math.min(n - 1, Math.floor(X(running) / bw))) : -1;
+  const mx = Math.max(1, ...d.counts.map((c, i) => c + (i === op ? 1 : 0)), ...d.curve), Y = (v) => v ? Math.max(floor, v / mx * (H - B - 6)) : 0;
+  const rect = (i, h, fill) => `<rect x="${(i * bw + .5).toFixed(1)}" y="${(H - B - h).toFixed(1)}" width="${(bw - 1).toFixed(1)}" height="${h.toFixed(1)}" fill="${fill}"></rect>`;
+  const bars = d.counts.map((c, i) => c ? rect(i, Y(c), "rgba(59,125,221,.5)") + (d.big[i] ? rect(i, Y(d.big[i]), "rgb(59,125,221)") : "") : "").join("");
+  const run = op >= 0 ? `<rect x="${(op * bw + 1).toFixed(1)}" y="${(H - B - Y(d.counts[op]) - Math.max(4, Y(1)) + .75).toFixed(1)}" width="${(bw - 2).toFixed(1)}" height="${(Math.max(4, Y(1)) - 1.5).toFixed(1)}" fill="none" stroke="var(--neg)" stroke-width="1.5"></rect>` : "";
+  const line = d.curve.map((v, i) => `${i ? "L" : "M"}${(i * bw + bw / 2).toFixed(1)} ${(H - B - v / mx * (H - B - 6)).toFixed(1)}`).join("");
+  const ticks = [[2, "2 d"], [5, "1 wk"], [21, "1 mo"], [63, "3 mo"], [252, "1 y"], [756, "3 y"], [2520, "10 y"], [7560, "30 y"]];
+  return `<svg class="inv-rec-chart" width="${W}" height="${H}" role="img" aria-label="How long each time below its high took to recover"><line x2="${W}" y1="${H - B}" y2="${H - B}" stroke="var(--border)"></line>${bars}${run}<path d="${line}" fill="none" stroke="var(--text)" stroke-width="1.5"></path>
+    ${ticks.map(([x, l], i) => `<text x="${X(x).toFixed(1)}" y="${H - 3}" text-anchor="${i === 0 ? "start" : i === ticks.length - 1 ? "end" : "middle"}">${l}</text>`).join("")}</svg>`;
 }
 RICH_TIPS["inv:yoc"] = (host) => {
   const x = invPos(host); if (!x) return "";

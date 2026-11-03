@@ -895,9 +895,13 @@ in `state/long_run.json`: results only, never closes (about 30 KB), a cache of m
 data, a malformed file reads as empty and is rebuilt. **Nothing here fetches on the
 page's path**; what isn't there is left out of the page.
 
-- **Per holding, from max history in the quote currency:** the falls and the fitted
-  curve (`recovery_fit`), behind a data gate (`usable_start`, because `_xray_clean`
-  removes nothing at this length and a fake fall reads as one that never recovered).
+- **Per holding, from max history in the quote currency:** every stretch below the
+  running all-time high with its histogram and curve (`dip_days`, `dip_histogram`, the
+  owner's definition, no minimum size), and the estimate for falls of 10% or more
+  (`recovery_fit`, its scale from the three-year volatility before each fall). Behind a
+  data gate (`repair_splits` then `usable_start`, because `_xray_clean` removes nothing at
+  this length and a fake fall reads as one that never recovered). A bad sign inside a
+  holding's own young line leaves the stand-in's older stretch to be read on its own.
   Merged into `/api/investments/risk` as `rec` at the time of asking, since those
   figures are cached 30 minutes. `_risk_stats`' ten-year figures stand in until then,
   and whenever they show a running fall the record doesn't (`_long_record`): a card

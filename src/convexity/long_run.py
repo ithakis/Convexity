@@ -34,7 +34,7 @@ import pandas as pd
 from convexity import paths
 from convexity.persistence import _atomic_write
 
-VERSION = 1  # of the kept file: bump when a constant below changes, and it is rebuilt
+VERSION = 2  # of the kept file: bump when a constant below changes, and it is rebuilt
 CHUNK = 4  # symbols per request
 PAUSE_S = 4.0  # between requests
 FIRST_TICK_S = 180  # after launch: the page and its warm-ups go first
@@ -66,24 +66,41 @@ _STATE: dict = {"thread": None, "stop": threading.Event(), "next": 0.0, "tried":
 MIN_FALL = 0.10  # a smaller dip isn't a recovery worth timing
 
 # A recovery is a first passage, so inverse Gaussian. The owner's peaks-over-threshold
-# idea was tested against it on 40 public large caps, max history, 1520 falls
+# idea was tested against it on 40 public large caps, max history, about 1500 falls
 # (docs/recovery_research.md): a lognormal body with a GPD tail scores +.008 (se .006)
 # out of sample, not worth a threshold, and its tail index runs from .78 at 3 months
 # to .02 at 6 years, so it has no one value to report. One holding's falls can't carry
-# two parameters: the shape is the panel's, the scale its own, shrunk to the panel's
-# by RECOVERY_N0 falls. Recompute with scripts/study_recovery.py, and bump VERSION
-# so the kept records are rebuilt.
-RECOVERY_PHI = 0.31  # lambda / mu
-RECOVERY_MU = 261.0  # trading days
-RECOVERY_N0 = 12
-RECOVERY_BINS = np.geomspace(5, 7560, 31)  # a week to thirty years, in trading days
+# two parameters: the shape is the panel's. Its scale starts from its volatility, which
+# rests on thousands of returns where its falls are a dozen: over every split tested, a
+# fall's own three-year volatility says more than the holding's past falls do, and a
+# calmer share takes longer, since 10% is further for it. Its own falls then move the
+# scale by n / (n + RECOVERY_N0). Recompute with scripts/study_recovery.py, and bump
+# VERSION so the kept records are rebuilt.
+RECOVERY_PHI = 0.30  # lambda / mu
+RECOVERY_MU = 269.0  # trading days, at RECOVERY_VOL_REF
+RECOVERY_VOL_SLOPE = -1.02  # of the log scale on log volatility
+RECOVERY_VOL_REF = 0.30
+RECOVERY_VOL_RANGE = (0.14, 0.73)  # the panel's falls, 1st to 99th percentile: no extrapolating
+RECOVERY_N0 = 25
+VOL_DAYS = 756  # three years of daily returns before a fall's high
+VOL_MIN_DAYS = 120
+
+# Every stretch below the running all-time high, however small: the histogram (owner,
+# 2026-11-03, after 10%+ falls alone left its bars empty and hid that half of all dips are
+# back within a week). The curve is a lognormal truncated below two days: its extreme
+# parameters are just a bending power law, and it holds the tail (2.8% past a year, 2.8%
+# seen) where one that starts at two days halves it. Other two-parameter curves score the
+# same. A holding's curve leans on the panel's by DIP_N0 dips: even at a hundred, its
+# own later dips are told better by the panel's shape.
+DIP_BINS = np.geomspace(2, 7560, 31)  # two days (down one, back the next) to thirty years
+DIP_MU, DIP_SIGMA, DIP_N0 = -5.08, 3.66, 100
 
 # A running fall gets its own estimate, never a ratio of the curve above: the curve
 # doesn't know how far the price still has to go, and told a holding 50% down after
 # 2.4 years that 6 in 10 are still out a year later when 96% were. Censored lognormal
 # on the days left: ln(days left) = b0 + b_a ln a + b_t ln t + b_w ln w, with a the log
 # distance to the high (floored), t the days so far, w the worst fall as a fraction.
-FROM_HERE = {"b0": 5.2239, "b_a": 1.2972, "b_t": 0.3008, "b_w": -0.5816, "sigma": 1.204}
+FROM_HERE = {"b0": 5.1645, "b_a": 1.2995, "b_t": 0.3088, "b_w": -0.5965, "sigma": 1.2054}
 FROM_HERE_FLOOR = 0.005
 Z_90 = 1.2816
 LONGEST_SEEN = 5949  # trading days, the panel's longest fall: past it the data says nothing
@@ -99,15 +116,34 @@ STALE_SHARE = 0.5
 WHIPSAW = (0.30, 0.25, 10, 3)  # moves over 30% undone by 25% within 10 rows, 3 in a year
 
 
-def usable_start(dates: pd.DatetimeIndex, px: np.ndarray) -> pd.Timestamp | None:
-    """The last sign of bad old data, or None. A fake fall reads as one that never
-    recovered: one line showed -92% "running" for thirty years before this. After the
-    last of: a hole in the dates, a year with over half its returns exactly zero, a year
-    of big moves that keep undoing themselves, or, more than ``JUMP_OLD_YEARS`` ago, a
-    day over +100% or under -75%, or an unadjusted split: a fall to an exact fraction
-    among calm days. On 40 large caps that last rule finds MCD's two 2:1 splits and
-    nothing else (AAPL's -52% in 2000 had a loud day beside it). A recent crash stays:
-    it is what the card is for."""
+def repair_splits(dates: pd.DatetimeIndex, px: np.ndarray) -> np.ndarray:
+    """``px`` with Yahoo's unadjusted splits undone: more than ``JUMP_OLD_YEARS`` ago, a
+    fall to an exact fraction among calm days rescales everything before it. Cutting
+    there threw away all the good years before. On 40 large caps this finds MCD's two 2:1
+    splits and nothing else (AAPL's -52% in 2000 had a loud day beside it). A recent crash
+    stays: it is what the card is for. The cost: a real -50% day among calm days, years
+    ago, reads as a split. Yahoo's split list can't tell them apart, since a split it
+    knows is already in its closes; what is left here is the one it missed."""
+    out = px.astype(float)
+    r = np.r_[0.0, px[1:] / px[:-1] - 1]
+    old = dates < dates[-1] - pd.Timedelta(days=365 * JUMP_OLD_YEARS)
+    for i in reversed(np.flatnonzero((r < -0.4) & old)):
+        k = min(SPLIT_RATIOS, key=lambda x: abs(1 + r[i] - x))
+        side = np.r_[r[max(1, i - 3) : i], r[i + 1 : i + 4]]
+        if abs(1 + r[i] - k) < SPLIT_NEAR and (not len(side) or np.abs(side).max() < SPLIT_CALM):
+            out[:i] *= k
+    return out
+
+
+def usable_start(
+    dates: pd.DatetimeIndex, px: np.ndarray, asof: pd.Timestamp | None = None
+) -> pd.Timestamp | None:
+    """The last sign of bad old data, or None, once ``repair_splits`` has done what it
+    can. A fake fall reads as one that never recovered: one line showed -92% "running"
+    for thirty years before this. After the last of: a hole in the dates, a year with
+    over half its returns exactly zero, a year of big moves that keep undoing themselves,
+    or, more than ``JUMP_OLD_YEARS`` before ``asof`` (the last row), a day over +100% or
+    under -75%."""
     r = np.r_[0.0, px[1:] / px[:-1] - 1]
     bad = list(
         np.flatnonzero(np.diff(dates.values).astype("timedelta64[D]").astype(int) > GAP_DAYS) + 1
@@ -119,13 +155,8 @@ def usable_start(dates: pd.DatetimeIndex, px: np.ndarray) -> pd.Timestamp | None
         w = r[i + 1 : i + 1 + within]
         undone[i] = bool(np.any((np.sign(w) == -np.sign(r[i])) & (np.abs(w) > undo)))
     bad += list(np.flatnonzero(pd.Series(undone).rolling(252).sum().to_numpy() >= count))
-    old = dates < dates[-1] - pd.Timedelta(days=365 * JUMP_OLD_YEARS)
+    old = dates < (dates[-1] if asof is None else asof) - pd.Timedelta(days=365 * JUMP_OLD_YEARS)
     bad += [i for i in np.flatnonzero((r > JUMP_UP) | (r < JUMP_DOWN)) if old[i]]
-    for i in np.flatnonzero((r < -0.4) & old):
-        near = min(abs(1 + r[i] - k) for k in SPLIT_RATIOS)
-        side = np.r_[r[max(1, i - 3) : i], r[i + 1 : i + 4]]
-        if near < SPLIT_NEAR and (not len(side) or np.abs(side).max() < SPLIT_CALM):
-            bad.append(i)
     return dates[max(bad)] if bad else None
 
 
@@ -147,21 +178,89 @@ def from_here(now_pct: float | None, days: int | None, worst_pct: float | None) 
     return {"q50": round(q50), "q90": round(q90), "beyond": days + q90 > LONGEST_SEEN}
 
 
+def _vol_before(returns: np.ndarray, i: int) -> float | None:
+    """Annualised volatility over the three years before row ``i``."""
+    r = returns[max(0, i - VOL_DAYS) : i]
+    return round(float(r.std()) * 252**0.5, 4) if len(r) >= VOL_MIN_DAYS else None
+
+
 def episodes(px: np.ndarray) -> dict:
-    """Every fall of ``MIN_FALL`` or more from a high: ``days`` and ``depths``
-    (percent) of the finished ones, and the running one kept apart: a fall still
-    running hasn't recovered, and leaving it out would make the holding that
-    never came back look the quickest."""
+    """Every fall of ``MIN_FALL`` or more from a high: ``days``, ``depths`` (percent) and
+    ``vols`` (volatility before its high) of the finished ones, and the running one kept
+    apart: a fall still running hasn't recovered, and leaving it out would make the
+    holding that never came back look the quickest. ``vol_now`` is what the next fall
+    starts from, or, in a fall, what this one did: the fall itself shouldn't inflate it."""
+    returns = np.diff(np.log(px))
     dd = px / np.maximum.accumulate(px) - 1
     highs = np.flatnonzero(dd == 0)
-    done = [(int(b - a), float(dd[a:b].min()) * 100) for a, b in zip(highs, highs[1:], strict=False)
-            if dd[a:b].min() <= -MIN_FALL]  # fmt: skip
+    done = [(int(b - a), float(dd[a:b].min()) * 100, _vol_before(returns, int(a)))
+            for a, b in zip(highs, highs[1:], strict=False) if dd[a:b].min() <= -MIN_FALL]  # fmt: skip
     last = int(highs[-1])
     running = bool(dd[last:].min() <= -MIN_FALL)
-    return {"days": [d for d, _ in done], "depths": [round(x, 1) for _, x in done],
+    return {"days": [d for d, _, _ in done], "depths": [round(x, 1) for _, x, _ in done],
+            "vols": [v for _, _, v in done],
+            "vol_now": (_vol_before(returns, last if running else len(returns))
+                        or _vol_before(returns, len(returns))),  # a young line: what there is
             "open_days": len(px) - 1 - last if running else None,
             "open_depth": round(float(dd[last:].min()) * 100, 1) if running else None,
             "open_now": round(float(dd[-1]) * 100, 1) if running else None}  # fmt: skip
+
+
+def dip_days(px: np.ndarray) -> tuple[list[int], int | None]:
+    """A running all-time high, and the days each stretch below it took to get back: the
+    finished ones, and the stretch still running, if any."""
+    highs = np.flatnonzero(px >= np.maximum.accumulate(px))
+    gaps = np.diff(highs)
+    return gaps[gaps > 1].tolist(), (len(px) - 1 - int(highs[-1]) or None)
+
+
+def _dip_sf(k, mu: float, sigma: float) -> np.ndarray:
+    """P(days > k) on whole days of the lognormal truncated below two days."""
+    from scipy.special import log_ndtr
+
+    z = lambda x: (np.log(np.asarray(x, float) + 0.5) - mu) / sigma  # noqa: E731
+    return np.exp(log_ndtr(-z(k)) - log_ndtr(-z(1)))
+
+
+def dip_histogram(days: list[int], running: int | None, big: list[int]) -> dict | None:
+    """Thirty bars of ``days``, how many of each were ``big`` (falls of ``MIN_FALL`` or
+    more), the curve in expected dips per bar, and the plain median and 90th percentile:
+    with this many, the sample says it directly. The running stretch is censored in the
+    fit. None without a finished dip."""
+    from scipy.optimize import minimize
+
+    if not days:
+        return None
+    k = np.asarray(days, float)
+
+    def nll(th):
+        mu, sigma = th[0], math.exp(th[1])
+        p = _dip_sf(k - 1, mu, sigma) - _dip_sf(k, mu, sigma)
+        ll = np.log(np.maximum(p, 1e-300)).sum()
+        return -ll - math.log(max(float(_dip_sf(running, mu, sigma)), 1e-300) if running else 1.0)
+
+    own = minimize(nll, [DIP_MU, math.log(DIP_SIGMA)], method="Nelder-Mead").x
+    edge, n = DIP_BINS, len(k) + (1 if running else 0)
+    # Whole days in each bar; the last bar takes everything longer. The two curves are
+    # blended as curves, since their parameters trade off along a ridge.
+    last = np.ceil(edge[1:]).astype(int) - 1
+    w = len(k) / (len(k) + DIP_N0)
+    sf = _dip_sf(last, own[0], math.exp(own[1])) ** w * _dip_sf(last, DIP_MU, DIP_SIGMA) ** (1 - w)
+    sf = np.r_[1.0, sf[:-1], 0.0]
+    bars = lambda x: np.histogram(np.clip(x, edge[0], edge[-1]), edge)[0].tolist()  # noqa: E731
+    return {"bins": [round(float(x), 1) for x in edge], "counts": bars(k),
+            "big": bars(big) if big else [0] * (len(edge) - 1),
+            "curve": [round(float(x) * n, 3) for x in -np.diff(sf)], "n": len(k), "running": running,
+            "q50": round(float(np.quantile(k, 0.5))), "q90": round(float(np.quantile(k, 0.9))),
+            "lo": int(k.min()), "hi": int(k.max())}  # fmt: skip
+
+
+def _vol_scale(vol: float | None) -> float:
+    """The log scale a volatility sets; the panel's middle when there's too little to read."""
+    if not vol or not math.isfinite(vol):
+        return 0.0
+    lo, hi = RECOVERY_VOL_RANGE
+    return RECOVERY_VOL_SLOPE * math.log(min(max(vol, lo), hi) / RECOVERY_VOL_REF)
 
 
 def _ig_cdf(t, mu: float) -> np.ndarray:
@@ -173,33 +272,35 @@ def _ig_cdf(t, mu: float) -> np.ndarray:
     return ndtr(r * (t / mu - 1)) + math.exp(2 * RECOVERY_PHI) * ndtr(-r * (t / mu + 1))
 
 
-def recovery_fit(days: list[int], open_days: int | None) -> dict | None:
-    """The falls' 30-bin histogram and the fitted curve on it, in expected falls
-    per bin, with the curve's median and 90th percentile. The running fall is
-    censored: it says "at least this long". None without a finished fall."""
+def recovery_fit(
+    days: list[int], open_days: int | None, vols: list | None = None, vol: float | None = None
+) -> dict | None:
+    """How long a fall of ``MIN_FALL`` or more takes: the median and 90th percentile of its
+    curve. ``vols`` is each fall's volatility before its high, ``vol`` the next fall's (and
+    the running one's): a fall is read against what its own volatility predicts, and the
+    answer is for ``vol``. The running fall is censored: it says "at least this long".
+    None without a finished fall."""
     from scipy.optimize import brentq, minimize_scalar
 
     if not days:
         return None
-    d = np.asarray(days, float) + 0.5  # a day count is a rounded length
+    vols = vols or [None] * len(days)
+    d = (np.asarray(days, float) + 0.5) / np.exp([_vol_scale(v) for v in vols])
+    still = (open_days + 0.5) / math.exp(_vol_scale(vol)) if open_days else None
 
     def nll(log_mu: float) -> float:
         mu = math.exp(log_mu)
         lam = RECOVERY_PHI * mu
         ll = np.sum(0.5 * np.log(lam / (2 * np.pi * d**3)) - lam * (d - mu) ** 2 / (2 * mu**2 * d))
-        if open_days:
-            ll += math.log(max(1e-300, 1 - float(_ig_cdf(open_days + 0.5, mu))))
+        if still:
+            ll += math.log(max(1e-300, 1 - float(_ig_cdf(still, mu))))
         return -float(ll)
 
     own = minimize_scalar(nll, bounds=(1.0, 12.0), method="bounded").x
-    mu = math.exp((len(d) * own + RECOVERY_N0 * math.log(RECOVERY_MU)) / (len(d) + RECOVERY_N0))
+    pooled = math.log(RECOVERY_MU)
+    mu = math.exp(pooled + _vol_scale(vol) + len(d) / (len(d) + RECOVERY_N0) * (own - pooled))
     quant = lambda q: brentq(lambda x: float(_ig_cdf(x, mu)) - q, 0.1, 1e7)  # noqa: E731
-    n = len(d) + (1 if open_days else 0)
-    edge = RECOVERY_BINS
-    counts = np.histogram(np.clip(days, edge[0], edge[-1]), edge)[0]
-    return {"bins": [round(float(x), 1) for x in edge], "counts": counts.tolist(),
-            "curve": [round(float(x) * n, 3) for x in np.diff(_ig_cdf(edge, mu))],
-            "q50": round(quant(0.5)), "q90": round(quant(0.9))}  # fmt: skip
+    return {"q50": round(quant(0.5)), "q90": round(quant(0.9))}
 
 
 # ---------------------------------------------------------------- covariance
@@ -316,7 +417,8 @@ def recovery(symbol: str) -> dict | None:
     r = (load().get("symbols") or {}).get(symbol)
     if not r or r.get("used", 0) < MIN_DAYS:
         return None  # the ten years' figures stand in
-    return {"fit": r.get("fit"), "falls": len(r.get("days") or []), "since": r.get("since"),
+    return {"fit": r.get("fit"), "dips": r.get("dips"), "falls": len(r.get("days") or []),
+            "since": r.get("since"),
             "open_days": r.get("open_days"), "open_depth": r.get("open_depth"),
             "open_now": r.get("open_now"), "asof": r.get("asof"),
             "from_here": from_here(r.get("open_now"), r.get("open_days"), r.get("open_depth")),
@@ -327,20 +429,44 @@ def _month(now: datetime | None = None) -> str:
     return (now or datetime.now(UTC)).strftime("%Y-%m")
 
 
-def _record(pts: list[tuple[str, float]], month: str, proxy: str | None) -> dict:
-    """What is kept for a holding, from its cleaned closes. ``n`` is the whole
-    answer's length (a later, shorter answer is degraded), ``used`` what the gate
-    left of it."""
+def _record(
+    pts: list[tuple[str, float]], month: str, proxy: str | None, own_from: str | None = None
+) -> dict:
+    """What is kept for a holding, from its cleaned closes. ``n`` is the whole answer's
+    length (a later, shorter answer is degraded), ``used`` what the gate left of it.
+    ``own_from`` is where a stand-in hands over to the holding's own line: a thin young
+    line is the gate's business, not the stand-in's clean years, so a bad sign after it
+    leaves the older stretch to be read on its own."""
     ser = pd.Series([v for _, v in pts], index=pd.to_datetime([d for d, _ in pts])).sort_index()
+    if len(ser) > 1:
+        ser = pd.Series(repair_splits(ser.index, ser.to_numpy()), index=ser.index)
     bad = usable_start(ser.index, ser.to_numpy()) if len(ser) > 1 else None
+    older = ser.iloc[:0]
     if bad is not None:
+        if own_from and bad >= pd.Timestamp(own_from):
+            older = ser[ser.index < pd.Timestamp(own_from)]
+            if (early := usable_start(older.index, older.to_numpy(), ser.index[-1]) if len(older) > 1 else None) is not None:  # fmt: skip
+                older = older[older.index > early]
         ser = ser[ser.index > bad]
-    base = {"month": month, "asof": pts[-1][0][:10], "n": len(pts), "used": len(ser)}
-    if len(ser) < MIN_DAYS:
+    used = len(older) + len(ser)
+    base = {"month": month, "asof": pts[-1][0][:10], "n": len(pts), "used": used}
+    if used < MIN_DAYS:
         return base
-    eps = episodes(ser.to_numpy())
-    return {**base, "since": str(ser.index[0])[:10], **eps,
-            "fit": recovery_fit(eps["days"], eps["open_days"]),
+    eps = episodes(ser.to_numpy()) if len(ser) > 1 else {**episodes(older.to_numpy()), "open_days": None, "open_depth": None, "open_now": None}  # fmt: skip
+    dips, running = (
+        dip_days(ser.to_numpy()) if len(ser) > 1 else (dip_days(older.to_numpy())[0], None)
+    )
+    if len(older) > 1 and len(ser) > 1:
+        # Finished ones only: what the stretch's end cut short has no answer.
+        past = episodes(older.to_numpy())
+        eps = {**eps, "days": past["days"] + eps["days"], "depths": past["depths"] + eps["depths"],
+               "vols": past["vols"] + eps["vols"], "vol_now": eps["vol_now"] or past["vol_now"]}  # fmt: skip
+        dips = dip_days(older.to_numpy())[0] + dips
+    vols = eps.pop("vols")
+    first = older if len(older) else ser
+    return {**base, "since": str(first.index[0])[:10], **eps,
+            "fit": recovery_fit(eps["days"], eps["open_days"], vols, eps["vol_now"]),
+            "dips": dip_histogram(dips, running, eps["days"]),
             **({"proxy": proxy} if proxy else {})}  # fmt: skip
 
 
@@ -426,7 +552,7 @@ def _fill_symbols(todo, held, cancel, month) -> bool:
                 # Too young to read yet, or a shorter answer than the one kept.
                 _STATE["tried"][s] = time.time() + RETRY_S
                 continue
-            fresh[s] = _record(pts, month, proxied[s][0] if s in proxied else None)
+            fresh[s] = _record(pts, month, *(proxied.get(s) or (None, None)))
         _update(symbols=fresh)
         failed = failed + 1 if not any(s in cols for s in chunk) else 0
         if failed >= MAX_FAILED_CHUNKS:

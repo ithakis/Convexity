@@ -41,11 +41,47 @@ def test_episodes_ignores_a_small_dip():
     assert e["days"] == [] and e["open_days"] is None
 
 
-def test_fit_counts_and_curve_share_a_scale():
-    days = [10, 20, 40, 80, 160, 320, 640]
-    f = long_run.recovery_fit(days, None)
-    assert sum(f["counts"]) == len(days) and len(f["bins"]) == 31 and len(f["curve"]) == 30
-    assert sum(f["curve"]) == pytest.approx(len(days), abs=1.5)
+def test_old_is_measured_from_the_date_asked():
+    idx = pd.bdate_range("2000-01-03", periods=4000)
+    px = _closes(4000).to_numpy().copy()
+    px[-200:] *= 0.1
+    assert long_run.usable_start(idx, px) is None  # recent, by its own last row
+    assert long_run.usable_start(idx, px, idx[-1] + pd.Timedelta(days=3650)) == idx[-200]
+
+
+def test_every_stretch_below_the_running_high_is_a_dip():
+    px = np.array([100, 99, 101, 102, 101, 100, 103, 90, 104, 95], float)
+    assert long_run.dip_days(px) == ([2, 3, 2], 1)  # 104 then 95: one still running
+    assert long_run.dip_days(np.array([1, 2, 3], float)) == ([], None)  # new highs aren't dips
+    assert long_run.dip_days(np.array([100, 90, 100, 90, 100], float))[0] == [2, 2]  # a tie is back
+
+
+def test_dip_bars_start_at_two_days_and_the_curve_shares_their_scale():
+    days = [2] * 40 + [3] * 20 + [4] * 12 + [6] * 9 + [15] * 8 + [60] * 5 + [400] * 3
+    d = long_run.dip_histogram(days, None, [60, 400, 400])
+    assert (
+        sum(d["counts"]) == d["n"] == len(days) and len(d["bins"]) == 31 and len(d["curve"]) == 30
+    )
+    assert d["counts"][0] == 40 and d["counts"][1] == 20  # a bar each for two days and three
+    assert sum(d["big"]) == 3 and all(b <= c for b, c in zip(d["big"], d["counts"], strict=True))
+    assert sum(d["curve"]) == pytest.approx(len(days), abs=0.1)
+    assert d["curve"][0] == max(d["curve"])  # most of the shape is the shortest
+    assert d["q50"] == 3 and d["q90"] == 15 and d["running"] is None
+    assert d["lo"] == 2 and d["hi"] == 400
+
+
+def test_a_running_dip_is_counted_and_stretches_the_curve():
+    days = [2, 3, 4, 5, 8, 12, 20, 40] * 5
+    plain = long_run.dip_histogram(days, None, [])
+    still = long_run.dip_histogram(days, 3000, [])
+    assert sum(still["curve"]) == pytest.approx(len(days) + 1, abs=0.1) and still["running"] == 3000
+    assert sum(still["curve"][-8:]) > sum(plain["curve"][-8:])
+    assert long_run.dip_histogram([], 30, []) is None
+    assert plain["big"] == [0] * 30
+
+
+def test_fit_says_how_long_a_fall_takes():
+    f = long_run.recovery_fit([10, 20, 40, 80, 160, 320, 640], None)
     assert 0 < f["q50"] < f["q90"]
 
 
@@ -69,16 +105,63 @@ def test_gate_keeps_a_recent_crash():
         assert e["open_days"] and e["open_now"] < -60
 
 
-def test_gate_finds_an_unadjusted_split_by_its_shape():
+def test_an_unadjusted_split_is_repaired_by_its_shape():
     idx = pd.bdate_range("2000-01-03", periods=4000)
     px = np.full(4000, 100.0) * np.exp(np.cumsum(np.full(4000, 0.0001) * (-1) ** np.arange(4000)))
     px = px * (1 + 0.002 * (-1) ** np.arange(4000))
     split = px.copy()
     split[1000:] *= 0.5
-    assert long_run.usable_start(idx, split) == idx[1000]
+    fixed = long_run.repair_splits(idx, split)
+    assert fixed[1000:] == pytest.approx(split[1000:])
+    assert fixed[:1000] == pytest.approx(split[:1000] * 0.5)  # the years before stay, rescaled
+    assert long_run.usable_start(idx, fixed) is None and not long_run.episodes(fixed)["days"]
     loud = split.copy()
     loud[1001:] *= 0.9  # a crash with a loud day beside it isn't a split
-    assert long_run.usable_start(idx, loud) is None
+    assert long_run.repair_splits(idx, loud) == pytest.approx(loud)
+    recent = px.copy()
+    recent[-200:] *= 0.5  # nor is a recent one: the card is for those
+    assert long_run.repair_splits(idx, recent) == pytest.approx(recent)
+
+
+def test_a_thin_young_line_leaves_its_stand_ins_years_alone():
+    idx = pd.bdate_range("2005-01-03", periods=4000)
+    px = _closes(4000).to_numpy().copy()
+    px[1000:1200] *= 0.7  # a fall in the stand-in's stretch
+    px[3400:3800] = px[3400]  # the holding's own line, hardly trading at first
+    own_from = str(idx[3400])[:10]
+    alone = long_run._record(_pts(idx, px), "2026-11", "AAPL")
+    kept = long_run._record(_pts(idx, px), "2026-11", "AAPL", own_from)
+    assert alone["used"] < 300 and alone["since"] > own_from
+    assert kept["since"] == str(idx[0])[:10] and kept["used"] > 3400 and kept["n"] == 4000
+    assert len(kept["days"]) > len(alone["days"]) and kept["proxy"] == "AAPL"
+    # a fake fall just before the handover isn't "recent" because that stretch ended there
+    fake = px.copy()
+    fake[2600:2800] *= 0.1  # over five years from the last row, under five from the handover
+    cut = long_run._record(_pts(idx, fake), "2026-11", "AAPL", own_from)
+    assert cut["since"] > str(idx[2600])[:10]
+    # a bad sign before the handover is the stand-in's own: it cuts as before
+    px[500:] *= 3
+    early = long_run._record(_pts(idx, px), "2026-11", "AAPL", own_from)
+    assert early["since"] > str(idx[500])[:10]
+
+
+def test_volatility_sets_the_scale():
+    days = [40, 60, 90]
+    calm = long_run.recovery_fit(days, None, [0.3] * 3, 0.15)
+    wild = long_run.recovery_fit(days, None, [0.3] * 3, 0.6)
+    base = long_run.recovery_fit(days, None, [0.3] * 3, 0.3)
+    assert calm["q50"] > base["q50"] > wild["q50"]
+    assert long_run.recovery_fit(days, None)["q50"] == base["q50"]  # none to read: the middle
+    # clamped to the panel's range, and past falls are read against their own volatility
+    assert long_run.recovery_fit(days, None, [0.3] * 3, 5.0)["q50"] == long_run.recovery_fit(days, None, [0.3] * 3, 0.73)["q50"]  # fmt: skip
+    assert long_run.recovery_fit(days, None, [0.6] * 3, 0.3)["q50"] > base["q50"]
+
+
+def test_a_falls_volatility_is_from_before_its_high():
+    calm = np.exp(np.cumsum(np.tile([0.012, -0.01], 500)))
+    wild = calm[-1] * np.exp(np.cumsum(np.tile([-0.2, 0.1], 20)))
+    e = long_run.episodes(np.r_[calm, wild])
+    assert e["open_days"] and e["vol_now"] == pytest.approx(0.011 * 252**0.5, rel=0.05)
 
 
 def test_gate_cuts_a_hole_an_old_jump_and_a_dead_stretch():
@@ -119,7 +202,11 @@ def test_record_with_too_little_left_defers_to_the_ten_years():
     idx = pd.bdate_range("2000-01-03", periods=500).delete(range(470, 490))  # a hole near the end
     px = _closes(len(idx)).to_numpy()
     long_run._save(
-        {"v": 1, "symbols": {"AAPL": long_run._record(_pts(idx, px), "2026-11", None)}, "cov": {}}
+        {
+            "v": long_run.VERSION,
+            "symbols": {"AAPL": long_run._record(_pts(idx, px), "2026-11", None)},
+            "cov": {},
+        }
     )
     assert long_run.recovery("AAPL") is None
 
@@ -177,7 +264,7 @@ def test_weekly_cov_survives_no_overlap():
 def _kept(symbols, cov, month="2026-11", ccy="USD"):
     long_run._save(
         {
-            "v": 1,
+            "v": long_run.VERSION,
             "symbols": {},
             "cov": {ccy: {"month": month, "symbols": symbols, "asked": symbols, "cov": cov}},
         }
@@ -214,9 +301,9 @@ def test_book_view_stays_quiet_when_too_little_is_measured():
 @pytest.mark.parametrize(
     "body",
     [
-        {"v": 1, "symbols": [1]},
-        {"v": 1, "symbols": {"AAPL": 5}},
-        {"v": 1, "symbols": "x", "cov": "y"},
+        {"v": long_run.VERSION, "symbols": [1]},
+        {"v": long_run.VERSION, "symbols": {"AAPL": 5}},
+        {"v": long_run.VERSION, "symbols": "x", "cov": "y"},
         [1],
         {"v": 99},
     ],
@@ -302,7 +389,7 @@ def test_malformed_file_reads_as_empty(tmp_path):
 
 
 def test_due_follows_the_month_and_new_holdings():
-    long_run._save({"v": 1, "symbols": {"AAPL": {"month": "2026-11"}, "MSFT": {"month": "2026-10"}},
+    long_run._save({"v": long_run.VERSION, "symbols": {"AAPL": {"month": "2026-11"}, "MSFT": {"month": "2026-10"}},
                     "cov": {"USD": {"month": "2026-11", "symbols": ["AAPL"], "asked": ["AAPL", "MSFT"]}}})  # fmt: skip
     assert long_run.due(["AAPL", "MSFT"], "USD", month="2026-11") == (["MSFT"], False)
     assert long_run.due(["AAPL", "MSFT", "NVDA"], "USD", month="2026-11") == (
@@ -385,7 +472,7 @@ def test_tick_waits_for_a_running_job(monkeypatch):
 
 def test_tick_is_quiet_when_nothing_is_due(monkeypatch):
     month = long_run._month()
-    long_run._save({"v": 1, "symbols": {"AAPL": {"month": month}},
+    long_run._save({"v": long_run.VERSION, "symbols": {"AAPL": {"month": month}},
                     "cov": {"USD": {"month": month, "symbols": ["AAPL"], "asked": ["AAPL"], "cov": [[0.04]]}}})  # fmt: skip
     monkeypatch.setattr(long_run, "_held_now", lambda: ([{"symbol": "AAPL"}], "USD"))
     monkeypatch.setattr(jobs, "current", lambda: None)
