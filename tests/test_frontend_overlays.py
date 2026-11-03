@@ -152,11 +152,21 @@ def test_each_opening_starts_on_the_view_its_button_names():
     assert "inv_att_view" not in _APP_JS
 
 
-def test_a_repaint_waits_for_the_analysis_tiles_to_land():
-    start = _APP_JS.index("function invFullPaint")
-    assert "INV_FULL.flying" in _APP_JS[start : start + 200]
-    assert "prefers-reduced-motion" in _APP_JS
-    assert "prefers-reduced-motion" in _CSS
+def test_analysis_opens_and_closes_with_no_animation():
+    """The owner's call, 2026-11-04: pressing it just opens the Map."""
+    assert "invFullFly" not in _APP_JS
+    assert "INV_FULL.flying" not in _APP_JS
+    assert ".flying" not in _CSS
+    start = _APP_JS.index("function invFullClose")
+    assert ".animate(" not in _APP_JS[start : _APP_JS.index("function invFullSelect")]
+
+
+def test_the_holding_card_says_where_the_depth_figures_come_from():
+    start = _APP_JS.index("function invRecCard")
+    body = _APP_JS[start : _APP_JS.index("function invRecChart")]
+    assert "At 40 large companies" in body
+    assert "inv-rec-dots" in body
+    assert "L.open_days < 2520" in body  # today's gap, only when the high is inside the ten years
 
 
 def test_the_news_view_reads_only_when_asked_and_keeps_the_mirror_entries():

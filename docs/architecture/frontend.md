@@ -131,13 +131,16 @@ dependency (loaded from CDN, used only for column-guide formulas).
   export keeps exact values. Do not add a "when your book falls 1%" beta sentence:
   median R² .16 on this kind of book.
 - **The holdings block swaps alone** (`#inv-hold`, `invHoldStill`): table to Drivers, or tab to tab, never `invRender` (it forces a layout while the page is short, which pulled the scroll up). A shorter block gets just enough `min-height` to hold the scroll position.
-- **The Analysis button (owner's pick from mockups, 2026-11-03).** It and the ⤢
-  are `--cta`, deep blue in light and dark. It holds a tiny Map (`.inv-glyph`) whose
-  tiles reshuffle on hover; pressed, `invFullFly` sends the real Map's tiles out of
-  it. **A repaint would replace tiles in flight, so `invFullPaint` waits while
-  `INV_FULL.flying`** and runs once when they land; `.flying` lifts the overflow
-  clip, because they start outside the Map's box. Closing goes back into the button
-  (`invFullClose`, a clip-path). `prefers-reduced-motion`: it simply opens and closes.
+- **The Analysis button (owner's pick from mockups, 2026-11-04).** A `--cta` outline
+  with nothing inside, a faint blue on hover, holding a tiny Map (`.inv-glyph`) in solid
+  `currentColor`: white in dark mode, the text colour in light, where white would vanish.
+  It opens and closes the Map with no animation, the owner's call. The ⤢ stays solid `--cta`.
+- **The holding's hover card (`inv:drv`, mockup C, 2026-11-04)** is written for a first-time
+  reader: what is left of every 100 in the display currency, and "out of 10" as dots. The
+  gap in "It is in a drop now" is today's (`now_pct`) when the holding is in the book's
+  currency and the running high is inside the ten years; `open_now` is from the record's
+  last pass, which may have been mid-session. The depth strip's figures are the panel's,
+  so the card says "At 40 large companies".
 - **The News view (`invFullNews`, mockup A, 2026-11-03).** One square per holding,
   for someone who doesn't look every day: Performance (the Month figure from
   Holdings, read against its usual month; since you bought), Financials (revenue

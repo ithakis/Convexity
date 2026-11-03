@@ -3802,24 +3802,16 @@
   .inv-hero { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; padding: 0 8px; }
   .inv-value { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
   /* Last month's change, its own line under the value (owner's layout A1). */
-  button.inv-analysis-btn { margin-left: auto; align-self: center; height: 34px; padding: 0 14px 0 8px; border: 0; border-radius: 5px; background: var(--cta); color: var(--on-cta); font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 9px; transition: filter .12s ease, transform 90ms ease; }
-  button.inv-analysis-btn:hover { filter: brightness(1.15); }
+  button.inv-analysis-btn { margin-left: auto; align-self: center; height: 34px; padding: 0 14px 0 9px; border: 1.5px solid var(--cta); border-radius: 5px; background: transparent; color: var(--text); font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 9px; }
+  :root[data-theme="dark"] button.inv-analysis-btn { color: #fff; }
+  button.inv-analysis-btn:hover { background: color-mix(in srgb, var(--cta) 20%, transparent); }
   button.inv-analysis-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  button.inv-analysis-btn:active { transform: scale(.975); }
-  /* A tiny Map, its tiles reshuffling under the mouse (invFullFly sends them out). */
   .inv-glyph { position: relative; display: block; flex: none; width: 22px; height: 18px; }
-  .inv-glyph i { position: absolute; border-radius: 1px; transition: all 260ms cubic-bezier(.3, 1.3, .5, 1); }
-  .inv-glyph i:nth-child(1) { left: 0; top: 0; width: 12px; height: 18px; background: currentColor; opacity: .92; }
-  .inv-glyph i:nth-child(2) { left: 13px; top: 0; width: 9px; height: 8px; background: currentColor; opacity: .62; transition-delay: 30ms; }
-  .inv-glyph i:nth-child(3) { left: 13px; top: 9px; width: 5px; height: 9px; background: currentColor; opacity: .42; transition-delay: 60ms; }
-  .inv-glyph i:nth-child(4) { left: 19px; top: 9px; width: 3px; height: 9px; background: currentColor; opacity: .72; transition-delay: 90ms; }
-  .inv-analysis-btn:hover .inv-glyph i:nth-child(1) { width: 8px; }
-  .inv-analysis-btn:hover .inv-glyph i:nth-child(2) { left: 9px; width: 13px; height: 11px; }
-  .inv-analysis-btn:hover .inv-glyph i:nth-child(3) { left: 9px; top: 12px; width: 8px; height: 6px; }
-  .inv-analysis-btn:hover .inv-glyph i:nth-child(4) { left: 18px; top: 12px; width: 4px; height: 6px; }
-  @media (prefers-reduced-motion: reduce) { .inv-glyph i, button.inv-analysis-btn { transition: none; } button.inv-analysis-btn:active { transform: none; } }
-  /* In flight the tiles start outside the Map's box. */
-  .att-fs-bg.flying .att-fs-body, .att-fs-bg.flying .att-fs-main, .att-fs-bg.flying .att-fs-map { overflow: visible; }
+  .inv-glyph i { position: absolute; border-radius: 1px; background: currentColor; }
+  .inv-glyph i:nth-child(1) { left: 0; top: 0; width: 12px; height: 18px; }
+  .inv-glyph i:nth-child(2) { left: 14px; top: 0; width: 8px; height: 8px; }
+  .inv-glyph i:nth-child(3) { left: 14px; top: 10px; width: 3px; height: 8px; }
+  .inv-glyph i:nth-child(4) { left: 19px; top: 10px; width: 3px; height: 8px; }
   .inv-month { font-size: 13.5px; font-weight: 600; padding: 2px 8px 0; }
   .inv-stale { font-size: 11.5px; color: var(--muted); font-weight: 500; }
   .inv-stale.failed { color: var(--warn); }
@@ -4193,7 +4185,7 @@
   .rich-tip-float .pf-metric-tip.inv-tip { width: 320px; }
   .rich-tip-float .pf-metric-tip.inv-tip-wide { width: 400px; }
   .rich-tip-float .pf-metric-tip.inv-col-tip { width: 300px; }
-  .inv-col-h { border-bottom: 1px dotted var(--muted); cursor: help; }
+  .inv-col-h { cursor: help; }
   .inv-col-body { display: grid; grid-template-columns: 84px 1fr; gap: 10px; align-items: start; margin-top: 6px; font-size: 12.5px; line-height: 1.42; }
   .inv-col-sk { display: block; width: 84px; height: 46px; }
   .inv-col-sk .p { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linejoin: round; }
@@ -4524,6 +4516,14 @@
   .inv-rec { border-top: 2px solid var(--border); margin-top: 8px; padding-top: 8px; }
   .inv-rec-k { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); margin-bottom: 3px; }
   .inv-rec p { margin: 0 0 6px; font-size: 12.5px; line-height: 1.42; }
+  .inv-e-lede { margin-bottom: 7px; font-size: 12.5px; line-height: 1.4; color: var(--muted); }
+  .inv-e { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .inv-e small { display: block; font-size: 11px; line-height: 1.3; color: var(--muted); }
+  .inv-e b { font-size: 15px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .inv-rec-ten { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; align-items: center; margin: 0 0 6px; font-size: 12px; }
+  .inv-rec-dots { display: flex; gap: 3px; }
+  .inv-rec-dots i { width: 12px; height: 12px; border-radius: 50%; background: rgba(59, 125, 221, .22); }
+  .inv-rec-dots i.on { background: rgb(59, 125, 221); }
   .inv-rec-chart { display: block; width: 100%; height: auto; }
   .inv-rec-chart text { font-size: 9.5px; fill: var(--muted); font-variant-numeric: tabular-nums; }
   .inv-rec-key { margin-top: 1px; font-size: 10.5px; color: var(--muted); }
@@ -4537,7 +4537,7 @@
   /* High zoom: the card gives way before it runs off the window, footnotes first. */
   @media (max-height: 600px) { .inv-rec ~ .inv-tip-tech { display: none; } }
   @media (max-height: 600px) { .inv-rec-sk, .inv-rec-depth { display: none; } }
-  @media (max-height: 500px) { .inv-rec-key { display: none; } }
+  @media (max-height: 500px) { .inv-rec-key, .inv-rec-chart, .inv-e small { display: none; } }
   .inv-drv-row[data-sym]:hover { background: var(--hover); }
   .inv-drv-row.tot { height: 28px; font-weight: 700; border-top: 1px solid var(--text); border-bottom: 0; }
   .inv-drv-row.minor { color: var(--muted); }

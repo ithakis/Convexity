@@ -174,9 +174,8 @@ Each of these has cost real debugging time; the link goes to the full story.
   "Read again" reads when pressed, and `news_watch.py` (a hidden `newsread` job,
   superseded by any refresh, needs both keys, skips funds, one share at a time) reads what
   is over 3 days old. **Any server with real keys and no `CONVEXITY_LONGRUN=0` will
-  spend the owner's quota by itself after 5 minutes.** The Analysis button's tiles fly into the Map, so
-  `invFullPaint` waits while `INV_FULL.flying`, and motion respects
-  `prefers-reduced-motion`.
+  spend the owner's quota by itself after 5 minutes.** The Analysis button opens the Map with
+  no animation, the owner's call.
   [frontend.md → Analysis, News](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv)
 - **Attention's full screen reads the rail, never a second rule set**
   (`evaluate`'s `near`, `limits`, `next`), and its charts and past results come

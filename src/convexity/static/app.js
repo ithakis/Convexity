@@ -16344,7 +16344,6 @@ function invFullLede(m) {
 function invFullPaint() {
   const host = $("#inv-att-fs");
   if (!invFullIsOpen() || !host) return;
-  if (INV_FULL.flying) { INV_FULL.repaint = true; return; }
   if (!INV.book?.positions?.length) { invFullClose(); return; }
   const m = invFullModel();
   if (INV_FULL.sel && !m.by[INV_FULL.sel]) INV_FULL.sel = null;
@@ -16402,33 +16401,9 @@ function invFullWanted() {
  * become the real one (owner's pick from mockups, 2026-11-03). A repaint would
  * replace the tiles in flight, so paints wait until they land. Motion switched
  * off in the system: it simply opens. */
-const INV_FLY_MS = 480, INV_FLY_SPREAD = 240;   // each tile's flight; the last one's head start
-const invFullStill = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
-function invFullFly(from) {
-  const bg = $("#inv-att-bg"), tiles = [...bg.querySelectorAll(".att-fs-tile")];
-  const spots = [...from.querySelectorAll(".inv-glyph i")].map(el => el.getBoundingClientRect());
-  if (invFullStill() || !tiles.length || !spots.length || !bg.animate) return;
-  INV_FULL.flying = true;
-  bg.classList.add("flying");
-  bg.animate([{ backgroundColor: "transparent" }, { backgroundColor: getComputedStyle(bg).backgroundColor }], { duration: 300 });
-  bg.querySelectorAll(".att-fs-head, .att-fs-maptop, .att-fs-side").forEach(el =>
-    el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, delay: 160, fill: "backwards" }));
-  const flights = tiles.map((t, i) => {
-    const r = t.getBoundingClientRect(), at = spots[i % spots.length];
-    return t.animate([
-      { transformOrigin: "0 0", transform: `translate(${at.left - r.left}px,${at.top - r.top}px) scale(${at.width / r.width},${at.height / r.height})`, opacity: 0.9 },
-      { transformOrigin: "0 0", transform: "none", opacity: 1 },
-    ], { duration: INV_FLY_MS, delay: i / tiles.length * INV_FLY_SPREAD, easing: "cubic-bezier(.2,.9,.2,1)", fill: "backwards" }).finished;
-  });
-  Promise.allSettled(flights).then(() => {
-    INV_FULL.flying = false;
-    bg.classList.remove("flying");
-    if (INV_FULL.repaint) { INV_FULL.repaint = false; invFullPaint(); }
-  });
-}
 /* Every opening starts on the view its button names: Desk from Attention, the
  * Map from Analysis (owner's call, 2026-11-03). */
-function invFullOpen(view = "desk", kicker = "Attention", from = null) {
+function invFullOpen(view = "desk", kicker = "Attention") {
   const bg = $("#inv-att-bg"), b = INV.book;
   if (!bg || !b?.positions?.length || invFullIsOpen()) return;
   INV_FULL.view = view;
@@ -16437,7 +16412,6 @@ function invFullOpen(view = "desk", kicker = "Attention", from = null) {
   INV_FULL.sel = null;
   if (!showOverlay(bg)) return;
   invFullPaint();
-  if (from) invFullFly(from);
   // A window left open for hours: background reads and prices arrived since.
   if (Date.now() - Date.parse(b.computed_at) > INV_FULL_PAGE_AGE && !INV.loading) invLoad();
   $("#inv-att-fs [data-full-close]")?.focus({ preventScroll: true });  // Enter must not press what's underneath
@@ -16450,21 +16424,10 @@ function invFullOpen(view = "desk", kicker = "Attention", from = null) {
 }
 function invFullClose() {
   invClosePop();
-  if (INV_FULL.closing) return;
-  const bg = $("#inv-att-bg"), wasAnalysis = INV_FULL.kicker === "Analysis";
-  const done = () => {
-    INV_FULL.closing = false;
-    if (!hideOverlay("#inv-att-bg")) return;
-    INV_FULL.sel = null;
-    if (wasAnalysis) $("[data-inv-analysis]")?.focus({ preventScroll: true });
-  };
-  // Opened from Analysis, it goes back into the button, quicker than it came.
-  const b = wasAnalysis ? $("[data-inv-analysis]")?.getBoundingClientRect() : null;
-  if (!b?.width || b.bottom < 0 || invFullStill() || !invFullIsOpen() || !bg.animate) { done(); return; }
-  INV_FULL.closing = true;
-  const back = bg.animate([{ clipPath: "inset(0 0 0 0 round 0)" }, { clipPath: `inset(${b.top}px ${innerWidth - b.right}px ${innerHeight - b.bottom}px ${b.left}px round 5px)` }],
-    { duration: 220, easing: "cubic-bezier(.5,0,.8,.4)", fill: "forwards" });
-  back.finished.then(() => { done(); back.cancel(); }, done);
+  const wasAnalysis = INV_FULL.kicker === "Analysis";
+  if (!hideOverlay("#inv-att-bg")) return;
+  INV_FULL.sel = null;
+  if (wasAnalysis) $("[data-inv-analysis]")?.focus({ preventScroll: true });
 }
 function invFullSelect(sym) {
   INV_FULL.sel = INV_FULL.sel === sym ? null : sym;
@@ -16870,51 +16833,56 @@ RICH_TIPS["inv:risk_share"] = (host) => {
 };
 RICH_TIPS["inv:drv"] = (host) => {
   const x = invPos(host); if (!x) return "";
-  const r = invRiskOf(x), vr = invOk(r?.var_pct) ? -r.var_pct : null, line = (k, v) => `<tr><th>${k}</th><td>${v}</td></tr>`;
-  const val = (M) => { const v = M.get(x, r); return v == null ? na() : M.fmt(v, x); };
-  const proxy = r?.rec?.proxy || r?.proxy;
+  const r = invRiskOf(x), vr = invOk(r?.var_pct) ? -r.var_pct : null, fall = INV_RISKS.fall.get(x, r), below = INV_RISKS.below.get(x, r);
+  // What is left of every 100 in the display currency: a first-time reader's way into a percentage.
+  const left = (loss) => loss == null ? na() : `${invSym()}${Math.round(100 - loss)}`;
+  const row = (k, sub, v) => `<div class="inv-e"><span>${k}${sub ? `<small>${sub}</small>` : ""}</span><b>${v}</b></div>`;
+  const share = invShareText(x, true), c = invContrib(x), when = invWords().replace(/^the /, "in the ");
+  const proxy = r?.rec?.proxy || r?.proxy, ccy = escapeHtml(INV.book.ccy), own = x.quote_ccy === "GBp" ? "GBP" : x.quote_ccy;
+  const apart = r?.rec && own && own !== INV.book.ccy;
+  const facts = [`${invPct(x.weight, 1).replace("+", "")} of your money`, share && `${share} of your risk`, invOk(c) && `${invPct(c, 1, " points")} to your return ${when}`].filter(Boolean).join(", ");
   return `<div class="pf-metric-tip inv-tip inv-tip-wide" role="tooltip"><div class="mt-name">${escapeHtml(x.name)}</div>
-    <table class="mt-table inv-tip-table"><tbody>
-      ${line(`Contribution, ${escapeHtml(INV.period)}`, invPts(invContrib(x)))}
-      ${line("Weight", invPct(x.weight, 1).replace("+", ""))}
-      ${line("Risk share", val(INV_RISKS.share))}
-      ${line("Bad month, on its own", vr == null ? na() : `${INV_RISKS.var.fmt(vr)} · about ${vr < 0 ? "+" : "−"}${invMoney(x.value * Math.abs(vr) / 100)}`)}
-      ${line("Worst fall, 10y", val(INV_RISKS.fall))}
-      ${line("Below its 10y high", val(INV_RISKS.below))}
-    </tbody></table>${invRecCard(r)}<div class="inv-tip-tech">${r ? "The past, not a promise: companies that never came back aren't in it. " : ""}${r?.rec ? "The table in" : "In"} ${escapeHtml(INV.book.ccy)}, dividends included.${proxy ? ` Before its own listing, ${escapeHtml(proxy)} stands in.` : ""}</div></div>`;
+    <div class="inv-e-lede">${facts}.</div>
+    <div class="inv-rec-k">Every ${invSym()}100 you have in it</div>
+    ${row("After a bad month", `1 month in 20 is this bad or worse.${vr == null ? "" : ` On your holding: ${vr < 0 ? "+" : "−"}${invMoney(x.value * Math.abs(vr) / 100)}`}`, left(vr))}
+    ${row("After its biggest drop in 10 years", "From a high to the low after it", left(fall))}
+    ${row("Today, compared with its 10-year high", "", left(below))}
+    ${invRecCard(r, apart ? null : r?.now_pct, apart ? own : null)}<div class="inv-tip-tech">${r ? "History, not a promise, and companies that never came back aren't in it. " : ""}${apart ? `The ${invSym()}100 figures in ${ccy}, the rest in ${escapeHtml(own)}, dividends included.` : `In ${ccy}, dividends included.`}${proxy ? ` Before its own listing, ${escapeHtml(proxy)} stands in.` : ""}</div></div>`;
 };
 /* Time to recover in the Drivers card: every stretch below its running all-time
  * high with the curve fitted to them, then the falls of 10% or more, and how long
  * falls of each depth took, which is what decides it. Words for a retail reader:
- * natural frequencies ("out of 10"). The figures by depth are the
- * panel's, Kaplan-Meier medians counting running falls: a table rather than a
+ * natural frequencies ("out of 10", drawn as dots). The figures by depth are the
+ * panel's (and the card says so), Kaplan-Meier medians counting running falls: a table rather than a
  * curve, which held out of time when curves by depth didn't. A running fall has
  * its own estimate (long_run.from_here), because how far the price still has to
  * go decides it (docs/recovery_research.md). */
 const INV_REC_DEPTH = [[10, 20, 59], [20, 30, 150], [30, 50, 384], [50, 100, 1223]];
 const invRecWords = (d) => d >= 252 ? `${(d / 252).toFixed(d >= 2520 ? 0 : 1).replace(/\.0$/, "")} year${d >= 252 * 1.05 ? "s" : ""}` : d >= 21 ? `${Math.round(d / 21)} month${Math.round(d / 21) > 1 ? "s" : ""}` : `${Math.max(1, Math.round(d))} day${Math.round(d) > 1 ? "s" : ""}`;
-function invRecCard(r) {
+function invRecCard(r, today, ccy) {
   if (!r) return "";
   // The monthly record's whole history when it is there, the ten years until then.
   const L = r.rec || {fit: r.rec_fit, dips: r.rec_dips, falls: r.falls, since: r.since, open_days: r.open_days, open_depth: r.open_depth, open_now: r.open_now, from_here: r.from_here};
-  const n = (L.falls || 0) + (L.open_days ? 1 : 0), since = String(L.since).slice(0, 4), f = L.fit, D = L.dips;
-  const head = `<div class="inv-rec-k">Time to recover</div>`, times = (k) => k === 1 ? "once" : `${k} times`;
+  const n = (L.falls || 0) + (L.open_days ? 1 : 0), since = escapeHtml(String(L.since).slice(0, 4)), f = L.fit, D = L.dips;
+  const head = (t) => `<div class="inv-rec-k">${t}</div>`, big = "When it drops 10% or more, how long until it's back?";
   // The record is up to a month old, and a week's move can change this much.
   const old = L.asof && Date.now() - Date.parse(L.asof) > 7 * 864e5, fh = L.from_here;
   // The ten years stand in until the record is there: their high is only ten years'.
-  const high = r.rec ? "all-time high" : "10-year high", many = D && D.n >= 5;
-  const back = !D ? "" : many ? `Half were back within ${invRecWords(D.q50)}, 9 in 10 within ${invRecWords(D.q90)}.` : D.n === 1 ? `It took ${invRecWords(D.lo)} to come back.` : `They took ${invRecWords(D.lo)} to ${invRecWords(D.hi)} to come back.`;
-  const dips = D ? `Since ${escapeHtml(since)} it has gone below its ${high} ${times(D.n)} and come back. ${back}` : "";
+  const high = r.rec ? "record" : "10-year high", many = D && D.n >= 5;
+  const dips = !D ? "" : many ? `${D.q50 < 21 ? "Most dips are quick: half" : "Half"} of its ${D.n} since ${since} were over within <b>${invRecWords(D.q50)}</b>.` : D.n === 1 ? `Its one dip since ${since} took ${invRecWords(D.lo)}.` : `Its ${D.n} dips since ${since} took ${invRecWords(D.lo)} to ${invRecWords(D.hi)}.`;
   const running = L.open_days && !old;
-  const chart = D ? `${invRecChart(D, running ? D.running : null)}<div class="inv-rec-key">Bars: each time below its high. Solid: falls of 10% or more.${running ? " Red: the one still running." : ""}</div>` : "";
-  if (!n) return `<div class="inv-rec">${head}<p>${D ? `${dips} None was a fall of 10% or more.` : `It hasn't fallen 10% or more from its high since ${escapeHtml(since)}.`}</p>${chart}</div>`;
-  const left = !fh ? "" : fh.q50 == null ? " Few falls this deep have ever come back, so there is no fair estimate of when." : ` From there, half of falls like it took about ${invRecWords(fh.q50)} more${fh.beyond ? ", the rest longer still" : `, 9 in 10 about ${invRecWords(fh.q90)}`}.`;
-  const open = L.open_days ? ` <span class="neg">${old ? `On ${escapeHtml(invDay(L.asof).replace(/^\w+ /, ""))} it was in one` : "It is in one now"}: ${invRecWords(L.open_days)} so far, ${Math.abs(L.open_now).toFixed(0)}% below its high.${left}</span>` : "";
-  const said = `${D ? `${dips} It has had ${n === 1 ? "one fall" : `${n} falls`} of 10% or more.` : `It has fallen 10% or more from its high ${times(n)} since ${escapeHtml(since)}.`}${f ? ` Out of 10 falls like these, expect about 5 back within ${invRecWords(f.q50)} and 9 within ${invRecWords(f.q90)}.` : ""}${open}`;
-  const depth = L.open_days ? Math.abs(L.open_depth ?? L.open_now) : null;
+  const chart = D ? `${invRecChart(D, running ? D.running : null)}<div class="inv-rec-key">Bars: past dips by how long they lasted. Bright: drops of 10% or more.${running ? " Red box: this one." : ""} White line: the pattern.</div>` : "";
+  if (!n) return `<div class="inv-rec">${head("How long until it's back?")}<p>${D ? `${dips} None was a drop of 10% or more.` : `It hasn't dropped 10% or more from its high since ${since}.`}</p>${chart}</div>`;
+  const dots = (k) => `<span class="inv-rec-dots">${Array.from({ length: 10 }, (_, i) => `<i class="${i < k ? "on" : ""}"></i>`).join("")}</span>`;
+  const out = f ? `<p>It has had ${n === 1 ? "one" : n} since ${since}. Out of 10 like ${n === 1 ? "it" : "them"}:</p><div class="inv-rec-ten">${dots(5)}<span>back within <b>${invRecWords(f.q50)}</b></span>${dots(9)}<span>back within <b>${invRecWords(f.q90)}</b></span></div>` : `<p>It has had ${n === 1 ? "one" : n} since ${since}.</p>`;
+  const after = !fh ? "" : fh.q50 == null ? " Few drops this deep have ever come back, so there is no fair estimate of when." : ` From there, half took about ${invRecWords(fh.q50)} more${fh.beyond ? ", the rest longer still" : `, 9 in 10 about ${invRecWords(fh.q90)}`}.`;
+  // The record keeps the gap from its last pass; today's is the table's, same closes, same high, when it is the same currency and the high is inside its ten years.
+  const gap = Math.abs(!old && invOk(today) && L.open_days < 2520 ? today : L.open_now), away = gap < 1 ? "under 1% away" : `${gap.toFixed(0)}% away${ccy ? ` in ${escapeHtml(ccy)}` : ""}`;
+  const open = L.open_days ? `<p class="neg">${old ? `On ${escapeHtml(invDay(L.asof).replace(/^\w+ /, ""))} it was in a drop` : "It is in a drop now"}: ${invRecWords(L.open_days)} under its ${high}, ${away}.${after}</p>` : "";
+  const depth = L.open_days ? Math.abs(L.open_depth ?? L.open_now) : null, hit = depth != null && INV_REC_DEPTH.some(([lo, hi]) => depth >= lo && depth < hi);
   const strip = INV_REC_DEPTH.map(([lo, hi, d]) => `<span class="${depth != null && depth >= lo && depth < hi ? "on" : ""}"><b>${invRecWords(d).replace(" months", " mo").replace(" month", " mo").replace(" years", " y").replace(" year", " y")}</b>${lo}${hi === 100 ? "%+" : `–${hi}%`}</span>`).join("");
-  return `<div class="inv-rec">${head}<p>${said}</p>${chart}
-    <div class="inv-rec-sk">Deeper falls take longer: half of the falls this deep took</div><div class="inv-rec-depth">${strip}</div></div>`;
+  return `<div class="inv-rec">${head(big)}${out}${dips ? `<p>${dips}</p>` : ""}${open}${chart}
+    <div class="inv-rec-sk">At 40 large companies, half of the drops this big took:${hit ? ` <span class="neg">(red: this one at its deepest, ${depth.toFixed(0)}%)</span>` : ""}</div><div class="inv-rec-depth">${strip}</div></div>`;
 }
 /* Thirty bars on a log axis, two days to thirty years, every stretch below the
  * running high; the curve is in the bars' own unit (expected dips per bar), so it can
@@ -18091,7 +18059,7 @@ $("#inv-page").addEventListener("click", (e) => {
   else if (e.target.closest("[data-inv-att-more]")) { INV.attMore = !INV.attMore; invAttApply(INV.book?.attention); invAttSeen(); }
   else if (e.target.closest("[data-inv-att-rules]")) { openSettings(); selectSettingsSection("attention"); }
   else if (e.target.closest("[data-inv-att-full]")) invFullOpen();
-  else if (e.target.closest("[data-inv-analysis]")) invFullOpen("map", "Analysis", e.target.closest("[data-inv-analysis]"));
+  else if (e.target.closest("[data-inv-analysis]")) invFullOpen("map", "Analysis");
   else if (e.target.closest("[data-inv-divs]")) { INV.divOpen = !INV.divOpen; const a = $("#inv-page .inv-rail"); if (a) a.innerHTML = invRailHtml(INV.book); }
   else if (e.target.closest("[data-inv-div-add]")) invAddDividends(e.target.closest("[data-inv-div-add]").dataset.invDivAdd);
   else if (e.target.closest("[data-inv-redo]")) invUndo(true);

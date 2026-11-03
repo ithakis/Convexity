@@ -9,6 +9,13 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## Unreleased
+
+- **The holding's hover card is written for a first-time reader.** Risk reads as what is left of every €100 (after a bad month, after its biggest drop in 10 years, today against its high), recovery as ten dots, and the chart and depth table say what they show, including that the depth figures come from 40 large companies.
+- **The running fall's gap matches the table**: it read the last long-record pass, so it could differ from today's figure (2% against 3%).
+- **The Analysis button is a blue outline with white squares**, and it opens the Map with no animation.
+- **The column headers lost their dotted underline.** The explanations still show on hover.
+
 ## 1.32.1 — 2026-11-03
 
 - **The app reads your holdings' news by itself** once a read is over 3 days old: quietly in the background, one share at a time, after anything else has finished and only with your NVIDIA and Finnhub keys set. Funds are left out, and your own Refresh always goes first. Opening the full screen on a page left open for a while brings it up to date.
