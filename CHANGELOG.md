@@ -9,6 +9,11 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.32.3 — 2026-11-04
+
+- **Attention's full-screen table centres every row vertically.** Cells used to sit at the top of tall rows.
+- **Constituent chips name the real exchange** (`AAPL.NASDAQ`, `TSM.NYSE`) instead of an invented `.US`. Suffixed tickers like `AIR.PA` are unchanged, and a mutual fund or over-the-counter ticker shows no suffix. Display only: entries, symbols and data keep the plain ticker. The chip's width limit goes from 280 to 294 px so the longer label cuts no name further.
+
 ## 1.32.2 — 2026-11-04
 
 - **The holding's hover card is written for a first-time reader.** Risk reads as what is left of every €100 (after a bad month, after its biggest drop in 10 years, today against its high), recovery as ten dots, and the chart and depth table say what they show, including that the depth figures come from 40 large companies.
