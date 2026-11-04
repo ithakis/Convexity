@@ -761,7 +761,7 @@
   .pf-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .pf-chips:empty::before { content: "Add companies with the search box above."; color: var(--muted); font-size: 12px; }
   .pf-chip {
-    display: inline-flex; align-items: center; gap: 7px; max-width: 280px;
+    display: inline-flex; align-items: center; gap: 7px; max-width: 294px;
     padding: 4px 5px 4px 12px; border: 1px solid transparent; border-radius: 999px;
     background: var(--chip-bg); color: var(--text); font-size: 12.5px;
     transition: background .12s;
@@ -770,7 +770,7 @@
   .pf-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* The ticker: a soft red badge with white letters in every theme (owner,
      2026-10-28). A fixed red, not --neg, so it never shifts with the theme;
-     the exchange suffix (.US, .L) is a step quieter than the ticker. */
+     the exchange suffix (.NASDAQ, .L) is a step quieter than the ticker. */
   .pf-chip-tk {
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px; font-weight: 600;
     color: #fff; background: #e05f5f; padding: 1px 6px; border-radius: var(--r-sm); letter-spacing: 0.02em;
@@ -4016,7 +4016,7 @@
   /* Desk */
   .att-fs-tbl { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   .att-fs-tbl th { position: sticky; top: 0; background: var(--bg-canvas); z-index: 1; font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--th-ink, var(--muted)); text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  .att-fs-tbl td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; white-space: nowrap; }
+  .att-fs-tbl td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
   .att-fs-tbl .left { text-align: left; }
   .att-fs-tbl td.left { white-space: normal; }
   .att-fs-tbl th:first-child { width: 24%; } .att-fs-tbl th:nth-child(2) { width: 27%; }

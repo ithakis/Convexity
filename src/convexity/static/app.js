@@ -6760,12 +6760,13 @@ function shortName(n) {
 }
 
 /* The badge names the exchange (owner, 2026-10-28): Yahoo's suffix as it is
-   (IE15.L, AIR.PA), and ".US" for a US line, which Yahoo leaves bare. A
-   ticker with neither (not in the pack, not built yet) stays bare. */
-const US_EXCHANGES = new Set(["NYQ", "NMS", "NGM", "NCM", "NAS", "ASE", "BTS", "PCX"]);
+   (IE15.L, AIR.PA), and the exchange's own name for a US line, which Yahoo
+   leaves bare (.NASDAQ, .NYSE). A ticker with neither (not in the pack, not
+   built yet) stays bare. */
+const EXCH_NAMES = { NMS: "NASDAQ", NGM: "NASDAQ", NCM: "NASDAQ", NYQ: "NYSE", PCX: "ARCA", BTS: "BATS", ASE: "AMEX" };
 function tickerBadge(sym, exch) {
   const s = String(sym || ""), i = s.lastIndexOf(".");
-  const [base, ext] = i > 0 ? [s.slice(0, i), s.slice(i)] : [s, US_EXCHANGES.has(exch) ? ".US" : ""];
+  const [base, ext] = i > 0 ? [s.slice(0, i), s.slice(i)] : [s, EXCH_NAMES[exch] ? "." + EXCH_NAMES[exch] : ""];
   return `<span class="pf-chip-tk">${escapeHtml(base)}${ext ? `<span class="pf-chip-ex">${escapeHtml(ext)}</span>` : ""}</span>`;
 }
 
