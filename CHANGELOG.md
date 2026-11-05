@@ -9,6 +9,13 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.33.0 — 2026-11-05
+
+- **Multiple My Investments portfolios.** A "Multiple portfolios" switch in Settings → My Investments, off by default. On, a pill beside the currency shows which portfolio is open and switches between them, and Settings lists them (Show, Rename, Delete, Add). Off, nothing else changes. The portfolio's name appears only in the pill, its menu, that list and the delete confirmation.
+- **Each portfolio keeps its own records**: trades, limits, plans, dismissed items and recaps. The first stays where it always was, with no migration; others live in `state/books/<id>/`. A change sent for a portfolio no longer showing is refused, and work under way when you switch can't land in the other one. Alerts and background news reads run only for the one showing. The first portfolio can't be deleted; deleting another keeps a copy in the data folder.
+- **Dropdown menus look fresher**: no border, larger rounded corners, the same colour as the pills, and a blue filled row for the current choice. This covers the portfolio, currency and benchmark menus.
+- **A rebuild left running could overwrite another portfolio's saved rows.** Leaving a tab while it rebuilt saved its rows under the tab you moved to. A build now stops when you leave and saves only under its own tab. Tab changes in quick succession no longer paint an older tab's rows. A saved view hit by this repairs itself on Refresh.
+
 ## 1.32.3 — 2026-11-04
 
 - **Attention's full-screen table centres every row vertically.** Cells used to sit at the top of tall rows.
