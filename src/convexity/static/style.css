@@ -390,21 +390,9 @@
   .fx-btn.open { border-color: var(--accent); background: var(--bg-subtle); }
   .fx-btn-label { font-weight: 600; letter-spacing: 0.02em; }
   .fx-btn-caret { font-size: 10px; color: var(--muted); }
-  .fx-dropdown {
-    position: absolute; right: 0; top: 36px;
-    background: var(--bg-canvas); border: 1px solid var(--border);
-    border-radius: var(--r-md); padding: 6px; min-width: 168px;
-    box-shadow: 0 8px 28px rgba(0,0,0,0.18);
-    display: none; z-index: 80;
-  }
+  .fx-dropdown { position: absolute; right: 0; top: calc(100% + 8px); width: max-content; display: none; z-index: 80; }
   .fx-dropdown.show { display: block; }
-  .fx-opt {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 10px; padding: 6px 10px; border-radius: var(--r-sm); cursor: pointer;
-    font-size: 12.5px; color: var(--text);
-  }
-  .fx-opt:hover { background: var(--bg-subtle); }
-  .fx-opt.selected { background: rgba(var(--accent-rgb), 0.12); color: var(--accent); font-weight: 600; }
+  .fx-opt { display: flex; align-items: center; justify-content: space-between; gap: 18px; cursor: pointer; white-space: nowrap; }
   .fx-opt .fx-opt-code { font-weight: 600; letter-spacing: 0.02em; }
   .fx-opt .fx-opt-name { color: var(--muted); font-size: 11.5px; }
   .fx-hover {
@@ -633,6 +621,7 @@
     display: none; align-items: center; justify-content: center; z-index: 80;
     padding: 20px;
   }
+  #confirm-bg { z-index: 96; }  /* over Settings (92), which deletes a portfolio */
   .confirm-bg.show { display: flex; }
   .confirm-modal {
     background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-lg);
@@ -1224,24 +1213,36 @@
   .bench-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .bench-caret { width: 10px; height: 10px; transition: transform .15s; }
   .bench-dd.open .bench-caret { transform: rotate(180deg); }
-  .bench-menu {
-    display: none; position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
-    min-width: 200px; padding: 4px; border-radius: var(--r-md);
-    background: var(--bg-canvas); border: 1px solid var(--border);
-    box-shadow: 0 10px 28px rgba(0,0,0,0.22), 0 2px 6px rgba(0,0,0,0.10);
-  }
+  .bench-menu { display: none; position: absolute; top: calc(100% + 8px); left: 0; z-index: 40; min-width: 210px; }
   .bench-dd.open .bench-menu { display: block; animation: bench-pop .12s ease-out; }
   @keyframes bench-pop { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
   .bench-opt {
-    font: inherit; font-size: 12.5px; width: 100%; display: grid; grid-template-columns: 1fr auto 14px;
-    align-items: center; gap: 10px; padding: 6px 8px; border: 0; border-radius: var(--r-sm);
-    background: transparent; color: var(--text); text-align: left; cursor: pointer;
+    font: inherit; width: 100%; display: grid; grid-template-columns: 1fr auto;
+    align-items: center; gap: 10px; text-align: left; cursor: pointer;
   }
-  .bench-opt:hover, .bench-opt:focus-visible { background: var(--hover); outline: none; }
   .bench-opt-key { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-  .bench-opt-check { width: 12px; height: 12px; color: var(--accent); visibility: hidden; }
-  .bench-opt.on { color: var(--accent); font-weight: 600; }
-  .bench-opt.on .bench-opt-check { visibility: visible; }
+  .bench-opt-check { display: none; }
+  /* The menus of the top bar's pills and the "vs" pickers, one look: the panel in
+     the pill's own colour, the row showing filled with the theme's accent. Both
+     selectors: .topbar button (0,1,1) and its :hover (0,2,1) set height, padding,
+     border, background and font-size inside the top bar. */
+  .bench-menu, .topbar .bench-menu, .fx-dropdown {
+    padding: 8px; border: 0; border-radius: 18px; background: var(--hover);
+    box-shadow: 0 18px 44px rgba(0,0,0,0.28), 0 2px 8px rgba(0,0,0,0.14);
+  }
+  .bench-opt, .topbar .bench-opt, .fx-opt {
+    box-sizing: border-box; height: auto; padding: 9px 14px; margin: 0; border: 0; border-radius: 12px;
+    background: transparent; color: var(--text); font-size: 13.5px; font-weight: 450;
+  }
+  .bench-opt + .bench-opt, .fx-opt + .fx-opt { margin-top: 3px; }
+  .bench-opt:hover, .bench-opt:focus-visible, .topbar .bench-opt:hover, .topbar .bench-opt:focus-visible, .fx-opt:hover {
+    background: color-mix(in srgb, var(--text) 7%, transparent); border: 0; outline: none;
+  }
+  .bench-opt.on, .topbar .bench-opt.on, .fx-opt.selected,
+  .bench-opt.on:hover, .topbar .bench-opt.on:hover, .fx-opt.selected:hover,
+  .bench-opt.on:focus-visible, .topbar .bench-opt.on:focus-visible {
+    background: rgba(var(--accent-rgb), 0.34); color: var(--text); font-weight: 600;
+  }
   .pf-stat-row .bench-v { color: var(--muted); font-weight: 400; }
   /* The settings pane clips its content: the list scrolls inside a short box. */
   .settings-row .bench-menu { left: auto; right: 0; max-height: min(200px, 30vh); overflow-y: auto; }
@@ -4671,8 +4672,9 @@
      raised surface instead of reading as a darker strip (box-in-box). Inner
      hairlines (header/footer dividers) stay — only the frame goes. A new
      overlay surface belongs in this list. Small dropdown menus (.inv-menu,
-     .ct-menu, .bench-menu) keep their hairline: they open over the undimmed
-     page, where a shadow alone does not hold the edge. */
+     .ct-menu) keep their hairline: they open over the undimmed page, where a
+     shadow alone does not hold the edge. .bench-menu and .fx-dropdown hold
+     theirs with the pill's own fill instead. */
   .modal,
   .info-modal,
   .confirm-modal,
@@ -4802,6 +4804,47 @@
     font-size: 13px;
   }
   .topbar button.fx-btn:hover, .topbar button.fx-btn.open { border: 0; filter: brightness(1.12); background: var(--hover); }
+  /* Which portfolio shows: the benchmark picker's menu on the currency pill.
+     Shrinks last, so the status text beside it gives way first. */
+  .topbar .status.status-clip { visibility: hidden; }
+  .topbar .book-pill { display: inline-flex; flex: 0 .12 auto; min-width: 72px; }
+  .topbar .book-pill:empty { display: none; }
+  .topbar .book-pill .bench-dd { display: inline-flex; min-width: 0; }
+  .topbar .book-pill button.bench-trigger { min-width: 0; max-width: 100%; color: var(--text); gap: 6px; }
+  .topbar .book-pill button.bench-trigger > span {
+    display: block; min-width: 0; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-weight: 600; letter-spacing: .02em;
+  }
+  .topbar .book-pill .bench-caret { flex: none; color: var(--muted); }
+  /* Not the currency pill's brightness(): that bleaches --hover to white on the light theme. */
+  .topbar .book-pill button.bench-trigger:hover, .topbar .book-pill .bench-dd.open button.bench-trigger {
+    filter: none; background: color-mix(in srgb, var(--accent) 16%, var(--hover));
+  }
+  .topbar .book-pill .bench-menu { left: auto; right: 0; min-width: 240px; max-width: 300px; }
+  .topbar .book-pill .bench-opt-key { display: none; }
+  .topbar .book-pill .bench-opt-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar .bench-opt.book-manage { margin-top: 8px; color: var(--muted); font-weight: 450; }
+  .topbar .bench-opt.book-manage:hover, .topbar .bench-opt.book-manage:focus-visible { color: var(--text); }
+  .book-manage .bench-opt-label { display: flex; align-items: center; gap: 8px; }
+  .book-manage svg { width: 14px; height: 14px; flex: none; }
+  /* Settings' list of portfolios: fixed columns, so Show, Rename and Delete line up. */
+  .books-ctl { display: flex; align-items: center; gap: 4px; }
+  .books-col-show { width: 76px; display: flex; justify-content: flex-end; margin-right: 8px; }
+  .books-col-act { width: 58px; display: flex; justify-content: flex-end; }
+  .books-on { font-size: 13px; font-weight: 600; color: var(--accent); padding: 6px 0; }
+  .books-act { border: 0; background: none; padding: 5px 2px; font: inherit; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+  .books-act:hover { color: var(--text); }
+  .books-act.del:hover { color: var(--neg); }
+  .books-act[aria-disabled="true"], .books-act[aria-disabled="true"]:hover { opacity: .45; cursor: default; color: var(--muted); }
+  .books-add { display: block; border: 0; background: none; padding: 12px 2px 2px; font: inherit; font-size: 13px; font-weight: 500; color: var(--accent); cursor: pointer; }
+  .books-add:hover { text-decoration: underline; text-underline-offset: 2px; }
+  .books-note { font-size: 12.5px; color: var(--muted); padding: 8px 2px 0; line-height: 1.55; }
+  .books-sep { margin-top: 16px; border-top: 1px solid var(--border); }
+  .settings-row.books-naming { align-items: flex-start; }
+  .settings-key-input.books-name { width: 300px; max-width: 100%; font: inherit; font-size: 14px; font-weight: 600; border: 1px solid var(--border); box-sizing: border-box; }
+  .settings-key-input.books-name::placeholder { font-weight: 400; }
+  .confirm-body p { margin: 0 0 8px; }
+  .confirm-body p:last-child { margin-bottom: 0; }
   .topbar button.theme-switch {
     border: 0; border-radius: 999px; background: var(--hover); padding: 0 11px; gap: 8px;
   }

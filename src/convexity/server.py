@@ -48,6 +48,7 @@ from convexity.analytics import (
     prefetch_closes,
 )
 from convexity import jobs
+from convexity import books as _books
 from convexity import investments as _investments
 from convexity.fetcher import fetch_detail, fetch_events, range_history
 from convexity.fetcher import stream_quotes as fetcher_stream_quotes
@@ -191,6 +192,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_refresh_job_create(self) -> None:
         payload = self._read_json()
+        if payload.get("view") in (jobs.BOOK_VIEW, BOOK_VIEW):
+            try:
+                _books.expect(payload.get("book_id"))
+            except _books.BookMoved as exc:
+                self._send_json(exc.status, {"error": exc.message})
+                return
         scope = "all" if payload.get("scope") == "all" else "current"
         # Validated here, not in the job thread: a bad value there fails the
         # job long after this request answered 202.
@@ -236,6 +243,10 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(entries, str):
                 self._send_json(400, {"error": "entries must be a string"})
                 return
+            # The book's mirror follows the portfolio showing, whatever the page
+            # sent: its copy may be from before a switch.
+            if view == BOOK_VIEW and _books.several():
+                entries = ", ".join(_investments.book_symbols())
             entries_by_view = {view: entries}
         if not any(v.strip() for v in entries_by_view.values()):
             self._send_json(400, {"error": "nothing to refresh"})
@@ -843,23 +854,27 @@ class Handler(BaseHTTPRequestHandler):
                 ccy = ccy if ccy in SUPPORTED_FX else "USD"
                 # At launch the page may still be computing (~20 s cold);
                 # page() then waits for it: say so, not a bare "exporting".
-                xlsx_export.PROGRESS.update(step="reading your book", done=0, total=0)
-                try:
-                    book = _investments.page(ccy)
-                except Exception as exc:  # the research sheets still export
-                    print(f"[export] book skipped: {type(exc).__name__}", file=sys.stderr)
-                    book = None
-                has_book = bool(book and not book.get("empty") and book.get("headline"))
-                if has_book:
-                    xlsx_export.PROGRESS.update(
-                        step="reading your holdings' history", done=0, total=0
-                    )
+                xlsx_export.PROGRESS.update(
+                    step=_books.phrase("reading your book"), done=0, total=0
+                )
+                with _books.pin():  # the page and its risk: one portfolio
                     try:
-                        book = {**book, "risk": _investments.holding_risk(ccy)}
-                    except Exception as exc:  # the rest of the sheet still exports
-                        print(
-                            f"[export] holding risk skipped: {type(exc).__name__}", file=sys.stderr
+                        book = _investments.page(ccy)
+                    except Exception as exc:  # the research sheets still export
+                        print(f"[export] book skipped: {type(exc).__name__}", file=sys.stderr)
+                        book = None
+                    has_book = bool(book and not book.get("empty") and book.get("headline"))
+                    if has_book:
+                        xlsx_export.PROGRESS.update(
+                            step="reading your holdings' history", done=0, total=0
                         )
+                        try:
+                            book = {**book, "risk": _investments.holding_risk(ccy)}
+                        except Exception as exc:  # the rest of the sheet still exports
+                            print(
+                                f"[export] holding risk skipped: {type(exc).__name__}",
+                                file=sys.stderr,
+                            )
                 if not full and not has_book:
                     self._send_json(404, {"error": "no saved portfolios to export"})
                     return
@@ -1019,51 +1034,63 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_investments_get(self, parsed) -> None:
         """The real book (investments.py). GETs never write the book file."""
         q = parse_qs(parsed.query)
+        book_id = _books.showing()
+
+        def send(out: dict) -> None:
+            self._send_json(200, {**out, "book_id": book_id})
+
         try:
-            if parsed.path == "/api/investments":
-                ccy = (q.get("ccy") or [None])[0]
-                if (q.get("cached") or [""])[0] == "1":
+            # One portfolio for the whole answer, and the answer says which.
+            with _books.pin(book_id):
+                if parsed.path == "/api/investments":
+                    ccy = (q.get("ccy") or [None])[0]
+                    if (q.get("cached") or [""])[0] != "1":
+                        send(_investments.page(ccy))
                     # The last good page, for an instant first paint; the page
                     # asks for the fresh one straight after.
-                    self._send_json(200, _investments.cached_page(ccy) or {"nocache": True})
-                else:
-                    self._send_json(200, _investments.page(ccy))
-            elif parsed.path == "/api/investments/risk":
-                # The Drivers view: ten years of closes per holding, on demand.
-                self._send_json(200, _investments.holding_risk_payload((q.get("ccy") or [None])[0]))
-            elif parsed.path == "/api/investments/attention/extras":
-                # Attention full screen: charts and past results, asked for
-                # once the screen is open, never on the page's path.
-                syms = [x for x in (q.get("symbols") or [""])[0].split(",") if x]
-                self._send_json(
-                    200,
-                    {"extras": _investments.attention_extras(syms, (q.get("ccy") or [None])[0])},
-                )
-            elif parsed.path == "/api/investments/attention":
-                # The topbar badge: from the computed page only, never a compute.
-                self._send_json(200, _investments.attention_now((q.get("ccy") or [None])[0]))
-            elif parsed.path == "/api/investments/recap":
-                # The weekly recap (Phase 9), from a computed page only.
-                from convexity import notify
+                    elif last := _investments.cached_page(ccy):
+                        send(last)
+                    else:
+                        self._send_json(200, {"nocache": True})
+                elif parsed.path == "/api/investments/books":
+                    self._send_json(
+                        200, _investments.books_state((q.get("facts") or [""])[0] == "1")
+                    )
+                elif parsed.path == "/api/investments/risk":
+                    # The Drivers view: ten years of closes per holding, on demand.
+                    send(_investments.holding_risk_payload((q.get("ccy") or [None])[0]))
+                elif parsed.path == "/api/investments/attention/extras":
+                    # Attention full screen: charts and past results, asked for
+                    # once the screen is open, never on the page's path.
+                    syms = [x for x in (q.get("symbols") or [""])[0].split(",") if x]
+                    ccy = (q.get("ccy") or [None])[0]
+                    self._send_json(200, {"extras": _investments.attention_extras(syms, ccy)})
+                elif parsed.path == "/api/investments/attention":
+                    # The topbar badge: from the computed page only, never a compute.
+                    send(_investments.attention_now((q.get("ccy") or [None])[0]))
+                elif parsed.path == "/api/investments/recap":
+                    # The weekly recap (Phase 9), from a computed page only.
+                    from convexity import notify
 
-                self._send_json(200, {"recap": notify.latest_recap()})
-            elif parsed.path == "/api/investments/symbols":
-                self._send_json(200, {"symbols": _investments.book_symbols()})
-            elif parsed.path == "/api/investments/lookup":
-                self._send_json(200, {"hits": _investments.lookup((q.get("q") or [""])[0][:80])})
-            elif parsed.path == "/api/investments/price":
-                sym = (q.get("symbol") or [""])[0].strip()[:32]
-                day = (q.get("date") or [""])[0].strip()
-                try:
-                    date.fromisoformat(day)
-                    if not sym:
-                        raise ValueError
-                except ValueError:
-                    self._send_json(400, {"error": "symbol and date required"})
-                    return
-                self._send_json(200, _investments.price_on(sym, day))
-            else:
-                self._send_json(404, {"error": "not found"})
+                    send({"recap": notify.latest_recap()})
+                elif parsed.path == "/api/investments/symbols":
+                    self._send_json(200, {"symbols": _investments.book_symbols()})
+                elif parsed.path == "/api/investments/lookup":
+                    q_text = (q.get("q") or [""])[0][:80]
+                    self._send_json(200, {"hits": _investments.lookup(q_text)})
+                elif parsed.path == "/api/investments/price":
+                    sym = (q.get("symbol") or [""])[0].strip()[:32]
+                    day = (q.get("date") or [""])[0].strip()
+                    try:
+                        date.fromisoformat(day)
+                        if not sym:
+                            raise ValueError
+                    except ValueError:
+                        self._send_json(400, {"error": "symbol and date required"})
+                        return
+                    self._send_json(200, _investments.price_on(sym, day))
+                else:
+                    self._send_json(404, {"error": "not found"})
         except Exception as exc:
             print(f"[investments] GET {parsed.path} failed: {type(exc).__name__}", file=sys.stderr)
             self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
@@ -1091,7 +1118,7 @@ class Handler(BaseHTTPRequestHandler):
             # A plan is set for what the book holds (no network: the replay);
             # clearing works on any plan, a sold-out holding's included.
             if path in (a + "plan", a + "alert") and sym not in _investments.book_symbols():
-                raise ValueError("that holding isn't in your book")
+                raise ValueError(_books.phrase("that holding isn't in your book"))
             # Today's price from the server's own page, the page's only when
             # the server has none yet.
             price = _investments.price_now(sym, ccy) if isinstance(sym, str) else None
@@ -1120,6 +1147,23 @@ class Handler(BaseHTTPRequestHandler):
             raise _investments.BookError(str(exc)) from exc
         return _investments.attention_now(ccy)
 
+    def _investments_books(self, path: str, p: dict, ccy) -> dict:
+        """Settings -> My Investments, and the pill: the list of portfolios."""
+        from convexity import long_run
+
+        book_id, name = p.get("id"), p.get("name")
+        changes = {
+            "enabled": lambda: _books.set_enabled(p.get("on") is True),
+            "add": lambda: _books.add(name),
+            "rename": lambda: _books.rename(book_id, name),
+            "show": lambda: _books.show(book_id),
+            "delete": lambda: (_books.delete(book_id), long_run.forget_book(str(book_id))),
+        }
+        change = changes.get(path.rsplit("/", 1)[-1])
+        if change is None:
+            raise _books.Refused("not found", 404)
+        return _investments.change_books(change, ccy)
+
     def _handle_investments_post(self, path: str) -> None:
         """Mutations of the real book. Each answers the new page payload, or
         {error, message}: 400 bad input, 409 stale rev or a damaged file
@@ -1127,35 +1171,43 @@ class Handler(BaseHTTPRequestHandler):
         p = self._read_json()
         rev, entry = p.get("base_rev"), p.get("entry") or {}
         ccy = p.get("ccy") if isinstance(p.get("ccy"), str) else None  # the display currency
+        book_id = None
         try:
             if not isinstance(entry, dict):
                 raise _investments.BookError("entry must be an object")
-            if path.startswith("/api/investments/attention/"):
-                out = self._investments_attention(path, p, ccy)
-            elif path == "/api/investments/entries":
-                out = _investments.add(entry, rev, ccy)
-            elif path == "/api/investments/entries/update":
-                out = _investments.update(str(p.get("id") or ""), entry, rev, ccy)
-            elif path == "/api/investments/entries/delete":
-                out = _investments.delete(str(p.get("id") or ""), rev, ccy)
-            elif path == "/api/investments/undo":
-                out = _investments.undo(rev, ccy)
-            elif path == "/api/investments/redo":
-                out = _investments.redo(rev, ccy)
-            elif path == "/api/investments/clear":
-                out = _investments.clear(rev, ccy)
-            elif path == "/api/investments/import":
-                out = self._investments_import(p)
-            elif path == "/api/investments/import/check":
-                out = {"problems": _investments.check_rows(p.get("entries"))}
-            elif path == "/api/investments/import/apply":
-                out = _investments.add_batch(p.get("entries"), rev, p.get("aliases"), ccy)
-            elif path == "/api/investments/dividends":
-                out = _investments.add_dividends(p.get("entries"), rev, ccy)
-            else:
-                self._send_json(404, {"error": "not found"})
+            if path.startswith("/api/investments/books/"):
+                self._send_json(200, self._investments_books(path, p, ccy))
                 return
-        except _investments.BookError as exc:
+            # Every change names the portfolio the page was showing, and all of
+            # it lands there even if another comes up meanwhile.
+            book_id = _books.expect(p.get("book_id"))
+            with _books.pin(book_id):
+                if path.startswith("/api/investments/attention/"):
+                    out = self._investments_attention(path, p, ccy)
+                elif path == "/api/investments/entries":
+                    out = _investments.add(entry, rev, ccy)
+                elif path == "/api/investments/entries/update":
+                    out = _investments.update(str(p.get("id") or ""), entry, rev, ccy)
+                elif path == "/api/investments/entries/delete":
+                    out = _investments.delete(str(p.get("id") or ""), rev, ccy)
+                elif path == "/api/investments/undo":
+                    out = _investments.undo(rev, ccy)
+                elif path == "/api/investments/redo":
+                    out = _investments.redo(rev, ccy)
+                elif path == "/api/investments/clear":
+                    out = _investments.clear(rev, ccy)
+                elif path == "/api/investments/import":
+                    out = self._investments_import(p)
+                elif path == "/api/investments/import/check":
+                    out = {"problems": _investments.check_rows(p.get("entries"))}
+                elif path == "/api/investments/import/apply":
+                    out = _investments.add_batch(p.get("entries"), rev, p.get("aliases"), ccy)
+                elif path == "/api/investments/dividends":
+                    out = _investments.add_dividends(p.get("entries"), rev, ccy)
+                else:
+                    self._send_json(404, {"error": "not found"})
+                    return
+        except (_investments.BookError, _books.BookMoved, _books.Refused) as exc:
             self._send_json(exc.status, {"error": type(exc).__name__, "message": exc.message})
             return
         except Exception as exc:
@@ -1163,7 +1215,7 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
             return
-        self._send_json(200, out)
+        self._send_json(200, {**out, "book_id": book_id})
 
     def do_POST(self):
         # Every POST, not just the key routes: watchlists, views, rename,

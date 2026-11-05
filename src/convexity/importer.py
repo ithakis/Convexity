@@ -42,6 +42,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
+from convexity import books
 from convexity.helpers import Cancelled, Deadline, major_ccy
 from convexity.investments import BookError
 
@@ -1170,8 +1171,8 @@ def _reconcile(rows: list[dict], held: dict) -> None:
         r["book_qty"] = have
         if qty is not None and abs(have - qty) <= 1e-6 * max(1.0, qty):
             r["include"] = False
-            r["checks"].append(f"Already in your book ({have:g} shares)")
+            r["checks"].append(books.phrase(f"Already in your book ({have:g} shares)"))
         elif qty is not None:
-            r["checks"].append(f"Your book has {have:g} shares; this shows {qty:g}")
+            r["checks"].append(books.phrase(f"Your book has {have:g} shares; this shows {qty:g}"))
             if qty > have:
                 r["fix"] = {"qty": round(qty - have, 6)}

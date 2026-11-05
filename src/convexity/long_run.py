@@ -31,7 +31,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from convexity import paths
+from convexity import books, paths
 from convexity.persistence import _atomic_write
 
 VERSION = 2  # of the kept file: bump when a constant below changes, and it is rebuilt
@@ -341,7 +341,7 @@ def book_view(positions: list[dict], ccy: str) -> dict:
     """{"shares": {symbol: share of the variance}, "bad_month": {value, pct}} for
     today's holdings on the kept covariance: algebra only, so the page may call
     it. Empty when the kept matrix misses too much of the book."""
-    cov = (load().get("cov") or {}).get(ccy)
+    cov = (load().get("cov") or {}).get(_cov_key(ccy))
     if not cov:
         return {}
     where = {s: i for i, s in enumerate(cov["symbols"])}
@@ -368,6 +368,13 @@ def book_view(positions: list[dict], ccy: str) -> dict:
 
 def _path():
     return paths.state_file("long_run")
+
+
+def _cov_key(ccy: str) -> str:
+    """The matrix is built from one held set: one per portfolio and currency.
+    The per-symbol records are market data, and shared."""
+    book = books.active_id()
+    return ccy if book == books.MAIN else f"{book}|{ccy}"
 
 
 def _sane(body) -> dict:
@@ -405,6 +412,15 @@ def _update(*, symbols: dict | None = None, cov: dict | None = None) -> None:
         body = load()
         _save({**body, "symbols": {**body["symbols"], **(symbols or {})},
                "cov": {**body["cov"], **(cov or {})}})  # fmt: skip
+
+
+def forget_book(book_id: str) -> None:
+    """A deleted portfolio's matrix names its holdings: it goes with them."""
+    with _LOCK:
+        body = load()
+        keep = {k: v for k, v in body["cov"].items() if not k.startswith(f"{book_id}|")}
+        if len(keep) != len(body["cov"]):
+            _save({**body, "cov": keep})
 
 
 def reset_memo() -> None:
@@ -479,11 +495,12 @@ def due(
     body, tried = load(), _STATE["tried"]
     syms = body.get("symbols") or {}
     todo = [s for s in held if (syms.get(s) or {}).get("month") != month and now >= tried.get(s, 0)]
-    cov = (body.get("cov") or {}).get(ccy) or {}
+    key = _cov_key(ccy)
+    cov = (body.get("cov") or {}).get(key) or {}
     cov_due = bool(held) and (
         cov.get("month") != month or not set(held) <= set(cov.get("asked") or ())
     )
-    return todo, cov_due and now >= tried.get(f"cov|{ccy}", 0)
+    return todo, cov_due and now >= tried.get(f"cov|{key}", 0)
 
 
 # ---------------------------------------------------------------------- pass
@@ -492,7 +509,7 @@ def due(
 def _held_now() -> tuple[list[dict], str | None]:
     from convexity import investments
 
-    last = investments._LAST_PAGE["v"][1] or investments.cached_page(None)
+    last = investments.last_page() or investments.cached_page(None)
     if not last or last.get("empty"):
         return [], None
     return [p for p in last.get("positions") or [] if not p.get("pending")], last.get("ccy")
@@ -595,7 +612,7 @@ def _fill_cov(held, ccy, cancel, month) -> None:
     value = {p["symbol"]: float(p.get("value") or 0) for p in held}
     if sum(value[s] for s in names) < COVERED * sum(value.values()):
         raise ValueError("too little of the book answered")  # degraded: keep the last one
-    _update(cov={ccy: {"month": month, "symbols": names, "asked": syms,
+    _update(cov={_cov_key(ccy): {"month": month, "symbols": names, "asked": syms,
                         "cov": [[float(f"{x:.5g}") for x in row] for row in m]}})  # fmt: skip
 
 
@@ -616,7 +633,7 @@ def run_pass(cancel) -> str:
         try:
             _fill_cov(held, ccy, cancel, month)
         except Exception as exc:
-            _STATE["tried"][f"cov|{ccy}"] = time.time() + RETRY_S
+            _STATE["tried"][f"cov|{_cov_key(ccy)}"] = time.time() + RETRY_S
             print(f"[long_run] covariance skipped: {exc}")
     return "done"
 

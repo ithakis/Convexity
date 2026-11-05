@@ -5956,6 +5956,14 @@ const AD_HOC_KEY = "__current__";
    only on the My Investments page. The server refuses the name for every
    portfolio write except the cached rows (docs/architecture/frontend.md). */
 const BOOK_KEY = "__book__";
+/* Multiple portfolios (books.py). The name shows only in the pill, its menu,
+   Settings' list and the delete confirmation; everything else stays "My Investments". */
+const BOOKS = { enabled: false, active: null, books: [], unreadable: false, edit: null };
+const booksMany = () => BOOKS.enabled && BOOKS.books.length > 1;
+const yourBook = (cap) => booksMany() ? (cap ? "This portfolio" : "this portfolio") : (cap ? "Your book" : "your book");
+const theBooks = () => booksMany() ? "this portfolio's" : "the book's";
+/* An answer for a portfolio that isn't the one this page shows. */
+const booksOther = (d) => BOOKS.active && d?.book_id && d.book_id !== BOOKS.active;
 const BOOK = { symbols: [], weights: null };
 const viewIsBook = (name) => name === BOOK_KEY;
 const bookEntries = () => BOOK.symbols.join(", ");
@@ -6194,6 +6202,7 @@ function setEntries(s) { ENTRIES = String(s || "").trim(); renderEditorMeta(); }
    refresh-job handler to keep its rows out while a build repopulates DATA. */
 let BUILD_GEN = 0;
 let BUILD_STREAMING = false;
+let BUILD_VIEW = null;
 
 /* Replace-by-symbol, else append — the one way a row enters DATA outside a
    full reload. Shared by the build stream and the refresh job's live patch. */
@@ -6219,6 +6228,8 @@ async function build(opts) {
   const entries = entriesArr(raw);
   const gen = ++BUILD_GEN;
   BUILD_STREAMING = true;
+  BUILD_VIEW = STATE.activeView || AD_HOC_KEY;
+  const targetName = BUILD_VIEW;
   $("#refresh").disabled = true;
   $("#status").innerHTML = lcHtml("resolving symbols", {bar: true, meta: `0·${entries.length}`});
   showProgress(2);
@@ -6285,13 +6296,10 @@ async function build(opts) {
       }
     }
     if (!sawDone) flushRender();  // final sorted render if the stream ended without a "done" line
-    {
-      const _nm = STATE.activeView || AD_HOC_KEY;
-      $("#status").innerHTML = statusHtml(_nm, new Date());
-    }
-    // Persist this build as a view under the active tab name (or ad-hoc).
-    const targetName = STATE.activeView || AD_HOC_KEY;
+    $("#status").innerHTML = statusHtml(targetName, new Date());
+    // Persist this build as a view under the tab it was built for (or ad-hoc).
     await persistView(targetName, raw, DATA);
+    if (gen !== BUILD_GEN) return;
     STATE.customWeights = null;  // new build — drop stale custom weights
     if (STATE.mode === "custom") STATE.mode = "cap";
     // Refresh per-portfolio presets — a brand-new build may have just
@@ -6332,7 +6340,7 @@ async function persistView(name, entries, rows) {
         stale: false,
       };
       LAST_VIEW = targetName;
-      STATE.activeView = targetName;
+      STATE.activeView ||= targetName;
       renderTabs();
       renderEditorMeta();
     }
@@ -6341,7 +6349,7 @@ async function persistView(name, entries, rows) {
 
 async function loadAllAtStartup() {
   $("#status").innerHTML = lcHtml("indexing portfolios", {bar: true});
-  await Promise.all([loadWatchlists(), loadViews(), loadColumnViews(), loadBookSymbols()]);
+  await Promise.all([loadWatchlists(), loadViews(), loadColumnViews(), loadBookSymbols(), booksLoad()]);
   $("#status").textContent = "Idle";
   wireColumnViewBar();
   renderTabs();
@@ -6486,8 +6494,16 @@ async function loadViews() {
   }
 }
 
+let _activateGen = 0;  // only the newest activation may paint: a slower older one lands late
 async function activateTab(name, opts) {
   opts = opts || {};
+  const gen = ++_activateGen, stale = () => gen !== _activateGen;
+  // A build still streaming belongs to the tab it started on: left running, its
+  // rows would land in this tab's DATA and be saved under this tab's name.
+  if (BUILD_STREAMING && BUILD_VIEW !== name) {
+    BUILD_GEN++; BUILD_STREAMING = false;
+    hideProgress(); $("#refresh").disabled = false;
+  }
   STATE.activeView = name;
   STATE.customWeights = null;
   // Keep STATE.analyticsByTab[*] across switches — re-visiting paints from memory.
@@ -6497,15 +6513,18 @@ async function activateTab(name, opts) {
   // mode could survive into a tab that has no such preset.
   STATE.mode = "cap";
   if (viewIsBook(name)) await bookLoadWeights();
+  if (stale()) return;
   // Switching tabs swaps the per-portfolio preset list, and loadPresetsForView
   // (restoreMode) restores this tab's own active preset so the user's last
   // selection persists across sessions.
   await loadPresetsForView(name, {restoreMode: true});
+  if (stale()) return;
   // Seed the in-memory analytics map from disk so reopening a portfolio
   // hydrates the Rating Distribution panel without re-fetching from
   // yfinance. requestAnalytics() will still kick off in the cached-rows
   // branch below, but its cache-hit path will take the disk seed.
   await loadAnalyticsCacheForView(name);
+  if (stale()) return;
   renderModeBar();
   renderTabs();
   renderEditorMeta();
@@ -6513,11 +6532,12 @@ async function activateTab(name, opts) {
   const view = VIEWS[name];
   const wlEntries = viewIsBook(name) ? bookEntries() : WATCHLISTS[name];
   setEntries(wlEntries != null ? wlEntries : (view ? view.entries : ""));
-  // Try to load cached rows for the view.
-  if (view && view.row_count > 0) {
+  // Try to load cached rows for the view (not another portfolio's, kept in the book's mirror).
+  if (view && view.row_count > 0 && !(BOOKS.books.length > 1 && viewIsBook(name) && refreshNeeded())) {
     try {
       const r = await fetch(`/api/views/${encodeURIComponent(name)}`);
       const d = await r.json();
+      if (stale()) return;
       const rows = (d.view && Array.isArray(d.view.rows)) ? d.view.rows : [];
       if (rows.length) {
         DATA = rows;
@@ -6892,7 +6912,8 @@ async function createNewTab() {
   $("#co-q").focus();
 }
 
-function showConfirm({title, body, okLabel}) {
+/* ``safe``: for what can't be undone, Cancel has the focus and Enter follows the focus. */
+function showConfirm({title, body, okLabel, safe}) {
   return new Promise((resolve) => {
     const bg = $("#confirm-bg");
     $("#confirm-title").textContent = title || "Are you sure?";
@@ -6904,18 +6925,19 @@ function showConfirm({title, body, okLabel}) {
       $("#confirm-ok").onclick = null;
       $("#confirm-cancel").onclick = null;
       bg.onclick = null;
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, true);
       resolve(val);
     };
     const onKey = (e) => {
-      if (e.key === "Escape") cleanup(false);
-      else if (e.key === "Enter") cleanup(true);
+      // Capture: the global Escape pass would close what this opened over.
+      if (e.key === "Escape") { e.stopPropagation(); cleanup(false); }
+      else if (e.key === "Enter" && !safe) cleanup(true);
     };
     $("#confirm-ok").onclick = () => cleanup(true);
     $("#confirm-cancel").onclick = () => cleanup(false);
     bg.onclick = (e) => { if (e.target.id === "confirm-bg") cleanup(false); };
-    document.addEventListener("keydown", onKey);
-    setTimeout(() => $("#confirm-ok").focus(), 30);
+    document.addEventListener("keydown", onKey, true);
+    setTimeout(() => $(safe ? "#confirm-cancel" : "#confirm-ok").focus(), 30);
   });
 }
 
@@ -7053,7 +7075,8 @@ function openExportPopup(fname, url) {
 
 function analyticsCacheKey(mode, period) {
   const t = tradingPrefs();
-  return mode + "|" + period + "|" + FX_QUOTE + "|" + t.rebalance + "|" + t.tc_bps;
+  const book = viewIsBook(STATE.activeView) && BOOKS.active !== "main" ? "|" + BOOKS.active : "";
+  return mode + "|" + period + "|" + FX_QUOTE + "|" + t.rebalance + "|" + t.tc_bps + book;
 }
 
 let _analyticsReqId = 0;
@@ -9578,6 +9601,7 @@ function rfRender() {
 function rfReset(state) {
   REFRESH.state = state;
   REFRESH.id = null;
+  REFRESH.bookOf = null;
   REFRESH.lastSeq = 0;
   REFRESH.pct = 0;        // or the next run's monotone clamp starts where this one ended
   REFRESH.reader = null;
@@ -9653,6 +9677,7 @@ function rfHandle(msg) {
     case "hello":
       if (msg.job) {
         REFRESH.scope = msg.job.scope;
+        REFRESH.bookOf = msg.job.views?.some(v => v === BOOK_KEY || v === INV_BOOK_VIEW) ? msg.job.book_id : null;
         if (msg.job.counts) REFRESH.counts = msg.job.counts;
         REFRESH.state = msg.job.phase || msg.job.state;
       }
@@ -9733,6 +9758,8 @@ function rfHandle(msg) {
 }
 
 function rfViewIsActive(view) {
+  // A job on the book reports for the portfolio it started on.
+  if (view === BOOK_KEY && REFRESH.bookOf && REFRESH.bookOf !== BOOKS.active) return false;
   return !view || view === STATE.activeView
       || (view === AD_HOC_KEY && STATE.activeView === AD_HOC_KEY);
 }
@@ -9869,6 +9896,7 @@ async function rfStart(scope, job) {
     body.entries = entries;
     body.context = nsRefreshContext(nsSymbols());
   }
+  body.book_id = BOOKS.active;
   REFRESH.counts = {quotes_done: 0, quotes_total: 0, news_done: 0, news_total: 0,
                     news_scored: 0, news_failed: 0};
   REFRESH.newsEnd = null;
@@ -9883,6 +9911,11 @@ async function rfStart(scope, job) {
       body: JSON.stringify(body),
     });
     const j = await r.json();
+    if (r.status === 409 && !j.job_id) {  // for a portfolio no longer showing
+      toast("The portfolio showing changed. Press Refresh again.");
+      rfReset("error");
+      return;
+    }
     if (r.status === 409) {
       // Single-flight: attach to the job that IS running rather than starting
       // a second one that would only fight it for the same API budget.
@@ -12702,7 +12735,7 @@ function mptWireAssetTips(root) {
 
 function mptApplyToPortfolio() {
   const d = MPT.result; if (!d) return;
-  if (viewIsBook(STATE.activeView)) return toast("Your real book's weights come from what you hold.");
+  if (viewIsBook(STATE.activeView)) return toast(booksMany() ? "This portfolio's weights come from what you hold." : "Your real book's weights come from what you hold.");
   const sel = mptActiveSel(); if (!sel) return;
   const w = sel.weights || {};
   if (!Object.keys(w).length) { toast("No weights at this point."); return; }
@@ -12724,7 +12757,7 @@ function mptApplyToPortfolio() {
 
 function mptSaveAsPreset() {
   const d = MPT.result; if (!d) return;
-  if (viewIsBook(STATE.activeView)) return toast("Your real book's weights come from what you hold.");
+  if (viewIsBook(STATE.activeView)) return toast(booksMany() ? "This portfolio's weights come from what you hold." : "Your real book's weights come from what you hold.");
   const sel = mptActiveSel(); if (!sel) return;
   if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
     return toast("Save the portfolio first to keep custom weights.");
@@ -13660,11 +13693,17 @@ const SETTINGS_SECTIONS = [
     id: "investments",
     group: "Settings",
     label: "My Investments",
-    description: "Your real book: every holding, trade, dividend and deposit you added. "
-               + "It is kept in state/investments.json in the data folder, on this machine only.",
+    get description() {
+      if (!BOOKS.enabled) return "Your real book: every holding, trade, dividend and deposit you added. "
+        + "It is kept in state/investments.json in the data folder, on this machine only.";
+      return "Your real investments, kept in the data folder on this machine only."
+        + (booksMany() ? " Each portfolio keeps its own trades, limits, plans and dismissed items." : "");
+    },
     keywords: ["investments", "book", "clear", "remove", "delete", "reset", "start over",
                "erase", "holdings", "entries", "clean"],
     items: [
+      { id: "inv-multi", label: "Multiple portfolios",
+        keywords: ["portfolios", "several", "partner", "family", "switch", "separate", "add", "books"] },
       { id: "inv-clear", label: "Clear my investments",
         keywords: ["clear", "remove", "delete", "reset", "start over", "erase", "clean", "wipe"] },
     ],
@@ -14519,6 +14558,201 @@ function renderSettingsLogs(el) {
   startLogPolling();
 }
 
+/* ---------------------------------------------------------------------------
+ * Multiple portfolios: the pill, the switch and Settings' list (books.py).
+ * A switch repaints in one go: the answer carries the new portfolio's holdings
+ * and last good page, and everything of the old one is dropped in the same tick.
+ * --------------------------------------------------------------------------- */
+/* One at a time, so the server sees them in the order sent, and only the newest
+   answer counts: the last one says what the server ended on. null when overtaken. */
+let _booksQueue = Promise.resolve(), _booksAsked = 0;
+function booksAsk(send) {
+  const n = ++_booksAsked, run = _booksQueue.then(send);
+  _booksQueue = run.catch(() => {});
+  return run.then(d => n === _booksAsked ? d : null);
+}
+async function booksLoad(facts) {
+  try { booksApply(await booksAsk(async () => (await fetch("/api/investments/books" + (facts ? "?facts=1" : ""))).json())); }
+  catch (e) { /* keeps what it knows */ }
+}
+function booksPost(act, body) {
+  return booksAsk(async () => {
+    const r = await fetch("/api/investments/books/" + act, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ccy: FX_QUOTE, ...body }) });
+    let d = {};
+    try { d = await r.json(); } catch (e) { /* non-JSON error */ }
+    if (!r.ok) throw new Error(d.message || "Couldn't save that. Try again in a moment.");
+    return d;
+  });
+}
+function booksApply(d) {
+  if (!d) return;
+  const active = d.page?.book_id || d.active;  // the name is the page's own
+  const moved = BOOKS.active && active !== BOOKS.active;
+  Object.assign(BOOKS, { enabled: d.enabled, active, books: d.books, unreadable: d.unreadable });
+  booksPaintPill();
+  if (moved) booksSwitched(d);
+}
+function booksSwitched(d) {
+  INV.seq++; INV.loading = null; _invChkSeq++;
+  INV.book = d.page || null; INV.imp = null; INV.editing = null; INV.risk = null; INV.recap = null; INV.attMore = false;
+  INV_FULL.extras = {}; INV_FULL.pending.clear();
+  NOTIFY.seq = null;  // what went out for the old one stays unread in the outbox
+  invMenuClose(); invClosePop(); invFullClose(); closeModal();
+  if (REFRESH.bookOf && REFRESH.bookOf !== BOOKS.active) rfReset("idle");
+  const host = $("#inv-page");
+  if (!INV.book && !host.classList.contains("hidden")) host.innerHTML = `<div class="inv-loading">Reading your prices…</div>`;
+  invRender();
+  invBadge(INV.book?.attention);
+  invLoad();
+  booksFollow(d.symbols);
+}
+/* The red Portfolios tab follows; hidden, it waits until a research page opens. */
+async function booksFollow(symbols) {
+  const open = viewIsBook(STATE.activeView);
+  BOOK.symbols = symbols || []; BOOK.weights = null;
+  delete STATE.analyticsByTab[BOOK_KEY];
+  if (open) {  // all in this tick, before the first await: it paints with the name
+    BUILD_GEN++; BUILD_STREAMING = false; _analyticsReqId++; _activateGen++;
+    $("#refresh").disabled = false; hideProgress();
+    DATA = []; STATE.analytics = null; render(); renderAnalyticsBody();
+    setEntries(bookEntries());
+  }
+  renderTabs();
+  if (!symbols) { await loadBookSymbols(); if (open) setEntries(bookEntries()); renderTabs(); }
+  if (!open) return;
+  if (!BOOK.symbols.length) { STATE.activeView = null; renderEditorMeta(); }
+  else if (document.body.dataset.page === "investments") BOOK.follow = true;
+  else activateTab(BOOK_KEY, { silent: true });
+}
+/* A change that may move what shows; an open import review keeps the page until finished. */
+async function booksMove(act, body, land) {
+  if (INV.imp?.prop && (act !== "enabled" || (!body.on && BOOKS.active !== "main"))) throw new Error("Finish or cancel the import first.");
+  const d = await booksPost(act, body);
+  if (d && land) { closeSettings(); showPage("investments"); }
+  booksApply(d);
+}
+function booksPaintPill() {
+  const host = $("#book-pill");
+  const cur = BOOKS.books.find(b => b.id === BOOKS.active);
+  host.innerHTML = BOOKS.enabled && cur ? benchMenuHtml(
+    { ...Object.fromEntries(BOOKS.books.map(b => [b.id, { label: b.name }])), __manage__: { label: "Manage portfolios…" } },
+    BOOKS.active, "book-dd", "") : "";
+  if (!host.innerHTML) return;
+  const trig = host.querySelector(".bench-trigger");
+  trig.classList.add("fx-btn");
+  trig.removeAttribute("title");
+  trig.dataset.tip = "Which portfolio is showing";
+  host.querySelector('[data-bench="__manage__"]').classList.add("book-manage");
+  host.querySelector('[data-bench="__manage__"] .bench-opt-label').insertAdjacentHTML("afterbegin",
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M10.3 4.3c.4-1.8 3-1.8 3.4 0a1.7 1.7 0 0 0 2.6 1.1c1.5-.9 3.3.8 2.4 2.4a1.7 1.7 0 0 0 1 2.5c1.8.4 1.8 3 0 3.4a1.7 1.7 0 0 0-1 2.6c.9 1.5-.9 3.3-2.4 2.4a1.7 1.7 0 0 0-2.6 1c-.4 1.8-3 1.8-3.4 0a1.7 1.7 0 0 0-2.5-1c-1.6.9-3.3-.9-2.4-2.4a1.7 1.7 0 0 0-1.1-2.6c-1.8-.4-1.8-3 0-3.4a1.7 1.7 0 0 0 1.1-2.5c-.9-1.6.8-3.3 2.4-2.4a1.7 1.7 0 0 0 2.5-1.1z"/><circle cx="12" cy="12" r="3"/></svg>`);
+  wireBenchSelect(host.querySelector(".bench-dd"), (id) => {
+    if (id === "__manage__") { SETTINGS.section = "investments"; openSettings(); }
+    else if (id !== BOOKS.active) booksMove("show", { id }).catch(err => toast(err.message));
+  });
+}
+const booksMoney = (v, ccy) => {
+  const known = ccy === FX_QUOTE || (FX_RATES[ccy] && FX_RATES[FX_QUOTE]);
+  return (known ? invSym() : FX_SYMBOL[ccy] || ccy + " ") + Math.round(known ? fxConvert(v, ccy) : v).toLocaleString(NUM_LOCALE);
+};
+const booksValue = (x) => x.id === BOOKS.active && invOk(INV.book?.headline?.value) ? invMoney(INV.book.headline.value)
+  : invOk(x.value) ? booksMoney(x.value, x.ccy) : "";
+const booksHoldings = (n) => `${n} holding${n === 1 ? "" : "s"}`;
+function booksFacts(x) {
+  if (x.unreadable) return "This portfolio's file couldn't be read. It was left untouched.";
+  if (!x.holdings) return ["No holdings yet", x.created_at && `added ${fmtDateMDY(x.created_at)}`].filter(Boolean).join(" · ");
+  const val = booksValue(x);
+  return [booksHoldings(x.holdings), val && (x.id === BOOKS.active ? val : `${val} when last opened`),
+    x.changed && `changed ${fmtDateMDY(x.changed)}`].filter(Boolean).join(" · ");
+}
+function booksNameRow(value, placeholder, help, ok) {
+  return `<div class="settings-row books-naming"><div class="settings-row-main">
+      <input class="settings-key-input books-name" id="books-name" type="text" maxlength="20" placeholder="${placeholder}" value="${escapeHtml(value)}" aria-label="Portfolio name">
+      <div class="inv-form-err" id="books-name-err" role="alert"></div>${help ? `<div class="settings-row-help">${help}</div>` : ""}
+    </div><div class="settings-row-control"><div class="settings-btn-row" style="margin-top:0">
+      <button class="settings-btn" type="button" data-books-cancel>Cancel</button>
+      <button class="settings-btn" type="button" data-books-save>${ok}</button>
+    </div></div></div>`;
+}
+function booksRowHtml(x) {
+  if (BOOKS.edit?.id === x.id) return booksNameRow(x.name, "", "", "Save");
+  const on = x.id === BOOKS.active, id = escapeHtml(x.id);
+  const del = x.id === "main" ? "" : on
+    ? `<button class="books-act del" type="button" aria-disabled="true" data-tip="Show another portfolio first.">Delete</button>`
+    : `<button class="books-act del" type="button" data-books-del="${id}">Delete</button>`;
+  return settingsRow({ id: "book-" + id, label: escapeHtml(x.name), help: escapeHtml(booksFacts(x)),
+    control: `<div class="books-ctl">
+      <div class="books-col-show">${on ? `<span class="books-on">Showing</span>` : `<button class="settings-btn" type="button" data-books-show="${id}">Show</button>`}</div>
+      <div class="books-col-act"><button class="books-act" type="button" data-books-rename="${id}">Rename</button></div>
+      <div class="books-col-act">${del}</div></div>` });
+}
+function booksSettingsHtml() {
+  const kept = BOOKS.books.length - 1;
+  const keptLine = !kept || BOOKS.enabled ? "" : kept === 1
+    ? "<br>The other portfolio is kept. It comes back when you turn this on again."
+    : `<br>The ${kept} other portfolios are kept. They come back when you turn this on again.`;
+  const damaged = BOOKS.unreadable ? "<br>The list of portfolios (<code>state/books.json</code>) is damaged, so it was left untouched. Repair or remove it to make changes." : "";
+  const sw = settingsRow({ id: "inv-multi", label: "Multiple portfolios",
+    help: "Keep separate portfolios, for example for someone else, and switch between them from the top bar." + keptLine + damaged,
+    control: `<label class="settings-check"><input type="checkbox" id="books-on"${BOOKS.enabled ? " checked" : ""}${BOOKS.unreadable ? " disabled" : ""} aria-label="Multiple portfolios"></label>` });
+  if (!BOOKS.enabled) return sw;
+  const adding = BOOKS.edit && !BOOKS.edit.id;
+  return sw + `<div class="settings-subhead">Portfolios</div>` + BOOKS.books.map(booksRowHtml).join("")
+    + (adding ? booksNameRow("", "Name, for example Partner", "Starts empty. It opens straight away so you can bring in its investments.", "Add")
+      : `<button class="books-add" type="button" data-books-add>+ Add a portfolio</button>`)
+    + (booksMany() ? `<div class="books-note">Alerts and news reads run only for the one showing.</div>` : "")
+    + `<div class="books-sep"></div>`;
+}
+new ResizeObserver(() => {  // a lone clipped letter says nothing: gone, until it has room
+  const s = $("#status");
+  s.classList.toggle("status-clip", BOOKS.enabled && s.clientWidth < 64 && s.scrollWidth > s.clientWidth);
+}).observe($("#status"));
+async function booksAskDelete(x) {
+  const n = x.entries || 0, val = booksValue(x);
+  const ok = await showConfirm({ safe: true, title: `Delete the ${x.name} portfolio?`, okLabel: `Delete ${x.name}`,
+    body: `<p>This removes everything in it: <b>${x.holdings ? booksHoldings(x.holdings) : "no holdings"}</b>${x.holdings && val ? ` worth ${escapeHtml(val)}` : ""}, <b>${n > 1 ? `${n} recorded trades, dividends and deposits` : n ? "1 recorded entry" : "no recorded trades"}</b>, and its limits, plans and dismissed items.</p>
+      <p>Your other portfolios are not touched. You can't undo this in the app. A copy is kept in the data folder.</p>` });
+  if (!ok) return;
+  try { booksApply(await booksPost("delete", { id: x.id })); } catch (err) { toast(err.message); }
+  renderSettingsPane();
+}
+/* The list's clicks and the name field. ``repaint`` keeps the section's own state. */
+function booksWire(el, repaint) {
+  const closeEdit = () => { BOOKS.edit = null; repaint(); };
+  const save = async () => {
+    const name = el.querySelector("#books-name").value, id = BOOKS.edit?.id;
+    try {
+      if (id) booksApply(await booksPost("rename", { id, name }));
+      else await booksMove("add", { name }, true);
+      BOOKS.edit = null;
+      if (id) renderSettingsPane();
+    } catch (err) { el.querySelector("#books-name-err").textContent = err.message; }
+  };
+  el.querySelector("#books-on")?.addEventListener("change", async (e) => {
+    BOOKS.edit = null;
+    try { await booksMove("enabled", { on: e.target.checked }); } catch (err) { toast(err.message); }
+    renderSettingsPane();
+  });
+  const name = el.querySelector("#books-name");
+  if (name) {
+    name.focus(); name.select();
+    name.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); save(); }
+      else if (e.key === "Escape") { e.stopPropagation(); closeEdit(); }
+    });
+  }
+  el.onclick = (e) => {
+    const t = e.target.closest("[data-books-show],[data-books-rename],[data-books-del],[data-books-add],[data-books-cancel],[data-books-save]");
+    if (!t) return;
+    if ("booksShow" in t.dataset) booksMove("show", { id: t.dataset.booksShow }, true).catch(err => toast(err.message));
+    else if ("booksRename" in t.dataset) { BOOKS.edit = { id: t.dataset.booksRename }; repaint(); }
+    else if ("booksAdd" in t.dataset) { BOOKS.edit = { id: null }; repaint(); }
+    else if ("booksCancel" in t.dataset) closeEdit();
+    else if ("booksSave" in t.dataset) save();
+    else booksAskDelete(BOOKS.books.find(b => b.id === t.dataset.booksDel));
+  };
+}
+
 /* Settings → My Investments. Clear is one journal step on the server, so
  * Undo on My Investments brings every entry back; a dated copy of the book
  * is also kept in the data folder (investments.clear). Two clicks: the first
@@ -14530,20 +14764,23 @@ async function renderSettingsInvestments(el) {
     try { b = await (await fetch("/api/investments?ccy=" + encodeURIComponent(FX_QUOTE))).json(); }
     catch (e) { b = { empty: true, error: true }; }
   }
+  await booksLoad(true);
   let n = (b.entries || []).length;
   const paint = (asking, err = "") => {
-    el.innerHTML = settingsRow({
+    const where = BOOKS.active === "main" ? "state" : `state/books/${escapeHtml(BOOKS.active)}`;
+    el.innerHTML = booksSettingsHtml() + settingsRow({
       id: "inv-clear",
-      label: "Clear my investments",
-      help: n ? `Removes all ${n} entr${n === 1 ? "y" : "ies"} from My Investments, to start again (say, to
+      label: booksMany() ? "Clear the portfolio showing" : "Clear my investments",
+      help: n ? `Removes all ${n} entr${n === 1 ? "y" : "ies"} from ${booksMany() ? "the portfolio showing" : "My Investments"}, to start again (say, to
           re-import a screenshot). Undo on My Investments brings them back, and a copy of the book
-          is kept in the data folder (<code>state/investments.before-clear-…json</code>).`
+          is kept in the data folder (<code>${where}/investments.before-clear-…json</code>).`
         : "There is nothing to clear: My Investments has no entries.",
       control: asking
         ? `<div class="settings-btn-row" style="margin-top:0"><button class="settings-btn" id="inv-clear-cancel">Cancel</button>
              <button class="settings-btn danger" id="inv-clear-go">Clear ${n} entr${n === 1 ? "y" : "ies"}</button></div>`
         : `<button class="settings-btn danger" id="inv-clear-ask"${n ? "" : " disabled"}>Clear…</button>`,
     }) + (err ? `<div class="inv-form-err" role="alert">${escapeHtml(err)}</div>` : "");
+    booksWire(el, () => paint(false));
     el.querySelector("#inv-clear-ask")?.addEventListener("click", () => paint(true));
     el.querySelector("#inv-clear-cancel")?.addEventListener("click", () => paint(false));
     el.querySelector("#inv-clear-go")?.addEventListener("click", async (ev) => {
@@ -14907,6 +15144,7 @@ function renderSettingsGuide(el) {
   wrap.className = "settings-guide";
   wrap.append(document.getElementById("guide-tpl").content.cloneNode(true));
   wrap.querySelectorAll(".info-card").forEach((c, i) => { c.dataset.item = `guide-${i}`; });
+  wrap.querySelectorAll("[data-your-book]").forEach(s => { s.textContent = yourBook(); });
   el.replaceChildren(wrap);
   if (window.renderMathInElement) {
     renderMathInElement(wrap, { delimiters: [{ left: "$$", right: "$$", display: true }], throwOnError: false });
@@ -15050,6 +15288,10 @@ function showPage(name) {
   try { localStorage.setItem("page", name); } catch (e) {}
   // Leaving My Investments: what wasn't read there (folded, behind Activity) badges again.
   if (name !== "investments") invBadge(INV.book?.attention);
+  if (name !== "investments" && BOOK.follow) {
+    BOOK.follow = false;
+    if (viewIsBook(STATE.activeView)) activateTab(BOOK_KEY, { silent: true });
+  }
   if (name !== "investments" && _fitDeferred) {
     _fitDeferred = false;
     requestAnimationFrame(() => render());
@@ -15106,12 +15348,14 @@ async function invLoad() {
     if (!INV.book) {
       try {
         const c = await (await fetch(q + "&cached=1")).json();
-        if (c && !c.nocache && seq === INV.seq && !INV.book) { INV.book = c; invRender(); }
+        if (c && !c.nocache && !booksOther(c) && seq === INV.seq && !INV.book) { INV.book = c; invRender(); }
       } catch (e) { /* no saved page: wait for the fresh one */ }
       if (!INV.book && visible) host.innerHTML = `<div class="inv-loading">Reading your prices…</div>`;
     }
     const d = await fresh;
     if (seq !== INV.seq) return;
+    // Another window switched: take its state; a move loads the page by itself.
+    if (booksOther(d)) { await booksLoad(); if (seq === INV.seq) invLoad(); return; }
     if (d.error && INV.book?.stale) {
       // Keep the saved page, but say it couldn't be brought up to date.
       INV.book = { ...INV.book, refresh_failed: true };
@@ -15735,14 +15979,10 @@ function invAttentionHtml(b) {
 /* The rail's preferences (dismiss, seen, rules) answer the rail as it now
  * reads. Not invPost: these never touch the book or its load sequence. */
 async function invAttPost(path, body) {
-  const r = await fetch("/api/investments/attention/" + path, { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ccy: FX_QUOTE, ...body }) });
-  let d = {};
-  try { d = await r.json(); } catch (e) { /* non-JSON error */ }
-  if (!r.ok) throw new Error(d.message || "Couldn't save that. Try again in a moment.");
-  return d;
+  return invSend("attention/" + path, { ccy: FX_QUOTE, ...body });
 }
 function invAttApply(att) {
+  if (booksOther(att)) return;
   // An answer with no page behind it (page: false) carries the rules only:
   // keep the items the rail shows, never blank it.
   if (att && att.page === false && INV.book?.attention) att = { ...INV.book.attention, rules: att.rules };
@@ -15784,6 +16024,7 @@ async function invBadgeLoad(tries = 12) {
   let a = null;
   try { a = await (await fetch("/api/investments/attention?ccy=" + encodeURIComponent(FX_QUOTE))).json(); }
   catch (e) { /* no badge */ }
+  if (booksOther(a)) return;
   if (INV.book?.attention) return;  // a page load got there first and owns the badge
   invBadge(a);
   if (a?.pending && tries > 1) setTimeout(() => invBadgeLoad(tries - 1), 10000);
@@ -15860,7 +16101,11 @@ async function invFocusItem(key) {
  * page can't say. A line at the top of the rail until it is opened (that
  * part is this viewer's, in localStorage) or the next one replaces it. */
 async function invRecapLoad() {
-  try { INV.recap = (await (await fetch("/api/investments/recap")).json()).recap || null; } catch (e) { return; }
+  try {
+    const d = await (await fetch("/api/investments/recap")).json();
+    if (booksOther(d)) return;
+    INV.recap = d.recap || null;
+  } catch (e) { return; }
   const aside = $("#inv-page .inv-rail");
   if (aside && INV.book && INV.rail === "attention") aside.innerHTML = invRailHtml(INV.book);
 }
@@ -15900,7 +16145,7 @@ function invRecapHtml(r) {
       ${row("Needs a look", nl)}
       ${row("Next week", nxt)}
     </div>
-    <div class="inv-recap-foot">From your book's prices as last computed. A dash means the figure wasn't available for that Friday.</div>`;
+    <div class="inv-recap-foot">From ${yourBook()}'s prices as last computed. A dash means the figure wasn't available for that Friday.</div>`;
 }
 function invRecapOpen() {
   const r = INV.recap;
@@ -15963,7 +16208,7 @@ const INV_FULL_METRICS = {
     lean: (r) => (r.p.return_pct ?? 0) / 50, big: (r) => invPct(r.p.return_pct), small: () => "" },
   peak: { label: "From peak", legend: ["−50%", "0%"], note: "Colour is how far it is below its peak since you bought it",
     lean: (r) => (r.x.peak_pct ?? 0) / 50, big: (r) => invPct(r.x.peak_pct), small: () => "" },
-  risk: { label: "Risk share", legend: ["0%", "15%+"], note: "Colour is its share of the book's risk", blue: true,
+  risk: { label: "Risk share", legend: ["0%", "15%+"], get note() { return `Colour is its share of ${theBooks()} risk`; }, blue: true,
     lean: (r) => Math.max(r.rs, 0) / 15, big: (r) => invShareText(r.p, true) ?? "—", small: () => "" },
 };
 
@@ -16040,7 +16285,7 @@ function invFullDeskRow(r, m, nearRow) {
 }
 function invFullBookRow(it) {
   const name = it.rule === "sector" ? it.text.split(" is ")[0] : it.text.split(" in ").pop();
-  return `<tr><td class="left"><span class="att-fs-name">${escapeHtml(name)}</span><span class="att-fs-sub">Across your book</span></td>
+  return `<tr><td class="left"><span class="att-fs-name">${escapeHtml(name)}</span><span class="att-fs-sub">Across ${yourBook()}</span></td>
     <td class="left" colspan="7"><div class="att-fs-whys"><span class="att-fs-why ${it.severity}"><i></i><span>${escapeHtml(it.text)}</span></span><span class="att-fs-sub">${escapeHtml(it.sub)}</span></div></td>
     <td class="att-fs-xc"><button type="button" class="x-close inv-att-x" data-inv-dismiss="${escapeHtml(it.key)}" data-level="${it.level}" aria-label="Dismiss: ${escapeHtml(it.text)}" data-tip="Dismiss. It comes back if it gets worse.">${X_SVG}</button></td></tr>`;
 }
@@ -16053,7 +16298,7 @@ function invFullDesk(m) {
   if (m.near.length) body += grp("Close to a limit") + m.near.map(r => invFullDeskRow(r, m, true)).join("");
   if (!body) return `<div class="inv-calm">Nothing is near any of your limits.</div>`;
   return `<table class="att-fs-tbl"><thead><tr><th class="left">Holding</th><th class="left">Why it's here</th><th>Weight</th><th>Risk</th><th>Last day</th><th>From cost</th><th data-tip="Below its peak since you bought it. The line runs from its high (right) to its worst fall in ten years (left); the tick is the 95th percentile of its falls.">Below peak</th><th>Reports</th><th></th></tr></thead><tbody>${body}</tbody></table>
-    <div class="att-fs-foot">Each group is sorted by share of the book's risk. From cost is the share price against what you paid, without dividends. Close to a limit means within 15% of it. A ✕ holds until the item gets a full step worse.</div>`;
+    <div class="att-fs-foot">Each group is sorted by share of ${theBooks()} risk. From cost is the share price against what you paid, without dividends. Close to a limit means within 15% of it. A ✕ holds until the item gets a full step worse.</div>`;
 }
 
 /* ---- News ---- */
@@ -16234,7 +16479,7 @@ function invFullMapDraw(m) {
     const r = c.r, heat = invFullHeat(met.lean(r), met.blue), f = r.high ? "high" : r.its.length ? "info" : "";
     const fs = Math.min(11 + c.w / 22, 17), big = c.w > 72 && c.h > 46;
     const label = r.p.name.length * fs * 0.56 > c.w - 26 ? r.sym.split(".")[0] : r.p.name, sm = met.small(r);
-    const tip = `${r.p.name}: ${r.p.weight.toFixed(1)}% of your book. ${r.its.length ? r.its.map(i => i.text).join(". ") : ""}`;
+    const tip = `${r.p.name}: ${r.p.weight.toFixed(1)}% of ${yourBook()}. ${r.its.length ? r.its.map(i => i.text).join(". ") : ""}`;
     return `<button type="button" class="att-fs-tile${heat.strong ? " strong" : ""}${INV_FULL.sel === r.sym ? " sel" : ""}" data-f="${f}" data-full-sym="${escapeHtml(r.sym)}" data-tip="${escapeHtml(tip)}" style="left:${(c.x + 1).toFixed(1)}px;top:${(c.y + 1).toFixed(1)}px;width:${Math.max(c.w - 2, 1).toFixed(1)}px;height:${Math.max(c.h - 2, 1).toFixed(1)}px;background:${heat.bg}${c.w > 34 && c.h > 22 ? "" : ";padding:0"}">
       ${big ? `<span class="n" style="font-size:${fs.toFixed(1)}px">${escapeHtml(label)}</span><span class="v" style="font-size:${Math.min(10 + c.w / 30, 14).toFixed(1)}px">${met.big(r)}${sm ? ` <small>${sm}</small>` : ""}</span>` : c.w > 34 && c.h > 22 ? `<span class="n" style="font-size:10px">${escapeHtml(r.sym.split(".")[0])}</span>` : ""}
       ${f && c.w > 24 && c.h > 22 ? `<span class="f ${f}">${r.its.length}</span>` : ""}</button>`;
@@ -16291,7 +16536,7 @@ function invFullSentence(r) {
     const deep = q && invOk(q.dd95_pct) && invOk(q.now_pct) && q.now_pct <= q.dd95_pct && Math.abs(q.now_pct - x.peak_pct) < 2;
     parts.push(`It is ${Math.abs(x.peak_pct).toFixed(0)}% below its peak of ${escapeHtml(invDay(x.peak_date))}${deep ? `, deeper than 95% of its days since ${escapeHtml(String(q.since).slice(0, 4))}` : ""}.`);
   }
-  for (const n of r.near) if (n.rule === "holding") parts.push(`It is ${n.value.toFixed(1)}% of your book, against your ${n.limit}% limit.`);
+  for (const n of r.near) if (n.rule === "holding") parts.push(`It is ${n.value.toFixed(1)}% of ${yourBook()}, against your ${n.limit}% limit.`);
   if (r.nextE) {
     const u = invFullUsual(r);
     parts.push(`It reports ${escapeHtml(invDay(r.nextE))}${u ? `; results have moved it a median ±${u.med.toFixed(1)}%, about ${invMoney(u.money)} for you` : ""}.`);
@@ -16334,10 +16579,10 @@ function invFullDetail(r) {
 function invFullLede(m) {
   const n = m.hi.length, sum = (f) => m.hi.reduce((t, r) => t + f(r), 0), r = INV.recap;
   const age = r ? (Date.now() - new Date(r.week_end + "T12:00:00").getTime()) / 864e5 : 99;
-  const week = r && age <= 7 && invOk(r.return_pct) ? `Your book ${r.return_pct >= 0 ? "rose" : "fell"} ${Math.abs(r.return_pct).toFixed(1)}% last week. ` : "";
+  const week = r && age <= 7 && invOk(r.return_pct) ? `${yourBook(true)} ${r.return_pct >= 0 ? "rose" : "fell"} ${Math.abs(r.return_pct).toFixed(1)}% last week. ` : "";
   const head = n ? `${n} holding${n > 1 ? "s need" : " needs"} a look.` : m.fy.length ? "Nothing needs a look." : "Nothing needs you today.";
   const parts = [];
-  if (n) parts.push(`${n > 1 ? "They are" : "It is"} ${sum(x => x.p.weight).toFixed(0)}% of your book${m.hi.every(x => x.rs != null) ? ` and about ${Math.max(0, sum(x => x.rs)).toFixed(0)}% of its risk` : ""}.`);
+  if (n) parts.push(`${n > 1 ? "They are" : "It is"} ${sum(x => x.p.weight).toFixed(0)}% of ${yourBook()}${m.hi.every(x => x.rs != null) ? ` and about ${Math.max(0, sum(x => x.rs)).toFixed(0)}% of its risk` : ""}.`);
   parts.push(`${m.quiet} of your ${m.rows.length} holdings have nothing to say.`);
   const err = m.a.plans_error ? `<div class="att-fs-err">${escapeHtml(m.a.plans_error)}. Your plans are paused until it is fixed or removed.</div>` : "";
   return `<div class="att-fs-lede"><div class="att-fs-big">${week}${head}</div><div class="att-fs-big-sub">${parts.join(" ")}</div>${err}</div>`;
@@ -16578,7 +16823,7 @@ function invPlanHtml(x) {
       <span class="inv-plan-now">${q(x.price)} now · ${invPct(x.weight, 1).replace("+", "")}</span></div>
     ${track}
     <div class="inv-f-row">${field("target", "Target", num(pl.target), unit, "")}${field("review", "Review below", num(pl.review), unit, "")}</div>
-    ${field("max_weight", "Max weight", num(pl.max_weight), `% of your book · your book limit is ${lim}%`, String(lim))}
+    ${field("max_weight", "Max weight", num(pl.max_weight), `% of ${yourBook()} · ${booksMany() ? "portfolio" : "your book"} limit is ${lim}%`, String(lim))}
     <label class="inv-f"><span>Why you hold it</span><input name="why" value="${escapeHtml(pl.why || "")}" maxlength="140" autocomplete="off" placeholder="One line, quoted back when the review level is hit"></label>
     ${pl.set_on ? `<div class="inv-pop-note">Set ${invDate(pl.set_on)} at ${q(pl.set_price)}</div>` : ""}
     <div class="inv-plan-sub">Price alerts <em>· each fires once</em></div>
@@ -17392,10 +17637,7 @@ async function invRead() {
   m.busy = true; m.error = ""; invComposerRefresh();
   try {
     const files = await Promise.all(m.files.map(async f => ({ name: f.name, type: f.type, data: await invB64(f.file) })));
-    const r = await fetch("/api/investments/import", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: m.text, files }) });
-    let d = {};
-    try { d = await r.json(); } catch (e) { /* non-JSON error */ }
+    const { r, d } = await invRaw("import", { text: m.text, files });
     if (!r.ok) throw new Error(d.message || (r.status === 400 && d.error ? "That was too much to send at once. Add fewer or smaller files." : "Couldn't read that. Try again in a moment."));
     m.prop = d; m.answers = Object.fromEntries((d.questions || []).map(q => [q.id, q.default]));
     invClosePop();
@@ -17550,9 +17792,7 @@ function invRecheck() {
     const seq = ++_invChkSeq;
     const live = m.prop.items.filter(r => r.include).map(r => [r, invRowEntry(r)]).filter(([, e]) => e);
     try {
-      const r = await fetch("/api/investments/import/check", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entries: live.map(([, e]) => e) }) });
-      const d = await r.json();
+      const { d } = await invRaw("import/check", { entries: live.map(([, e]) => e) });
       if (seq !== _invChkSeq || INV.imp !== m) return;
       for (const row of m.prop.items) delete row.problem;
       for (const [k, pr] of Object.entries(d.problems || {})) live[+k][0].problem = pr;
@@ -17905,13 +18145,26 @@ async function invPriceFill(form) {
 }
 
 /* --- mutations ---------------------------------------------------------- */
-async function invPost(path, body) {
-  INV.seq++;  // a change's answer supersedes any load still in flight
+/* Every POST names the portfolio this page shows, and the server refuses a
+   mismatch (books.expect); then the page takes up what is showing now. */
+async function invRaw(path, body) {
   const r = await fetch("/api/investments/" + path, { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ base_rev: INV.book?.rev ?? 0, ccy: FX_QUOTE, ...body }) });
+    body: JSON.stringify({ book_id: BOOKS.active, ...body }) });
   let d = {};
   try { d = await r.json(); } catch (e) { /* non-JSON error */ }
+  if (d.error === "BookMoved") booksLoad();
+  return { r, d };
+}
+async function invSend(path, body) {
+  const { r, d } = await invRaw(path, body);
   if (!r.ok) throw new Error(d.message || "Couldn't save that. Try again in a moment.");
+  return d;
+}
+async function invPost(path, body) {
+  INV.seq++;  // a change's answer supersedes any load still in flight
+  const d = await invSend(path, { base_rev: INV.book?.rev ?? 0, ccy: FX_QUOTE, ...body });
+  // Saved where it was sent, but that portfolio has gone from the screen meanwhile.
+  if (booksOther(d)) throw new Error("Saved, but another portfolio is showing now.");
   return d;
 }
 async function invCommit(path, body, toastMsg, form) {

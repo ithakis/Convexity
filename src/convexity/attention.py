@@ -33,7 +33,7 @@ import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 
-from convexity import paths
+from convexity import books, paths
 from convexity.helpers import finite_num, major_ccy
 
 # ------------------------------------------------------------------ rules
@@ -85,7 +85,7 @@ _LOCK = threading.Lock()
 
 
 def _state_path():
-    return paths.state_file("attention")
+    return books.book_file("attention")
 
 
 def _clean_rules(raw) -> dict:
@@ -350,7 +350,7 @@ class PlansUnreadable(ValueError):
 
 
 def _plans_path():
-    return paths.state_file("plans")
+    return books.book_file("plans")
 
 
 def _clean_alert(a) -> dict | None:

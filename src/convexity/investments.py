@@ -36,7 +36,7 @@ from datetime import UTC, date, datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from convexity import ledger, long_run, paths
+from convexity import books, ledger, long_run, paths
 from convexity.helpers import SUPPORTED_FX, major_ccy, price_in_major
 
 SCHEMA_VERSION = 1
@@ -127,7 +127,7 @@ def period_starts(dates: list[str]) -> dict:
 
 
 def _path():
-    return paths.state_file("investments")
+    return books.book_file("investments")
 
 
 def _new_book() -> dict:
@@ -1751,7 +1751,7 @@ def _holding_risk(ccy: str | None = None) -> tuple[dict, list[str]]:
     from convexity.analytics import extend_history
     from convexity.fx import _apply_fx_to_closes, _fx_usd_series
 
-    last = _LAST_PAGE["v"][1] or page(ccy)
+    last = last_page() or page(ccy)
     held = [p for p in last.get("positions") or [] if not p.get("pending")]
     disp = _display_ccy(ccy, last.get("ccy") or "USD")
     syms = [p["symbol"] for p in held]
@@ -2192,6 +2192,12 @@ def _page_key(ccy) -> tuple | None:
             str(_path()))  # fmt: skip
 
 
+def last_page() -> dict | None:
+    """The last page computed, if for this portfolio."""
+    key, out = _LAST_PAGE["v"]
+    return out if key is None or key[4] == str(_path()) else None
+
+
 def _healthy(out: dict) -> bool:
     """A page worth keeping: computed, with prices, nothing left out."""
     return bool(out.get("series")) and not any(
@@ -2202,28 +2208,33 @@ def _healthy(out: dict) -> bool:
 def page(ccy: str | None = None, *, fresh: bool = False) -> dict:
     """``book(ccy)`` for the page route: one computation per currency at a
     time, reused for a minute, and saved to disk as the last good page."""
-    key = _page_key(ccy)
-    lock_key = key[1] if key else "?"
-    with _PAGE_GUARD:
-        lock = _PAGE_LOCKS.setdefault(lock_key, threading.Lock())
-    with lock:
-        hit = _PAGE_MEMO.get(key) if key and not fresh else None
-        if hit and time.monotonic() - hit[0] < PAGE_MEMO_TTL:
-            return with_attention(hit[1])
-        t0 = time.monotonic()
-        out = book(ccy)
-        # When: the weekly recap keeps only a page computed after Friday's
-        # close (notify.maybe_recap); the disk copy carries the same stamp.
-        out["computed_at"] = _now()
-        took = time.monotonic() - t0
-        _LAST_PAGE["v"] = (key, out)
-        if out.get("positions"):
-            print(f"[investments] book computed in {took:.1f}s ({out.get('ccy')})")
-        if key and _healthy(out):
-            _PAGE_MEMO.clear()  # one book: older keys are stale by definition
-            _PAGE_MEMO[key] = (time.monotonic(), out)
-            _save_cached_page(key, out)
-        return with_attention(out, fresh=key is not None and _healthy(out))
+    with books.pin():
+        key = _page_key(ccy)
+        lock_key = (key[1], key[4]) if key else "?"  # portfolios don't wait for each other
+        with _PAGE_GUARD:
+            lock = _PAGE_LOCKS.setdefault(lock_key, threading.Lock())
+        with lock:
+            hit = _PAGE_MEMO.get(key) if key and not fresh else None
+            if hit and time.monotonic() - hit[0] < PAGE_MEMO_TTL:
+                return with_attention(hit[1])
+            t0 = time.monotonic()
+            out = book(ccy)
+            # When: the weekly recap keeps only a page computed after Friday's
+            # close (notify.maybe_recap); the disk copy carries the same stamp.
+            out["computed_at"] = _now()
+            took = time.monotonic() - t0
+            # Switched away while computing: this page goes back to its request and no further.
+            showing = books.is_showing()
+            keep = showing and key is not None and _healthy(out)
+            if showing:
+                _LAST_PAGE["v"] = (key, out)
+            if out.get("positions"):
+                print(f"[investments] book computed in {took:.1f}s ({out.get('ccy')})")
+            if keep:
+                _PAGE_MEMO.clear()  # older keys are stale by definition
+                _PAGE_MEMO[key] = (time.monotonic(), out)
+                _save_cached_page(key, out)
+            return with_attention(out, fresh=keep)
 
 
 def _with_long_run(out: dict) -> dict:
@@ -2279,7 +2290,7 @@ def with_attention(out: dict, *, fresh: bool = False) -> dict:
     except Exception as exc:  # the rail is extra: never lose the page over it
         print(f"[attention] evaluate failed: {type(exc).__name__}")
         return out
-    return {**out, "attention": att}
+    return {**out, "attention": books.words(att)}
 
 
 def price_now(symbol: str, ccy: str | None = None) -> float | None:
@@ -2348,7 +2359,7 @@ def attention_now(ccy: str | None = None) -> dict:
 
 
 def _cache_path():
-    return paths.state_file("book_cache")
+    return books.book_file("book_cache")
 
 
 def _save_cached_page(key: tuple, out: dict) -> None:
@@ -2377,6 +2388,71 @@ def cached_page(ccy: str | None = None) -> dict | None:
     if (body.get("rev"), body.get("ccy"), body.get("bench")) != key[:3]:
         return None
     return with_attention({**body["book"], "stale": True, "computed_at": body.get("computed_at")})
+
+
+def _book_facts() -> dict:
+    """Settings' line about the portfolio this thread works on, from its files
+    alone: never a fetch, and the value is what its last good page said."""
+    try:
+        raw = _load()
+    except BookUnreadable:
+        return {"unreadable": True}
+    held = book_symbols()
+    try:
+        changed = date.fromtimestamp(_path().stat().st_mtime).isoformat()
+    except OSError:
+        changed = None
+    out = {
+        "holdings": len(held),
+        "entries": len((raw or {}).get("entries") or []),
+        "changed": changed,
+    }
+    try:
+        last = json.loads(_cache_path().read_text(encoding="utf-8"))["book"]
+        return {**out, "value": last["headline"]["value"], "ccy": last["ccy"]} if held else out
+    except (OSError, ValueError, KeyError, TypeError):
+        return out
+
+
+def books_state(facts: bool = False) -> dict:
+    st = books.state()
+    if facts:
+        for row in st["books"]:
+            with books.pin(row["id"]):
+                row.update(_book_facts())
+    return st
+
+
+def change_books(change, ccy: str | None = None) -> dict:
+    """Run ``change`` on the list of portfolios. When that moves what is showing:
+    nothing more is sent for the old one (the flip waits for a send in progress,
+    what quiet hours held is dropped), its hidden passes and any refresh of the
+    book stop, and the answer carries the new one's holdings and last good page,
+    so the page can paint them in one go."""
+    from convexity import attention, jobs, notify, persistence
+
+    with notify._RAIL_LOCK:
+        before = books.showing()
+        change()
+        st = books_state()  # read here: another request may move what shows right after
+        after = st["active"]
+        if after != before:
+            notify._HELD.update(items=False, recap=None)
+    if after == before:
+        return st
+    forget_page()
+    jobs.cancel_book_jobs()
+    persistence.clear_analytics_cache("__book__")
+    with books.pin(after):
+        # What is on the rail when it comes back is read there, not sent as news.
+        if attention.load_state()["armed"]:
+            attention.disarm()
+        held = book_symbols()
+        try:
+            shown = cached_page(ccy) or (None if held else page(ccy))
+        except BookError:
+            shown = None
+        return {**st, "symbols": held, "page": shown and {**shown, "book_id": after}}
 
 
 def warm(ccy: str | None = None) -> None:

@@ -618,7 +618,7 @@ the rules below, which code comments cite as "engine rules" and "alert research"
 |---|---|
 | Placement | Its own page, the first topbar button, left of Portfolio. Self-contained: no links into the research tabs, and hypothetical weightings are untouched. |
 | Layout | Split: performance and holdings on the left (~70%), the attention rail on the right (~30%). |
-| Book | One book, no accounts. A future "race against friends" would compare TWR %, so the TWR index is stored cleanly. |
+| Book | No accounts. One book unless the owner turns on Multiple portfolios (below). A future "race against friends" would compare TWR %, so the TWR index is stored cleanly. |
 | Headline | Value · Today $ and % · P&L (unrealised · realised · dividends) · TWR against the S&P 500 in pp · MWR p.a. with the timing effect (MWR − TWR). |
 | Ledger | Buy, sell, dividend, deposit, withdrawal, fee, split. A quick-added holding is one synthetic buy. Every change can be undone. |
 | Cost basis | Average cost, which matches what brokers show. |
@@ -1125,6 +1125,56 @@ page's path**; what isn't there is left out of the page.
   `notify.on_prefs` (off cancels a running pass and disarms).
   `POST /api/notifications/test` sends a test; `/check` runs a pass now
   (202, or 409 while a refresh runs or when off).
+
+### My Investments: several portfolios (`books.py`, 2026-11-05)
+- **Storage.** The first portfolio (`main`, default name Mine) stays exactly where
+  the single book was: no migration, no rewrite. Every other has the same file
+  names in `state/books/<id>/`: `investments`, `book_cache`, `attention`, `plans`,
+  `recaps`. `state/books.json` is `{enabled, active, books: [{id, name,
+  created_at}]}`. No file means one implicit portfolio with the switch off, and
+  nothing is written until the owner changes something. A malformed file reads the
+  same way, is never overwritten, and every change is refused (409). Ids are
+  generated (12 hex digits), never from a name, and validated on every use.
+- **One seam.** `books.book_file(name)` resolves those five files. Market data stays
+  shared: `splits`, `events`, `betas`, `beta_lines`, `proxies`, `research_lines`,
+  `news`, `news_watch`, `policy_rates`, `sentiment_history`, `long_run.json`'s
+  per-symbol records. Its covariance comes from one held set, so `long_run._cov_key`
+  keeps one per portfolio and currency (`ccy` for main, its old key; `<id>|<ccy>`
+  for others), and a deleted portfolio's goes with it.
+- **The pin is what makes a switch safe.** `books.active_id()` is the thread's pinned
+  portfolio, else the one showing (`showing()`). The route for every My Investments
+  request, `investments.page`, every job (`Job.book_id`, `_run_pinned`) and the
+  notification scheduler's tick pin at the start, so one piece of work never
+  reads A's ledger and writes B's rail. A context variable: a thread pool that
+  reads per-portfolio files must `copy_context` (none does today).
+
+| Failure | What stops it |
+|---|---|
+| A page computed for A saved or served for B | `page` keeps its result (memo, last page, disk) only while `is_showing()`; the memo key holds the path; `last_page()` checks it too |
+| A stale request writes into B (two portfolios can share a rev) | Every POST under `/api/investments/` carries `book_id`; `books.expect` refuses a mismatch with 409 `BookMoved` (none means main, which is what an older page means). Inside, the pin keeps the write in the portfolio it named |
+| A notification for a portfolio no longer showing | `notify_rail` and the recap check `is_showing()` under `_RAIL_LOCK`, the flip takes the same lock, and quiet hours' `_HELD` is dropped. The rail coming back is disarmed: what is on it then is read there, not sent |
+| Hidden passes or a book refresh running on | `jobs.cancel_book_jobs` (views `__investments__`, `__book__`); a research refresh carries on. Dead clients still aren't cancels |
+| A's rows or analytics under `__book__` | `clear_analytics_cache` on a switch; `save_view` drops a `__book__` save whose constituents aren't the showing portfolio's (with several portfolios only); the page's analytics key carries the id; rows stay until rebuilt, since `_saved_rows` only reads market data from them |
+| Dismissals lost on a switch | `prune` runs on a fresh page, on that portfolio's own file |
+| Deleting the wrong thing | The first and the one showing are refused, so one always remains. Out of the list first, then the folder moves to `state/books/deleted/<id>-<UTC stamp>/`; a failed move leaves it unlisted, nothing lost |
+
+- **Routes:** `GET /api/investments/books[?facts=1]` (cheap state; `facts` adds each
+  one's holdings, entries, last good value and file date, from its files alone).
+  JSON POSTs `/api/investments/books/{enabled,add,rename,show,delete}` all go
+  through `investments.change_books`, which runs the side effects above only when
+  what shows moved and answers with the new one's `symbols` and last good `page`.
+  It reads the state under the lock, so an answer's `active` is the portfolio its
+  `page` belongs to, however requests overlap. Answers for the page carry `book_id`.
+- **The mirror's refresh:** with several portfolios a `__book__` job takes its
+  constituents from the server, whatever the page sent: the page's copy can be from
+  before a switch, and its extra rows would land in the new portfolio's table.
+- **Wording:** with 2+ portfolios and the switch on, `books.words` rewrites each rail
+  item's `text` on the copy `with_attention` returns, and `books.phrase` our other
+  sentences. Never a blind replace: a plan's note (`sub`, `plans`) is the owner's own
+  words. Names refuse Unicode category C (control, bidi).
+- **Choices:** one display currency for the app; the export covers the one showing;
+  the changed date is the book file's modified time (entries don't record a delete
+  or an undo). Logs carry ids and operations only.
 
 ### My Investments import (`importer.py`)
 Roadmap Phases 5–6 (run together, ahead of Performance, at the owner's

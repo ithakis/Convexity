@@ -34,7 +34,7 @@ from collections import deque
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from convexity import paths
+from convexity import books
 from convexity.helpers import finite_num
 
 DEFAULTS = {"notify_on": True, "quiet_on": True, "quiet_from": "22:00", "quiet_to": "08:00"}
@@ -205,7 +205,7 @@ def notify_rail(att: dict | None, *, now: datetime | None = None, s: dict | None
 
     with _RAIL_LOCK:
         s = s or settings()
-        if not s["notify_on"] or not att or att.get("page") is False:
+        if not s["notify_on"] or not att or att.get("page") is False or not books.is_showing():
             return 0
         st = attention.load_state()
         items = attention.should_notify(att, st)
@@ -393,7 +393,8 @@ def _loop() -> None:
         return
     while True:
         try:
-            tick()
+            with books.pin():
+                tick()
         except Exception as exc:  # the scheduler outlives any one bad tick
             print(f"[notify] tick failed: {type(exc).__name__}: {exc}")
         if stop.wait(TICK_S):
@@ -437,7 +438,7 @@ def recap_friday(now: datetime | None = None) -> date:
 
 
 def _recaps_path():
-    return paths.state_file("recaps")
+    return books.book_file("recaps")
 
 
 def load_recaps() -> dict[str, dict]:
@@ -634,10 +635,13 @@ def maybe_recap(now: datetime | None = None, *, notify: bool = True) -> dict | N
         and (now or datetime.now(UTC)).astimezone(ZoneInfo(_NY)).hour >= 16
     )
     if notify and s["notify_on"] and not late:
-        if in_quiet(_now_local(now), s):
-            _HELD["recap"] = r
-        else:
-            _send_recap(r)
+        with _RAIL_LOCK:
+            if not books.is_showing():
+                return r
+            if in_quiet(_now_local(now), s):
+                _HELD["recap"] = r
+            else:
+                _send_recap(r)
     return r
 
 

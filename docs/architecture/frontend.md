@@ -346,6 +346,44 @@ dependency (loaded from CDN, used only for column-guide formulas).
   rows (`Handler._writes_book_name`). A changed book rebuilds the rows on
   activation instead of turning Refresh red. The xlsx export skips it.
 
+### Several portfolios: the pill (`booksApply`)
+- Settings → My Investments' switch (off by default, then exactly today's section)
+  shows the list and, immediately left of the currency pill, `#book-pill`:
+  `benchMenuHtml` + `wireBenchSelect` with one extra row, `__manage__`. It shrinks
+  last (`flex-shrink: .12`), so the status text gives way first.
+- **The name appears ONLY in the pill, its menu, Settings' list and the delete
+  confirmation.** The tab, the red pill, Attention's kicker, Add and import keep
+  their words, and a switch has no toast. A new surface doesn't name it.
+- **`yourBook(cap)` is the one way to write "your book"** (rail, full screen, plan
+  form, recap, Guide): "this portfolio" with 2+ portfolios and the switch on. Its
+  server side is `books.words`. A test greps for strays.
+- **A switch is one paint** (`booksSwitched`): the POST answers with the new one's
+  holdings and last good page, and in one tick `INV.seq` bumps, the old state, menus,
+  the full screen and the stock window go, the pill and page are set, then `invLoad`
+  fetches fresh ("Updated … · refreshing"). An empty portfolio's page comes in that
+  answer too: straight to the welcome page. `booksAsk` sends one request at a time, in
+  order, and only the newest answer counts, so a burst settles on what the server
+  ended on; the name comes from the page painted (`d.page.book_id`). `booksOther(d)` drops any answer whose
+  `book_id` isn't the page's; a load that sees one means another window switched,
+  and takes up its state. An open import review refuses the switch with a toast.
+- **Every My Investments POST goes through `invRaw`**, which adds `book_id`, and a
+  409 `BookMoved` reloads the state. Never `fetch` those routes by hand.
+- **The red tab follows** (`booksFollow`): with `__book__` open its constituents,
+  rows and analytics change in the same tick as the name, before the first await
+  (a test checks), then it is activated again; on My Investments that waits for the next research page
+  (`BOOK.follow`). With several portfolios `activateTab` doesn't paint `__book__`'s
+  saved rows when they aren't this portfolio's. A job on the book reports for the
+  portfolio it started on (`REFRESH.bookOf`, from `hello`): after a switch the client
+  detaches, and `rfViewIsActive` keeps its frames out of `DATA`.
+- `showConfirm({safe: true})` focuses Cancel, and Enter follows the focus. Its Esc is
+  capture-phase for every confirm, or the global pass closes Settings underneath;
+  `#confirm-bg` is z 96, over Settings.
+- **One menu style** for `.bench-menu` and `.fx-dropdown`: no border, radius 18, the
+  pill's `--hover` as the panel, rows 9/14 at 13.5 px, the row showing filled with
+  `rgba(var(--accent-rgb), .34)`, bold (no check mark), hover 7% of `--text`. Bloomberg
+  follows its own orange accent. Measured text on the fill: dark 7.46, light 9.23,
+  Bloomberg 7.42. Chart type, Columns, ✕ menus and Optimize's selects are apart.
+
 ### State (`STATE`, `DATA`, `VIEWS`, `WATCHLISTS`)
 - `DATA` — currently-rendered rows
 - `VIEWS` — server-side view metadata (mirrors `/api/views` response)
@@ -757,6 +795,7 @@ The `LOGO_HOSTS` block is the only place that may name a host
   frames out while a build repopulates `DATA`. Both write through
   `upsertDataRow()`, never `push()`. Before this, overlapping writers left
   symbols in `DATA` twice and the build persisted them (§4 "One row per
+  A build belongs to the tab it started on (`BUILD_VIEW`): `activateTab` supersedes one still streaming for another tab, and `_activateGen` drops an older activation's late paint.
   symbol").
 - **In-place tab rename** (2026-10-19): double-click a `.pf-tab-label`, or
   right-click the tab → Rename (`tabMenuOpen`, an `invMenuOpen` menu), and the
@@ -917,8 +956,9 @@ The `LOGO_HOSTS` block is the only place that may name a host
   "canvas" don't read as darker strips. It sits last in the file on purpose:
   several per-window rules higher up have the same specificity. **A new overlay
   surface goes in that list.** Inner hairlines (header/footer dividers) stay.
-  Small dropdowns (`.inv-menu`, `.ct-menu`, `.bench-menu`) keep their hairline —
-  they open over the undimmed page, where a shadow alone doesn't hold the edge;
+  Small dropdowns (`.inv-menu`, `.ct-menu`) keep their hairline — they open over
+  the undimmed page, where a shadow alone doesn't hold the edge (`.bench-menu` and
+  `.fx-dropdown` hold theirs with the pill's own fill);
   the window-sized Constraints popover (`.inv-menu.tr-pop`) is in the list.
   `--surface-raised` / `--surface-sunk` / `--shadow-window` are literal per
   theme (never `var(--bg-canvas)` — that would be a cycle inside a window).

@@ -218,6 +218,15 @@ Each of these has cost real debugging time; the link goes to the full story.
   a constant changes: `scripts/study_recovery.py`, then bump `VERSION`.
   [backend.md → long view](docs/architecture/backend.md#my-investments-long-view-long_runpy-2026-11-02) ·
   [docs/recovery_research.md](docs/recovery_research.md)
+- **Several portfolios, one seam** (`books.py`): the first stays where the one
+  book always was, each other is `state/books/<id>/`, and every per-portfolio file
+  goes through `books.book_file`. A request or job pins the portfolio it started
+  on (`books.pin`); a write names it (`book_id`, 409 otherwise: revs can't tell two
+  portfolios apart). Market caches stay shared; `long_run.json`'s matrix is keyed per
+  portfolio. A new per-portfolio file goes through the seam or it leaks. The name
+  shows only in the pill, its menu, Settings' list and the delete confirmation.
+  [backend.md → several portfolios](docs/architecture/backend.md#my-investments-several-portfolios-bookspy-2026-11-05) ·
+  [frontend.md → the pill](docs/architecture/frontend.md#several-portfolios-the-pill-booksapply)
 - **Holding contributions add up to the TWR exactly** (Phase 4): a new
   entry type that moves money into or out of a holding must land in
   `ledger.Day.flows`, or "Cash and fees" silently absorbs it.
@@ -410,6 +419,7 @@ sub-decision.
 │   ├── data/                    ← Package data: lm_lexicon.json, sp500.json (the pack's universe, source + date inside), indices.json
 │   ├── options_density.py       ← The stock window's σ/μ: option-implied real-world price distribution, GET /api/density — §4
 │   ├── keys.py                  ← Settings → API keys: config.json write/clear, live reload, Test calls — §4
+│   ├── books.py                 ← Which My Investments portfolio shows, and THE resolver of each one's files (book_file, pin) — §4 "several portfolios"
 │   ├── investments.py           ← My Investments (the real book): the book file, undo/redo, prices/FX, page payload — §4 "My Investments"
 │   ├── ledger.py                ← My Investments ledger engine: pure replay (average cost, implied deposits, splits), TWR/MWR
 │   ├── long_run.py              ← My Investments' monthly long view: max-history recoveries + 3-year covariance, a background job, read by the page as algebra
@@ -477,7 +487,9 @@ overrides it):
 │   ├── news_watch.json         ← when each held share's news was last tried by the background read (news_watch.py; a cache)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
 │   ├── recaps.json             ← My Investments' weekly recaps, last 12 (derived from the computed page: a cache)
-│   └── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)
+│   ├── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)
+│   ├── books.json              ← the list of portfolios {enabled, active, books}; absent until the owner changes something; never overwritten when malformed
+│   └── books/                  ← every portfolio but the first: <id>/{investments,book_cache,attention,plans,recaps}.json; deleted/<id>-<when>/ keeps a deleted one's copy
 ├── models/mlsent-v1.1/         ← The Market read artifact (was ~/.convexity/ml_model/)
 ├── reference/                  ← The downloaded reference pack (a cache; reference_pack.py)
 ├── webengine/                  ← The desktop window's web storage (localStorage, cache): desktop._persistent_profile

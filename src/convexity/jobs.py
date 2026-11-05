@@ -52,7 +52,7 @@ import time
 import uuid
 from collections import OrderedDict, deque
 
-from convexity import helpers, persistence
+from convexity import books, helpers, persistence
 from convexity import news_sentiment as _ns
 from convexity.fetcher import stream_quotes
 
@@ -106,6 +106,7 @@ class Job:
         self.entries = dict(entries)  # view -> entries string, snapshotted
         self.days = days
         self.context = context
+        self.book_id = books.active_id()  # what the job reads and writes, whatever shows later
         # Phase 9: the notification scheduler's pass (notify.py). The topbar
         # chip ignores it, and a refresh the owner asks for supersedes it.
         self.background = (
@@ -186,6 +187,7 @@ class Job:
         with self._cv:
             return {
                 "id": self.id,
+                "book_id": self.book_id,
                 "scope": self.scope,
                 "background": self.background,
                 "state": self.state,
@@ -310,10 +312,19 @@ def submit(
         "job", state="queued", scope=scope, views=job.views, days=days, phases=list(job.phases)
     )
     job._thread = threading.Thread(
-        target=_run, args=(job,), name=f"cx-refresh-{job.id}", daemon=True
+        target=_run_pinned, args=(job,), name=f"cx-refresh-{job.id}", daemon=True
     )
     job._thread.start()
     return job, "created"
+
+
+def cancel_book_jobs() -> None:
+    """Another portfolio shows now: a job on the book stops (the hidden passes
+    run under BOOK_VIEW too), one on a research portfolio carries on. Outside
+    the registry lock, like every emit."""
+    job = current()
+    if job is not None and {BOOK_VIEW, "__book__"} & set(job.views):
+        job.request_cancel("portfolio switched")
 
 
 def shutdown(grace_s: float = 1.5) -> None:
@@ -378,6 +389,11 @@ def _plan_totals(job: Job) -> None:
             e.upper() for v in job.views for e in _parse_entries(job.entries.get(v) or "")
         }
         job.set_count("news_total", len(planned_news) + 1)
+
+
+def _run_pinned(job: Job) -> None:
+    with books.pin(job.book_id):
+        _run(job)
 
 
 def _run(job: Job) -> None:
@@ -522,8 +538,9 @@ def _run_quotes_phase(job: Job, view: str, index: int, rows_by_symbol: dict) -> 
         # set_last=False: a background job must never repoint the
         # restore-on-launch target at whatever portfolio it happened to touch.
         payload = persistence.save_view(view, entries, rows, set_last=False)
-        saved = True
-        job.emit("view_saved", view=view, rows=len(rows), saved_at=payload.get("saved_at"))
+        saved = bool(payload)  # {}: the book's mirror, from before a switch
+        if saved:
+            job.emit("view_saved", view=view, rows=len(rows), saved_at=payload["saved_at"])
     job.emit(
         "phase",
         phase="quotes",

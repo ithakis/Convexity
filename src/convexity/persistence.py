@@ -4,6 +4,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import tempfile
 import threading
 from datetime import UTC, datetime
@@ -135,8 +136,25 @@ def _drop_yahoo_beta(row):
     return row
 
 
+def _stale_book_rows(name: str, entries: str) -> bool:
+    """A save for the book's mirror still on its way when another portfolio came
+    up: its constituents aren't those of the portfolio showing."""
+    if name != "__book__":
+        return False
+    from convexity import books, investments
+
+    if not books.several():
+        return False
+    with books.pin(books.showing()):
+        held = set(investments.book_symbols())
+    return {e.strip() for e in re.split(r"[,\n]", entries or "") if e.strip()} != held
+
+
 def save_view(name: str, entries: str, rows: list, *, set_last: bool = True) -> dict:
     clean_name = (name or "").strip() or _CURRENT_KEY
+    if _stale_book_rows(clean_name, entries):
+        print("[views] dropped the book's rows from before a switch")
+        return {}
     payload = {
         "entries": str(entries or "").strip(),
         # One row per symbol. The client can hand us repeats (build()'s
