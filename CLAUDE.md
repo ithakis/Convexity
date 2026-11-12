@@ -350,6 +350,14 @@ Each of these has cost real debugging time; the link goes to the full story.
   the last saved row's fundamentals (`fundamentals_asof`). A new cache of
   analyst or fundamental data must follow the same rule.
   [backend.md → degraded answers](docs/architecture/backend.md#yahoo-answers-without-fundamentals-2026-10-30)
+- **The holdings total has one rule set, in Python** (`analytics._holdings_totals`,
+  run on every analytics answer, read by the table, the panels' figures and the
+  export), and **one risk function** (`mpt.risk_parts`, also My Investments'). The
+  table reads analytics only through `TBL` (this tab, weighting and period's
+  payload), never `STATE.analytics`. Fit to screen zooms, never transforms: a
+  transform breaks the sticky header and total.
+  [backend.md → Analytics](docs/architecture/backend.md#analytics-apiportfolio-analytics-multi) ·
+  [frontend.md → Column registry](docs/architecture/frontend.md#column-registry-cols--builtin_views)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---

@@ -1159,6 +1159,188 @@ def _when(iso: str) -> str:
     return f"{d:%b} {d.day}, {d.year}"
 
 
+def _risk_returns(wide_sym, rows, symbols, active, names, warmup_yf, ccy, as_traded):
+    """The last year of daily returns for ``mpt.risk_parts``: fixed at 1Y, so
+    Risk doesn't move with the chart's period, and always in the display currency."""
+    frame = wide_sym
+    raw = _bulk_close(symbols, warmup_yf, adjusted=False) if as_traded else None
+    if raw is not None and not raw.empty:
+        by_sym = {r["symbol"]: r for r in rows}
+        ccys = {s: by_sym[s].get("currency") for s in symbols}
+        raw, _ = extend_history(raw, symbols, ccys, names, warmup_yf)
+        raw = _apply_fx_to_closes(raw, by_sym, ccy, warmup_yf)
+        held = [s for s in active if s in raw.columns]
+        if held:
+            frame = raw[held].dropna(how="all").ffill()
+    start = _period_start("1Y", frame.index[-1])
+    return frame.loc[start:].pct_change(fill_method=None).iloc[1:]
+
+
+def _rec_trend_score(r: dict) -> float | None:
+    """Analyst consensus now minus the oldest month's, as the Rec Δ6M column."""
+
+    def score(m):
+        m = m or {}
+        total = sum(m.get(k) or 0 for k in ("strongBuy", "buy", "hold", "sell", "strongSell"))
+        return (2 * (m.get("strongBuy") or 0) + (m.get("buy") or 0) - (m.get("sell") or 0)
+                - 2 * (m.get("strongSell") or 0)) / total if total else None  # fmt: skip
+
+    arr = r.get("rec_trend_fh") or []
+    new, old = (score(arr[0]), score(arr[-1])) if len(arr) >= 2 else (None, None)
+    return new - old if new is not None and old is not None else None
+
+
+def _news_score(r: dict) -> float | None:
+    from convexity import news_sentiment as ns
+
+    read = ns.get_cached_sentiment(r["symbol"]) or r.get("news_sentiment") or {}
+    return (read.get("news") or {}).get("score")
+
+
+def _slot_mean(lists: dict, weights: dict) -> list:
+    """The weighted mean of each position across the lists, renormalised per
+    position, None where no list has a value."""
+    out = []
+    for i in range(max((len(v) for v in lists.values()), default=0)):
+        vals = {s: v[i] for s, v in lists.items() if i < len(v)}
+        out.append(_w_avg(vals, weights))
+    return out
+
+
+def _total_spark(by_sym: dict, weights: dict) -> list | None:
+    """Today's weights, each holding's last 12 months, held without rebalancing."""
+    lines = {}
+    for s, r in by_sym.items():
+        sp = r.get("sparkline") or []
+        if len(sp) >= 2 and sp[0] and weights[s] > 0:
+            xp = np.linspace(0, len(sp) - 1, _TOTAL_SPARK_LEN)
+            lines[s] = np.interp(xp, np.arange(len(sp)), np.array(sp, float) / sp[0]).tolist()
+    return [round(x, 4) for x in _slot_mean(lines, weights)] or None
+
+
+_TOTAL_SPARK_LEN = 252
+_TOTAL_COV_FLOOR = 0.40
+_TOTAL_HARMONIC = ("pe_ratio", "ps_ratio", "forward_pe", "peg", "ev_revenue", "ev_ebitda",
+                   "price_book")  # fmt: skip
+_TOTAL_MEAN = {
+    **dict.fromkeys(("pct_1d", "pct_2d", "pct_1w", "pct_1m", "pct_3m", "pct_6m", "pct_ytd",
+                     "pct_1y"), "ret"),
+    **dict.fromkeys(("rsi_14", "bb_pct_b"), "loose"),
+    **dict.fromkeys(("macd_hist_pct", "operating_margin", "debt_equity", "current_ratio",
+                     "dividend_yield", "roe", "roa", "gross_margin", "profit_margin", "fcf_yield",
+                     "revenue_growth", "earnings_growth", "quick_ratio", "payout_ratio"), "mean"),
+    "beta": "beta",
+    "model_mu": "mu",
+    "delta_ath": "peak",
+}  # fmt: skip
+_TOTAL_OTHER = {
+    "market_cap": ("mcap", _market_cap_usd),
+    "analyst_rating": ("mean", lambda r: r.get("recommendation_mean")),
+    "target_upside_pct": ("upside", lambda r: (r["target_mean_price"] / r["price"] - 1) * 100
+                          if r.get("target_mean_price") and r.get("price") else None),
+    "rec_trend_fh": ("mean", _rec_trend_score),
+    "insider_mspr": ("mean", lambda r: (r.get("insider_mspr") or {}).get("mspr")),
+    "news_sentiment": ("news", _news_score),
+    **{k: ("sma", lambda r, k=k: None if r.get(k) is None else float(bool(r[k])))
+       for k in ("above_sma_20", "above_sma_50", "above_sma_200")},
+}  # fmt: skip
+
+
+def _holdings_totals(rows: list[dict], a: dict) -> dict:
+    """The holdings table's total row, one entry per column: ``{rule, v, cov, n,
+    out}`` for the table, the panels' reader and the export alike. ``cov`` is the
+    share of the weight with a figure, ``out`` what was left out, biggest first; a
+    holding at 0% never counts. Under 40% covered ``v`` is None. A figure a panel
+    also shows is read from the same payload, so the two can't differ."""
+    from convexity import attention
+
+    w = a.get("weights_applied") or {}
+    by_sym = {r["symbol"]: r for r in rows if r.get("symbol") in w}
+    held = [s for s in by_sym if w[s] > 0]
+    total_w = sum(w[s] for s in held) or 1.0
+
+    def entry(rule, vals, value, ok=lambda x: True) -> dict:
+        good = {s: x for s, x in vals.items() if _usable(x) is not None and ok(float(x))}
+        out = sorted((s for s in held if s not in good), key=lambda s: -w[s])
+        return {
+            "rule": rule,
+            "v": value(vals, w),
+            "cov": sum(w[s] for s in held if s in good) / total_w,
+            "n": sum(1 for s in held if s in good),
+            "out": [[s, w[s], "loss" if _usable(vals.get(s)) is not None else "none"] for s in out],
+        }
+
+    T = {k: entry("harm", {s: r.get(k) for s, r in by_sym.items()}, _w_harmonic, lambda x: x > 0)
+         for k in _TOTAL_HARMONIC}  # fmt: skip
+    for k, rule in _TOTAL_MEAN.items():
+        T[k] = entry(rule, {s: r.get(k) for s, r in by_sym.items()}, _w_avg)
+    for k, (rule, get) in _TOTAL_OTHER.items():
+        T[k] = entry(rule, {s: get(r) for s, r in by_sym.items()}, _w_avg)
+
+    weighted, stats, analyst = a.get("weighted") or {}, a.get("stats") or {}, a.get("analyst") or {}
+    cov = weighted.get("coverage") or {}
+    for k, v, c in (
+        ("pe_ratio", weighted.get("pe"), cov.get("pe")),
+        ("ps_ratio", weighted.get("ps"), cov.get("ps")),
+        ("ev_ebitda", weighted.get("ev_ebitda"), cov.get("ev_ebitda")),
+        ("dividend_yield", weighted.get("div_yield"), None),
+        ("market_cap", weighted.get("market_cap"), None),
+        ("beta", stats.get("beta"), stats.get("beta_coverage")),
+        ("analyst_rating", analyst.get("mean_rating"), analyst.get("rating_coverage_weight")),
+        ("target_upside_pct", analyst.get("weighted_target_upside_pct"),
+         analyst.get("target_coverage_weight")),
+    ):  # fmt: skip
+        if v is None and c is None:  # a payload without that panel: the rows' figure stands
+            continue
+        T[k]["v"] = v
+        if c is not None:
+            T[k]["cov"] = c
+            if c >= 1 - 1e-9:
+                T[k].update(n=len(held), out=[])
+    for e in T.values():
+        if e["cov"] < _TOTAL_COV_FLOOR:
+            e["v"] = None
+
+    def capped(r):
+        arr = [e.get("surprise_pct") if e else None for e in (r.get("earnings_surprise") or [])[:8]]
+        return [None if x is None else max(-10.0, min(10.0, x)) for x in arr]
+
+    eps = {s: capped(r) for s, r in by_sym.items()}
+    eps = {s: v for s, v in eps.items() if any(x is not None for x in v)}
+    ranks = {s: r["rs_rank"][::-1] for s, r in by_sym.items() if r.get("rs_rank")}
+    spark = {s: 1.0 for s, r in by_sym.items() if len(r.get("sparkline") or []) >= 2}
+    last = {s: float(v[0] > 0) for s, v in eps.items() if v[0] is not None}
+    for k, rule, have, value in (
+        ("earnings_surprise", "eps", eps,
+         [{"surprise_pct": x, "period": ""} for x in _slot_mean(eps, w)]),
+        ("rs_rank", "rs", ranks, _slot_mean(ranks, w)[::-1]),
+        ("spark", "spark", spark, _total_spark(by_sym, w)),
+    ):  # fmt: skip
+        T[k] = entry(rule, {s: 1.0 if s in have else None for s in by_sym}, lambda *_: None)
+        T[k]["v"] = (value or None) if T[k]["cov"] >= _TOTAL_COV_FLOOR else None
+    T["earnings_surprise"]["beat"] = _w_avg(last, w)
+
+    exposure = a.get("exposure") or {}
+    for k, by in (("sector", exposure.get("by_sector")), ("industry", exposure.get("by_industry"))):
+        top = sorted(((n, x) for n, x in (by or {}).items() if n != "Unknown"), key=lambda t: -t[1])
+        T[k] = {"rule": "text", "v": top[0][0] if top else None, "top": top[:4]}
+
+    T["weight"] = {"rule": "sum", "v": sum(w.values())}
+    T["contrib"] = {"rule": "contrib", "v": stats.get("total_return")}
+    risk = a.get("risk") or {}
+    parts = risk.get("holdings") or {}
+    if parts:
+        T["risk"] = entry("risk", {s: parts.get(s, {}).get("share") for s in by_sym},
+                          lambda vals, _: sum(v for v in vals.values() if v is not None))  # fmt: skip
+        T["risk_w"] = {"rule": "ratio", "v": 1.0}
+        T["vol"] = {"rule": "vol", "v": risk.get("vol"), "avg": risk.get("vol_avg")}
+        T["corr"] = {"rule": "corr", "v": _w_avg({s: x["corr"] for s, x in parts.items()}, w)}
+    dates = attention.next_earnings(held)
+    soon = sorted(dates.items(), key=lambda t: t[1])[:4]
+    T["next_earnings"] = {"rule": "next", "v": soon[0][1] if soon else None, "list": soon}
+    return T
+
+
 def analyze_portfolios_multi(
     rows: list[dict],
     weight_sets: dict[str, dict],
@@ -1166,7 +1348,20 @@ def analyze_portfolios_multi(
     display_ccy: str = "USD",
     rebalance: str = "D",
     tc_bps: float = 0.0,
+    as_traded: bool = False,
 ) -> dict:
+    """``as_traded``: the red tab, whose Risk must match My Investments' (the
+    book books dividends as cash, so it reads closes as traded). The totals are
+    worked out on every answer, cached or not: they read the rows just sent."""
+    rows = _dedupe_rows_by_symbol([r for r in (rows or []) if r and r.get("symbol")])
+    results = _analyze(rows, weight_sets, period, display_ccy, rebalance, tc_bps, as_traded)
+    return {
+        k: {**a, "totals": _holdings_totals(rows, a)} if isinstance(a, dict) else a
+        for k, a in results.items()
+    }
+
+
+def _analyze(rows, weight_sets, period, display_ccy, rebalance, tc_bps, as_traded) -> dict:
     period_u = (period or "1Y").upper()
     rebalance, tc = clean_trading(rebalance, tc_bps)
     if period_u not in _PERIOD_YF:
@@ -1174,11 +1369,10 @@ def analyze_portfolios_multi(
 
     display_ccy = major_ccy(display_ccy or "USD")
 
-    # Deduped here even though save_view/load_view already do it: rows reach
-    # this function straight from the client's DATA array, and one repeated
-    # symbol turns `closes[[...]]` below into a frame with duplicate columns —
-    # a "float() ... not 'Series'" 500 rather than a wrong number.
-    rows = _dedupe_rows_by_symbol([r for r in (rows or []) if r and r.get("symbol")])
+    # Deduped by the caller even though save_view/load_view already do it: rows
+    # reach it straight from the client's DATA array, and one repeated symbol
+    # turns `closes[[...]]` below into a frame with duplicate columns — a
+    # "float() ... not 'Series'" 500 rather than a wrong number.
     symbols = [str(r["symbol"]) for r in rows]
     if not symbols:
         return {"error": "no symbols"}
@@ -1204,6 +1398,7 @@ def analyze_portfolios_multi(
             "pf|"
             + "|".join(f"{s}:{weights[s]:.6f}" for s in sorted(symbols))
             + f"|{period_u}|{display_ccy}|{rebalance}|{tc:.6f}|b{mst['years']}:{mst['shrink']}"
+            + ("|raw" if as_traded else "")
         )
         per_set_cache_keys[name] = key
         hit = _cache_get(key)
@@ -1351,6 +1546,12 @@ def analyze_portfolios_multi(
     # Daily holding returns inside the window (the base bar excluded), for the
     # linked contribution below.
     win_ret = wide_ret.loc[common_index[1:], active]
+
+    from convexity import mpt
+
+    risk_rets = _risk_returns(
+        wide_sym, rows, symbols, active, names, warmup_yf, display_ccy, as_traded
+    )
 
     results: dict[str, dict] = dict(cached_results)
     for name, weights in normalized_sets.items():
@@ -1624,6 +1825,7 @@ def analyze_portfolios_multi(
             },
             "concentration": {"top5": top5, "herfindahl": herfindahl, "effective_n": effective_n},
             "contribution": contribution,
+            "risk": mpt.risk_parts(risk_rets, weights),
             "warnings": warnings,
         }
         _cache_put(per_set_cache_keys[name], out_one, ttl=_CACHE_TTL_ANALYTICS)

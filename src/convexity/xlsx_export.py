@@ -12,7 +12,10 @@ Sheets, in order:
     period next to SPY and QQQ, with what each metric means), Valuation,
     Analysts, Where the money is, Concentration, What drove the return,
     Notes (stand-in listings, missing history), then the Holdings table
-    (an Excel table: every row field, both news reads, the analyst block).
+    (an Excel table: every row field, both news reads, the analyst block, each
+    holding's weight, risk, contribution, volatility, correlation and next
+    earnings) with a Total and a Coverage row under it, from
+    analytics._holdings_totals, the rules the app's total row draws.
   • Data: every portfolio figure as one long table with its unit.
   • Definitions: formula, meaning and typical range of every column and
     metric; the same text is on each header as a hover comment, and
@@ -44,6 +47,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 # `_maybe_num` is helpers._safe_num (finite float or None), named for the
 # many call sites below.
+from convexity import attention
 from convexity.analytics import _market_cap_usd
 from convexity.helpers import _safe_num as _maybe_num
 
@@ -59,6 +63,12 @@ HOLDINGS_PRIMARY_COLS: list[tuple[str, str]] = [
     ("symbol", "Ticker"),
     ("name", "Company"),
     ("weight", "Weight"),
+    ("risk", "Risk"),
+    ("risk_w", "Risk ÷ Weight"),
+    ("contrib", "Contribution (1Y, pts)"),
+    ("vol", "Volatility"),
+    ("corr", "Correlation"),
+    ("next_earnings", "Next earnings"),
     ("exchange", "Exchange"),
     ("currency", "Currency"),
     ("price", "Price"),
@@ -303,6 +313,36 @@ COLUMN_DEFS: dict[str, tuple[str, str, str]] = {
         "",
     ),
     "name": ("", "Company or fund name as Yahoo reports it.", ""),
+    "risk": (
+        "RC_i = w_i (Σw)_i / σ²",
+        "This holding's share of the portfolio's risk (variance): last 1 year of daily returns, "
+        "in the display currency. Adds up to 100%.",
+        "",
+    ),
+    "risk_w": (
+        "RC_i / w_i = Vol × Corr / the portfolio's Vol",
+        "Above 1 the holding adds more risk than its size; below 1 it steadies the portfolio; "
+        "negative, it lowers it.",
+        "Usually 0 to 3",
+    ),
+    "contrib": (
+        "Carino-linked, adds up to the period's return",
+        "Points of the portfolio's 1Y return that came from this holding, with its rebalancing "
+        "and costs.",
+        "",
+    ),
+    "vol": ("√Σ_ii", "Annualised volatility of its daily returns, last 1 year.", ""),
+    "corr": (
+        "(Σw)_i / (σ_i σ_p)",
+        "Correlation of its daily returns with the portfolio's, last 1 year.",
+        "-1 to 1",
+    ),
+    "next_earnings": (
+        "",
+        "Next earnings date from Yahoo's calendar, for the company's primary line, when the app "
+        "has fetched it. Empty when unknown.",
+        "",
+    ),
     "weight": (
         "the portfolio's weight in this holding",
         "Share of the portfolio in this holding, as the app weights it.",
@@ -862,7 +902,10 @@ _HOLDING_FMT = {
                      "macd_hist_pct", "recommendation_mean"], "0.00"),
     **dict.fromkeys(["market_cap", "market_cap_usd", "volume", "num_analysts"], "#,##0"),
     **dict.fromkeys(_PP_COLS, "0.00\\%"),
-    **dict.fromkeys([*FRACTION_KEYS, "weight"], "0.0%"),
+    **dict.fromkeys([*FRACTION_KEYS, "weight", "risk", "vol"], "0.0%"),
+    "risk_w": "0.00",
+    "corr": "0.00",
+    "contrib": "+0.0;-0.0;0.0",
 }  # fmt: skip
 
 
@@ -1361,7 +1404,8 @@ def _write_portfolio_sheet(
         r += 1
     r += 1
 
-    _write_holdings(ws, _write_section(ws, r, "Holdings"), rows, weights, primary, table_n)
+    year = abp.get("1Y") if not (abp.get("1Y") or {"error": 1}).get("error") else primary
+    _write_holdings(ws, _write_section(ws, r, "Holdings"), rows, weights, primary, year, table_n)
     ws.column_dimensions["A"].width = 40
     for col in range(2, 9):
         ws.column_dimensions[get_column_letter(col)].width = 15
@@ -1369,7 +1413,7 @@ def _write_portfolio_sheet(
 
 
 def _write_holdings(
-    ws, r: int, rows: list[dict], weights: dict, primary: dict, table_n: int
+    ws, r: int, rows: list[dict], weights: dict, primary: dict, year: dict, table_n: int
 ) -> None:
     """Every row field plus the analyst columns, as an Excel table (filter
     and sort). Unknown row keys are appended, so fetch_one additions show up."""
@@ -1388,12 +1432,21 @@ def _write_holdings(
     header_row = r
     analyst_keys = {k for k, _ in ANALYST_COLS}
     by_sym = _per_symbol_analyst(primary)
+    parts = (year.get("risk") or {}).get("holdings") or {}
+    contrib = {x.get("symbol"): x.get("contribution") for x in year.get("contribution") or []}
+    dates = attention.next_earnings([row.get("symbol") for row in rows])
     for row in rows:
         r += 1
         sym = row.get("symbol")
         for c, (key, _label) in enumerate(headers, 1):
             if key == "weight":
                 v = weights.get(sym)
+            elif key in _RISK_FIELD:
+                v = (parts.get(sym) or {}).get(_RISK_FIELD[key])
+            elif key == "contrib":
+                v = contrib.get(sym)
+            elif key == "next_earnings":
+                v = dates.get(sym)
             elif key in analyst_keys:
                 v = _analyst_cell(key, row, by_sym.get(sym) or {})
             elif key.startswith("ns:"):
@@ -1406,9 +1459,39 @@ def _write_holdings(
         t = Table(displayName=f"Holdings{table_n}", ref=ref)
         t.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=True)
         ws.add_table(t)
+        _write_totals(ws, r + 1, headers, year.get("totals") or {})
     for c, (_key, label) in enumerate(headers, 1):
         if c > 8:
             ws.column_dimensions[get_column_letter(c)].width = max(11, min(len(str(label)) + 2, 24))
+
+
+_RISK_FIELD = {"risk": "share", "risk_w": "ratio", "vol": "vol", "corr": "corr"}
+# Export column -> the total's key, where the two differ.
+_TOTAL_KEY = {"recommendation_mean": "analyst_rating", "ns:news_tier": "news_sentiment"}
+
+
+def _write_totals(ws, r: int, headers: list, totals: dict) -> None:
+    """The Total and Coverage rows under the holdings table: the entries the
+    app's total row draws, the figure itself when it is one (a chart's list
+    isn't). The market cap is in the display currency, unlike its column."""
+    if not totals:
+        return
+    ws.cell(row=r, column=1, value="Total").font = Font(bold=True)
+    ws.cell(row=r + 1, column=1, value="Coverage").font = _MEANING_FONT
+    for c, (key, _label) in enumerate(headers, 1):
+        e = totals.get(_TOTAL_KEY.get(key, key))
+        if not e:
+            continue
+        if isinstance(e.get("v"), int | float | str):
+            _put(ws, r, c, e["v"], _HOLDING_FMT.get(key))
+            ws.cell(row=r, column=c).font = Font(bold=True)
+        if e.get("cov") is not None:
+            _put(ws, r + 1, c, e["cov"], "0%")
+    if "market_cap" in totals:
+        col = next((c for c, (k, _l) in enumerate(headers, 1) if k == "market_cap"), None)
+        if col:
+            _add_comment(ws.cell(row=r, column=col),
+                         ("", "Weighted average company size in the display currency, as Valuation.", ""))  # fmt: skip
 
 
 def _write_data(ws, data: _Data) -> None:

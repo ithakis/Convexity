@@ -615,7 +615,7 @@ def save_mpt_run(view_name: str, run: dict) -> dict:
 
 # ----------------------------- Column views (Pass D) ------------------------
 
-_BUILTIN_COLUMN_VIEW_NAMES = {"Default", "Fundamentals", "Momentum"}
+_BUILTIN_COLUMN_VIEW_NAMES = {"Default", "Fundamentals", "Momentum", "Manager"}
 # Valid per-column color-coding ("heat") modes. Persisted per view (both
 # built-in overrides and custom views carry their own map) so, e.g.,
 # EV/EBITDA can be quantile-colored in Fundamentals but min-max elsewhere.

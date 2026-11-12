@@ -2279,21 +2279,17 @@
 
   /* Table */
   .table-wrap { padding: 12px 16px 16px; overflow-x: auto; --table-scale: 1; }
-  .table-wrap.fit-columns { overflow-x: hidden; }
+  .table-wrap.fit-columns, .table-wrap.tbl-sticky { overflow-x: clip; }
   table#tbl {
     width: 100%; border-collapse: separate; border-spacing: 0;
     font-variant-numeric: tabular-nums; font-size: 12px;
     background: var(--bg-canvas);
-    border-radius: var(--r-md); overflow: hidden;
+    border-radius: var(--r-md); overflow: clip;  /* clip: not a scroll container (sticky head and foot) */
     border: 1px solid var(--border);
   }
-  .table-wrap.fit-columns table#tbl {
-    font-size: calc(12px * var(--table-scale));
-    /* In fit mode the table takes its scaled-column width (not 100%) and
-       centers, so the user sees symmetric empty space on both sides when the
-       columns are narrower than the viewport. */
-    width: auto; margin-left: auto; margin-right: auto;
-  }
+  .table-wrap.fit-columns table#tbl { font-size: calc(12px * var(--table-scale)); }
+  .tbl-sticky #tbl thead th { position: sticky; top: calc(var(--topbar-h, 50px) / var(--tbl-zoom, 1)); z-index: 7; }
+  .tbl-sticky #tbl tfoot td { position: sticky; bottom: 0; z-index: 6; box-shadow: 0 -6px 12px -8px rgba(0, 0, 0, .55); }
   table#tbl th {
     background: var(--header-bg); color: var(--text); font-weight: 700;
     border: none; border-bottom: 1px solid var(--border);
@@ -2340,7 +2336,7 @@
   }
   td.sym { font-weight: 700; letter-spacing: 0.2px; }
   td.name { color: var(--text); max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
-  .table-wrap.fit-columns td.name { max-width: calc(240px * var(--table-scale)); }
+  .table-wrap.fit-columns td.name { max-width: calc(150px * var(--table-scale)); }
 
   /* Δ Highs bar */
   .bar-cell {
@@ -2374,6 +2370,34 @@
     line-height: calc(18px * var(--table-scale));
     padding: 0 calc(6px * var(--table-scale));
   }
+
+  /* The holdings total: My Investments' total row (bold, a text-coloured rule on top). */
+  #tbl .inv-bar { min-width: 0; margin: -2px -4px; padding: 2px 4px; }
+  #tbl [data-rich-tip] { text-decoration: none; }
+  #tbl tr.tbl-total td {
+    background: var(--header-bg); font-weight: 700; color: var(--text);
+    border-top: 1px solid var(--text); border-bottom: none; cursor: default;
+  }
+  #tbl tr.tbl-total.has-cov td { vertical-align: top; }
+  #tbl tr.tbl-total.has-cov td.tbl-total-graphic { vertical-align: middle; }
+  #tbl .tbl-total-sub { font-weight: 500; color: var(--muted); }
+  #tbl .tbl-total-text { font-weight: 600; color: var(--muted); }
+  #tbl .tbl-total-dim { font-weight: 500; color: var(--muted); }
+  #tbl .tbl-cov { display: inline-flex; flex-direction: column; align-items: flex-end; line-height: 1.25; }
+  #tbl td.center .tbl-cov { align-items: center; }
+  #tbl .tbl-cov small { font-size: 0.8em; font-weight: 500; color: var(--muted); }
+  /* Waiting for analytics: a dash means "no data", so it can't mean "wait". */
+  .tbl-wait {
+    display: inline-block; width: 70%; min-width: 22px; height: 8px; border-radius: var(--r-xs); vertical-align: middle;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--muted) 16%, transparent) 25%, color-mix(in srgb, var(--muted) 34%, transparent) 50%, color-mix(in srgb, var(--muted) 16%, transparent) 75%);
+    background-size: 200% 100%; animation: tbl-wait 1.4s ease-in-out infinite;
+  }
+  @keyframes tbl-wait { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  .rich-tip-float .pf-metric-tip.tbl-tip { width: 340px; }
+  .tbl-tip .tbl-tip-sec { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); color: var(--text); }
+  .tbl-tip .tbl-tip-out { margin-top: 4px; color: var(--muted); }
+  .tbl-tip .tbl-tip-grid { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; font-variant-numeric: tabular-nums; }
+  .tbl-tip .tbl-tip-grid b { font-weight: 600; text-align: right; }
 
   .tri-up   { color: var(--pos); font-size: 13px; }
   .tri-down { color: var(--neg); font-size: 13px; }

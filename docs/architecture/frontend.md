@@ -456,6 +456,34 @@ through `getActiveColumns()` which resolves the active view from
 in-memory until they Save-as-new or Reset). User-defined views persist
 to `<data>/state/column_views.json` via `/api/column-views`.
 
+**Manager and the Portfolio columns (2026-11).** `BUILTIN_VIEWS.Manager`
+(after Momentum; `BUILTIN_SORT` opens it on Weight) is Weight, Risk, Risk/Wt,
+Contrib (its label follows the chart's period), % 1D, Beta, Vol, Corr, Model μ,
+Target Δ, Δ Highs, Earnings and NS; Default gains Weight and Risk after Company.
+The new keys sit in the Customize group "Portfolio". **Every figure that isn't a
+row field reads `TBL`**, set at the top of `render()` by `tblPrepare()`: Weight
+from `weightsForMode` at once, the rest from **this tab's map under this
+weighting and period** (`currentAnalyticsMap()[analyticsCacheKey(...)]`), never
+`STATE.analytics`, so a switch can't pair new rows with an old total. Until that
+payload's request has answered the cells show the moving bar (`.tbl-wait`); an
+answer of either kind, or 4 s with nothing asked, turns them into dashes. Weight
+and Risk are My Investments' bars (`invBarCell`, one scale); Risk uses
+`riskShareText` (the same text as `invShareText`); Risk/Wt is one decimal,
+"≈0" under 0.25, a dash at weight 0. A fund at 0% under Cap says why
+(`data-tip`). Heat reads `sortValue` when a column has one (Target Δ painted
+nothing before). An analytics payload without `risk` or `totals` (a disk cache
+from before) is backfilled silently.
+
+**The total row** (`#tfoot`, `renderTotalRows`) draws `totalRows()`, a list:
+the what-if second row is one more entry. Its rules are all in
+`analytics._holdings_totals` (backend.md, Analytics); only Weight (the active
+weighting, at once) and Earnings (filled in the background) are the client's.
+A value is formatted by its column's own `render` from the totals (or
+`TOTAL_CELL`), coverage under 95% shows a small grey % under it (never on the
+graphics, Δ Highs, sector or industry), and every cell is a `[data-rich-tip="total"]`
+with the rule, the three-number ladder for a return on the chart's period, and
+what was left out. Cursor `default`, focusable.
+
 **To add a new column**: append an entry to `COLS`, add a `COL_INFO`
 tooltip, and (if it belongs in a preset) include its key in
 `BUILTIN_VIEWS`. The XLSX export auto-discovers row-payload keys via
@@ -1106,6 +1134,20 @@ The `LOGO_HOSTS` block is the only place that may name a host
   it through the `--table-scale` CSS variable. The active view should
   remain readable, but the explicit goal is "keep the current preset on
   screen before falling back to horizontal overflow."
+  **The last resort is `zoom`, never a transform** (`applyTableZoom`, 2026-11):
+  a transformed table can't hold a sticky row (the total floated mid-table, the
+  header slid under the topbar) and kept reserving its unscaled height. Under
+  Fit a narrower view fills the width (`width: 100%`), and Company is capped at
+  150 px × scale. Measured at 1500 / 1280 px on a 27-name book: Default 11.6 /
+  9.8 px effective font (11.9 / 10.1 before Weight and Risk), Fundamentals 10.3 /
+  8.7 and Momentum 10.8 / 9.1 (unchanged), Manager 12 / 12. Checked in
+  QtWebEngine (Chrome 140): zoom and the sticky header apply.
+- **Sticky header and total** (`.tbl-sticky`): the header sticks under the
+  topbar (`--topbar-h`, divided by `--tbl-zoom`, since zoom scales the offset)
+  and the foot to the window's bottom edge. Sticky needs `.table-wrap` and
+  `table#tbl` not to be scroll containers (`overflow: clip`), so with Fit off and
+  a table wider than the window the wrap keeps its sideways scroll and the
+  total is a plain foot.
   **A hidden table is never measured** (owner, 2026-10-11: "the table gets
   really small"): a `render()` while My Investments shows (a resize, a
   refresh) read a 0px wrap, floored the width to 320px and the scale to 0.4.

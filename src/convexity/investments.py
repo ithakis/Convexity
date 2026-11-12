@@ -1675,10 +1675,9 @@ def _contrib_linked(daily: pd.DataFrame, i0: int) -> dict[str, float]:
 
 
 def _risk_share(syms, vps, qty_s, traded, i0: int) -> dict[str, float]:
-    """Each holding's share of the holdings' variance at today's weights:
-    RC_i = w_i (Σw)_i / σ², Σ from the last year of daily returns in the
-    display currency (Ledoit-Wolf, ``mpt.annualized_cov``). Adds up to 1;
-    {} with fewer than 20 shared trading days."""
+    """Each holding's share of the holdings' variance at today's weights
+    (``mpt.risk_parts``), the last year of daily returns in the display
+    currency. Adds up to 1; {} with fewer than 20 shared trading days."""
     from convexity import mpt
 
     held = [s for s in syms if qty_s[s][-1] > 1e-9 and np.isfinite(vps[s][-1])]
@@ -1687,25 +1686,8 @@ def _risk_share(syms, vps, qty_s, traded, i0: int) -> dict[str, float]:
     days = np.flatnonzero(traded[i0:]) + i0
     px = pd.DataFrame({s: vps[s][days] for s in held})
     rets = px.pct_change(fill_method=None).iloc[1:]
-    # A listing younger than a month (an IPO) is left out rather than
-    # cutting everyone's window to its few days; it shows no figure. So is one
-    # that never moved (delisted, its last close carried forward): 0% of the
-    # risk is what it would read, and that is no measurement.
-    held = [s for s in held if rets[s].notna().sum() >= 20 and rets[s].abs().sum() > 0]
-    rets = rets[held].dropna(how="any")
-    w = np.array([qty_s[s][-1] * vps[s][-1] for s in held])
-    if len(held) == 1:
-        return {held[0]: 1.0}
-    if len(held) < 1 or len(rets) < 20 or w.sum() <= 0:
-        return {}
-    w = w / w.sum()
-    cov = mpt.annualized_cov(rets, "daily", "ledoit").to_numpy()
-    sw = cov @ w
-    var = float(w @ sw)
-    if not np.isfinite(var) or var <= 0:
-        return {}
-    out = {s: float(w[k] * sw[k] / var) for k, s in enumerate(held)}
-    return out if all(math.isfinite(v) for v in out.values()) else {}
+    parts = mpt.risk_parts(rets, {s: qty_s[s][-1] * vps[s][-1] for s in held})
+    return {s: x["share"] for s, x in (parts.get("holdings") or {}).items()}
 
 
 RISK_SPAN = "10y"

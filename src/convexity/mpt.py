@@ -196,6 +196,46 @@ def annualized_cov(returns: pd.DataFrame, freq: str, model: str = "ledoit") -> p
     return ledoit_wolf_shrink(returns.cov(), returns) * n
 
 
+def risk_parts(returns: pd.DataFrame, weights: dict) -> dict:
+    """Each holding's part in the portfolio's variance at ``weights``: its
+    ``share`` RC_i = w_i (Σw)_i / σ² (adds up to 1), its ``ratio`` RC_i / w_i =
+    (Σw)_i / σ² = vol·corr / σ_p, written without dividing by w so a tiny weight
+    stays well behaved, its ``vol`` √Σ_ii and its ``corr`` with the portfolio.
+    Σ from daily returns (Ledoit-Wolf). A listing younger than a month is left
+    out rather than cutting everyone's window to its few days; so is one that
+    never moved (delisted, its last close carried forward): 0% of the risk is
+    what it would read, and that is no measurement. {} with fewer than 20 shared
+    days."""
+    held = [
+        s for s in returns.columns if returns[s].notna().sum() >= 20 and returns[s].abs().sum() > 0
+    ]
+    rets = returns[held].dropna(how="any")
+    w = np.array([max(0.0, float(weights.get(s, 0.0))) for s in held])
+    if not held or len(rets) < 20 or w.sum() <= 0:
+        return {}
+    w = w / w.sum()
+    cov = annualized_cov(rets, "daily", "ledoit").to_numpy()
+    sw = cov @ w
+    var = float(w @ sw)
+    vols = np.sqrt(np.diag(cov))
+    if not np.isfinite(var) or var <= 0 or not np.isfinite(sw).all():
+        return {}
+    vol = math.sqrt(var)
+    return {
+        "holdings": {
+            s: {
+                "share": float(w[k] * sw[k] / var),
+                "ratio": float(sw[k] / var),
+                "vol": float(vols[k]),
+                "corr": float(sw[k] / (vols[k] * vol)),
+            }
+            for k, s in enumerate(held)
+        },
+        "vol": vol,
+        "vol_avg": float(w @ vols),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Black-Litterman
 # ---------------------------------------------------------------------------

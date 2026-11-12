@@ -425,7 +425,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(
                 200,
                 {
-                    "builtins": ["Default", "Fundamentals", "Momentum"],
+                    "builtins": ["Default", "Fundamentals", "Momentum", "Manager"],
                     "custom": raw.get("custom_views") or {},
                     "builtin_overrides": raw.get("builtin_overrides") or {},
                     "active": raw.get("active_view") or "Default",
@@ -1449,7 +1449,12 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
                 results = analyze_portfolios_multi(
-                    rows, weight_sets, period, display_ccy=display_ccy, **_trading(payload)
+                    rows,
+                    weight_sets,
+                    period,
+                    display_ccy=display_ccy,
+                    as_traded=payload.get("as_traded") is True,
+                    **_trading(payload),
                 )
                 self._send_json(200, {"results": results} if "error" not in results else results)
             except Exception as exc:
@@ -1664,6 +1669,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"models": capm.for_rows(rows, load_prefs())})
             except Exception as exc:
                 print(f"[model-prices] {type(exc).__name__}: {exc}")
+                self._send_json(500, {"error": type(exc).__name__})
+            return
+
+        if parsed.path == "/api/next-earnings":
+            # The holdings table's Earnings column: the dates cached now, and how
+            # many a small background batch is still filling (attention.fill_events).
+            from convexity import attention
+
+            try:
+                symbols = [str(s).strip().upper() for s in self._read_json().get("symbols") or []]
+                due = attention.fill_events(symbols[:500])
+                self._send_json(200, {"dates": attention.next_earnings(symbols), "due": due})
+            except Exception as exc:
                 self._send_json(500, {"error": type(exc).__name__})
             return
 

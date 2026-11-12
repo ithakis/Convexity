@@ -397,7 +397,7 @@ fundamental data must treat `_fundamentals_missing` / an unknown miss the
 same way.
 
 ### Analytics (`/api/portfolio-analytics-multi`)
-`analyze_portfolios_multi(rows, weight_sets, period, display_ccy)`.
+`analyze_portfolios_multi(rows, weight_sets, period, display_ccy, rebalance, tc_bps, as_traded)`.
 Returns either `{set_name: analytics_dict | {"error": ...}}` OR
 `{"results": {...}}` OR `{"error": ...}` — handle all three shapes.
 
@@ -422,8 +422,50 @@ analyst {mean_rating, rating_coverage_weight, weighted_target_upside_pct,
                     rec_key, n_analysts, dist}, ...]},
 exposure {by_sector, by_industry, by_bucket},
 concentration {top5, herfindahl, effective_n},
+risk {holdings {sym: {share, ratio, vol, corr}}, vol, vol_avg},   ← the holdings table's Risk columns
+totals {column_key: {rule, v, cov, n, out, …}},                    ← the holdings table's total row
 warnings
 ```
+
+**The holdings table's Risk columns and total row (Feature 5/6, 2026-11).**
+- **One risk function, `mpt.risk_parts(returns, weights)`**, for My Investments
+  (`investments._risk_share` calls it) and Portfolios. RC_i = w_i(Σw)_i/σ²
+  (`share`, adds up to 1); `ratio` = (Σw)_i/σ² = vol × corr / σ_p, written without
+  dividing by w so a tiny weight stays well behaved; `vol` = √Σ_ii; `corr` =
+  (Σw)_i/(σ_i σ_p). Σ is Ledoit-Wolf on daily returns. A listing with under 20
+  returns, or one that never moved, is left out.
+- **Fixed at the last 1Y of daily returns in the display currency**
+  (`_risk_returns`), from the analytics' own wide frame (extended by
+  `extend_history`), so it never moves with the chart's period and costs no
+  fetch. **The red tab sends `as_traded: true`**: its returns come from
+  `_bulk_close(adjusted=False)`, like My Investments' book, so the two agree
+  (measured 2026-11-12: mean 0.003, max 0.015 points of risk share on a
+  27-name book). It is part of the cache key (`|raw`).
+- **`_holdings_totals(rows, payload)` is the total row's one rule set**, for the
+  table, the panels and the export. It runs on **every answer, cached or not**
+  (`analyze_portfolios_multi` wraps `_analyze`), from the rows just sent, so a
+  refreshed row never meets an old total. Rules: multiples are `_w_harmonic`
+  (losses are gaps); returns, margins, Model μ and the like are weighted means
+  over the holdings with a figure, renormalised; P/E, P/S, EV/EBITDA, div yield,
+  market cap, beta, rating and target upside are **read from the payload's
+  panels** so the two can never differ; Risk sums, Risk ÷ Weight is 1,
+  Contribution is the period's return, Vol is σ_p, Corr the weighted mean ρ;
+  the chart, RS rank and EPS bars are per-slot weighted means (EPS capped
+  ±10% like the bars); SMA flags are the share of the weight above; sector and
+  industry name the biggest group. `cov` is the share of the weight with a
+  figure, `out` what was left out; **a holding at 0% never counts, and under
+  40% covered `v` is None** (`_TOTAL_COV_FLOOR`).
+- **Earnings (`POST /api/next-earnings`, `attention.fill_events`)**: dates come
+  from `state/events.json` only; the route starts one small background batch
+  (`EVENTS_BATCH` = 12) of what is due and answers at once with `{dates, due}`;
+  the client asks again every 20 s while any are due. It reuses
+  `refresh_events` (single flight with the book's own fill), stops when any job
+  runs (`_JobRunning`: the owner's Refresh goes first), and treats an empty
+  calendar as a failed call (`_dated_only`), so nothing is cached from it and it
+  is asked again after `EVENTS_RETRY`. One Yahoo call per share a day (two when
+  the listing isn't the primary line); a 58-row portfolio (46 shares, funds
+  skipped) took 46 calls in 4 batches. Never on `fetch_one`'s path; a test
+  checks.
 
 **One wide fetch, then slice.** `_bulk_close` pulls holdings + every
 benchmark + the sector ETFs (+ `^IRX` in USD) over `_WARMUP_YF[period]`
@@ -601,6 +643,7 @@ before that (and never for a row with no mean target: no coverage, a fund).
 **POST (also)**
 - `/api/refresh-job`               — `{scope: "current"|"all", view?, entries?, phases?, days, context?, on_conflict?}` → `202 {job_id}` or **`409`** with the running job (§17)
 - `/api/refresh-job/<id>/cancel`   — cancel; the `cancelled` frame is emitted synchronously
+- `/api/next-earnings`             — `{symbols}` → `{dates, due}` from the events cache; starts a small background fill (Analytics, "Risk columns and total row")
 - `/api/news-rescore`              — `{symbols, days}` → cache-only re-aggregation onto a new window. Sub-50 ms, no network, no LLM, no ML inference. Deliberately **not** a job (§17)
 
 **GET (also, v1.11.0)**
@@ -2040,7 +2083,10 @@ the module docstring and the HTML comment by the topbar `#export` button
    Where the money is (sector, size, industry) → Concentration → What drove
    the return (Carino contributions, they sum to the total) → Notes (the
    analytics' warnings: stand-ins, missing history) → Holdings as an Excel
-   table. Weighting = the view's active preset (`_resolve_active_weights`),
+   table (with each holding's weight, risk, Risk ÷ Weight, 1Y contribution,
+   volatility, correlation and next earnings from the cache), then a **Total**
+   and a **Coverage** row from the payload's `totals` (`_write_totals`), the
+   same rules as the app's total row. Weighting = the view's active preset (`_resolve_active_weights`),
    else by market value.
 5. **Data** — every portfolio figure as a long table (portfolio, period,
    section, key, label, series, value, unit), built by `_Data` while the

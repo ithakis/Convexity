@@ -1098,6 +1098,9 @@ def evaluate(page: dict, state: dict | None = None, events: dict | None = None,
 
 EVENTS_TTL = 24 * 3600
 EVENTS_RETRY = 15 * 60
+EVENTS_BATCH = 12  # a research portfolio's fill, per request
+EVENTS_EMPTY_RETRY = 4 * 3600  # a share whose calendar had no dates, asked again after
+_EVENTS_EMPTY: dict[str, float] = {}  # in memory only: an empty calendar is no answer to keep
 _EVENTS_LOCK = threading.Lock()  # single flight: one refresh at a time
 _EVENTS_FILE_LOCK = threading.Lock()
 _EVENTS_TRIED: dict[str, float] = {}
@@ -1182,7 +1185,8 @@ def _due(symbols, cache: dict, force: bool) -> list[str]:
     now, wall = time.monotonic(), time.time()
     out = []
     for s in symbols:
-        if now - _EVENTS_TRIED.get(s, -1e12) < EVENTS_RETRY:
+        if (now - _EVENTS_TRIED.get(s, -1e12) < EVENTS_RETRY
+                or now - _EVENTS_EMPTY.get(s, -1e12) < EVENTS_EMPTY_RETRY):  # fmt: skip
             continue
         at = (cache.get(s) or {}).get("at")
         if force or not isinstance(at, int | float) or wall - at > EVENTS_TTL:
@@ -1242,6 +1246,52 @@ def _refresh_locked(symbols: list[str], force: bool, cancel, fetch) -> int:
     return len(got)
 
 
+def next_earnings(symbols) -> dict[str, str]:
+    """{symbol: its next report date} from the events cache. No network."""
+    events, today = load_events(), date.today().isoformat()
+    return {
+        s: d for s in symbols if _is_day(d := (events.get(s) or {}).get("earnings")) and d >= today
+    }
+
+
+class _JobRunning:
+    """A cancel token: any job, the owner's Refresh above all, goes first."""
+
+    @staticmethod
+    def is_set() -> bool:
+        from convexity import jobs
+
+        return jobs.current() is not None
+
+
+def _dated_only(symbol: str) -> dict | None:
+    """yfinance can hide a failure behind an empty calendar, and a research
+    share has no older dates to protect (``_refresh_locked``): empty counts as a
+    failed call, so nothing stays cached from it; it is asked again after a few
+    hours (a real failure, None, after ``EVENTS_RETRY``)."""
+    ev = fetch_events(symbol)
+    if ev is not None and not any(ev.values()):
+        _EVENTS_EMPTY[symbol] = time.monotonic()
+    return ev if ev and any(ev.values()) else None
+
+
+def fill_events(symbols) -> int:
+    """A portfolio's shares, for the holdings table's Earnings column: starts one
+    small background batch of what is due (one Yahoo call per share a day, two
+    when the listing isn't the company's primary line) and returns how many are
+    due. Never waits on Yahoo; single flight with ``refresh_events``."""
+    symbols = sorted(set(symbols))
+    due = _due(symbols, load_events(), False)
+    if due and not _EVENTS_LOCK.locked() and not _JobRunning.is_set():
+        threading.Thread(
+            target=_refresh_quietly,
+            args=(due[:EVENTS_BATCH], False, _JobRunning, _dated_only),
+            name="attention-events",
+            daemon=True,
+        ).start()
+    return len(due)
+
+
 def refresh_events_soon(symbols, *, force: bool = False) -> None:
     """``refresh_events`` in a background thread when anything is due (the
     page calls this after computing, the topbar Refresh with ``force``;
@@ -1256,8 +1306,8 @@ def refresh_events_soon(symbols, *, force: bool = False) -> None:
         ).start()
 
 
-def _refresh_quietly(symbols, force: bool = False) -> None:
+def _refresh_quietly(symbols, force: bool = False, cancel=None, fetch=None) -> None:
     try:
-        refresh_events(symbols, force=force)
+        refresh_events(symbols, force=force, cancel=cancel, fetch=fetch)
     except Exception as exc:  # a cache: the page shows no dates rather than failing
         print(f"[attention] events refresh failed: {type(exc).__name__}")

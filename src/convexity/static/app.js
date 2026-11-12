@@ -168,6 +168,30 @@ const COLS = [
   { key: "news_sentiment", label: "NS", w: 48, align: "center", sortable: true,
     sortValue: (r) => r.news_sentiment?.news?.score ?? null,
     render: (r) => nsDot(r.news_sentiment, r.symbol) },
+  /* Weight follows the active weighting at once; the rest arrive with analytics. */
+  { key: "weight", label: "Weight", w: 64, align: "right", sortable: true,
+    sortValue: (r) => TBL.w[r.symbol] ?? null,
+    render: (r) => invBarCell((TBL.w[r.symbol] || 0) * 100, "w", TBL,
+      STATE.mode === "cap" && !TBL.w[r.symbol] && r.quote_type && r.quote_type !== "EQUITY"
+        ? ' data-tip="Funds have no market cap, so Cap leaves them out."' : "", TBL.w[r.symbol] > 0 ? null : "0%") },
+  { key: "risk", label: "Risk", w: 60, align: "right", sortable: true,
+    sortValue: (r) => TBL.risk[r.symbol]?.share ?? null,
+    render: (r) => tblRisk(r, (x, w) => invBarCell(x.share * 100, "r", TBL, "", w > 0 ? riskShareText(x.share * 100, w, true) : "0%")) },
+  { key: "risk_w", label: "Risk/Wt", w: 60, align: "right", sortable: true,
+    sortValue: (r) => (TBL.w[r.symbol] > 0 ? TBL.risk[r.symbol]?.ratio ?? null : null),
+    render: (r) => tblRisk(r, (x, w) => !(w > 0) ? TBL_DASH : x.ratio < 0.25 ? '<span class="na">≈0</span>' : `${x.ratio.toFixed(1)}×`) },
+  { get label() { return `Contrib ${STATE.period}`; }, key: "contrib", w: 76, align: "right", sortable: true,
+    sortValue: (r) => TBL.contrib[r.symbol] ?? null,
+    render: (r) => TBL.contrib[r.symbol] != null ? `<span class="${invPtsCls(TBL.contrib[r.symbol])}">${invPts(TBL.contrib[r.symbol])}</span>` : TBL.wait ? TBL_WAIT : TBL_DASH },
+  { key: "vol", label: "Vol", w: 50, align: "right", sortable: true,
+    sortValue: (r) => TBL.risk[r.symbol]?.vol ?? null,
+    render: (r) => tblRisk(r, (x) => `${Math.round(x.vol * 100)}%`) },
+  { key: "corr", label: "Corr", w: 50, align: "right", sortable: true,
+    sortValue: (r) => TBL.risk[r.symbol]?.corr ?? null,
+    render: (r) => tblRisk(r, (x) => (Math.abs(x.corr) < 0.005 ? "0.00" : x.corr.toFixed(2).replace("-", "−"))) },
+  { key: "next_earnings", label: "Earnings", w: 64, align: "right", sortable: true,
+    sortValue: (r) => (r.next_earnings >= TBL.today ? r.next_earnings : null),
+    render: (r) => (r.next_earnings >= TBL.today ? fmtDateMD(`${r.next_earnings}T12:00`) : TBL_DASH) },
 ];
 
 /* Short hover descriptions for the column-header info icons.
@@ -227,6 +251,13 @@ const COL_INFO = {
   target_upside_pct: "Mean analyst price target ÷ current price − 1, signed (positive = upside). A price return: dividends are not included.",
   w52_high:      "Highest daily close over the trailing 52 weeks (dividend-adjusted closes; Yahoo's quoted 52-week high uses intraday prices, so it can sit slightly above).",
   w52_low:       "Lowest daily close over the trailing 52 weeks (dividend-adjusted closes; Yahoo's quoted 52-week low uses intraday prices).",
+  weight: "This holding's share of the portfolio under the active weighting: Equal, Cap, a saved set, or Book on the red tab.",
+  risk: "This holding's share of the portfolio's risk (variance): last 1 year of daily returns, in the display currency. It does not change with the chart's period. Adds up to 100%. Under a quarter of its weight reads ≈0%.",
+  risk_w: "Risk ÷ Weight. Above 1× the holding adds more risk than its size; below 1× it steadies the portfolio. ≈0 means it barely adds any, or lowers it.",
+  contrib: "Points of the portfolio's return over the chart's period that came from this holding. Adds up to the chart's return.",
+  vol: "How much this holding moves: annualised volatility of its daily returns, last 1 year, in the display currency.",
+  corr: "How closely this holding moves with the portfolio: correlation of its daily returns with the portfolio's, last 1 year. Vol × Corr ÷ the portfolio's Vol is exactly Risk ÷ Weight.",
+  next_earnings: "Next earnings date, from Yahoo's calendar for the company's primary line. A dash for funds, or when no date is published.",
   news_sentiment: "Two dots, two independent reads of the same headlines. Left: the Market read — how prices have historically reacted to news like this, as a percentile of its own history (only the tails are called; the middle is \"No edge\"). Right: the News read — what the news says, lens by lens (Financials, Outlook, Competition, Regulation, Street view). Green = bullish, grey = mixed / no edge, red = bearish, hollow = no read. Hover for the full card. Sorts by the News read.",
 };
 
@@ -234,6 +265,13 @@ const COL_INFO = {
    distinct from COL_INFO's full hover-tooltip text used elsewhere. */
 const COL_INFO_SHORT = {
   symbol: "Exchange ticker symbol",
+  weight: "Share of the portfolio",
+  risk: "Share of the portfolio's risk, last 1Y",
+  risk_w: "Risk ÷ Weight",
+  contrib: "Points of the chart's return from it",
+  vol: "Annualised volatility, last 1Y",
+  corr: "Correlation with the portfolio, last 1Y",
+  next_earnings: "Next earnings date",
   logo: "Company/fund logo",
   name: "Full company or fund name",
   price: "Last price, in display currency",
@@ -293,6 +331,8 @@ const COL_INFO_SHORT = {
 /* Category grouping for the Customize Columns modal — purely a display
    grouping, has no effect on rendering order in the actual table. */
 const COL_GROUP = {
+  weight: "Portfolio", risk: "Portfolio", risk_w: "Portfolio", contrib: "Portfolio",
+  vol: "Portfolio", corr: "Portfolio", next_earnings: "Portfolio",
   logo: "Core", symbol: "Core", name: "Core", price: "Core", market_cap: "Core",
   sector: "Core", industry: "Core",
   ps_ratio: "Valuation", pe_ratio: "Valuation", forward_pe: "Valuation",
@@ -314,7 +354,7 @@ const COL_GROUP = {
   analyst_rating: "Analyst & Sentiment", earnings_surprise: "Analyst & Sentiment",
   rec_trend_fh: "Analyst & Sentiment", insider_mspr: "Analyst & Sentiment", news_sentiment: "Analyst & Sentiment",
 };
-const COL_GROUP_ORDER = ["Core", "Valuation", "Profitability & Leverage", "Returns", "Technical & Momentum", "Analyst & Sentiment"];
+const COL_GROUP_ORDER = ["Core", "Portfolio", "Valuation", "Profitability & Leverage", "Returns", "Technical & Momentum", "Analyst & Sentiment"];
 
 let DATA = [];
 let SORT = { key: "pct_ytd", dir: -1 };
@@ -337,11 +377,13 @@ let SORT = { key: "pct_ytd", dir: -1 };
  * should hardcode column keys outside that table.
  * --------------------------------------------------------------------------- */
 const BUILTIN_VIEWS = {
-  "Default":      ["logo","symbol","name","price","market_cap","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200","earnings_surprise","rec_trend_fh","insider_mspr","news_sentiment"],
+  "Default":      ["logo","symbol","name","weight","risk","price","market_cap","pe_ratio","pct_ytd","spark","pct_1y","delta_ath","rs_rank","above_sma_20","above_sma_50","above_sma_200","earnings_surprise","rec_trend_fh","insider_mspr","news_sentiment"],
   "Fundamentals": ["symbol","price","market_cap","sector","industry","ps_ratio","pe_ratio","forward_pe","peg","ev_revenue","ev_ebitda","operating_margin","debt_equity","current_ratio","dividend_yield","beta","model_price","model_mu","earnings_surprise","rec_trend_fh","insider_mspr"],
   "Momentum":     ["symbol","price","pct_1w","pct_1m","pct_3m","pct_6m","pct_ytd","rsi_14","macd_hist_pct","bb_pct_b","beta","spark","pct_1y","delta_ath","rs_rank","earnings_surprise","rec_trend_fh","insider_mspr","above_sma_20","above_sma_50","above_sma_200","news_sentiment"],
+  "Manager":      ["logo","symbol","name","weight","risk","risk_w","contrib","pct_1d","beta","vol","corr","model_mu","target_upside_pct","delta_ath","next_earnings","news_sentiment"],
 };
-const BUILTIN_ORDER = ["Default", "Fundamentals", "Momentum"];
+const BUILTIN_ORDER = ["Default", "Fundamentals", "Momentum", "Manager"];
+const BUILTIN_SORT = { "Manager": "weight" };
 /* Factory per-view color-coding ("heat") defaults. Only columns whose default
  * mode should DEVIATE from the column's intrinsic default (minmax for yo_dyn,
  * on for div) need an entry here — everything else falls back automatically.
@@ -351,7 +393,148 @@ const BUILTIN_VIEW_HEAT = {
   "Fundamentals": { ev_ebitda: "quantile" },
 };
 const COLS_BY_KEY = Object.fromEntries(COLS.map(c => [c.key, c]));
-const DESC_DEFAULT_KEYS = new Set(["pct_ytd","pct_1y","pct_1w","pct_1m","pct_3m","pct_6m","delta_ath","market_cap","price","target_upside_pct"]);
+
+/* What the holdings table reads for the rows on screen, set at the top of
+ * render(). The payload comes from this tab's map under this weighting and
+ * period, never STATE.analytics: a switch can't pair new rows with an old total.
+ * `wait` (the moving bar) ends when this payload's request has answered, either way. */
+const TBL = { w: {}, max: 1, a: null, risk: {}, contrib: {}, wait: false, today: "", rows: [] };
+const TBL_DASH = '<span class="na">—</span>', TBL_WAIT = '<span class="tbl-wait"></span>';
+const tblRisk = (r, draw) => {
+  const x = TBL.risk[r.symbol];
+  return x ? draw(x, (TBL.w[r.symbol] || 0) * 100) : TBL.wait ? TBL_WAIT : TBL_DASH;
+};
+let _analyticsSettled = null, _analyticsAsking = false, _tblWaitTimer = 0;
+const analyticsSettleKey = () => `${STATE.activeView}|${analyticsCacheKey(STATE.mode, STATE.period)}`;
+function tblPrepare() {
+  const a = currentAnalyticsMap()[analyticsCacheKey(STATE.mode, STATE.period)];
+  const t = new Date();
+  TBL.a = a && !a.error ? a : null;
+  TBL.w = weightsForMode(STATE.mode);
+  TBL.risk = TBL.a?.risk?.holdings || {};
+  TBL.contrib = Object.fromEntries((TBL.a?.contribution || []).map(x => [x.symbol, x.contribution]));
+  TBL.today = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  TBL.max = Math.max(1, ...Object.values(TBL.w).map(x => x * 100), ...Object.values(TBL.risk).map(x => x.share * 100));
+  TBL.wait = !TBL.a?.risk && _analyticsSettled !== analyticsSettleKey();
+  clearTimeout(_tblWaitTimer);
+  if (TBL.wait && DATA.length) {  // nothing asked for it (a build that failed): don't leave the bar running
+    _tblWaitTimer = setTimeout(() => {
+      if (!_analyticsAsking) { _analyticsSettled = analyticsSettleKey(); render(); }
+    }, 4000);
+  }
+}
+
+/* ---- The foot: one <tr> per entry of totalRows(). The rules are all in
+ * analytics._holdings_totals (shared with the panels and the export); this only
+ * draws them. Two figures are the client's, because they can't wait for analytics:
+ * Weight follows the active weighting at once, and Earnings fills in the
+ * background after the analytics answered. */
+const TOTAL_BLANK = new Set(["logo", "symbol", "price", "model_price", "w52_high", "w52_low"]);
+const TOTAL_GRAPHIC = new Set(["spark", "rs_rank", "earnings_surprise", "news_sentiment"]);
+const TOTAL_TAGLESS = new Set([...TOTAL_GRAPHIC, "delta_ath", "sector", "industry"]);
+const TOTAL_QUIET = 95;  // in shown percent
+const covPct = (e) => Math.floor(e.cov * 100 + 1e-9), covAll = (e) => e.cov >= 1 - 1e-9;
+const TOTAL_NAMES = { risk_w: "Risk ÷ Weight", contrib: "Contribution", vol: "Volatility", corr: "Correlation", news_sentiment: "News read" };
+const WEIGHT_NAMES = { cap: "Cap", equal: "Equal", book: "Book", custom: "Custom" };
+const totalPct = (e) => `${Math.round(e.v * 100)}%`;
+const totalTop = (e) => `<span class="tbl-total-text">${escapeHtml(e.v)} ${Math.round(e.top[0][1] * 100)}%</span>`;
+const noTip = (html) => html.replace(/ data-tip="[^"]*"/, "");
+const TOTAL_CELL = {
+  weight: totalPct, risk: totalPct, vol: totalPct,
+  above_sma_20: totalPct, above_sma_50: totalPct, above_sma_200: totalPct,
+  risk_w: (e) => `<span class="tbl-total-dim">${e.v.toFixed(1)}×</span>`,
+  contrib: (e) => `<span class="${invPtsCls(e.v)}">${invPts(e.v)}</span>`,
+  corr: (e) => e.v.toFixed(2),
+  market_cap: (e) => fmtCompactMoney(e.v, TBL.a?.display_ccy),
+  analyst_rating: (e) => fmt2(e.v),
+  target_upside_pct: (e) => fmtPctSigned(e.v),
+  spark: (e, T) => sparkSvg(e.v, T.pct_1y?.v),
+  earnings_surprise: (e) => noTip(epsSurpriseBars(e.v)),
+  rec_trend_fh: (e) => recTrendHtml(e.v),
+  insider_mspr: (e) => noTip(msprBadge({ mspr: e.v })),
+  news_sentiment: (e) => `<span class="ns-dots">${nsTierDot(null)}${nsTierDot(nsNewsTier(e.v))}</span>`,
+  sector: totalTop, industry: totalTop,
+  next_earnings: (e) => fmtDateMD(`${e.v}T12:00`),
+};
+function totalRows() {
+  const held = DATA.filter(r => TBL.w[r.symbol] > 0).length, n = DATA.length;
+  const soon = DATA.filter(r => TBL.w[r.symbol] > 0 && r.next_earnings >= TBL.today)
+    .sort((a, b) => a.next_earnings.localeCompare(b.next_earnings)).slice(0, 4).map(r => [r.symbol, r.next_earnings]);
+  const sum = Object.values(TBL.w).reduce((a, b) => a + b, 0);
+  const named = WEIGHT_NAMES[STATE.mode] || String(STATE.mode).slice(7);
+  return [{ label: "Total", sub: `${held === n ? `${n} holdings` : `${held} of ${n} held`} · ${named}`, wait: TBL.wait,
+    totals: { ...TBL.a?.totals, weight: { rule: "sum", v: sum }, next_earnings: { rule: "next", v: soon[0]?.[1] ?? null, list: soon } } }];
+}
+function totalCellHtml(c, e, row) {
+  if (!e) return row.wait ? TBL_WAIT : TBL_DASH;
+  if (e.v == null) return TBL_DASH;
+  const T = row.totals, flat = row.flat;
+  let html = (TOTAL_CELL[c.key] || (() => c.render(flat)))(e, T);
+  if (c.heat?.kind === "div") html = `<span class="${invCls(e.v)}">${html}</span>`;
+  if (e.cov == null || covPct(e) >= TOTAL_QUIET || TOTAL_TAGLESS.has(c.key)) return html;
+  return `<span class="tbl-cov">${html}<small>${covPct(e)}%</small></span>`;
+}
+function renderTotalRows(cols) {
+  const foot = $("#tfoot"); foot.innerHTML = "";
+  if (!DATA.length) { TBL.rows = []; return; }
+  TBL.rows = totalRows();
+  const labelAt = cols[0]?.key === "logo" ? 1 : 0;
+  TBL.rows.forEach((row, i) => {
+    const tr = document.createElement("tr"); tr.className = "tbl-total";
+    const T = row.totals;
+    row.flat = Object.fromEntries(Object.entries(T).map(([k, x]) => [k, x.v]));
+    cols.forEach((c, k) => {
+      const td = document.createElement("td");
+      if (c.align !== "right") td.className = c.align;
+      if (k === labelAt) td.textContent = row.label;
+      else if (c.key === "name") td.innerHTML = `<span class="tbl-total-sub">${escapeHtml(row.sub)}</span>`;
+      else if (!TOTAL_BLANK.has(c.key)) {
+        const e = T[c.key];
+        td.innerHTML = totalCellHtml(c, e, row);
+        if (TOTAL_GRAPHIC.has(c.key)) td.classList.add("tbl-total-graphic");
+        if (c.bg && e?.v != null) td.style.cssText = c.bg(row.flat);
+        if (e) { td.dataset.richTip = "total"; td.dataset.row = i; td.dataset.col = c.key; td.tabIndex = 0; }
+      }
+      tr.appendChild(td);
+    });
+    tr.classList.toggle("has-cov", !!tr.querySelector(".tbl-cov"));
+    foot.appendChild(tr);
+  });
+}
+const totalMult = (c) => (/P\/E/.test(c.label) ? "earnings yields, which add up" : "the inverse of each multiple, which adds up");
+const TOTAL_TIP = {
+  sum: () => "The holdings' weights added up.",
+  risk: () => "Each holding's share of the portfolio's risk, added up. Always 100% of what could be measured.",
+  ratio: () => "Risk ÷ Weight over the whole portfolio is 1× by definition: 100% of the risk on 100% of the weight.",
+  contrib: () => `Adds up exactly to the chart's return for this period, in ${TBL.a.display_ccy}, with its rebalancing and costs.${viewIsBook(STATE.activeView) ? " It assumes today's weights for the whole period, so it is not your real result: My Investments has that." : ""}`,
+  vol: (e) => `The portfolio's own volatility over 1 year, not an average. The holdings' weighted average is ${Math.round(e.avg * 100)}%; the ${Math.round(e.avg * 100) - Math.round(e.v * 100)} points between them are what diversification removes.`,
+  corr: () => "Weighted average of each holding's correlation with the portfolio. Near 1, the portfolio moves as one; near 0, its holdings go their own way.",
+  next: () => "The soonest report among the holdings.",
+  harm: (e, c) => `Weighted harmonic mean${["pe_ratio", "ps_ratio", "ev_ebitda"].includes(c.key) ? ", the same as the Valuation panel" : ""}. It averages ${totalMult(c)}, then turns the result back into a multiple. Losses are left out.`,
+  ret: (e, c) => `Weighted average of the holdings' own ${c.label.slice(2)} returns, each in its own currency, at today's weights.`,
+  mean: () => "Weighted average of the holdings that have a figure.",
+  loose: () => "Weighted average of the holdings' readings. It says how stretched the holdings are, not what the portfolio's own reading would be.",
+  mcap: () => `Weighted average company size in ${TBL.a.display_ccy}, the same as the Valuation panel.`,
+  beta: () => "Weights × betas, added up: the same as “Beta · holdings” in Risk & return.",
+  mu: () => "Weighted average of the holdings' model returns. Each one uses its own market's rate.",
+  upside: () => "Weighted average upside to the analysts' mean target, the same as the consensus card.",
+  peak: () => "Weighted average of how far each holding is below its own 2-year high. The portfolio as a whole may sit closer to its own high.",
+  spark: () => "Today's weights, each holding's last 12 months in its own currency, held without rebalancing. It ends on the % 1Y beside it.",
+  rs: () => "Each month, the weighted average of the holdings' RS rank.",
+  sma: (e, c) => `Share of the weight trading above its ${c.label.replace("MA", "")}-day average.`,
+  eps: (e) => `Each quarter, the weighted average surprise, capped at ±10% like the bars.${e.beat != null ? ` Last quarter ${Math.round(e.beat * 100)}% of the covered weight beat.` : ""}`,
+  news: (e) => `News read: the weighted average score${e.v != null ? `, ${fmtSig(e.v, 2)}` : ""}, read with the usual tiers. Market read stays empty: it is a rank for one share, and an average of ranks is not a rank.`,
+  text: () => "The biggest groups, as a share of all the weight.",
+};
+function totalLadder(e, c) {
+  if (e.rule !== "ret" || !TBL.a) return "";
+  const ccy = TBL.a.display_ccy, span = c.label.slice(2);
+  if (span !== TBL.a.period) return `<div class="tbl-tip-sec">The chart can differ: it counts in ${ccy}, rebalances and pays costs.</div>`;
+  const held = (TBL.a.contribution || []).reduce((s, x) => s + x.weight * x.period_return, 0);
+  const pct = (x) => (x == null ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(1)}%`);
+  return `<div class="tbl-tip-sec tbl-tip-grid"><span>This total, own currencies</span><b>${pct(e.v)}</b><span>The same holdings in ${ccy}</span><b>${pct(held)}</b><span>The chart, rebalanced, after costs</span><b>${pct(TBL.a.stats?.total_return)}</b></div>`;
+}
+const DESC_DEFAULT_KEYS = new Set(["weight","risk","risk_w","contrib","vol","corr","pct_ytd","pct_1y","pct_1w","pct_1m","pct_3m","pct_6m","delta_ath","market_cap","price","target_upside_pct"]);
 
 /* ---- Effective view resolution ----------------------------------------
  * A view (built-in or custom) resolves to an effective {columns, heat}.
@@ -406,7 +589,7 @@ function ensureSortKey() {
   if (stillThere) return;
   const ytd = active.find(c => c.key === "pct_ytd" && c.sortable);
   if (ytd) { SORT.key = "pct_ytd"; SORT.dir = -1; return; }
-  const firstSortable = active.find(c => c.sortable);
+  const firstSortable = active.find(c => c.key === "weight") || active.find(c => c.sortable);
   SORT.key = firstSortable ? firstSortable.key : null;
   SORT.dir = SORT.key ? defaultSortDirFor(SORT.key) : -1;
 }
@@ -760,6 +943,25 @@ document.addEventListener("keydown", (ev) => {
  * is hidden when that finishes; a show() meanwhile cancels it.
  * --------------------------------------------------------------------------- */
 const RICH_TIPS = Object.create(null);
+RICH_TIPS["total"] = (host) => {
+  const c = COLS_BY_KEY[host.dataset.col], e = TBL.rows[+host.dataset.row]?.totals?.[host.dataset.col];
+  if (!c || !e || !TOTAL_TIP[e.rule] || (!TBL.a && e.rule !== "sum" && e.rule !== "next")) return "";
+  const held = DATA.filter(r => TBL.w[r.symbol] > 0).length;
+  let body = `<div class="mt-name">${escapeHtml(TOTAL_NAMES[c.key] || c.label)} · total</div><div class="mt-desc">${TOTAL_TIP[e.rule](e, c)}</div>${totalLadder(e, c)}`;
+  const list = e.top || (e.list || []).map(([s, d]) => [s, fmtDateMD(`${d}T12:00`)]);
+  if (list.length) body += `<div class="tbl-tip-sec tbl-tip-grid">${list.map(([k, v]) => `<span>${escapeHtml(k)}</span><b>${typeof v === "number" ? `${Math.round(v * 100)}%` : v}</b>`).join("")}</div>`;
+  if (e.cov != null) {
+    const pct = covPct(e);
+    body += `<div class="tbl-tip-sec">${covAll(e) ? "Covers all of the weight."
+      : e.v == null ? `Only ${pct}% of the weight has this figure, too little for a total, so it stays empty.`
+      : `Covers ${pct}% of the weight: ${e.n} of ${held} holdings. The average is taken over those.`}</div>`;
+    if (e.out?.length && !covAll(e)) {
+      const names = e.out.slice(0, 6).map(([s, w, why]) => `${escapeHtml(s)} ${(w * 100).toFixed(1)}%${why === "loss" ? " (a loss)" : ""}`).join(", ");
+      body += `<div class="tbl-tip-out">Left out: ${names}${e.out.length > 6 ? ` and ${e.out.length - 6} more` : ""}.</div>`;
+    }
+  }
+  return `<div class="pf-metric-tip tbl-tip" role="tooltip">${body}</div>`;
+};
 const STICKY_TIPS = new Set(["model-price"]);
 // Opened by a click and kept until its ✕, Escape or a click elsewhere (the
 // owner, 2026-10-30: the model price is a button). Until the first click a
@@ -1008,57 +1210,35 @@ function fitScaleForColumns(columns = getActiveColumns()) {
   return clamp(available / required, 0.4, 1);
 }
 
-// Pass 2 — after the scaled DOM has painted, measure the table's actual
-// scrollWidth and, if it still overflows the wrap, apply a CSS transform
-// to guarantee zero horizontal overflow. The font/padding pass keeps text
-// crisp at normal scales; the transform only kicks in as a last resort.
-function applyTableTransformFit() {
+// Pass 2 — after the scaled DOM has painted, measure the table's real width
+// and, if it still overflows the wrap, zoom it to fit. Zoom, never a transform:
+// a transformed table can't hold a sticky row or header, and it kept reserving
+// the unscaled height. Sticky needs a wrap that is not a scroll container, so
+// with Fit off and a table wider than the window the row is a plain foot.
+function applyTableZoom() {
   const wrap = document.querySelector(".table-wrap");
   const table = document.getElementById("tbl");
   if (!wrap || !table) return;
-  if (!STATE.fitColumns) {
-    table.style.transform = "";
-    table.style.transformOrigin = "";
-    table.style.width = "";
-    wrap.style.height = "";
-    return;
+  const have = tableContentWidth(wrap);
+  if (have <= 0) return;   // hidden: keep what it had
+  table.style.zoom = "";
+  table.style.removeProperty("--tbl-zoom");
+  const need = table.getBoundingClientRect().width;
+  const over = need > have + 0.5;
+  if (STATE.fitColumns && over) {
+    const zoom = (have / need).toFixed(4);
+    table.style.zoom = zoom;
+    table.style.setProperty("--tbl-zoom", zoom);
   }
-  // Reset any prior transform before measuring so scrollWidth is the
-  // intrinsic post-scaling width, not a post-transform width.
-  table.style.transform = "";
-  table.style.width = "";
-  wrap.style.height = "";
-  const need = table.scrollWidth;
-  const have = tableContentWidth(wrap);   // exclude wrap padding — see fitScaleForColumns
-  if (need > have + 0.5) {
-    const extra = have / need;
-    // Expand the pre-transform table so the post-transform render fills
-    // the wrap edge-to-edge. clientHeight needs to shrink with the
-    // transform too, otherwise the wrap reserves the pre-scale height.
-    table.style.transformOrigin = "top left";
-    table.style.transform = `scale(${extra.toFixed(4)})`;
-    table.style.width = `${(100 / extra).toFixed(3)}%`;
-    const postHeight = table.getBoundingClientRect().height;
-    if (postHeight > 0) wrap.style.height = `${Math.ceil(postHeight + 4)}px`;
-    // Self-correct: the measurement above can occasionally land a few
-    // pixels short of the table's true rendered height (e.g. a stale
-    // rAF from an earlier render() resolving after a newer one during a
-    // streaming build). Any shortfall turns .table-wrap into its own
-    // vertically-scrollable region — a "scroll trapped inside the
-    // table" bug distinct from the page's normal scroll. The wrap must
-    // NEVER be shorter than its content, so widen it to match if so.
-    if (wrap.scrollHeight > wrap.clientHeight) {
-      wrap.style.height = `${wrap.scrollHeight}px`;
-    }
-  }
+  wrap.classList.toggle("tbl-sticky", !!STATE.fitColumns || !over);
+  document.documentElement.style.setProperty("--topbar-h", `${document.querySelector(".topbar")?.offsetHeight || 50}px`);
 }
 
 // Renders during a streaming build call render() (and therefore this
 // function) once per incoming row, each scheduling its own async
 // double-rAF re-measurement below. Without a generation guard, an older
 // render's rAF pair can resolve after a newer one and clobber the wrap's
-// height with a stale (too-short) measurement — see applyTableTransformFit's
-// self-correction comment for what that breaks. Bumping _fitGen per call and
+// zoom with a stale measurement. Bumping _fitGen per call and
 // having each scheduled pass bail out once superseded makes only the latest
 // render's measurement ever take effect.
 let _fitGen = 0;
@@ -1082,10 +1262,10 @@ function applyTableFitMode(columns = getActiveColumns()) {
   const myGen = ++_fitGen;
   requestAnimationFrame(() => {
     if (myGen !== _fitGen) return;
-    applyTableTransformFit();
+    applyTableZoom();
     requestAnimationFrame(() => {
       if (myGen !== _fitGen) return;
-      applyTableTransformFit();
+      applyTableZoom();
     });
   });
   return scale;
@@ -1644,7 +1824,8 @@ function deltaBar(v) {
   else { tgt = C.neg; intensity = clamp(0.55 + (mag - 15) / 50, 0.55, 0.95); }
   const bg = rgbMix(C.bg, tgt, intensity);
   const label = (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
-  const txt = intensity > 0.6 ? "#fff" : "var(--text)";
+  // White only where the bar sits under the whole label: on a short bar it ran onto the light track.
+  const txt = intensity > 0.6 && width >= 55 ? "#fff" : "var(--text)";
   return `<div class="bar-cell">
     <div class="bar" style="width:${width.toFixed(1)}%; background:${bg}"></div>
     <span class="bar-label" style="color:${txt}">${label}</span>
@@ -1958,6 +2139,19 @@ function recTrendScore(arr) {
   return newest - oldest;
 }
 
+function recTrendMark(delta) {
+  let glyph, color;
+  if (delta > 0.02) { glyph = "▲"; color = "var(--pos)"; }
+  else if (delta < -0.02) { glyph = "▼"; color = "var(--neg)"; }
+  else { glyph = "—"; color = "var(--muted)"; }
+  const sign = delta > 0 ? "+" : (delta < 0 ? "−" : "");
+  return { color, label: `${glyph} ${sign}${Math.abs(delta).toFixed(2)}` };
+}
+function recTrendHtml(delta) {
+  const { color, label } = recTrendMark(delta);
+  return `<span style="color:${color}">${label}</span>`;
+}
+
 function recTrendCell(arr, row) {
   if (!arr || arr.length < 2) return na();
   const newest = fhConsensus(arr[0]);
@@ -1965,12 +2159,7 @@ function recTrendCell(arr, row) {
   if (newest == null || oldest == null) return na();
   const delta = newest - oldest;
   const n = arr.length;
-  let glyph, color;
-  if (delta > 0.02) { glyph = "▲"; color = "var(--pos)"; }
-  else if (delta < -0.02) { glyph = "▼"; color = "var(--neg)"; }
-  else { glyph = "—"; color = "var(--muted)"; }
-  const sign = delta > 0 ? "+" : (delta < 0 ? "−" : "");
-  const label = `${glyph} ${sign}${Math.abs(delta).toFixed(2)}`;
+  const { color, label } = recTrendMark(delta);
   const src = row && row.rec_src;
   const from = !src ? ""
     : src.source === "Yahoo" ? " Source: Yahoo (no US listing for Finnhub to cover)."
@@ -2153,6 +2342,7 @@ function debouncedSaveCustom(name, columns, heat) {
 function setActiveView(name, {persist = true} = {}) {
   if (!isBuiltinView(name) && !STATE.customViews[name]) return;
   STATE.activeViewName = name;
+  if (BUILTIN_SORT[name]) { SORT.key = BUILTIN_SORT[name]; SORT.dir = -1; }
   render();
   if (persist) persistActiveView(name);
 }
@@ -2572,12 +2762,15 @@ function renderHeader(scale = 1) {
   wireHeaderDnD(tr);
 }
 
+const heatValue = (c) => c.sortValue || ((r) => r[c.key]);
 function render() {
+  tblPrepare();
   ensureSortKey();
   const cols = getActiveColumns();
   const scale = applyTableFitMode(cols);
   renderHeader(scale);
   renderColumnViewBar();
+  renderTotalRows(cols);
   const tbody = $("#tbody"); tbody.innerHTML = "";
   if (!DATA.length) {
     tbody.innerHTML = `<tr><td colspan="${cols.length}" style="padding:30px; text-align:center; color:var(--muted);">Add companies above, then press <b>Refresh</b>.</td></tr>`;
@@ -2610,7 +2803,7 @@ function render() {
     const mode = getHeatMode(c.key);
     if (mode === "off") { heatCtx[c.key] = null; continue; }
     if (c.heat.kind === "yo_dyn") {
-      const vals = rows.map(r => r[c.key]).filter(v => v != null && isFinite(v));
+      const vals = rows.map(heatValue(c)).filter(v => v != null && isFinite(v));
       if (vals.length < 2) { heatCtx[c.key] = null; continue; }
       const sorted = vals.slice().sort((a, b) => a - b);
       heatCtx[c.key] = (mode === "minmax")
@@ -2629,7 +2822,7 @@ function render() {
       if (c.td_cls) td.className = c.td_cls;
       let styles = "";
       const ctx = c.heat ? heatCtx[c.key] : undefined;
-      if (c.heat && ctx !== null) styles += cellStyleHeat(c, r[c.key], theme, ctx);
+      if (c.heat && ctx !== null) styles += cellStyleHeat(c, heatValue(c)(r), theme, ctx);
       if (c.bg)   styles += c.bg(r);
       /* Mark cells that should follow the alt-row stripe (no heat / no custom bg). */
       if ((!c.heat || ctx === null) && !c.bg) td.classList.add("alt-stripe");
@@ -6430,7 +6623,7 @@ async function warmRecentTabs(maxN) {
       const res = await fetch("/api/portfolio-analytics-multi", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({rows, weight_sets: wsets, period: STATE.period, display_ccy: FX_QUOTE, ...tradingPrefs()}),
+        body: JSON.stringify({rows, weight_sets: wsets, period: STATE.period, display_ccy: FX_QUOTE, as_traded: viewIsBook(name), ...tradingPrefs()}),
       });
       if (!res.ok || analyticsCacheKey("", STATE.period) !== asked) continue;
       const dr = await res.json();
@@ -7092,6 +7285,29 @@ function betaTitle(bm) {
     : bm.method === "weekly" ? `${Math.max(bm.years || 3, 2)}Y weekly${bm.fit_r2 != null ? "" : " in USD (no home index here)"}` : "prior: under 151 days of history";
   return `vs ${bm.proxy_name} · ${how}${bm.fit_r2 != null ? ` · fund, best fit R² ${(+bm.fit_r2).toFixed(2)}` : ""}${bm.via ? ` · via ${bm.via}` : ""}${bm.raw != null ? ` · raw ${(+bm.raw).toFixed(2)}` : ""}`;
 }
+/* The Earnings column: the dates cached now; the server fills what is due a small
+ * background batch at a time (attention.fill_events), so ask again while any are.
+ * Never on the streaming path. Funds report no earnings. */
+let _earnTimer = 0, _earnPolls = 0;
+async function requestEarnings(again) {
+  clearTimeout(_earnTimer);
+  if (!again) _earnPolls = 0;
+  const rows = DATA.filter(r => r && r.symbol && !r.error && (!r.quote_type || r.quote_type === "EQUITY"));
+  if (!rows.length) return;
+  try {
+    const res = await fetch("/api/next-earnings", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols: rows.map(r => r.symbol) }) });
+    if (!res.ok) return;
+    const { dates = {}, due = 0 } = await res.json();
+    let hit = false;
+    for (const r of rows) {
+      const d = dates[r.symbol.toUpperCase()] ?? null;
+      if ((r.next_earnings ?? null) !== d) { r.next_earnings = d; hit = true; }
+    }
+    if (hit) render();
+    if (due > 0 && ++_earnPolls < 30) _earnTimer = setTimeout(() => requestEarnings(true), 20000);
+  } catch (e) { /* the column stays a dash; the next open asks again */ }
+}
 async function requestModelPrices(force) {
   // Every row, keyed on symbols and prices: a saved row's numbers are from the
   // day it was saved, so a new price (a refresh) re-prices them all, once.
@@ -7121,13 +7337,16 @@ async function requestModelPrices(force) {
       r.beta = m.beta; r.beta_meta = m.beta_meta; r.model_price = m.model_price; r.model_mu = m.mu;
       hit = true;
     }
-    if (hit) render();
+    if (hit && TBL.a && !TBL.a.totals?.model_mu?.cov) requestAnalytics();  // a warm-up sent rows without them
+    else if (hit) render();
   } catch (e) { /* the columns stay "—"; the next refresh asks again */ }
 }
 
+const paintAnalytics = () => { render(); renderAnalyticsBody(); };
 async function requestAnalytics(opts) {
   opts = opts || {};
-  requestModelPrices();
+  const models = requestModelPrices();
+  requestEarnings();
   if (!DATA.length) {
     STATE.analytics = null;
     renderAnalyticsBody();
@@ -7149,18 +7368,22 @@ async function requestAnalytics(opts) {
   // readout waits for it).
   const backfill = !!(cached && !opts.force &&
                       (!cached.benchmarks || !(cached.series && "ohlc" in cached.series) || !cached.trading
-                       || !(cached.stats && "beta" in cached.stats)));   // 1.29: the holdings' beta
+                       || !(cached.stats && "beta" in cached.stats)      // 1.29: the holdings' beta
+                       || !cached.risk || !cached.totals                  // the holdings table's Risk and total
+                       || (!cached.totals.model_mu?.cov && DATA.some(r => r.model_mu != null))));
   if (cached && !opts.force && !backfill) {
     STATE.analytics = cached;
     STATE.analyticsLoading = false;
-    renderAnalyticsBody();
+    paintAnalytics();
     return;
   }
 
   const reqId = ++_analyticsReqId;
   if (backfill) STATE.analytics = cached;   // keep the cached panel on screen during the silent backfill
   STATE.analyticsLoading = !backfill;
-  renderAnalyticsBody();
+  const settle = analyticsSettleKey();
+  _analyticsSettled = null; _analyticsAsking = true;
+  paintAnalytics();
 
   // Build the weight_sets we'll request. Always include the *active* mode;
   // also opportunistically include any other modes we don't already have
@@ -7178,10 +7401,12 @@ async function requestAnalytics(opts) {
   maybeRequest("cap");
 
   try {
+    await models;   // the total's Model μ reads the rows sent
+    if (reqId !== _analyticsReqId) return;
     const r = await fetch("/api/portfolio-analytics-multi", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({rows: DATA, weight_sets: wsets, period, display_ccy: FX_QUOTE, ...tradingPrefs()}),
+      body: JSON.stringify({rows: DATA, weight_sets: wsets, period, display_ccy: FX_QUOTE, as_traded: viewIsBook(STATE.activeView), ...tradingPrefs()}),
     });
     const d = await r.json();
     if (reqId !== _analyticsReqId) return;
@@ -7201,8 +7426,8 @@ async function requestAnalytics(opts) {
     // than wiping it with an error — on every reopen, until a fetch succeeds.
     if (!backfill) STATE.analytics = {error: e.message};
   } finally {
-    if (reqId === _analyticsReqId) STATE.analyticsLoading = false;
-    renderAnalyticsBody();
+    if (reqId === _analyticsReqId) { STATE.analyticsLoading = false; _analyticsAsking = false; _analyticsSettled = settle; }
+    paintAnalytics();
   }
 }
 
@@ -9218,7 +9443,7 @@ window.addEventListener("scroll", () => {
 });
 let _modalResizeT = 0;
 window.addEventListener("resize", () => {
-  if (STATE.fitColumns) render();
+  if (STATE.fitColumns) render(); else applyTableZoom();  // Fit off: only whether the table still fits (sticky)
   // The stock chart's SVG stretches with the window but its forecast canvas does not: redraw both.
   // A timer, not rAF: rAF does not run while the window is in the background.
   clearTimeout(_modalResizeT);
@@ -15560,10 +15785,9 @@ function invBarCell(v, cls, ctx, attrs = "", text = null) {
  * negative or under a quarter of its size, and never a minus sign. The share is
  * of the holdings, cash excluded, so its size is measured the same way. */
 const invHeldWeight = (x) => { const t = INV.book.positions.reduce((s, p) => s + (p.pending ? 0 : p.value || 0), 0); return t > 0 ? x.value / t * 100 : x.weight; };
+const riskShareText = (r, w, narrow = false) => r < w / 4 ? (narrow ? "≈0%" : "about 0%") : r < 0.5 ? "<1%" : `${Math.round(r)}%`;
 function invShareText(x, narrow = false) {
-  if (!invOk(x.risk_share)) return null;
-  const r = x.risk_share * 100;
-  return r < invHeldWeight(x) / 4 ? (narrow ? "≈0%" : "about 0%") : r < 0.5 ? "<1%" : `${Math.round(r)}%`;
+  return invOk(x.risk_share) ? riskShareText(x.risk_share * 100, invHeldWeight(x), narrow) : null;
 }
 function invRiskVerdict(x) {
   const r = x.risk_share * 100, w = invHeldWeight(x);
