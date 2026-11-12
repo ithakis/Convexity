@@ -9,6 +9,15 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.34.0 — 2026-11-12
+
+- **Holdings show each name's Weight and share of the Risk**, on the same bars as My Investments. Weight follows the active weighting; Risk is the share of the portfolio's variance over the last year of daily returns (Ledoit-Wolf), the same calculation My Investments uses, and it doesn't move with the chart's period. Default gains both after Company.
+- **A Manager view after Momentum**: Weight, Risk, Risk ÷ Weight, Contribution (adds up to the chart's return), % 1D, Beta, Volatility, Correlation with the portfolio, Model μ, Target Δ, Δ Highs, next Earnings and News. Earnings dates fill in the background, never on the page's path.
+- **A total row** pinned to the bottom of the window, computed in one place so it matches the panels exactly (multiples are the panel's harmonic mean, Beta its Beta · holdings). A total that covers less than 95% of the weight says how much under its value; under 40% it stays empty, and the tooltip lists what is left out.
+- **Fit to screen uses zoom**, so the header and total can stay pinned, and Company is capped under Fit.
+- **The Excel export** gains Weight, Risk, Risk ÷ Weight, Contribution, Volatility, Correlation and Next earnings, with Total and Coverage rows from the same rules.
+- Target Δ paints its heat again.
+
 ## 1.33.0 — 2026-11-05
 
 - **Multiple My Investments portfolios.** A "Multiple portfolios" switch in Settings → My Investments, off by default. On, a pill beside the currency shows which portfolio is open and switches between them, and Settings lists them (Show, Rename, Delete, Add). Off, nothing else changes. The portfolio's name appears only in the pill, its menu, that list and the delete confirmation.
