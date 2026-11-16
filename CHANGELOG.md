@@ -9,6 +9,16 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.35.0 — 2026-11-16
+
+- **A Weight Center for weight sets.** The weights get their own row on the Portfolios tab, with larger pills. As many saved sets show as fit, the rest go under "+N more", and a Weight Center button sits at the end. The Weight Center puts several sets side by side on each holding's slider row, with the difference in points, and against My Investments when the portfolio is a what-if. A holding on another listing of the same company is matched ("as APC.DE"). Creating, renaming and deleting sets moved there.
+- **Optimize and save as a set**, inside the Weight Center. It runs the optimizer with the portfolio's last settings and saves a set from the point with the same risk as now (by the daily CVaR the optimizer minimises), the lowest risk, or the point selected on the Optimize tab. A name the run leaves out keeps its current weight and is listed. If anything fails, nothing is saved.
+- **"New My Investments" makes a what-if**: a copy of the showing My Investments portfolio at today's weights, with Undo. The copy's holdings carry a jade outline on their pills and a jade bar on their rows. A holding taken out stays faded and struck through at 0%. The chart adds a jade line of what My Investments really did, and Risk & Return puts the what-if, My Investments and the S&P 500 side by side on one risk-free rate, with a note that a rebalanced mix held in hindsight is not what you would have earned. The holdings foot gains a second total row for My Investments. What-ifs show only while their My Investments portfolio shows; deleting that portfolio keeps them as normal portfolios.
+- **Rebalance to this portfolio**: the trades that turn My Investments into the what-if, in whole shares (the default), exact, €100 steps, or the fewest trades within a tracking error, with a €100 minimum trade (selling everything is exempt), the option to invest cash, and an estimated gain at average cost. It is arithmetic only; nothing is sent to a broker.
+- **The Optimize tab marks every saved set** on the chart: hover for its figures, click to inspect it, "Use this set" to apply it. In Bloomberg the current and selected rings are no longer both orange.
+- **The optimizer uses the same stand-in histories as the rest of the app**, so a young listing of an old company is no longer left out of a run.
+- The 3Y chart no longer repeats year labels.
+
 ## 1.34.0 — 2026-11-12
 
 - **Holdings show each name's Weight and share of the Risk**, on the same bars as My Investments. Weight follows the active weighting; Risk is the share of the portfolio's variance over the last year of daily returns (Ledoit-Wolf), the same calculation My Investments uses, and it doesn't move with the chart's period. Default gains both after Company.
