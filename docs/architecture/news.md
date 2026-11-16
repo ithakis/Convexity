@@ -20,7 +20,7 @@ not reintroduce one; the engines answer different questions.
 
 *Fetch and cache (`news_sentiment.py`).*
 - Finnhub `/company-news` for the company's US line (`symbol_db.us_line`:
-  TTE for TTE.PA; the free plan answers 403 to every other listing, so a
+  ASML for ASML.AS; the free plan answers 403 to every other listing, so a
   company with none skips Finnhub — see backend.md, Finnhub supplemental
   columns) + yfinance `get_news`, merged and deduplicated with
   the title dedup in `relevance.py` (rapidfuzz `token_set_ratio`); the
@@ -34,7 +34,7 @@ not reintroduce one; the engines answer different questions.
   (`relatedTickers`): it covers US lines and returns nothing for European
   ones, so when the ticker finds nothing the company's name is searched
   (`_company_query`: `symbol_db.name_key`, stocks only), keeping items tagged
-  with any listing of its pack group or its US line (Engie 23 of 25, Repsol
+  with any listing of its pack group or its US line (two European energy names: 23 of 25 and
   39 of 40 tagged; most are older than a week). Cache keys, history and the Market read stay on the row's own symbol,
   and relevance ranks by the row's company name, so an ADR's feed (general
   sector stories included) is read as the company's.

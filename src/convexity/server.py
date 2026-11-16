@@ -120,7 +120,15 @@ def _rows_summary(rows, period=None) -> str:
 BOOK_VIEW = "__book__"
 _BOOK_GUARDED = {"/api/watchlists": ("name",), "/api/portfolio/rename": ("old", "new"),
                  "/api/mpt-runs": ("view",), "/api/weight-presets": ("view",),
-                 "/api/weight-presets/active": ("view",)}  # fmt: skip
+                 "/api/weight-presets/active": ("view",), "/api/whatif": ("name",),
+                 "/api/weight-presets/optimized": ("view",)}  # fmt: skip
+
+
+def _whatif():
+    """whatif.py, imported on first use (it brings the rebalance engine)."""
+    from convexity import whatif
+
+    return whatif
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -621,11 +629,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/mpt-runs":
             # Last-3 run history per portfolio: `last` (newest, restored on open)
-            # plus `runs` (the ≤3 list rendered under Apply to Portfolio).
+            # plus `runs` (the ≤3 list rendered under Apply to Portfolio), and
+            # `plug`: the settings the Weight Center's "Optimize and save as a
+            # set" runs with (the newest run's, cleaned; frontier.plug_params).
             q = parse_qs(parsed.query)
             view = (q.get("view") or [""])[0].strip()
             runs = get_mpt_runs(view)
-            self._send_json(200, {"last": (runs[0] if runs else None), "runs": runs})
+            from convexity.frontier import plug_params
+
+            self._send_json(
+                200, {"last": (runs[0] if runs else None), "runs": runs, "plug": plug_params(runs)}
+            )
+            return
+        if parsed.path == "/api/whatif/book":
+            # The showing book's weights for the Weight Center and the weights
+            # row (whatif.book_view): computed from the page, never a write.
+            q = parse_qs(parsed.query)
+            syms = [
+                x.strip().upper() for x in (q.get("symbols") or [""])[0].split(",") if x.strip()
+            ]
+            view = (q.get("view") or [""])[0].strip() or None
+            self._whatif(lambda: _whatif().book_view(view, syms[:500], (q.get("ccy") or [None])[0]))
             return
         if parsed.path == "/api/risk-free-history":
             q = parse_qs(parsed.query)
@@ -1031,6 +1055,24 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _whatif(self, compute) -> None:
+        """Answer a what-if route (whatif.py): 200 with its payload, or
+        {error, message} with 400 bad input, 409 another portfolio showing
+        (BookMoved) or a book still waiting for its split history, 422 a book
+        that can't be computed or holds nothing."""
+        wi = _whatif()
+        try:
+            out = compute()
+        except (wi.WhatIfError, _books.BookMoved, _books.Refused) as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+            self._send_json(exc.status, {"error": code, "message": exc.message})
+            return
+        except Exception as exc:
+            self._log_exception(self.path.split("?")[0])
+            self._send_json(500, {"error": f"internal error ({type(exc).__name__})"})
+            return
+        self._send_json(200, out)
+
     def _handle_investments_get(self, parsed) -> None:
         """The real book (investments.py). GETs never write the book file."""
         q = parse_qs(parsed.query)
@@ -1286,6 +1328,29 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/investments/"):
             self._handle_investments_post(parsed.path)
             return
+        if parsed.path == "/api/whatif":
+            # "New My Investments": the showing book copied into a what-if.
+            p = self._read_json()
+            self._whatif(lambda: _whatif().create(p.get("book_id"), p.get("name"), p.get("ccy")))
+            return
+        if parsed.path == "/api/whatif/compare":
+            p = self._read_json()
+            self._whatif(
+                lambda: _whatif().compare(
+                    p.get("book_id"), p.get("rows"), p.get("weights"), p.get("period") or "1Y",
+                    p.get("display_ccy") or "USD", p.get("rebalance"), p.get("tc_bps"),
+                )
+            )  # fmt: skip
+            return
+        if parsed.path == "/api/whatif/rebalance":
+            # Read-only: the trades to the target, never written, never sent.
+            p = self._read_json()
+            self._whatif(lambda: _whatif().rebalance_payload(p))
+            return
+        if parsed.path == "/api/weight-presets/optimized":
+            p = self._read_json()
+            self._whatif(lambda: _whatif().save_optimized(p))
+            return
         if parsed.path == "/api/watchlists":
             try:
                 payload = self._read_json()
@@ -1512,6 +1577,9 @@ class Handler(BaseHTTPRequestHandler):
                 haircut=_fnum("haircut", 0.25),
                 budget=budget,
                 current_weights=payload.get("current_weights") or {},
+                weight_sets=payload.get("weight_sets")
+                if isinstance(payload.get("weight_sets"), dict)
+                else None,
                 **_trading(payload),
             )
             try:
@@ -1556,6 +1624,7 @@ class Handler(BaseHTTPRequestHandler):
                     weights,
                     rename_from=(str(rename_from).strip() if rename_from else None),
                     set_active=set_active,
+                    source=payload.get("source"),
                 )
                 self._send_json(200, out)
             except ValueError as exc:

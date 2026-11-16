@@ -23,7 +23,7 @@ their original numbers:
 | § | Topic | Where |
 |---|---|---|
 | 1–3 | What the app is, file layout, how to run / restart | this file |
-| 4 | Backend: caching, data folder, persistence, symbol resolution, streaming build, analytics, FX, HTTP routes | [docs/architecture/backend.md](docs/architecture/backend.md) |
+| 4 | Backend: caching, data folder, persistence, symbol resolution, streaming build, analytics, FX, HTTP routes, what-if portfolios + rebalance | [docs/architecture/backend.md](docs/architecture/backend.md) |
 | 4 | News & Sentiment: News read, Market read, model download/release, Track record | [docs/architecture/news.md](docs/architecture/news.md) |
 | 4 | Request-origin guard, Settings → API keys (`keys.py`) | [docs/architecture/security.md](docs/architecture/security.md) |
 | 5, 8, 11 | Frontend, CSS / theming, finding things | [docs/architecture/frontend.md](docs/architecture/frontend.md) |
@@ -261,15 +261,15 @@ Each of these has cost real debugging time; the link goes to the full story.
   and check any new stand-in's returns against Yahoo directly.
   [backend.md → Short listings' history](docs/architecture/backend.md#short-listings-history-analyticsextend_history-2026-10-09) ·
   [backend.md → stock window](docs/architecture/backend.md#the-stock-windows-stand-in-analyticswindow_stand_in-2026-11-02)
-- **Finnhub's free plan answers US listings only** (403 for REP.MC, TTE.PA,
-  CCC3.DE…): every Finnhub call goes to the company's US line
+- **Finnhub's free plan answers US listings only** (403 for AIR.PA, SIE.DE,
+  APC.DE…): every Finnhub call goes to the company's US line
   (`symbol_db.us_line`, from the pack's company group). MSPR is SEC Form 4,
   so a foreign company never has one. **yfinance `get_news` returns `[]` for
   every ticker** (Yahoo 404, 2026-10-11); search news backs it up for US lines.
   [backend.md → Finnhub supplemental columns](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson)
 - **A logo is the company's, not the ticker's**: the hosts key on the exact
-  ticker, so a cut-off suffix shows another company (SU.PA is Schneider, SU is
-  Suncor). Always `logoImg(fullSymbol)`; `symbol_db.logo_tickers` picks the US
+  ticker, so a cut-off suffix shows another company (AI.PA is Air Liquide, AI is
+  C3.ai). Always `logoImg(fullSymbol)`; `symbol_db.logo_tickers` picks the US
   line, then the listing itself, then initials.
   [frontend.md → Company logos](docs/architecture/frontend.md#company-logos-logoimg-symbol_dblogo_tickers)
 - **σ/μ (the price distribution) is a detail path, never `fetch_one`**:
@@ -319,14 +319,14 @@ Each of these has cost real debugging time; the link goes to the full story.
   listing's own or research-line targets only, like its row, so the numbers
   agree. [backend.md → model price](docs/architecture/backend.md#the-model-price-capmpy-129)
 - **One primary line for every company fact** (`capm.primary_line`,
-  2026-10-29): beta, the rate's currency (`capm.rate_ccy`: WMT.DE takes the
+  2026-10-29): beta, the rate's currency (`capm.rate_ccy`: APC.DE takes the
   US bill), analysts (`fetcher.analyst_line`, primary line with 3+ analysts
   wins over a listing's own), the options chain and report dates all read
   the company's primary line; price, returns, P&L and correlations stay on
   the listing held. `scripts/audit_beta_lines.py` check 4 asserts it.
   [backend.md → model price](docs/architecture/backend.md#the-model-price-capmpy-129)
 - **A secondary listing borrows its research** (2026-10-18): Yahoo has no
-  analysts on NOV.DE or CCC3.DE. `fetcher.research_line` (home or US
+  analysts on most Xetra lines of foreign companies (APC.DE). `fetcher.research_line` (home or US
   line, the most analysts, a week in `state/research_lines.json`) fills them,
   targets × own price / research price, and fills fundamentals' gaps only,
   never replacing a listing's own. **σ/μ maturities count from the quotes'
@@ -358,6 +358,47 @@ Each of these has cost real debugging time; the link goes to the full story.
   transform breaks the sticky header and total.
   [backend.md → Analytics](docs/architecture/backend.md#analytics-apiportfolio-analytics-multi) ·
   [frontend.md → Column registry](docs/architecture/frontend.md#column-registry-cols--builtin_views)
+- **A what-if is a normal portfolio with a `whatif` block** (Phase 4,
+  `whatif.py`): `{book_id, copied_at, rev, ccy, origin, entry_ids}`, written once
+  by `create` (watchlist + view + preset + block, one views.json write), carried
+  by every `save_view` (`persistence._VIEW_CARRY`: a new per-view key joins it or
+  the first refresh drops it), shown only while its book shows, **detached, never
+  deleted** with its book (`books.delete`). `origin` is frozen; the line, stats,
+  diffs and rebalance read the LIVE book through the page's memo
+  (`whatif._page`: never the disk copy, never a second computation). A copy or
+  rebalance of a book that isn't whole (waiting, splits_pending, broken) is refused.
+  [backend.md → what-if](docs/architecture/backend.md#what-if-portfolios-and-the-rebalance-whatifpy-rebalancepy-phase-4)
+- **The rebalance is arithmetic, never advice, and never writes** (`rebalance.py`,
+  pure numpy): both sides at the page's closes (one snapshot), a name taken out is
+  sold in full in every mode (fixed at 0, `n_base`), a close older than 7 days or
+  no price/rate locks a name, ≤ 8 tradeable names are enumerated exactly, Fewest
+  trades has a "≤ budget" branch. Cost = `tc_bps` only. Run `tests/test_rebalance.py`
+  (scipy and brute-force references) after any change to the solve or the search.
+  [backend.md → the engine](docs/architecture/backend.md#what-if-portfolios-and-the-rebalance-whatifpy-rebalancepy-phase-4)
+- **What-if UI** (Phase 4, `app.js` "Phase 4"): a what-if tab, strip and pills show
+  only while `wiHidden` is false (its `book_id` is the showing book); a book switch or
+  delete runs `wiFollowBooks`. The jade `--origin` (all three themes) is only an
+  outline, the 4px row bar, the chart line: never a fill, never text, never the data
+  green. Weight differences are neutral text (`wiPts`). Compare, book weights and
+  trades re-ask on `rev` (`bookTabSync` → `wiRevCheck`); the comparison is asked after
+  each analytics paint (`wiAfterAnalytics`), errors never cached. The plug saves the
+  run with `mptCompactRun` (sets, picks, held_out, stand_ins, and the streamed cloud)
+  and says "Nothing was saved" on any failure. The weights row's mode bar must not
+  scroll (it clips "+N more"); how many sets show is measured (`wrowFit`), never a
+  fixed count. ✕ on a name the copy held takes it to 0% (`wiZeroOrigin`), never
+  deletes it. Optimize's "current" is `--mpt-current` (cyan in
+  Bloomberg). `tests/test_frontend_whatif.py` holds these.
+  [frontend.md → Phase 4](docs/architecture/frontend.md#what-ifs-the-weights-row-the-weight-center-rebalance-phase-4-appjs-phase-4)
+- **The optimizer uses the chart's stand-ins** (Phase 4): `frontier.py` runs
+  `extend_history` before the coverage rule, so a young or gapped secondary line is
+  no longer silently dropped; what is still left out is `held_out` and keeps its
+  weight in a set made from the run. Saved sets are marked per run (`weight_sets` →
+  `sets`, partial when names fall outside), the plug's points are
+  `frontier.pick_points` (same risk = highest `ret` with the LP's daily `cvar` ≤ current's,
+  never the displayed `cvar30`; a `note` when the grid leaves it below now), and
+  `POST /api/weight-presets/optimized` reads the point from the SAVED run, never the
+  request; a preset's `source` is allow-listed and dropped when weights are edited.
+  [mpt.md](docs/architecture/mpt.md#apiefficient-frontier-params-frontierpy)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -400,7 +441,9 @@ sub-decision.
 │   ├── analytics.py             ← analyze_portfolios_multi(), bulk close, analyst blocks — §4
 │   ├── capm.py                  ← THE app's expected-return model: one beta (home index, 3Y daily BSWA, shrunk), mu = rf_local + beta·ERP + alpha, model price S0·e^(mu T) — §4
 │   ├── fx.py                    ← FX spot rates, basket index history, currency conversion — §4
-│   ├── frontier.py              ← Mean-CVaR frontier orchestrator (BL returns + CVaR risk, wraps mpt.py) — §12
+│   ├── frontier.py              ← Mean-CVaR frontier orchestrator (BL returns + CVaR risk, wraps mpt.py); saved-set marks, the plug's points and weight sets — §12
+│   ├── rebalance.py             ← The rebalance engine (pure numpy, no I/O): trades from the book to a target in whole shares / exact / value steps / fewest trades — §4 "what-if"
+│   ├── whatif.py                ← What-if portfolios: the copy of My Investments, book weights + same-company match, the comparison (green line, stats, book total row), the rebalance route, the optimizer plug's preset — §4 "what-if"
 │   ├── mpt.py                   ← Optimization primitives: Black-Litterman + mean-CVaR numba solver — §12
 │   ├── persistence.py           ← JSON CRUD for views/watchlists/presets/MPT runs/column views — §4
 │   ├── cache.py                 ← Process-global TTL cache dicts shared across modules

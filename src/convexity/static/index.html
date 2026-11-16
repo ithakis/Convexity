@@ -76,6 +76,9 @@
   <!-- The open portfolio, below its tab. Not a box (v1.19): the page holds the
        search and constituents, and the analytics sheet is the only box. -->
   <div class="pf-body">
+  <!-- A what-if (a copy of My Investments, Phase 4): where it came from, what
+       changed in the book since, and the way to its trades (wiStripRender). -->
+  <div class="wi-strip" id="wi-strip" hidden></div>
 
   <!-- Company search (search.py, POST /api/search). One box: the server picks
        the search type (name, theme, screen) and returns the query it ran as
@@ -106,7 +109,7 @@
   <div class="pf-editor">
     <!-- The kicker folds the chips away (global, prefs.json pf_chips_collapsed);
          folded, one muted line of tickers says what is inside. -->
-    <div class="section-anchor pf-anchor"><button type="button" class="sa-kicker pf-fold" id="pf-chips-toggle" aria-expanded="true" aria-controls="pf-chips"><span class="pf-caret" aria-hidden="true">&#9662;</span>Portfolio Constituents<span id="pf-count"></span></button></div>
+    <div class="section-anchor pf-anchor"><button type="button" class="sa-kicker pf-fold" id="pf-chips-toggle" aria-expanded="true" aria-controls="pf-chips"><span class="pf-caret" aria-hidden="true">&#9662;</span>Portfolio Constituents<span id="pf-count"></span></button><span class="wi-okey" id="pf-origin-key" hidden></span></div>
     <div class="pf-chips" id="pf-chips"></div>
     <div class="pf-chips-sum" id="pf-chips-sum" hidden></div>
   </div>
@@ -115,11 +118,17 @@
        separated by hairlines only, never by boxes of their own. -->
   <div class="section-anchor pf-anchor"><span class="sa-kicker">Portfolio analytics</span></div>
   <div class="pf-analytics" id="pf-analytics">
-    <div class="pf-analytics-head">
-      <!-- Mode bar: built-in pills (Equal, Cap) + any saved per-portfolio
-           weight presets. Trailing "+" opens the weights editor in new-preset
-           mode; the pencil on an active preset opens it for edit/delete. -->
+    <!-- Weights row (Phase 4, option A): Equal, Cap, up to five saved sets (the
+         active one always among them), the rest in "+N more", and the Weight
+         Center, where sets are created, compared, renamed and deleted. -->
+    <div class="pf-wrow" id="pf-wrow">
+      <span class="pf-wlabel">Weights</span>
       <div class="pf-mode-bar" id="pf-mode-toggle" role="tablist" aria-label="Weighting"></div>
+      <span class="pf-wspacer"></span>
+      <span class="pf-wmeta" id="pf-wmeta"></span>
+      <button type="button" class="pf-wc-btn" id="pf-wc-open" data-tip="Create, compare, rename and delete weight sets, and let the optimizer make one"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h6.5M12.5 4.5H14M2 11.5h2.5M8.5 11.5H14"/><circle cx="10.5" cy="4.5" r="1.8"/><circle cx="6.5" cy="11.5" r="1.8"/></svg>Weight Center</button>
+    </div>
+    <div class="pf-analytics-head">
       <div class="pf-period-tabs" id="pf-period-tabs">
         <button data-p="3M">3M</button>
         <button data-p="6M">6M</button>
@@ -278,16 +287,17 @@
   </div>
 </div>
 
-<!-- Custom-weight popup. The name input + Save/Save-as/Delete row turns the
-     editor into a named-preset manager; Apply alone still works as the
-     legacy ad-hoc "custom" mode for one-off comparisons. -->
+<!-- The Weight Center (Phase 4, option A): the editable set's slider rows as
+     before (editing a row rebalances the unlocked rest), each compared set a
+     column on the same line with its difference in points under it (neutral
+     text: a weight difference is not performance). On a what-if a thin red tick
+     marks My Investments' weight on each track. The optimizer plug sits above
+     the rows. Opened only through showOverlay (openWeightsPopup). -->
 <div class="pf-weights-bg" id="pf-weights-bg">
-  <!-- Weights editor (v1.28.6, "V1 · plain number"): slim sliders, the weight
-       reads as text until hovered/focused, ghost lock icons, no company colours.
-       Behaviour is unchanged — editing a row still rebalances the unlocked rest. -->
-  <div class="pf-weights-modal" role="dialog" aria-modal="true" aria-labelledby="pf-weights-title">
+  <div class="pf-weights-modal wc" role="dialog" aria-modal="true" aria-labelledby="pf-weights-title">
     <div class="pf-weights-head">
-      <span class="pf-weights-title" id="pf-weights-title">Custom weights</span>
+      <span class="pf-weights-title" id="pf-weights-title">Weight Center</span>
+      <span class="wc-sub" id="wc-sub"></span>
       <div class="pf-weights-sum" id="pf-weights-sum" data-tip="Total of all weights">100.0%</div>
       <span class="pf-weights-seg" role="group" aria-label="Fill weights">
         <button type="button" id="pf-weights-equal" data-tip="Set every holding to the same weight">Equal</button>
@@ -295,15 +305,38 @@
       </span>
       <button type="button" id="pf-weights-close" class="x-close" aria-label="Close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
     </div>
+    <div class="wc-bar" id="wc-bar"></div>
+    <div class="wc-bar wc-dbar" id="wc-dbar"></div>
+    <div class="wc-opt" id="wc-opt" hidden></div>
     <div class="pf-weights-body" id="pf-weights-body"></div>
     <div class="pf-weights-foot">
-      <input id="pf-weights-name" type="text" placeholder="Preset name (e.g. Growth Tilt)" autocomplete="off" spellcheck="false" aria-label="Preset name"/>
-      <button type="button" id="pf-weights-save" title="Save as named preset">Save</button>
+      <input id="pf-weights-name" type="text" placeholder="Name of the set (e.g. Growth Tilt)" autocomplete="off" spellcheck="false" aria-label="Set name"/>
+      <button type="button" id="pf-weights-save" title="Save this set under the name">Save</button>
       <button type="button" id="pf-weights-saveas" title="Save under a new name">Save as…</button>
-      <button type="button" id="pf-weights-delete" class="danger" title="Delete this preset" style="display:none">Delete</button>
-      <button type="button" id="pf-weights-apply" class="primary" title="Apply without saving, as an unsaved comparison">Apply</button>
+      <button type="button" id="pf-weights-delete" class="danger" title="Delete this set" style="display:none">Delete</button>
+      <span class="wc-sp"></span>
+      <button type="button" id="wc-rebal" hidden title="The trades that would take My Investments to these weights">Rebalance to this…</button>
+      <button type="button" id="pf-weights-apply" class="primary" title="Use these weights now">Apply</button>
     </div>
     <div class="pf-name-status" id="pf-weights-status"></div>
+  </div>
+</div>
+
+<!-- Rebalance to a what-if (Phase 4, option A): a side panel with the what-if
+     visible beside it. Read-only arithmetic toward the owner's own target:
+     nothing is saved and nothing is sent to a broker (rbOpen). -->
+<div class="rb-bg" id="rb-bg">
+  <div class="rb-panel" role="dialog" aria-modal="true" aria-labelledby="rb-title">
+    <div class="rb-head">
+      <div class="rb-head-main"><div class="rb-title" id="rb-title">Rebalance</div><div class="rb-sub" id="rb-sub"></div></div>
+      <button type="button" id="rb-close" class="x-close" aria-label="Close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
+    </div>
+    <div class="rb-body" id="rb-body"></div>
+    <div class="rb-foot">
+      <span class="rb-disc"><b>Arithmetic toward your own target, not advice.</b> Nothing is sent to a broker: you place the trades yourself, then add them on My Investments.</span>
+      <button type="button" id="rb-copy">Copy list</button>
+      <button type="button" id="rb-done" class="primary">Done</button>
+    </div>
   </div>
 </div>
 
@@ -403,6 +436,8 @@
         <div class="pf-mpt-legend" id="pf-mpt-legend"></div>
       </div>
       <div class="pf-mpt-side" id="pf-mpt-side">
+        <!-- A saved weight set picked on the chart (mptSelectSet): its name and where it came from. -->
+        <div class="pf-mpt-sethead" id="pf-mpt-sethead" hidden></div>
         <div class="pf-mpt-tiles" id="pf-mpt-tiles"></div>
         <!-- Stale-result line (mptStaleUpdate): what the shown run used vs the
              controls now, and "Use these" when only the shared trading

@@ -1308,7 +1308,7 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
 
     # Display-currency value of one current share on each day: the close, or
     # the last trade price on days the share has no close yet.
-    vps, last_close = {}, {}
+    vps, last_close, last_date = {}, {}, {}
     for s in syms:
         m = mult.get(major_ccy(qccy[s]))
         v = close[s] * price_in_major(1.0, qccy[s]) * m if m is not None else np.full(n, np.nan)
@@ -1322,6 +1322,10 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
         vps[s] = v
         finite = close[s][~np.isnan(close[s])]
         last_close[s] = float(finite[-1]) if len(finite) else None
+        # The day of that close (the calendar read carries it forward): the
+        # rebalance refuses a price older than a week (whatif.py, Phase 4).
+        own = closes[s].dropna() if s in has else None
+        last_date[s] = str(own.index[-1])[:10] if own is not None and len(own) else None
 
     cr = mult[base] if mult.get(base) is not None else np.ones(n)  # display per base unit
     value, cash = np.zeros(n), np.zeros(n)
@@ -1484,7 +1488,8 @@ def _performance(raw: dict, b: ledger.Book, entries: list[dict], base: str, disp
     priced = not syms or any(np.isfinite(c).any() for c in close.values())
     return {"series": series if priced else None, "periods": per if priced else None,
             "cash": float(cash[-1]), "net_deposits": float(np.sum(d_in - w_out)),
-            "implied": float(implied), "month": month, "close": close, "last_close": last_close, "mult": mult,
+            "implied": float(implied), "month": month, "close": close, "last_close": last_close,
+            "last_date": last_date, "mult": mult,
             "qccy": qccy, "est": est_by_sym, "suggested": suggested,
             "risk_share": _risk_share(syms, vps, qty_s, traded, starts["1Y"]),
             "xray": {s: _xray(closes[s] if s in has else None, _held_since(qty_s[s], dates), _dividends(s))
@@ -2040,6 +2045,7 @@ def book(ccy: str | None = None) -> dict:
             "quote_ccy": qccy, "shares": round(p.qty, 6),
             "avg_price": avg * to_quote if avg is not None else None,
             "price": price * to_quote, "value": m.value,
+            "price_date": perf["last_date"].get(p.symbol) if note is None else None,
             "month_pct": ((last_q / ms_q - 1) * 100 if last_q and ms_q and np.isfinite(ms_q) else None),
             "profit_held": m.unrealised, "profit_sold": p.realised, "dividends": p.dividends,
             "dividends_est": est,

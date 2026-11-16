@@ -73,6 +73,10 @@ POST_PATHS = [
     "/api/mpt-runs",
     "/api/weight-presets",
     "/api/weight-presets/active",
+    "/api/weight-presets/optimized",
+    "/api/whatif",
+    "/api/whatif/compare",
+    "/api/whatif/rebalance",
     "/api/analytics-cache",
     "/api/refresh-job",
     "/api/refresh-job/rj_x/cancel",
@@ -155,7 +159,15 @@ def test_cross_origin_delete_refused(srv, path, headers):
 
 @pytest.mark.parametrize(
     "path",
-    ["/", "/static/app.js", "/api/watchlists", "/api/views", "/api/views/Book", "/api/health"],
+    [
+        "/",
+        "/static/app.js",
+        "/api/watchlists",
+        "/api/views",
+        "/api/views/Book",
+        "/api/health",
+        "/api/whatif/book",
+    ],
 )
 def test_rebinding_get_refused(srv, path):
     """A rebound page is same-origin, so without the Host check it could read

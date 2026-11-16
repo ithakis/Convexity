@@ -384,6 +384,101 @@ dependency (loaded from CDN, used only for column-guide formulas).
   follows its own orange accent. Measured text on the fill: dark 7.46, light 9.23,
   Bloomberg 7.42. Chart type, Columns, ✕ menus and Optimize's selects are apart.
 
+### What-ifs, the weights row, the Weight Center, rebalance (Phase 4, app.js "Phase 4")
+The owner approved option A of each mockup (2026-11-13). Server side: `whatif.py`,
+`rebalance.py`, `frontier.py` (backend.md "What-if portfolios"). One code block in
+`app.js`, just above "Custom weights popup": `WI` (what-if answers), `WC` (the
+Weight Center), `RB` (the rebalance panel).
+
+- **A what-if shows only with its own book.** `wiBlock(name)` is `VIEWS[name].whatif`;
+  `wiHidden(name)` is true when its `book_id` isn't `wiShowing()` (`BOOKS.active` when
+  the switch is on, else `"main"`). `renderTabs` leaves hidden ones out and puts the
+  visible ones right after the red tab (`.pf-tab-wi`, a hollow red ring); startup
+  moves off a hidden `LAST_VIEW`; a book switch or delete runs `wiFollowBooks`
+  (reload `/api/views`: a deleted book's what-ifs come back as plain portfolios;
+  leave a hidden what-if for the red tab). `persistView` keeps `whatif` in `VIEWS`
+  (the page never writes the block; the server carries it).
+- **"New My Investments"** (`.pf-tab-newbook`, after "+ New portfolio" while the book
+  holds anything): `wiCreate` posts once, no dialog, opens the copy, builds rows the
+  red tab had none for (`rows_complete: false`), and toasts with Undo (`wiUndo`, the
+  ordinary `DELETE /api/watchlists`). 409 `BookMoved` reloads the books state.
+- **The jade `--origin` token** (all three themes, never the data green, never a fill
+  or text: an outline, the 4px row bar, the chart line, the 3px legend swatch) marks
+  what the copy held. `wiOrigin()` reads the FROZEN `origin`; a copy name at 0% in the
+  active weights is "removed": its chip stays faded and struck through with no ✕, its
+  row stays faded with a faded bar (`tr.wi-gone`), its Weight Center row too. The chips
+  repaint with the rows (`render()` and `renderModeBar` call `renderConstituents` on a
+  what-if), so any weight change (Apply, a set, the plug) shows at once.
+  **✕ on a name the copy held never deletes it** (`removeEntry` → `wiZeroOrigin`): it
+  goes to 0% in the active weights, the rest scaled up; a saved set is saved again
+  (its optimizer provenance goes, as with any hand edit), Equal / Cap / applied weights
+  become applied weights ("Custom"), with Undo. ✕ on a name the copy didn't hold
+  removes it as before. Equal and Cap weight every constituent, so choosing one gives
+  removed names weight again: `selectMode` says so in a toast rather than hiding it. The row
+  bar is `#tbl tbody tr.wi-o > td:first-child`'s inset shadow, so it is in every view.
+- **Everything that compares reads the LIVE book**, asked again when `rev` moves:
+  `bookTabSync` → `wiRevCheck` (clears `WI.bk` / `WI.cmp`, re-asks the strip, the
+  comparison, an open rebalance). `wiLoadBook` (`GET /api/whatif/book`, keyed on view,
+  currency and symbols, one request per key) feeds the strip's "changed since" note,
+  the weights row's "differs by X% of value" (what-ifs only) and the Weight Center's
+  "My Investments" column (any portfolio).
+- **The comparison** (`wiCompare`, `POST /api/whatif/compare`) is asked by
+  `wiAfterAnalytics` at both ends of `requestAnalytics` (cache hit and answer), keyed
+  like the analytics plus the weights themselves (`wiCmpKey`: a set edited in place
+  keeps its name), errors kept apart (`WI.cmpErr`) so a failure is
+  asked again on the next paint, not cached. It draws three things: the solid jade
+  line in `pfBenchLines` (`solid`, `starts` → the dashed "My Investments starts" mark),
+  Risk & Return as three columns (`renderStatsHtml` → `wiStatsHtml`; `shared` adds the
+  "Since <date>" table; one rf for all three, said under the table; the bench picker
+  is a fixed "S&P 500" there), and the second total row (`totalRows` pushes
+  `book_total` with `book: true`; `renderTotalRows` lifts the first row's sticky
+  `bottom` by the second's height; its tip is `wiBookTotalTip`: Contrib is a backtest,
+  the actual record is the green line).
+- **The weights row** (`#pf-wrow`, `renderModeBar`): Book (red tab), Equal, Cap, then as
+  many saved sets as fit, the rest in a `bench-dd` "+N more" (`wcMenuHtml`, the one menu
+  style), and the Weight Center button where "+" and "✎" were. **The count is measured,
+  not fixed** (`wrowFit`): every pill is drawn once at its natural width (a name is cut
+  at 180 px with an ellipsis, the whole name in its `title` or tip), then sets are kept
+  in order while they fit beside the label, Equal/Cap, the "differs by" line and the
+  button, the active one always kept. Before any set is hidden, "differs by" drops to
+  its own line (`.meta-below`), so nothing overlaps and the button never leaves the
+  row. Hidden (width 0) it falls back to five (`WROW_MAX`); a `ResizeObserver` on the
+  row redraws on a width change. A set made by the optimizer explains itself on hover
+  (`presetTip`, incl. `SAME_RISK_NOTE`). `.pf-wrow .pf-mode-bar` must not scroll: an
+  `overflow` there clips the menu.
+- **The Weight Center** is the old weights modal grown (`#pf-weights-bg`, still
+  `WEIGHTS_DRAFT` / `onWeightInput`): one CSS grid template `--wc-cols` for the header
+  and every row; compared sets are columns (`WC.cmp`, chips), each cell its weight and,
+  under it, that set minus the reference in points (`wiPts`, **neutral text**, bold at
+  5+ points); "Differences against" switches the reference to My Investments and adds
+  a "Δ vs My Inv." column. `wcFillRow` refreshes the cells from `syncWeightsInputs` as
+  a slider moves. The book column says "as APC.DE" for a same-company line (`match.via`).
+  On a what-if, a thin red tick on each track marks the book's weight. The book's names
+  this portfolio lacks fold under one line with Add (into the constituents; its slider
+  comes with Refresh). Apply on an untouched saved set just selects it.
+- **The optimizer plug** (`wcOptimize`): the newest run's settings (`plug` from
+  `GET /api/mpt-runs`), budget light, `weight_sets`; the stream (its `cloud` chunks
+  kept: `done` ships none) → `POST /api/mpt-runs` (`mptCompactRun`) →
+  `POST /api/weight-presets/optimized`. Any failure says "Nothing was saved"; success
+  makes the set active and compares it. Rules: Same risk as now (with `SAME_RISK_NOTE`:
+  the optimizer's daily CVaR, so the 30-day figure can differ), Lowest risk, Selected
+  point (only while the Optimize tab holds a run of this portfolio).
+- **Rebalance** (`#rb-bg`, a right side panel through `showOverlay`): opened from the
+  strip (the active weights) or the Weight Center (the draft). Whole shares by default,
+  Exact, €100 steps, Fewest trades (a slider over `path`, debounced 350 ms: each answer
+  recomputes the path). The other modes' trade counts fill in one by one after the
+  shown one (`rbCountOthers`). Cash: keep (default) or invest down to a reserve. Gains
+  column folded. Words are arithmetic, never advice; the footer says nothing is sent.
+- **Optimize: saved sets on the chart.** `mptRun` sends `weight_sets`; the stream's
+  `sets / picks / held_out / stand_ins` are kept and saved. `mptDrawSets` marks each set
+  (labelled, greedy placement, a dashed ring when partial, the active one ringed
+  "current"); a set with `error` is listed in the legend instead. The overlay grows
+  the hovered mark (`mptHitSet`, 12 px) and rings the selected one (`MPT.selSet`); the
+  side panel then shows the set (`mptActiveSel`), "Use this set" selects the preset
+  and "Open in Weight Center" opens it there. Any frontier pick clears `selSet`.
+  **"Current" is `--mpt-current`**: orange, but Bloomberg's cyan, since its accent
+  (the selected ring) is orange.
+
 ### State (`STATE`, `DATA`, `VIEWS`, `WATCHLISTS`)
 - `DATA` — currently-rendered rows
 - `VIEWS` — server-side view metadata (mirrors `/api/views` response)
@@ -796,17 +891,17 @@ picked.
 ### Company logos (`logoImg`, `symbol_db.logo_tickers`)
 
 Every logo goes through `logoImg(symbol)` with the row's **full** symbol. Never
-cut the suffix off: FMP and Parqet key on the exact ticker, so `SU` is Suncor
-while `SU.PA` is Schneider, `NOV` is NOV Inc. while `NOV.DE` is Novo Nordisk,
-`GIS` is General Mills while `GIS.DE` is Gilead.
+cut the suffix off: FMP and Parqet key on the exact ticker, so `AI` is C3.ai
+while `AI.PA` is Air Liquide, `OR` is OR Royalties while `OR.PA` is L'Oréal,
+`BN` is Brookfield while `BN.PA` is Danone.
 
 `/api/logo-tickers` answers from the symbol pack, with no network:
 `symbol_db.logo_tickers` returns the company's US line, then the listing itself,
 then its home line. `logoImg` walks those tickers across both hosts on `onerror`
 and ends on the initials tile, built from the row's own symbol. The US line comes
-first because a listing's own image can be an old brand (TTE.PA still shows
-Total) or a tiny icon (AIR.PA). The listing's full ticker stays in the chain since
-it names the same company: Philogen and UCITS ETFs have no US line, and both
+first because a listing's own image can be an old brand (a renamed company's
+listing can still show the old name) or a tiny icon (AIR.PA). The listing's full ticker stays in the chain since
+it names the same company: small Italian biotechs and UCITS ETFs have no US line, and both
 hosts have them.
 
 `logoImg` is synchronous. A symbol not yet known renders an `<img>` with no `src`,
@@ -1397,7 +1492,9 @@ grep -n "<symbol>" src/convexity/*.py src/convexity/static/*.{js,html,css}
 
 Anchors worth knowing (all greppable): `COLS` / `BUILTIN_VIEWS` (column registry,
 top of `app.js`); `renderTabs`, `beginTabRename`, `tabMenuOpen` (tabs); `requestAnalytics`,
-`renderModeBar` (analytics); `exportXlsx`; `lcHtml` / `lcShow` / `lcHide` (loading
+`renderModeBar` (analytics, the weights row); `openWeightsPopup` / `wcFillRow` (Weight
+Center); `wiCreate`, `wiCompare`, `wiStatsHtml`, `rbOpen` (what-ifs, rebalance);
+`mptDrawSets` (Optimize marks); `exportXlsx`; `lcHtml` / `lcShow` / `lcHide` (loading
 chip, CSS `.lc-*`); `showOverlay` / `hideOverlay` and the global Escape handler;
 `Handler` and `_pick_port` in `server.py`; `fetch_one`, `fetch_detail` in
 `fetcher.py`; `resolve_symbol` in `resolver.py`; `analyze_portfolios_multi` in

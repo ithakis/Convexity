@@ -104,6 +104,10 @@ def list_views() -> dict:
             "row_count": len(_dedupe_rows_by_symbol(rows)) if isinstance(rows, list) else 0,
             "stale": bool(entry.get("stale")),
         }
+        if isinstance(entry.get("whatif"), dict):
+            # The tab bar shows a what-if only while its book is the one
+            # showing (books.showing()); the origin draws its green markers.
+            out[name]["whatif"] = {k: v for k, v in entry["whatif"].items() if k != "entry_ids"}
     return {"views": out, "last_view": raw.get("last_view")}
 
 
@@ -150,6 +154,9 @@ def _stale_book_rows(name: str, entries: str) -> bool:
     return {e.strip() for e in re.split(r"[,\n]", entries or "") if e.strip()} != held
 
 
+_VIEW_CARRY = ("weight_presets", "active_weight_preset", "analytics_cache", "whatif")
+
+
 def save_view(name: str, entries: str, rows: list, *, set_last: bool = True) -> dict:
     clean_name = (name or "").strip() or _CURRENT_KEY
     if _stale_book_rows(clean_name, entries):
@@ -170,7 +177,10 @@ def save_view(name: str, entries: str, rows: list, *, set_last: bool = True) -> 
         views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
         prior = views_map.get(clean_name) if isinstance(views_map.get(clean_name), dict) else None
         if prior:
-            for k in ("weight_presets", "active_weight_preset", "analytics_cache"):
+            # Everything that isn't the rows: a refresh rewrites the rows only.
+            # "whatif" (Phase 4) was once missing here, which would have turned a
+            # what-if into a plain portfolio on its first refresh.
+            for k in _VIEW_CARRY:
                 if k in prior:
                     payload[k] = prior[k]
         views_map[clean_name] = payload
@@ -311,6 +321,76 @@ def list_weight_presets(view_name: str) -> dict:
     return {"presets": presets, "active": entry.get("active_weight_preset")}
 
 
+# A preset's provenance (Phase 4): the optimizer plug in the Weight Center saves
+# a set with where it came from. Allow-listed key by key, because the block is
+# shown back to the owner and kept for good: only these keys, these types, these
+# sizes. Anything else is dropped, never stored.
+_SOURCE_RULES = ("same_risk", "min_cvar", "selected")
+_SOURCE_PARAMS = ("lookback", "alpha", "rf", "fully_invested", "cov_model", "haircut", "budget",
+                  "rebalance", "tc_bps", "display_ccy")  # fmt: skip
+_SOURCE_POINT = ("ret", "ret_net", "cvar30", "vol", "mdd")
+
+
+def _finite(v) -> float | None:
+    if isinstance(v, bool) or not isinstance(v, int | float):
+        return None
+    return float(v) if math.isfinite(v) else None
+
+
+def _short_text(v, most: int) -> str | None:
+    return v[:most] if isinstance(v, str) and v.isprintable() else None
+
+
+def clean_preset_source(src) -> dict | None:
+    """The allow-listed provenance block of a weight preset, or None."""
+    if not isinstance(src, dict) or src.get("kind") != "optimizer":
+        return None
+    out: dict = {"kind": "optimizer"}
+    if src.get("rule") in _SOURCE_RULES:
+        out["rule"] = src["rule"]
+    for k in ("index", "n_points"):
+        v = src.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 100_000:
+            out[k] = v
+    if (rid := _short_text(src.get("run_id"), 64)) and re.fullmatch(r"[\w.:-]+", rid):
+        out["run_id"] = rid
+    if isinstance(src.get("params"), dict):
+        prm = {}
+        for k in _SOURCE_PARAMS:
+            v = src["params"].get(k)
+            if isinstance(v, bool):
+                prm[k] = v
+            elif (f := _finite(v)) is not None:
+                prm[k] = f
+            elif (t := _short_text(v, 16)) is not None:
+                prm[k] = t
+        out["params"] = prm
+    for blk, keys in (("point", _SOURCE_POINT), ("current", _SOURCE_POINT)):
+        if isinstance(src.get(blk), dict):
+            out[blk] = {k: f for k in keys if (f := _finite(src[blk].get(k))) is not None}
+    if isinstance(src.get("held_out"), list):
+        held = []
+        for x in src["held_out"][:200]:
+            sym = _short_text(x.get("symbol"), 32) if isinstance(x, dict) else None
+            w = _finite(x.get("weight")) if isinstance(x, dict) else None
+            if sym and w is not None and 0.0 <= w <= 1.0:
+                held.append({"symbol": sym.strip().upper(), "weight": w})
+        out["held_out"] = held
+    if isinstance(src.get("warnings"), list):
+        out["warnings"] = [t for x in src["warnings"][:5] if (t := _short_text(x, 200))]
+    if at := _short_text(src.get("computed_at"), 40):
+        out["computed_at"] = at
+    return out
+
+
+def _same_weights(a: dict, b) -> bool:
+    if not isinstance(b, dict):
+        return False
+    b = _normalize_preset_weights(b)
+    keys = {k for k, v in a.items() if v} | {k for k, v in b.items() if v}
+    return all(abs(a.get(k, 0.0) - b.get(k, 0.0)) < 1e-9 for k in keys)
+
+
 def upsert_weight_preset(
     view_name: str,
     preset_name: str,
@@ -318,7 +398,11 @@ def upsert_weight_preset(
     *,
     rename_from: str | None = None,
     set_active: bool = True,
+    source: dict | None = None,
 ) -> dict:
+    """Save a preset. ``source`` (the optimizer's provenance) is allow-listed;
+    a save without one keeps the old preset's only when the weights are the
+    same (a rename): weights edited by hand are the owner's, not the run's."""
     clean_view = (view_name or "").strip()
     clean_name = (preset_name or "").strip()
     if not clean_view:
@@ -330,6 +414,8 @@ def upsert_weight_preset(
         "weights": _normalize_preset_weights(weights),
         "saved_at": datetime.now(UTC).isoformat(),
     }
+    if (src := clean_preset_source(source)) is not None:
+        payload["source"] = src
     with _VIEWS_LOCK:
         raw = _read_views_raw()
         views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
@@ -344,11 +430,10 @@ def upsert_weight_preset(
             if not isinstance(p, dict):
                 continue
             pname = (p.get("name") or "").strip()
-            if rename_from and pname == rename_from.strip():
-                presets[i] = payload
-                replaced = True
-                break
-            if not rename_from and pname == clean_name:
+            if pname == (rename_from.strip() if rename_from else clean_name):
+                if ("source" not in payload and isinstance(p.get("source"), dict)
+                        and _same_weights(payload["weights"], p.get("weights"))):  # fmt: skip
+                    payload["source"] = p["source"]
                 presets[i] = payload
                 replaced = True
                 break
@@ -404,6 +489,100 @@ def set_active_weight_preset(view_name: str, preset_name: str | None) -> dict:
         raw["views"] = views_map
         _write_views_raw(raw)
     return list_weight_presets(clean_view)
+
+
+# ----------------------------- What-if portfolios (Phase 4) -----------------
+#
+# A what-if is a normal portfolio (watchlist + view + presets) whose view
+# carries a ``whatif`` block: {book_id, copied_at, rev, ccy, origin {sym: w},
+# entry_ids}. ``origin`` is frozen at the copy (the green markers); the line,
+# the stats, the weight differences and the rebalance read the LIVE book.
+# ``entry_ids`` (the ledger's ids at the copy) lets the page say what changed
+# since, without keeping a copy of the book. whatif.py writes and reads it.
+
+
+def clean_whatif(block) -> dict | None:
+    """The what-if block as stored, or None when it isn't one."""
+    if not isinstance(block, dict) or not isinstance(block.get("book_id"), str):
+        return None
+    origin = {}
+    for sym, w in (
+        (block.get("origin") or {}).items() if isinstance(block.get("origin"), dict) else ()
+    ):
+        if isinstance(sym, str) and (f := _finite(w)) is not None and f >= 0:
+            origin[sym.strip().upper()] = f
+    ids = block.get("entry_ids")
+    return {
+        "book_id": block["book_id"][:32],
+        "copied_at": _short_text(block.get("copied_at"), 40),
+        "rev": block.get("rev") if isinstance(block.get("rev"), int) else None,
+        "ccy": _short_text(block.get("ccy"), 8),
+        "origin": origin,
+        "entry_ids": [x[:64] for x in ids if isinstance(x, str)][:20_000]
+        if isinstance(ids, list)
+        else [],
+    }
+
+
+def create_whatif_view(
+    name: str, entries: str, rows: list, block: dict, preset_name: str, *, stale: bool = False
+) -> dict:
+    """The what-if's view, its active preset (the book's weights at the copy)
+    and its block in ONE write of views.json; the watchlist goes first and is
+    taken back if this write fails. Refuses a name already in use."""
+    clean_name = (name or "").strip()
+    clean = clean_whatif(block)
+    if not clean_name or clean is None:
+        raise ValueError("a what-if needs a name and a book")
+    if clean_name in load_watchlists() or clean_name in (list_views().get("views") or {}):
+        raise ValueError(f"portfolio '{clean_name}' already exists")
+    watchlists, _ = upsert_watchlist(clean_name, entries)
+    now = datetime.now(UTC).isoformat()
+    payload = {
+        "entries": str(entries or "").strip(),
+        "rows": _dedupe_rows_by_symbol(rows or []),
+        "saved_at": now,
+        "stale": bool(stale),
+        "weight_presets": [
+            {"name": preset_name, "weights": dict(clean["origin"]), "saved_at": now}
+        ],
+        "active_weight_preset": preset_name,
+        "whatif": clean,
+    }
+    try:
+        with _VIEWS_LOCK:
+            raw = _read_views_raw()
+            views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+            if clean_name in views_map:
+                raise ValueError(f"portfolio '{clean_name}' already exists")
+            views_map[clean_name] = payload
+            raw["views"] = views_map
+            raw["last_view"] = clean_name
+            _write_views_raw(raw)
+    except BaseException:
+        watchlists.pop(clean_name, None)
+        save_watchlists(watchlists)
+        raise
+    return payload
+
+
+def detach_whatifs(book_id: str) -> list[str]:
+    """A deleted My Investments portfolio's what-ifs become plain portfolios:
+    the block goes, the portfolio, its presets and runs stay (owner's call,
+    Phase 4: detach, never delete). Returns their names."""
+    names = []
+    with _VIEWS_LOCK:
+        raw = _read_views_raw()
+        views_map = raw.get("views") if isinstance(raw.get("views"), dict) else {}
+        for name, entry in views_map.items():
+            blk = entry.get("whatif") if isinstance(entry, dict) else None
+            if isinstance(blk, dict) and blk.get("book_id") == book_id:
+                entry.pop("whatif", None)
+                names.append(name)
+        if names:
+            raw["views"] = views_map
+            _write_views_raw(raw)
+    return names
 
 
 # ----------------------------- Analytics cache (per-portfolio) --------------

@@ -18,7 +18,15 @@ import time
 import numpy as np
 
 from convexity import analyst_targets, mpt
-from convexity.analytics import _analyst_for, _bulk_close, _drift, _market_cap_usd, _rebalance_days
+from convexity.analytics import (
+    _analyst_for,
+    _bulk_close,
+    _drift,
+    _market_cap_usd,
+    _rebalance_days,
+    _when,
+    extend_history,
+)
 from convexity.persistence import clean_trading
 from convexity.cache import _cache_get, _cache_put
 from convexity.fx import _apply_fx_to_closes
@@ -311,6 +319,191 @@ def _turnover(returns, w: dict, rebalance: str, tc: float, rf: float) -> dict:
     }
 
 
+# ---- Phase 4: saved sets on the chart, the plug's point, its weight set ----
+
+_MAX_SETS = 40  # marks per run: 0.3 + 1.5 ms each on 27 names over 3Y
+
+
+def _clean_weights(w_in) -> dict[str, float]:
+    out: dict[str, float] = {}
+    if not isinstance(w_in, dict):
+        return out
+    for s, v in w_in.items():
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(s, str) and math.isfinite(f) and f > 0:
+            out[s.strip().upper()] = out.get(s.strip().upper(), 0.0) + f
+    return out
+
+
+def _mark_sets(weight_sets, active: list[str], anchor) -> dict[str, dict]:
+    """Each saved set measured like an anchor (``anchor`` = this run's
+    portfolio_risk_metrics). Names outside the run's ``active`` are dropped
+    and the rest renormalised; such a mark is ``partial``, with the share of
+    its weight it kept (``coverage``) and what it dropped."""
+    out: dict[str, dict] = {}
+    if not isinstance(weight_sets, dict):
+        return out
+    for name, w_in in list(weight_sets.items())[:_MAX_SETS]:
+        if not isinstance(name, str):
+            continue
+        w = _clean_weights(w_in)
+        total = sum(w.values())
+        inside = sum(w.get(s, 0.0) for s in active)
+        dropped = sorted((s for s in w if s not in active), key=lambda s: -w[s])
+        if total <= 0 or inside <= 0:
+            out[name] = {"error": "no weight inside this run", "partial": True,
+                         "coverage": 0.0, "dropped": dropped}  # fmt: skip
+            continue
+        m = anchor({s: w.get(s, 0.0) / inside for s in active})
+        m.update(partial=bool(dropped), coverage=inside / total, dropped=dropped)
+        out[name] = m
+    return out
+
+
+def _held_out(current_weights, symbols: list[str], active: list[str]) -> list[dict]:
+    """The portfolio's names this run leaves out (no usable history even with
+    a stand-in) and their current weight: a set built from the run keeps them
+    there (``set_from_point``) instead of selling them."""
+    cur = _clean_weights(current_weights)
+    total = sum(cur.get(s, 0.0) for s in symbols)
+    if total <= 0:
+        return []
+    return [{"symbol": s, "weight": cur[s] / total}
+            for s in symbols if s not in active and cur.get(s, 0.0) > 0]  # fmt: skip
+
+
+def _num(v) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _cvar30(p: dict) -> float | None:
+    """The displayed 30-day CVaR (the legacy annualised one for old runs)."""
+    return _num(p.get("cvar30") if p.get("cvar30") is not None else p.get("cvar"))
+
+
+SAME_RISK_NOTE = ("Your current weights sit above this frontier point: the run has only a "
+                  "few points, and this is the nearest one at or below your current risk, "
+                  "with a little less expected return.")  # fmt: skip
+SAME_RISK_FALLBACK_NOTE = ("No point of the frontier is as safe as your current weights: "
+                           "this is the lowest-risk point.")  # fmt: skip
+
+
+def pick_points(frontier: list[dict], current: dict | None) -> dict:
+    """The optimizer plug's two points, one rule here rather than in the page.
+
+    Both are chosen by ``cvar``, the daily CVaR (annualised) the frontier is
+    optimal for, never the displayed ``cvar30``: the 30-day figure is another
+    estimator, and by it the current weights could sit above the drawn
+    frontier, so a "same risk" pick by cvar30 had less return than now (1Y on
+    a real 27-name book: 5.7% against 6.5%; by cvar: 6.7%).
+
+    ``same_risk``: the highest-return point whose ``cvar`` is no worse than the
+    current weights'. When the current set is inside the feasible set that
+    point returns at least as much, up to the frontier's grid: if the grid
+    still leaves it below the current return, it is the nearest point at or
+    below the current risk and carries a ``note``. None qualifying: the
+    lowest-risk point (``fallback``, with a note). ``min_cvar``: the
+    lowest-``cvar`` point. Max return per CVaR is not offered: on a real book
+    it was a 100% single-stock corner, and the ratio is flat over most of the
+    frontier (ill-conditioned). Indexes into ``frontier``."""
+    pts = [(i, _num(p.get("cvar")), p.get("ret")) for i, p in enumerate(frontier or [])]
+    pts = [(i, c, r) for i, c, r in pts if c is not None and isinstance(r, int | float)]
+    if not pts:
+        return {"same_risk": None, "min_cvar": None}
+    lo = min(pts, key=lambda t: (t[1], -t[2]))[0]
+    cur = current or {}
+    risk, ret = _num(cur.get("cvar")), _num(cur.get("ret"))
+    ok = [t for t in pts if risk is not None and t[1] <= risk + 1e-12]
+    same = max(ok, key=lambda t: (t[2], -t[1]))[0] if ok else lo
+    pick = {"index": same, "fallback": not ok, "current_cvar30": _cvar30(cur)}
+    if not ok:
+        pick["note"] = SAME_RISK_FALLBACK_NOTE
+    elif ret is not None and frontier[same]["ret"] < ret - 1e-12:
+        pick["note"] = SAME_RISK_NOTE
+    return {"same_risk": pick, "min_cvar": {"index": lo}}
+
+
+_PICK_LABEL = {"same_risk": "same risk", "min_cvar": "lowest risk", "selected": "selected"}
+
+
+def set_from_point(point_weights, held_out: list[dict] | None) -> dict[str, float]:
+    """A frontier point as a weight set: under 0.1% to 0, renormalised, the
+    run's left-out names kept at their current weight (the optimised part
+    scaled to 1 − kept), rounded to 0.01% with the rounding residue on the
+    largest weight so the set sums to exactly 1."""
+    w = {s: v for s, v in _clean_weights(point_weights).items() if v >= 0.001}
+    tot = sum(w.values())
+    if tot <= 0:
+        raise ValueError("the point has no weights")
+    kept = {x["symbol"]: float(x["weight"]) for x in held_out or []
+            if isinstance(x, dict) and isinstance(x.get("symbol"), str) and x["symbol"] not in w
+            and isinstance(x.get("weight"), int | float) and 0 < x["weight"] < 1}  # fmt: skip
+    k = sum(kept.values())
+    if k >= 1:
+        kept, k = {}, 0.0
+    out = {s: v / tot * (1.0 - k) for s, v in w.items()} | kept
+    out = {s: round(v, 4) for s, v in out.items() if round(v, 4) > 0}
+    big = max(out, key=out.get)
+    out[big] = round(out[big] + 1.0 - sum(out.values()), 4)
+    return out
+
+
+def set_name(rule: str, taken, today=None) -> str:
+    """ "Optimized · same risk · 13 Nov", then " (2)", " (3)"… if taken."""
+    from datetime import date
+
+    d = today or date.today()
+    base = f"Optimized · {_PICK_LABEL.get(rule, 'selected')} · {d.day} {d:%b}"
+    taken = set(taken)
+    name, n = base, 2
+    while name in taken:
+        name, n = f"{base} ({n})", n + 1
+    return name
+
+
+PLUG_DEFAULTS = {"lookback": "3Y", "alpha": 0.95, "rf": 0.045, "fully_invested": True,
+                 "cov_model": "ledoit", "haircut": 0.25, "bounds": {}}  # fmt: skip
+
+
+def plug_params(runs: list[dict] | None) -> dict:
+    """The optimizer plug's settings: the portfolio's newest saved run's,
+    cleaned (old runs carry ``frequency``, ``diversified`` and budgets that no
+    longer exist), else the app's defaults; always the light budget. The
+    rebalancing calendar and cost come from the page's saved trading setting."""
+    out = {**PLUG_DEFAULTS, "bounds": {}}
+    src = runs[0].get("params") if runs and isinstance(runs[0], dict) else None
+    src = src if isinstance(src, dict) else {}
+
+    def num(k, lo, hi):
+        try:
+            f = float(src.get(k))
+        except (TypeError, ValueError):
+            return
+        if math.isfinite(f) and lo <= f <= hi:
+            out[k] = f
+
+    if str(src.get("lookback") or "").upper() in _MPT_LOOKBACK_YF:
+        out["lookback"] = str(src["lookback"]).upper()
+    num("alpha", 0.80, 0.995)
+    num("rf", 0.0, 0.2)
+    num("haircut", 0.0, 1.0)
+    if isinstance(src.get("fully_invested"), bool):
+        out["fully_invested"] = src["fully_invested"]
+    if str(src.get("cov_model") or "").lower() in _COV_MODELS:
+        out["cov_model"] = str(src["cov_model"]).lower()
+    if isinstance(src.get("bounds"), dict):
+        out["bounds"] = src["bounds"]
+    out["budget"] = "light"
+    return out
+
+
 def compute_efficient_frontier_stream(
     rows: list[dict],
     *,
@@ -329,8 +522,13 @@ def compute_efficient_frontier_stream(
     rebalance: str = "D",
     tc_bps: float = 0.0,
     max_seconds: float | None = None,
+    weight_sets: dict | None = None,
 ):
     """Streaming mean-CVaR frontier. Yields ``{"type": ...}`` messages.
+
+    ``weight_sets`` ({name: {symbol: weight}}, the portfolio's saved sets) are
+    marked on the chart: each gets the anchors' figures (``sets``), measured
+    with this run's μ, Σ, scenarios, α, rf and cash rule (Phase 4).
 
     Message shapes:
       ``{"type": "progress", "pct": 0-100, "eta": secs|None, "label": str}``
@@ -388,6 +586,25 @@ def compute_efficient_frontier_stream(
     yield _prog("Fetching price history…")
     t_fetch = time.perf_counter()
     closes = _bulk_close(symbols, period_yf)
+    # A short listing borrows the same company's longer line before its own
+    # first close, exactly as the portfolio chart does (analytics.extend_history):
+    # without it a young or gapped secondary line (a Swiss company's Xetra line
+    # had no closes for five years) failed compute_returns' coverage rule and was
+    # silently left out of the run, so a weight set from it sold all of it.
+    stand_ins: dict[str, dict] = {}
+    if closes is not None and not closes.empty:
+
+        def _fetch(syms, period, retry=True):  # through this module's name: tests stub it
+            return _bulk_close(syms, period) if retry else _bulk_close(syms, period, retry=False)
+
+        try:
+            closes, proxied = extend_history(
+                closes, symbols, {s: by_sym[s].get("currency") for s in symbols},
+                {s: by_sym[s].get("name") for s in symbols}, period_yf, fetch=_fetch,
+            )  # fmt: skip
+            stand_ins = {s: {"proxy": p, "since": since} for s, (p, since) in proxied.items()}
+        except Exception as e:  # a stand-in is extra: never lose the run over one
+            print(f"[frontier] stand-ins skipped: {type(e).__name__}")
     if display_ccy != "USD" and closes is not None and not closes.empty:
         closes = _apply_fx_to_closes(closes, by_sym, display_ccy, period_yf)
     fetch_ms = int((time.perf_counter() - t_fetch) * 1000)
@@ -404,6 +621,9 @@ def compute_efficient_frontier_stream(
         return
     active = list(returns.columns)
     missing = [s for s in symbols if s not in active]
+    # A stand-in that still left its line short of the coverage rule (a company
+    # listed 20 months ago, on a 3Y lookback) didn't make it in: not a stand-in.
+    stand_ins = {s: x for s, x in stand_ins.items() if s in active}
 
     # ---- Black-Litterman posterior returns ----
     yield _prog("Black-Litterman posterior returns…")
@@ -470,6 +690,8 @@ def compute_efficient_frontier_stream(
         )
 
     anchors = {"equal": _anchor(eq_w), "cap": _anchor(cap_w), "current": _anchor(cur_w)}
+    sets = _mark_sets(weight_sets, active, _anchor)
+    held_out = _held_out(cur_in, symbols, active)
     # What each portfolio would trade, and moving to it from the current
     # weights. The optimizer ranks on a cost linearised around the market
     # basket (_drift_cost); "ret_net" swaps that estimate for this exact
@@ -477,7 +699,8 @@ def compute_efficient_frontier_stream(
     # paying for trades it never makes. (min_cvar / max_ret are usually the
     # frontier's end points: the same dicts, done once.)
     seen: set[int] = set()
-    for p in [*frontier, *anchors.values(), fr["min_cvar"], fr["max_ret"]]:
+    marked = [m for m in sets.values() if "weights" in m]
+    for p in [*frontier, *anchors.values(), fr["min_cvar"], fr["max_ret"], *marked]:
         if id(p) in seen:
             continue
         seen.add(id(p))
@@ -511,6 +734,8 @@ def compute_efficient_frontier_stream(
         "rebalance": rebalance,
         "tc_bps": round(tc * 1e4, 6),
     }
+    picks = pick_points(frontier, anchors["current"])
+    p4 = {"sets": sets, "picks": picks, "held_out": held_out, "stand_ins": stand_ins}
 
     # Ship the frontier + anchors NOW so the client can fix the axis domain and
     # draw axes + the frontier line while the cloud streams in beneath it. The
@@ -523,6 +748,7 @@ def compute_efficient_frontier_stream(
         "min_cvar": fr["min_cvar"],
         "max_ret": fr["max_ret"],
         "anchors": anchors,
+        **p4,
         "bl": bl_payload,
         "params": params_payload,
         "meta": {"n_frontier": int(K), "n_cloud": int(cloud_n), "n_viewed": int(len(bl["viewed"]))},
@@ -600,6 +826,10 @@ def compute_efficient_frontier_stream(
         warnings.append(f"only {n_tail} scenarios in the α={alpha:.0%} tail")
     if fr.get("n_nonconv"):
         warnings.append(f"{fr['n_nonconv']} frontier point(s) hit the solver iteration cap")
+    for s, x in stand_ins.items():
+        name = by_sym.get(s, {}).get("name") or s
+        warnings.append(f"{name} ({s}): before {_when(x['since'])} the prices are {x['proxy']}'s, "
+                        "the same company on another exchange.")  # fmt: skip
 
     result = {
         "symbols": active,
@@ -611,11 +841,13 @@ def compute_efficient_frontier_stream(
         # 20-80k points here. The blocking wrapper reassembles them from the chunks.
         "cloud": [],
         "anchors": anchors,
+        **p4,
         "asset_stats": mpt.asset_risk_stats(returns, alpha),
         "analyst_detail": analyst_detail,
         "bl": bl_payload,
         "params": params_payload,
         "meta": {
+            "n_nonconv": int(fr.get("n_nonconv") or 0),
             "n_obs": int(returns.shape[0]),
             "n_assets": int(len(active)),
             "n_frontier": int(K),

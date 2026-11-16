@@ -462,8 +462,17 @@ function totalRows() {
     .sort((a, b) => a.next_earnings.localeCompare(b.next_earnings)).slice(0, 4).map(r => [r.symbol, r.next_earnings]);
   const sum = Object.values(TBL.w).reduce((a, b) => a + b, 0);
   const named = WEIGHT_NAMES[STATE.mode] || String(STATE.mode).slice(7);
-  return [{ label: "Total", sub: `${held === n ? `${n} holdings` : `${held} of ${n} held`} · ${named}`, wait: TBL.wait,
+  const wi = !!wiActive();
+  const out = [{ label: "Total", sub: `${held === n ? `${n} holdings` : `${held} of ${n} held`} · ${wi ? "What-if, " : ""}${named}`, wait: TBL.wait,
     totals: { ...TBL.a?.totals, weight: { rule: "sum", v: sum }, next_earnings: { rule: "next", v: soon[0]?.[1] ?? null, list: soon } } }];
+  // A what-if: the second row is My Investments as held today, the red tab's
+  // Book-mode total (whatif._book_total: live weights, as traded, same rules).
+  const bt = wi ? wiCmpFor()?.book_total : null;
+  if (bt?.totals) {
+    out.push({ label: "My Investments", sub: `${bt.n_holdings} holdings · as held today`, wait: false, book: true,
+               totals: { ...bt.totals, weight: { rule: "sum", v: 1 } } });
+  }
+  return out;
 }
 function totalCellHtml(c, e, row) {
   if (!e) return row.wait ? TBL_WAIT : TBL_DASH;
@@ -498,8 +507,15 @@ function renderTotalRows(cols) {
       tr.appendChild(td);
     });
     tr.classList.toggle("has-cov", !!tr.querySelector(".tbl-cov"));
+    if (row.book) tr.classList.add("tbl-total-book");
     foot.appendChild(tr);
   });
+  // Two rows in the sticky foot: the first sits on top of the second (a hidden
+  // table measures 0, so a usual height stands in until the next render).
+  if (TBL.rows.length > 1) {
+    const h = foot.lastChild.offsetHeight || 34;
+    foot.firstChild.querySelectorAll("td").forEach(td => { td.style.bottom = h + "px"; });
+  }
 }
 const totalMult = (c) => (/P\/E/.test(c.label) ? "earnings yields, which add up" : "the inverse of each multiple, which adds up");
 const TOTAL_TIP = {
@@ -944,8 +960,10 @@ document.addEventListener("keydown", (ev) => {
  * --------------------------------------------------------------------------- */
 const RICH_TIPS = Object.create(null);
 RICH_TIPS["total"] = (host) => {
-  const c = COLS_BY_KEY[host.dataset.col], e = TBL.rows[+host.dataset.row]?.totals?.[host.dataset.col];
+  const row = TBL.rows[+host.dataset.row];
+  const c = COLS_BY_KEY[host.dataset.col], e = row?.totals?.[host.dataset.col];
   if (!c || !e || !TOTAL_TIP[e.rule] || (!TBL.a && e.rule !== "sum" && e.rule !== "next")) return "";
+  if (row.book) return wiBookTotalTip(e, c);
   const held = DATA.filter(r => TBL.w[r.symbol] > 0).length;
   let body = `<div class="mt-name">${escapeHtml(TOTAL_NAMES[c.key] || c.label)} · total</div><div class="mt-desc">${TOTAL_TIP[e.rule](e, c)}</div>${totalLadder(e, c)}`;
   const list = e.top || (e.list || []).map(([s, d]) => [s, fmtDateMD(`${d}T12:00`)]);
@@ -962,6 +980,22 @@ RICH_TIPS["total"] = (host) => {
   }
   return `<div class="pf-metric-tip tbl-tip" role="tooltip">${body}</div>`;
 };
+/* The what-if's second total row: My Investments as held today, by the same
+   rules. Its Contrib is a backtest of today's weights; the actual record is the
+   green line. */
+function wiBookTotalTip(e, c) {
+  const cmp = wiCmpFor(), bt = cmp?.book_total || {};
+  const actual = cmp?.shared?.book?.total_return ?? cmp?.columns?.book?.total_return;
+  let body = `<div class="mt-name">${escapeHtml(TOTAL_NAMES[c.key] || c.label)} · My Investments</div>`
+    + `<div class="mt-desc">${e.rule === "contrib"
+      ? `Today's My Investments weights held through the whole period, rebalanced like the what-if: a backtest, not your real result.`
+      : e.rule === "sum" ? "My Investments' weights added up, cash left out." : TOTAL_TIP[e.rule](e, c)}</div>`
+    + `<div class="tbl-tip-sec">My Investments as it is today, weighted by value as on the red tab: its names not in this what-if count, the what-if's own new names don't.</div>`;
+  if (e.rule === "contrib" && actual != null) body += `<div class="tbl-tip-sec">What it really did is the green line on the chart: <b>${fmtPctSigned(actual)}</b>${cmp?.shared ? ` since ${escapeHtml(fmtDateMDY(cmp.shared.since))}` : ""}.</div>`;
+  if (e.cov != null && !covAll(e)) body += `<div class="tbl-tip-sec">Covers ${covPct(e)}% of the weight.</div>`;
+  if ((bt.missing || []).length) body += `<div class="tbl-tip-out">Left out, no row anywhere: ${bt.missing.slice(0, 6).map(escapeHtml).join(", ")}${bt.missing.length > 6 ? ` and ${bt.missing.length - 6} more` : ""}.</div>`;
+  return `<div class="pf-metric-tip tbl-tip" role="tooltip">${body}</div>`;
+}
 const STICKY_TIPS = new Set(["model-price"]);
 // Opened by a click and kept until its ✕, Escape or a click elsewhere (the
 // owner, 2026-10-30: the model price is a button). Until the first click a
@@ -2790,6 +2824,7 @@ function render() {
     });
   }
   const theme = getTheme();
+  const wo = wiOrigin();   // a what-if: the copy's names get the 4px jade bar, removed ones fade
   /* Per-column heat context, computed once per render across the live rows
      currently being shown — NOT a fixed clip range, so the ramp always
      reflects what's actually on screen right now. Mode ("off" / "2c" /
@@ -2835,9 +2870,15 @@ function render() {
       }
       tr.appendChild(td);
     }
+    if (wo) {
+      const S = String(r.symbol || "").toUpperCase();
+      if (wo.removed.has(S)) tr.classList.add("wi-gone");
+      else if (wo.origin.has(S)) tr.classList.add("wi-o");
+    }
     tr.onclick = () => openModal(r);
     tbody.appendChild(tr);
   }
+  if (wo) renderConstituents();   // the pills read the same weights: removed names fade with their rows
 }
 
 /* ===========================================================================
@@ -6531,6 +6572,7 @@ async function persistView(name, entries, rows) {
         saved_at: d.view.saved_at,
         row_count: (d.view.rows || []).length,
         stale: false,
+        whatif: d.view.whatif || VIEWS[targetName]?.whatif,  // the server keeps the block; so does the page
       };
       LAST_VIEW = targetName;
       STATE.activeView ||= targetName;
@@ -6547,6 +6589,7 @@ async function loadAllAtStartup() {
   wireColumnViewBar();
   renderTabs();
   // Restore the last open view if any.
+  if (LAST_VIEW && wiHidden(LAST_VIEW)) LAST_VIEW = BOOK.symbols.length ? BOOK_KEY : null;  // its book isn't showing
   if (LAST_VIEW && (viewIsBook(LAST_VIEW) ? BOOK.symbols.length : (VIEWS[LAST_VIEW] || WATCHLISTS[LAST_VIEW]))) {
     await activateTab(LAST_VIEW, {silent: true});
   } else {
@@ -6656,6 +6699,7 @@ async function bookLoadWeights() {
 }
 /* Keep the book pill in step with My Investments after any change there. */
 function bookTabSync(opts) {
+  wiRevCheck();   // a what-if's comparison, weights and trades follow the book's rev
   // A book that can't be totalled, or one waiting for a holding's split
   // history, keeps its pill as it was.
   if (INV.book?.broken || INV.book?.waiting || INV.book?.splits_pending?.length) return;
@@ -6699,6 +6743,7 @@ async function activateTab(name, opts) {
   }
   STATE.activeView = name;
   STATE.customWeights = null;
+  WI.changesOpen = false;
   // Keep STATE.analyticsByTab[*] across switches — re-visiting paints from memory.
   // Neutralize any weight mode leaked from the previous tab up front; the
   // restoreMode load below then sets THIS tab's deterministic mode (its own
@@ -6735,7 +6780,7 @@ async function activateTab(name, opts) {
       if (rows.length) {
         DATA = rows;
         render();
-        // DATA just landed — refresh the mode bar so the [+] pill appears
+        // DATA just landed — refresh the weights row so the Weight Center button appears
         // and the active preset paints with the correct active state.
         renderModeBar();
         $("#status").innerHTML = statusHtml(name, view.saved_at, view.stale);
@@ -6788,10 +6833,13 @@ let TAB_RENAME = null;   // {pending} while a label is being edited: a redraw th
 function renderTabs() {
   if (TAB_RENAME) { TAB_RENAME.pending = true; return; }
   const wrap = $("#pf-tabs"); wrap.innerHTML = "";
-  // Tab order: saved watchlists alphabetically, then ad-hoc (if present), then "+ New".
-  const wlNames = Object.keys(WATCHLISTS).sort((a, b) => a.localeCompare(b));
+  // Tab order: the red book tab, its what-ifs, saved watchlists alphabetically,
+  // then ad-hoc (if present), then "+ New". A what-if of another My Investments
+  // portfolio is not shown at all (wiHidden).
+  const wlNames = Object.keys(WATCHLISTS).filter(n => !wiHidden(n)).sort((a, b) => a.localeCompare(b));
+  const wiNames = wlNames.filter(n => wiBlock(n));
   const hasAdhoc = !!VIEWS[AD_HOC_KEY] || STATE.activeView === AD_HOC_KEY;
-  const tabNames = [...wlNames];
+  const tabNames = [...wiNames, ...wlNames.filter(n => !wiBlock(n))];
   if (hasAdhoc) tabNames.push(AD_HOC_KEY);
 
   if (BOOK.symbols.length) {
@@ -6807,7 +6855,8 @@ function renderTabs() {
 
   for (const name of tabNames) {
     const tab = document.createElement("div");
-    tab.className = "pf-tab" + (STATE.activeView === name ? " active" : "") + (name === AD_HOC_KEY ? " pf-tab-newadhoc" : "");
+    const wi = !!wiBlock(name);
+    tab.className = "pf-tab" + (STATE.activeView === name ? " active" : "") + (name === AD_HOC_KEY ? " pf-tab-newadhoc" : "") + (wi ? " pf-tab-wi" : "");
     tab.setAttribute("role", "tab");
     tab.setAttribute("data-name", name);
 
@@ -6817,7 +6866,8 @@ function renderTabs() {
     // The full name in a (slow) native title for a cut-off label; the rename
     // hint only on the open tab, not popping up on every tab you pass over.
     const tip = STATE.activeView === name ? ' data-tip="Double-click or right-click to rename"' : "";
-    tab.innerHTML = `${staleDot}<span class="pf-tab-label" title="${escapeHtml(viewLabel(name))}"${tip}>${escapeHtml(viewLabel(name))}</span>${closeBtn}`;
+    const ring = wi ? `<span class="wi-ring" aria-hidden="true" data-tip="A what-if: a copy of My Investments"></span>` : "";
+    tab.innerHTML = `${staleDot}${ring}<span class="pf-tab-label" title="${escapeHtml(viewLabel(name))}"${tip}>${escapeHtml(viewLabel(name))}</span>${closeBtn}`;
     tab.addEventListener("click", (e) => {
       // Re-activating the open tab would redraw the row between the two clicks of a double-click.
       if (e.target.closest(".pf-tab-close") || TAB_RENAME || STATE.activeView === name) return;
@@ -6842,6 +6892,17 @@ function renderTabs() {
   add.textContent = "＋ New portfolio";
   add.addEventListener("click", () => createNewTab());
   wrap.appendChild(add);
+  // "New My Investments": a what-if copy of the book showing, made at once.
+  if (BOOK.symbols.length) {
+    const nb = document.createElement("button");
+    nb.type = "button";
+    nb.className = "pf-tab-add pf-tab-newbook";
+    nb.disabled = _wiCreating;
+    nb.innerHTML = `<span class="wi-ring" aria-hidden="true"></span>New My Investments`;
+    nb.dataset.tip = "Copy My Investments as it is now into a what-if portfolio you can change freely";
+    nb.addEventListener("click", wiCreate);
+    wrap.appendChild(nb);
+  }
 }
 
 function tabMenuOpen(e, tab, name) {
@@ -6955,6 +7016,7 @@ async function renamePortfolio(oldName, newName) {
 function renderEditorMeta() {
   $("#input-panel").classList.toggle("pf-book-ro", viewIsBook(STATE.activeView));
   renderConstituents(); syncRefreshNeeded();
+  wiStripRender();
 }
 
 /* Refresh is red while the open portfolio's rows were not built from its
@@ -6985,6 +7047,7 @@ function tickerBadge(sym, exch) {
 
 function renderConstituents() {
   const bySym = new Map(DATA.map(r => [String(r.symbol || "").toUpperCase(), r]));
+  const wo = wiOrigin();
   const list = entriesArr(ENTRIES);
   $("#pf-count").textContent = list.length ? String(list.length) : "";
   const missing = [];
@@ -6997,12 +7060,24 @@ function renderConstituents() {
     // yet leaves the badge alone until fillEntryNames() finds one.
     const tk = tickerBadge(row ? row.symbol : e, (row && row.exchange) || ENTRY_EXCH[e.toUpperCase()]);
     const nm = name ? `<span class="pf-chip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>` : "";
-    return `<span class="pf-chip${name ? "" : " pf-chip-bare"}">${nm}${tk}` +
-      `<button type="button" class="pf-chip-x" data-entry="${escapeHtml(e)}" title="Remove" aria-label="Remove ${escapeHtml(name || e)}">✕</button></span>`;
+    const S = (row ? row.symbol : e).toUpperCase();
+    // A what-if: the copy's names outlined; a name taken to 0% stays, faded and
+    // struck through, with no ✕ (the Weight Center brings it back).
+    if (wo?.removed.has(S)) {
+      const bw = wo.block.origin?.[row ? row.symbol : e];
+      return `<span class="pf-chip wi-gone"${bw != null ? ` data-tip="Removed in this what-if. My Investments held ${wiPct(bw)} at the copy."` : ""}>${nm}${tk}</span>`;
+    }
+    return `<span class="pf-chip${name ? "" : " pf-chip-bare"}${wo?.origin.has(S) ? " wi-o" : ""}">${nm}${tk}` +
+      `<button type="button" class="pf-chip-x" data-entry="${escapeHtml(e)}" title="${wo?.origin.has(S) ? "Take to 0% in this what-if" : "Remove"}" aria-label="${wo?.origin.has(S) ? "Take to 0%" : "Remove"} ${escapeHtml(name || e)}">✕</button></span>`;
   }).join("");
   if (missing.length) fillEntryNames(missing);
   const shown = 7, tks = list.map(e => { const r = bySym.get(e.toUpperCase()); return r ? r.symbol : e; });
   $("#pf-chips-sum").textContent = tks.slice(0, shown).join(" · ") + (tks.length > shown ? `  +${tks.length - shown}` : "");
+  const key = $("#pf-origin-key");
+  if (key) {
+    key.hidden = !wo;
+    key.innerHTML = wo ? `<i class="o"></i>In My Investments on ${escapeHtml(fmtDateMD(wo.block.copied_at))}${wo.removed.size ? '<i class="g"></i>Removed here' : ""}` : "";
+  }
   syncChipsFold();
 }
 
@@ -7081,6 +7156,10 @@ async function commitEntries(next) {
 }
 
 function removeEntry(entry) {
+  // A what-if: ✕ on a name of the copy takes it to 0% in the active weights and
+  // keeps it in the list (faded, struck through); other names leave as before.
+  const E = String(entry).toUpperCase();
+  if (wiOrigin()?.origin.has(E) && DATA.some(r => String(r.symbol).toUpperCase() === E)) return wiZeroOrigin(entry);
   const next = entriesArr(ENTRIES).filter(e => e !== entry);
   if (!next.length) { toast("A portfolio needs at least one company. Delete the tab instead."); return; }
   commitEntries(next.join(", "));
@@ -7375,6 +7454,7 @@ async function requestAnalytics(opts) {
     STATE.analytics = cached;
     STATE.analyticsLoading = false;
     paintAnalytics();
+    wiAfterAnalytics();
     return;
   }
 
@@ -7428,6 +7508,7 @@ async function requestAnalytics(opts) {
   } finally {
     if (reqId === _analyticsReqId) { STATE.analyticsLoading = false; _analyticsAsking = false; _analyticsSettled = settle; }
     paintAnalytics();
+    if (reqId === _analyticsReqId && STATE.analytics && !STATE.analytics.error) wiAfterAnalytics();
   }
 }
 
@@ -7470,7 +7551,7 @@ function renderAnalyticsBody() {
         </div>
       </div>
       <div class="pf-card">
-        <h4 class="rr-head">Risk &amp; return <span class="rr-ctl"><span class="rr-vs">vs</span>${benchSelectHtml(a)}<span class="rr-ccy">${escapeHtml(a.display_ccy || FX_QUOTE)}</span></span></h4>
+        <h4 class="rr-head">Risk &amp; return <span class="rr-ctl"><span class="rr-vs">vs</span>${wiActive() ? '<span class="rr-static">S&amp;P 500</span>' : benchSelectHtml(a)}<span class="rr-ccy">${escapeHtml(a.display_ccy || FX_QUOTE)}</span></span></h4>
         ${renderStatsHtml(a)}
       </div>
       <div class="pf-card">
@@ -7724,6 +7805,10 @@ function wireBenchSelect(root, onPick) {
    Beta, R² and tracking error are relative measures, so they have no "/ x".
    Below: the period return of every extra line switched on in the chart. */
 function renderStatsHtml(a) {
+  // A what-if: three columns with My Investments' actual record (wiStatsHtml).
+  return wiActive() ? wiStatsHtml(a) : renderStatsHtmlBase(a);
+}
+function renderStatsHtmlBase(a) {
   const s = a.stats || {};
   const b = (a.benchmarks || {})[activeBench(a)] || {};
   const bs = b.stats || {}, rel = b.rel || {};
@@ -8463,6 +8548,13 @@ function pfBenchLines(a) {
       out.push({ key: k, label: b.label, pts: b.series, color, ret: (b.stats || {}).total_return });
     }
   }
+  // A what-if: My Investments' actual record on the same scale (whatif.compare),
+  // solid jade, never backfilled before the book's first day.
+  const c = wiCmpFor(), pts = c?.status === "ok" ? c.line?.points || [] : [];
+  if (pts.length >= 2) {
+    out.push({ key: "BOOK", label: "My Investments", pts, color: "var(--origin)", solid: true,
+               ret: (pts[pts.length - 1][1] / pts[0][1] - 1) * 100, starts: c.line.mid_chart ? c.line.starts : null });
+  }
   return out;
 }
 
@@ -8501,10 +8593,14 @@ function drawPortfolioChart(a, hostEl, legendEl) {
   const path = (pts, y = yScale) => pts.map((p, i) => (i ? "L" : "M") + xScale(p[0]).toFixed(1) + "," + y(p[1]).toFixed(1)).join(" ");
   const yTicks = [0, 1, 2, 3, 4].map(i => lo + (hi - lo) * i / 4);
   const xTicks = [0, 1, 2, 3, 4, 5].map(i => t0 + (t1 - t0) * i / 5);
+  // Six ticks over 3 years fall about seven months apart, so year-only labels
+  // repeat ("2025, 2025"): then every tick says its month too.
+  const yearOnly = !["3M", "6M", "YTD", "1Y"].includes(STATE.period)
+    && new Set(xTicks.map(t => new Date(t).getFullYear())).size === xTicks.length;
   const fmtT = (ts) => {
     const d = new Date(ts);
     if (STATE.period === "3M" || STATE.period === "6M") return d.toLocaleDateString(undefined, {month: "short", day: "numeric"});
-    if (STATE.period === "YTD" || STATE.period === "1Y") return d.toLocaleDateString(undefined, {month: "short", year: "2-digit"});
+    if (!yearOnly) return d.toLocaleDateString(undefined, {month: "short", year: "2-digit"});
     return d.toLocaleDateString(undefined, {year: "numeric"});
   };
   const col = chartColors();
@@ -8512,7 +8608,8 @@ function drawPortfolioChart(a, hostEl, legendEl) {
     ${yTicks.map(v => `<line x1="${padL}" y1="${yScale(v).toFixed(1)}" x2="${W-padR}" y2="${yScale(v).toFixed(1)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>
       <text x="${padL-6}" y="${(yScale(v)+3).toFixed(1)}" font-size="10" fill="var(--muted)" text-anchor="end">${v.toFixed(0)}</text>`).join("")}
     ${xTicks.map((t, i) => `<text x="${xScale(t).toFixed(1)}" y="${H-padB+12}" font-size="10" fill="var(--muted)" text-anchor="${tickAnchor(i, xTicks.length)}">${fmtT(t)}</text>`).join("")}
-    ${benches.map(b => `<path d="${path(b.pts)}" fill="none" stroke="${b.color}" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>`).join("")}
+    ${benches.map(b => `<path d="${path(b.pts)}" fill="none" stroke="${b.color}" stroke-width="${b.solid ? 2 : 1.4}"${b.solid ? "" : ' stroke-dasharray="4 3"'} opacity="${b.solid ? 1 : 0.85}"/>`).join("")}
+    ${benches.filter(b => b.starts).map(b => { const x = xScale(b.pts[0][0]).toFixed(1); return `<line x1="${x}" x2="${x}" y1="${padT}" y2="${H - padB}" stroke="var(--origin)" stroke-width="1" stroke-dasharray="3 3" opacity="0.8"/><text class="wi-start" x="${(+x + 5).toFixed(1)}" y="${padT + 10}" font-size="10" fill="var(--muted)">My Investments starts ${escapeHtml(fmtDateMD(b.starts + "T12:00"))}</text>`; }).join("")}
     ${smas.map(s => `<path d="${path(s.pts)}" fill="none" stroke="${SMA_COLORS[s.n]}" stroke-width="1.2" opacity="0.9"/>`).join("")}
     ${type === "area"
       ? `<path d="${path(port)} L${xScale(t1).toFixed(1)},${yScale(lo).toFixed(1)} L${xScale(t0).toFixed(1)},${yScale(lo).toFixed(1)} Z" fill="rgba(var(--accent-rgb),0.12)"/>
@@ -8550,9 +8647,10 @@ function drawPortfolioChart(a, hostEl, legendEl) {
   hostEl.innerHTML = svg + volSvg + ddSvg + `<div class="pf-tt" id="pf-tt"></div><div class="chart-measure" id="pf-measure"></div>`;
 
   // The Nasdaq / Sector-mix entries are listed under Risk & Return instead.
-  const bench = benches.find(b => b.key === "SPY");
+  const bench = benches.find(b => b.key === "SPY"), bookLine = benches.find(b => b.key === "BOOK");
   legendEl.innerHTML = [
-    `<span><i style="background:var(--accent)"></i> Portfolio</span>`,
+    `<span><i style="background:var(--accent)"></i> ${bookLine ? "What-if, rebalanced" : "Portfolio"}</span>`,
+    bookLine && `<span class="lg-origin" data-tip="What My Investments really did, with its own trades and timing (time-weighted, deposits left out)"><i style="background:var(--origin)"></i> My Investments, actual</span>`,
     bench && `<span><i style="background:${bench.color}"></i> ${escapeHtml(bench.label)}</span>`,
     dd.length && `<span><i style="background:var(--neg)"></i> Drawdown</span>`,
     ...smas.map(s => `<span><i style="background:${SMA_COLORS[s.n]}"></i> SMA ${s.n} · daily</span>`),
@@ -8569,6 +8667,998 @@ function drawPortfolioChart(a, hostEl, legendEl) {
                                       (v) => v.toFixed(2), (v) => fmtCompactMoney(v, ccy)) : "",
   });
   attachRangeBrush({ ...common, selRect: $("#pf-sel"), badge: $("#pf-measure") });
+}
+
+/* ===========================================================================
+ * Phase 4: what-ifs, the weights row, the Weight Center's comparisons and
+ * optimizer plug, the rebalance panel. Server side: whatif.py, rebalance.py,
+ * frontier.py (docs/architecture/backend.md "What-if portfolios").
+ *
+ * A what-if is a normal portfolio whose view carries a `whatif` block
+ * {book_id, copied_at, rev, ccy, origin}. Three rules hold everywhere below:
+ * - It shows (tab, pills, strip) only while its own My Investments portfolio
+ *   shows (wiActive / wiHidden): a what-if of another portfolio is invisible.
+ * - `origin` is frozen at the copy: it only draws the jade --origin marks
+ *   (chip outlines, the 4px row bar). Everything that compares (the line, the
+ *   figures, the differences, the trades) reads the LIVE book, and is asked
+ *   again when the book's `rev` moves (wiRevCheck).
+ * - The page never writes the block; the server does (create, rename, detach).
+ * --------------------------------------------------------------------------- */
+const WI = {
+  bk: null,          // {key, d}: GET /api/whatif/book for the open portfolio
+  bkAsk: null,       // {key, p}: that request in flight (one at a time per key)
+  cmp: {},           // compare answers by wiCmpKey(): the green line, Risk & Return, the 2nd total row
+  cmpErr: {},        // a failed compare's message by key (asked again on the next analytics paint)
+  cmpAsk: null,      // the key in flight
+  rev: null,         // the book's rev the answers above belong to
+  changesOpen: false,
+};
+const wiShowing = () => (BOOKS.enabled && BOOKS.active) || "main";
+const wiBlock = (name) => (name && VIEWS[name]?.whatif) || null;
+/* A what-if of a My Investments portfolio that isn't showing: hidden. */
+const wiHidden = (name) => { const b = wiBlock(name); return !!b && b.book_id !== wiShowing(); };
+const wiActive = () => (wiHidden(STATE.activeView) ? null : wiBlock(STATE.activeView));
+const wiPct = (v, dp = 1) => (v == null || !isFinite(v) ? "—" : (v * 100).toFixed(dp) + "%");
+/* A weight difference in points: neutral text, never green or red (a weight is not a return). */
+const wiPts = (d, dp = 1) => {
+  if (d == null || !isFinite(d)) return "—";
+  const r = +(d * 100).toFixed(dp);
+  return r === 0 ? (0).toFixed(dp) : (r > 0 ? "+" : "−") + Math.abs(r).toFixed(dp);
+};
+const wiMoney = (v) => (v == null || !isFinite(v) ? "—" : (v < 0 ? "−" : "") + invSym() + Math.round(Math.abs(v)).toLocaleString(NUM_LOCALE));
+function wiCopiedLabel(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+/* The frozen origin and what this what-if has taken out of it: a name of the
+   copy at 0% in the active weights is "removed" (it stays at 0%, faded and
+   struck through; dragging its slider up in the Weight Center brings it back). */
+function wiOrigin() {
+  const b = wiActive();
+  if (!b) return null;
+  const origin = new Set(Object.keys(b.origin || {}).map(s => s.toUpperCase()));
+  const w = DATA.length ? weightsForMode(STATE.mode) : {};
+  const removed = new Set();
+  for (const r of DATA) {
+    const S = String(r.symbol || "").toUpperCase();
+    if (origin.has(S) && !((w[r.symbol] || 0) > 5e-5)) removed.add(S);
+  }
+  return { block: b, origin, removed };
+}
+
+/* ---- The book's weights for the open portfolio (any portfolio, not only a
+   what-if): the Weight Center's "My Investments" column and red ticks, the
+   weights row's "differs by", the strip's "changed since" note. ---- */
+function wiBookKey(view) { return `${view}|${FX_QUOTE}|${DATA.map(r => r.symbol).join(",")}`; }
+function wiLoadBook(force) {
+  const view = STATE.activeView;
+  if (!view || viewIsBook(view) || !BOOK.symbols.length || wiHidden(view)) { WI.bk = null; return Promise.resolve(null); }
+  const key = wiBookKey(view);
+  if (!force && WI.bk?.key === key) return Promise.resolve(WI.bk.d);
+  if (!force && WI.bkAsk?.key === key) return WI.bkAsk.p;
+  const syms = DATA.map(r => r.symbol).filter(Boolean);
+  const qs = `ccy=${encodeURIComponent(FX_QUOTE)}&view=${encodeURIComponent(view === AD_HOC_KEY ? "" : view)}`
+    + (syms.length ? "&symbols=" + encodeURIComponent(syms.join(",")) : "");
+  const p = (async () => {
+    try {
+      const r = await fetch("/api/whatif/book?" + qs);
+      const d = await r.json();
+      if (!r.ok) { if (d.error === "BookMoved") booksLoad(); return null; }
+      if (d.rev != null && WI.rev == null) WI.rev = d.rev;
+      WI.bk = { key, d };
+      return d;
+    } catch (e) { return null; }
+    finally { if (WI.bkAsk?.key === key) WI.bkAsk = null; }
+  })();
+  WI.bkAsk = { key, p };
+  return p;
+}
+/* The answer for the open portfolio as it is now, or null. */
+function wiBookD() {
+  const v = STATE.activeView;
+  return v && WI.bk?.key === wiBookKey(v) ? WI.bk.d : null;
+}
+/* {symbol: the book's weight} keyed by THIS portfolio's symbols (a book line of
+   the same company counts: "as APC.DE"), or null while unknown. */
+function wiBookW() {
+  const d = wiBookD();
+  if (!d || d.status !== "ok" || !d.match) return null;
+  return Object.fromEntries(Object.entries(d.match).map(([s, m]) => [s, m.weight || 0]));
+}
+/* "differs from My Investments by X% of value": half the sum of absolute gaps,
+   the names only the book holds counting in full. */
+function wiDiffers(w) {
+  const d = wiBookD();
+  if (!d || d.status !== "ok") return null;
+  let s = 0;
+  for (const [sym, m] of Object.entries(d.match || {})) s += Math.abs((w[sym] || 0) - (m.weight || 0));
+  for (const x of d.book_only || []) s += x.weight || 0;
+  return s / 2;
+}
+function wiRenderMeta() {
+  const el = $("#pf-wmeta");
+  if (!el) return;
+  const x = wiActive() && DATA.length ? wiDiffers(weightsForMode(STATE.mode)) : null;
+  el.innerHTML = x == null ? "" : `${escapeHtml(labelForMode(STATE.mode))} differs from <b class="wi-book">My Investments</b> by <b>${wiPct(x)}</b> of value`;
+  el.dataset.tip = x == null ? "" : "Half the sum of the gaps between the two sets of weights, names only one side holds counting in full: how much of the value would have to change hands to go from one to the other.";
+}
+
+/* ---- The strip under the tabs: where this copy came from, what changed in
+   the book since, and the way to the trades. ---- */
+function wiChangesText(ch) {
+  const added = ch.added || [], n = ch.n_added || 0;
+  const trades = added.length && added.every(e => e.type === "buy" || e.type === "sell");
+  const days = [...new Set(added.map(e => e.date).filter(Boolean))].sort();
+  let t = n ? `${n} ${trades ? (n === 1 ? "trade" : "trades") : (n === 1 ? "new entry" : "new entries")}` : "";
+  if (n && days.length === 1) t += ` on ${fmtDateMD(days[0] + "T12:00")}`;
+  else if (n && days.length) t += ` since ${fmtDateMD(days[0] + "T12:00")}`;
+  if (ch.n_removed) t += `${t ? ", and " : ""}${ch.n_removed} ${ch.n_removed === 1 ? "entry" : "entries"} of the copy deleted`;
+  return t || "its prices or entries moved";
+}
+function wiStripRender() {
+  const el = $("#wi-strip");
+  if (!el) return;
+  const b = wiActive();
+  if (!b) { el.hidden = true; el.innerHTML = ""; return; }
+  const d = wiBookD(), w = d?.whatif, ch = w?.changed ? w.changes || {} : null;
+  const when = fmtDateMD(b.copied_at);
+  const list = ch && WI.changesOpen && (ch.added || []).length
+    ? `<div class="wi-chg-list">${ch.added.map(e => `<span>${escapeHtml(fmtDateMD((e.date || "") + "T12:00"))}</span><span>${escapeHtml(e.type || "")}</span><span><b>${escapeHtml(e.symbol || "")}</b> ${escapeHtml(shortName(e.name || ""))}</span><span>${e.qty != null ? escapeHtml(Number(e.qty).toLocaleString(NUM_LOCALE)) : ""}</span>`).join("")}${ch.n_added > ch.added.length ? `<span class="wi-chg-more">and ${ch.n_added - ch.added.length} more</span>` : ""}</div>` : "";
+  el.hidden = false;
+  el.innerHTML = `<span class="wi-ring" aria-hidden="true"></span>
+    <span class="wi-strip-t">What-if of <b class="wi-book">My Investments</b>, copied ${escapeHtml(wiCopiedLabel(b.copied_at))}. Changes here never touch My Investments itself.</span>
+    <span class="wi-sp"></span>
+    <button type="button" class="wi-strip-btn" id="wi-strip-wc"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h6.5M12.5 4.5H14M2 11.5h2.5M8.5 11.5H14"/><circle cx="10.5" cy="4.5" r="1.8"/><circle cx="6.5" cy="11.5" r="1.8"/></svg>Weight Center</button>
+    <button type="button" class="wi-rb-btn" id="wi-strip-rb"${DATA.length ? "" : " disabled"}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5h9l-2.5-2.5M13 11H4l2.5 2.5"/></svg>Rebalance to this portfolio</button>
+    ${ch ? `<div class="wi-chg"><span class="wi-dot" aria-hidden="true"></span><span>My Investments has changed since this copy: <b>${escapeHtml(wiChangesText(ch))}</b>. The green line, its figures and the differences use it as it is now; the green outlines still show what it held on ${escapeHtml(when)}.</span>${(ch.added || []).length ? `<button type="button" class="wi-link" id="wi-chg-see">${WI.changesOpen ? "Hide" : "See what changed"}</button>` : ""}</div>${list}` : ""}`;
+  $("#wi-strip-wc").onclick = () => openWeightsPopup();
+  $("#wi-strip-rb").onclick = () => rbOpen();
+  const see = $("#wi-chg-see");
+  if (see) see.onclick = () => { WI.changesOpen = !WI.changesOpen; wiStripRender(); };
+}
+/* After a book answer: everything that reads it repaints. */
+function wiPaintBook() {
+  wiStripRender();
+  wiRenderMeta();
+  if ($("#pf-weights-bg").classList.contains("show")) { wcRenderBars(); renderWeightsRows(); }
+}
+
+/* ---- "New My Investments": the showing book copied at once, no dialog, a
+   toast with Undo (the ordinary delete removes everything it made). ---- */
+let _wiCreating = false;
+async function wiCreate() {
+  if (_wiCreating) return;
+  _wiCreating = true;
+  $$(".pf-tab-newbook").forEach(b => { b.disabled = true; });
+  try {
+    const r = await fetch("/api/whatif", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ book_id: wiShowing(), ccy: FX_QUOTE }),
+    });
+    let d = {};
+    try { d = await r.json(); } catch (e) { /* non-JSON error */ }
+    if (!r.ok) {
+      if (d.error === "BookMoved") booksLoad();
+      throw new Error(d.message || d.error || "Couldn't copy My Investments. Try again in a moment.");
+    }
+    await Promise.all([loadWatchlists(), loadViews()]);
+    await activateTab(d.name);
+    // Names the red tab had no saved row for: build them now, not a red Refresh.
+    if (!d.rows_complete && STATE.activeView === d.name) build({ keepPanelOpen: true });
+    toast(`${d.name} made: a copy of My Investments, ${d.n_holdings} holdings at today's weights.`,
+          { label: "Undo", fn: () => wiUndo(d.name) });
+  } catch (e) {
+    toast(e.message || "Couldn't copy My Investments.");
+  } finally {
+    _wiCreating = false;
+    renderTabs();
+  }
+}
+async function wiUndo(name) {
+  try {
+    const r = await fetch(`/api/watchlists?name=${encodeURIComponent(name)}`, { method: "DELETE" });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Couldn't remove it.");
+    WATCHLISTS = d.watchlists || {};
+    delete VIEWS[name];
+    delete STATE.analyticsByTab[name];
+    if (STATE.activeView === name) {
+      if (BOOK.symbols.length) await activateTab(BOOK_KEY);
+      else { STATE.activeView = null; DATA = []; render(); }
+    }
+    renderTabs(); renderEditorMeta();
+    toast(`Removed ${name}.`);
+  } catch (e) { toast(e.message || "Couldn't remove it."); }
+}
+
+/* A switch of My Investments portfolio, or a deleted one: the what-ifs follow
+   (another book's are hidden; a deleted book's came back from the server as
+   plain portfolios), and nothing computed for the old book is kept. */
+async function wiFollowBooks() {
+  WI.bk = null; WI.cmp = {}; WI.cmpErr = {}; WI.rev = null;
+  if ($("#rb-bg")?.classList.contains("show")) rbClose();
+  await loadViews();
+  if (wiHidden(STATE.activeView)) {
+    if ($("#pf-weights-bg").classList.contains("show")) closeWeightsPopup();
+    if (BOOK.symbols.length) activateTab(BOOK_KEY, { silent: true });
+    else { STATE.activeView = null; DATA = []; render(); renderAnalyticsBody(); }
+  }
+  renderTabs(); renderEditorMeta();
+}
+
+/* The book moved (an entry, an undo, new prices): the comparison, weights and
+   trades shown were for the old one, so they are asked again. */
+function wiRevCheck() {
+  const rev = INV.book?.rev;
+  if (rev == null) return;
+  if (WI.rev == null) { WI.rev = rev; return; }
+  if (rev === WI.rev) return;
+  WI.rev = rev; WI.bk = null; WI.cmp = {}; WI.cmpErr = {};
+  const open = (id) => $(id)?.classList.contains("show");
+  if (wiActive()) { wiLoadBook().then(wiPaintBook); wiCompare(); }
+  else if (open("#pf-weights-bg")) wiLoadBook().then(wiPaintBook);
+  if (open("#rb-bg")) { RB.counts = {}; rbAsk(); }
+}
+
+/* ✕ on a name the copy held: 0% in the active weights, the rest scaled up.
+   A saved set is saved again (its optimizer provenance goes, as with any hand
+   edit); Equal, Cap or applied weights become applied weights ("Custom"),
+   since Equal and Cap can't hold a zero. Undo puts the weights back. */
+async function wiZeroOrigin(entry) {
+  const row = DATA.find(r => String(r.symbol).toUpperCase() === String(entry).toUpperCase());
+  if (!row) return;
+  const sym = row.symbol, before = weightsForMode(STATE.mode), w = { ...before };
+  const gone = w[sym] || 0, rest = 1 - gone;
+  if (rest <= 1e-9) return toast("It is the only name with weight: give another one weight first.");
+  for (const k of Object.keys(w)) w[k] = k === sym ? 0 : w[k] / rest;
+  const name = activePresetName(), p = name && presetByName(name);
+  let undo;
+  try {
+    if (p) {
+      const old = p.weights;
+      await savePresetServer(name, w, { setActive: true });
+      _invalidateModeCache(modeId(name));
+      undo = async () => {
+        try { await savePresetServer(name, old, { setActive: true }); } catch (e) { return toast(e.message || "Couldn't undo."); }
+        _invalidateModeCache(modeId(name)); renderModeBar(); requestAnalytics({ force: true });
+      };
+    } else {
+      const prevMode = STATE.mode, prevCustom = STATE.customWeights;
+      STATE.customWeights = w; STATE.mode = "custom"; _invalidateModeCache("custom");
+      undo = () => {
+        STATE.mode = prevMode; STATE.customWeights = prevCustom; _invalidateModeCache("custom");
+        renderModeBar(); persistActivePreset(); requestAnalytics({ force: true });
+      };
+    }
+  } catch (e) { return toast(e.message || "Couldn't change the weights."); }
+  renderModeBar(); persistActivePreset(); requestAnalytics({ force: true });
+  toast(`${sym} is at 0% in ${p ? `“${name}”` : "these weights"}. It stays in the list, struck through; the Weight Center brings it back.`,
+        { label: "Undo", fn: undo });
+}
+
+/* ---- The comparison (POST /api/whatif/compare), asked after the what-if's
+   own analytics with the same rows, weights, period, currency and trading. ---- */
+/* Keyed on the weights themselves, not only the mode's name: a saved set edited
+   in place (or a name taken to 0%) keeps its name and must be compared again. */
+function wiCmpKey() {
+  const w = weightsForMode(STATE.mode);
+  const fp = Object.keys(w).sort().map(k => `${k}:${(w[k] || 0).toFixed(5)}`).join(",");
+  return `${STATE.activeView}|${analyticsCacheKey(STATE.mode, STATE.period)}|${fp}`;
+}
+function wiCmpFor() { return wiActive() ? WI.cmp[wiCmpKey()] || null : null; }
+async function wiCompare() {
+  if (!wiActive() || !DATA.length) return;
+  const key = wiCmpKey(), view = STATE.activeView;
+  if (WI.cmp[key] || WI.cmpAsk === key) return;
+  WI.cmpAsk = key; delete WI.cmpErr[key];
+  try {
+    const r = await fetch("/api/whatif/compare", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ book_id: wiShowing(), rows: DATA, weights: weightsForMode(STATE.mode),
+                             period: STATE.period, display_ccy: FX_QUOTE, ...tradingPrefs() }),
+    });
+    let d = {};
+    try { d = await r.json(); } catch (e) { /* non-JSON error */ }
+    if (!r.ok) {
+      if (d.error === "BookMoved") booksLoad();
+      WI.cmpErr[key] = d.message || d.error || "The comparison failed.";
+    } else {
+      WI.cmp[key] = d;
+      if (d.rev != null && WI.rev == null) WI.rev = d.rev;
+    }
+  } catch (e) {
+    WI.cmpErr[key] = e.message || "The comparison failed.";
+  } finally {
+    if (WI.cmpAsk === key) WI.cmpAsk = null;
+  }
+  if (STATE.activeView === view && wiCmpKey() === key) paintAnalytics();
+}
+/* After the analytics of a what-if painted: its book answer, then the comparison. */
+function wiAfterAnalytics() {
+  if (!wiActive()) return;
+  wiLoadBook().then(wiPaintBook);
+  wiCompare();
+}
+
+/* Risk & Return on a what-if: three columns on one calendar and one risk-free
+   rate (whatif.compare), the hindsight note under them. The book's MWR, profit,
+   cash and turnover are not comparable with a backtest and are not shown. */
+const WI_RR_ROWS = [
+  ["Period return", "total_return", "ps"], ["Ann. return", "ann_return", "ps"], ["Ann. vol", "ann_vol", "pp"],
+  ["Sharpe", "sharpe", "n"], ["Sortino", "sortino", "n"], ["Max drawdown", "max_dd", "ps"], ["Calmar", "calmar", "n"],
+];
+function wiRrTable(blk, sub) {
+  const t = tradingPrefs(), freq = t.rebalance === "N" ? "never rebalanced" : `rebalanced ${(REBALANCE_LABEL[t.rebalance] || "").toLowerCase()}`;
+  const F = { ps: (v) => fmtPctSigned(v), pp: (v) => fmtPctPlain(v), n: (v) => fmtNumOr(v, 2) };
+  const cls = (k, v) => (v == null || !["total_return", "ann_return", "max_dd"].includes(k) ? "" : v >= 0 ? "pos" : "neg");
+  const cell = (side, k, f, c) => {
+    const x = blk[side];
+    if (!x) return `<td class="${c} na">—</td>`;
+    return `<td class="${c} ${c === "bm" ? "" : cls(k, x[k])}">${F[f](x[k])}</td>`;
+  };
+  const rel = (side, k, f) => blk[side]?.rel?.[k];
+  const body = WI_RR_ROWS.map(([l, k, f]) => `<tr><td>${l}</td>${cell("whatif", k, f, "wi")}${cell("book", k, f, "bk")}${cell("spy", k, f, "bm")}</tr>`).join("")
+    + `<tr><td>Beta · vs S&amp;P 500</td><td class="wi">${fmtNumOr(rel("whatif", "beta"), 2)}</td><td class="bk${blk.book ? "" : " na"}">${fmtNumOr(rel("book", "beta"), 2)}</td><td class="bm"></td></tr>`
+    + `<tr><td>Tracking err · Info ratio</td><td class="wi">${fmtPctPlain(rel("whatif", "te"))} · ${fmtNumOr(rel("whatif", "ir"), 2)}</td><td class="bk${blk.book ? "" : " na"}">${blk.book ? `${fmtPctPlain(rel("book", "te"))} · ${fmtNumOr(rel("book", "ir"), 2)}` : "—"}</td><td class="bm"></td></tr>`;
+  return `<table class="wi-rr">${sub ? `<caption>${sub}</caption>` : ""}<tr><th></th><th><span class="sw wi"></span>What-if<small>${freq}</small></th><th><span class="sw bk"></span>My Investments<small>actual</small></th><th>S&amp;P 500<small>index</small></th></tr>${body}</table>`;
+}
+/* The comparison's one risk-free rate (analytics._daily_rf: ^IRX in US dollars, 0 otherwise). */
+function wiRfWords(src) {
+  const t = String(src || "");
+  if (/IRX/i.test(t)) return "the 13-week US Treasury bill (^IRX)";
+  if (!t || /^0\b/.test(t)) return "zero, as there is no short-rate series in this currency";
+  return escapeHtml(t);
+}
+function wiStatsHtml(a) {
+  const c = wiCmpFor(), err = WI.cmpErr[wiCmpKey()];
+  if (!c || c.status !== "ok" || !c.columns) {
+    const why = err ? `My Investments can't be compared right now: ${escapeHtml(err)}`
+      : !c ? lcHtml("comparing with My Investments", { bar: true })
+      : c.status === "waiting" ? "My Investments is waiting for a holding's split history: the comparison follows in a minute."
+      : c.status === "broken" ? "My Investments can't be computed right now, so there is nothing to compare with."
+      : c.status === "empty" ? "My Investments holds nothing yet." : "My Investments has no history in this window yet.";
+    return renderStatsHtmlBase(a) + `<div class="wi-note">${why}</div>`;
+  }
+  const t = c.trading || tradingPrefs();
+  const freq = t.rebalance === "N" ? "never rebalanced" : `rebalanced ${(REBALANCE_LABEL[t.rebalance] || "monthly").toLowerCase()}`;
+  const sh = c.shared;
+  const since = sh ? fmtDateMDY(sh.since) : "";
+  let html = wiRrTable(c.columns);
+  if (sh) {
+    html += `<div class="wi-note">My Investments starts ${escapeHtml(since)}, after this window does, so its column is empty above. Over the dates both have:</div>`
+      + wiRrTable(sh, `Since ${escapeHtml(since)}`);
+    if (sh.between?.te != null) html += `<div class="wi-note">The two lines moved apart by <b>${fmtPctPlain(sh.between.te)}</b> a year (tracking error between them).</div>`;
+  } else if (c.columns.between?.te != null) {
+    html += `<div class="wi-note">The two lines moved apart by <b>${fmtPctPlain(c.columns.between.te)}</b> a year (tracking error between them).</div>`;
+  }
+  html += `<div class="wi-note wi-note-main"><span class="sw wi"></span><b>What-if</b>: today's plan held for the whole period, ${freq}, ${+(t.tc_bps ?? 0)} bps a trade. <span class="sw bk"></span><b>My Investments</b>: what your account really did, with your own trades and timing (time-weighted, deposits left out).`
+    + ` Sharpe and Sortino use one risk-free rate for all three columns: ${wiRfWords(c.rf_source)}.</div>`;
+  return html;
+}
+
+/* ===========================================================================
+ * The weights row (option A) and the Weight Center
+ * --------------------------------------------------------------------------- */
+const WROW_MAX = 5;        // saved sets shown as pills; the active one is always among them
+const OPT_RULE = { same_risk: "Same risk as now", min_cvar: "Lowest risk", selected: "Selected point" };
+const SAME_RISK_NOTE = "“Same risk” uses the risk the optimizer minimises, the average loss on the worst days measured day by day, so the 30-day CVaR on the Optimize chart can differ.";
+function presetKind(p) {
+  if (p?.source?.kind === "optimizer") return "optimizer";
+  return p?.saved_at ? `saved ${fmtDateMD(p.saved_at)}` : "saved";
+}
+function presetTip(p) {
+  const s = p?.source;
+  if (!s || s.kind !== "optimizer") return "";
+  const pt = s.point || {}, cur = s.current || {};
+  let t = `Made by the optimizer${s.computed_at ? ` on ${fmtDateMD(s.computed_at)}` : ""}: ${OPT_RULE[s.rule] || s.rule}`
+    + `${s.params?.lookback ? `, ${s.params.lookback}` : ""}. Return ${wiPct(pt.ret_net ?? pt.ret)}, CVaR 30d ${wiPct(pt.cvar30)}`;
+  if (cur.ret != null) t += ` (the weights then active: ${wiPct(cur.ret)}, ${wiPct(cur.cvar30)})`;
+  t += ".";
+  if ((s.held_out || []).length) t += ` Kept at their weight, not in the run: ${s.held_out.map(x => x.symbol).join(", ")}.`;
+  if (s.rule === "same_risk") t += " " + SAME_RISK_NOTE;
+  return t;
+}
+const WC_CARET = '<svg class="bench-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+/* A dropdown in the app's one menu style (benchMenuHtml's markup, wired by
+   wireBenchSelect): options are [key, label, aside]. */
+function wcMenuHtml(id, trigCls, trigHtml, opts, cur, tail) {
+  return `<span class="bench-dd" id="${id}"><button type="button" class="bench-trigger ${trigCls}" aria-haspopup="listbox" aria-expanded="false">${trigHtml}${WC_CARET}</button>
+    <span class="bench-menu" role="listbox">${opts.map(([k, label, aside]) => `<button type="button" role="option" class="bench-opt${k === cur ? " on" : ""}" data-bench="${escapeHtml(k)}" aria-selected="${k === cur}"><span class="bench-opt-label">${escapeHtml(label)}</span><span class="bench-opt-key">${escapeHtml(aside || "")}</span></button>`).join("")}${tail || ""}</span></span>`;
+}
+
+function renderModeBar() {
+  // The weights row: Book (red tab), Equal, Cap, a hairline, as many saved sets
+  // as fit (the active one always among them), the rest under "+N more".
+  // Creating, editing, renaming and deleting sets live in the Weight Center.
+  const host = document.getElementById("pf-mode-toggle");
+  if (!host) return;
+  const active = STATE.mode, book = viewIsBook(STATE.activeView);
+  // A long name is cut with an ellipsis; the whole name is in its tip.
+  const pill = (mode, label, cls, tip) => `<span class="pf-mode-pill${active === mode ? " active" : ""}${cls ? " " + cls : ""}" role="tab" aria-selected="${active === mode}" data-mode="${escapeHtml(mode)}" tabindex="0"${tip ? ` data-tip="${escapeHtml(tip)}"` : ` title="${escapeHtml(label)}"`}><span class="pf-pill-t">${escapeHtml(label)}</span></span>`;
+  const presets = (STATE.weightPresets || []).filter(p => p && p.name);
+  const base = [];
+  if (book) base.push(pill("book", "Book"));
+  base.push(pill("equal", "Equal"), pill("cap", "Cap"));
+  if (active === "custom") base.push(pill("custom", "Custom", "", "Weights applied from the Weight Center without a name"));
+  if (presets.length) base.push('<span class="pf-wsep" aria-hidden="true"></span>');
+  const presetPill = (p) => { const t = presetTip(p); return pill(modeId(p.name), p.name, "preset", t ? `${p.name}. ${t}` : ""); };
+  const draw = (shown, hidden) => {
+    host.innerHTML = base.join("") + shown.map(presetPill).join("") + (hidden.length ? wcMenuHtml("pf-wmore", "pf-mode-pill more", `+${hidden.length} more`,
+      hidden.map(p => [modeId(p.name), p.name, presetKind(p)]), active,
+      `<span class="wc-menu-sep"></span><button type="button" role="option" class="bench-opt wc-menu-all" data-bench="__wc__"><span class="bench-opt-label">All weight sets in the Weight Center</span><span></span></button>`) : "");
+  };
+  const wc = document.getElementById("pf-wc-open");
+  if (wc) wc.hidden = !STATE.activeView || book || !DATA.length;
+  wiRenderMeta();
+  const shown = wrowFit(presets, active, draw);
+  draw(shown, presets.filter(p => !shown.includes(p)));
+  host.querySelectorAll(".pf-mode-pill[data-mode]").forEach(el => {
+    el.addEventListener("click", () => selectMode(el.dataset.mode));
+    el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMode(el.dataset.mode); } });
+  });
+  wireBenchSelect(host.querySelector("#pf-wmore"), (k) => (k === "__wc__" ? openWeightsPopup() : selectMode(k)));
+  if (wiActive()) renderConstituents();   // a removed name's pill follows the weights at once
+}
+/* Which saved sets get a pill: measured, not a fixed count. Every pill is drawn
+   once at its natural (capped) width, then sets are kept in order while they
+   fit beside Equal/Cap, the label, the "differs by" line and the Weight Center
+   button, the active one always kept. Before any set is hidden the "differs
+   by" line drops to its own line (.meta-below), so nothing ever overlaps and
+   the button is never pushed out. Hidden (width 0: another page shows), the
+   old fixed five; the ResizeObserver below redraws once it has a width. */
+function wrowFit(presets, active, draw) {
+  const row = $("#pf-wrow"), host = $("#pf-mode-toggle");
+  row.classList.remove("meta-below");
+  const act = presets.find(p => modeId(p.name) === active);
+  const W = row.clientWidth;
+  if (!W || !presets.length) {
+    if (presets.length <= WROW_MAX) return presets;
+    const shown = presets.slice(0, WROW_MAX);
+    return act && !shown.includes(act) ? [...presets.slice(0, WROW_MAX - 1), act] : shown;
+  }
+  draw(presets, []);
+  const hostL = host.getBoundingClientRect().left;
+  const pills = [...host.querySelectorAll(".pf-mode-pill.preset")];
+  const width = new Map(pills.map(el => [el.dataset.mode, el.getBoundingClientRect().width]));
+  const sep = host.querySelector(".pf-wsep");
+  const GAP = 6, MORE = 108, SLACK = 8;
+  const baseW = sep ? sep.getBoundingClientRect().right - hostL + 4 + GAP : 0;
+  const cs = getComputedStyle(row), gap = parseFloat(cs.columnGap) || 12;
+  const kids = [...row.children].filter(el => getComputedStyle(el).display !== "none");
+  const meta = $("#pf-wmeta"), metaW = meta?.textContent ? meta.scrollWidth : 0;
+  const others = kids.filter(el => el !== host && el !== meta).reduce((a, el) => a + el.getBoundingClientRect().width, 0);
+  const fixed = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + others + gap * (kids.length - 1) + baseW + SLACK;
+  const fit = (avail) => {
+    const all = presets.reduce((a, p) => a + width.get(modeId(p.name)) + GAP, 0);
+    if (all <= avail) return presets;
+    let budget = avail - MORE - (act ? width.get(modeId(act.name)) + GAP : 0);
+    const out = [];
+    for (const p of presets) {
+      if (p === act) { out.push(p); continue; }
+      const w = width.get(modeId(p.name)) + GAP;
+      if (w > budget) break;
+      out.push(p); budget -= w;
+    }
+    if (act && !out.includes(act)) out.push(act);
+    return out;
+  };
+  let shown = fit(W - fixed - metaW);
+  if (shown.length < presets.length && metaW) {
+    row.classList.add("meta-below");
+    shown = fit(W - fixed + gap);
+  }
+  return shown;
+}
+let _wrowW = 0;
+new ResizeObserver((ents) => {
+  const w = Math.round(ents[0].contentRect.width);
+  if (w && w !== _wrowW) { _wrowW = w; renderModeBar(); }
+}).observe($("#pf-wrow"));
+
+/* The Weight Center's own state. The draft rows are WEIGHTS_DRAFT (the old
+   editor's, same rebalancing); WC says what is edited and compared. */
+const WC = {
+  edit: null,              // the saved set being edited, or null for a new one
+  cmp: null,               // Set of compared ids: "__book__", "equal", "cap", or a set's name
+  dvs: "edit",             // differences against: "edit" (the edited set) or "book"
+  bookOpen: false,         // the "in My Investments, not here" group unfolded
+  W: {},                   // compared sets' weights, fixed while the window is open
+  opt: { state: "idle", rule: "same_risk", plug: null, msg: "", res: null, pct: 0, label: "", abort: null, view: null },
+};
+const wcCanBook = () => !!BOOK.symbols.length && !viewIsBook(STATE.activeView);
+function wcSetLabel(id) { return id === "__book__" ? "My Investments" : id === "equal" ? "Equal" : id === "cap" ? "Cap" : id; }
+function wcSetWeights(id) {
+  if (id === "__book__") return wiBookW();
+  if (id === "equal" || id === "cap") return weightsForMode(id);
+  return presetByName(id) ? weightsForMode(modeId(id)) : {};
+}
+function wcCmpIds() {
+  const ids = [];
+  if (wcCanBook()) ids.push("__book__");
+  ids.push("equal", "cap");
+  for (const p of STATE.weightPresets || []) if (p?.name && p.name !== WC.edit) ids.push(p.name);
+  return ids;
+}
+const wcCompared = () => wcCmpIds().filter(id => WC.cmp.has(id));
+const wcDvsBook = () => WC.dvs === "book" && wcCanBook();
+
+function openWeightsPopup(opts) {
+  if (!DATA.length) return toast("Build a portfolio first.");
+  opts = opts || {};
+  if (viewIsBook(STATE.activeView)) return toast("My Investments is weighted by what you hold.");
+  if (!WC.cmp) WC.cmp = new Set(wcCanBook() ? ["__book__"] : []);
+  const rows = DATA.filter(r => r && r.symbol);
+  // What is edited: the named set, else the active one, else a new set seeded
+  // from what the page shows (Equal, Cap or applied weights).
+  const name = opts.presetName !== undefined ? opts.presetName
+    : opts.intent === "new" || opts.intent === "adhoc" ? null : activePresetName();
+  const p = name ? presetByName(name) : null;
+  WC.edit = p ? p.name : null;
+  WEIGHTS_INTENT = p ? "edit" : opts.intent === "adhoc" ? "adhoc" : "new";
+  WEIGHTS_EDITING_NAME = WC.edit;
+  const init = p ? p.weights : (STATE.customWeights || weightsForMode(STATE.mode));
+  const bw = wiBookW() || {};
+  WEIGHTS_DRAFT = rows.map(r => ({ symbol: r.symbol, name: r.name || r.symbol, weight: Number(init[r.symbol] || 0), locked: false }))
+    .sort((a, b) => b.weight - a.weight || (bw[b.symbol] || 0) - (bw[a.symbol] || 0));
+  WC.cmp.delete(WC.edit);
+  for (const id of [...WC.cmp]) if (!wcCmpIds().includes(id)) WC.cmp.delete(id);
+  const saved = STATE.activeView && STATE.activeView !== AD_HOC_KEY;
+  $("#wc-sub").textContent = `${viewLabel(STATE.activeView)} · ${rows.length} holding${rows.length === 1 ? "" : "s"}`;
+  const nameEl = $("#pf-weights-name");
+  nameEl.value = WC.edit || "";
+  $("#pf-weights-delete").style.display = WC.edit ? "" : "none";
+  $("#pf-weights-status").textContent = saved ? "" : "Save the portfolio to keep named weight sets.";
+  ["pf-weights-save", "pf-weights-saveas"].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = !saved; });
+  $("#wc-rebal").hidden = !wiActive();
+  if (WC.opt.view !== STATE.activeView && WC.opt.state !== "run") Object.assign(WC.opt, { state: "idle", msg: "", res: null, plug: null, view: STATE.activeView });
+  wcRenderBars();
+  wcRenderOpt();
+  renderWeightsRows();
+  showOverlay("#pf-weights-bg");
+  wiLoadBook().then(() => { if ($("#pf-weights-bg").classList.contains("show")) { wcRenderBars(); renderWeightsRows(); } });
+  if (!WC.opt.plug) wcLoadPlug();
+}
+function closeWeightsPopup() {
+  hideOverlay("#pf-weights-bg");
+  hideInlinePrompt();
+}
+
+function wcRenderBars() {
+  const bar = $("#wc-bar"), dbar = $("#wc-dbar");
+  const presets = (STATE.weightPresets || []).filter(p => p?.name);
+  const saved = STATE.activeView && STATE.activeView !== AD_HOC_KEY;
+  const editOpts = [...presets.map(p => [p.name, p.name, presetKind(p)]), ["__new__", "New set", "from the weights now"]];
+  const editLabel = WC.edit || "New set";
+  const chip = (id) => `<button type="button" class="wc-chip${WC.cmp.has(id) ? " on" : ""}${id === "__book__" ? " book" : ""}" data-cmp="${escapeHtml(id)}" aria-pressed="${WC.cmp.has(id)}"><span class="bx" aria-hidden="true"></span>${escapeHtml(wcSetLabel(id))}</button>`;
+  bar.innerHTML = `<span class="wc-k">Editing</span>${saved ? wcMenuHtml("wc-edit-dd", "wc-edsel", `<span>${escapeHtml(editLabel)}</span>`, editOpts, WC.edit || "__new__") : `<span class="wc-edsel static">${escapeHtml(editLabel)}</span>`}
+    <span class="wc-k wc-k-cmp">Compare</span>${wcCmpIds().map(chip).join("")}`;
+  wireBenchSelect(bar.querySelector("#wc-edit-dd"), (k) => openWeightsPopup({ presetName: k === "__new__" ? null : k, intent: k === "__new__" ? "new" : undefined }));
+  bar.querySelectorAll(".wc-chip").forEach(b => b.onclick = () => {
+    const id = b.dataset.cmp;
+    WC.cmp.has(id) ? WC.cmp.delete(id) : WC.cmp.add(id);
+    wcRenderBars(); renderWeightsRows();
+  });
+  const ref = WC.edit || "this set";
+  const wi = wiActive();
+  dbar.innerHTML = wcCanBook()
+    ? `<span class="wc-k">Differences against</span><span class="wc-dseg" role="group"><button type="button" data-dvs="edit" class="${WC.dvs === "edit" ? "on" : ""}">${escapeHtml(WC.edit || "This set")}</button><button type="button" data-dvs="book" class="${WC.dvs === "book" ? "on" : ""}">My Investments</button></span>
+       <span class="wc-k wc-k-help">Under each weight: that set minus ${wcDvsBook() ? "My Investments" : escapeHtml(ref)}, in points.${wi ? '<span class="wc-tick-key" aria-hidden="true"></span>on a track: My Investments' : ""}</span>`
+    : `<span class="wc-k wc-k-help">Under each weight: that set minus ${escapeHtml(ref)}, in points.</span>`;
+  dbar.querySelectorAll("[data-dvs]").forEach(b => b.onclick = () => { WC.dvs = b.dataset.dvs; wcRenderBars(); renderWeightsRows(); });
+}
+
+function wcCols(k, dvb) {
+  return `minmax(120px, 190px) minmax(130px, 1fr) 70px 28px${dvb ? " 70px" : ""}${" 98px".repeat(k)}`;
+}
+function renderWeightsRows() {
+  const body = $("#pf-weights-body"); body.innerHTML = "";
+  const cmps = wcCompared(), dvb = wcDvsBook(), o = wiOrigin();
+  const bw = wiBookW(), bd = wiBookD();
+  WC.W = Object.fromEntries(cmps.map(id => [id, wcSetWeights(id)]));
+  body.style.setProperty("--wc-cols", wcCols(cmps.length, dvb));
+  const th = document.createElement("div");
+  th.className = "wc-th";
+  th.innerHTML = `<span>Holding</span><span class="wc-th-ed">Editing <b>${escapeHtml(WC.edit || "New set")}</b></span><span></span>`
+    + (dvb ? `<span class="r" title="This set minus My Investments">Δ vs<br>My Inv.</span>` : "")
+    + cmps.map(id => `<span class="r cmp${id === "__book__" ? " book" : ""}">${escapeHtml(wcSetLabel(id))}</span>`).join("");
+  body.appendChild(th);
+  WEIGHTS_DRAFT.forEach((row, i) => {
+    const r = document.createElement("div");
+    const S = row.symbol.toUpperCase(), orig = o && o.origin.has(S);
+    r.className = "pf-w-row" + (row.locked ? " locked" : "") + (orig ? " wi-o" : "");
+    const showName = row.name && row.name !== row.symbol;
+    const tick = o && bw && (bw[row.symbol] || 0) > 0.0005
+      ? `<span class="wc-tick" style="left:calc(7px + (100% - 14px) * ${Math.min(1, bw[row.symbol]).toFixed(4)})" title="My Investments: ${wiPct(bw[row.symbol])}"></span>` : "";
+    r.innerHTML = `
+      <span class="pf-w-id"><span class="pf-w-sym">${escapeHtml(row.symbol)}</span>${showName ? `<span class="pf-w-name">${escapeHtml(row.name)}</span>` : ""}</span>
+      <span class="wc-slwrap"><input class="pf-w-slider" type="range" min="0" max="1" step="0.001" value="${row.weight.toFixed(3)}" aria-label="${escapeHtml(row.symbol)} weight" ${row.locked ? "disabled" : ""}/>${tick}</span>
+      <input class="pf-w-num" type="text" inputmode="decimal" value="${(row.weight*100).toFixed(2)}" aria-label="${escapeHtml(row.symbol)} weight, percent" ${row.locked ? "readonly" : ""}/>
+      <button type="button" class="pf-w-lock${row.locked ? " on" : ""}" aria-pressed="${row.locked}" data-tip="${row.locked ? "Locked — click to unlock" : "Lock this weight; the others rebalance"}">${row.locked ? W_LOCK_SVG.on : W_LOCK_SVG.off}</button>
+      ${dvb ? '<span class="wc-c r wc-dvb"></span>' : ""}${cmps.map(() => '<span class="wc-c cmp"></span>').join("")}`;
+    const slider = r.querySelector(".pf-w-slider");
+    const num = r.querySelector(".pf-w-num");
+    const lock = r.querySelector(".pf-w-lock");
+    slider.addEventListener("input", () => onWeightInput(i, Number(slider.value)));
+    num.addEventListener("input", () => onWeightInput(i, Math.max(0, Math.min(100, parseWeightPct(num.value))) / 100));
+    // Select the value on focus so typing replaces it. Keyboard focus selects
+    // at once; for a click the browser places the caret on MOUSEUP (after focus
+    // and after any rAF), which would undo the selection and make "20" typed
+    // over 9.28 read "209.28" — so a click-focus selects on its own mouseup.
+    let clickFocus = false;
+    num.addEventListener("mousedown", () => { clickFocus = document.activeElement !== num; });
+    num.addEventListener("mouseup", (e) => { if (clickFocus) { e.preventDefault(); num.select(); clickFocus = false; } });
+    num.addEventListener("focus", () => { if (!clickFocus) num.select(); });
+    num.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); num.blur(); } });
+    num.addEventListener("blur", () => { num.value = (WEIGHTS_DRAFT[i].weight * 100).toFixed(2); });
+    lock.addEventListener("click", () => { row.locked = !row.locked; renderWeightsRows(); updateWeightsSum(); });
+    body.appendChild(r);
+  });
+  // The book's names this portfolio doesn't hold: folded, one line.
+  const only = bd?.status === "ok" && (WC.cmp.has("__book__") || dvb) ? bd.book_only || [] : [];
+  if (only.length) {
+    const tot = only.reduce((a, x) => a + (x.weight || 0), 0);
+    const sep = document.createElement("div");
+    sep.className = "wc-sep";
+    sep.innerHTML = `<span>In My Investments, not in ${escapeHtml(viewLabel(STATE.activeView))}: <b>${only.length} holding${only.length === 1 ? "" : "s"}</b>, ${wiPct(tot, 0)} of its value</span><span class="wc-sp"></span><button type="button" class="wc-btn ghost sm">${WC.bookOpen ? "Hide" : "Show"}</button>`;
+    sep.querySelector("button").onclick = () => { WC.bookOpen = !WC.bookOpen; renderWeightsRows(); };
+    body.appendChild(sep);
+    if (WC.bookOpen) for (const x of only) {
+      const r = document.createElement("div");
+      r.className = "wc-row wc-ghost";
+      const cells = cmps.map(id => {
+        if (id !== "__book__") return '<span class="wc-c cmp"><span class="v zero">–</span></span>';
+        return `<span class="wc-c cmp"><span class="v">${wiPct(x.weight)}</span>${dvb ? "" : `<span class="d${x.weight >= 0.05 ? " big" : ""}">${wiPts(x.weight)}</span>`}</span>`;
+      }).join("");
+      r.innerHTML = `<span class="pf-w-id"><span class="pf-w-sym">${escapeHtml(x.symbol)}</span>${x.name ? `<span class="pf-w-name">${escapeHtml(x.name)}</span>` : ""}</span>
+        <span class="wc-notin"><span>Not in this portfolio</span><span class="ln"></span><button type="button" class="wc-btn sm" data-add="${escapeHtml(x.symbol)}">Add</button></span>
+        ${dvb ? `<span class="wc-c r wc-dvb"><span class="v">${wiPts(-x.weight)}</span></span>` : ""}${cells}`;
+      r.querySelector("[data-add]").onclick = (e) => wcAddName(e.currentTarget.dataset.add, e.currentTarget);
+      body.appendChild(r);
+    }
+  }
+  syncWeightsInputs();
+  updateWeightsSum();
+}
+/* A book name added from the Weight Center: into the constituents at once;
+   its row (and so its slider) comes with the next Refresh. */
+async function wcAddName(sym, btn) {
+  if (entriesArr(ENTRIES).some(e => e.toUpperCase() === sym.toUpperCase())) return;
+  if (btn) btn.disabled = true;
+  if (await commitEntries(entriesArr(ENTRIES).concat(sym).join(", "))) {
+    if (btn) btn.textContent = "Added";
+    toast(`Added ${sym}. Refresh to build its row, then give it a weight here.`);
+  } else if (btn) btn.disabled = false;
+}
+/* One row's comparison cells, from the draft as it is now. */
+function wcFillRow(el, i) {
+  const row = WEIGHTS_DRAFT[i];
+  if (!row) return;
+  const s = row.symbol, dvb = wcDvsBook(), bw = wiBookW(), bd = wiBookD();
+  const ref = dvb ? (bw ? bw[s] || 0 : null) : row.weight;
+  const dv = el.querySelector(".wc-dvb");
+  if (dv) dv.innerHTML = bw ? `<span class="v${Math.abs(row.weight - (bw[s] || 0)) >= 0.05 ? " big" : ""}">${wiPts(row.weight - (bw[s] || 0))}</span>` : '<span class="v zero">…</span>';
+  const cells = el.querySelectorAll(".wc-c.cmp");
+  wcCompared().forEach((id, k) => {
+    const c = cells[k];
+    if (!c) return;
+    const W = WC.W[id];
+    if (!W) { c.innerHTML = '<span class="v zero">…</span>'; return; }
+    const v = W[s] || 0, via = id === "__book__" ? bd?.match?.[s]?.via : null;
+    const showD = !(id === "__book__" && dvb) && ref != null;
+    const d = showD ? v - ref : 0;
+    if (v < 5e-5 && Math.abs(d) < 5e-5 && !via) { c.innerHTML = '<span class="v zero">–</span>'; return; }
+    c.innerHTML = `<span class="v${v < 5e-5 ? " zero" : ""}">${v < 5e-5 ? "0" : wiPct(v)}</span>`
+      + (via ? `<span class="alt" title="The same company on another listing">as ${escapeHtml(via)}</span>`
+        : showD ? `<span class="d${Math.abs(d) >= 0.05 ? " big" : ""}">${wiPts(d)}</span>` : "");
+  });
+  // A name of the copy taken down to 0% reads as removed; dragging it up restores it.
+  if (el.classList.contains("wi-o") || el.classList.contains("wi-gone")) el.classList.toggle("wi-gone", row.weight < 5e-5);
+}
+
+/* ---- The optimizer plug: run the frontier with this portfolio's newest run
+   settings (light budget), save the run, save the picked point as a set.
+   Nothing is saved when any step fails. ---- */
+async function wcLoadPlug() {
+  const view = STATE.activeView;
+  if (!view || view === AD_HOC_KEY || viewIsBook(view)) { WC.opt.plug = null; wcRenderOpt(); return; }
+  try {
+    const j = await (await fetch(`/api/mpt-runs?view=${encodeURIComponent(view)}`)).json();
+    if (STATE.activeView === view) WC.opt.plug = j.plug || null;
+  } catch (e) { WC.opt.plug = null; }
+  wcRenderOpt();
+}
+function wcPlugLine(p) {
+  if (!p) return "";
+  return [p.lookback, `CVaR ${Math.round((p.alpha || 0.95) * 100)}%`, MPT_COV_LABEL[p.cov_model] || p.cov_model,
+          tradingLabel(), `trust ${Math.round((p.haircut ?? 0.25) * 100)}%`, "Light"].filter(Boolean).join(" · ");
+}
+const wcHasSelected = () => !!(MPT.result && MPT.view === STATE.activeView && (MPT.result.frontier || []).length);
+function wcRenderOpt() {
+  const el = $("#wc-opt");
+  if (!el) return;
+  const view = STATE.activeView, o = WC.opt;
+  if (!view || view === AD_HOC_KEY || viewIsBook(view)) { el.hidden = true; return; }
+  el.hidden = false;
+  if (o.rule === "selected" && !wcHasSelected()) o.rule = "same_risk";
+  const rules = ["same_risk", "min_cvar", ...(wcHasSelected() ? ["selected"] : [])];
+  const seg = `<span class="wc-dseg" role="group" aria-label="Which point">${rules.map(k => `<button type="button" data-rule="${k}" class="${o.rule === k ? "on" : ""}"${o.state === "run" ? " disabled" : ""}>${OPT_RULE[k]}</button>`).join("")}</span>`;
+  const why = o.rule === "same_risk" ? SAME_RISK_NOTE
+    : o.rule === "min_cvar" ? "The frontier's least risky point."
+    : `Point ${MPT.selectedIdx + 1} of ${(MPT.result?.frontier || []).length} on the Optimize tab, as it is selected now.`;
+  let html = `<div class="wc-opt-row"><span class="wc-opt-t">Optimizer</span><span class="wc-opt-s">${escapeHtml(wcPlugLine(o.plug))}</span><span class="wc-sp"></span>${seg}`;
+  if (o.state === "run") {
+    html += `</div><div class="wc-opt-row"><div class="wc-prog"><div class="tr"><div class="fl" style="width:${Math.max(2, Math.min(100, o.pct || 0)).toFixed(1)}%"></div></div><span class="pc">${escapeHtml(o.label || "Starting…")} · ${Math.round(o.pct || 0)}%</span></div><button type="button" class="wc-btn sm" id="wc-opt-cancel">Cancel</button></div>`;
+  } else {
+    html += `<button type="button" class="wc-btn primary" id="wc-opt-go">Optimize and save as a set</button></div><div class="wc-opt-note">${escapeHtml(why)}</div>`;
+  }
+  if (o.state === "done" && o.res) {
+    const s = presetByName(o.res.name)?.source || {}, pt = s.point || {}, cur = s.current || {};
+    const held = o.res.held_out || [];
+    html += `<div class="wc-opt-res"><span>Saved as <b>“${escapeHtml(o.res.name)}”</b> and in use: return ${wiPct(pt.ret_net ?? pt.ret)}${cur.ret != null ? ` (now ${wiPct(cur.ret)})` : ""} · CVaR 30d ${wiPct(pt.cvar30)}${cur.cvar30 != null ? ` (now ${wiPct(cur.cvar30)})` : ""}.</span>`
+      + (o.res.name !== WC.edit ? `<button type="button" class="wc-btn ghost sm" id="wc-opt-edit">Edit it</button>` : "") + `</div>`
+      + (held.length ? `<div class="wc-opt-note">Kept at their weight, not in the run (too little history): ${held.map(x => `${escapeHtml(x.symbol)} ${wiPct(x.weight)}`).join(", ")}.</div>` : "")
+      + (o.res.warnings || []).map(w => `<div class="wc-opt-warn">${escapeHtml(w)}</div>`).join("");
+  } else if (o.state === "error") {
+    html += `<div class="wc-opt-err">${escapeHtml(o.msg)}</div>`;
+  }
+  el.innerHTML = html;
+  el.querySelectorAll("[data-rule]").forEach(b => b.onclick = () => { o.rule = b.dataset.rule; if (o.state !== "run") { o.state = "idle"; o.res = null; } wcRenderOpt(); });
+  const go = $("#wc-opt-go"); if (go) go.onclick = wcOptimize;
+  const cancel = $("#wc-opt-cancel"); if (cancel) cancel.onclick = () => o.abort?.abort();
+  const ed = $("#wc-opt-edit"); if (ed) ed.onclick = () => openWeightsPopup({ presetName: o.res.name });
+}
+/* The saved weight sets, for the optimizer's markers (frontier.py, max 40). */
+function wcWeightSets() {
+  if (viewIsBook(STATE.activeView)) return undefined;
+  return Object.fromEntries((STATE.weightPresets || []).filter(p => p?.name && p.weights).slice(0, 40).map(p => [p.name, p.weights]));
+}
+/* Read an NDJSON response line by line. */
+async function ndjsonRead(r, onMsg) {
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) onMsg(JSON.parse(line));
+    }
+  }
+}
+async function wcOptimize() {
+  const view = STATE.activeView, o = WC.opt, rule = o.rule;
+  if (o.state === "run" || !view || view === AD_HOC_KEY) return;
+  Object.assign(o, { state: "run", pct: 0, label: "Starting…", msg: "", res: null, view });
+  wcRenderOpt();
+  const paint = () => { if (STATE.activeView === view) wcRenderOpt(); };
+  try {
+    let runId, index;
+    if (rule === "selected") {
+      // The point on screen in the Optimize tab: its run must be saved first.
+      if (!MPT.result?.id) await mptSaveRun({ silent: true });
+      runId = MPT.result?.id; index = MPT.selectedIdx;
+      if (!runId) throw new Error("The run on the Optimize tab couldn't be saved.");
+    } else {
+      if (!o.plug) await wcLoadPlug();
+      const ac = new AbortController();
+      o.abort = ac;
+      const r = await fetch("/api/efficient-frontier", {
+        method: "POST", headers: { "Content-Type": "application/json" }, signal: ac.signal,
+        body: JSON.stringify({ rows: DATA, display_ccy: FX_QUOTE, ...(o.plug || {}), budget: "light", ...tradingPrefs(),
+                               current_weights: weightsForMode(STATE.mode), weight_sets: wcWeightSets() }),
+      });
+      if (!r.ok || !r.body) {
+        let m = "HTTP " + r.status;
+        try { const j = await r.json(); if (j.error) m = j.error; } catch (e) { /* keep the status */ }
+        throw new Error(m);
+      }
+      let done = null;
+      const cloud = [];   // `done` ships no cloud: the chunks are the run's scatter, saved with it
+      await ndjsonRead(r, (msg) => {
+        if (msg.type === "progress") { o.pct = msg.pct ?? o.pct; o.label = msg.label || o.label; paint(); }
+        else if (msg.type === "cloud") { for (const pt of msg.points || []) cloud.push(pt); }
+        else if (msg.type === "done") done = msg.result;
+        else if (msg.type === "error") throw new Error(msg.error || "optimization failed");
+      });
+      if (!done) throw new Error("the optimizer stopped without a result");
+      if (!(done.cloud || []).length) done.cloud = cloud;
+      o.label = "Saving"; paint();
+      const sr = await fetch("/api/mpt-runs", { method: "POST", headers: { "Content-Type": "application/json" },
+                                               body: JSON.stringify({ view, run: mptCompactRun(done) }) });
+      const sj = await sr.json();
+      if (!sr.ok || !sj.run?.id) throw new Error(sj.error || "the run couldn't be saved");
+      runId = sj.run.id;
+    }
+    const pr = await fetch("/api/weight-presets/optimized", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ view, run_id: runId, rule, ...(rule === "selected" ? { index } : {}) }) });
+    let d = {};
+    try { d = await pr.json(); } catch (e) { /* non-JSON error */ }
+    if (!pr.ok) throw new Error(d.message || d.error || "HTTP " + pr.status);
+    if (STATE.activeView === view) {
+      STATE.weightPresets = Array.isArray(d.presets) ? d.presets : STATE.weightPresets;
+      _invalidateModeCache(modeId(d.name));
+      STATE.mode = modeId(d.name);
+      STATE.customWeights = null;
+      renderModeBar();
+      requestAnalytics({ force: true });
+      if (WC.cmp) WC.cmp.add(d.name);
+    }
+    Object.assign(o, { state: "done", res: d });
+    if (STATE.activeView === view && $("#pf-weights-bg").classList.contains("show")) { wcRenderBars(); renderWeightsRows(); }
+  } catch (e) {
+    const m = e.name === "AbortError" ? "Cancelled." : (e.message || String(e));
+    Object.assign(o, { state: "error", msg: /Nothing was saved/.test(m) ? m : `Nothing was saved. ${m}` });
+  } finally {
+    o.abort = null;
+    paint();
+  }
+}
+
+/* ===========================================================================
+ * Rebalance to a what-if (option A, a side panel). Read-only arithmetic: the
+ * trades that would take My Investments to this portfolio's weights, at the
+ * book's own prices (whatif.rebalance_payload). Words describe arithmetic,
+ * never advice; nothing is saved, nothing is sent to a broker.
+ * --------------------------------------------------------------------------- */
+const RB = { mode: "shares", cash: "keep", reserve: 0, nTrades: null, seq: 0, res: null, err: null,
+             counts: {}, gains: false, target: null, label: "", view: null, busy: false, timer: 0 };
+function rbModes() {
+  const s = invSym();
+  return [
+    ["shares", "Whole shares", "Rounds each trade to whole shares, as close to the target as it can get."],
+    ["exact", "Exact", "Fractional shares. Lands exactly on your target."],
+    ["step", `${s}100 steps`, `Trades in ${s}100 steps, for a broker that sells fractions.`],
+    ["fewest", "Fewest trades", "The fewest trades that stay within 0.5% a year of tracking error to the target. Names added are still bought, names taken out still sold."],
+  ];
+}
+function rbOpen(weights, label) {
+  if (!wiActive() || !DATA.length) return;
+  RB.view = STATE.activeView;
+  RB.target = weights || weightsForMode(STATE.mode);
+  RB.label = label || labelForMode(STATE.mode);
+  Object.assign(RB, { res: null, err: null, counts: {}, nTrades: null });
+  rbRender();
+  showOverlay("#rb-bg");
+  rbAsk();
+}
+function rbClose() {
+  RB.seq++;
+  clearTimeout(RB.timer);
+  hideOverlay("#rb-bg");
+}
+function rbBody(extra) {
+  return { book_id: wiShowing(), view: RB.view, ccy: FX_QUOTE, weights: RB.target, mode: RB.mode,
+           step: 100, min_trade: 100, cash: RB.cash, reserve: RB.reserve, te_tol: 0.005,
+           n_trades: RB.mode === "fewest" ? RB.nTrades : null, ...extra };
+}
+async function rbPost(body) {
+  const r = await fetch("/api/whatif/rebalance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  let d = {};
+  try { d = await r.json(); } catch (e) { /* non-JSON error */ }
+  if (!r.ok) { const e = new Error(d.message || d.error || "HTTP " + r.status); e.code = d.error; throw e; }
+  return d;
+}
+async function rbAsk() {
+  const seq = ++RB.seq;
+  RB.busy = true; rbRender();
+  try {
+    const d = await rbPost(rbBody());
+    if (seq !== RB.seq) return;
+    Object.assign(RB, { res: d, err: null });
+    if (d.rev != null) WI.rev = d.rev;
+    if (RB.nTrades == null) RB.counts[RB.mode] = d.summary?.n_trades;
+  } catch (e) {
+    if (seq !== RB.seq) return;
+    RB.err = e;
+    if (e.code === "BookMoved") booksLoad();
+  } finally {
+    if (seq === RB.seq) { RB.busy = false; rbRender(); rbCountOthers(seq); }
+  }
+}
+/* The other modes' trade counts, one after the other in the background. */
+async function rbCountOthers(seq) {
+  for (const [m] of rbModes()) {
+    if (seq !== RB.seq || RB.err) return;
+    if (RB.counts[m] != null) continue;
+    try {
+      const d = await rbPost(rbBody({ mode: m, n_trades: null }));
+      if (seq !== RB.seq) return;
+      RB.counts[m] = d.summary?.n_trades;
+      const el = document.querySelector(`#rb-body [data-rb-count="${m}"]`);
+      if (el) el.textContent = `${RB.counts[m]} trade${RB.counts[m] === 1 ? "" : "s"}`;
+    } catch (e) { return; }
+  }
+}
+function rbShares(t) {
+  const n = Number(t.shares) || 0;
+  const s = Number.isInteger(n) ? n.toLocaleString(NUM_LOCALE) : n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 3 });
+  return t.all ? `all ${s}` : s;
+}
+function rbRender() {
+  const body = $("#rb-body");
+  if (!body) return;
+  const d = RB.res, s = d?.summary || {};
+  const nHold = Object.keys(wiBookD()?.weights || {}).length || (INV.book?.positions || []).length;
+  $("#rb-title").textContent = `Rebalance to ${viewLabel(RB.view)}`;
+  $("#rb-sub").innerHTML = `From <b class="wi-book">My Investments</b> as it is now${s.value != null ? ` (${wiMoney(s.value)}${nHold ? `, ${nHold} holdings` : ""})` : ""} to <b>${escapeHtml(viewLabel(RB.view))} · ${escapeHtml(RB.label)}</b>.`;
+  const modes = rbModes().map(([k, n, e]) => {
+    const c = RB.counts[k];
+    return `<button type="button" class="rb-mode${k === RB.mode ? " on" : ""}" data-rb-mode="${k}" role="radio" aria-checked="${k === RB.mode}"><span class="rd" aria-hidden="true"></span><span class="n">${escapeHtml(n)}<small data-rb-count="${k}">${c != null ? `${c} trade${c === 1 ? "" : "s"}` : ""}</small></span><span class="e">${escapeHtml(e)}</span></button>`;
+  }).join("");
+  const cashNow = s.cash_before;
+  const noCash = cashNow != null && cashNow <= 0.5;
+  const cash = `<div class="rb-toggle${noCash ? " off" : ""}"><button type="button" class="rb-sw${RB.cash === "invest" ? " on" : ""}" id="rb-cash" role="switch" aria-checked="${RB.cash === "invest"}"${noCash ? " disabled" : ""} aria-label="Invest my cash too"></button>
+    <span>Invest my cash too<br><span class="s">${noCash ? "My Investments holds no cash now, so there is none to invest."
+      : RB.cash === "invest" ? `Down to a reserve of <input type="text" inputmode="decimal" id="rb-reserve" value="${RB.reserve ? Math.round(RB.reserve) : 0}" aria-label="Cash to keep"> ${escapeHtml(FX_QUOTE)}.`
+      : `Off: the ${cashNow != null ? wiMoney(cashNow) + " of " : ""}cash stays as it is.`}</span></span></div>`;
+  let slider = "";
+  if (RB.mode === "fewest" && d?.path?.length > 1) {
+    const path = d.path.slice().sort((a, b) => a.trades - b.trades);
+    const cur = Math.max(0, path.findIndex(p => p.trades >= (s.n_trades ?? 0)));
+    slider = `<div class="rb-path"><div class="rb-path-l"><span>Fewer trades</span><span id="rb-path-v">${path[cur].trades} trades · tracking error ${(path[cur].te * 100).toFixed(2)}%</span><span>Closer to target</span></div>
+      <input type="range" id="rb-path" min="0" max="${path.length - 1}" step="1" value="${cur}" aria-label="Number of trades"></div>`;
+    RB._path = path;
+  }
+  const stat = (l, v, sub, tip) => `<div${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}><div class="l">${l}</div><div class="v">${v}${sub ? ` <small>${sub}</small>` : ""}</div></div>`;
+  const stats = d ? `<div class="rb-stats">
+      ${stat("Trades", s.n_trades ?? "—", `${s.n_sells || 0} sells, ${s.n_buys || 0} buys`)}
+      ${stat("Traded", wiMoney((s.buys || 0) + (s.sells || 0)), s.turnover != null ? `${(s.turnover * 100).toFixed(1)}% turnover` : "")}
+      ${stat("Cost, about", wiMoney(s.cost), `${+(d.options?.tc_bps ?? 0)} bps`, "Your trading cost from Settings, on the value traded. No fixed fee per trade.")}
+      ${stat("Tracking error", s.te != null ? `${(s.te * 100).toFixed(2)}%` : "—", s.te_before != null ? `a year · was ${(s.te_before * 100).toFixed(2)}%` : "a year", "How far the result would still move apart from the target in a year, from the last year of daily returns. Before: My Investments as it is now against the target.")}
+      ${stat("Cash left", wiMoney(s.cash_after), s.cash_before != null ? `was ${wiMoney(s.cash_before)}` : "")}
+      ${stat("Estimated gain", s.gain_est != null ? wiMoney(s.gain_est) : "—", "on sells", "Estimated gain at average cost, before tax rules: what the sells would realise over what those shares cost on average.")}
+    </div>` : "";
+  const warns = d ? [...(d.warnings || [])] : [];
+  if (s.shortfall > 0) warns.push(`The target can't be funded in full: ${wiMoney(s.shortfall)} short, so the buys were scaled down.`);
+  const warnHtml = warns.map(w => `<div class="rb-warn">${escapeHtml(w)}</div>`).join("");
+  const trades = d?.trades || [];
+  const nS = trades.filter(t => t.side === "sell").length, nB = trades.length - nS;
+  const gains = RB.gains;
+  const rows = trades.map(t => `<tr><td><span class="side ${t.side}">${t.side === "sell" ? "Sell" : "Buy"}</span></td>
+      <td><span class="tk">${escapeHtml(t.symbol)}</span>${t.new ? ' <span class="rb-new">new</span>' : ""}<span class="nm">${escapeHtml(shortName(t.name || ""))}</span></td>
+      <td title="${escapeHtml(`at ${t.price != null ? t.price : "—"} ${t.quote_ccy || ""}${t.price_date ? `, close of ${fmtDateMDY(t.price_date)}` : ""}`)}">${escapeHtml(rbShares(t))}</td>
+      <td>${wiMoney(t.value)}</td>
+      <td class="w" title="Target ${(t.weight_target * 100).toFixed(1)}%">${(t.weight_now * 100).toFixed(1)} → <b>${(t.weight_after * 100).toFixed(1)}</b> <span class="tgt">(${(t.weight_target * 100).toFixed(1)})</span></td>
+      ${gains ? `<td class="g">${t.gain_est != null ? wiMoney(t.gain_est) : ""}</td>` : ""}</tr>`).join("");
+  const table = trades.length ? `<table class="rb-tl${gains ? " gains" : ""}"><thead><tr><th>Side</th><th>Holding</th><th>Shares</th><th>Value</th><th>Weight now → after${gains ? "" : " (target)"}</th>${gains ? '<th data-tip="Estimated gain at average cost, before tax rules">Gain, est.</th>' : ""}</tr></thead><tbody>${rows}</tbody></table>`
+    : d ? `<div class="rb-none">No trades: My Investments is already as close to the target as these rules allow.</div>` : "";
+  const err = RB.err ? `<div class="rb-err">${escapeHtml(RB.err.message)}</div>` : "";
+  const wait = !d && !RB.err ? `<div class="rb-wait">${lcHtml("working out the trades", { bar: true })}</div>` : "";
+  body.classList.toggle("busy", RB.busy && !!d);
+  body.innerHTML = `<div class="rb-sec">How to trade</div><div class="rb-modes" role="radiogroup" aria-label="How to trade">${modes}</div>${cash}${slider}
+    ${err}${wait}${d ? `<div class="rb-sec">Result</div>${stats}${warnHtml}` : ""}
+    ${trades.length ? `<div class="rb-lead"><span>To reach your target: ${nS} sell${nS === 1 ? "" : "s"}, ${nB} buy${nB === 1 ? "" : "s"}</span><span class="wc-sp"></span><button type="button" class="wc-btn ghost sm" id="rb-gains">${gains ? "Hide" : "Show"} estimated gains</button></div>` : ""}
+    ${table}${d?.prices_as_of ? `<div class="rb-asof">Prices as of ${escapeHtml(fmtDateMDY(d.prices_as_of))}, the same closes for both sides. Minimum trade ${invSym()}100, full exits excepted.</div>` : ""}`;
+  body.querySelectorAll("[data-rb-mode]").forEach(b => b.onclick = () => {
+    if (RB.mode === b.dataset.rbMode) return;
+    RB.mode = b.dataset.rbMode; RB.nTrades = null; rbAsk();
+  });
+  const cs = $("#rb-cash");
+  if (cs) cs.onclick = () => { RB.cash = RB.cash === "invest" ? "keep" : "invest"; RB.counts = {}; RB.nTrades = null; rbAsk(); };
+  const rv = $("#rb-reserve");
+  if (rv) rv.onchange = () => { RB.reserve = Math.max(0, parseWeightPct(rv.value)); RB.counts = {}; RB.nTrades = null; rbAsk(); };
+  const g = $("#rb-gains");
+  if (g) g.onclick = () => { RB.gains = !RB.gains; rbRender(); };
+  const sl = $("#rb-path");
+  if (sl) sl.oninput = () => {
+    // Each answer recomputes the path (about 0.8 s on a large book): the label
+    // follows the slider at once, the request waits for it to settle.
+    const p = RB._path[+sl.value];
+    $("#rb-path-v").textContent = `${p.trades} trades · tracking error ${(p.te * 100).toFixed(2)}%`;
+    clearTimeout(RB.timer);
+    RB.timer = setTimeout(() => { RB.nTrades = p.trades; rbAsk(); }, 350);
+  };
+}
+function rbCopy() {
+  const d = RB.res;
+  if (!d?.trades?.length) return toast("No trades to copy.");
+  const lines = d.trades.map(t => `${t.side === "sell" ? "SELL" : "BUY"}\t${t.symbol}\t${rbShares(t)}\t${t.name || ""}\t≈ ${FX_QUOTE} ${Math.round(t.value)}`);
+  navigator.clipboard?.writeText(lines.join("\n")).then(() => toast(`Copied ${lines.length} trades.`), () => toast("Couldn't copy."));
 }
 
 /* ===========================================================================
@@ -8602,57 +9692,7 @@ function equalWeightsOf(rows) {
 let WEIGHTS_INTENT = "adhoc";
 let WEIGHTS_EDITING_NAME = null;
 
-function openWeightsPopup(opts) {
-  if (!DATA.length) return toast("Build a portfolio first.");
-  opts = opts || {};
-  const rows = DATA.filter(r => r && r.symbol);
-  // Seed the draft from the most appropriate source:
-  //   intent=edit → the preset's saved weights
-  //   intent=new  → current resolved mode weights (capture what user sees)
-  //   intent=adhoc (default) → existing customWeights or active mode
-  let init;
-  if (opts.intent === "edit" && opts.presetName) {
-    const p = presetByName(opts.presetName);
-    init = (p && p.weights) ? p.weights : weightsForMode(STATE.mode);
-    WEIGHTS_INTENT = "edit"; WEIGHTS_EDITING_NAME = opts.presetName;
-  } else if (opts.intent === "new") {
-    init = weightsForMode(STATE.mode);
-    WEIGHTS_INTENT = "new"; WEIGHTS_EDITING_NAME = null;
-  } else {
-    init = STATE.customWeights || weightsForMode(STATE.mode);
-    WEIGHTS_INTENT = "adhoc"; WEIGHTS_EDITING_NAME = null;
-  }
-  WEIGHTS_DRAFT = rows.map(r => ({
-    symbol: r.symbol,
-    name: r.name || r.symbol,
-    weight: Number(init[r.symbol] || 0),
-    locked: false,
-  }));
-  // Wire UI to reflect intent (title, prefilled name, delete-button visibility).
-  const titleEl = document.getElementById("pf-weights-title");
-  const nameEl = document.getElementById("pf-weights-name");
-  const delBtn = document.getElementById("pf-weights-delete");
-  const statusEl = document.getElementById("pf-weights-status");
-  const saved = STATE.activeView && STATE.activeView !== AD_HOC_KEY;
-  if (titleEl) titleEl.textContent =
-      WEIGHTS_INTENT === "edit" ? `Edit preset · ${opts.presetName}` :
-      WEIGHTS_INTENT === "new"  ? "New weight preset" :
-                                  "Custom weights";
-  if (nameEl) nameEl.value = WEIGHTS_INTENT === "edit" ? opts.presetName : "";
-  if (delBtn) delBtn.style.display = WEIGHTS_INTENT === "edit" ? "" : "none";
-  if (statusEl) statusEl.textContent = saved ? "" : "Save the portfolio to enable named presets.";
-  // Disable save buttons when there's no active saved portfolio to attach to.
-  ["pf-weights-save", "pf-weights-saveas"].forEach(id => {
-    const b = document.getElementById(id); if (b) b.disabled = !saved;
-  });
-  renderWeightsRows();
-  showOverlay("#pf-weights-bg");
-}
 
-function closeWeightsPopup() {
-  hideOverlay("#pf-weights-bg");
-  hideInlinePrompt();
-}
 
 // Lock glyphs for the weights rows: inline SVG (no emoji, whose size and
 // colour vary by system font). Stroke follows currentColor, so the muted/accent
@@ -8669,39 +9709,6 @@ function parseWeightPct(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function renderWeightsRows() {
-  const body = $("#pf-weights-body"); body.innerHTML = "";
-  WEIGHTS_DRAFT.forEach((row, i) => {
-    const r = document.createElement("div");
-    r.className = "pf-w-row" + (row.locked ? " locked" : "");
-    const showName = row.name && row.name !== row.symbol;
-    r.innerHTML = `
-      <span class="pf-w-id"><span class="pf-w-sym">${escapeHtml(row.symbol)}</span>${showName ? `<span class="pf-w-name">${escapeHtml(row.name)}</span>` : ""}</span>
-      <input class="pf-w-slider" type="range" min="0" max="1" step="0.001" value="${row.weight.toFixed(3)}" aria-label="${escapeHtml(row.symbol)} weight" ${row.locked ? "disabled" : ""}/>
-      <input class="pf-w-num" type="text" inputmode="decimal" value="${(row.weight*100).toFixed(2)}" aria-label="${escapeHtml(row.symbol)} weight, percent" ${row.locked ? "readonly" : ""}/>
-      <button type="button" class="pf-w-lock${row.locked ? " on" : ""}" aria-pressed="${row.locked}" data-tip="${row.locked ? "Locked — click to unlock" : "Lock this weight; the others rebalance"}">${row.locked ? W_LOCK_SVG.on : W_LOCK_SVG.off}</button>
-    `;
-    const slider = r.querySelector(".pf-w-slider");
-    const num = r.querySelector(".pf-w-num");
-    const lock = r.querySelector(".pf-w-lock");
-    slider.addEventListener("input", () => onWeightInput(i, Number(slider.value)));
-    num.addEventListener("input", () => onWeightInput(i, Math.max(0, Math.min(100, parseWeightPct(num.value))) / 100));
-    // Select the value on focus so typing replaces it. Keyboard focus selects
-    // at once; for a click the browser places the caret on MOUSEUP (after focus
-    // and after any rAF), which would undo the selection and make "20" typed
-    // over 9.28 read "209.28" — so a click-focus selects on its own mouseup.
-    let clickFocus = false;
-    num.addEventListener("mousedown", () => { clickFocus = document.activeElement !== num; });
-    num.addEventListener("mouseup", (e) => { if (clickFocus) { e.preventDefault(); num.select(); clickFocus = false; } });
-    num.addEventListener("focus", () => { if (!clickFocus) num.select(); });
-    num.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); num.blur(); } });
-    num.addEventListener("blur", () => { num.value = (WEIGHTS_DRAFT[i].weight * 100).toFixed(2); });
-    lock.addEventListener("click", () => { row.locked = !row.locked; renderWeightsRows(); updateWeightsSum(); });
-    body.appendChild(r);
-  });
-  syncWeightsInputs();
-  updateWeightsSum();
-}
 
 function onWeightInput(i, newVal) {
   const row = WEIGHTS_DRAFT[i];
@@ -8740,6 +9747,7 @@ function syncWeightsInputs() {
     // Accent fill up to the thumb (the track is a two-layer background).
     s.style.setProperty("--p", (Math.max(0, Math.min(1, w.weight)) * 100).toFixed(2) + "%");
     el.classList.toggle("locked", w.locked);
+    wcFillRow(el, i);
   });
 }
 
@@ -8759,14 +9767,9 @@ function resetDraftToEqual() {
 }
 
 function resetDraftToCap() {
-  // Re-derive cap weights from DATA.
-  const caps = DATA.map(r => Math.max(0, Number(r.market_cap) || 0));
-  const total = caps.reduce((a, b) => a + b, 0);
-  const w = total > 0 ? DATA.map((r, i) => caps[i] / total) : DATA.map(() => 1 / DATA.length);
-  WEIGHTS_DRAFT.forEach((row, i) => {
-    row.weight = w[i] || 0;
-    row.locked = false;
-  });
+  // Cap weights on USD caps (capWeightsOf), by symbol: the draft is sorted by weight, not in DATA's order.
+  const w = capWeightsOf(DATA.filter(r => r && r.symbol));
+  WEIGHTS_DRAFT.forEach((row) => { row.weight = w[row.symbol] || 0; row.locked = false; });
   renderWeightsRows();
 }
 
@@ -8784,6 +9787,11 @@ function applyWeightsDraft() {
   // / saveAsPresetClick instead, which also call selectMode("preset:<name>").
   const w = _normalizedDraft();
   if (!w) { toast("Weights must sum to a positive value."); return; }
+  // The edited set, untouched: Apply simply makes it the active one.
+  if (WC.edit && presetByName(WC.edit)) {
+    const pw = weightsForMode(modeId(WC.edit));
+    if (Object.keys(w).every(k => Math.abs((pw[k] || 0) - w[k]) < 1e-6)) { closeWeightsPopup(); selectMode(modeId(WC.edit)); return; }
+  }
   STATE.customWeights = w;
   STATE.mode = "custom";
   const tabMap = currentAnalyticsMap();
@@ -8919,46 +9927,12 @@ function _ipSubmit() {
   if (onOk) onOk(v);
 }
 
-function renderModeBar() {
-  // Rebuilds the pill bar: Equal, Cap, each saved preset, then [+] (and [✎]
-  // when a preset is currently active so the user can jump straight to edit).
-  const host = document.getElementById("pf-mode-toggle");
-  if (!host) return;
-  const active = STATE.mode;
-  const pills = [];
-  function pill(mode, label, extra) {
-    const cls = "pf-mode-pill" + (active === mode ? " active" : "") + (extra ? " " + extra : "");
-    return `<span class="${cls}" role="tab" data-mode="${escapeHtml(mode)}" tabindex="0">${escapeHtml(label)}</span>`;
-  }
-  if (viewIsBook(STATE.activeView)) pills.push(pill("book", "Book"));
-  pills.push(pill("equal", "Equal"));
-  pills.push(pill("cap", "Cap"));
-  for (const p of (STATE.weightPresets || [])) {
-    if (!p || !p.name) continue;
-    pills.push(pill(modeId(p.name), p.name, "preset"));
-  }
-  // Trailing controls (only meaningful for saved portfolios)
-  const canAdd = !!STATE.activeView && STATE.activeView !== AD_HOC_KEY && !viewIsBook(STATE.activeView) && DATA.length > 0;
-  if (canAdd) {
-    pills.push(`<span class="pf-mode-pill icon" id="pf-mode-add" title="New preset from current weights">＋</span>`);
-  }
-  const activeName = activePresetName();
-  if (activeName) {
-    pills.push(`<span class="pf-mode-pill icon" id="pf-mode-edit" title="Edit '${escapeHtml(activeName)}'">✎</span>`);
-  }
-  host.innerHTML = pills.join("");
-  host.querySelectorAll(".pf-mode-pill[data-mode]").forEach(el => {
-    el.addEventListener("click", () => selectMode(el.dataset.mode));
-    el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMode(el.dataset.mode); }});
-  });
-  const addBtn = document.getElementById("pf-mode-add");
-  if (addBtn) addBtn.onclick = () => openWeightsPopup({intent: "new"});
-  const editBtn = document.getElementById("pf-mode-edit");
-  if (editBtn) editBtn.onclick = () => openWeightsPopup({intent: "edit", presetName: activeName});
-}
 
 function selectMode(mode) {
   if (!mode || mode === STATE.mode) return;
+  // Equal and Cap weight every constituent: names this what-if took to 0% are
+  // held again under them, said once rather than silently.
+  const back = (mode === "equal" || mode === "cap") ? [...(wiOrigin()?.removed || [])] : [];
   STATE.mode = mode;
   // Drop ad-hoc custom weights when switching away from "custom" — preset modes
   // resolve through STATE.weightPresets, not customWeights.
@@ -8966,6 +9940,7 @@ function selectMode(mode) {
   renderModeBar();
   persistActivePreset();
   requestAnalytics();
+  if (back.length) toast(`${WEIGHT_NAMES[mode]} weights every name, so ${back.length === 1 ? back[0] : `the ${back.length} names taken out (${back.slice(0, 4).join(", ")}${back.length > 4 ? "…" : ""})`} ${back.length === 1 ? "is" : "are"} held again under it. The set that took ${back.length === 1 ? "it" : "them"} out still has ${back.length === 1 ? "it" : "them"} at 0%.`);
 }
 function updatePeriodButtons() {
   $$("#pf-period-tabs button").forEach(b => b.classList.toggle("active", b.dataset.p === STATE.period));
@@ -11512,6 +12487,19 @@ function wireSmaPill(id, n) {
 }
 for (const n of SMA_PERIODS) wireSmaPill(`#pf-show-sma${n}`, n);
 
+/* --- Weights row, Weight Center and rebalance panel wiring --- */
+$("#pf-wc-open").addEventListener("click", () => openWeightsPopup());
+$("#wc-rebal").addEventListener("click", () => {
+  const w = _normalizedDraft();
+  if (!w) return toast("Weights must sum to a positive value.");
+  const label = WC.edit ? (Object.keys(w).every(k => Math.abs((weightsForMode(modeId(WC.edit))[k] || 0) - w[k]) < 1e-6) ? WC.edit : `${WC.edit}, edited`) : "these weights";
+  closeWeightsPopup();
+  rbOpen(w, label);
+});
+$("#rb-close").addEventListener("click", rbClose);
+$("#rb-done").addEventListener("click", rbClose);
+$("#rb-copy").addEventListener("click", rbCopy);
+$("#rb-bg").addEventListener("click", (e) => { if (e.target.id === "rb-bg") rbClose(); });
 /* --- Weights popup wiring --- */
 $("#pf-weights-bg").addEventListener("click", (e) => { if (e.target.id === "pf-weights-bg") closeWeightsPopup(); });
 $("#pf-weights-close").addEventListener("click", closeWeightsPopup);
@@ -11532,9 +12520,10 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   const ip = document.getElementById("pf-name-prompt");
   if (ip && ip.classList.contains("show")) { hideInlinePrompt(); return; }
+  if ($("#rb-bg").classList.contains("show")) { rbClose(); return; }
   if ($("#pf-weights-bg").classList.contains("show")) closeWeightsPopup();
 });
-// Initial paint — empty until DATA is built but renders the [+] / Equal/Cap baseline.
+// Initial paint — empty until DATA is built but renders the Equal/Cap baseline.
 renderModeBar();
 
 /* ===========================================================================
@@ -11561,6 +12550,9 @@ const MPT = {
   bounds: {},          // {symbol: {min?, max?}} per-position weight limits (fractions)
   abort: null,         // AbortController for the in-flight streaming run (Cancel)
   busy: false,
+  selSet: null,        // a saved weight set picked on the chart (its name), else the frontier point is selected
+  hoverSet: null,      // the saved set under the pointer
+  _sets: [],           // the sets' marks as drawn: [{n, a, x, y}] (mptDrawSets), for the hit test
 };
 
 async function openMptOverlay() {
@@ -11881,6 +12873,7 @@ function mptSyncActions() {
 // Forget the shown run (opening the optimizer on another portfolio).
 function mptResetResult() {
   MPT.result = null;
+  MPT.selSet = null; MPT.hoverSet = null; MPT._sets = [];
   MPT.selectedIdx = 0;
   mptClearChart();
   const status = document.getElementById("pf-mpt-status");
@@ -11949,6 +12942,7 @@ async function mptRun() {
   // The run on screen survives until this one finishes: mptStreamFrontier
   // replaces MPT.result mid-stream, so a Cancel or an error puts it back.
   const prev = MPT.result, prevIdx = MPT.selectedIdx;
+  MPT.selSet = null; MPT.hoverSet = null;
   mptClearChart();
   const params = mptGetParams();
   mptProgressShow();
@@ -11962,7 +12956,7 @@ async function mptRun() {
     const r = await fetch("/api/efficient-frontier", {
       method: "POST", headers: {"Content-Type": "application/json"}, signal: ac.signal,
       body: JSON.stringify({rows: DATA, display_ccy: FX_QUOTE, ...params,
-                            current_weights: weightsForMode(STATE.mode)}),
+                            current_weights: weightsForMode(STATE.mode), weight_sets: wcWeightSets()}),
     });
     if (!r.ok || !r.body) {
       let msg = "HTTP " + r.status;
@@ -12070,6 +13064,7 @@ function mptStreamFrontier(msg) {
     symbols: msg.symbols, missing: msg.missing,
     frontier: msg.frontier, min_cvar: msg.min_cvar, max_ret: msg.max_ret,
     anchors: msg.anchors, bl: msg.bl, params: msg.params, meta: msg.meta || {},
+    sets: msg.sets, picks: msg.picks, held_out: msg.held_out, stand_ins: msg.stand_ins,
     cloud: [],
   };
   const host = document.getElementById("pf-mpt-chart");
@@ -12268,6 +13263,7 @@ function mptComputeProj(d, host, opts = {}) {
   if (!opts.cloudRoom) (d.cloud || []).forEach(p => consume(p[0], p[1]));
   (d.frontier || []).forEach(p => { consume(mptCvar(p), p.ret); consume(mptCvarLo(p), p.ret); consume(mptCvarHi(p), p.ret); });
   Object.values(d.anchors || {}).forEach(a => a && consume(mptCvar(a), a.ret));
+  Object.values(d.sets || {}).forEach(a => a && !a.error && consume(mptCvar(a), a.ret));
   if (!isFinite(xMin)) { xMin = 0; xMax = 0.3; yMin = 0; yMax = 0.2; }
   // Floor the y-domain at the rf that actually produced this frontier (from the
   // run payload), not the live control — the two can differ after a restore.
@@ -12371,7 +13367,14 @@ function mptRenderChart(opts = {}) {
     });
     return best;
   }
+  const _px = (ev) => {
+    const r = fresh.getBoundingClientRect();
+    return r.width && r.height ? [(ev.clientX - r.left) * (cssW / r.width), (ev.clientY - r.top) * (cssH / r.height)] : null;
+  };
   fresh.addEventListener("click", (ev) => {
+    const at = _px(ev), hitSet = at && mptHitSet(at[0], at[1]);
+    if (hitSet) { mptSelectSet(hitSet); return; }
+    MPT.selSet = null;
     const idx = _hitPoint(ev);
     if (idx == null) return;
     MPT.selectedIdx = idx;
@@ -12388,6 +13391,14 @@ function mptRenderChart(opts = {}) {
     }
   });
   fresh.addEventListener("mousemove", (ev) => {
+    const at = _px(ev), hitSet = at && mptHitSet(at[0], at[1]);
+    if (hitSet) {
+      MPT.hoverIdx = null;
+      if (MPT.hoverSet !== hitSet) { MPT.hoverSet = hitSet; mptUpdateSelection(); }
+      mptShowSetTip(ev, hitSet);
+      return;
+    }
+    if (MPT.hoverSet) { MPT.hoverSet = null; }
     const idx = _hitPoint(ev);
     if (idx == null) {
       MPT.hoverIdx = null;
@@ -12401,6 +13412,7 @@ function mptRenderChart(opts = {}) {
   });
   fresh.addEventListener("mouseleave", () => {
     MPT.hoverIdx = null;
+    MPT.hoverSet = null;
     mptUpdateSelection();
     mptHideFrontierTip();
   });
@@ -12417,6 +13429,7 @@ function mptRenderChart(opts = {}) {
     <span data-legend="cap" data-tip="Jump to the point nearest the cap-weight portfolio">${legendSwatch("cap")}Cap-weight</span>
     <span data-legend="current" data-tip="Jump to the point nearest the current portfolio">${legendSwatch("current")}Current</span>
     <span class="no-click">${legendSwatch("selected")}Selected</span>
+    ${mptSetLegend(d)}
     <span class="no-click" style="margin-left:auto">${(d.cloud || []).length.toLocaleString(NUM_LOCALE)} portfolios · ${d.meta?.n_obs || "?"} daily obs · ${blNote} · ${d.meta?.total_ms || "?"}ms</span>
   `;
   legend.querySelectorAll("span[data-legend]").forEach(el => {
@@ -12456,6 +13469,7 @@ function _nearestFrontierIdx(cvar, ret) {
 // risk slider to the closest point on the frontier; "frontier" just pulses it.
 function mptLegendClick(kind) {
   const d = MPT.result; if (!d) return;
+  MPT.selSet = null;
   switch (kind) {
     case "frontier":
       break;
@@ -12475,6 +13489,13 @@ function mptLegendClick(kind) {
   mptRenderSide();
 }
 
+function mptSetLegend(d) {
+  const all = Object.entries(d.sets || {});
+  if (!all.length) return "";
+  const shown = all.filter(([, a]) => a && !a.error), gone = all.filter(([, a]) => !a || a.error);
+  return (shown.length ? `<span class="no-click">${legendSwatch("set")}Saved sets (${shown.length}) · hover for figures, click to select${shown.some(([, a]) => a.partial) ? " · * partly outside this run" : ""}</span>` : "")
+    + (gone.length ? `<span class="no-click" data-tip="${escapeHtml(gone.map(([n, a]) => `${n}: ${a?.error || "no figures"}`).join("; "))}">Not on the chart: ${escapeHtml(gone.map(([n]) => n).join(", "))}</span>` : "");
+}
 function legendSwatch(kind) {
   const c = 'class="lg-swatch"';
   switch (kind) {
@@ -12485,7 +13506,9 @@ function legendSwatch(kind) {
     case "cap":
       return `<svg ${c} viewBox="0 0 14 12"><polygon points="7,1 12,11 2,11" fill="#06b6d4"/></svg>`;
     case "current":
-      return `<svg ${c} viewBox="0 0 14 12"><path d="M2 2 L12 10 M12 2 L2 10" stroke="#f59e0b" stroke-width="2.2"/></svg>`;
+      return `<svg ${c} viewBox="0 0 14 12"><path d="M2 2 L12 10 M12 2 L2 10" stroke="var(--mpt-current)" stroke-width="2.2"/></svg>`;
+    case "set":
+      return `<svg ${c} viewBox="0 0 14 12"><circle cx="7" cy="6" r="4.2" fill="var(--text)" stroke="var(--surface-raised)" stroke-width="1.6"/></svg>`;
     case "selected":
       return `<svg ${c} viewBox="0 0 14 12"><circle cx="7" cy="6" r="4.5" fill="none" stroke="var(--accent)" stroke-width="1.8"/><circle cx="7" cy="6" r="1.6" fill="var(--accent)"/></svg>`;
     default:
@@ -12633,6 +13656,107 @@ function drawFrontierAndAnchors(ctx, d, proj) {
   if (an.equal)   drawMarker(ctx, "equal",   X(mptCvar(an.equal)),   Y(an.equal.ret));
   if (an.cap)     drawMarker(ctx, "cap",     X(mptCvar(an.cap)),     Y(an.cap.ret));
   if (an.current) drawMarker(ctx, "current", X(mptCvar(an.current)), Y(an.current.ret));
+  mptDrawSets(ctx, d, proj);
+}
+
+/* Phase 4: every saved weight set of the portfolio as a mark (frontier.py
+   `sets`, plotted at its own CVaR 30d and return), labelled, the active one
+   ringed as "current". A partial set (names outside this run, renormalised)
+   gets a dashed ring; a set with no weight inside the run is listed in the
+   legend instead. Hover and selection are drawn on the overlay (drawOverlay). */
+function mptSetEntries(d, proj) {
+  const out = [];
+  for (const [n, a] of Object.entries(d.sets || {})) {
+    if (!a || a.error || mptCvar(a) == null || a.ret == null) continue;
+    out.push({ n, a, x: proj.X(mptCvar(a)), y: proj.Y(a.ret) });
+  }
+  return out;
+}
+function mptDrawSets(ctx, d, proj) {
+  const E = mptSetEntries(d, proj);
+  MPT._sets = E;
+  if (!E.length) return;
+  const text = _mptCssColor("--text", "#111"), halo = _mptCssColor("--surface-raised", "#fff");
+  const muted = _mptCssColor("--muted", "#888"), cur = _mptCssColor("--mpt-current", "#f59e0b");
+  const current = MPT.view === STATE.activeView ? activePresetName() : null;
+  ctx.save();
+  ctx.font = "600 11.5px ui-sans-serif, -apple-system, system-ui, sans-serif";
+  // Labels: greedy, top to bottom, the first spot that hits no label and no mark.
+  const placed = [], W = proj.cssW;
+  for (const e of E.slice().sort((p, q) => p.y - q.y)) {
+    e.label = e.n + (e.n === current ? " · current" : "") + (e.a.partial ? " *" : "");
+    const tw = ctx.measureText(e.label).width + 4;
+    const cands = [[12, 4], [12, -9], [12, 17], [-12 - tw, 4], [-12 - tw, -9], [-12 - tw, 17]];
+    let best = cands[0];
+    for (const c of cands) {
+      const bx = e.x + c[0], by = e.y + c[1] - 10;
+      if (bx < proj.pad.l + 2 || bx + tw > W - 4) continue;
+      const hitL = placed.some(r => bx < r.x + r.w && bx + tw > r.x && by < r.y + 14 && by + 14 > r.y);
+      const hitM = E.some(o => o !== e && o.x > bx - 6 && o.x < bx + tw + 6 && o.y > by - 4 && o.y < by + 18);
+      if (!hitL && !hitM) { best = c; break; }
+    }
+    placed.push({ x: e.x + best[0], y: e.y + best[1] - 10, w: tw });
+    e.lx = e.x + best[0]; e.ly = e.y + best[1];
+  }
+  for (const e of E) {
+    if (e.n === current) {
+      ctx.strokeStyle = cur; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(e.x, e.y, 10.5, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (e.a.partial) {
+      ctx.save(); ctx.setLineDash([2, 2]); ctx.strokeStyle = muted; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(e.x, e.y, 9, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+    }
+    ctx.fillStyle = text; ctx.strokeStyle = halo; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(e.x, e.y, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+  ctx.textBaseline = "alphabetic"; ctx.textAlign = "start"; ctx.lineJoin = "round";
+  for (const e of E) {
+    ctx.strokeStyle = halo; ctx.lineWidth = 3.5; ctx.strokeText(e.label, e.lx, e.ly);
+    ctx.fillStyle = text; ctx.fillText(e.label, e.lx, e.ly);
+  }
+  ctx.restore();
+}
+/* The saved set under the pointer: within 12 px of its mark. */
+function mptHitSet(px, py) {
+  let best = null, bestD = 144;
+  for (const e of MPT._sets || []) {
+    const dd = (e.x - px) ** 2 + (e.y - py) ** 2;
+    if (dd < bestD) { bestD = dd; best = e.n; }
+  }
+  return best;
+}
+function mptShowSetTip(ev, n) {
+  const d = MPT.result, a = d?.sets?.[n];
+  if (!a) return;
+  const aConf = Math.round((d.params?.alpha || 0.95) * 100), src = presetByName(n)?.source;
+  let tip = document.getElementById("pf-mpt-frontier-tip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "pf-mpt-frontier-tip";
+    tip.className = "pf-mpt-frontier-tip";
+    document.body.appendChild(tip);
+  }
+  tip.innerHTML = `<div class="tip-title">${escapeHtml(n)} <span style="font-weight:400;color:var(--muted);font-size:10px">· saved set</span></div>
+    <div class="tip-row"><span class="k">Return, net</span><span class="v">${mptFmtLoss(a.ret_net ?? a.ret)}</span></div>
+    <div class="tip-row"><span class="k">CVaR ${aConf}% · 30d</span><span class="v neg">${mptFmtLoss(mptCvar(a))}</span></div>
+    <div class="tip-row"><span class="k">Volatility</span><span class="v">${mptFmtLoss(a.vol)}</span></div>
+    <div class="tip-row"><span class="k">Max drawdown</span><span class="v neg">${mptFmtLoss(a.mdd)}</span></div>
+    ${a.partial ? `<div class="tip-sub">${escapeHtml((a.dropped || []).join(", "))} not in this run: the rest renormalised (${Math.round((a.coverage || 0) * 100)}% of the set).</div>` : ""}
+    ${src?.kind === "optimizer" && src.rule === "same_risk" ? `<div class="tip-sub">${escapeHtml(SAME_RISK_NOTE)}</div>` : ""}
+    <div class="tip-sub">Click to select it</div>`;
+  tip.classList.add("show");
+  placeTip(tip, {left: ev.clientX, top: ev.clientY, right: ev.clientX, bottom: ev.clientY, width: 0, height: 0},
+           {preferred: "above", offset: 14, gap: 8});
+}
+/* A saved set picked on the chart: the side panel shows its own figures, and
+   "Use this set" makes it the active weights (nothing new is saved). */
+function mptSelectSet(n) {
+  MPT.selSet = n;
+  MPT.hoverSet = null;
+  mptHideFrontierTip();
+  drawOverlay();
+  mptRenderSide();
 }
 
 function drawMarker(ctx, kind, x, y) {
@@ -12655,7 +13779,8 @@ function drawMarker(ctx, kind, x, y) {
       ctx.fill();
       break;
     case "current":
-      ctx.strokeStyle = "#f59e0b"; ctx.lineWidth = 2;
+      // A token, not orange: in Bloomberg the accent (the selected ring) is orange.
+      ctx.strokeStyle = _mptCssColor("--mpt-current", "#f59e0b"); ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5);
       ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5); ctx.stroke();
       break;
@@ -12691,8 +13816,20 @@ function drawOverlay() {
     }
   }
 
+  // A saved set under the pointer grows; a selected one gets the accent ring
+  // (and the frontier's own ring steps aside).
+  const setAt = (n) => (MPT._sets || []).find(e => e.n === n);
+  const hs = MPT.hoverSet && setAt(MPT.hoverSet), ss = MPT.selSet && setAt(MPT.selSet);
+  const text = _mptCssColor("--text", "#111"), halo = _mptCssColor("--surface-raised", "#fff");
+  for (const e of [hs, ss].filter(Boolean)) {
+    ctx.save();
+    if (e === ss) { ctx.strokeStyle = accent; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(e.x, e.y, 14, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.fillStyle = text; ctx.strokeStyle = halo; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(e.x, e.y, 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
   // Active selection ring on the frontier.
-  const sel = (d.frontier || [])[MPT.selectedIdx];
+  const sel = ss ? null : (d.frontier || [])[MPT.selectedIdx];
   if (sel) {
     const x = X(mptCvar(sel)), y = Y(sel.ret);
     ctx.save();
@@ -12747,7 +13884,7 @@ function drawPulse(ctx, d, proj, accent) {
       if (d.anchors?.cap) ringAt(mptCvar(d.anchors.cap), d.anchors.cap.ret, "#06b6d4");
       break;
     case "current":
-      if (d.anchors?.current) ringAt(mptCvar(d.anchors.current), d.anchors.current.ret, "#f59e0b");
+      if (d.anchors?.current) ringAt(mptCvar(d.anchors.current), d.anchors.current.ret, _mptCssColor("--mpt-current", "#f59e0b"));
       break;
   }
 
@@ -12810,6 +13947,8 @@ function mptHideFrontierTip() {
 // sidebar, apply button, and save flow.
 function mptActiveSel() {
   const d = MPT.result; if (!d) return null;
+  const set = MPT.selSet && d.sets?.[MPT.selSet];
+  if (set && !set.error) return set;
   return (d.frontier || [])[MPT.selectedIdx] || null;
 }
 
@@ -12822,8 +13961,18 @@ function mptRenderSide() {
   // Slider readout: expected return / CVaR at the current point.
   const sliderReadout = document.getElementById("pf-mpt-slider-readout");
   if (sliderReadout) {
-    sliderReadout.textContent = `${(sel.ret * 100).toFixed(1)}% ret / ${mptFmtLoss(mptCvar(sel))} CVaR (30d)`;
+    sliderReadout.textContent = `${MPT.selSet ? MPT.selSet + ": " : ""}${(sel.ret * 100).toFixed(1)}% ret / ${mptFmtLoss(mptCvar(sel))} CVaR (30d)`;
   }
+  const sh = document.getElementById("pf-mpt-sethead"), isSet = !!(MPT.selSet && d.sets?.[MPT.selSet]);
+  if (sh) {
+    sh.hidden = !isSet;
+    const src = isSet ? presetByName(MPT.selSet)?.source : null;
+    sh.innerHTML = isSet ? `<b>${escapeHtml(MPT.selSet)}</b><span>Saved weight set${sel.partial ? ` · ${escapeHtml((sel.dropped || []).join(", "))} not in this run, the rest renormalised` : ""}</span>`
+      + (src?.kind === "optimizer" && src.rule === "same_risk" ? `<span class="pf-mpt-setnote">${escapeHtml(SAME_RISK_NOTE)}</span>` : "") : "";
+  }
+  const ap = document.getElementById("pf-mpt-apply"), sv = document.getElementById("pf-mpt-save");
+  if (ap) ap.textContent = isSet ? "Use this set" : "Use these weights";
+  if (sv) sv.textContent = isSet ? "Open in Weight Center" : "Save as preset…";
   const cash = d.params?.fully_invested === false;
   const invested = Object.values(sel.weights || {}).reduce((a, b) => a + b, 0);
   const lo = mptCvarLo(sel), hi = mptCvarHi(sel);
@@ -12961,6 +14110,13 @@ function mptWireAssetTips(root) {
 function mptApplyToPortfolio() {
   const d = MPT.result; if (!d) return;
   if (viewIsBook(STATE.activeView)) return toast(booksMany() ? "This portfolio's weights come from what you hold." : "Your real book's weights come from what you hold.");
+  if (MPT.selSet && presetByName(MPT.selSet)) {   // a saved set: make it the active one, nothing new
+    const n = MPT.selSet;
+    closeMptOverlay();
+    selectMode(modeId(n));
+    toast(`Using “${n}”.`);
+    return;
+  }
   const sel = mptActiveSel(); if (!sel) return;
   const w = sel.weights || {};
   if (!Object.keys(w).length) { toast("No weights at this point."); return; }
@@ -12983,6 +14139,12 @@ function mptApplyToPortfolio() {
 function mptSaveAsPreset() {
   const d = MPT.result; if (!d) return;
   if (viewIsBook(STATE.activeView)) return toast(booksMany() ? "This portfolio's weights come from what you hold." : "Your real book's weights come from what you hold.");
+  if (MPT.selSet && presetByName(MPT.selSet)) {   // "Open in Weight Center", editing that set
+    const n = MPT.selSet;
+    closeMptOverlay();
+    openWeightsPopup({ presetName: n });
+    return;
+  }
   const sel = mptActiveSel(); if (!sel) return;
   if (!STATE.activeView || STATE.activeView === AD_HOC_KEY) {
     return toast("Save the portfolio first to keep custom weights.");
@@ -13025,15 +14187,7 @@ async function mptSaveRun({silent} = {silent: false}) {
     return;
   }
   try {
-    // Persist everything, plus a DOWNSAMPLED cloud (~2.5k of the 20-80k points) so
-    // a restored run shows a representative scatter without bloating the JSON.
-    const compact = {
-      params: d.params, symbols: d.symbols, missing: d.missing,
-      frontier: d.frontier, min_cvar: d.min_cvar, max_ret: d.max_ret,
-      anchors: d.anchors, bl: d.bl, meta: d.meta,
-      asset_stats: d.asset_stats, analyst_detail: d.analyst_detail,
-      cloud: mptDownsampleCloud(d.cloud, 2500),
-    };
+    const compact = mptCompactRun(d);
     const r = await fetch("/api/mpt-runs", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({view: STATE.activeView, run: compact}),
@@ -13046,6 +14200,21 @@ async function mptSaveRun({silent} = {silent: false}) {
   } catch (e) { if (!silent) toast("Save failed: " + (e.message || e)); }
 }
 
+// What a saved run keeps: everything, plus a DOWNSAMPLED cloud (~2.5k of the
+// 20-80k points) so a restored run shows a representative scatter without
+// bloating the JSON. Phase 4: the saved sets' marks, the picks, the names held
+// out and the stand-ins too; the Weight Center's plug reads them from the saved
+// run (POST /api/weight-presets/optimized never trusts the request's point).
+function mptCompactRun(d) {
+  return {
+    params: d.params, symbols: d.symbols, missing: d.missing,
+    frontier: d.frontier, min_cvar: d.min_cvar, max_ret: d.max_ret,
+    anchors: d.anchors, bl: d.bl, meta: d.meta,
+    asset_stats: d.asset_stats, analyst_detail: d.analyst_detail,
+    sets: d.sets, picks: d.picks, held_out: d.held_out, stand_ins: d.stand_ins,
+    cloud: mptDownsampleCloud(d.cloud, 2500),
+  };
+}
 // Evenly subsample the cloud to at most `cap` points (deterministic stride) so
 // the persisted run stays small but the restored scatter keeps its shape.
 function mptDownsampleCloud(cloud, cap) {
@@ -13123,6 +14292,7 @@ async function mptRefreshRunHistory() {
 // Load a specific saved run into the chart (reflect its params, repaint).
 function mptLoadRun(run) {
   if (!run || !Array.isArray(run.frontier) || !run.frontier.length) return;
+  MPT.selSet = null; MPT.hoverSet = null;
   MPT.result = {...run, cloud: run.cloud || []};
   const p = run.params || {};
   // mptSegSet compares numerically (alpha 0.9 finds the "0.90" pill). The
@@ -13183,6 +14353,7 @@ $("#pf-mpt-info-bg")?.addEventListener("click", (e) => { if (e.target.id === "pf
 let _mptSliderFrame = 0;
 $("#pf-mpt-slider").addEventListener("input", (e) => {
   MPT.selectedIdx = Number(e.target.value) || 0;
+  MPT.selSet = null;
   MPT.hoverIdx = null;
   if (_mptSliderFrame) return;
   _mptSliderFrame = requestAnimationFrame(() => {
@@ -14831,6 +16002,7 @@ function booksSwitched(d) {
   invBadge(INV.book?.attention);
   invLoad();
   booksFollow(d.symbols);
+  wiFollowBooks();   // what-ifs show only with their own portfolio
 }
 /* The red Portfolios tab follows; hidden, it waits until a research page opens. */
 async function booksFollow(symbols) {
@@ -14938,7 +16110,10 @@ async function booksAskDelete(x) {
     body: `<p>This removes everything in it: <b>${x.holdings ? booksHoldings(x.holdings) : "no holdings"}</b>${x.holdings && val ? ` worth ${escapeHtml(val)}` : ""}, <b>${n > 1 ? `${n} recorded trades, dividends and deposits` : n ? "1 recorded entry" : "no recorded trades"}</b>, and its limits, plans and dismissed items.</p>
       <p>Your other portfolios are not touched. You can't undo this in the app. A copy is kept in the data folder.</p>` });
   if (!ok) return;
-  try { booksApply(await booksPost("delete", { id: x.id })); } catch (err) { toast(err.message); }
+  try {
+    booksApply(await booksPost("delete", { id: x.id }));
+    await wiFollowBooks();   // its what-ifs came back as plain portfolios
+  } catch (err) { toast(err.message); }
   renderSettingsPane();
 }
 /* The list's clicks and the name field. ``repaint`` keeps the section's own state. */

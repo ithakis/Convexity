@@ -43,6 +43,7 @@ _OVERLAY_IDS = [
     "export-bg",
     "co-full-bg",
     "inv-att-bg",
+    "rb-bg",
 ]
 
 
@@ -116,6 +117,7 @@ def test_overlay_scroll_containers_contain_their_overscroll():
         ".ns-prog-jobs",
         ".ns-tape-fs-body",
         ".pf-weights-body",
+        ".rb-body",
         ".pf-mpt-cons-body",
         ".cv-list",
         ".settings-pane-body.scroll",

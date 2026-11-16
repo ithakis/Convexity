@@ -237,7 +237,8 @@ def show(book_id) -> None:
 def delete(book_id) -> None:
     """Out of the list, then its folder moves to ``books/deleted/<id>-<when>/``.
     The first portfolio and the one showing are refused, so one always remains.
-    A failed move leaves the folder where it is: unlisted, nothing lost."""
+    A failed move leaves the folder where it is: unlisted, nothing lost. Its
+    what-if portfolios lose their ``whatif`` block and stay as plain ones."""
 
     def apply(st):
         row = _row(st, book_id)
@@ -257,4 +258,10 @@ def delete(book_id) -> None:
             os.replace(src, dest)
     except OSError as exc:
         print(f"[books] keeping the folder of {book_id}: {type(exc).__name__}")
+    # Its what-ifs become plain portfolios (Phase 4): detached, never deleted.
+    from convexity import persistence
+
+    detached = persistence.detach_whatifs(book_id)
+    if detached:
+        print(f"[books] {len(detached)} what-if portfolio(s) of {book_id} detached")
     print(f"[books] deleted {book_id}")

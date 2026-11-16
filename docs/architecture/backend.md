@@ -60,6 +60,13 @@ Renaming a portfolio touches BOTH files (`rename_watchlist` +
 `rename_view`) — see `/api/portfolio/rename` handler. Failure on the
 view side rolls back the watchlist rename.
 
+**What a refresh keeps (`persistence._VIEW_CARRY`).** `save_view` rewrites the
+rows and carries over `weight_presets`, `active_weight_preset`,
+`analytics_cache` and, since Phase 4, `whatif` (the what-if block, below). A
+new per-view key that isn't rows must join that tuple, or the first refresh
+drops it. A preset may carry an allow-listed `source` block
+(`clean_preset_source`, mpt.md: the optimizer plug's provenance).
+
 **One row per symbol, everywhere.** A repeated `symbol` in a
 rows list turns `closes[[...]]` into a frame with duplicate columns, so
 `closes[s]` is a DataFrame and `analyze_portfolios_multi` 500s with
@@ -209,28 +216,28 @@ The columns are `Rec Δ6M` and `MSPR` (Fundamentals preset). The third
 Finnhub-style column, `EPS Surp.`, is now yfinance-sourced (see above).
 
 **Finnhub's free plan covers US listings only (checked 2026-10-11).** Every
-other ticker (REP.MC, TTE.PA, CCC3.DE…) answers HTTP 403 on recommendation,
+other ticker (AIR.PA, SIE.DE, APC.DE…) answers HTTP 403 on recommendation,
 insider-sentiment and company-news alike, while the same company's US line
-answers: its home (KO for CCC3.DE), an ADR (TTE, NVO, SAP) or an OTC ADR
-(REPYY, BNPQY). So every Finnhub call is made for `symbol_db.us_line(symbol)`
+answers: its home (AAPL for APC.DE), an ADR (TM, SONY, UL) or an OTC ADR
+(EADSY, SIEGY). So every Finnhub call is made for `symbol_db.us_line(symbol)`
 (through `finnhub_adapter.finnhub_symbol`, which also spells BRK-B as
 BRK.B): the company group's US listings in the symbol pack, home first, then
 exchange lines before OTC, then the busiest. It reads only the pack, so it is
-safe in `fetch_one`. A company the pack has no US line for (SCGLY, Société
-Générale's ADR, is missing from Yahoo's screener) is looked up by name with
+safe in `fetch_one`. A company the pack has no US line for (a French bank's OTC ADR
+is missing from Yahoo's screener) is looked up by name with
 Yahoo's Lookup by `symbol_db.discover_us_line`, a network call made only from
 the news refresh; the answer, a miss too, is kept for the process and the
 table uses it from the next build. With no US line Finnhub is not asked at
 all, and a 403 is negative-cached like an empty answer (it used to be
 retried on every build: three wasted calls per European row).
-- **Rec:** Finnhub answers an ADR with the company's worldwide consensus (TTE
-  comes back as TTE.PA). With no US line, or no answer, the trend is Yahoo's
+- **Rec:** Finnhub answers an ADR with the company's worldwide consensus (the
+  ADR comes back as its home listing). With no US line, or no answer, the trend is Yahoo's
   for the row's own listing — the `tk.recommendations` frame `fetch_one`
-  already reads for `rating_dist`, so no extra request (PHIL.MI). The row
+  already reads for `rating_dist`, so no extra request (a small Milan listing). The row
   carries `rec_src` ({source, via}) and `us_line` for the tooltips. Both
   sources now return four months, so the column's Δ spans three.
 - **MSPR** is built from SEC Form 4, which only US companies file: a US
-  company's German line gets it through its home (CCC3.DE via KO), a foreign
+  company's German line gets it through its home (APC.DE via AAPL), a foreign
   company never does, ADR or not (EU insider dealings are published regulator
   by regulator; there is no free feed). The n/a cell says why.
 
@@ -301,12 +308,12 @@ which is why it, not a backtest, is what can raise the IC.
 
 **The research line: analysts for a secondary listing (2026-10-18).** Yahoo
 keeps a company's analysts, and much of its fundamentals, on its home or US
-line only. Checked live: NOV.DE and CCC3.DE (and every other Xetra or Vienna
-line of a foreign company tried) had no target, rating or analyst count (and
-no options), while NOVO-B.CO had 24 analysts, NVO 12 and KO 23. `fetcher.research_line(symbol)` picks, among
+line only. Checked live: every Xetra or Vienna line of a foreign company tried had no
+target, rating or analyst count (and no options), while the same companies'
+home and US lines had a dozen to two dozen analysts each. `fetcher.research_line(symbol)` picks, among
 `symbol_db.research_candidates` (the pack group's home line, then its US
-line), the one with the most `numberOfAnalystOpinions`. NOV.DE gets NOVO-B.CO
-over NVO.
+line), the one with the most `numberOfAnalystOpinions`. A Danish company's Xetra line gets
+its Copenhagen line over its US ADR when Copenhagen has more analysts.
 - **Caching.** The choice is kept a week in `state/research_lines.json` (a
   miss a day; written atomically). A probe Yahoo didn't answer is not
   recorded.
@@ -352,7 +359,7 @@ had all of it.
 
 The two cases are separable. A share almost always carries `financialData`: all
 121 equities in the owner's portfolios did, and a secondary line with no
-targets of its own (NVD.DE, WMT.DE, CCC3.DE) still answers it with its
+targets of its own (NVD.DE, APC.DE, MSF.DE) still answers it with its
 `current` price and revenue. A fund never has it. The exception is a line that
 never does (`KDP.MX`: EQUITY, "No fundamentals data found", on every call), which
 only time can tell from a lapse. So:
@@ -615,6 +622,10 @@ before that (and never for a row with no mean target: no coverage, a fund).
 - `/api/keys/test`                 — `{provider}` → `{status, http, ms}`, one cheap provider call
 - `/api/model-download`            — start (or retry) the first-run model download; `202` + `model_fetch.status()` (§4 Market read)
 - `/api/mpt-runs`                  — save `{view, run}` onto the portfolio's **last-3 run history** (newest-first, cap 3; a run whose `params` match the newest replaces it instead of duplicating)
+- `/api/whatif`                    — `{book_id, name?, ccy}`: copy the showing book into a what-if (`whatif.create`); 409 BookMoved / BookWaiting / NameTaken, 422 BookBroken / BookEmpty. Undo is `DELETE /api/watchlists?name=…`
+- `/api/whatif/compare`            — `{book_id, rows, weights, period, display_ccy, rebalance?, tc_bps?}`: the green line, both sides' statistics, the book's total row (read-only)
+- `/api/whatif/rebalance`          — `{book_id, view?, ccy, weights | preset?, mode, rounding?, step?, min_trade?, cash?, reserve?, te_tol?, n_trades?}`: the trades (read-only, never sent anywhere)
+- `/api/weight-presets/optimized`  — `{view, run_id, rule, index?, set_active?}`: a point of a saved optimizer run as a preset with its `source` (mpt.md)
 
 **DELETE**
 - `/api/views/<name>`              — drop a view (cascades to the saved run)
@@ -625,7 +636,8 @@ before that (and never for a row with no mean target: no coverage, a fund).
 **GET (also)**
 - `/api/column-views`              — `{builtins, custom, active}`
 - `/api/weight-presets?view=…`     — `{presets: [...], active: name|null}` for a portfolio
-- `/api/mpt-runs?view=…`           — `{last: run|null, runs: [...]}` — newest run + the last-3 history (rendered under *Apply to Portfolio*)
+- `/api/mpt-runs?view=…`           — `{last: run|null, runs: [...], plug}` — newest run + the last-3 history (rendered under *Apply to Portfolio*), and the optimizer plug's settings (`frontier.plug_params`)
+- `/api/whatif/book?ccy=&view=&symbols=` — the showing book's weights (cash out), each name's book weight with same-company matching, book-only names; for a what-if view its copy facts and the ledger changes since (`whatif.book_view`)
 - `/api/logs?since=<seq>&limit=<n>` — backend console tail from `logbuf` (§16)
 - `/api/keys`                      — `{config_ok, config_path, finnhub|nvidia: {set, source, in_config, env_overrides}}` — booleans only (§4 keys.py)
 - `/api/runtime-status`            — cheap ML availability + `envcheck.status()` +
@@ -1219,6 +1231,109 @@ page's path**; what isn't there is left out of the page.
   the changed date is the book file's modified time (entries don't record a delete
   or an undo). Logs carry ids and operations only.
 
+### What-if portfolios and the rebalance (`whatif.py`, `rebalance.py`, Phase 4)
+"New My Investments" copies the showing book into a **normal portfolio**
+(watchlist + view + presets) whose view carries a `whatif` block:
+`{book_id, copied_at, rev, ccy, origin {sym: weight}, entry_ids}`
+(`persistence.clean_whatif`). `origin` is frozen at the copy (the green
+markers); `entry_ids` (the ledger's ids then) is how the page says what changed
+since without keeping a copy of the book. Everything else reads the **live**
+book. The rules that matter:
+
+- **One write.** `create` refuses a book that isn't whole (`broken`, `empty`,
+  `waiting`, `splits_pending`: a holding left out for want of splits would be
+  missing from the copy), then `persistence.create_whatif_view` writes the
+  watchlist (taken back if the view write fails), the view with the red tab's
+  saved rows for those names (`stale` when some are missing, so the page
+  rebuilds), the active preset "My Investments · 13 Nov" with `origin`, and the
+  block, in one views.json write. Names "What-if N" (first free); a name given
+  is checked and `__…` refused (also by the `__book__` guard). Undo is the
+  ordinary delete (`DELETE /api/watchlists`), which takes the view, its presets
+  and runs with it.
+- **It belongs to its book.** `list_views` exposes the block (without
+  `entry_ids`); the page shows a what-if only while `book_id == books.showing()`.
+  `books.delete` calls `persistence.detach_whatifs`: the block goes, the portfolio
+  stays (owner's call: detach, never delete). `save_view` carries the block.
+- **The book is read through the page's memo** (`whatif._page`): the memo or the
+  last page of this rev and day (`investments.computed_page`), else
+  `investments.page`, which waits on a computation already running. The disk
+  copy is never used (its prices may be hours old). Never on `fetch_one`'s path.
+- **Book weights** are value ÷ the positions' total (cash out): the red tab's
+  Book mode. `match` gives each portfolio name its book weight: the same ticker,
+  else the book's line of the same company (symbol pack group, shares only, never
+  a fund for a share: `may_stand_in`), each book line matched once and never
+  when the portfolio holds that line itself ("AAPL as APC.DE").
+- **The green line** (`compare`): g(t) = P(d0)·TWR(t)/TWR(d0), P the what-if's
+  value series from `analyze_portfolios_multi` (its 30-min cache: the page just
+  asked for the same weights), TWR the page's `series.twr_index` read as-of on
+  the what-if's dates, d0 = max(window start, the book's first date). Never
+  backfilled. Statistics for both sides with `analytics._stats` / `_relative`
+  on one calendar and **one risk-free rate** (`_daily_rf`: ^IRX in USD, 0
+  otherwise, the rule `investments._risk` uses): `columns` over the window
+  (book `None` when the window starts before the book) and `shared` over the
+  book's dates only (`None` when the book covers the window), each with
+  what-if, book, S&P (the analytics' SPY line, already in the display
+  currency) and `between` (the realised TE and beta of the book against the
+  what-if). Checked on a real 27-name book (2026-11-13): the book's TWR on the
+  what-if's calendar equals the page's to the hundredth of a point (1Y and 3Y),
+  Sharpe within 0.01.
+- **The second total row** (`book_total`): `_holdings_totals` from
+  `analyze_portfolios_multi` over the book's names with the live book weights,
+  `as_traded=True` (the red tab's own call, same cache key when the weights
+  match), rows from the request and the red tab's saved rows for book names the
+  what-if dropped; a book name with neither is listed in `missing`.
+- **The rebalance** (`rebalance_payload`, read-only) refuses a book that isn't
+  whole (409/422), values **both sides at the page's snapshot**: a held name at
+  the page's price and the rate its own value implies (value ÷ shares × major
+  price: the page's rate, pence handled by `price_in_major`; `price_date` is the
+  close's day, added to the page's positions for this), a new name at its last
+  close as traded and the rate a held name of its currency implies (else
+  today's). Σ (`_sigma`, ten-minute cache) is Ledoit-Wolf on the last year of
+  daily as-traded returns in the display currency with stand-ins
+  (`extend_history`), the book's own Risk recipe; a name with under 60 returns
+  (or under 80% of the rows) gets its own volatility from 20 returns, else the
+  median, and the average correlation, so a young line never cuts the others'
+  window. The cost is `trading_prefs().tc_bps` only (no fixed fee, no FX fee).
+
+**The engine (`rebalance.py`, pure numpy, no I/O).** Notation and modes are in
+its docstring. The rules:
+
+- Target weights w*_i = t_i (V' − F)/V' with V' = V − cost: the cost is paid out
+  of the money invested, so Exact lands at TE 0. Cash: keep (F = today's cash,
+  the default) or invest down to a reserve. C' ≥ F always; a shortfall (every
+  seller locked, a reserve above the cash) scales the buys and says so.
+- **A name taken out is sold in full in every mode** (`n_base`: fixed at 0, never
+  a variable; the TE solve would otherwise keep a bit of a correlated exit). A
+  full exit is exempt from the minimum trade, and a fractional holding may be
+  sold whole in whole-share mode. New names are always bought.
+- Locked: no price, no rate, or a close older than 7 calendar days (refused with
+  its date). A held name stays as it is at the page's value; a new name isn't
+  bought and its weight goes TE-optimally to the names that track it best (the
+  solve routes around a fixed name), with a warning.
+- Continuous solve: min TE² over the movable names, KKT with one budget equality
+  and an active set for w ≥ 0; the cost a fixed point (contracts by tc). Matches
+  scipy SLSQP to 1e-5 of TE (tests). Fewest trades adds a **"≤ budget" branch**:
+  if the best weights with a free sum fit, the proceeds stay in cash (two names
+  out and one new one in: 3 trades and about 1% of the value left in cash,
+  instead of piling it into the new name).
+- Rounding: whole shares (default), value steps, or exact with a minimum trade.
+  A lattice search (nearest and sequential starts, cash repair, steepest descent
+  over single and pair moves, 40 kicks of iterated local search) by
+  TE² + 1e-3·cost/V (the cost only a tie-break: a real cost weight treats the
+  target as optional); with **≤ 8 tradeable names the box around the continuous
+  solution is enumerated exactly** (chunked, ≤ 0.3 s, `method: "enumerated"`).
+- Fewest trades: backward elimination on the continuous TE (forced trades never
+  dropped), up to 6 one-swaps a step, then rounding inside the chosen set; the
+  whole path (trades vs TE) goes out for the slider, and `n_trades` picks a point
+  on it. Exact on 8 names against exhaustive subsets, within 0.4% at 12.
+- Gains: at average cost, (sold ÷ held) × the page's unrealised profit − the
+  sale's cost: right for the UK pool, France's PMP, Italy; not FIFO or specific
+  lots. Labelled "Estimated gain at average cost, before tax rules".
+
+Timings on a real 27-name book (2026-11-13): copy 0.6 s; compare
+0.3 s on 1Y, 1.4 s on 3Y (cold raw closes for the book total); rebalance
+0.1–0.3 s (whole shares 16–26 trades, TE 0.02–0.04%), fewest trades 0.7–0.8 s.
+
 ### My Investments import (`importer.py`)
 Roadmap Phases 5–6 (run together, ahead of Performance, at the owner's
 request): the composer is the way into the page.
@@ -1239,8 +1354,8 @@ request): the composer is the way into the page.
   405.00 as 405.05. The gold images are rendered at an iPhone's 1179 px.
 - **The model may suggest, never decide** (the `search.py` rule). Code then:
   verifies each ticker in the symbol pack and picks the listing by the row's
-  currency (a £ price makes "Shell" SHEL.L; the pack's home listing for the
-  name is the NYSE line); counts a ticker as *read* only if it literally
+  currency (a £ price makes a dual-listed name its London line, even where the
+  pack's home listing for the name is the NYSE line); counts a ticker as *read* only if it literally
   appears in the source, else marks it guessed; turns GBX/GBp into pounds;
   checks qty × price against the row's total (tolerance: half a cent a share
   plus a cent) and offers the price the total implies; drops a "holding"
@@ -1308,10 +1423,10 @@ picked the first euro line (`_CCY_SUFFIX` order, `.DE` first). Now:
   Proxies are marked guessed (✦); the review shows the note under the
   row, and a proxy's note is saved in the entry's `note`. The row's currency,
   when not shown, is the venue's.
-- **A name that is only the ticker and its exchange code** ("GLE SBF", a
+- **A name that is only the ticker and its exchange code** ("XYZ SBF", a
   positions screen's instrument cell copied as the name) is no name:
   `_company_words` hands `match_listing` the bare ticker. Checked against
-  "GLE SBF", Société Générale failed `same_company`, and every row of a
+  such a cell, the company failed `same_company`, and every row of a
   correctly read screenshot was marked as the AI's guess (2026-10-10).
 - **No exchange shown** (typed text, "40 Richter Gedeon at 9640 HUF"): when
   the pack has nothing for the name, or nothing in the row's currency,
@@ -1374,8 +1489,8 @@ on 2026-10-09 (Yahoo then answers only "1d"/"5d" for it).
   book first holds it), else later than most of the frame's lines (MAX must
   not splice ADRs onto a 2000 start next to Unilever's 1988).
 - **A hole counts as a late start** (`_after_gap`, `_GAP_ROWS` = 60, added
-  2026-10-10): Yahoo has no NOT.DE (Novartis, Xetra) close from Sep 2019 to
-  Jan 2025, and junk before it; ffill drew five flat years. A line with a
+  2026-10-10): Yahoo had no close for one Swiss company's Xetra line for over
+  five years, and junk before it; ffill drew five flat years. A line with a
   hole of more than 60 rows starts, for splicing, after it: the part before
   is blanked and the stand-in fills it. With no stand-in the line's own data
   is restored untouched (a real suspension stays as it was). A month's gap
@@ -1673,8 +1788,8 @@ CAPM and the per-firm analyst mixture with its trust control:
   download that returned nothing is the prior, uncached.
 - **Whose beta** (`beta_line`, 2026-10-24, from the owner's real book): a
   secondary listing of a stock is measured on the company's home line (the
-  symbol pack's group: NVD.DE → NVDA, APC.DE → AAPL, CCC3.DE → KO, NSRGY →
-  NESN.SW, NOV.DE → NOVO-B.CO); on its venue's index NVIDIA read as a German
+  symbol pack's group: NVD.DE → NVDA, APC.DE → AAPL, MDO.DE → MCD, NSRGY →
+  NESN.SW, ASME.DE → ASML.AS); on its venue's index NVIDIA read as a German
   stock. A listing the pack lacks learns its home line by name
   (`learn_line`: Yahoo Lookup, accepted only when the pack knows the hit under
   the same name; a US company's line on Borsa Italiana's global segment), batch path only, a found line
@@ -1685,7 +1800,7 @@ CAPM and the per-firm analyst mixture with its trust control:
   day, 2026-10-24). **The company's country checks the pack's home**
   (`learn_country_line`, 2026-10-28): the pack picks a home by reporting
   currency, then traded value, so companies reporting in another currency
-  than their market's landed on a US receipt (Shell, Infosys, BP: USD) or an
+  than their market's landed on a US receipt (Infosys, BP: USD) or an
   old venue (Unilever: EUR, Amsterdam). Yahoo's profile country now decides:
   the listing itself when it trades there (A and H shares are different
   securities), else the most traded line there trading 10%+ of the top
@@ -1714,7 +1829,7 @@ CAPM and the per-firm analyst mixture with its trust control:
   venues). The beta's line is the company's primary line, and every other
   fact about the company reads it too; what the owner holds (price, returns,
   P&L, the optimizer's correlations) stays on their own listing.
-  - **Rate:** `capm.rate_ccy`: the primary line's currency (WMT.DE takes the
+  - **Rate:** `capm.rate_ccy`: the primary line's currency (APC.DE takes the
     US bill, 4.0%, not the euro's 2.4%). Beta, premium and the FX layer
     describe the company at home with no expected currency move; the euro
     rate would assume the dollar falls by the rate gap every year. A primary
@@ -1795,8 +1910,8 @@ CAPM and the per-firm analyst mixture with its trust control:
   the listing's); the chain line's block is still shown as the Street
   reference but sets no alpha, since the row has none. `analyst_targets.consensus` returns None for a
   listing with no target summary of its own: Yahoo hands such a secondary
-  line the parent's firm list in the parent's currency (CCC3.DE got Coca-Cola's
-  $93.73 as euros, ~11% high, in the window, the coverage card and old rows),
+  line the parent's firm list in the parent's currency (a Frankfurt line of a US company got
+  its parent's dollar target as euros, ~11% high, in the window, the coverage card and old rows),
   so every caller falls through to the research line, scaled. The window's dividend
   yield is computed with the row's rule, currencies included (HSBA.L read
   0.04% with a pence price).
@@ -1892,7 +2007,7 @@ industry, mcap_usd, group, home. **Rules learned from the data:**
 - **Dropped too:** stock groups with no size and no industry anywhere —
   warrants, CBBCs and re-listings (~5.5k Hong Kong rows, ~1.4k Vienna).
 - **Home listing:** among primary listings, quoted in the reporting currency
-  **unless that is USD** (Shell, Zurich, Genmab report in USD but list at home
+  **unless that is USD** (BP, Zurich, Genmab report in USD but list at home
   elsewhere) **and only if liquid** (≥10% of the group's top traded value —
   Alibaba's RMB counter 89988.HK is "local" but thin), then the highest
   3-month traded value in USD. Gold set: NVO→NOVO-B.CO, TSM→2330.TW, LLY.F→LLY,
@@ -1917,8 +2032,8 @@ for the Market read (its cache is cleared on install).
 
 `lookup(q)`: exact ticker (any listing) or `ALIASES` (google → GOOGL) first;
 then **candidates from SQLite** — an FTS5 trigram index over the home
-listings' cleaned names (legal forms dropped: "Novo Nordisk A/S" → "novo
-nordisk"), top 300 by bm25, plus initials ("tsmc", "ibm") from a partial
+listings' cleaned names (legal forms dropped: "Carlsberg A/S" →
+"carlsberg"), top 300 by bm25, plus initials ("tsmc", "ibm") from a partial
 index — scored with rapidfuzz WRatio and re-ranked exact > prefix > whole
 word > fuzzy, shorter-is-better, then size (+≤6) and type (stock > index >
 ETF > fund). Memoised per file version. An in-memory index of ~450k names
@@ -1972,7 +2087,7 @@ the page shows it as chips, every search prints one `[search]` line.
   case where the careful model was slow. Free strings and lists in the schema
   are capped (`maxLength`/`maxItems`) for the same loop the News read had.
 - **Which listing a card shows.** The most traded real listing of the company
-  (`symbol_db.top`: NVO for Novo Nordisk, 7203.T for Toyota) — and on an
+  (`symbol_db.top`: BABA for Alibaba, 7203.T for Toyota) — and on an
   exchange screen the listing there (SKHY for SK hynix on Nasdaq); a typed
   ticker stays as typed. Region, sector and size stay the company's own.
   "Also listed on" (`alternates`) shows only listings someone would buy: no
@@ -2014,8 +2129,8 @@ the page shows it as chips, every search prints one `[search]` line.
   a list ("AI, robotics, automation" is a theme). A header word as a whole
   part ("Ticker", "Name", "Weight (%)": `_HEADER`) is dropped; lower-case class
   tickers dash too (`brk.b` → BRK-B). A name that lands on the company of a
-  ticker typed elsewhere in the paste (a spreadsheet row "NOV IBIS, Novo
-  Nordisk") is dropped for that listing, unless it names a share class
+  ticker typed elsewhere in the paste (a spreadsheet row "APC IBIS,
+  Apple") is dropped for that listing, unless it names a share class
   ("GOOGL, Alphabet Class C" stays two). The whole list runs under
   one 20 s `Deadline`; truncation (50 names, 4,000 characters), duplicates
   and unfinished parts are warnings, never silent.

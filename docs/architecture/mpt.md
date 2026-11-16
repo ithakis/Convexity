@@ -187,8 +187,69 @@ at the next chunk boundary.
 `_MPT_LOOKBACK_YF = {"1Y":"1y","3Y":"3y","5Y":"5y","10Y":"10y"}`. Request fields:
 `lookback, display_ccy, rf, alpha, fully_invested, bounds ({sym:{min,max}} fractions),
 cov_model, haircut, budget (light/standard/dense wall-clock tiers), current_weights,
-rebalance, tc_bps` (the last two default to the shared prefs). Scenarios are fixed
-**daily**.
+rebalance, tc_bps, weight_sets` (the last two trading fields default to the shared
+prefs). Scenarios are fixed **daily**.
+
+**Short listings borrow the company's longer line (Phase 4).** Before the coverage rule
+in `mpt.compute_returns` (60% of the rows), the closes go through
+`analytics.extend_history`, exactly like the portfolio chart: a young or gapped
+secondary line (a Swiss company's Xetra line with five years of missing closes; a recent
+German line of a US company) takes the same company's longer listing before its own
+first close, in its own currency, scaled to meet it. Without it the line silently
+failed the rule and was left out of the run, so a weight set built from the run sold
+all of it. `stand_ins` = `{sym: {proxy, since}}` (only names that made it into
+`symbols`) and a `meta.warnings` line each. A company that itself listed too recently
+for the lookback (listed 20 months ago, on a 3Y lookback) is still left out: `missing` and
+`held_out`. The fetch goes through this module's `_bulk_close` name, so tests' stubs
+apply; a failure is logged and the run goes on without stand-ins. The cloud and the
+frontier still share one feasible set (one `returns` frame feeds both).
+
+**Saved sets on the chart (`weight_sets`, Phase 4).** `{name: {sym: w}}`, up to 40.
+Each is measured like an anchor (`_mark_sets`: `portfolio_risk_metrics` with this run's
+μ net of cost, Σ, scenarios, α, rf and cash rule, then `_turnover`, `ret_net`,
+`switch_cost`), so a set equal to a frontier point lands exactly on it. Names outside
+`symbols` are dropped and the rest renormalised: the mark is `partial`, with `coverage`
+(share of the set's weight kept) and `dropped`. A set with no weight inside the run is
+`{error, partial: true, coverage: 0, dropped}`. ~2 ms a set at 27 names over 3Y. Out
+as `sets` in the `frontier` message and `done`.
+
+**The plug's points, in Python (`pick_points`).** Both are chosen by `cvar`, the
+annualised daily CVaR the LP is optimal for, never the displayed `cvar30` (another
+estimator: by it the current weights can sit above the drawn frontier, and a pick by
+cvar30 once had less return than now, 1Y on a real 27-name book). `picks.same_risk` =
+the frontier point with the highest `ret` whose `cvar` is ≤ the current weights' (the
+anchor `current`): with the current set inside the feasible set it returns at least as
+much, up to the frontier's grid. If the grid still leaves it below the current return
+it is the nearest point at or below the current risk and carries a `note` (plain words
+the page can show); none qualifying, the lowest-`cvar` point with `fallback: true` and a
+`note`. `picks.min_cvar` = the lowest-`cvar` point. `current_cvar30` is the current
+weights' displayed figure (the chart's axis stays cvar30). Indexes into `frontier`. Max
+return per CVaR is deliberately not a pick: on a real 27-name book it was a 100%
+single-stock corner and the ratio is flat over most of the frontier. The plug's save
+turns a `note` into a warning.
+
+**Names a run leaves out (`held_out`).** `[{symbol, weight}]`: each `missing` name with
+its share of `current_weights` (over all the request's names). A set made from the run
+keeps them at that weight and scales the optimised part to 1 − kept
+(`set_from_point`), instead of selling them.
+
+**From a point to a weight set (`set_from_point`, `set_name`, `plug_params`).**
+Weights under 0.1% → 0, renormalised, held-out names added, rounded to 0.01% with the
+residue on the largest weight (sums to exactly 1). Named "Optimized · same risk ·
+13 Nov" / "· lowest risk ·" / "· selected ·", then " (2)", " (3)"… `plug_params(runs)`
+is the newest saved run's params cleaned of legacy keys (`frequency`, `diversified`,
+old budgets, `display_ccy`, the trading pair) with unknown or out-of-range values
+replaced by `PLUG_DEFAULTS` (3Y, 95%, rf 4.5%, fully invested, Ledoit, 25%, no
+bounds), always `budget: "light"`; served as `plug` by `GET /api/mpt-runs`.
+`POST /api/weight-presets/optimized` (`whatif.save_optimized`) turns a point of a
+**saved** run into a preset: the point is read from `mpt.json` by `run_id` (never
+from the request), `rule` same_risk / min_cvar uses the run's `picks` (recomputed
+for a run saved before Phase 4), selected takes `index`. The preset gets the
+allow-listed `source` block (`persistence.clean_preset_source`: kind, rule, index,
+n_points, run_id, params, point, current, held_out, warnings, computed_at); a save
+without one keeps the old `source` only when the weights are unchanged (a rename),
+so editing by hand drops it. A run with `meta.n_nonconv > 0` saves with a warning;
+anything missing saves nothing.
 
 **Trading costs (2026-10-19).** Each asset's yearly cost of rebalancing is linear in its
 weight: `tc · f · m_i`, f the rebalances a year and m_i its mean drift from the market
@@ -227,7 +288,9 @@ and non-streaming callers are unaffected. `done` also carries `asset_stats` and
       "symbols": [...], "missing": [...],
       "frontier": [{ret, cvar, var30, cvar30, cvar30_lo/med/hi, cvar_lo/med/hi, vol, mdd, cdar, weights}, ...],
       "min_cvar": {...}, "max_ret": {...},
-      "anchors": {equal, cap, current}, "bl": {...}, "meta": {...},
+      "anchors": {equal, cap, current}, "bl": {...}, "meta": {..., n_nonconv},
+      "sets": {name: mark}, "picks": {same_risk, min_cvar}, "held_out": [...],
+      "stand_ins": {...},                // Phase 4: the client saves them with the run
       "asset_stats": {...}, "analyst_detail": {...},
       "cloud": [[cvar30, ret], ...] },   // DOWNSAMPLED to ~2.5k client-side
     ...] } }
