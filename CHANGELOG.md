@@ -9,6 +9,13 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.36.0 — 2026-11-18
+
+- **Earnings filings in the E card.** Clicking an earnings marker in a company's window now offers an "Earnings release ↗" button that opens that report's results filing on SEC EDGAR (the 8-K, or a foreign company's 6-K), with when it was filed. Beside it is the quarter's periodic report: the 10-Q for Q1-Q3, the 10-K for Q4 (a foreign company's 20-F or 40-F). A report not filed yet shows as a dashed "pending" chip with the date it is usually due. The card names the company's own fiscal quarter ("Q4 FY2026"), learned from its 10-Ks when its year ends in January-March.
+- **An Earnings history pop-up**, from a button on the About heading: the last 12 reports with EPS against the estimate, the surprise, the first session's price move and five days later, and links to each one's filings. The table shows at once; only the filings column waits.
+- **Where the filings come from:** Finnhub's list of SEC filings, asked for the company's US line (a secondary listing like APC.DE links Apple's filings and says so), only when a marker is hovered or the history opened, never when the window opens, and capped well under Finnhub's per-minute allowance. A failed lookup says so and is never read as "no filings"; a company that doesn't file with the SEC links its website instead. The app never contacts sec.gov itself: it only opens links, each checked against EDGAR's address pattern.
+- When Yahoo answers a company's earnings calendar empty, the window asks again after 10 minutes instead of hiding the E markers for 6 hours.
+
 ## 1.35.0 — 2026-11-16
 
 - **A Weight Center for weight sets.** The weights get their own row on the Portfolios tab, with larger pills. As many saved sets show as fit, the rest go under "+N more", and a Weight Center button sits at the end. The Weight Center puts several sets side by side on each holding's slider row, with the difference in points, and against My Investments when the portfolio is a what-if. A holding on another listing of the same company is matched ("as APC.DE"). Creating, renaming and deleting sets moved there.
