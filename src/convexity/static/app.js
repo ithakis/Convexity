@@ -2985,12 +2985,14 @@ function openModal(r) {
       if (DETAIL.row !== r || !ev || ev.error) return;
       DETAIL.events = ev;
       if (DETAIL.geom) { renderEventMarkers(); renderFcReadouts(); }
+      ehButtonSync();
     })
     .catch(() => {});
 }
 function closeModal() {
   // A new seq drops answers still on their way (detail, options) for the
   // closed window, which would otherwise render into it while hidden.
+  ehClose();
   if (hideOverlay("#modal-bg")) { DETAIL.data = null; DETAIL.seq = (DETAIL.seq || 0) + 1; }
 }
 $("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") closeModal(); });
@@ -4107,6 +4109,9 @@ function renderEventMarkers() {
     const i = +b.dataset.ev;
     if (DETAIL.evOpen === i) closeEventCard(); else openEventCard(i, b);
   }));
+  // The filings (filings.py) are asked on the first hover of an E flag: a
+  // head start before the click, never when the window opens.
+  wrap.querySelectorAll(".m-ev.e").forEach(b => b.addEventListener("pointerenter", () => ehEnsure(), { once: true }));
 }
 
 function closeEventCard() {
@@ -4132,7 +4137,8 @@ function openEventCard(i, btn) {
   if (it.kind === "E") {
     const e = it.e, sur = e.surprise_pct;
     const timing = e.timing === "after" ? "after the close" : e.timing === "before" ? "before the close" : "time not given";
-    h = `<div class="hd"><span class="m-ev e${sur == null ? "" : sur >= 0 ? " beat" : " miss"}">E</span><div><b>Earnings</b><span>${date(e.date)} · ${timing}</span></div></div>`;
+    const q = ehLabel(e);
+    h = `<div class="hd"><span class="m-ev e${sur == null ? "" : sur >= 0 ? " beat" : " miss"}">E</span><div><b>Earnings</b><span><span class="ef-q" data-ef-day="${escapeHtml(e.date)}">${q ? `${escapeHtml(q)} · ` : ""}</span>${date(e.date)} · ${timing}</span></div></div>`;
     if (e.actual != null) {
       h += row("Reported EPS", e.actual.toFixed(2));
       h += row("Expected EPS <small>(analysts’ consensus)</small>", e.estimate != null ? e.estimate.toFixed(2) : "—");
@@ -4154,6 +4160,8 @@ function openEventCard(i, btn) {
       }
       h += `<div class="nt">From the close before the report to the first close after it.</div>`;
     }
+    // The report's SEC filings (A1 + B1): filled by ehRefresh when they land.
+    h += `<div class="ef" data-ef-day="${escapeHtml(e.date)}">${ehCardHtml(e.date)}</div>`;
   } else {
     const e = it.e, divs = (DETAIL.events.dividends || []);
     const k = divs.indexOf(e), prev = k > 0 ? divs[k - 1] : null;
@@ -4178,7 +4186,7 @@ function openEventCard(i, btn) {
       h += row("With the dividend", pctS(tr), cls(tr), "total return");
     }
   }
-  wrap.insertAdjacentHTML("beforeend", `<div class="m-ev-card" role="dialog">${h}<button class="x" aria-label="Close">×</button></div>`);
+  wrap.insertAdjacentHTML("beforeend", `<div class="m-ev-card${it.kind === "E" ? " e-card" : ""}" role="dialog">${h}<button class="x" aria-label="Close">×</button></div>`);
   const card = wrap.querySelector(".m-ev-card");
   card.querySelector(".x").onclick = closeEventCard;
   const x = parseFloat(btn.style.left), w = card.offsetWidth;
@@ -4186,7 +4194,331 @@ function openEventCard(i, btn) {
   card.style.top = (parseFloat(btn.style.top) + 22) + "px";
   btn.classList.add("open");
   DETAIL.evOpen = i;
+  ehFitCard();
+  if (it.kind === "E") ehEnsure();
 }
+
+/* ---- Earnings filings and the Earnings history (filings.py, Phase 5) ----
+ * The E card links its report to the SEC filings (A1: the results 8-K, a
+ * foreign filer's 6-K; B1: the quarter's 10-Q / 10-K, 20-F for a foreign
+ * Q4, or a dashed "pending" chip until it is filed), and About's heading
+ * carries an "Earnings history" button (C1): the last 12 reports over the
+ * window, EPS from Yahoo, price moves on the HELD line's closes (like the
+ * card, so the two never disagree), filings from SEC EDGAR.
+ *
+ * Rules the server keeps and this code relies on (backend.md "Earnings
+ * filings"): the filings are asked once per window, on the first hover of an
+ * E flag, an opened card or the button, never when the window opens; every
+ * href is an EDGAR link (or the company's https site) checked server-side,
+ * opened as a real <a target=_blank> (the desktop window hands those to the
+ * OS browser; the app never fetches sec.gov); the payload carries structured
+ * fields only and every word is here. Progressive: the table draws at once
+ * from DETAIL.events and only its Filings column waits. */
+const EH = { seq: -1, p: null, pending: null, at: 0, back: null };
+const EH_YEARS_DAYS = 1460;   // filings.YEARS: Yahoo's calendar has holes and stale stubs
+const EH_ROWS = 12;           // filings.N_REPORTS
+const EH_PER_TITLE = { "10-K": "Annual report", "10-Q": "Quarterly report", "20-F": "Annual report", "40-F": "Annual report" };
+const EH_ICON_DOC = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/><path d="M6 8.5h5M6 11h5"/></svg>`;
+const EH_ICON_TBL = `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6.2h12M2 9.8h12M6.2 6.2v7.3"/></svg>`;
+const EH_EXT = `<span class="ef-ext" aria-hidden="true">↗</span>`;
+
+function ehDay(s) { return fcFmtDate(new Date(String(s).slice(0, 10) + "T12:00:00")); }   // "2 Nov 2026"
+function ehDayShort(s) { return ehDay(s).replace(/ \d{4}$/, ""); }                          // "10 Dec"
+function ehTimeET(iso) {   // "4:30 pm ET": `accepted` carries its US Eastern offset
+  const [h, m] = String(iso).slice(11, 16).split(":").map(Number);
+  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h >= 12 ? "pm" : "am"} ET`;
+}
+function ehToday() {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+}
+function ehA(href, inner, cls, tip) {
+  return `<a class="${cls || ""}" href="${escapeHtml(href)}" target="_blank" rel="noopener"${tip ? ` data-tip="${escapeHtml(tip)}"` : ""}>${inner}</a>`;
+}
+const ehHost = (u) => { try { return new URL(u).host.replace(/^www\./, ""); } catch (e) { return u; } };
+
+/* The window's filings, once per window (DETAIL.seq). A no-key answer is
+ * asked again on the next use (free: the server spends nothing without a
+ * key, and a key added in Settings then shows at once); a failure after a
+ * minute or on "Try again"; anything else stays for the window. */
+function ehEnsure(force) {
+  const r = DETAIL.row;
+  if (!r) return Promise.resolve(null);
+  const seq = DETAIL.seq;
+  if (EH.seq !== seq) { EH.seq = seq; EH.p = null; EH.pending = null; EH.at = 0; }
+  if (EH.pending) return EH.pending;
+  const st = EH.p && EH.p.sec.status;
+  if (EH.p && !force && st !== "no_key" && !(st === "unavailable" && Date.now() - EH.at > 60e3)) return Promise.resolve(EH.p);
+  if (force) EH.p = null;   // "Try again" shows the loading state, not the old notice
+  EH.pending = fetch("/api/earnings-history?symbol=" + encodeURIComponent(r.symbol))
+    .then(res => (res.ok ? res.json() : null))
+    .catch(() => null)
+    .then(p => {
+      if (EH.seq !== seq) return null;
+      EH.pending = null; EH.at = Date.now();
+      // The route itself failing reads like Finnhub failing: try again.
+      EH.p = p && p.sec ? p : { sec: { status: "unavailable", reason: "no_answer" }, reports: [] };
+      ehRefresh();
+      return EH.p;
+    });
+  ehRefresh();
+  return EH.pending;
+}
+
+/* The quarter's name: "Q4 FY2026" when the fiscal year is certain (the
+ * payload's, which knows the company's own naming, over the events' row);
+ * a January-March year end whose naming isn't known has no FY (HD calls the
+ * year to Feb 2026 "fiscal 2025", WMT "fiscal 2026"), so the quarter is
+ * named by its end, and only when that end is exact (a 52/53-week quarter's
+ * comes from its 10-Q's file name). Never a guessed year. */
+function ehLabel(e) {
+  const p = EH.seq === DETAIL.seq && EH.p;
+  const r = (p && (p.reports || []).find(x => x.date === e.date)) || e;
+  if (r.label) return r.label;
+  if (!r.quarter) return null;
+  return r.period_exact && r.period_end ? `Q${r.quarter} · quarter to ${ehDay(r.period_end)}` : `Q${r.quarter}`;
+}
+/* The card lives in #m-chart (overflow: hidden): past the chart's foot it
+ * scrolls inside instead of being cut (a foreign filer's long notes). */
+function ehFitCard() {
+  const card = document.querySelector("#m-chart .m-ev-card"), wrap = $("#m-chart");
+  if (!card || !wrap) return;
+  card.style.maxHeight = "";
+  const room = wrap.clientHeight - parseFloat(card.style.top || "0") - 6;
+  if (card.offsetHeight > room) card.style.maxHeight = Math.max(120, room) + "px";
+}
+
+/* loading | no_key | unavailable | none | ok | no_reports */
+function ehState() {
+  if (!EH.p || EH.seq !== DETAIL.seq) return "loading";
+  const st = EH.p.sec.status;
+  return st === "no_line" ? "none" : st;
+}
+function ehOtherLine() {   // the SEC line when it is not the window's own listing
+  const line = EH.p && EH.p.sec.line, sym = DETAIL.row && DETAIL.row.symbol;
+  return line && sym && line.replace(/\./g, "-") !== sym.replace(/\./g, "-") ? line : null;
+}
+function ehVia() {
+  const line = ehOtherLine();
+  if (!line) return "";
+  const name = EH.p.sec.name || (DETAIL.data && DETAIL.data.name) || line;
+  return `${escapeHtml(name)} files with the SEC as <b>${escapeHtml(line)}</b>.`;
+}
+
+/* What the card and the table can offer for the report of `day`. */
+function ehModel(day) {
+  const st = ehState();
+  if (st === "loading" || st === "no_key") return { kind: st };
+  if (st === "unavailable") return { kind: st, reason: EH.p.sec.reason };
+  if (st === "no_reports") return { kind: "skip" };
+  const p = EH.p;
+  if (st === "none") return { kind: "none", site: p.website };
+  const via = ehVia(), foreign = p.sec.filer === "foreign", list = foreign ? "6-K" : "8-K";
+  const rep = (p.reports || []).find(r => r.date === day);
+  const per = rep && rep.periodic_filing;
+  const fy = rep && rep.label ? rep.label.split(" ").pop() : "";
+  const perFor = (f) => (f.form === "10-Q" ? rep.label : fy);
+  const periodic = (f) => {
+    const sub = perFor(f);
+    return { href: f.url, form: f.form, title: EH_PER_TITLE[f.form] || f.form,
+      cap: `${f.form}${sub ? ` for ${escapeHtml(sub)}` : ""}, filed ${ehDay(f.filed)}.`, short: `${f.form} filed ${ehDay(f.filed)}.` };
+  };
+  if (!rep || !rep.earnings_filing) {
+    const age = rep ? rep.age_days : Math.round((Date.now() - Date.parse(day + "T12:00:00")) / 864e5);
+    const miss = !rep && age >= 3 ? "This report is older than the ones linked here."
+      : age < 3 ? "Finnhub doesn’t list this report’s filing yet." : "Finnhub doesn’t list this report’s filing.";
+    return { kind: "unmatched", alt: (rep && rep.edgar_list) || p.sec.edgar_url, miss, via,
+      list: rep && rep.edgar_list ? `EDGAR’s own list shows every ${list} up to that week${foreign ? "" : ", each with its Items"}.` : "EDGAR’s own list has every filing.",
+      per: per && per.kind === "periodic" && per.url ? periodic(per) : null };
+  }
+  const ef = rep.earnings_filing, is8 = ef.form === "8-K";
+  const late = ef.days_after > 0 ? `, ${ef.days_after} day${ef.days_after > 1 ? "s" : ""} after the results` : "";
+  const rel = { href: ef.url, form: ef.form, title: is8 ? "Earnings release" : `Results (${ef.form})`,
+    cap: is8 ? `8-K filed ${ehDay(ef.filed)}, ${ehTimeET(ef.accepted)}. The press release is the first link inside.`
+      : `${ef.form} filed ${ehDay(ef.filed)}${late}.` };
+  let pm = null;
+  if (per && per.kind === "periodic" && per.url) pm = periodic(per);
+  else if (per && per.kind === "pending")
+    pm = { off: true, form: per.form, due: per.due,
+      cap: `${per.form} not filed yet (usually by ${ehDayShort(per.due)}). Until then the ${ef.form} is the latest filing.` };
+  else if (per && per.kind === "fallback" && foreign)
+    pm = { merged: true, cap: `No 10-Q: foreign companies report their quarters on a ${ef.form}.` };
+  return { kind: "ok", rel, per: pm, via };
+}
+
+/* The card's foot (A1 + B1). */
+function ehCardHtml(day) {
+  const m = ehModel(day);
+  if (m.kind === "skip") return "";
+  if (m.kind === "loading") return `<hr><span class="ef-skel"></span><div class="ef-cap"><span class="ef-spin"></span>&nbsp; Finding the filing…</div>`;
+  if (m.kind === "no_key") return `<hr><div class="ef-note">Add a Finnhub key in <a href="#" data-eh-keys>Settings → API keys</a> to link the filings.</div>`;
+  if (m.kind === "unavailable") return `<hr><div class="ef-note">${ehFailText(m.reason)} <a href="#" data-eh-retry>Try again</a></div>`;
+  if (m.kind === "none") return `<hr>${m.site ? `<div class="ef-btns">${ehA(m.site, `Company website ${EH_EXT}`, "ef-btn")}</div>` : ""}<div class="ef-cap">Not filed with the SEC. Results are on the company’s investor pages.</div>`;
+  if (m.kind === "unmatched") {
+    const btns = (m.alt ? ehA(m.alt, `${EH_ICON_DOC} Filings on EDGAR ${EH_EXT}`, "ef-btn pri") : "")
+      + (m.per ? ehA(m.per.href, `${m.per.form} ${EH_EXT}`, "ef-btn", m.per.cap) : "");
+    const caps = [`${m.miss} ${m.alt ? m.list : ""}`.trim()];
+    if (m.per) caps.push(m.per.cap);
+    if (m.via) caps.push(m.via);
+    return `<hr>${btns ? `<div class="ef-btns">${btns}</div>` : ""}<div class="ef-cap">${caps.join("<br>")}</div>`;
+  }
+  let btns = ehA(m.rel.href, `${EH_ICON_DOC} ${m.rel.title} ${EH_EXT}`, "ef-btn pri", `Opens the ${m.rel.form} on sec.gov`);
+  const caps = [m.rel.cap];
+  if (m.per) {
+    if (m.per.off) btns += `<span class="ef-btn off" data-tip="${escapeHtml(m.per.cap)}">${m.per.form} pending</span>`;
+    else if (!m.per.merged) btns += ehA(m.per.href, `${m.per.form} ${EH_EXT}`, "ef-btn", m.per.cap);
+    caps.push(m.per.short || m.per.cap);
+  }
+  if (m.via) caps.push(m.via);
+  return `<hr><div class="ef-btns">${btns}</div><div class="ef-cap">${caps.join("<br>")}</div>`;
+}
+function ehFailText(reason) {
+  return reason === "busy" ? "Couldn’t load the filings (too many lookups this minute)."
+    : reason === "empty" ? "Couldn’t load the filings (Finnhub lists none for this company)."
+    : "Couldn’t load the filings (Finnhub didn’t answer).";
+}
+
+/* Repaint whatever shows the filings: the open card, the open pop-up. */
+function ehRefresh() {
+  const slot = document.querySelector("#m-chart .m-ev-card .ef");
+  if (slot) {
+    slot.innerHTML = ehCardHtml(slot.dataset.efDay);
+    const q = document.querySelector("#m-chart .m-ev-card .ef-q"), e = { date: slot.dataset.efDay };
+    const row = (DETAIL.events && DETAIL.events.earnings || []).find(x => x.date === e.date) || e;
+    if (q) { const l = ehLabel(row); q.textContent = l ? `${l} · ` : ""; }
+    ehFitCard();
+  }
+  if ($("#eh-bg").classList.contains("show")) ehRender();
+}
+
+/* The reports the table shows: filings.past_reports' rule, on the same
+ * events, so the table's rows and the server's reports are the same ones. */
+function ehRows() {
+  const ev = DETAIL.events;
+  if (!ev || !DETAIL.row || ev.symbol !== DETAIL.row.symbol) return [];
+  const t = ehToday();
+  const c = new Date(); c.setDate(c.getDate() - EH_YEARS_DAYS);
+  const cut = `${c.getFullYear()}-${String(c.getMonth() + 1).padStart(2, "0")}-${String(c.getDate()).padStart(2, "0")}`;
+  return (ev.earnings || []).filter(e => (e.date < t || (e.date === t && e.actual != null)) && e.date >= cut).slice(-EH_ROWS);
+}
+
+/* C1: the button on About's heading row; disabled when Yahoo has nothing. */
+function ehButtonSync() {
+  const slot = $("#m-eh-slot");
+  if (!slot) return;
+  if (!DETAIL.events || DETAIL.events.symbol !== (DETAIL.row && DETAIL.row.symbol)) { slot.innerHTML = ""; return; }
+  const n = ehRows().length;
+  const sec = $("#m-eh-sec");
+  if (sec) sec.hidden = !n;
+  slot.innerHTML = n
+    ? `<button class="ef-btn eh-open" type="button" data-eh-open>${EH_ICON_TBL} Earnings history</button>`
+    : `<span class="ef-btn off eh-open" data-tip="Yahoo has no recent earnings dates for this company.">${EH_ICON_TBL} No earnings history</span>`;
+}
+
+function ehOpen(trigger) {
+  if (!DETAIL.data || !ehRows().length) return;
+  EH.back = trigger || null;
+  ehEnsure();
+  ehRender();
+  // Focus the sheet itself: on the close button it would pop its tooltip.
+  if (showOverlay("#eh-bg")) requestAnimationFrame(() => $("#eh-modal").focus({ preventScroll: true }));
+}
+function ehClose() {
+  if (!hideOverlay("#eh-bg")) return;
+  const b = EH.back; EH.back = null;
+  if (b && b.isConnected) b.focus();
+}
+
+function ehRender() {
+  const box = $("#eh-modal"), d = DETAIL.data, sym = DETAIL.row && DETAIL.row.symbol;
+  if (!box || !d || !sym) return;
+  const keep = box.querySelector(".eh-body")?.scrollTop || 0;
+  const pts = d.history || [];
+  const evs = ehRows();
+  const st = ehState();
+  const R = evs.slice().reverse().map(e => {
+    const j = evIdx(pts, e.react || e.date);
+    const r1 = j > 0 && j < pts.length ? pts[j][1] / pts[j - 1][1] - 1 : null;
+    const r5 = j > 0 && j + 4 < pts.length ? pts[j + 4][1] / pts[j - 1][1] - 1 : null;
+    return { e, r1, r5, m: ehModel(e.date) };
+  });
+  const pctS = (v) => (v == null || !isFinite(v) ? "—" : `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}%`);
+  const cls = (v) => (v == null || !isFinite(v) ? "" : v >= 0 ? "pos" : "neg");
+  const n = R.length, line = st === "ok" ? ehOtherLine() : null;
+  let sub;
+  if (st === "none") sub = `Last ${n} reports · EPS from Yahoo`;
+  else if (line) {
+    const name = escapeHtml(EH.p.sec.name || d.name || line);
+    sub = `Last ${n} reports · ${DETAIL.events.earnings_via ? "dates and " : "EPS from Yahoo · "}filings of ${name} as <b>${escapeHtml(line)}</b>, the US line · price moves on ${escapeHtml(sym)}`;
+  } else sub = `Last ${n} reports · EPS from Yahoo · filings from SEC EDGAR`;
+  const head = `<div class="eh-head">${logoImg(sym)}<div class="eh-ttl"><h3 id="eh-title">Earnings history · <span class="tk">${escapeHtml(sym)}</span> ${escapeHtml(d.name || "")}</h3><div>${sub}</div></div>
+    <button class="x-close" type="button" data-eh-close aria-label="Close" data-tip="Close (Esc)">${X_SVG}</button></div>`;
+  const solid = "The figures below come from Yahoo and are complete.";
+  const notice = st === "no_key" ? `<div class="eh-notice">Add a Finnhub key in <a href="#" data-eh-keys>Settings → API keys</a> to link the filings. ${solid}</div>`
+    : st === "unavailable" ? `<div class="eh-notice">${ehFailText(EH.p.sec.reason)} <a href="#" data-eh-retry>Try again</a>. ${solid}</div>`
+    : st === "none" ? `<div class="eh-notice info">Not filed with the SEC. Results are on the company’s investor pages${EH.p.website ? `: ${ehA(EH.p.website, `${escapeHtml(ehHost(EH.p.website))} ${EH_EXT}`)}` : "."}</div>`
+    : "";
+  // "yet" only while a report is fresh: an old gap is Yahoo's, not a delay.
+  const eps = (e) => (e.actual == null ? `<small>not in Yahoo${Date.now() - Date.parse(`${e.date}T12:00:00Z`) < 14 * 864e5 ? " yet" : ""}</small>`
+    : e.estimate == null ? `${e.actual.toFixed(2)} <small>no estimate</small>` : `${e.actual.toFixed(2)} <small>vs ${e.estimate.toFixed(2)}</small>`);
+  // `before` is any time before the exchange's close (fetch_events), not only pre-market.
+  const timing = (t) => (t === "after" ? "after close" : t === "before" ? "before close" : "");
+  const fcell = (m) => {
+    if (m.kind === "loading") return `<span class="ef-spin" aria-label="Finding the filings"></span>`;
+    if (m.kind === "unmatched") return (m.alt ? ehA(m.alt, `<span class="ef-form">EDGAR</span>`, "", `${m.miss} Opens EDGAR’s list of filings up to that week.`) : "")
+      + (m.per ? ehA(m.per.href, `<span class="ef-form">${m.per.form}</span>`, "", m.per.cap) : "") || "<small>—</small>";
+    if (m.kind !== "ok") return `<small>—</small>`;
+    let h = ehA(m.rel.href, `<span class="ef-form">${m.rel.form}</span>`, "", m.rel.cap);
+    if (m.per && !m.per.merged) h += m.per.off
+      ? ` <span class="pend" data-tip="${escapeHtml(m.per.cap)}">${m.per.form} by ${ehDayShort(m.per.due)}</span>`
+      : ehA(m.per.href, `<span class="ef-form">${m.per.form}</span>`, "", m.per.cap);
+    return h;
+  };
+  const rows = R.map(x => {
+    const go = (x.m.kind === "ok" || x.m.kind === "unmatched") && (x.m.kind === "ok" || x.m.alt);
+    const s = x.e.surprise_pct;
+    return `<tr${go ? ' class="go"' : ""}><td><span class="q">${escapeHtml(ehLabel(x.e) || "—")}</span></td>
+      <td>${ehDay(x.e.date)} <small>${timing(x.e.timing)}</small></td>
+      <td>${eps(x.e)}</td>
+      <td class="${cls(s)}"${s == null && x.e.actual != null ? ' data-tip="No consensus in Yahoo’s calendar."' : ""}><b>${pctS(s)}</b></td>
+      <td class="${cls(x.r1)}"${x.r1 == null ? ' data-tip="Before the chart’s history."' : ""}>${pctS(x.r1 == null ? null : x.r1 * 100)}${x.r5 != null ? ` <small>${pctS(x.r5 * 100)} 5d</small>` : ""}</td>
+      <td class="f">${fcell(x.m)}</td></tr>`;
+  }).join("");
+  const table = `<table><thead><tr><th>Quarter</th><th>Reported</th><th>EPS vs expected</th><th>Surprise</th>
+    <th data-tip="From the close before the report to the first close after it${line || DETAIL.events.earnings_via ? `, on ${escapeHtml(sym)}` : ""}">Price, first session</th><th>Filings</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const lead = st === "ok" ? "Click a row to open its earnings release. " : "";
+  const edgar = st === "ok" && EH.p.sec.edgar_url ? ehA(EH.p.sec.edgar_url, `All filings on EDGAR ${EH_EXT}`) : "";
+  box.innerHTML = head + `<div class="eh-body">${notice}${table}</div>`
+    + `<div class="eh-foot"><span>${lead}EPS per share as Yahoo reports it. Price: from the close before the report to the first close after it.</span><span class="sp"></span>${edgar}</div>`;
+  box.querySelector(".eh-body").scrollTop = keep;
+}
+
+$("#eh-bg").addEventListener("click", (e) => {
+  if (e.target.id === "eh-bg" || e.target.closest("[data-eh-close]")) { ehClose(); return; }
+  // A row opens its earnings release: the row's first link, a real anchor.
+  const tr = e.target.closest("tr.go");
+  if (tr && !e.target.closest("a")) tr.querySelector("td.f a")?.click();
+});
+document.addEventListener("click", (e) => {
+  const t = e.target.closest?.("[data-eh-open], [data-eh-retry], [data-eh-keys]");
+  if (!t) return;
+  e.preventDefault();
+  if (t.hasAttribute("data-eh-open")) ehOpen(t);
+  else if (t.hasAttribute("data-eh-retry")) ehEnsure(true);
+  else { ehClose(); closeEventCard(); openSettings(); selectSettingsSection("keys"); }
+});
+// The button's hover is a head start too (the filings, not the table).
+document.addEventListener("pointerover", (e) => { if (e.target.closest?.("[data-eh-open]")) ehEnsure(); });
+/* Esc closes the top layer only: the pop-up over the window, else an open E
+ * card, never the window with them. On window in the capture phase, before
+ * the global pass (which closes the stock window) and the Attention screen's
+ * capture handler on document. Settings and confirmations open over all of
+ * it and keep their own Esc. */
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || document.querySelector("#settings-bg.show, #confirm-bg.show")) return;
+  if ($("#eh-bg").classList.contains("show")) { e.preventDefault(); e.stopImmediatePropagation(); ehClose(); return; }
+  if (DETAIL.evOpen != null && $("#modal-bg").classList.contains("show")) { e.preventDefault(); e.stopImmediatePropagation(); closeEventCard(); }
+}, true);
 
 /* A price tag on the left axis (the σ/μ gauge and its hover level): a filled
  * pill under the tick labels' column, the value in the axis' own format. */
@@ -6062,17 +6394,23 @@ function renderSections() {
       </div>`;
   }
 
-  // ---- About
+  // ---- About (its heading row carries the Earnings history button, C1)
   let aboutHtml = "";
+  const ehFund = ["ETF", "MUTUALFUND", "INDEX"].includes(d.quote_type);
+  const ehSlot = ehFund ? "" : `<span class="eh-slot" id="m-eh-slot"></span>`;
   if (d.summary) {
     aboutHtml = `
-      <div class="m-sec full">
-        <h3>About${d.next_earnings ? ` · Next earnings: <b style="color:var(--text); font-weight:700">${fmtDateMDY(d.next_earnings)}</b>` : ""}</h3>
+      <div class="m-sec full m-about">
+        <h3>About${d.next_earnings ? ` · Next earnings: <b style="color:var(--text); font-weight:700">${fmtDateMDY(d.next_earnings)}</b>` : ""}</h3>${ehSlot}
         <div class="m-summary collapsed" id="m-summary">${escapeHtml(d.summary)}</div>
         <button class="m-summary-toggle" onclick="this.previousElementSibling.classList.toggle('collapsed'); this.textContent = this.previousElementSibling.classList.contains('collapsed') ? 'Show more' : 'Show less';">Show more</button>
       </div>`;
   } else if (d.next_earnings) {
-    aboutHtml = `<div class="m-sec full"><h3>Upcoming</h3><div class="m-summary">Next earnings: <b style="color:var(--text)">${fmtDateMDY(d.next_earnings)}</b></div></div>`;
+    aboutHtml = `<div class="m-sec full m-about"><h3>Upcoming</h3>${ehSlot}<div class="m-summary">Next earnings: <b style="color:var(--text)">${fmtDateMDY(d.next_earnings)}</b></div></div>`;
+  } else if (!ehFund) {
+    // No profile and no date: a heading of its own, shown once Yahoo's
+    // calendar has reports (ehButtonSync).
+    aboutHtml = `<div class="m-sec full m-about" id="m-eh-sec" hidden><h3>Earnings</h3>${ehSlot}</div>`;
   }
 
   sec.innerHTML = `
@@ -6116,6 +6454,7 @@ function renderSections() {
     ${newsHtml}
     ${aboutHtml}
   `;
+  ehButtonSync();
   renderStatTipsKatex("#m-sections");
 }
 

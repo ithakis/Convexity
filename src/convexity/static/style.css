@@ -2673,7 +2673,8 @@
   .ns-quad.rows-fixed .ns-card,
   .settings-nav-list,
   .settings-pane-body.scroll,
-  .settings-log-body {
+  .settings-log-body,
+  .eh-body {
     overscroll-behavior: contain;
   }
 
@@ -2915,6 +2916,94 @@
   .m-ev-card .x { position: absolute; top: 6px; right: 8px; border: 0; background: transparent; color: var(--muted);
     font-size: 17px; line-height: 1; cursor: pointer; padding: 2px 4px; }
   .m-ev-card .x:hover { color: var(--text); }
+  /* ---- Earnings filings in the E card (A1 + B1) and the Earnings history (C1).
+     filings.py links each report to its SEC filings; app.js "Earnings filings
+     and the Earnings history". Tokens only, so the three themes follow; the
+     pop-up is the one box over the window, its notice a tint, never a card. */
+  .m-ev-card.e-card { width: 300px; overflow-y: auto; overscroll-behavior: contain; }  /* ehFitCard caps its height */
+  .ef-ext { font-size: 0.92em; opacity: 0.85; margin-left: 1px; }
+  .ef-btns { display: flex; gap: 6px; }
+  .ef-btns .ef-btn { flex: 1 1 auto; }
+  .ef-btns .ef-btn.pri { flex: 1 1 60%; }
+  .ef-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 6px 11px; border-radius: var(--r-md); font-size: 12.5px; font-weight: 600; line-height: 1.2;
+    border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text);
+    text-decoration: none; cursor: pointer; white-space: nowrap; font-family: inherit;
+  }
+  .ef-btn:hover, .ef-btn:focus-visible { border-color: var(--accent); color: var(--accent); outline: none; }
+  .ef-btn.pri { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .ef-btn.pri:hover, .ef-btn.pri:focus-visible { filter: brightness(1.08); color: var(--on-accent); }
+  .ef-btn.off { border-style: dashed; color: var(--muted); background: transparent; cursor: default; font-weight: 500; }
+  .ef-btn.off:hover { border-color: var(--border); color: var(--muted); }
+  .ef-btn svg { width: 13px; height: 13px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .ef-cap, .ef-note { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+  .ef-cap { margin-top: 6px; }
+  .ef-cap b { color: var(--text); font-weight: 600; }
+  .ef-cap a, .ef-note a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .ef-cap a:hover, .ef-note a:hover { text-decoration: underline; }
+  .ef-form {
+    display: inline-block; min-width: 34px; text-align: center; padding: 1px 4px; border-radius: var(--r-sm);
+    font: 700 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0;
+    color: var(--accent); background: rgba(var(--accent-rgb), 0.12);
+  }
+  .ef-skel { display: block; height: 30px; border-radius: var(--r-md);
+    background: linear-gradient(90deg, rgba(var(--accent-rgb), .06), rgba(var(--accent-rgb), .16), rgba(var(--accent-rgb), .06));
+    background-size: 200% 100%; animation: ef-sh 1.2s linear infinite; }
+  @keyframes ef-sh { to { background-position: -200% 0; } }
+  .ef-spin { display: inline-block; width: 11px; height: 11px; border-radius: 50%; border: 2px solid rgba(var(--accent-rgb), .25);
+    border-top-color: var(--accent); animation: ef-rot .8s linear infinite; vertical-align: -1px; }
+  @keyframes ef-rot { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .ef-skel, .ef-spin { animation: none; } }
+
+  /* C1: the button on About's heading row */
+  .m-sec.m-about { position: relative; }
+  .m-about .eh-slot { position: absolute; right: 12px; top: 8px; }
+  .m-about .eh-open.ef-btn { padding: 4px 10px; font-size: 12px; }
+
+  /* The pop-up: over the stock window (50, or 88 over the Attention screen),
+     under the plan popover (90), Settings (92) and confirmations (96). Not a
+     .modal-bg: that class is lifted to 88 while the Attention screen shows. */
+  .eh-bg { position: fixed; inset: 0; z-index: 89; display: none; align-items: center; justify-content: center;
+    padding: 24px 16px; background: rgba(0, 0, 0, 0.38); }
+  .eh-bg.show { display: flex; }
+  .eh-modal { width: min(780px, 94vw); max-height: calc(100vh - 48px); display: flex; flex-direction: column;
+    background: var(--bg-canvas); border: 1px solid var(--border); border-radius: var(--r-lg);
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35); overflow: hidden; color: var(--text); }
+  .eh-modal .eh-head { flex: none; display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px 12px; border-bottom: 1px solid var(--border); }
+  .eh-modal .eh-head .logo, .eh-modal .eh-head .logo-fallback { width: 30px; height: 30px; font-size: 12px; flex: none; }
+  .eh-modal .eh-ttl { flex: 1; min-width: 0; }
+  .eh-modal .eh-ttl h3 { margin: 0; font-size: 16px; font-weight: 700; }
+  .eh-modal .eh-ttl h3 .tk { color: var(--accent); }
+  .eh-modal .eh-ttl div { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .eh-modal .eh-ttl div b { color: var(--text); font-weight: 600; }
+  .eh-modal .eh-body { flex: 1 1 auto; min-height: 0; padding: 6px 20px 14px; max-height: min(620px, 72vh); overflow-y: auto; }
+  .eh-modal .eh-notice { margin: 10px 0 2px; padding: 8px 12px; border-radius: var(--r-md); font-size: 12px; line-height: 1.45;
+    background: rgba(var(--amber-rgb), 0.12); color: var(--text); }
+  .eh-modal .eh-notice.info { background: rgba(var(--accent-rgb), 0.08); }
+  .eh-modal .eh-notice a { color: var(--accent); font-weight: 600; text-decoration: none; }
+  .eh-modal .eh-notice a:hover { text-decoration: underline; }
+  .eh-modal table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .eh-modal th { text-align: right; font-size: 10.5px; font-weight: 700; color: var(--th-ink, var(--muted)); text-transform: uppercase; letter-spacing: .4px;
+    padding: 10px 8px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0; background: var(--bg-canvas); z-index: 1; }
+  .eh-modal th:first-child, .eh-modal td:first-child { text-align: left; padding-left: 6px; }
+  .eh-modal td { padding: 8px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .eh-modal td small { color: var(--muted); font-size: 11px; }
+  .eh-modal td .q { font-weight: 700; }
+  .eh-modal tr.go { cursor: pointer; }
+  .eh-modal tr.go:hover td { background: rgba(var(--accent-rgb), 0.07); }
+  .eh-modal tr.go:hover td .q { color: var(--accent); }
+  .eh-modal:focus { outline: none; }
+  .eh-modal th:last-child, .eh-modal td.f { width: 104px; }  /* no shift when the filings land */
+  .eh-modal td.f a { margin-left: 4px; text-decoration: none; }
+  .eh-modal td.f a:hover .ef-form, .eh-modal td.f a:focus-visible .ef-form { background: var(--accent); color: var(--on-accent); }
+  .eh-modal td.f .pend { color: var(--muted); font-size: 11px; }
+  .eh-modal td.pos { color: var(--pos); } .eh-modal td.neg { color: var(--neg); }
+  .eh-modal .eh-foot { flex: none; padding: 10px 20px 14px; color: var(--muted); font-size: 11.5px; line-height: 1.5;
+    border-top: 1px solid var(--border); display: flex; gap: 16px; align-items: baseline; }
+  .eh-modal .eh-foot .sp { flex: 1; }
+  .eh-modal .eh-foot a { color: var(--accent); font-weight: 600; text-decoration: none; white-space: nowrap; }
+  .eh-modal .eh-foot a:hover { text-decoration: underline; }
   .m-fc-tt { position: absolute; pointer-events: none; z-index: 3; display: none; min-width: 230px;
     background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 10px;
     padding: 10px 12px; font-size: 13px; line-height: 1.6; color: var(--text);

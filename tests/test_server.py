@@ -167,12 +167,20 @@ def test_cross_origin_delete_refused(srv, path, headers):
         "/api/views/Book",
         "/api/health",
         "/api/whatif/book",
+        "/api/earnings-history?symbol=AAPL",
+        "/api/events?symbol=AAPL",
     ],
 )
 def test_rebinding_get_refused(srv, path):
     """A rebound page is same-origin, so without the Host check it could read
     the user's holdings from /api/watchlists and /api/views."""
     assert _req(srv, "GET", path, {"Host": "evil.example:8765"})[0] == 403
+
+
+@pytest.mark.parametrize("q", ["", "?symbol=", "?symbol=%3Cscript%3E", "?symbol=" + "A" * 40])
+def test_earnings_history_wants_a_ticker(srv, q):
+    """Read before anything is asked of Yahoo or Finnhub (filings.py)."""
+    assert _req(srv, "GET", "/api/earnings-history" + q)[0] == 400
 
 
 def test_nothing_changes_on_refused_requests(srv):

@@ -220,3 +220,23 @@ def test_events_read_timing_dedupe_and_yield(monkeypatch):
     assert next(e for e in out["earnings"] if e["date"] == "2026-04-30")["timing"] == ""
     assert out["div_ttm"] == pytest.approx(1.20)
     assert out["div_yield_ttm"] == pytest.approx(1.20 / 30.0)
+
+
+class EmptyCalendarTk(FakeTk):
+    def get_earnings_dates(self, limit=60):
+        return pd.DataFrame(columns=["EPS Estimate", "Reported EPS", "Surprise(%)"])
+
+
+def test_events_empty_calendar_is_kept_briefly(monkeypatch):
+    """An empty calendar beside real dividends is doubtful (a reporting company
+    once came back that way): kept 10 minutes, not the 6 hours of a full answer."""
+    puts = []
+    monkeypatch.setattr(fetcher.yf, "Ticker", EmptyCalendarTk)
+    monkeypatch.setattr(fetcher, "research_line", lambda s: None)
+    monkeypatch.setattr(fetcher, "_cache_put", lambda k, v, ttl: puts.append(ttl))
+    out = fetcher.fetch_events("ZZEC.AS")
+    assert out["earnings"] == [] and out["dividends"]
+    assert puts == [600.0]
+    monkeypatch.setattr(fetcher.yf, "Ticker", FakeTk)
+    fetcher.fetch_events("ZZEF.AS")
+    assert puts[-1] == 6 * 3600.0

@@ -758,6 +758,56 @@ own crosshair. Rules that matter (owner feedback 2026-10-17 folded in):
   European midnight bar keeps its day): first session, 5 sessions, S&P 500 the
   same session and the excess; a D's price move is the total return minus
   amount / previous close (≈, the closes are adjusted).
+- **Earnings filings and the Earnings history** (app.js "Earnings filings and
+  the Earnings history", Phase 5; backend.md "Earnings filings"). The E card's
+  subtitle names the fiscal quarter (`e.label` from `/api/events`). Its foot
+  (`.ef`, `ehCardHtml`, card 300 px wide) is A1 + B1: a full-width primary
+  "Earnings release ↗" (a foreign filer's "Results (6-K) ↗") beside the
+  quarter's "10-Q ↗" / "10-K ↗" / "20-F ↗", or a dashed "10-Q pending" chip
+  (tip and caption: "not filed yet (usually by 10 Dec). Until then the 8-K is
+  the latest filing."); a foreign Q1-Q3 is one button. Other states: loading
+  (skeleton, "Finding the filing…"), no key (link to Settings → API keys),
+  Finnhub failed ("… Try again", re-asks), no SEC filings ("Company website ↗"),
+  Finnhub lacks the filing ("Filings on EDGAR ↗", EDGAR's own 8-K list, "yet"
+  under 3 days old), a secondary listing ("Apple Inc. files with the SEC as
+  AAPL."). About's heading row carries C1, "Earnings history" (`ehButtonSync`;
+  disabled "No earnings history" with a tip when Yahoo has no report in 4 years;
+  none for funds; a hidden "Earnings" section when the window has neither a
+  profile nor a next date). The pop-up (`#eh-bg`, `ehRender`, ~780 px): logo,
+  title, "Last 12 reports · EPS from Yahoo · filings from SEC EDGAR" (a
+  secondary listing names the US line and "price moves on" the held line);
+  Quarter, Reported, EPS vs expected, Surprise, Price first session (+5d small),
+  Filings chips; a row click opens its first link; footer "All filings on EDGAR
+  ↗".
+  - **Asked once per window** (`EH`, keyed on `DETAIL.seq`; `ehEnsure`): on the
+    first `pointerenter` of an E flag, an opened card, the button's hover or
+    click. **Never in `openModal`**. A no-key answer is asked again on the next
+    use (free, and a key added in Settings shows at once); a failure after a
+    minute or on Try again.
+  - **Progressive**: the table's rows come from `DETAIL.events` (`ehRows`, the
+    server's `past_reports` rule: `EH_YEARS_DAYS`, `EH_ROWS`), the price moves
+    from `DETAIL.data.history` exactly as the card measures them; only the
+    Filings column waits (a spinner per row).
+  - **Links are `ehA` anchors** (`target=_blank rel=noopener`, href escaped):
+    the desktop window hands them to the OS browser (`_ExternalLinkPage`); every
+    href was checked server-side. All copy lives here; the payload has none.
+  - **Stacking**: `.eh-bg` z 89, its own class (not `.modal-bg`, which is lifted
+    to 88 over the Attention screen), under the plan popover (90), Settings (92)
+    and confirmations (96). Opened and closed through `showOverlay` /
+    `hideOverlay`; `closeModal` closes it too. **Esc closes the top layer only**:
+    a capture-phase handler on `window` closes the pop-up, else an open E card,
+    and stops the global pass (which would close the stock window); Settings and
+    confirmations keep their own Esc. The Settings link closes the pop-up and the
+    card first. Focus goes to the sheet (not the close button: its tooltip would
+    pop) and back to the button on close.
+  - **The quarter's name** (`ehLabel`): the payload's label over the events'
+    row (the payload knows the company's year naming once learned, and the
+    card's subtitle `.ef-q` follows it); with no certain year, "Q2 · quarter to
+    3 Aug 2025" when the end is exact, else "Q2". Never a guessed FY.
+  - **The card can't be clipped** by `#m-chart`'s `overflow: hidden`
+    (`ehFitCard`, on open and on every refresh): past the chart's foot it scrolls
+    inside (2330.TW's foreign-filer notes, the longest real case).
+  - `tests/test_frontend_earnings.py` holds these.
 
 - **Paths are bridges, not GBM** (`fcSimulate`): ends are stratified inverse-CDF
   draws from the drawn curve, so the end marginal is exact; the clock includes

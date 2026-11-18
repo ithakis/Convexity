@@ -26,11 +26,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from convexity.helpers import (
     _FH_LIMITER,
+    Cancelled,
     _MAX_RETRIES,
     _RETRY_SLEEP_S,
     _load_local_secret,
@@ -82,7 +84,9 @@ def _fh_put(key: str, val: Any, ttl: float) -> None:
     _FH_CACHE[key] = (time.time(), ttl, val)
 
 
-def _fh_call(path: str, params: dict[str, Any], symbol: str) -> Any | None:
+def _fh_call(
+    path: str, params: dict[str, Any], symbol: str, *, timeout: float = 6.0, cancel=None
+) -> Any | None:
     """Single GET against the Finnhub REST API.
 
     Returns the parsed JSON (dict or list) on HTTP 200, else ``None``.
@@ -97,14 +101,23 @@ def _fh_call(path: str, params: dict[str, Any], symbol: str) -> Any | None:
     blank. Retries mirror news_sentiment's (3 attempts, 5 s apart) and emit
     ``rate_limited`` events so a background refresh job can report the wait
     instead of just looking stalled.
+
+    ``cancel`` (a ``helpers.Deadline``) bounds the limiter wait for someone
+    waiting on a page: the stock window's filings (filings.py) must not queue
+    a minute behind a news refresh. A cancelled wait is a failure (None).
     """
     query = dict(params)
     query["token"] = FINNHUB_API_KEY
     url = _BASE_URL + path + "?" + urllib.parse.urlencode(query)
     for attempt in range(_MAX_RETRIES):
-        _FH_LIMITER.acquire()
         try:
-            with urllib.request.urlopen(url, timeout=6) as resp:
+            _FH_LIMITER.acquire(cancel)
+        except Cancelled:
+            return None
+        if cancel is not None and attempt and cancel.is_set():
+            return None
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
                 if resp.status != 200:
                     return None
                 return json.loads(resp.read().decode("utf-8"))
@@ -253,3 +266,104 @@ def get_recommendation_trend(symbol: str) -> list[dict] | None:
 def _via(out: dict, fsym: str, symbol: str) -> dict:
     """``out`` with the line that answered, when it is another listing."""
     return {**out, "via": fsym} if fsym.replace(".", "-") != symbol.upper() else out
+
+
+# ------------------------------------------------------------ SEC filings
+# The stock window's earnings filings (filings.py, Phase 5). Finnhub's free
+# /stock/filings answers one form per call (`8-K,10-Q` returns []), and an
+# unfiltered call is capped at 500 rows (JPM's 424B2 notes fill that in a
+# year) and timed out at 15 s on XOM: so always by form, 3 calls a company
+# (4 for a 40-F filer). Cached here, in _FH_CACHE, so reload_keys() drops it
+# with the key. A failed call is never cached and never reads as "none".
+_FILING_FORMS = ("10-Q", "8-K", "10-K", "6-K", "20-F", "40-F")
+_FILING_FIELDS = ("cik", "form", "filedDate", "acceptedDate", "reportUrl", "filingUrl")
+FILINGS_NONE_TTL = 86400.0  # an unsponsored ADR doesn't start filing overnight
+# Nothing at all for an exchange-listed line can't be true (every one files):
+# Finnhub's gap or spelling, kept as briefly as a degraded Yahoo answer.
+FILINGS_DOUBT_TTL = 60.0
+
+
+def _filings_one(line: str, form: str, frm: str, to: str, cancel) -> list[dict] | None:
+    """One form's filings, slimmed to the fields the matching reads; None when
+    Finnhub didn't answer (a timeout, 5xx, a 429 after retries, a 403, or
+    anything that isn't a list)."""
+    raw = _fh_call(
+        "stock/filings",
+        {"symbol": line, "form": form, "from": frm, "to": to},
+        line,
+        timeout=10.0,
+        cancel=cancel,
+    )
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for f in raw:
+        if isinstance(f, dict) and f.get("form") == form:  # 8-K/A, 10-K/A: never the report
+            out.append({k: f.get(k) for k in _FILING_FIELDS if isinstance(f.get(k), str)})
+    return out
+
+
+def sec_filings_cached(line: str, frm: str, max_age: float) -> tuple[str, dict] | None:
+    """The cached answer for ``line`` from ``frm``, when younger than both its
+    own TTL and ``max_age`` (the caller's: 30 min while a report is fresh)."""
+    hit = _FH_CACHE.get(f"filings|{line}|{frm}")
+    if hit is None:
+        return None
+    ts, ttl, val = hit
+    if time.time() - ts > min(ttl, max_age):
+        return None
+    return val
+
+
+def sec_filings(
+    line: str, frm: str, to: str, *, ttl: float, none_ttl: float = FILINGS_NONE_TTL, cancel=None
+) -> tuple[str, dict, int] | None:
+    """(filer, {form: [filings]}, calls) for the SEC line ``line`` in the
+    DASH spelling (BRK-B: /stock/filings returns nothing for BRK.B, unlike
+    the other endpoints), filed in [frm, to]. filer: "us" (10-Q, 8-K, 10-K), "foreign"
+    (6-K, 20-F or 40-F) or "none" (nothing at all: a no-SEC company's
+    unsponsored ADR, cached FILINGS_NONE_TTL). None when any call failed:
+    nothing is cached then, so the next ask tries again.
+
+    The order tells the filer apart in as few calls as possible: a US
+    domestic filer has 10-Qs; a foreign private issuer has 6-Ks instead; a
+    domestic filer with no 10-Q in the window (a trust) still has a 10-K."""
+    if not FINNHUB_API_KEY:
+        return None
+    asked: list[str] = []
+
+    def get(form: str) -> list[dict] | None:
+        asked.append(form)
+        return _filings_one(line, form, frm, to, cancel)
+
+    # Each step: the forms to ask next, by what the last answer said. A
+    # step's forms don't depend on each other, so they go out together (a US
+    # filer's 8-K and 10-K: two calls' wait instead of three).
+    got: dict[str, list[dict]] = {}
+    plan = ["10-Q"]
+    while plan:
+        if len(plan) == 1:
+            answers = [get(plan[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=len(plan)) as pool:
+                answers = list(pool.map(get, plan))
+        if any(a is None for a in answers):
+            return None  # one failed call: the whole answer is unknown
+        got.update(zip(plan, answers, strict=True))
+        last, rows = plan[0], answers[0]
+        if last == "10-Q":
+            plan = ["8-K", "10-K"] if rows else ["6-K"]
+        elif last == "6-K":
+            plan = ["20-F"] if rows else ["10-K"]
+        elif last == "20-F" and not rows:
+            plan = ["40-F"]
+        else:
+            plan = []
+    if got["10-Q"] or (got.get("10-K") and not got.get("6-K")):
+        filer = "us"
+    elif got.get("6-K"):
+        filer = "foreign"
+    else:
+        filer = "none"
+    _fh_put(f"filings|{line}|{frm}", (filer, got), none_ttl if filer == "none" else ttl)
+    return filer, got, len(asked)

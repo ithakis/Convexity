@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import socket
 import sys
 import threading
@@ -50,7 +51,7 @@ from convexity.analytics import (
 from convexity import jobs
 from convexity import books as _books
 from convexity import investments as _investments
-from convexity.fetcher import fetch_detail, fetch_events, range_history
+from convexity.fetcher import fetch_detail, range_history
 from convexity.fetcher import stream_quotes as fetcher_stream_quotes
 
 # NB: convexity.frontier (and its numba/mpt dependency, ~1.7s to
@@ -548,16 +549,39 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"tickers": tickers})
             return
         if parsed.path == "/api/events":
-            # The stock window's E and D chart markers (fetcher.fetch_events).
+            # The stock window's E and D chart markers (fetcher.fetch_events),
+            # each report with its fiscal label (filings.events: Yahoo's
+            # cached .info, no Finnhub call).
+            from convexity import filings
+
             q = parse_qs(parsed.query)
             sym = (q.get("symbol") or [""])[0].strip().upper()
             if not sym:
                 self._send_json(400, {"error": "symbol required"})
                 return
             try:
-                self._send_json(200, fetch_events(sym))
+                self._send_json(200, filings.events(sym))
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/earnings-history":
+            # The E card's filings and the Earnings history pop-up
+            # (filings.history): a detail path the page asks on an E hover,
+            # an opened card or the button, never when the window opens.
+            # Always 200 with a `sec.status` the page explains; Finnhub calls
+            # go to the US line, and every link is checked against EDGAR.
+            from convexity import filings
+
+            q = parse_qs(parsed.query)
+            sym = (q.get("symbol") or [""])[0].strip().upper()
+            if not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-^=]{0,31}", sym):
+                self._send_json(400, {"error": "symbol required"})
+                return
+            try:
+                self._send_json(200, filings.history(sym))
+            except Exception as exc:
+                print(f"[filings] {sym}: {type(exc).__name__}", file=sys.stderr)
+                self._send_json(500, {"error": "earnings history failed"})
             return
         if parsed.path == "/api/density":
             # The stock window's σ/μ: a real-world price distribution from the

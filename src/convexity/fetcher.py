@@ -1582,10 +1582,16 @@ def _earnings_rows(tk) -> list[dict]:
             sur = _safe_num(row.get("Surprise(%)"))
             if sur is None and act is not None and est not in (None, 0):
                 sur = (act - est) / abs(est) * 100.0
+            # The report's exact time in New York (filings.py matches the
+            # results 8-K by it: accepted minutes after the release).
+            ny = None
+            with contextlib.suppress(Exception):
+                ny = ts.tz_convert("America/New_York").isoformat() if ts.tzinfo else None
             out["earnings"].append(
                 {
                     "date": day.isoformat(),
                     "react": react.isoformat(),
+                    "ts": ny,
                     "timing": ("after" if after else "before") if known else "",
                     "estimate": est,
                     "actual": act,
@@ -1614,8 +1620,9 @@ def fetch_events(symbol: str) -> dict:
     there moves the next session, anything earlier the same one, so `react`
     is the first session whose close can carry it. The price reactions are
     measured by the page on the chart's own closes. Dividends are per share
-    in the quote's unit (pence on LSE), by ex-date. Cached for 6 hours,
-    and only when Yahoo answered something.
+    in the quote's unit (pence on LSE), by ex-date. Cached for 6 hours when
+    the calendar answered, 10 minutes when only dividends came back (an empty
+    calendar is doubtful), and not at all when Yahoo answered nothing.
     """
     cache_key = f"events|{symbol}"
     cached = _cache_get(cache_key)
@@ -1656,6 +1663,13 @@ def fetch_events(symbol: str) -> dict:
             last = float(tk.fast_info.last_price)
         out["div_ttm"] = ttm
         out["div_yield_ttm"] = ttm / last if last and last > 0 else None
-    if out["earnings"] or out["dividends"]:
+    # Yahoo's calendar sometimes answers empty for a company that reports
+    # (TGT, 2026-11-18) while its dividends come back: an empty calendar is a
+    # doubtful answer, kept 10 minutes, so the E flags return on the next
+    # open instead of staying away for 6 hours. A fund's empty calendar costs
+    # one re-ask every 10 minutes, on a detail path.
+    if out["earnings"]:
         _cache_put(cache_key, out, 6 * 3600.0)
+    elif out["dividends"]:
+        _cache_put(cache_key, out, 600.0)
     return out

@@ -399,6 +399,24 @@ Each of these has cost real debugging time; the link goes to the full story.
   `POST /api/weight-presets/optimized` reads the point from the SAVED run, never the
   request; a preset's `source` is allow-listed and dropped when weights are edited.
   [mpt.md](docs/architecture/mpt.md#apiefficient-frontier-params-frontierpy)
+- **Earnings filings are matched by TIME, not by Item** (`filings.py`, Phase 5):
+  Finnhub's filings carry no Items, so the results 8-K is the first accepted in
+  [report - 3 h, + 3 d] (6-K + 7 d), and the periodic form follows the fiscal
+  quarter (Q1-Q3 10-Q, Q4 10-K, foreign Q4 20-F/40-F). **A January-March year
+  end has no universal naming** (HD's fiscal 2025 ends Feb 2026, WMT's fiscal
+  2026 ends Jan 2026): the year is the company's own 10-Ks' word
+  (`learn_naming`, `state/fiscal_naming.json`), else no FY at all ("Q2 · quarter
+  to 3 Aug 2025"). Finnhub is asked by form, for the company's **US line**
+  (APC.DE -> AAPL) **in the dash spelling** (`/stock/filings` returns nothing for
+  BRK.B; its other endpoints keep the dot), on an E hover, an
+  opened card or the button, **never when the window opens**, throttled and
+  single-flight. **A failed call is `unavailable`, never "none"**, and nothing is
+  cached; nothing at all for an exchange-listed line is Finnhub's gap, never
+  "none" (60 s). **The app never fetches sec.gov**: it only hands the browser links,
+  each checked against the EDGAR allow-list (`filings.sec_url`). The pop-up
+  (`#eh-bg`, z 89) closes on Esc before the window (capture phase on `window`).
+  [backend.md → Earnings filings](docs/architecture/backend.md#earnings-filings-filingspy-get-apiearnings-history-phase-5) ·
+  [frontend.md → σ/μ, E/D flags](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -457,7 +475,8 @@ sub-decision.
 │   ├── search.py                ← Company search: field registry, rule + LLM parsers, executor (/api/search) — §6
 │   ├── helpers.py                ← Shared small utilities (dividend-yield normalisation, etc.)
 │   ├── xlsx_export.py           ← One-sheet-per-portfolio Excel export — §7
-│   ├── finnhub_adapter.py       ← Optional Finnhub supplemental columns (MSPR, rec trend) — §4
+│   ├── finnhub_adapter.py       ← Optional Finnhub supplemental columns (MSPR, rec trend) and the SEC filings transport (`sec_filings`) — §4
+│   ├── filings.py               ← The E card's SEC filings + Earnings history: match by time, fiscal labels, EDGAR URL allow-list, throttle, GET /api/earnings-history — §4
 │   ├── news_sentiment.py        ← News fetch/cache, the News read (LLM, five lenses), refresh orchestration — §4
 │   ├── ml_sentiment.py          ← The Market read (mlsent-v1.1 statistical model) — §4
 │   ├── ml_features.py           ← Featurizer shared by ml/ training and the Market read (train/serve parity) — §4
@@ -533,6 +552,7 @@ overrides it):
 │   ├── betas.json              ← the app's beta per symbol and window, recomputed daily (capm.py; a cache, market data only)
 │   ├── policy_rates.json       ← central-bank policy rates from the BIS, refreshed daily: rf for currencies without a CME future (options_density.py; market data only)
 │   ├── beta_lines.json         ← home lines found by name (a US company's Milan line → its US line) or by the company's country (SHEL → SHEL.L), a week (capm.py; market data only)
+│   ├── fiscal_naming.json      ← how each Jan-Mar year-end company names its fiscal years, from its 10-Ks, 90 days (filings.py; market data only)
 │   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
 │   ├── long_run.json           ← each holding's recoveries from max history and the 3-year covariance, monthly (long_run.py; a cache, market data only)
 │   ├── news_watch.json         ← when each held share's news was last tried by the background read (news_watch.py; a cache)
@@ -909,7 +929,9 @@ GitHub's side needs a GitHub Support request by the owner.
   `options_density._policy_rates`, approved 2026-10-26), and GitHub Releases for the
   one-time model download — `model_fetch.py` — and the daily reference pack —
   `reference_pack.py`, §4 — plus the weekly symbol pack, `symbol_db.py`, §6;
-  both packs can be switched off in Settings).
+  both packs can be switched off in Settings). The E card's sec.gov links
+  (`filings.py`) are not a host the app calls: they open in the owner's own
+  browser, and the app never fetches them.
 - No `eval`/`exec`, `shell=True`, `pickle`/`joblib.load` of anything downloaded,
   or `yaml.load` without `SafeLoader`. Anything downloaded at runtime (model
   artifact — `model_fetch.MODEL_SHA256`, checked before the archive is opened)

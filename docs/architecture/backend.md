@@ -597,6 +597,8 @@ before that (and never for a row with no mean target: no coverage, a fund).
 - `/api/fx-index?ccy=…`            — one synthetic basket index
 - `/api/fx-indexes-bulk?ccys=…`    — many in one call (sequential server-side)
 - `/api/detail?symbol=…`           — heavy per-symbol payload for the modal
+- `/api/events?symbol=…`           — the window's E/D flags, each report with its fiscal label (`filings.events`)
+- `/api/earnings-history?symbol=…` — the E card's filings and the Earnings history (`filings.history`): asked on an E hover, an opened card or the button, never when the window opens. Always 200 with a `sec.status`; 400 on anything that isn't a ticker
 - `/api/export-xlsx?ccy=`          — Excel export of every saved portfolio and the book
 - `/api/export-progress`           — `{step, done, total}` of the running export (the button's label)
 
@@ -1963,6 +1965,141 @@ York means no time given (`timing: ""`). Dividends per share by ex-date in
 the quote's unit; `div_ttm` / `div_yield_ttm` = the last 365 days over the last
 price. Cached 6 h, only when something came back. Reactions are computed by
 the page on the detail's daily (adjusted) closes.
+
+Each row also keeps `ts`, the report's exact time in New York (ISO with offset,
+midnight when Yahoo gave no time): the filing match below needs the time of
+day. The route serves `filings.events`: the same rows with `label` ("Q4
+FY2026") and `period_end`, added on a copy at response time from the primary
+line's cached `.info` (`fetcher._research_info`, asked in parallel with the
+calendar, skipped for funds), so a degraded `.info` never sits in the 6-hour
+events cache as "no label".
+
+### Earnings filings (`filings.py`, `GET /api/earnings-history`, Phase 5)
+
+The E card's "Earnings release" / 10-Q / 10-K buttons and the Earnings history
+pop-up. Research: 30 names live (2026-11-17), the results filing found for
+281/282 past reports of 24 SEC filers, the periodic report for 216/216 US
+reports. Module split: `finnhub_adapter.sec_filings` is the transport and the
+cache (`_FH_CACHE`, so `reload_keys()` drops it with the key; no new
+`reload_keys` was needed); `filings.py` matches, labels, checks URLs and
+throttles; `server.py` only routes. A detail path: never `fetch_one`, and the
+page asks it on the first hover of an E flag, an opened E card or the Earnings
+history button, **never when the window opens**.
+
+- **Calls.** Finnhub's free `/stock/filings` answers one form per call
+  (`8-K,10-Q` returns `[]`) and an unfiltered call is capped at 500 rows (JPM's
+  424B2s fill that in a year; XOM's timed out at 15 s), so always by form:
+  10-Q first (a US domestic filer has them), then 8-K and 10-K **together**;
+  else 6-K, then 20-F (40-F when no 20-F); else 10-K (a trust) or "none". 3
+  calls a company, 4 for a 40-F filer, from the oldest kept report - 10 days on
+  the first of its month (a stable cache key) to today. Amendments (8-K/A,
+  10-K/A) are dropped. Each call `timeout=10`, the whole lookup a
+  `helpers.Deadline` of 25 s through the shared `_FH_LIMITER` (`_fh_call` took
+  `timeout` and `cancel` for this).
+- **The SEC line is the company's US line** (`filings._sec_line`: `symbol_db.us_line`
+  in the pack's DASH spelling. `/stock/filings` answers class shares only by the
+  dash: BRK.B 0 rows, BRK-B 6; BF.B 0, BF-B 1. Finnhub's other endpoints keep
+  `finnhub_symbol`'s BRK.B): APC.DE asks AAPL, SAP.DE asks SAP, a
+  no-SEC company's unsponsored ADR (RHM.DE -> RNMBY) answers `[]` everywhere: a
+  clean "none". A listing with no US line at all (ENI.MI) is `no_line`. A
+  secondary listing shares its US line's cache entry (APC.DE after AAPL: 0 calls).
+- **The results filing is matched by TIME, not by Item.** Finnhub's rows have no
+  Items, no exhibits, no period. Results 8-Ks are accepted minutes after the
+  release (AAPL 16:30, P&G 07:02), so: the first 8-K accepted in [report time -
+  3 h, + 3 days] (Yahoo's exact time in New York; midnight when it gave none);
+  a 6-K in [- 3 h, + 7 days] (SAP files its quarterly 6-K 1-6 days late, every
+  time). Same-day ties prefer a file name that looks like results; names that
+  plainly aren't (remuneration report, AGM, buy-back, notice…) are skipped (they
+  had given NVO's Q4 its remuneration report). A non-results 8-K accepted
+  between the release and the results 8-K would be picked: none in the sample
+  (JPM's and P&G's second same-day 8-K come later).
+- **The periodic form follows the fiscal quarter** (the owner's rule): Q1-Q3 the
+  first 10-Q filed in [report - 3 d, min(next report, + 75 d)); Q4 the first
+  10-K in [report - 3 d, + 130 d) (NVDA and SHOP file the 10-Q the same day as
+  the release, hence - 3 d). A foreign filer: Q4 the 20-F / 40-F, Q1-Q3 the 6-K
+  itself (`kind: "fallback"`). A plain "first periodic report after" gave TSM's
+  20-F (filed on its Q1 results day) to Q1. Not filed and still inside its
+  window: `kind: "pending"`, `form` the expected one, `url: null`, `due` = period
+  end (the real one, above) + 40 d (10-Q) / 60 d (10-K) / 120 d (20-F) / 90 d (40-F), the large
+  accelerated deadlines: an estimate, "usually by" on the page. Past its window
+  with nothing found: the results filing (`fallback`).
+- **Fiscal label** from Yahoo's `lastFiscalYearEnd` of the primary line: the
+  quarter is the last quarter end on that grid at least 7 days before the
+  report; a 52/53-week year ending in a month's first week (2026-01-03) belongs
+  to the month before. The YEAR's name follows the company, and for years ending
+  in **January to March there is no universal rule**: WMT and NVDA name theirs
+  by the end (FY2026 ends Jan 2026), HD, TGT and LOW by the start (HD's fiscal
+  2025 ends 1 Feb 2026). For those, `filings.learn_naming` asks the company's
+  10-Ks once (Finnhub `financials-reported`, annual: each 10-K's fiscal year and
+  end date; 0.5-0.9 s, ~200 KB, `from` is ignored; `/stock/earnings` is no
+  use, it gave HD "2027" for a 2026 quarter): the last three 10-Ks must agree,
+  kept 90 days in `state/fiscal_naming.json` (a disagreement or no 10-K rows, 7
+  days; a failed call, never). Asked beside the filings lookup (hover / click
+  path, never the window's open); `/api/events` only reads the file. Unknown,
+  the report has `quarter` but no `fiscal_year` and no `label`, and the page
+  names it "Q2 · quarter to 3 Aug 2025" (the end only when `period_exact`) or
+  "Q2": **never a guessed year**. CRM is the case in point: Finnhub labels both
+  its Jan-2025 and Jan-2026 10-Ks "2025", so it stays unknown. Every other year
+  end is named by the calendar year it ends in (115/116 US company-quarters
+  agreed with Finnhub's XBRL labels; ORCL's one difference was Finnhub's error).
+  A degraded `.info` (`_fundamentals_missing`) gives no label at all.
+- **Period ends are the real ones**: a month-end year has month-end quarters
+  (`period_exact`); a 52/53-week year's are 13 weeks from its last year end
+  (CSCO 2026-07-25 -> 2026-10-24, not Oct 31, which put "usually by" a week
+  late), and exact once the quarter's 10-Q / 10-K is matched: its file name
+  carries the period (`hd-20250803.htm`, EDGAR's inline-XBRL naming).
+- **An empty answer for an exchange-listed line is never "none"**: every company
+  listed on a US exchange files with the SEC, so nothing at all is Finnhub's gap
+  or spelling (the BRK.B bug read as "Not filed", cached a day). Only a line the
+  pack has off-exchange (OTC: an unsponsored ADR) may truly have nothing; on an
+  exchange or unknown to the pack (`filings._on_us_exchange`), it is
+  `unavailable` / `reason: "empty"`, cached `FILINGS_DOUBT_TTL` (60 s).
+- **Statuses** (`sec.status`): `ok`, `none` (no filings at all for an OTC line, cached 24 h),
+  `no_line`, `no_key` (nothing asked, nothing cached; `reload_keys` makes the
+  next ask try), `unavailable` (`reason`: `no_answer`, `busy` or `empty`; a
+  request that waited on another's lookup reports that lookup's reason), `no_reports`
+  (Yahoo has none: nothing asked). **A failed call is never "none"**: any form's
+  call failing (timeout, 5xx, 429 after retries, a 403, a non-list) makes the
+  whole answer `unavailable` and nothing is cached, not even the forms that
+  answered. The 2026-10-30 degraded-answer rule.
+- **Cache.** An answer 12 h; 30 min while the latest report is under 7 days old
+  (its 8-K, then its 10-Q, are about to appear: the read checks the age against
+  the caller's TTL too, so an entry stored before the report doesn't outlive
+  it). No payload cache: the route composes cached parts in ms, so the card and
+  the table read the same ones.
+- **Throttle.** Cold lookups are single-flight per line (a hover and the click
+  right after it wait for one answer) and capped at `COLD_PER_MIN` = 8 a rolling
+  minute (at most ~32 of the free plan's 60, which the news refresh and the
+  quotes build share); past a 12 s wait the answer is `unavailable` / `busy`
+  and the page offers Try again.
+- **Links.** The app never fetches sec.gov (it answers automated clients 403);
+  it only hands the owner's browser links, each checked first:
+  `filings.sec_url` admits `https://www.sec.gov/Archives/edgar/data/<cik>/…`
+  only (no query, fragment, port, credentials, `..`); a filing whose link fails
+  is dropped. EDGAR's company list (`edgar_list`, per report: the 8-K / 6-K list
+  up to report + 8 days; `sec.edgar_url`: everything) is built here from a
+  digits-only CIK. `website` is Yahoo `website` of the primary line (never
+  `irWebsite`: 6/25, all http and stale), https only (`filings.website_url`).
+- **Payload**: `{symbol, primary, dates_via, sec: {status, line, cik, filer,
+  name, edgar_url, reason?}, website, fiscal_year_end, reports: [{date, react,
+  timing, ts, quarter, fiscal_year, label, period_end, period_exact, age_days, eps: {est, act, surprise_pct},
+  earnings_filing: {form, filed, accepted (ISO, US Eastern offset), url,
+  index_url, days_after, others_that_day} | null, periodic_filing: {kind:
+  periodic | fallback, form, filed, accepted, url, index_url} | {kind: pending,
+  form, url: null, due} | null, edgar_list}], next, asof}`, reports oldest first,
+  the last 12 out (today's once Yahoo has the figure) from the last 4 years.
+  **Structured fields only**: every word is app.js's. Price reactions are not in
+  it: the page measures them on the held line's closes, like the E card.
+- **Speed** (live, 2026-11-17): Finnhub part 0.8-4.7 s cold (AAPL 2.6, MSFT 1.6,
+  CSCO 2.7, AMAT 0.8, SAP 1.4, RNMBY 4.7), the whole route warm 20-30 ms. With
+  the window open (events and `.info` cached) the route's cold cost is the
+  Finnhub part only; asked cold from nothing (JPM, curl) 8.7 s.
+- **Not covered**: filer transitions (SHOP's older 6-Ks once it files 10-Qs),
+  class-share spellings, 10-KT transition periods, half-year reporters' labels.
+
+`tests/test_filings.py` pins the windows, the form mapping, pending and its due
+dates, no-SEC, the Finnhub miss with EDGAR's list, no key, failures never
+cached, the URL allow-list, the throttle and the US line of a secondary listing.
 
 ## 6. Symbol pack + company search (`symbol_db.py`, `symbol_build.py`, `search.py`)
 
