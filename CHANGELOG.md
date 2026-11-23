@@ -9,6 +9,16 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.37.0 — 2026-11-23
+
+- **Recent events in My Investments.** Below Upcoming, the rail lists up to five events from the last 30 days that moved your holdings most for their weight: results with how they compared with the estimate, dividends that were raised, cut or special, and very large price moves. Each shows its Market Reaction.
+- **An Events view in the full screen** (Desk · Map · Charts · News · Events), opened by the full-screen button on Upcoming or on Recent events. A timeline puts every holding's results (E), dividends (D) and big moves (!) on one axis: a marker's height is how the share moved against the market, its colour what the event was (beat or miss, raised or cut), a ring a big reaction, and a grey band a day the whole market moved. Click a marker or a row for a small window that explains it in plain words, with the filing buttons for results. Below it, a table of what happened, and the next dates beside it. Periods from one month to two years, filters by type and holding.
+- **Market Reaction**: the event day and the next, after taking out the broad market (the S&P 500 for a US share, the STOXX 600 for a European one, so a company that is a big part of its home index can't explain away its own fall), in units of the share's normal two-day move: Big drop, Fell, Shrugged off, Rose, Big rise. Whether it kept going, held or gave back shows after five days. Dividends have none.
+- **Big moves are rare on purpose**: a day of at least 4× the share's normal move on the company's main listing, not a results day (that colours the E) and not a day the whole market moved, unless the share's own move was still that large after the market. Funds have none.
+- **Causes are never guessed.** For a big move under about a year old the app looks for the news (Finnhub, the company's US listing); the NVIDIA model may only explain the move from a headline it found, and code checks its sentence. Older moves say "No headline found". All of it runs in the background, never while a page loads, and a failed call is never stored; a rejected key stops the model calls until the key changes.
+- **Dividends are compared in the currency the company declares them in**, so a dollar dividend paid in pence no longer reads as raised or cut when the pound moves.
+- The Excel export gains an Events sheet.
+
 ## 1.36.0 — 2026-11-18
 
 - **Earnings filings in the E card.** Clicking an earnings marker in a company's window now offers an "Earnings release ↗" button that opens that report's results filing on SEC EDGAR (the 8-K, or a foreign company's 6-K), with when it was filed. Beside it is the quarter's periodic report: the 10-Q for Q1-Q3, the 10-K for Q4 (a foreign company's 20-F or 40-F). A report not filed yet shows as a dashed "pending" chip with the date it is usually due. The card names the company's own fiscal quarter ("Q4 FY2026"), learned from its 10-Ks when its year ends in January-March.
