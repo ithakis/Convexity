@@ -923,6 +923,10 @@ class Handler(BaseHTTPRequestHandler):
                                 f"[export] holding risk skipped: {type(exc).__name__}",
                                 file=sys.stderr,
                             )
+                        try:  # the Events sheet: the same caches as the view, no fetch
+                            book = {**book, "events": _investments.events_now(ccy)}
+                        except Exception as exc:
+                            print(f"[export] events skipped: {type(exc).__name__}", file=sys.stderr)
                 if not full and not has_book:
                     self._send_json(404, {"error": "no saved portfolios to export"})
                     return
@@ -1131,6 +1135,10 @@ class Handler(BaseHTTPRequestHandler):
                     syms = [x for x in (q.get("symbols") or [""])[0].split(",") if x]
                     ccy = (q.get("ccy") or [None])[0]
                     self._send_json(200, {"extras": _investments.attention_extras(syms, ccy)})
+                elif parsed.path == "/api/investments/events":
+                    # The Events view (P6): the two event caches, filtered by
+                    # this portfolio's holdings; never a fetch, never a model.
+                    send(_investments.events_now((q.get("ccy") or [None])[0]))
                 elif parsed.path == "/api/investments/attention":
                     # The topbar badge: from the computed page only, never a compute.
                     send(_investments.attention_now((q.get("ccy") or [None])[0]))
@@ -2027,13 +2035,15 @@ def start_server() -> tuple[ThreadingHTTPServer, int]:
     threading.Thread(target=_warm_book, name="cx-warm-book", daemon=True).start()
     # Phase 9: the notification scheduler (a minute tick; its passes are
     # background jobs, so single-flight with every refresh).
-    from convexity import long_run, news_watch, notify
+    from convexity import event_study, long_run, news_watch, notify
 
     notify.start()
     # The monthly long-history pass: the same kind of job, and it waits its turn.
     long_run.start()
     # The held shares' news, once their reads are days old: the same again.
     news_watch.start()
+    # The Events view's numbers and notes (P6): the same again.
+    event_study.start()
     return server, port
 
 

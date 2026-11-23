@@ -185,6 +185,25 @@ Each of these has cost real debugging time; the link goes to the full story.
   stays five trading days (`xray.big_days`), not until the next session opens.
   [frontend.md → Attention, full screen](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv) ·
   [backend.md → full screen](docs/architecture/backend.md#my-investments-attention-full-screen-attention_extras-2026-11-02)
+- **Past events never fetch on the page's path, and their causes are never
+  guessed** (P6, `event_study.py`): a hidden `events` job (like `longrun`) fills two
+  caches shared by every portfolio and keyed by the company's PRIMARY line
+  (`state/events_history.json` numbers, `state/event_notes.json` headlines and the
+  model's clause), never per book; the rail's Recent events and the Events view
+  read them. A big move is 4σ on the primary line, not an earnings session, not a
+  market day; the label is code's (CAR(0,+1) in two-day sigmas, cuts 1 and 2.5),
+  the size sentence is code's, the model writes only the "why" from a headline the
+  code fetched (Finnhub, US line, under a year old) and code checks it (pick,
+  words, no hedge, no number outside the headline, direction and tone); a failed NIM or
+  Finnhub call is never stored, but headlines that came back are kept and reused, a
+  401/403 stops the model until the keys change (`event_study.reload_keys` in
+  `keys.reload_all`) and other failures back off 10 min doubling to 6 h. A dividend is
+  compared in the currency it was declared in (Yahoo gives a USD dividend of a London
+  line in pence): the series that repeats (the line's own, else the US line's), else
+  converted to the reporting currency; a quarterly payer needs the last payment and
+  the year-ago one to agree. A fund has no big moves; a market day keeps a move only when its
+  abnormal z is 4 the same way. [backend.md → past events](docs/architecture/backend.md#my-investments-past-events-and-the-market-reaction-event_studypy-p6-2026-11-18) ·
+  [frontend.md → Pages](docs/architecture/frontend.md#pages-and-my-investments-showpage-inv)
 - **Plans are the owner's words, kept beside the book** (Phase 8,
   `state/plans.json`): never overwritten when malformed, untouched holdings
   written back verbatim; levels are quote-unit prices rescaled by later
@@ -317,7 +336,13 @@ Each of these has cost real debugging time; the link goes to the full story.
   the rest). `/api/density` ignores any client beta and ships `model` plus
   curves `model` (mu on) and `market` (mu off); the window's alpha uses the
   listing's own or research-line targets only, like its row, so the numbers
-  agree. [backend.md → model price](docs/architecture/backend.md#the-model-price-capmpy-129)
+  agree. **The one exception (owner, 2026-11-18): the Events view's Market Reaction
+  and its big-move card** adjust by the BROAD index (^GSPC for a US line, ^STOXX
+  for a European one, capm's home index otherwise) with their own OLS beta over
+  sessions −257..−6, shrunk like capm and floored at 0: an index heavyweight drags
+  its home index (an −11% day of a fifth of the SMI moves the SMI −1.5% by itself). Nothing else
+  reads that beta. [backend.md → model price](docs/architecture/backend.md#the-model-price-capmpy-129) ·
+  [backend.md → past events](docs/architecture/backend.md#my-investments-past-events-and-the-market-reaction-event_studypy-p6-2026-11-18)
 - **One primary line for every company fact** (`capm.primary_line`,
   2026-10-29): beta, the rate's currency (`capm.rate_ccy`: APC.DE takes the
   US bill), analysts (`fetcher.analyst_line`, primary line with 3+ analysts
@@ -494,6 +519,7 @@ sub-decision.
 │   ├── ledger.py                ← My Investments ledger engine: pure replay (average cost, implied deposits, splits), TWR/MWR
 │   ├── long_run.py              ← My Investments' monthly long view: max-history recoveries + 3-year covariance, a background job, read by the page as algebra
 │   ├── news_watch.py            ← Reads the held shares' news by itself once reads are 3 days old: a hidden background job, one share at a time
+│   ├── event_study.py           ← Past events (P6): big moves, the Market Reaction, outcomes, the headline "why" (NIM), the events job, GET /api/investments/events
 │   ├── attention.py             ← My Investments' Attention rail: X-ray rules, events cache, dismiss/unread (Phase 7)
 │   ├── notify.py                ← My Investments notifications (Phase 9): scheduler (a background job), dedup via attention.py, quiet hours, outbox, weekly recap
 │   ├── importer.py              ← My Investments import: text, screenshots, PDFs, CSV/Excel → rows to review (NIM vision + text, symbol-pack checks)
@@ -556,6 +582,8 @@ overrides it):
 │   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
 │   ├── long_run.json           ← each holding's recoveries from max history and the 3-year covariance, monthly (long_run.py; a cache, market data only)
 │   ├── news_watch.json         ← when each held share's news was last tried by the background read (news_watch.py; a cache)
+│   ├── events_history.json     ← the held companies' events and Market Reactions, keyed by primary line, shared by every portfolio (event_study.py; a cache, market data only)
+│   ├── event_notes.json        ← each event's headlines and the model's "why", keyed by event and an inputs hash (event_study.py; a cache)
 │   ├── plans.json              ← My Investments plans and price alerts (the owner's input: never overwritten when malformed)
 │   ├── recaps.json             ← My Investments' weekly recaps, last 12 (derived from the computed page: a cache)
 │   ├── book_cache.json         ← My Investments' last good page (derived from the real book; a cache keyed by rev, never the source)

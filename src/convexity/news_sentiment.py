@@ -1210,6 +1210,7 @@ def _nvidia_call(
     timeout: float | None = None,
     max_tokens: int | None = None,
     model: str | None = None,
+    failure: dict | None = None,
 ) -> dict | None:
     """One schema-constrained NIM completion, parsed.
 
@@ -1231,7 +1232,12 @@ def _nvidia_call(
     limiter and the circuit breaker stay shared. The My Investments import
     (importer.py) does the same with a larger `max_tokens`: a statement can
     hold dozens of entries. `model` pins one model (search's hedged pair):
-    it never walks the chain, and a 404 for it is just a failed call."""
+    it never walks the chain, and a 404 for it is just a failed call.
+
+    ``failure``, when given, receives ``{"code": <last HTTP status or None>}``
+    on a failed call: with ``record=False`` the caller can't read
+    llm_status, and the Events job stops on a 401/403 but backs off on
+    anything else (event_study._nim_result)."""
     global _nv_rate_limit_until
     rec = _llm_record if record else (lambda *a, **k: None)
     if not NVIDIA_API_KEY:
@@ -1287,6 +1293,8 @@ def _nvidia_call(
             raise
         except Exception as exc:
             code = _http_status(exc)
+            if failure is not None:
+                failure["code"] = code
             if code in (404, 410) and pinned:
                 print(f"[{tag}] NIM {code} for {pinned}", file=sys.stderr)
                 return None

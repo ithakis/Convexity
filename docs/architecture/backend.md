@@ -587,6 +587,7 @@ before that (and never for a row with no mean target: no coverage, a fund).
 - `/api/watchlists`                — `{name: entries_string}` map
 - `/api/investments`               — My Investments page payload (`investments.book(ccy)`, `?ccy=` the display currency; the benchmark comes from `prefs.json`), computed by replaying the ledger. Never writes the book file. See "My Investments" below
 - `/api/prefs`                     — the saved preferences (`persistence.load_prefs`), allow-listed
+- `/api/investments/events?ccy=`   — the Events view (P6, `event_study.for_book`): the showing book's past events, market bands and next 45 days, from the event caches only; see "past events and the Market Reaction" below
 - `/api/investments/risk?ccy=`     — each holding's own risk for the Drivers view and the export (`investments.holding_risk`): ten years of closes per holding, so never on the page's path
 - `/api/investments/symbols`       — open positions only, no network (the Portfolio tab's pinned book pill)
 - `/api/investments/lookup?q=…`    — company typeahead for the Add popover (symbol pack)
@@ -1090,6 +1091,143 @@ page's path**; what isn't there is left out of the page.
   sends (`_build_news_context` on the `__book__` rows, the page's weights), so these
   reads are as good as a pressed one and count in the Track record. `forget_page` at the end.
   `CONVEXITY_LONGRUN=0` switches it off, with `long_run`.
+
+### My Investments past events and the Market Reaction (`event_study.py`, P6, 2026-11-18)
+The rail's **Recent events** (below Upcoming) and the full screen's fifth view,
+**Events**: earnings (E), dividends (D) and very large moves (M) of the held
+companies over two years, how the market took each one, and why. The method is
+the P6 quant's (`METHOD.md`, signed off by the owner with "Build with defaults");
+plain code sets every number and label, the model writes one clause.
+- **A big move** (`big_moves`): `|z| >= K_MOVE` (4) on the company's PRIMARY line
+  (`capm.primary_line`, never the held listing: Vienna and Milan lines barely trade
+  and their stale closes jump when they catch up), z = the day's log return over
+  the std of the 252 sessions before (min 60, floored 0.2%), bad prints dropped
+  first (`clean_bars`: capm's one-bar spike rule, then |log r| > 1). Not an
+  earnings reaction session or the one after (the move colours that E), not a
+  **market day** (the broad index itself moved `K_MKT` = 3 of its own sigmas the
+  same way: those go to the book's grey band, `merge_bands`: consecutive sessions
+  that went the same way are one band, so a fall and the next session's rebound are
+  two), unless the move is huge on its own too (`abn_z`, the abnormal return against
+  the broad index with the reaction's beta and sigma, `|abn_z| >= 4` the same way:
+  a chip maker's +31.5% on a +4.7% S&P day was hidden in the band), one per 5
+  sessions (the largest stands for the cluster). Raw z, not abnormal: the shrunk
+  beta is fitted in calm years, so on a crash a defensive name that fell less than
+  the market reads as a big abnormal rise (its raw z is small, so it stays out).
+  About 0.5 per company-year (24 in a 27-holding book over two years). **A fund has
+  none** (`build_line`): its move is its market's (an emerging-markets fund read
+  "Big move · No headline found"); its market days still count towards the bands.
+- **The Market Reaction** (`reaction`): abnormal log returns ar = r − β·m, label =
+  CAR(0,+1) / (σ_abn·√2), cuts 1 and 2.5 → Big drop / Fell / Shrugged off / Rose /
+  Big rise, σ_abn and β from sessions −257..−6 (before any run-up). Day 0 is
+  `fetch_events`' `react`; the label shows from the close of day +1 and is then
+  final ("Reacting · day 0" before); follow-through (kept going / held / gave
+  back: CAR(0,5)/CAR(0,1) > 1.5 / < 0.5) after day +5, never for Shrugged off.
+  Dividends have none (an ex-date drop is the dividend). Funds use raw returns.
+  Also kept: z_day, car_5, pre_5, gap_z, vol_ratio, range_ratio and the plain %s.
+- **The one exception to "one beta" (owner, 2026-11-18).** The index here is the
+  BROAD one, `broad_index`: ^GSPC for a US line, ^STOXX for a European one (the
+  same pair as the market-day test), capm's home index for anything else; β = OLS
+  of the primary line's daily log returns on it over −257..−6, shrunk 1 + 0.9(b − 1)
+  like capm, floored at 0. An index heavyweight drags its home index (a fifth of
+  the SMI falling 11% moves the SMI −1.5% while the STOXX 600 stays flat), so the home index would
+  explain part of its own fall. Only the Market Reaction and the big-move card use
+  it; every other surface keeps `capm`'s beta.
+- **What it was** (the event's own outcome, never the reaction): E beat / in line /
+  miss at ±2% on EPS (`eps_outcome`; beyond ±50% the estimate is on another basis:
+  figures only); D raised / held / cut / special / first against the company's own
+  history (`div_outcome`: a quarterly payer is raised or cut only when the change
+  against its last payment AND against the same payment a year before (±45 days of
+  the anniversary) agree: the same as the last one is held, opposite ways are held
+  with basis `mixed` (a big fourth payment read "raised 12.5%" then "cut 5.6%");
+  the last payment alone when there was none a year
+  before; a yearly or half-yearly one by trailing-12-month totals with windows cut
+  45 days off the anniversary; under 1% is held; special by timing), funds "paid";
+  M the cause headline's tone (−2..+2) when there is one. **In the company's own
+  currency**: Yahoo gives a London line's USD dividend in pence, so an unchanged
+  one read "raised 4%" and "cut 5%" with the pound. When the line's currency isn't
+  the reporting one (`reporting_ccy`: the saved `__book__` rows'
+  `financial_currency`, else the line's cached `.info`), `div_in_reporting_ccy`
+  (job-side only) picks the series that was DECLARED, the one whose payments repeat
+  an earlier one (`_clean_share` ≥ 0.5; a converted one drifts with the rate): the
+  line's own (a French company reporting in USD declares in euros; its US line's
+  converted amounts read "raised 20%"), else the US line's (`_us_divs`, a USD
+  reporter: an ADR's ratio cancels in a change; ≥ 80% of the payments matched
+  within 7 days, never mixed with converted figures), else, with no evidence either
+  way, each payment at its ex-date's rate (`fx.fx_multipliers`), which is only
+  close (the pence are fixed at the announcement: up to ~2% off), so under 2% is
+  held then, and a date with no rate reads "held" (basis `no_fx`), never a guess.
+  The dividend block says `compared_in` (None when the line's own amounts are kept).
+- **Causes are never guessed.** An M under `NEWS_DAYS` (365) old: one Finnhub
+  company-news call for the session and the day before, on the company's US line
+  (`finnhub_adapter.finnhub_symbol`, else the primary line when that is a US line:
+  a US company's Milan line → its US line), kept when the app's relevance scorer puts the company in the title
+  or lead (≥ 0.5, the company's name from the page or the symbol pack: a name that
+  is only the ticker matches nothing), at most 6; plus the app's own cached news
+  (free; an E gets only these). Then **one NIM call** (`news_sentiment._nvidia_call`,
+  the `_MODELS` chain and limiter, `record=False`, a 90 s Deadline combined with the
+  job's cancel) that picks a headline by number (0 = none fits), writes the "why"
+  clause and the headline's tone, in strict JSON. Code checks (`check_why`): the pick
+  exists, the clause uses that headline's words, no hedge (likely/may/could…; case-aware,
+  so the month "May" passes), no number that isn't in the picked headline's title or
+  lead (the code's own size sentence is in the input; its figures aren't the
+  headline's), no "Headline N", no price verb against the move,
+  no tone against the move (a drug maker's −16% trial-miss day once got its
+  upbeat sales headline). One retry, then "No headline found". A results-like headline
+  (Q2, half-year, earnings call) makes the move a **results day** (Yahoo has no
+  report dates for some European companies). Older than a year: "No headline
+  found" at once, no call (the free plan's company news stops about a year back).
+  The SIZE sentence (`size_sentence`) is code's, one template, shipped as `say`.
+- **Where it lives**: market data shared by every portfolio, keyed by the primary
+  line, never per book: `state/events_history.json` (`{v, lines: {line: {asof,
+  computed_at, fund, index, ccy, events, drops, held}}}`, `VERSION`, recomputed every 3 hours
+  by the job; `held` is each held listing's own % on each event session, for "your
+  listing: −11.4%") and `state/event_notes.json` (`{v, notes: {event_id: {stage,
+  inputs, checked_at, headlines, headlines_at, headlines_stage, cause, why, model}}}`,
+  `NOTES_VERSION`, apart so a new rule for the numbers keeps the costly notes). Both are caches: a
+  malformed file or another `VERSION` reads as empty. Writes merge under a lock
+  (`_merge`), reads are memoised by mtime (the page reads them on every answer).
+  A note is written at day +1 (`d1`) and once more after day +5 (`final`), keyed by
+  `inputs_hash` (stage, label, follow-through, two-day % to 0.1, the headlines), so
+  a restated close or a new headline writes it again and nothing else does. **A
+  failed NIM or Finnhub call (None, or an error body) is never stored**; "No
+  headline found" is asked again daily while the move is under a week old.
+  **Headlines that came back are kept** (`headlines`, `headlines_at`,
+  `headlines_stage`) whatever the model does, and reused at that stage
+  (`_reusable_heads`) instead of asking Finnhub again; a note waiting for the model
+  has `inputs: null` and reads "Looking for the news". **The model's failures**
+  (`_nim_result`, from `_nvidia_call`'s `failure` code): a 401/403 stops the calls
+  until the keys change (`reload_keys`, hooked into `keys.reload_all`), anything
+  else backs off 10 minutes doubling to 6 hours, reset by an answer; meanwhile
+  `notes_due` lists only moves whose headlines must still be fetched, so no pass
+  runs just to wait. (Before: a rejected key cost ~11 Finnhub + ~11 NIM calls every
+  10 minutes.) A move before its lookup, day 0 included, is "pending" ("Looking for
+  the news"), never "No headline found". Each event carries its line's `index_name`
+  (the earnings window names the index, as the move's does).
+- **The job** (`events`, `run_pass`): hidden, single-flight, superseded by the
+  owner's Refresh, started by `tick` every 5 minutes (first after 4) only when
+  nothing else runs; off under `CONVEXITY_LONGRUN=0`. The showing book (pinned by
+  the job), `capm.ensure` first (it learns the primary lines), then 5 years of
+  adjusted daily OHLCV, six symbols a request (`_download`; today's bar only after
+  its market closes, `_closed`), `fetcher.fetch_events` per line, `build_line`
+  (pure), then the notes: Finnhub 3 s apart, NIM 12 s apart, at most 30 / 40 a
+  pass. Numbers need no key; texts need the NVIDIA key (moves also Finnhub's).
+  First backfill of a 27-holding book (2026-11-18): 159 E, 145 D, 24 M, 9 market
+  days in 4 bands, ~55 s for the numbers; one Finnhub call per move under a year
+  old (11) and about 20 NIM calls (moves with headlines, reports with cached news),
+  ~3 minutes at the pace above. The NIM budget counts calls (a refused clause's
+  retry is a second one), and a unit starts only with two left.
+- **`GET /api/investments/events?ccy=`** (`investments.events_now` →
+  `for_book`): `{events, market_days, bands, upcoming, asof, today, pending,
+  rail, rules}` for the showing book's holdings from the two caches only (never a
+  fetch, never the model); a company held through two listings shows once, under
+  the bigger; `pending.holdings` are lines not computed yet, `pending.notes` moves
+  whose news is still being looked for; `upcoming` is the Attention events cache's
+  next 45 days. The page carries the rail's part in `attention.recent`
+  (`with_attention` → `rail_block`, at response time like the rail itself): the
+  last 30 days, ranked by |reaction z| × √weight (`rail_pick`; a held dividend is no
+  news, a raise/cut/special counts as 1σ), the top 5 flagged. The Excel export
+  adds an **Events** sheet from the same payload (a dividend's currency beside its
+  amount, and the currency a change was compared in).
 
 ### My Investments Attention, full screen (`attention_extras`, 2026-11-02)
 - **The rail's answer again, not a second rule set.** `evaluate` adds three
@@ -2328,7 +2466,8 @@ the module docstring and the HTML comment by the topbar `#export` button
    (`headline()`: return vs the S&P 500, worst fall, top-5 share), how to
    read periods, currency, units and colours.
 2. **Overview** — every portfolio, 1Y and 5Y side by side.
-3. **Positions / Ledger** — My Investments, when there is a book.
+3. **Positions / Ledger / Events** — My Investments, when there is a book
+   (Events: the Events view's table, `_write_events`, from the event caches).
 4. **One sheet per portfolio**: headline → Performance (each period's
    Portfolio / S&P 500 / Nasdaq-100 next to each other, plus "What it
    means") → Valuation (look-through multiples with coverage) → Analysts →

@@ -412,6 +412,10 @@ def _run(job: Job) -> None:
             _run_newsread_phase(job)
             _finish(job, "cancelled" if job.cancel.is_set() else "done")
             return
+        if job.phases == ("events",):
+            _run_events_phase(job)
+            _finish(job, "cancelled" if job.cancel.is_set() else "done")
+            return
         if job.phases == ("book",):
             _run_book_phase(job)
             _finish(job, "cancelled" if job.cancel.is_set() else "done")
@@ -612,6 +616,18 @@ def _run_newsread_phase(job: Job) -> None:
     job.emit("phase", phase="newsread", state="start", view=BOOK_VIEW)
     outcome = news_watch.run_pass(job)
     job.emit("phase", phase="newsread", state="end", view=BOOK_VIEW, outcome=outcome)
+
+
+def _run_events_phase(job: Job) -> None:
+    """The Events view's background pass (event_study.run_pass): the held
+    companies' event numbers, then the headlines and the model's "why",
+    hidden and superseded like the passes above."""
+    from convexity import event_study
+
+    job.phase = "events"
+    job.emit("phase", phase="events", state="start", view=BOOK_VIEW)
+    outcome = event_study.run_pass(job.cancel)
+    job.emit("phase", phase="events", state="end", view=BOOK_VIEW, outcome=outcome)
 
 
 def _run_news_phase(job: Job, rows_by_symbol: dict) -> None:

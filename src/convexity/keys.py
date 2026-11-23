@@ -186,10 +186,11 @@ def reload_all() -> None:
     not reported as ignored forever — and a newly broken one is reported."""
     del helpers._CONFIG_WARNED[:]
     del _MALFORMED_WARNED[:]
-    from convexity import finnhub_adapter, news_sentiment
+    from convexity import event_study, finnhub_adapter, news_sentiment
 
     news_sentiment.reload_keys()
     finnhub_adapter.reload_keys()
+    event_study.reload_keys()  # a rejected NVIDIA key stopped the Events clauses
 
 
 # ----------------------------- Test buttons ---------------------------------

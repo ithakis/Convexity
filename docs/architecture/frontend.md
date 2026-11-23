@@ -181,6 +181,54 @@ dependency (loaded from CDN, used only for column-guide formulas).
   read, nothing being folded. `invRender`, `invAttApply` and `invRiskLoad` repaint
   it. `invFullPaint` rebuilds the screen, so it keeps each pane's scroll, and
   charts and the map are drawn after it, at their measured size (redrawn on resize).
+- **Past events: Recent events and the Events view (P6, owner's picks from the
+  mockups, 2026-11-18; app.js "Events (P6)", `evx*`, `EVX`).** event_study.py
+  measures everything (backend.md "past events and the Market Reaction"); the page
+  only draws it, and the size sentence is the server's `say`, never a second
+  template here. **Recent events** sits below Upcoming in `invAttentionHtml`
+  (`invRecentHtml`): the server's top 5 of the last 30 days (|reaction z| × √weight,
+  `attention.recent`, computed at response time from the caches, so the page never
+  waits on a fetch or the model), newest first, "n more ▾" for the rest
+  (`EVX.railMore`); an item reads "Apple beat by 7%" / "Wed 28 Oct · shares −5.7% over
+  two days, gave back" with the reaction chip, and opens the view with its window.
+  **The ⤢ on Upcoming and on Recent events open the full screen on Events**
+  (`evxOpenFromRail`, `data-inv-ev-full`); Attention's ⤢ keeps opening Desk. **Events
+  is the fifth view** of `INV_FULL_VIEWS` (no top-bar tab), for the showing book; its
+  data comes from `GET /api/investments/events` when the view paints (`evxLoad`,
+  keyed by book, page time and currency; a failure waits for Try again, never a
+  loop). The view: a lede ("39 events in the last 3 months, 6 with a big
+  reaction"), type toggles E · D · !, "All N holdings ▾" (the app's own menu,
+  `evxHoldMenu`: a native select is painted black by the desktop shell), period
+  pills 1M · 3M · 6M · 1Y · 2Y (default 3M); the **lollipop timeline** (`evxDraw`,
+  SVG + absolutely placed buttons, drawn after the paint at its measured width):
+  x = time with the next 45 days tinted and a TODAY line, stem height = the Market
+  Reaction in normal two-day moves (±1 band shaded, ±2.5 and ±4 gridlines, clipped at
+  ±4 with the marker on the edge), marker colour = the event's own outcome (E
+  beat/miss/in line, D raised/cut/held, ! up/down), a thick ring = a Big reaction,
+  dividends on the zero line, upcoming hollow and dashed, names on the six biggest
+  reactions only (never past TODAY), crowded markers step sideways (height is data,
+  never nudged), a market-wide day is one grey band labelled with the index move in
+  a label lane above the plot (`lane`, so a marker clipped at ±4× never sits under
+  it; a label with no room is the band's hover title);
+  the legend line under it; then **"What happened"** (`evxTableHtml`, TB1), newest
+  first: Date · Holding · Event · What it was · Market reaction (chip + "N× · ±x% vs
+  market · 2 days", follow-through) · Why, in plain words (the code's sentence, a
+  move's ✦ clause and headline, or "No headline found." and the market sentence).
+  The side column keeps **How to read it** (the five labels, and that the history
+  keeps 4× moves while the Attention rail flags 3× for a week) and the screen's own
+  Upcoming (`invFullEvents`). **The marker window** (`evxCardHtml`, placed by
+  `evxPlaceCard` beside its marker, or under its row when the marker is scrolled
+  away) is the stock window's E card (`.m-ev-card`, its rows), then the reaction
+  chip, the −4×…+4× scale, the size sentence, for a big move the primary line's %
+  with the held line's % beside it, the market row (the SAME broad index, named in
+  every window from `e.index_name`, an earnings one too), a dividend's "compared in
+  USD" or why it held (`mixed`, `no_fx`), the ✦
+  clause with the headline and "Read ↗" (a real `target=_blank` anchor), for an E
+  the P5 filing buttons (`ehCardHtml(day, ctx)` / `ehEnsure(false, ctx)` with a
+  per-company cache: one request site, asked when a window opens or an E marker is
+  hovered, never when the view opens). A marker selects its row, a row its marker;
+  **Esc closes the window first**, then the screen (the screen's capture handler).
+
 - **Holdings order (owner, 2026-10-11).** A header click sorts (`INV_COLS`:
   biggest first, names A to Z), a second flips it, a third returns to "your
   order", where rows drag by a grip shown on hover (HTML5 drag on the `tr`,

@@ -142,7 +142,9 @@ def test_contribution_header_is_sticky_and_opaque():
 
 def test_attention_full_screen_opens_from_both_rail_headers_through_the_helpers():
     assert 'kicker("Attention", tools(gear, full))' in _APP_JS
-    assert 'kicker("Upcoming", tools(full))' in _APP_JS
+    # P6 (owner, 2026-11-18): Upcoming's ⤢ opens the same screen on its Events view.
+    assert 'kicker("Upcoming", tools(evFull))' in _APP_JS
+    assert 'invFullOpen("events", "Events")' in _APP_JS
     start = _APP_JS.index("function invFullOpen")
     assert "showOverlay(bg)" in _APP_JS[start : start + 500]
     start = _APP_JS.index("function invFullClose")

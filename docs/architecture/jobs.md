@@ -123,6 +123,12 @@ Refresh, and the scheduler only submits when nothing else is running, so it runs
 after everything else. Its own limits: four symbols a request, a pause between,
 `retry=False`, two silent chunks end the pass for an hour.
 
+The Events view's pass is a job too (`phases=["events"]`, `event_study.py`, P6):
+hidden, superseded by the owner's Refresh, started only when nothing else runs. It
+recomputes the held companies' event numbers (every 3 hours) and writes the notes
+(Finnhub headlines, one NIM "why" each), paced and capped per pass; a failed call is
+never stored, so the next pass asks again.
+
 The notification scheduler's pass is a job too (`phases=["watch"]`,
 `context={"background": True}` → `Job.background`), so it is single-flight
 with every refresh: they share Yahoo and the page. Three rules: the

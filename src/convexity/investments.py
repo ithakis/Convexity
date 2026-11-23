@@ -2248,7 +2248,7 @@ def with_attention(out: dict, *, fresh: bool = False) -> dict:
     thresholds and dismissals at the time of asking. On a fresh, complete
     page, items that stopped firing are forgotten and due event dates are
     fetched in the background."""
-    from convexity import attention
+    from convexity import attention, event_study
 
     if out.get("empty") or not out.get("positions"):
         return out
@@ -2266,6 +2266,9 @@ def with_attention(out: dict, *, fresh: bool = False) -> dict:
         except attention.PlansUnreadable:
             plans = None  # evaluate reports it
         att = attention.evaluate({**out, "positions": held}, plans=plans)
+        # P6: the rail's Recent events, read from the event caches at the time
+        # of asking (like the rail itself), never fetched on the page's path.
+        att["recent"] = event_study.rail_block(held)
         if fresh and not out.get("stale"):
             attention.apply_splits(splits)
             attention.prune(set(att["firing"]), set(att["checked"]))
@@ -2279,6 +2282,22 @@ def with_attention(out: dict, *, fresh: bool = False) -> dict:
         print(f"[attention] evaluate failed: {type(exc).__name__}")
         return out
     return {**out, "attention": books.words(att)}
+
+
+def events_now(ccy: str | None = None) -> dict:
+    """The Events view's payload (event_study.for_book) for the holdings of
+    the page as already computed; never computes the book and never fetches.
+    With no computed page yet, the ledger's symbols (no weights, no names)."""
+    from convexity import event_study
+
+    key = _page_key(ccy)
+    hit = _PAGE_MEMO.get(key) if key else None
+    # Events don't depend on the currency: the last page of this portfolio in any.
+    out = hit[1] if hit else last_page() or cached_page(ccy)
+    pos = (out or {}).get("positions") or [
+        {"symbol": s, "name": s, "weight": 0.0} for s in held_symbols()
+    ]
+    return {**event_study.for_book(pos), "computed_at": (out or {}).get("computed_at")}
 
 
 def price_now(symbol: str, ccy: str | None = None) -> float | None:

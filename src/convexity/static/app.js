@@ -4241,28 +4241,31 @@ const ehHost = (u) => { try { return new URL(u).host.replace(/^www\./, ""); } ca
  * asked again on the next use (free: the server spends nothing without a
  * key, and a key added in Settings then shows at once); a failure after a
  * minute or on "Try again"; anything else stays for the window. */
-function ehEnsure(force) {
-  const r = DETAIL.row;
-  if (!r) return Promise.resolve(null);
-  const seq = DETAIL.seq;
-  if (EH.seq !== seq) { EH.seq = seq; EH.p = null; EH.pending = null; EH.at = 0; }
-  if (EH.pending) return EH.pending;
-  const st = EH.p && EH.p.sec.status;
-  if (EH.p && !force && st !== "no_key" && !(st === "unavailable" && Date.now() - EH.at > 60e3)) return Promise.resolve(EH.p);
-  if (force) EH.p = null;   // "Try again" shows the loading state, not the old notice
-  EH.pending = fetch("/api/earnings-history?symbol=" + encodeURIComponent(r.symbol))
+function ehEnsure(force, ext) {
+  // `ext`: the Events view's marker window (P6), with its own per-company
+  // cache and repaint; the request, its states and the server's throttle are
+  // the same ones.
+  const sym = ext ? ext.symbol : DETAIL.row && DETAIL.row.symbol;
+  if (!sym) return Promise.resolve(null);
+  const seq = DETAIL.seq, c = ext ? ext.cache : EH, paint = ext ? ext.done : ehRefresh;
+  if (!ext && EH.seq !== seq) { EH.seq = seq; EH.p = null; EH.pending = null; EH.at = 0; }
+  if (c.pending) return c.pending;
+  const st = c.p && c.p.sec.status;
+  if (c.p && !force && st !== "no_key" && !(st === "unavailable" && Date.now() - c.at > 60e3)) return Promise.resolve(c.p);
+  if (force) c.p = null;   // "Try again" shows the loading state, not the old notice
+  c.pending = fetch("/api/earnings-history?symbol=" + encodeURIComponent(sym))
     .then(res => (res.ok ? res.json() : null))
     .catch(() => null)
     .then(p => {
-      if (EH.seq !== seq) return null;
-      EH.pending = null; EH.at = Date.now();
+      if (!ext && EH.seq !== seq) return null;
+      c.pending = null; c.at = Date.now();
       // The route itself failing reads like Finnhub failing: try again.
-      EH.p = p && p.sec ? p : { sec: { status: "unavailable", reason: "no_answer" }, reports: [] };
-      ehRefresh();
-      return EH.p;
+      c.p = p && p.sec ? p : { sec: { status: "unavailable", reason: "no_answer" }, reports: [] };
+      paint();
+      return c.p;
     });
-  ehRefresh();
-  return EH.pending;
+  paint();
+  return c.pending;
 }
 
 /* The quarter's name: "Q4 FY2026" when the fiscal year is certain (the
@@ -4289,31 +4292,37 @@ function ehFitCard() {
 }
 
 /* loading | no_key | unavailable | none | ok | no_reports */
-function ehState() {
-  if (!EH.p || EH.seq !== DETAIL.seq) return "loading";
-  const st = EH.p.sec.status;
+/* Whose filings: the stock window's (the default) or a context the Events
+ * view passes ({p, sym, name, retry}). */
+function ehWin() {
+  return { p: EH.seq === DETAIL.seq ? EH.p : null, sym: DETAIL.row && DETAIL.row.symbol, name: DETAIL.data && DETAIL.data.name, retry: "data-eh-retry" };
+}
+function ehState(ctx) {
+  const c = ctx || ehWin();
+  if (!c.p) return "loading";
+  const st = c.p.sec.status;
   return st === "no_line" ? "none" : st;
 }
-function ehOtherLine() {   // the SEC line when it is not the window's own listing
-  const line = EH.p && EH.p.sec.line, sym = DETAIL.row && DETAIL.row.symbol;
+function ehOtherLine(ctx) {   // the SEC line when it is not the window's own listing
+  const c = ctx || ehWin(), line = c.p && c.p.sec.line, sym = c.sym;
   return line && sym && line.replace(/\./g, "-") !== sym.replace(/\./g, "-") ? line : null;
 }
-function ehVia() {
-  const line = ehOtherLine();
+function ehVia(ctx) {
+  const c = ctx || ehWin(), line = ehOtherLine(c);
   if (!line) return "";
-  const name = EH.p.sec.name || (DETAIL.data && DETAIL.data.name) || line;
+  const name = c.p.sec.name || c.name || line;
   return `${escapeHtml(name)} files with the SEC as <b>${escapeHtml(line)}</b>.`;
 }
 
 /* What the card and the table can offer for the report of `day`. */
-function ehModel(day) {
-  const st = ehState();
+function ehModel(day, ctx) {
+  const c = ctx || ehWin(), st = ehState(c);
   if (st === "loading" || st === "no_key") return { kind: st };
-  if (st === "unavailable") return { kind: st, reason: EH.p.sec.reason };
+  if (st === "unavailable") return { kind: st, reason: c.p.sec.reason };
   if (st === "no_reports") return { kind: "skip" };
-  const p = EH.p;
+  const p = c.p;
   if (st === "none") return { kind: "none", site: p.website };
-  const via = ehVia(), foreign = p.sec.filer === "foreign", list = foreign ? "6-K" : "8-K";
+  const via = ehVia(c), foreign = p.sec.filer === "foreign", list = foreign ? "6-K" : "8-K";
   const rep = (p.reports || []).find(r => r.date === day);
   const per = rep && rep.periodic_filing;
   const fy = rep && rep.label ? rep.label.split(" ").pop() : "";
@@ -4347,12 +4356,12 @@ function ehModel(day) {
 }
 
 /* The card's foot (A1 + B1). */
-function ehCardHtml(day) {
-  const m = ehModel(day);
+function ehCardHtml(day, ctx) {
+  const m = ehModel(day, ctx), retry = (ctx || ehWin()).retry;
   if (m.kind === "skip") return "";
   if (m.kind === "loading") return `<hr><span class="ef-skel"></span><div class="ef-cap"><span class="ef-spin"></span>&nbsp; Finding the filing…</div>`;
   if (m.kind === "no_key") return `<hr><div class="ef-note">Add a Finnhub key in <a href="#" data-eh-keys>Settings → API keys</a> to link the filings.</div>`;
-  if (m.kind === "unavailable") return `<hr><div class="ef-note">${ehFailText(m.reason)} <a href="#" data-eh-retry>Try again</a></div>`;
+  if (m.kind === "unavailable") return `<hr><div class="ef-note">${ehFailText(m.reason)} <a href="#" ${retry}>Try again</a></div>`;
   if (m.kind === "none") return `<hr>${m.site ? `<div class="ef-btns">${ehA(m.site, `Company website ${EH_EXT}`, "ef-btn")}</div>` : ""}<div class="ef-cap">Not filed with the SEC. Results are on the company’s investor pages.</div>`;
   if (m.kind === "unmatched") {
     const btns = (m.alt ? ehA(m.alt, `${EH_ICON_DOC} Filings on EDGAR ${EH_EXT}`, "ef-btn pri") : "")
@@ -17707,10 +17716,13 @@ function invAttentionHtml(b) {
   }
   const days = (a.rules || []).find(r => r.key === "events");
   const up = a.upcoming || [];
-  html += kicker("Upcoming", tools(full));
+  // P6: Upcoming's ⤢ opens the Events view, like Recent events' below it (Attention's keeps Desk).
+  const evFull = `<button type="button" class="inv-att-btn blue" data-inv-ev-full aria-label="Open Events full screen" data-tip="Open full screen">${CORNERS_SVG}</button>`;
+  html += kicker("Upcoming", tools(evFull));
   if (days && !days.on) html += `<div class="inv-calm">Event dates are switched off.</div>`;
   else if (!up.length) html += `<div class="inv-calm">No earnings or ex-dividend dates in the next ${days ? days.value : 14} days.</div>`;
   else html += up.map(u => `<div class="inv-rail-item inv-att"><div class="inv-att-main"><span>${escapeHtml(`${u.name} ${u.what}`)}</span>${x({ ...u, text: `${u.name} ${u.what}` })}</div><div class="inv-rail-sub">${invDate(u.date)}</div></div>`).join("");
+  html += invRecentHtml(b, kicker, tools);
   return html;
 }
 
@@ -17926,7 +17938,7 @@ notifyPoll();
  * page's path. */
 const invFullPref = (k, d) => { try { return localStorage.getItem(k) || d; } catch (e) { return d; } };
 const invFullSave = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* per browser only */ } };
-const INV_FULL_VIEWS = [["desk", "Desk"], ["map", "Map"], ["charts", "Charts"], ["news", "News"]];
+const INV_FULL_VIEWS = [["desk", "Desk"], ["map", "Map"], ["charts", "Charts"], ["news", "News"], ["events", "Events"]];
 const INV_FULL_RESULTS = 8;     // past results behind "usually moves it"
 const INV_FULL_USUAL_MIN = 3;   // fewer results than this say nothing "usual"
 const INV_FULL_CHUNK = 8;       // symbols per request: the screen fills in as they answer
@@ -18337,15 +18349,16 @@ function invFullPaint() {
   const asOf = m.b.computed_at ? new Date(m.b.computed_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
   const now = new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).replace(",", "");
   const sel = INV_FULL.sel ? m.by[INV_FULL.sel] : null;
-  const main = view === "desk" ? invFullLede(m) + invFullDesk(m) : view === "charts" ? invFullLede(m) + invFullCharts(m) : view === "news" ? invFullNews(m) : invFullMap(INV_FULL.metric);
-  const side = sel ? invFullDetail(sel) : (view === "map" ? invFullFlagged(m) : "") + invFullEvents(m) + invFullLimits(m) + invFullTidy(m);
+  const main = view === "desk" ? invFullLede(m) + invFullDesk(m) : view === "charts" ? invFullLede(m) + invFullCharts(m) : view === "news" ? invFullNews(m)
+    : view === "events" ? evxMainHtml(m) : invFullMap(INV_FULL.metric);
+  const side = sel ? invFullDetail(sel) : view === "events" ? evxSideHtml(m) : (view === "map" ? invFullFlagged(m) : "") + invFullEvents(m) + invFullLimits(m) + invFullTidy(m);
   host.innerHTML = `<div class="att-fs-head">
-      <div class="att-fs-head-l"><span class="sa-kicker">${INV_FULL.kicker}</span><span class="att-fs-sub">${escapeHtml(now)}${asOf ? ` · prices as of ${asOf}` : ""}${m.b.stale ? " · refreshing…" : ""}</span></div>
+      <div class="att-fs-head-l"><span class="sa-kicker">${view === "events" ? "Events" : INV_FULL.kicker}</span><span class="att-fs-sub">${escapeHtml(now)}${asOf ? ` · prices as of ${asOf}` : ""}${m.b.stale ? " · refreshing…" : ""}</span></div>
       <span class="pf-contrib-toggle att-fs-views" role="group" aria-label="View">${pills}</span>
       <div class="att-fs-head-r"><button type="button" class="att-fs-gear" data-full-rules aria-label="Attention settings" data-tip="Change what the rail watches for, and the limits">${GEAR_SVG}</button><button type="button" class="x-close" data-full-close aria-label="Close">${X_SVG}</button></div>
     </div>
     <div class="att-fs-body">
-      <div class="att-fs-main${view === "map" || view === "news" ? ` ${view}` : ""}" data-full-scroll="main-${view}">${main}</div>
+      <div class="att-fs-main${view === "map" || view === "news" || view === "events" ? ` ${view}` : ""}" data-full-scroll="main-${view}">${main}</div>
       <div class="att-fs-side" data-full-scroll="${sel ? "det" : "side"}">${side}</div>
     </div>`;
   host.querySelectorAll("[data-full-scroll]").forEach(el => { el.scrollTop = scroll[el.dataset.fullScroll] || 0; });
@@ -18355,6 +18368,7 @@ function invFullPaint() {
     if (res.length) el.innerHTML = invFullResultsChart(res, el.clientWidth, 96);
   });
   if (view === "map") invFullMapDraw(m);
+  if (view === "events") { evxAfterPaint(); evxLoad(); }
   // A refresh or a changed rule can flag a holding after the screen opened.
   invFullExtras(invFullWanted());
 }
@@ -18433,6 +18447,7 @@ async function invFullDismissAll(sym) {
 }
 $("#inv-att-bg").addEventListener("click", (e) => {
   const t = (sel) => e.target.closest(sel);
+  if (t("[data-evx-view], [data-evx-close], [data-evx-eh-retry]") && evxClick(e, t)) return;
   if (t("[data-full-close]")) invFullClose();
   else if (t("[data-full-read-news]")) invNewsRead();
   else if (t("[data-full-news-sort]")) {
@@ -18472,6 +18487,7 @@ $("#inv-att-bg").addEventListener("keydown", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || !invFullIsOpen()) return;
   if (_invMenu || $("#inv-pop")?.hidden === false || document.querySelector(".modal-bg.show, #settings-bg.show, #confirm-bg.show")) return;
+  if (INV_FULL.view === "events" && EVX.sel) { EVX.sel = null; invFullPaint(); return; }
   if (INV_FULL.sel) { INV_FULL.sel = null; invFullPaint(); } else invFullClose();
 }, true);
 let _invFullResize = 0;
@@ -18479,6 +18495,482 @@ window.addEventListener("resize", () => {
   if (!invFullIsOpen()) return;
   cancelAnimationFrame(_invFullResize);
   _invFullResize = requestAnimationFrame(invFullPaint);
+});
+
+/* ---- Events (P6): the rail's Recent events and the full screen's Events view ----
+ * event_study.py measures everything: which moves count (4× a normal day on
+ * the company's main line), the Market Reaction (the event day and the next,
+ * after the broad market, in the share's normal two-day moves) and its label;
+ * the size sentence is the server's own (`say`). The model writes one clause
+ * only, the "why" (✦), from a headline the server fetched and checked. The
+ * page carries the rail's items (attention.recent, read from the caches at
+ * the time of asking); the view asks the events route (evxLoad) when it opens,
+ * never on the page's path. Owner's picks from the P6 mockups (2026-11-18):
+ * the compact rail list (R1), a fifth full-screen view, the lollipop
+ * timeline (T3), one chronological table (TB1), labels "Big drop … Big rise"
+ * with the size as "N×". Data colours only: green, red, muted; blue (accent)
+ * is selection. */
+const EVX = { data: null, key: "", loading: null, failed: false, range: 90, types: { E: true, D: true, M: true },
+  filter: "", sel: null, hov: null, from: "", railMore: false, eh: {} };
+const EVX_RANGES = [[30, "1M"], [90, "3M"], [180, "6M"], [365, "1Y"], [730, "2Y"]];
+const EVX_AHEAD = 45;   // event_study.UPCOMING_DAYS: the tinted days after today
+const EVX_ZMAX = 4;     // stems are clipped here, the marker sits on the edge
+const EVX_NAMED = 6;    // names only on the six biggest reactions
+const EVX_CATS = { "-2": "big_drop", "-1": "fell", "0": "flat", "1": "rose", "2": "big_rise" };
+const EVX_DAY = 864e5;
+const evxT = (d) => Date.parse(String(d).slice(0, 10) + "T12:00:00");
+const evxPct = (v, dp = 1) => (!invOk(v) ? "—" : `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(dp)}%`);
+const evxCat = (e) => (e.reaction && e.reaction.category != null ? EVX_CATS[String(e.reaction.category)] : null);
+const evxWhen = (e) => e.date;   // the day it happened (a report after the close reacts on the next session)
+const evxShort = (h, n = 58) => (h.length > n ? h.slice(0, n - 2).replace(/\s+\S*$/, "") + "…" : h);
+function evxAmt(v, ccy) {
+  if (!invOk(v)) return "—";
+  if (ccy === "GBp") return `${v.toFixed(2)}p`;
+  const s = FX_SYMBOL[ccy] || (ccy ? ccy + " " : "");
+  return s + v.toFixed(v < 1 ? 3 : 2);
+}
+/* The marker's colour is the event's own outcome; a thick ring is a Big
+ * reaction, so "beat but sold off hard" shows at a glance. */
+function evxCls(e) {
+  if (e.upcoming) return "up";
+  const o = e.outcome;
+  let c = e.type === "E" ? (e.reacting ? "pend" : o === "beat" ? "pos" : o === "miss" ? "neg" : "mid")
+    : e.type === "D" ? (o === "raised" || o === "special" ? "pos" : o === "cut" ? "neg" : "mid")
+    : (o === "up" ? "pos" : "neg");
+  const k = evxCat(e);
+  if (k === "big_drop") c += " ring-neg";
+  else if (k === "big_rise") c += " ring-pos";
+  return c;
+}
+const evxLetter = (e) => (e.type === "M" ? "!" : e.type);
+const evxMk = (e, extra = "") => `<span class="evx-mk ${evxCls(e)} ${extra}" aria-hidden="true">${evxLetter(e)}</span>`;
+const evxKind = (e) => (e.upcoming ? (e.type === "E" ? "Earnings" : "Ex-dividend")
+  : e.type === "E" ? "Results" : e.type === "D" ? "Dividend" : e.results_day ? "Results day" : "Big move");
+/* The Market Reaction chip: the label and its size in normal two-day moves;
+ * hollow while only day 0 has closed; a dash for a dividend or a date to come. */
+function evxChip(e, o = {}) {
+  const r = e.reaction;
+  if (e.upcoming || e.type === "D") return `<span class="evx-rx na">—</span>`;
+  if (e.reacting) return `<span class="evx-rx flat prov">Reacting · day 0</span>`;
+  if (!r) return `<span class="evx-rx na">—</span>`;
+  if (r.category == null) return `<span class="evx-rx ${r.z_day >= 0 ? "rose" : "fell"} prov">Reacting · day 0 <i>${Math.abs(r.z_day).toFixed(1)}×</i></span>`;
+  const k = evxCat(e), x = k === "flat" ? "" : ` <i>${Math.abs(r.z).toFixed(1)}×</i>`;
+  const f = !o.noFollow && r.follow && k !== "flat" ? `<span class="evx-fol">${escapeHtml(r.follow)}</span>` : "";
+  return `<span class="evx-rx ${k}">${escapeHtml(r.label)}${x}</span>${f}`;
+}
+/* What the event itself was (the table's "What it was"): never the reaction. */
+function evxOutcome(e) {
+  if (e.type === "E") {
+    const p = e.eps || {}, s = p.surprise_pct;
+    const fig = invOk(p.actual) && invOk(p.estimate) ? `EPS ${p.actual.toFixed(2)} vs ${p.estimate.toFixed(2)} expected` : "";
+    if (e.upcoming) return { t: "Report date", c: "", sub: "" };
+    if (e.outcome === "beat") return { t: `Beat by ${Math.abs(s).toFixed(1)}%`, c: "pos", sub: fig };
+    if (e.outcome === "miss") return { t: `Missed by ${Math.abs(s).toFixed(1)}%`, c: "neg", sub: fig };
+    if (e.outcome === "in line") return { t: "In line", c: "", sub: `${evxPct(s)} vs expected` };
+    if (e.reacting || !invOk(p.actual)) return { t: "Figures not out yet", c: "", sub: "" };
+    if (e.outcome_note === "estimate not comparable") return { t: `EPS ${p.actual.toFixed(2)} vs ${invOk(p.estimate) ? p.estimate.toFixed(2) : "—"}`, c: "", sub: "estimate not comparable" };
+    return { t: `EPS ${p.actual.toFixed(2)}`, c: "", sub: "no estimate" };
+  }
+  if (e.type === "D") {
+    const dv = e.dividend || {}, amt = `${evxAmt(dv.amount, e.ccy)} a share`, ch = dv.change_pct;
+    if (e.outcome === "raised") return { t: invOk(ch) ? `Raised ${Math.abs(ch).toFixed(0)}%` : "Raised", c: "pos", sub: amt };
+    if (e.outcome === "cut") return { t: invOk(ch) ? `Cut ${Math.abs(ch).toFixed(0)}%` : "Cut", c: "neg", sub: amt };
+    return { t: { special: "Special", paid: "Paid", first: "First payment" }[e.outcome] || "Held", c: e.outcome === "special" ? "pos" : "", sub: amt };
+  }
+  const mv = e.move || {}, c = e.cause || {}, tone = c.tone;
+  const sub = e.results_day ? "results day" : c.headline ? `news tone: ${!invOk(tone) ? "—" : tone >= 1 ? "good" : tone <= -1 ? "bad" : "mixed"}`
+    : c.kind === "pending" ? "—" : "no headline";
+  return { t: `${mv.pct >= 0 ? "Up" : "Down"} ${Math.abs(mv.pct).toFixed(1)}% in a day`, c: mv.pct >= 0 ? "pos" : "neg", sub };
+}
+/* A big move's cause: the model's clause (✦) and the headline it came from,
+ * or "No headline found" and whether the market explains the move. Never a guess. */
+function evxCause(e, card) {
+  const c = e.cause || {};
+  if (c.kind === "news" || c.kind === "results") {
+    const read = card && c.url ? ` <a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">Read ↗</a>` : "";
+    return `${e.why ? `<span class="ai" aria-label="AI">✦</span> ${escapeHtml(e.why)} ` : ""}<span class="evx-hl">“${escapeHtml(card ? c.headline : evxShort(c.headline, 90))}”${c.source ? ` · ${escapeHtml(c.source)}` : ""}</span>${read}`;
+  }
+  if (e.type !== "M") return "";
+  if (c.kind === "pending") return `<span class="evx-hl">Looking for the news.</span>`;
+  const why = { older: "The news source keeps about a year.", no_key: "Needs the Finnhub and NVIDIA keys." }[c.reason] || "";
+  const mkt = c.market ? ` ${escapeHtml(c.market)}.` : "";
+  return `<b>No headline found.</b>${mkt}${why && card ? ` <span class="evx-hl">${why}</span>` : ""}`;
+}
+
+/* ---- the rail ---- */
+function evxRailLine(e) {
+  const n = e.name, p = e.eps || {};
+  if (e.type === "E") return e.outcome === "beat" ? `${n} beat by ${Math.abs(p.surprise_pct).toFixed(0)}%` : e.outcome === "miss" ? `${n} missed by ${Math.abs(p.surprise_pct).toFixed(0)}%` : e.outcome === "in line" ? `${n} reported in line` : `${n} reported`;
+  if (e.type === "D") { const ch = e.dividend?.change_pct; return e.outcome === "special" ? `${n} paid a special dividend` : `${n} ${e.outcome} its dividend${invOk(ch) ? ` ${Math.abs(ch).toFixed(0)}%` : ""}`; }
+  return `${n} ${e.move.pct >= 0 ? "rose" : "fell"} ${Math.abs(e.move.pct).toFixed(0)}%${e.results_day ? " on results" : ""}`;
+}
+function evxRailSub(e) {
+  const d = escapeHtml(invDay(evxWhen(e)));
+  if (e.type === "M") return `${d} · ${e.cause?.headline ? escapeHtml(evxShort(e.cause.headline)) : e.cause?.kind === "pending" ? "looking for the news" : "No headline found"}`;
+  if (e.type === "D") return `${d} · ${evxAmt(e.dividend?.amount, e.ccy)} a share`;
+  if (e.reacting) return `${d} · reacting today`;
+  const r = e.reaction;
+  if (!r) return d;
+  if (r.category == null) return `${d} · day 0 so far`;
+  return `${d} · shares ${evxPct(r.pct_0_1 ?? r.day_pct)} over two days${r.follow && r.category ? `, ${escapeHtml(r.follow)}` : ""}`;
+}
+/* Below Upcoming: at most five of the last 30 days, ranked by the reaction's
+ * size × √weight and listed newest first; "n more" opens the rest; ⤢ opens
+ * the Events view. A held dividend is no news: only raises, cuts, specials. */
+function invRecentHtml(b, kicker, tools) {
+  const rc = b.attention?.recent;
+  const full = `<button type="button" class="inv-att-btn blue" data-inv-ev-full aria-label="Open Events full screen" data-tip="Open full screen">${CORNERS_SVG}</button>`;
+  let h = kicker("Recent events", tools(full));
+  if (!rc || !rc.computed) return h + `<div class="inv-calm">Your holdings' earnings, dividends and big moves show here once they are read (a few minutes in the background).</div>`;
+  const items = rc.items || [];
+  if (!items.length) return h + `<div class="inv-calm">Nothing happened in the last ${rc.days} days: no report, no dividend change, no move of 4× a normal day.</div>`;
+  const shown = EVX.railMore ? items : items.filter(e => e.top);
+  const more = items.length - items.filter(e => e.top).length;
+  h += shown.map(e => `<div class="evx-rail-item" data-inv-ev="${escapeHtml(e.id)}" tabindex="0" role="button" aria-label="${escapeHtml(evxRailLine(e))}: open in Events">${evxMk(e)}<div class="t"><span>${escapeHtml(evxRailLine(e))}</span><div class="inv-rail-sub">${evxRailSub(e)}</div></div>${evxChip(e, { noFollow: true })}</div>`).join("");
+  if (more > 0) h += `<button type="button" class="inv-link inv-att-more" data-inv-ev-more aria-expanded="${EVX.railMore}">${EVX.railMore ? "Show fewer ▴" : `${more} more ▾`}</button>`;
+  return h;
+}
+
+/* ---- the data ---- */
+async function evxLoad(force) {
+  const key = `${INV.book?.book_id || ""}|${INV.book?.computed_at || ""}|${FX_QUOTE}`;
+  if (!force && EVX.data && EVX.key === key) return EVX.data;
+  if (EVX.loading) return EVX.loading;
+  if (!force && EVX.failed && EVX.tried === key) return null;  // a failure waits for Try again, never a loop
+  EVX.tried = key;
+  EVX.loading = (async () => {
+    try {
+      const r = await fetch(`/api/investments/events?ccy=${encodeURIComponent(FX_QUOTE)}`);
+      const d = r.ok ? await r.json() : null;
+      if (d && !booksOther(d) && d.events) { EVX.data = d; EVX.key = key; EVX.failed = false; }
+      else if (!EVX.data) EVX.failed = true;
+    } catch (e) { if (!EVX.data) EVX.failed = true; }
+    EVX.loading = null;
+    if (INV_FULL.view === "events") invFullPaint();
+    return EVX.data;
+  })();
+  return EVX.loading;
+}
+function evxAll() {
+  const d = EVX.data;
+  if (!d) return [];
+  return [...(d.events || []), ...(d.upcoming || [])];
+}
+const evxById = (id) => evxAll().find(e => e.id === id);
+/* What the view shows: the period behind, the 45 days ahead, the types and the holding picked. */
+function evxShown() {
+  const d = EVX.data, now = evxT(invToday()), t0 = now - EVX.range * EVX_DAY, t1 = now + EVX_AHEAD * EVX_DAY;
+  const ok = (e) => EVX.types[e.type] && (!EVX.filter || e.symbol === EVX.filter);
+  const past = (d?.events || []).filter(e => evxT(evxWhen(e)) >= t0 && ok(e));
+  const up = (d?.upcoming || []).filter(e => evxT(e.date) <= t1 && ok(e));
+  return { past, up, t0, t1, now };
+}
+
+/* ---- the view ---- */
+function evxMainHtml(m) {
+  if (!EVX.data) {
+    return EVX.failed ? `<div class="inv-calm">Couldn't read the events. <button type="button" class="inv-link" data-evx-retry>Try again</button></div>`
+      : `<div class="inv-calm">Reading the events…</div>`;
+  }
+  const d = EVX.data, held = (m.b.positions || []).filter(p => !p.pending && invOk(p.weight));
+  if (!d.asof) return `<div class="inv-calm">Your holdings' events are being read in the background: two years of prices, then the news for the big moves. The first time takes a few minutes.</div>`;
+  const { past, up } = evxShown();
+  const big = past.filter(e => ["big_drop", "big_rise"].includes(evxCat(e))).length;
+  const span = { 30: "month", 90: "3 months", 180: "6 months", 365: "year", 730: "2 years" }[EVX.range];
+  const fp = EVX.filter ? held.find(p => p.symbol === EVX.filter) : null;
+  const fname = fp ? escapeHtml(fp.name) : "";
+  const lede = fp ? (past.length ? `${fname}: ${past.length} event${past.length > 1 ? "s" : ""} in the last ${span}` : `${fname}: a quiet ${EVX.range === 30 ? "month" : "period"}`)
+    : `${past.length} event${past.length === 1 ? "" : "s"} in the last ${span}${past.length ? `, ${big} with a big reaction` : ""}`;
+  const n = new Set(past.map(e => e.symbol)).size;
+  const pend = d.pending || {};
+  const notes = [`${up.length} coming in the next ${EVX_AHEAD} days`];
+  if (!fp) notes.push(`${n} of your ${held.length} holdings`);
+  if ((pend.holdings || []).length) notes.push(`still reading ${pend.holdings.length} holding${pend.holdings.length > 1 ? "s" : ""}`);
+  if (pend.notes) notes.push(`looking for the news of ${pend.notes} move${pend.notes > 1 ? "s" : ""}`);
+  const types = [["E", "Earnings"], ["D", "Dividends"], ["M", "Big moves"]].map(([k, l]) =>
+    `<button type="button" class="evx-type" data-evx-type="${k}" aria-pressed="${!!EVX.types[k]}"><span class="evx-mk sm ${EVX.types[k] ? "mid" : "up"}" aria-hidden="true">${k === "M" ? "!" : k}</span>${l}</button>`).join("");
+  const pills = EVX_RANGES.map(([v, l]) => `<button type="button" data-evx-range="${v}" class="${v === EVX.range ? "active" : ""}" aria-pressed="${v === EVX.range}">${l}</button>`).join("");
+  const body = past.length ? evxTableHtml(past) : evxEmptyHtml(fp);
+  return `<div class="evx" data-evx-view>
+    <div class="evx-band"><div class="att-fs-lede"><div class="att-fs-big">${lede}</div><div class="att-fs-big-sub">${notes.join(" · ")}</div></div>
+      <div class="evx-tools"><span class="evx-types" role="group" aria-label="Event types">${types}</span><button type="button" class="evx-hold" data-evx-hold aria-haspopup="menu">${fp ? fname : `All ${held.length} holdings`} ▾</button><span class="pf-period-tabs pf-contrib-toggle" role="group" aria-label="Period">${pills}</span></div></div>
+    <div class="evx-tl" id="evx-tl" role="group" aria-label="Timeline of events"></div>
+    ${evxLegendHtml()}
+    ${body}
+  </div>`;
+}
+function evxLegendHtml() {
+  const s = (cls, l) => `<span class="evx-mk sm ${cls}" aria-hidden="true">${l}</span>`;
+  return `<div class="evx-legend"><span>Height = how the share moved against the market, in its normal two-day moves</span>
+    <span>${s("pos", "E")} beat</span><span>${s("neg", "E")} missed</span><span>${s("mid", "E")} in line</span>
+    <span>${s("pos", "D")} raised · ${s("mid", "D")} held · ${s("neg", "D")} cut</span><span>${s("pos", "!")} ${s("neg", "!")} big move</span>
+    <span>${s("up", "E")} coming</span><span><svg width="12" height="10" aria-hidden="true"><rect class="evx-mband" x="0" y="0" width="12" height="10"/></svg> a market-wide day</span>
+    <span>${s("pos ring-neg", "E")} ring = a big reaction</span></div>`;
+}
+function evxEmptyHtml(fp) {
+  const nx = fp ? (EVX.data.upcoming || []).find(u => u.symbol === fp.symbol) : null;
+  const next = nx ? ` Its next ${nx.type === "E" ? "report" : "ex-dividend date"} is ${escapeHtml(invDay(nx.date))}.` : "";
+  return `<div class="inv-calm evx-empty">${fp ? `Nothing happened to ${escapeHtml(fp.name)} in this period` : "Nothing happened in this period"}: no report, no dividend, no move of 4× its normal day or more.${next}</div>`;
+}
+/* "What happened", newest first; the upcoming dates are in the side column. */
+function evxTableHtml(past) {
+  const rows = [...past].sort((a, c) => evxWhen(c).localeCompare(evxWhen(a)) || a.name.localeCompare(c.name)).map(e => {
+    const o = evxOutcome(e), r = e.reaction, dd = Math.round((evxT(evxWhen(e)) - evxT(invToday())) / EVX_DAY);
+    const rel = dd === 0 ? "today" : dd === -1 ? "yesterday" : "";
+    const sub = !r || e.type === "D" ? "" : r.category == null ? `<small>label when day +1 closes</small>`
+      : `<small>${r.category ? `${Math.abs(r.z).toFixed(1)}× · ` : ""}${r.abn_pct_0_1 != null ? `${evxPct(r.abn_pct_0_1)} vs market` : `${evxPct(r.pct_0_1)}`} · 2 days</small>`;
+    const why = e.type === "M" ? evxCause(e, false) : e.type === "D" ? "" : `${escapeHtml(e.say || "")}${e.why ? ` <span class="ai" aria-label="AI">✦</span> ${escapeHtml(e.why)}` : ""}`;
+    return `<tr class="evx-row${EVX.sel === e.id ? " sel" : ""}" data-evx-row="${escapeHtml(e.id)}" tabindex="0">
+      <td class="d"><b>${escapeHtml(invDay(evxWhen(e)))}</b>${rel ? `<div class="att-fs-sub">${rel}</div>` : ""}</td>
+      <td class="h"><span class="att-fs-holding">${logoImg(e.symbol)}<span><span class="att-fs-name">${escapeHtml(e.name)}</span></span></span></td>
+      <td class="e"><span>${evxMk(e, "sm")}${evxKind(e)}</span></td>
+      <td class="s"><span class="${o.c}">${escapeHtml(o.t)}</span>${o.sub ? `<small>${escapeHtml(o.sub)}</small>` : ""}</td>
+      <td class="x">${evxChip(e)}${sub}</td><td class="w">${why}</td></tr>`;
+  }).join("");
+  return `<table class="evx-tbl"><thead><tr><th>Date</th><th>Holding</th><th>Event</th><th>What it was</th><th>Market reaction</th><th>Why, in plain words</th></tr></thead>
+    <tbody><tr class="grp"><td colspan="6">What happened</td></tr>${rows}</tbody></table>`;
+}
+/* The side column: how to read a reaction, then the screen's own Upcoming. */
+function evxSideHtml(m) {
+  const k = { big_rise: ["Big rise", "more than 2.5× a normal move up"], rose: ["Rose", "1× to 2.5× up"], flat: ["Shrugged off", "within a normal move"],
+    fell: ["Fell", "1× to 2.5× down"], big_drop: ["Big drop", "more than 2.5× down"] };
+  const rows = Object.entries(k).map(([c, [l, t]]) => `<div class="evx-sc-row"><span><span class="evx-rx ${c}">${l}</span></span><span>${t}</span></div>`).join("");
+  const rz = EVX.data?.rules?.rail_move_z ?? 3;
+  return `<div class="section-anchor inv-anchor inv-rail-anchor"><span class="sa-kicker">How to read it</span></div>
+    <p class="evx-side-p">Each reaction is the event day and the next, after taking out what the market did (the S&amp;P 500 for a US share, the STOXX 600 for a European one), measured in the share's <b>normal two-day move</b> from the year before. Dividends have none: the drop on an ex-date is the dividend itself.</p>
+    <div class="evx-scale-side">${rows}</div>
+    <p class="evx-side-p">Follow-through (kept going, held, gave back) shows beside the label after day five. A big move here is a day of 4× a normal day or more on the company's main listing; the Attention rail flags ${rz}× and up for a week, so a smaller move shows there and not here. Headlines go back about a year; older moves say “No headline found”.</p>
+    ${invFullEvents(m)}`;
+}
+
+/* ---- the timeline: x = time, the stem's height = the Market Reaction ---- */
+function evxDraw() {
+  const host = $("#evx-tl");
+  if (!host || !EVX.data) return;
+  const { past, up, t0, t1, now } = evxShown();
+  // `lane` is the band labels' own row above the plot: a marker clipped at ±4× sits
+  // at the plot's top edge, so a label drawn in the plot collided with it (1Y view).
+  const W = host.clientWidth, H = 314, padL = 46, padR = 14, lane = 14, top = 38, bot = H - 26, mid = (top + bot) / 2;
+  const x = (d) => padL + (evxT(d) - t0) / (t1 - t0) * (W - padL - padR);
+  const y = (z) => mid - Math.max(-EVX_ZMAX, Math.min(EVX_ZMAX, z)) / (EVX_ZMAX + 0.2) * (bot - top) / 2;
+  const fmt = (t) => { const d = new Date(t); return `${d.getDate()} ${d.toLocaleDateString("en-GB", { month: "short" })}`; };
+  let svg = "", marks = "", labels = "";
+  const xt = x(new Date(now).toISOString().slice(0, 10));
+  svg += `<rect class="evx-fut" x="${xt}" y="${top}" width="${Math.max(0, W - padR - xt)}" height="${bot - top}"/>`;
+  svg += `<rect class="evx-band1" x="${padL}" y="${y(1)}" width="${W - padL - padR}" height="${y(-1) - y(1)}"/>`;
+  for (const z of [-4, -2.5, -1, 1, 2.5, 4]) svg += `<line class="evx-grid" x1="${padL}" x2="${W - padR}" y1="${y(z)}" y2="${y(z)}"/>`;
+  svg += `<line class="evx-zero" x1="${padL}" x2="${W - padR}" y1="${mid}" y2="${mid}"/>`;
+  for (const z of [4, 2.5, 1, -1, -2.5, -4]) svg += `<text class="evx-ylab${Math.abs(z) === 2.5 ? " strong" : ""}" x="${padL - 8}" y="${y(z) + 3.5}" text-anchor="end">${z > 0 ? "+" : "−"}${Math.abs(z)}×</text>`;
+  svg += `<text class="evx-ylab" x="${padL - 8}" y="${mid + 3.5}" text-anchor="end">0</text><text class="evx-ylab" x="${padL - 8}" y="${top - 10}" text-anchor="end">× normal</text>`;
+  const step = EVX.range <= 31 ? 7 : EVX.range <= 90 ? 14 : EVX.range <= 180 ? 30 : EVX.range <= 365 ? 61 : 122;
+  for (let t = t1 - 3 * EVX_DAY; t > t0; t -= step * EVX_DAY) svg += `<text class="evx-tick" x="${x(new Date(t).toISOString().slice(0, 10))}" y="${H - 6}" text-anchor="middle">${fmt(t)}</text>`;
+  // A market-wide day is ONE grey band, labelled with the index move in the
+  // label lane above the plot (a label that would run into the last one is
+  // left to the band's own hover title, which carries the same words).
+  let bandEnd = -1e9;
+  for (const b of EVX.data.bands || []) {
+    if (evxT(b.end) < t0 || evxT(b.start) > t1) continue;
+    if (EVX.filter && !(b.holdings || []).includes(EVX.filter)) continue;
+    const xa = Math.max(padL, x(b.start) - 4), xb = x(b.end) + 4, short = (b.index === "^GSPC" ? "S&P" : b.index === "^STOXX" ? "STOXX" : b.index_name || "Market");
+    const lab = `Market day · ${short} ${evxPct(b.index_pct)}`, half = lab.length * 2.6;
+    svg += `<rect class="evx-mband" x="${xa}" y="${lane + 4}" width="${Math.max(8, xb - xa)}" height="${bot - lane - 4}"><title>${escapeHtml(lab)}: ${escapeHtml((b.holdings || []).length + "")} of your holdings moved 4× with it</title></rect>`;
+    const lx = Math.max(padL + half, Math.min(W - padR - half, (xa + xb) / 2));  // never past the axis labels
+    if (lx - half > bandEnd + 6) {
+      svg += `<text class="evx-mbandt" x="${lx}" y="${lane}" text-anchor="middle">${escapeHtml(lab)}</text>`;
+      bandEnd = lx + half;
+    }
+  }
+  svg += `<line class="evx-today" x1="${xt}" x2="${xt}" y1="${top - 4}" y2="${bot}"/><text class="evx-todayt" x="${xt + 5}" y="${top + 9}">TODAY</text>`;
+  const z = (e) => { const r = e.reaction; return e.upcoming || !r ? 0 : r.category == null ? r.z_day : r.z; };
+  const items = [...past, ...up].map(e => ({ e, X: x(evxWhen(e)), z: z(e) || 0 })).map(it => ({ ...it, Y: y(it.z), small: !it.e.upcoming && Math.abs(it.z) < 1 }))
+    .sort((a, c) => Math.abs(a.z) - Math.abs(c.z));
+  // Height is data: never nudged. Crowded markers step sideways instead.
+  const placed = [];
+  for (const it of items) {
+    const x0 = it.X;
+    for (let k = 0; k < 6 && placed.some(p => Math.abs(p.X - it.X) < (p.small || it.small ? 12 : 16) && Math.abs(p.Y - it.Y) < 14); ) { k++; it.X = x0 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 9; }
+    placed.push(it);
+  }
+  for (const it of items) {
+    const e = it.e, sel = EVX.sel === e.id ? " sel" : "", out = Math.abs(it.z) > EVX_ZMAX ? " edge" : "";
+    if (!e.upcoming && e.reaction) svg += `<line class="evx-stem ${evxCls(e).split(" ")[0]}" x1="${it.X}" x2="${it.X}" y1="${mid}" y2="${it.Y}"/>`;
+    const what = `${e.name} · ${evxKind(e)} · ${invDay(evxWhen(e))}${evxCat(e) ? " · " + e.reaction.label : ""}`;
+    marks += `<button type="button" class="evx-mk ${evxCls(e)}${it.small ? " sm" : ""}${sel}${out}" data-evx-mk="${escapeHtml(e.id)}" style="left:${it.X.toFixed(1)}px;top:${it.Y.toFixed(1)}px" aria-label="${escapeHtml(what)}">${evxLetter(e)}</button>`;
+  }
+  const boxes = [], xToday = xt;
+  for (const it of [...items].reverse()) {
+    if (it.e.upcoming || Math.abs(it.z) < 2.4 || boxes.length >= EVX_NAMED) continue;
+    const w = it.e.name.length * 5.8 + 6;
+    let lx = it.X, ly = it.z > 0 ? it.Y - 25 : it.Y + 12;
+    if (ly < top || ly > bot - 14) { lx = it.X + 12 + w / 2; ly = it.Y - 7; }
+    if (ly < top || lx - w / 2 < padL) continue;  // never over the axis or the band labels
+    if (boxes.some(b => Math.abs(b.x - lx) < (b.w + w) / 2 + 4 && Math.abs(b.y - ly) < 13) || lx + w / 2 > xToday - 4) continue;
+    // Never over another marker: a name that would cover one is left to the hover.
+    if (items.some(o => o !== it && Math.abs(o.X - lx) < w / 2 + 9 && o.Y > ly - 9 && o.Y < ly + 22)) continue;
+    boxes.push({ x: lx, y: ly, w });
+    labels += `<span class="evx-lbl" style="left:${lx.toFixed(1)}px;top:${ly.toFixed(1)}px">${escapeHtml(it.e.name)}</span>`;
+  }
+  host.style.height = H + "px";
+  host.innerHTML = `<svg width="${W}" height="${H}" aria-hidden="true">${svg}</svg>${labels}${marks}`;
+}
+/* The hover's name tag, without a repaint. */
+function evxHover(id) {
+  const host = $("#evx-tl");
+  host?.querySelector(".evx-hovlbl")?.remove();
+  EVX.hov = id;
+  const e = id && evxById(id), b = id && host?.querySelector(`[data-evx-mk="${CSS.escape(id)}"]`);
+  if (!e || !b) return;
+  const hr = host.getBoundingClientRect(), br = b.getBoundingClientRect();
+  host.insertAdjacentHTML("beforeend", `<div class="evx-hovlbl" style="left:${br.left - hr.left + br.width / 2}px;top:${br.top - hr.top - 6}px">${escapeHtml(e.name)} <span>· ${evxKind(e)} · ${escapeHtml(invDay(evxWhen(e)))}${evxCat(e) ? " · " + escapeHtml(e.reaction.label) : ""}</span></div>`);
+}
+
+/* ---- the marker window: the stock window's E card, plus the reaction ---- */
+function evxCardHtml(e) {
+  const r = e.reaction, row = (k, v, c, sub) => `<div class="r"><span>${k}</span><b class="${c || ""}">${v}</b>${sub ? `<i>${sub}</i>` : ""}</div>`;
+  const timing = e.timing === "after" ? "after the close" : e.timing === "before" ? "before the open" : "time not given";
+  const sub = e.upcoming ? `${escapeHtml(invDay(e.date))} · coming` : e.type === "E" ? `${escapeHtml(invDay(e.date))} · ${timing}` : e.type === "D" ? `ex-date ${escapeHtml(invDay(e.date))}` : escapeHtml(invDay(e.date));
+  let h = `<div class="hd">${evxMk(e, "lg")}<div><b>${escapeHtml(e.name)} · ${e.type === "E" ? "Earnings" : e.type === "D" ? "Dividend" : evxKind(e)}</b><span>${sub}</span></div></div>`;
+  if (e.type === "E" && !e.upcoming) {
+    const p = e.eps || {};
+    if (invOk(p.actual)) {
+      h += row("Reported EPS", p.actual.toFixed(2)) + row("Expected EPS <small>(analysts)</small>", invOk(p.estimate) ? p.estimate.toFixed(2) : "—");
+      if (e.outcome_note === "estimate not comparable") h += row("Surprise", "—", "", "the estimate is on another EPS basis");
+      else if (invOk(p.surprise_pct)) h += row("Surprise", evxPct(p.surprise_pct), e.outcome === "beat" ? "pos" : e.outcome === "miss" ? "neg" : "", e.outcome === "beat" ? "beat" : e.outcome === "miss" ? "missed" : "in line (within ±2%)");
+    } else h += row("Reported EPS", "—") + row("Expected EPS <small>(analysts)</small>", invOk(p.estimate) ? p.estimate.toFixed(2) : "—");
+  } else if (e.type === "D" && !e.upcoming) {
+    const dv = e.dividend || {};
+    h += row("Paid", evxAmt(dv.amount, e.ccy), "", `a share${e.line && e.line !== e.symbol ? ` · on ${escapeHtml(e.line)}` : ""}`);
+    const inCcy = dv.compared_in ? ` · compared in ${escapeHtml(dv.compared_in)}` : "";
+    if (invOk(dv.change_pct)) h += row(dv.basis === "year" ? "Against the year before" : "Against the last one", evxPct(dv.change_pct, 0), e.outcome === "raised" ? "pos" : e.outcome === "cut" ? "neg" : "", escapeHtml(e.outcome) + inCcy);
+    else if (e.outcome) h += row("Against the last one", "—", "", escapeHtml(e.outcome === "first" ? "the first in two years"
+      : dv.basis === "mixed" ? "held: the last one and the year before disagree" : dv.basis === "no_fx" ? `held: no exchange rate to compare in ${dv.compared_in || "its currency"}` : e.outcome) + (dv.basis === "no_fx" ? "" : inCcy));
+  } else if (e.type === "M") {
+    const mv = e.move || {};
+    h += row(`Shares that day${e.line && e.line !== e.symbol ? ` <small>(${escapeHtml(e.line)})</small>` : ""}`, evxPct(mv.pct), mv.pct >= 0 ? "pos" : "neg", invOk(e.held_pct) ? `your ${escapeHtml(e.symbol)}: ${evxPct(e.held_pct)}` : "");
+    if (invOk(mv.market_pct)) h += row(escapeHtml(mv.index_name || "The market"), evxPct(mv.market_pct), mv.market_pct >= 0 ? "pos" : "neg");
+    if (r && invOk(r.sigma_pct)) h += row("A normal day for it", `±${r.sigma_pct.toFixed(1)}%`, "", "its typical move against the market");
+  }
+  h += `<hr>`;
+  if (e.upcoming) h += `<div class="evx-why">Coming ${escapeHtml(invDay(e.date))}. The reaction is read when the session after it closes.</div>`;
+  else if (e.type === "D") h += `<div class="evx-rxline"><b>Market reaction</b>${evxChip(e)}</div><div class="evx-why">On an ex-date the price drops by about the dividend; that is not news, so there is no reaction to read.</div>`;
+  else if (e.reacting || !r || r.category == null) h += `<div class="evx-rxline"><b>Market reaction</b>${evxChip(e)}</div><div class="evx-say">${escapeHtml(e.say || "")}</div>`;
+  else {
+    const pos = (Math.max(-EVX_ZMAX, Math.min(EVX_ZMAX, r.z)) + EVX_ZMAX) / (2 * EVX_ZMAX) * 100;
+    h += `<div class="evx-rxline"><b>Market reaction</b>${evxChip(e)}</div>
+      <div class="evx-scale" role="img" aria-label="${escapeHtml(r.label)}, ${Math.abs(r.z).toFixed(1)} times a normal two-day move"><div class="tr"></div><div class="dot" style="left:${pos.toFixed(1)}%"></div></div>
+      <div class="evx-scale-l"><span style="left:0;transform:none">−4×</span><span style="left:18.75%">−2.5×</span><span style="left:50%">normal</span><span style="left:81.25%">+2.5×</span><span style="right:0;left:auto;transform:none">+4×</span></div>
+      <div class="evx-say">${escapeHtml(e.say || "")}</div>`;
+    if ((r.sessions_after ?? 5) < 5) h += `<div class="evx-prov">${r.sessions_after} of 5 sessions so far: the label is final; how it follows through shows after day five.</div>`;
+    // The index the server measured against (event_study.broad_index), named for every event type.
+    if (r.abnormal && invOk(r.beta)) h += `<div class="evx-tech">Against the ${escapeHtml(e.move?.index_name || e.index_name || "broad market")} with a beta of ${r.beta.toFixed(2)}; a normal two-day move is ±${(r.sigma_pct * Math.SQRT2).toFixed(1)}%.</div>`;
+  }
+  const cause = e.type === "M" || e.why ? evxCause(e, true) : "";
+  if (cause) h += `<div class="evx-why">${cause}</div>`;
+  if (e.type === "E" && !e.upcoming) h += `<div class="ef" data-evx-ef="${escapeHtml(e.id)}">${ehCardHtml(e.date, evxEhCtx(e))}</div>`;
+  return h;
+}
+/* The P5 filings, on the same path as the stock window's card (ehEnsure, the
+ * server's throttle), asked when a card opens, never when the view does. */
+function evxEhCtx(e) {
+  const c = EVX.eh[e.symbol] ||= { p: null, pending: null, at: 0 };
+  return { symbol: e.symbol, sym: e.symbol, name: e.name, p: c.p, cache: c, retry: "data-evx-eh-retry", done: () => evxEfRefresh() };
+}
+function evxEfRefresh() {
+  const slot = document.querySelector("#inv-att-fs [data-evx-ef]"), e = slot && evxById(slot.dataset.evxEf);
+  if (slot && e) slot.innerHTML = ehCardHtml(e.date, evxEhCtx(e));
+}
+function evxPlaceCard() {
+  const wrap = document.querySelector("#inv-att-fs [data-evx-view]");
+  wrap?.querySelector(".evx-card")?.remove();
+  const e = EVX.sel && evxById(EVX.sel);
+  if (!wrap || !e) return;
+  const main = wrap.closest(".att-fs-main"), mk = wrap.querySelector(`[data-evx-mk="${CSS.escape(e.id)}"]`), tr = wrap.querySelector(`[data-evx-row="${CSS.escape(e.id)}"]`);
+  wrap.insertAdjacentHTML("beforeend", `<div class="m-ev-card evx-card${e.type === "E" ? " e-card" : ""}" role="dialog" aria-label="${escapeHtml(`${e.name}, ${evxKind(e)}`)}">${evxCardHtml(e)}<button type="button" class="x" data-evx-close aria-label="Close">×</button></div>`);
+  const card = wrap.querySelector(".evx-card"), wr = wrap.getBoundingClientRect(), mr = main.getBoundingClientRect();
+  const cw = card.offsetWidth, ch = card.offsetHeight;
+  // Beside its marker when the marker is on screen (a marker click), else under its row (a row click deep in the table).
+  const mkSeen = mk && (() => { const r = mk.getBoundingClientRect(); return r.top >= mr.top && r.bottom <= mr.bottom; })();
+  const a = (mkSeen || !tr ? mk : tr.querySelector("td.h") || tr)?.getBoundingClientRect();
+  if (!a) { card.remove(); return; }
+  let left = a.right - wr.left + 12, topY = mkSeen || !tr ? a.top - wr.top - 10 : a.bottom - wr.top + 4;
+  if (left + cw > wr.width - 4) left = Math.max(4, a.left - wr.left - cw - 12);
+  // Inside what the main column shows: its visible top and bottom, in the view's own coordinates.
+  topY = Math.max(mr.top - wr.top + 4, Math.min(topY, mr.top + main.clientHeight - wr.top - ch - 8));
+  card.style.left = left + "px"; card.style.top = topY + "px";
+  if (e.type === "E" && !e.upcoming) ehEnsure(false, evxEhCtx(e));
+}
+function evxAfterPaint() {
+  evxDraw();
+  evxPlaceCard();
+  if (EVX.hov) evxHover(EVX.hov);
+}
+/* A marker selects its row, a row its marker; either opens the window. */
+function evxSelect(id, from) {
+  EVX.sel = EVX.sel === id && from !== "rail" ? null : id;
+  EVX.from = from || "";
+  // The row is highlighted, not scrolled to: scrolling would carry the marker and its window away.
+  invFullPaint();
+}
+/* From the rail: the full screen opens on Events; an item opens with its window. */
+function evxOpenFromRail(id) {
+  if (id) {
+    const e = (INV.book?.attention?.recent?.items || []).find(x => x.id === id);
+    if (e && evxT(evxWhen(e)) < evxT(invToday()) - EVX.range * EVX_DAY) EVX.range = 90;
+    EVX.filter = ""; EVX.types = { E: true, D: true, M: true };
+  }
+  EVX.sel = id || null;
+  invFullOpen("events", "Events");
+  evxLoad();
+}
+/* The view's own clicks (the screen's handler hands them here first); true when handled. */
+function evxClick(e, t) {
+  if (t("[data-evx-close]")) { EVX.sel = null; invFullPaint(); return true; }
+  if (t("[data-evx-eh-retry]")) { e.preventDefault(); const c = evxById(EVX.sel); if (c) ehEnsure(true, evxEhCtx(c)); return true; }
+  if (t(".evx-card")) return !t("a, [data-eh-keys]");  // links inside the window keep their own behaviour
+  if (t("[data-evx-mk]")) { evxSelect(t("[data-evx-mk]").dataset.evxMk, "mk"); return true; }
+  if (t("[data-evx-row]") && !t("a, button")) { evxSelect(t("[data-evx-row]").dataset.evxRow, "row"); return true; }
+  if (t("[data-evx-range]")) { EVX.range = +t("[data-evx-range]").dataset.evxRange; invFullPaint(); return true; }
+  if (t("[data-evx-type]")) {
+    const k = t("[data-evx-type]").dataset.evxType;
+    EVX.types[k] = !EVX.types[k];
+    if (!Object.values(EVX.types).some(Boolean)) EVX.types[k] = true;  // never an empty chart
+    invFullPaint(); return true;
+  }
+  if (t("[data-evx-retry]")) { evxLoad(true); return true; }
+  if (t("[data-evx-hold]")) { evxHoldMenu(t("[data-evx-hold]")); return true; }
+  return false;
+}
+/* "All N holdings ▾": the app's own menu (a native <select> is painted with
+ * black highlights by the desktop shell), heaviest holding first. */
+function evxHoldMenu(anchor) {
+  const held = [...(INV.book?.positions || [])].filter(p => !p.pending && invOk(p.weight)).sort((a, c) => c.weight - a.weight);
+  const el = invMenuOpen(anchor, "inv-menu-list evx-hold-menu", (e) => {
+    const it = e.target.closest("[data-v]");
+    if (!it) return;
+    invMenuClose();
+    EVX.filter = it.dataset.v;
+    if (EVX.sel && EVX.filter && evxById(EVX.sel)?.symbol !== EVX.filter) EVX.sel = null;
+    invFullPaint();
+  });
+  if (!el) return;
+  const opts = [{ v: "", html: `<b>All ${held.length} holdings</b>` }, ...held.map(p => ({ v: p.symbol, html: `<b>${escapeHtml(p.name)}</b><span>${p.weight.toFixed(1)}%</span>` }))];
+  el.innerHTML = opts.map(o => `<button type="button" role="menuitem" class="inv-menu-it${o.v === EVX.filter ? " on" : ""}" data-v="${escapeHtml(o.v)}"><i>${o.v === EVX.filter ? "✓" : ""}</i>${o.html}</button>`).join("");
+  invMenuPlace(el, anchor);
+}
+$("#inv-att-bg").addEventListener("pointerover", (e) => {
+  const b = e.target.closest?.("[data-evx-mk]");
+  const id = b ? b.dataset.evxMk : null;
+  if (id !== EVX.hov) evxHover(id);
+  // A big move's filings button is no use; an earnings marker's hover is a head start.
+  const ev = id && evxById(id);
+  if (ev && ev.type === "E" && !ev.upcoming) ehEnsure(false, evxEhCtx(ev));
+});
+$("#inv-att-bg").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.matches?.("[data-evx-row]")) { e.preventDefault(); evxSelect(e.target.dataset.evxRow, "row"); }
+});
+document.addEventListener("keydown", (e) => {
+  const it = e.target.closest?.("[data-inv-ev]");
+  if (it && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); evxOpenFromRail(it.dataset.invEv); }
 });
 
 /* Suggested dividends (owner, 2026-10-11): payouts Yahoo knows about that
@@ -20051,6 +20543,9 @@ $("#inv-page").addEventListener("click", (e) => {
   else if (e.target.closest("[data-inv-att-more]")) { INV.attMore = !INV.attMore; invAttApply(INV.book?.attention); invAttSeen(); }
   else if (e.target.closest("[data-inv-att-rules]")) { openSettings(); selectSettingsSection("attention"); }
   else if (e.target.closest("[data-inv-att-full]")) invFullOpen();
+  else if (e.target.closest("[data-inv-ev-full]")) evxOpenFromRail(null);
+  else if (e.target.closest("[data-inv-ev-more]")) { EVX.railMore = !EVX.railMore; const a = $("#inv-page .inv-rail"); if (a && INV.book) a.innerHTML = invRailHtml(INV.book); }
+  else if (e.target.closest("[data-inv-ev]")) evxOpenFromRail(e.target.closest("[data-inv-ev]").dataset.invEv);
   else if (e.target.closest("[data-inv-analysis]")) invFullOpen("map", "Analysis");
   else if (e.target.closest("[data-inv-divs]")) { INV.divOpen = !INV.divOpen; const a = $("#inv-page .inv-rail"); if (a) a.innerHTML = invRailHtml(INV.book); }
   else if (e.target.closest("[data-inv-div-add]")) invAddDividends(e.target.closest("[data-inv-div-add]").dataset.invDivAdd);

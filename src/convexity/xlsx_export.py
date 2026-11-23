@@ -914,7 +914,7 @@ _HOLDING_FMT = {
 # --------------------------------------------------------------------------
 
 _INVALID_SHEET_CHARS = re.compile(r"[\\/?*\[\]:]")
-_RESERVED_SHEETS = ("Read me", "Overview", "Positions", "Ledger", "Data", "Definitions")
+_RESERVED_SHEETS = ("Read me", "Overview", "Positions", "Ledger", "Events", "Data", "Definitions")
 _BENCH_SERIES = (("Portfolio", None), ("S&P 500", "SPY"), ("Nasdaq-100", "QQQ"))
 _PERIOD_WORDS = {"1Y": "the last year", "3Y": "the last 3 years", "5Y": "the last 5 years"}
 # A cold export downloads every holding once; this bounds what is left (a
@@ -1722,6 +1722,10 @@ def build_workbook(
         _write_ledger(wb.create_sheet("Ledger"), book, period)
         sheets += [("Positions", "My Investments: what you hold now, its value, profit and dividends."),
                    ("Ledger", "My Investments: every trade, dividend, deposit and fee you entered.")]  # fmt: skip
+        if (book.get("events") or {}).get("events"):
+            _write_events(wb.create_sheet("Events"), book["events"])
+            sheets.append(("Events", "My Investments: earnings, dividends and very large moves of your "
+                                     "holdings over two years, and how the market reacted (the Events view)."))  # fmt: skip
     data = _Data(display_ccy)
     titles = []
     for i, pf in enumerate(portfolios, 1):
@@ -1853,6 +1857,46 @@ def _write_ledger(ws, book: dict, period: str) -> None:
     _write_table(ws, 4, cols, rows)
     ws.column_dimensions["A"].width = 12
     ws.column_dimensions["C"].width = 32
+
+
+def _write_events(ws, payload: dict) -> None:
+    """The Events view's table (event_study.for_book), newest first: the
+    event's own outcome, then the Market Reaction as the code measured it
+    and the "why" (the code's size sentence; a big move's headline and the
+    model's clause when there is one). Same caches as the view: no fetch.
+    A dividend is per share in its line's quote unit (``ccy``: GBp is pence),
+    so the currency sits beside it; a change compared after converting to the
+    company's reporting currency says which."""
+    ws["A1"] = "My Investments — Events"
+    ws["A1"].font = _TITLE_FONT
+    ws["A2"] = (f"Generated: {datetime.now(UTC).isoformat(timespec='seconds')} · market reaction = the event day "
+                "and the next, after the market (S&P 500 / STOXX 600), in the share's normal two-day moves")  # fmt: skip
+    ws["A2"].font = Font(italic=True, color="6B7280")
+    cols = [("Holding", None), ("Ticker", None), ("Company line", None), ("Event", None), ("Date", None),
+            ("Session", None), ("What it was", None), ("EPS reported", "0.00"), ("EPS expected", "0.00"),
+            ("Surprise", _PCT), ("Dividend a share", "0.0000"), ("Dividend currency", None), ("Dividend change", _PCT),
+            ("Change compared in", None), ("Move that day", _PCT),
+            ("Market reaction", None), ("× a normal two-day move", "0.0"), ("Two days", _PCT),
+            ("Two days vs market", _PCT), ("Follow-through", None), ("Beta (broad index)", "0.00"),
+            ("Why, in plain words", None), ("Headline", None), ("Source", None)]  # fmt: skip
+    kinds = {"E": "Earnings", "D": "Dividend", "M": "Big move"}
+    rows = []
+    for e in payload.get("events") or []:
+        rx, eps, dv, mv, c = (
+            e.get(k) or {} for k in ("reaction", "eps", "dividend", "move", "cause")
+        )
+        what = e.get("outcome") or e.get("outcome_note") or ""
+        why = " ".join(x for x in (e.get("say"), e.get("why")) if x) or None
+        rows.append([e.get("name"), e.get("symbol"), e.get("line"), kinds.get(e.get("type"), e.get("type")),
+                     e.get("date"), e.get("session"), what, eps.get("actual"), eps.get("estimate"),
+                     _pct(eps.get("surprise_pct")), dv.get("amount"), e.get("ccy") if dv else None,
+                     _pct(dv.get("change_pct")), dv.get("compared_in"), _pct(mv.get("pct")),
+                     rx.get("label"), abs(rx["z"]) if rx.get("label") and rx.get("z") is not None else None,
+                     _pct(rx.get("pct_0_1")), _pct(rx.get("abn_pct_0_1")), rx.get("follow"), rx.get("beta"),
+                     why, c.get("headline"), c.get("source")])  # fmt: skip
+    _write_table(ws, 4, cols, rows)
+    ws.column_dimensions["V"].width = 70  # Why, in plain words
+    ws.column_dimensions["W"].width = 50  # Headline
 
 
 def _cap_weights(rows: list[dict]) -> dict[str, float]:
