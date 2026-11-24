@@ -263,10 +263,10 @@ def test_logo_tickers_route_answers_per_symbol(srv):
 
     install()
     try:
-        code, body = _req(srv, "GET", "/api/logo-tickers?s=NOV.DE,NVDA,ZZZZ.F,,")
+        code, body = _req(srv, "GET", "/api/logo-tickers?s=GE9.DE,NVDA,ZZZZ.F,,")
         assert code == 200
         assert json.loads(body)["tickers"] == {
-            "NOV.DE": ["NVO", "NOV.DE", "NOVO-B.CO"],
+            "GE9.DE": ["GMAB", "GE9.DE", "GMAB.CO"],
             "NVDA": ["NVDA"],
             "ZZZZ.F": ["ZZZZ.F"],
         }

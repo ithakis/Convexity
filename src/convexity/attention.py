@@ -1142,7 +1142,7 @@ def fetch_events(symbol: str) -> dict | None:
     failed (an empty calendar, a fund's, is an answer: both dates None).
 
     The report date is the company's: a listing that is not its primary
-    line (capm.primary_line: WMT for WMT.DE, whose own calendar Yahoo
+    line (capm.primary_line: AAPL for APC.DE, whose own calendar Yahoo
     leaves empty) reads it there. The ex-dividend date is the listing's own
     when Yahoo has one, the primary line's otherwise."""
     from convexity import capm

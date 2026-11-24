@@ -293,8 +293,8 @@ def finite_num(v) -> float | None:
 # Yahoo quotes some exchanges in the currency's minor unit: LSE prices in pence
 # (GBp / GBX), JSE in cents (ZAc), Tel Aviv in agorot (ILA). Per-share prices
 # and price targets come in that minor unit, but marketCap, dividendRate and the
-# statements are in the MAJOR unit — verified on SHEL.L: price 3654.5 GBp,
-# marketCap 208e9 (GBP), dividendRate 1.16 (GBP).
+# statements are in the MAJOR unit — verified on a London large cap: price
+# 3654.5 GBp, marketCap 208e9 (GBP), dividendRate 1.16 (GBP).
 MINOR_UNIT_CCY = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ZAC": "ZAR", "ILA": "ILS"}
 
 
@@ -307,9 +307,10 @@ def fundamentals_missing(info: dict | None) -> bool:
     without it is a degraded answer, never "this company has no analysts",
     until it has lasted long enough to be the line itself (``thin_line``).
 
-    On 2026-10-30 Yahoo dropped it for MU for a few minutes. The stock window
+    On 2026-10-30 Yahoo dropped it for a US large cap for a few
+    minutes. The stock window
     then cached "no analyst targets" and n/a fundamentals and σ/μ lost the
-    analysts' α, although MU has 45 analysts. Every cache that keys off these
+    analysts' α, although it has 45 analysts. Every cache that keys off these
     fields must treat this answer as unknown (short TTL, never on disk)."""
     if not isinstance(info, dict) or not info:
         return False
@@ -319,7 +320,7 @@ def fundamentals_missing(info: dict | None) -> bool:
 
 
 # Each line's run of answers without financialData this process: [first, last,
-# answers]. Yahoo's lapses last minutes (MU's did); some real shares never carry
+# answers]. Yahoo's lapses last minutes (that one's did); some real shares never carry
 # the module (KDP.MX: EQUITY, "No fundamentals data found", on every call).
 # Mistaking a lapse for a thin line loses a big name's analysts, while the
 # reverse only re-asks every couple of minutes, so the bar is high.
@@ -398,7 +399,7 @@ def _normalize_dividend_yield(
        last close. Both are per-share amounts in the listing's currency, except
        that a minor-unit listing (GBp, ZAc, ILA) quotes the price in pence /
        cents and the rate in pounds / rand, so the price is scaled to the major
-       unit first (SHEL.L: 1.16 / 36.545 = 3.2%, not 1.16 / 3654.5 = 0.03%).
+       unit first (a London line: 1.16 / 36.545 = 3.2%, not 1.16 / 3654.5 = 0.03%).
     2. ``dividendYield`` — Yahoo's own forward yield. yfinance >= 1.0 (the
        pyproject floor) reports it in PERCENT (AAPL 0.32 means 0.32%), so it is
        always divided by 100; guessing the unit from its size misread every
@@ -428,7 +429,7 @@ def _normalize_dividend_yield(
         return float(trate / px)
     tval = _safe_num(trailing_yield)
     if tval is not None and tval >= 0:
-        # trailingAnnualDividendYield is a fraction (KO 0.0237 = 2.37%).
+        # trailingAnnualDividendYield is a fraction (PEP 0.0237 = 2.37%).
         return float(tval)
     return None
 

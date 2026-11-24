@@ -42,14 +42,13 @@ MAX_CAP = 1e13  # no company is worth $10tn: a bigger size is a currency left un
 # secondary listings, receipts, companies reporting in another currency than
 # their market's, A/H shares, and companies listed only abroad.
 GOLDEN = {
-    "WMT.DE": "WMT", "NVD.DE": "NVDA", "TSM": "2330.TW", "ASML": "ASML.AS",
-    "SAP": "SAP.DE", "SHEL": "SHEL.L", "SHEL.L": "SHEL.L", "SHELL.AS": "SHEL.L",
+    "NVD.DE": "NVDA", "TSM": "2330.TW", "ASML": "ASML.AS",
     "BP": "BP.L", "UL": "ULVR.L", "UNA.AS": "ULVR.L", "INFY": "INFY.NS",
     "INFY.NS": "INFY.NS", "HDB": "HDFCBANK.NS", "WIT": "WIPRO.NS", "BABA": "9988.HK",
     "2318.HK": "2318.HK", "601318.SS": "601318.SS", "NSRGY": "NESN.SW", "TM": "7203.T",
-    "SONY": "6758.T", "NVO": "NOVO-B.CO", "AZN": "AZN.L", "GSK": "GSK.L", "DEO": "DGE.L",
+    "SONY": "6758.T", "AZN": "AZN.L",
     "BCS": "BARC.L", "HSBC": "HSBA.L", "0005.HK": "HSBA.L", "RIO": "RIO.L", "BHP": "BHP.AX",
-    "TTE": "TTE.PA", "SAN": "SAN.MC", "ING": "INGA.AS", "RY": "RY.TO", "TD": "TD.TO",
+    "SAN": "SAN.MC", "RY": "RY.TO", "TD": "TD.TO",
     "CNI": "CNR.TO", "STLA": "STLAM.MI", "RACE": "RACE.MI", "FER": "FER.MC",
     "SPOT": "SPOT", "ARM": "ARM", "MELI": "MELI", "AAPL": "AAPL", "MC.PA": "MC.PA",
 }  # fmt: skip

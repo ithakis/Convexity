@@ -762,8 +762,8 @@ _PROXY_TTL_S = 24 * 3600.0
 _PROXY: dict[str, tuple[float, tuple[str, ...]]] = {}
 _SHORT_ROWS = 5  # a line starting this many rows into the frame is "short"
 # A stretch this long with no close inside a listing's history is a hole in
-# Yahoo's data, not a quiet market: Novartis's Xetra line (NOT.DE) has none
-# from Sep 2019 to Jan 2025, which ffill drew as five flat years.
+# Yahoo's data, not a quiet market: a Swiss company's Xetra line had none
+# for five years (2019-2025), which ffill drew as five flat years.
 _GAP_ROWS = 60
 _STALE_DAYS = 92  # a stand-in with no close this long before the join has stopped
 # The stock window (window_stand_in): a listing whose own closes start less
@@ -1137,7 +1137,7 @@ def _clean_tail(col: pd.Series) -> pd.Series:
     """The unbroken stretch of a stand-in's closes that ends at the join.
     Yahoo's old data has glitches: Frankfurt's Gedeon Richter line has
     negative closes in 2009, London's Unilever a 52x jump in 1993 (a unit
-    change), Xetra's Novartis no close for five years. A close at or below
+    change), a Xetra line of a Swiss company no close for five years. A close at or below
     zero, a day more than tripling or losing two thirds, or a hole of more
     than three months starts the stretch at the first close after it."""
     col = col.dropna()

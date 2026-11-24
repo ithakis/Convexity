@@ -916,7 +916,7 @@ def _held_now(raw: dict) -> dict[str, float] | None:
 
 
 def _remember(raw: dict, aliases, used: set[str]) -> None:
-    """Keep the owner's corrections of names ("Shell" is SHEL.L): only for
+    """Keep the owner's corrections of names ("BP" is BP.L): only for
     tickers this batch actually booked, newest first, at most ALIASES_MAX."""
     from convexity.importer import alias_key
 

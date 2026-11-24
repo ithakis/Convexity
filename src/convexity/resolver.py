@@ -153,8 +153,8 @@ def _venue_suffix(code: str) -> str | None:
     """The Yahoo suffix for an exchange code. Brokers write their own codes
     (Interactive Brokers: SBF, IBIS, BM, BVME, AEB…) and ISO MICs; those live
     in the import's venue table (importer._VENUES), so the Add box and the
-    import read one table. Without them "IBIS:NOV" fell through to a name
-    search and became NOV Inc. instead of Novo Nordisk (2026-10-11). This
+    import read one table. Without them a Xetra code fell through to a name
+    search and became a different company (2026-10-11). This
     table's own entries win where the two disagree (BVL: Lima here)."""
     if code in _EXCHANGE_SUFFIX:
         return _EXCHANGE_SUFFIX[code]
@@ -247,11 +247,11 @@ def _refine_via_search(tail: str, expected_suffix: str) -> str | None:
 
 def _broker_pair(entry: str) -> tuple[str, str] | None:
     """A ticker with a broker's exchange code, as a portfolio screen shows it:
-    "SBF:GLE" / "GLE:SBF", or "GLE SBF" (ticker first, then the code). The
+    "SBF:AIR" / "AIR:SBF", or "AIR SBF" (ticker first, then the code). The
     colon form is split here because a code may carry a dot (NASDAQ.NMS,
     BVME.ETF), which the dotted path would cut in the wrong place. The space
     form accepts only a broker code or MIC (importer._VENUE_CODES), never a
-    country shorthand: "SAP SE" is a company name, not SAP on Stockholm."""
+    country shorthand: "Airbus SE" is a company name, not Airbus on Stockholm."""
     if ":" in entry:
         head, _, tail = entry.partition(":")
         return _try_prefix_pair(head, tail) or _try_prefix_pair(tail, head)

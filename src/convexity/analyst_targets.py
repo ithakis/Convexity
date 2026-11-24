@@ -50,7 +50,7 @@ TTL = 6 * 3600.0
 MISS_TTL = 1800.0  # Yahoo answered nothing: ask again sooner (§9: never cache a failure long)
 # Yahoo sent no financialData at all for a share (helpers.fundamentals_missing):
 # we do not know whether it has analysts, so the miss is kept two minutes only
-# and marked, and σ/μ does not keep a model price built on it (MU, 2026-10-30).
+# and marked, and σ/μ does not keep a model price built on it (a US large cap, 2026-10-30).
 UNKNOWN_TTL = 120.0
 _KEEP_ACTIONS = ("main", "reit")  # actions that leave the firm's previous target standing
 
@@ -294,9 +294,9 @@ def consensus(symbol: str, tk=None, info: dict | None = None, splits=None, price
     if all(summary.get(k) is None for k in ("mean", "median", "low", "high")) and not summary.get(
         "n_opinions"
     ):
-        # No target of the listing's own: a secondary line (CCC3.DE, NVD.DE,
+        # No target of the listing's own: a secondary line (NVD.DE,
         # APC.DE). Yahoo still hands it the PARENT's firm list, in the
-        # parent's currency: CCC3.DE got Coca-Cola's 15 firms at $93.73 read as
+        # parent's currency: a Xetra line got its US parent's 15 firms at $93.73 read as
         # euros, ~11% high, while its grid row (fetch_one skips such a listing
         # and scales the research line's targets) said EUR 84.09. None here,
         # so every caller falls through to the research line the same way.

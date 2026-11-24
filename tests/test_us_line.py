@@ -15,11 +15,59 @@ from tests.test_symbol_db import ROWS, install
 _FIN = "Financial Services"
 _EXTRA = [
     # ticker, name, type, exchange, region, sector, industry, mcap, adv, group, home
-    ["TTE.PA", "TotalEnergies SE", "stock", "PAR", "fr", "Energy", "Oil & Gas", 1.4e11, 4e8, 90, 1],
-    ["TTFNF", "TotalEnergies SE", "stock", "PNK", "us", "Energy", "Oil & Gas", 1.4e11, 9e8, 90, 0],
-    ["TTE", "TotalEnergies SE", "stock", "NYQ", "us", "Energy", "Oil & Gas", 1.4e11, 1e8, 90, 0],
-    ["REP.MC", "Repsol, S.A.", "stock", "MCE", "es", "Energy", "Oil & Gas", 2e10, 5e7, 91, 1],
-    ["REPYY", "Repsol, S.A.", "stock", "OQX", "us", "Energy", "Oil & Gas", 2e10, 3e6, 91, 0],
+    [
+        "SAN.PA",
+        "Sanofi",
+        "stock",
+        "PAR",
+        "fr",
+        "Healthcare",
+        "Drug Manufacturers",
+        1.4e11,
+        4e8,
+        90,
+        1,
+    ],
+    [
+        "SNYNF",
+        "Sanofi",
+        "stock",
+        "PNK",
+        "us",
+        "Healthcare",
+        "Drug Manufacturers",
+        1.4e11,
+        9e8,
+        90,
+        0,
+    ],
+    ["SNY", "Sanofi", "stock", "NMS", "us", "Healthcare", "Drug Manufacturers", 1.4e11, 1e8, 90, 0],
+    [
+        "IBE.MC",
+        "Iberdrola, S.A.",
+        "stock",
+        "MCE",
+        "es",
+        "Utilities",
+        "Utilities—Diversified",
+        2e10,
+        5e7,
+        91,
+        1,
+    ],
+    [
+        "IBDRY",
+        "Iberdrola, S.A.",
+        "stock",
+        "OQX",
+        "us",
+        "Utilities",
+        "Utilities—Diversified",
+        2e10,
+        3e6,
+        91,
+        0,
+    ],
     ["IWDA.AS", "iShares Core MSCI World", "etf", "AMS", "nl", None, None, None, 1e8, 92, 1],
 ]
 
@@ -37,12 +85,12 @@ def db():
     "symbol, us",
     [
         ("MSF.DE", "MSFT"),  # a US company's German line: its home
-        ("NOV.DE", "NVO"),  # a Frankfurt line of a foreign company: the ADR
-        ("NOVO-B.CO", "NVO"),
+        ("GE9.DE", "GMAB"),  # a Frankfurt line of a foreign company: the ADR
+        ("GMAB.CO", "GMAB"),
         ("2330.TW", "TSM"),
-        ("TTE.PA", "TTE"),  # the exchange line beats a busier pink sheet
-        ("REP.MC", "REPYY"),  # an OTC ADR when that is all there is
-        ("BNP.PA", None),  # no US line in the pack
+        ("SAN.PA", "SNY"),  # the exchange line beats a busier pink sheet
+        ("IBE.MC", "IBDRY"),  # an OTC ADR when that is all there is
+        ("ACA.PA", None),  # no US line in the pack
         ("IWDA.AS", None),  # a UCITS fund
         ("NVDA", "NVDA"),
         ("BRK-B", "BRK-B"),
@@ -60,16 +108,16 @@ def test_a_missing_adr_is_found_by_name_and_remembered(db, monkeypatch):
     def lookup(q, limit=6, timeout=8.0):
         calls.append(q)
         return [
-            sdb.Hit("BNP.PA", "BNP Paribas", "stock", "PAR", "fr", _FIN, None, None, -1, 90.0),
-            sdb.Hit("BNPQF", "BNP Paribas", "stock", "OID", None, _FIN, None, None, -1, 90.0),
-            sdb.Hit("BNPQY", "BNP Paribas", "stock", "OID", None, _FIN, None, None, -1, 90.0),
-            sdb.Hit("BNPX", "BNP Media Group", "stock", "NMS", None, None, None, None, -1, 90.0),
+            sdb.Hit("ACA.PA", "Credit Agricole", "stock", "PAR", "fr", _FIN, None, None, -1, 90.0),
+            sdb.Hit("CRARF", "Credit Agricole", "stock", "OID", None, _FIN, None, None, -1, 90.0),
+            sdb.Hit("CRARY", "Credit Agricole", "stock", "OID", None, _FIN, None, None, -1, 90.0),
+            sdb.Hit("CRAX", "Credit Media Group", "stock", "NMS", None, None, None, None, -1, 90.0),
         ]
 
     monkeypatch.setattr(sdb, "yahoo_lookup", lookup)
-    assert sdb.us_line("BNP.PA") is None
-    assert sdb.discover_us_line("BNP.PA") == "BNPQY"  # the ADR, not the pink sheet
-    assert sdb.us_line("BNP.PA") == "BNPQY"
+    assert sdb.us_line("ACA.PA") is None
+    assert sdb.discover_us_line("ACA.PA") == "CRARY"  # the ADR, not the pink sheet
+    assert sdb.us_line("ACA.PA") == "CRARY"
     monkeypatch.setattr(sdb, "yahoo_lookup", lambda *a, **k: [])
     assert sdb.discover_us_line("HSBA.L") is None
     assert sdb.discover_us_line("HSBA.L") is None
@@ -94,16 +142,16 @@ def finnhub(monkeypatch):
 
 
 def test_finnhub_is_asked_for_the_us_line(db, finnhub):
-    assert fh.get_recommendation_trend("NOV.DE")[0]["buy"] == 3
+    assert fh.get_recommendation_trend("GE9.DE")[0]["buy"] == 3
     ins = fh.get_insider_sentiment("MSF.DE")
     assert ins["mspr"] == 12.5 and ins["via"] == "MSFT"
     assert "via" not in fh.get_insider_sentiment("MSFT")  # the same cache entry
     assert fh.finnhub_symbol("BRK-B") == "BRK.B"
-    assert finnhub == ["NVO", "MSFT"]
+    assert finnhub == ["GMAB", "MSFT"]
 
 
 def test_no_us_line_means_no_call(db, finnhub):
-    assert fh.get_recommendation_trend("BNP.PA") is None
+    assert fh.get_recommendation_trend("ACA.PA") is None
     assert fh.get_insider_sentiment("IWDA.AS") is None
     assert finnhub == []
 
@@ -127,7 +175,7 @@ def test_a_403_is_remembered(db, monkeypatch):
 def test_news_skips_finnhub_without_a_us_line(monkeypatch):
     monkeypatch.setattr(ns, "_fh_call", lambda *a, **k: pytest.fail("Finnhub was asked"))
     monkeypatch.setattr(ns, "_fetch_yf_news", lambda *a, **k: [])
-    assert ns.collect_company_news("PHIL.MI", 7, finnhub_symbol="") == ([], True, 0)
+    assert ns.collect_company_news("BC.MI", 7, finnhub_symbol="") == ([], True, 0)
 
 
 def test_yahoo_search_news_backs_up_an_empty_get_news(monkeypatch):
@@ -147,18 +195,18 @@ def test_yahoo_search_news_backs_up_an_empty_get_news(monkeypatch):
     class Search:
         def __init__(self, q, news_count, max_results):
             self.news = [
-                {"title": "Coca-Cola raises its outlook", "publisher": "Reuters",
+                {"title": "PepsiCo raises its outlook", "publisher": "Reuters",
                  "link": "https://example.com/a", "providerPublishTime": now - 3600,
-                 "relatedTickers": ["KO", "PEP"]},
+                 "relatedTickers": ["PEP", "KDP"]},
                 {"title": "Ten stocks to watch", "publisher": "Blog",
                  "link": "https://example.com/b", "providerPublishTime": now - 3600,
-                 "relatedTickers": ["PEP"]},
+                 "relatedTickers": ["KDP"]},
             ]  # fmt: skip
 
     monkeypatch.setattr(yf, "Ticker", Ticker)
     monkeypatch.setattr(yf, "Search", Search)
-    out = ns._fetch_yf_news("KO", 7)
-    assert [a["headline"] for a in out] == ["Coca-Cola raises its outlook"]
+    out = ns._fetch_yf_news("PEP", 7)
+    assert [a["headline"] for a in out] == ["PepsiCo raises its outlook"]
     assert out[0]["source"] == "Reuters" and out[0]["url"] == "https://example.com/a"
 
 
@@ -183,20 +231,20 @@ def test_a_european_line_searches_the_company_name(db, monkeypatch):
     class Search:
         def __init__(self, q, news_count, max_results):
             asked.append(q)
-            self.news = [] if q != "repsol" else [
-                item("Repsol weighs a stake sale", ["REP.MC", "BP"]),
-                item("Repsol ADR volume jumps", ["REPYY"]),
-                item("Oil majors to watch", ["BP", "SHEL"]),
+            self.news = [] if q != "iberdrola" else [
+                item("Iberdrola weighs a stake sale", ["IBE.MC", "NEE"]),
+                item("Iberdrola ADR volume jumps", ["IBDRY"]),
+                item("Utilities to watch", ["NEE", "DUK"]),
             ]  # fmt: skip
 
     monkeypatch.setattr(yf, "Ticker", Ticker)
     monkeypatch.setattr(yf, "Search", Search)
-    out = ns._fetch_yf_news("REP.MC", 7)
+    out = ns._fetch_yf_news("IBE.MC", 7)
     assert sorted(a["headline"] for a in out) == [
-        "Repsol ADR volume jumps",
-        "Repsol weighs a stake sale",
+        "Iberdrola ADR volume jumps",
+        "Iberdrola weighs a stake sale",
     ]
-    assert asked == ["REP.MC", "repsol"]
+    assert asked == ["IBE.MC", "iberdrola"]
     asked.clear()
     assert ns._fetch_yf_news("IWDA.AS", 7) == [] and asked == ["IWDA.AS"]  # a fund: no name search
 
@@ -214,10 +262,10 @@ def test_an_otc_adr_with_no_region_is_a_us_line(db):
 @pytest.mark.parametrize(
     "symbol, cands",
     [
-        ("NOV.DE", ["NOVO-B.CO", "NVO"]),  # home first, then the US line
-        ("NOVO-B.CO", ["NVO"]),  # a home line: only its US line
-        ("NVO", ["NOVO-B.CO"]),
-        ("TTE.PA", ["TTE"]),
+        ("GE9.DE", ["GMAB.CO", "GMAB"]),  # home first, then the US line
+        ("GMAB.CO", ["GMAB"]),  # a home line: only its US line
+        ("GMAB", ["GMAB.CO"]),
+        ("SAN.PA", ["SNY"]),
         ("IWDA.AS", []),  # a fund: no research line
         ("ZZZZ", []),  # not in the pack
     ],
@@ -229,11 +277,11 @@ def test_research_candidates(db, symbol, cands):
 @pytest.mark.parametrize(
     "symbol, tickers",
     [
-        ("NOV.DE", ["NVO", "NOV.DE", "NOVO-B.CO"]),  # never NOV, a different company
-        ("TTE.PA", ["TTE", "TTE.PA"]),
-        ("REP.MC", ["REPYY", "REP.MC"]),
+        ("GE9.DE", ["GMAB", "GE9.DE", "GMAB.CO"]),  # never the bare GE9
+        ("SAN.PA", ["SNY", "SAN.PA"]),
+        ("IBE.MC", ["IBDRY", "IBE.MC"]),
         ("MSF.DE", ["MSFT", "MSF.DE"]),
-        ("BNP.PA", ["BNP.PA"]),  # no US line: its own full ticker, nothing shorter
+        ("ACA.PA", ["ACA.PA"]),  # no US line: its own full ticker, nothing shorter
         ("IWDA.AS", ["IWDA.AS"]),
         ("NVDA", ["NVDA"]),
         ("BRK-B", ["BRK-B"]),
@@ -248,5 +296,5 @@ def test_logo_tickers_name_the_company(db, symbol, tickers):
 
 def test_logo_tickers_without_a_pack(tmp_path, monkeypatch):
     monkeypatch.setattr(sdb, "db_path", lambda: tmp_path / "missing.sqlite")
-    assert sdb.logo_tickers("SU.PA") == ["SU.PA"]
+    assert sdb.logo_tickers("AI.PA") == ["AI.PA"]
     assert sdb.logo_tickers("AAPL") == ["AAPL"]

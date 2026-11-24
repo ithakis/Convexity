@@ -1,5 +1,5 @@
 """Yahoo sometimes answers a share's ``.info`` without its ``financialData``
-module (MU, 2026-10-30: 45 analysts, but the stock window read "no analyst
+module (2026-10-30, a US large cap with 45 analysts, but the stock window read "no analyst
 targets" and n/a fundamentals, and σ/μ dropped the analysts' α). Such an
 answer is unknown, never "no analysts": it is asked again, kept briefly
 only, and never overwrites a saved row's fundamentals. Synthetic numbers,
@@ -11,11 +11,11 @@ from convexity import analyst_targets as at
 from convexity import cache, fetcher, helpers, options_density, persistence
 from convexity.helpers import fundamentals_missing
 
-HEALTHY = {"quoteType": "EQUITY", "longName": "Micron Technology, Inc.", "currency": "USD",
+HEALTHY = {"quoteType": "EQUITY", "longName": "Advanced Micro Devices, Inc.", "currency": "USD",
            "financialCurrency": "USD", "totalRevenue": 1.3e11, "targetMeanPrice": 150.0,
            "numberOfAnalystOpinions": 45, "returnOnEquity": 0.3, "recommendationMean": 1.4}  # fmt: skip
 # What Yahoo sent: identity and multiples, nothing from financialData.
-DEGRADED = {"quoteType": "EQUITY", "longName": "Micron Technology, Inc.", "currency": "USD",
+DEGRADED = {"quoteType": "EQUITY", "longName": "Advanced Micro Devices, Inc.", "currency": "USD",
             "trailingPE": 12.0}  # fmt: skip
 
 
@@ -53,9 +53,9 @@ def test_an_empty_answer_for_a_share_is_unknown_and_kept_briefly(monkeypatch):
     monkeypatch.setattr(
         at, "_cache_put", lambda k, v, ttl: (puts.append((v, ttl)), real(k, v, ttl))
     )
-    assert at.consensus("MU", tk=Tk("MU", {})) is None
+    assert at.consensus("AMD", tk=Tk("AMD", {})) is None
     assert puts == [({"v": None, "unknown": True}, at.UNKNOWN_TTL)]
-    assert at.unknown("MU") and not at.unknown("NVDA")
+    assert at.unknown("AMD") and not at.unknown("NVDA")
 
 
 def test_a_secondary_line_without_targets_is_a_real_none(monkeypatch):
@@ -75,14 +75,14 @@ def test_a_fund_is_never_unknown(monkeypatch):
 def test_degraded_info_falls_back_to_financial_data_alone():
     """The detail path passes its .info; without fundamentals it is not
     read as "no targets": financialData is asked on its own."""
-    b = at.consensus("MU", tk=Tk("MU", {"current": 100.0, "mean": 150.0}), info=DEGRADED)
+    b = at.consensus("AMD", tk=Tk("AMD", {"current": 100.0, "mean": 150.0}), info=DEGRADED)
     assert b and b["mean"] == 150.0
 
 
 def test_a_cached_miss_never_outranks_a_healthy_answer():
-    at.consensus("MU", tk=Tk("MU", {}))
-    assert at.unknown("MU")
-    b = at.consensus("MU", tk=Tk("MU", {}), info=HEALTHY)
+    at.consensus("AMD", tk=Tk("AMD", {}))
+    assert at.unknown("AMD")
+    b = at.consensus("AMD", tk=Tk("AMD", {}), info=HEALTHY)
     assert b and b["mean"] == 150.0
 
 
@@ -98,17 +98,17 @@ def test_safe_info_asks_once_more_and_keeps_the_good_answer(monkeypatch):
     answers = [dict(HEALTHY)]
     monkeypatch.setattr(fetcher.time, "sleep", lambda s: None)
     monkeypatch.setattr(fetcher.yf, "Ticker", lambda s: InfoTk(s, answers.pop(0)))
-    info = fetcher._safe_info(InfoTk("MU", dict(DEGRADED)))
+    info = fetcher._safe_info(InfoTk("AMD", dict(DEGRADED)))
     assert info["totalRevenue"] == 1.3e11 and not info.get("_fundamentals_missing")
 
 
 def test_safe_info_marks_an_answer_that_stays_degraded(monkeypatch):
     monkeypatch.setattr(fetcher.time, "sleep", lambda s: None)
     monkeypatch.setattr(fetcher.yf, "Ticker", lambda s: InfoTk(s, dict(DEGRADED)))
-    assert fetcher._safe_info(InfoTk("MU", dict(DEGRADED)))["_fundamentals_missing"]
+    assert fetcher._safe_info(InfoTk("AMD", dict(DEGRADED)))["_fundamentals_missing"]
     # A healthy share and a fund are read once.
     monkeypatch.setattr(fetcher.yf, "Ticker", lambda s: pytest.fail("no retry expected"))
-    assert not fetcher._safe_info(InfoTk("MU", dict(HEALTHY))).get("_fundamentals_missing")
+    assert not fetcher._safe_info(InfoTk("AMD", dict(HEALTHY))).get("_fundamentals_missing")
     assert not fetcher._safe_info(InfoTk("SPY", {"quoteType": "ETF"})).get("_fundamentals_missing")
 
 
@@ -119,7 +119,7 @@ def test_a_degraded_research_answer_is_kept_briefly(monkeypatch):
     )
     monkeypatch.setattr(fetcher.yf, "Ticker", lambda s: None)
     monkeypatch.setattr(fetcher, "_cache_put", lambda k, v, ttl: puts.append(ttl))
-    fetcher._research_info("MU")
+    fetcher._research_info("AMD")
     assert puts == [fetcher._DEGRADED_TTL]
 
 
@@ -137,25 +137,25 @@ def test_a_degraded_candidate_never_records_no_research_line(monkeypatch):
 
 # ------------------------------------------------------------- the saved row
 def test_a_degraded_row_keeps_the_last_saved_fundamentals():
-    saved = {"symbol": "MU", "price": 90.0, "n_analysts": 45.0, "target_mean_price": 150.0,
+    saved = {"symbol": "AMD", "price": 90.0, "n_analysts": 45.0, "target_mean_price": 150.0,
              "target_source": "firms", "roe": 0.3, "rec_key": "strong_buy"}  # fmt: skip
-    persistence.save_view("Test", "MU", [saved], set_last=False)
-    out = {"symbol": "MU", "price": 100.0, "n_analysts": None, "target_mean_price": None,
+    persistence.save_view("Test", "AMD", [saved], set_last=False)
+    out = {"symbol": "AMD", "price": 100.0, "n_analysts": None, "target_mean_price": None,
            "roe": None, "rec_key": None}  # fmt: skip
-    fetcher._carry_fundamentals(out, "MU")
+    fetcher._carry_fundamentals(out, "AMD")
     assert out["price"] == 100.0  # this fetch's price stands
     assert out["n_analysts"] == 45.0 and out["target_mean_price"] == 150.0 and out["roe"] == 0.3
     assert out["fundamentals_asof"]
-    fresh = {"symbol": "MU", "n_analysts": 44.0}
-    fetcher._carry_fundamentals(fresh, "MU")
+    fresh = {"symbol": "AMD", "n_analysts": 44.0}
+    fetcher._carry_fundamentals(fresh, "AMD")
     assert fresh["n_analysts"] == 44.0  # only gaps are filled
 
 
 # ------------------------------------------------------------------ σ/μ
 def test_density_knows_when_analysts_were_withheld(monkeypatch):
     monkeypatch.setattr(fetcher, "analyst_line", lambda s: None)
-    at.consensus("MU", tk=Tk("MU", {}))
-    assert options_density._analysts_unknown("MU", "MU")
+    at.consensus("AMD", tk=Tk("AMD", {}))
+    assert options_density._analysts_unknown("AMD", "AMD")
     assert not options_density._analysts_unknown("NVDA", "NVDA")
     assert options_density.UNKNOWN_TTL < options_density.TTL
 
@@ -176,17 +176,17 @@ FULL_TARGETS = {"current": 100.0, "mean": 130.0, "median": 128.0, "low": 90.0, "
 def test_a_failed_info_is_never_read_as_no_analysts(info):
     # tk.info raised, so σ/μ passes {} (or _safe_info's fast_info gaps): the
     # targets are still asked for, not recorded as "none" for half an hour.
-    block = at.consensus("MU", tk=Tk("MU", FULL_TARGETS), info=info)
+    block = at.consensus("AMD", tk=Tk("AMD", FULL_TARGETS), info=info)
     assert block and block["mean"] == 130.0
-    cache._CACHE.pop("analyst_targets|MU", None)
-    assert at.consensus("MU", tk=Tk("MU", {}), info=info) is None
-    assert at.unknown("MU")
+    cache._CACHE.pop("analyst_targets|AMD", None)
+    assert at.consensus("AMD", tk=Tk("AMD", {}), info=info) is None
+    assert at.unknown("AMD")
 
 
 def test_a_real_answer_without_targets_is_still_a_real_none():
     info = {"quoteType": "EQUITY", "financialCurrency": "USD", "totalRevenue": 1e9}
-    assert at.consensus("MU", tk=Tk("MU", {}), info=info) is None
-    assert not at.unknown("MU")
+    assert at.consensus("AMD", tk=Tk("AMD", {}), info=info) is None
+    assert not at.unknown("AMD")
 
 
 # ------------------------------------------------------- the research line
@@ -199,28 +199,28 @@ def _research(monkeypatch, infos):
 
 
 def test_one_degraded_line_blocks_the_no_research_line_record(monkeypatch):
-    # MU has the analysts but didn't say; its other line said it has none.
-    _research(monkeypatch, {"MU": {**DEGRADED, "_fundamentals_missing": True},
-                            "MU.MX": {**HEALTHY, "numberOfAnalystOpinions": 0}})  # fmt: skip
-    assert fetcher.research_line("MTE1.DE") is None
-    assert "MTE1.DE" not in fetcher._research_load()
+    # AMD has the analysts but didn't say; its other line said it has none.
+    _research(monkeypatch, {"AMD": {**DEGRADED, "_fundamentals_missing": True},
+                            "AMD.MX": {**HEALTHY, "numberOfAnalystOpinions": 0}})  # fmt: skip
+    assert fetcher.research_line("ZZA1.DE") is None
+    assert "ZZA1.DE" not in fetcher._research_load()
     # Yahoo recovers: the answer is there at once, not a day later.
-    _research(monkeypatch, {"MU": HEALTHY, "MU.MX": {**HEALTHY, "numberOfAnalystOpinions": 0}})
-    assert fetcher.research_line("MTE1.DE") == "MU"
-    assert fetcher._research_load()["MTE1.DE"][1] == "MU"
+    _research(monkeypatch, {"AMD": HEALTHY, "AMD.MX": {**HEALTHY, "numberOfAnalystOpinions": 0}})
+    assert fetcher.research_line("ZZA1.DE") == "AMD"
+    assert fetcher._research_load()["ZZA1.DE"][1] == "AMD"
 
 
 def test_a_healthy_line_with_fewer_analysts_is_used_but_not_recorded(monkeypatch):
-    _research(monkeypatch, {"MU": {**DEGRADED, "_fundamentals_missing": True},
-                            "MU.MX": {**HEALTHY, "numberOfAnalystOpinions": 3}})  # fmt: skip
-    assert fetcher.research_line("MTE2.DE") == "MU.MX"
-    assert "MTE2.DE" not in fetcher._research_load()
+    _research(monkeypatch, {"AMD": {**DEGRADED, "_fundamentals_missing": True},
+                            "AMD.MX": {**HEALTHY, "numberOfAnalystOpinions": 3}})  # fmt: skip
+    assert fetcher.research_line("ZZA2.DE") == "AMD.MX"
+    assert "ZZA2.DE" not in fetcher._research_load()
 
 
 def test_an_empty_answer_blocks_the_record_too(monkeypatch):
-    _research(monkeypatch, {"MU": {}, "MU.MX": {**HEALTHY, "numberOfAnalystOpinions": 0}})
-    assert fetcher.research_line("MTE3.DE") is None
-    assert "MTE3.DE" not in fetcher._research_load()
+    _research(monkeypatch, {"AMD": {}, "AMD.MX": {**HEALTHY, "numberOfAnalystOpinions": 0}})
+    assert fetcher.research_line("ZZA3.DE") is None
+    assert "ZZA3.DE" not in fetcher._research_load()
 
 
 # ---------------------------------------- a line that never carries the module
@@ -287,22 +287,22 @@ def test_a_line_answering_so_for_hours_is_the_line(info_ticker, monkeypatch):
     (6, 7 * 3600.0),  # a name asked rarely: each gap starts over
 ])  # fmt: skip
 def test_a_lapse_is_not_a_thin_line(info_ticker, monkeypatch, answers, every):
-    _, got = _thin_run(monkeypatch, "MU", answers, every)
+    _, got = _thin_run(monkeypatch, "AMD", answers, every)
     assert got.get("_fundamentals_missing")
-    assert not helpers.thin_line("MU")
+    assert not helpers.thin_line("AMD")
 
 
 def test_a_stale_thin_verdict_expires(info_ticker, monkeypatch):
-    t, _ = _thin_run(monkeypatch, "MU")
+    t, _ = _thin_run(monkeypatch, "AMD")
     t[0] += helpers._THIN_GAP_S + 1
-    assert not helpers.thin_line("MU") and helpers.fundamentals_retry_due("MU")
+    assert not helpers.thin_line("AMD") and helpers.fundamentals_retry_due("AMD")
 
 
 def test_a_good_answer_ends_the_run(info_ticker, monkeypatch):
-    _thin_run(monkeypatch, "MU")
+    _thin_run(monkeypatch, "AMD")
     Info.asks, Info.answers = 0, [HEALTHY]
-    assert not fetcher._safe_info(Info("MU")).get("_fundamentals_missing")
-    assert not helpers.thin_line("MU") and helpers.fundamentals_retry_due("MU")
+    assert not fetcher._safe_info(Info("AMD")).get("_fundamentals_missing")
+    assert not helpers.thin_line("AMD") and helpers.fundamentals_retry_due("AMD")
 
 
 # ------------------------------------------------- an .info that raised (a 429)
@@ -315,7 +315,7 @@ class Raises(Info):
 
 @pytest.mark.parametrize("cls", [Raises])
 def test_a_failed_info_is_flagged_not_a_row_with_no_analysts(info_ticker, cls):
-    got = fetcher._safe_info(cls("MU"))
+    got = fetcher._safe_info(cls("AMD"))
     assert got["_fundamentals_missing"]
     assert Info.asks == 1  # a throttled ask isn't repeated at once
 
@@ -325,19 +325,19 @@ def test_failed_infos_never_add_up_to_a_thin_line(info_ticker, monkeypatch):
     monkeypatch.setattr(helpers.time, "time", lambda: t[0])
     for _ in range(10):
         t[0] += 3600.0
-        assert fetcher._safe_info(Raises("MU"))["_fundamentals_missing"]
-    assert not helpers.thin_line("MU") and "MU" not in helpers._THIN_RUN
+        assert fetcher._safe_info(Raises("AMD"))["_fundamentals_missing"]
+    assert not helpers.thin_line("AMD") and "AMD" not in helpers._THIN_RUN
 
 
 def test_a_failed_info_keeps_the_saved_rows_fundamentals(info_ticker, monkeypatch):
-    persistence.save_view("Test", "MU", [{"symbol": "MU", "price": 90.0, "n_analysts": 45.0,
+    persistence.save_view("Test", "AMD", [{"symbol": "AMD", "price": 90.0, "n_analysts": 45.0,
                                           "target_mean_price": 150.0, "operating_margin": 0.3}],
                           set_last=False)  # fmt: skip
-    info = fetcher._safe_info(Raises("MU"))
-    out = {"symbol": "MU", "price": 100.0, "n_analysts": None, "target_mean_price": None,
+    info = fetcher._safe_info(Raises("AMD"))
+    out = {"symbol": "AMD", "price": 100.0, "n_analysts": None, "target_mean_price": None,
            "operating_margin": None}  # fmt: skip
     if info.get("_fundamentals_missing"):
-        fetcher._carry_fundamentals(out, "MU")
+        fetcher._carry_fundamentals(out, "AMD")
     assert out["n_analysts"] == 45.0 and out["operating_margin"] == 0.3 and out["price"] == 100.0
 
 

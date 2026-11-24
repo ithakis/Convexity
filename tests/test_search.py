@@ -97,14 +97,14 @@ def test_an_unsupported_phrase_is_kept_and_warned_about(yahoo):
 def test_names_and_categories_never_call_yahoo(yahoo):
     assert s.search("microsft")["results"][0]["ticker"] == "MSFT"
     out = s.search("european banks")
-    assert [c["ticker"] for c in out["results"]] == ["HSBA.L", "BNP.PA", "DBK.DE"]
+    assert [c["ticker"] for c in out["results"]] == ["HSBA.L", "ACA.PA", "DBK.DE"]
     assert {"kind": "regions", "label": "Region: Europe"} in out["chips"]
-    # A company shows its most traded listing (NVO), its home and country
-    # kept; NOV.DE trades too little to list. A typed ticker stays as typed.
-    nvo = s.search("novo nordisk")["results"][0]
-    assert (nvo["ticker"], nvo["exchange_name"], nvo["region"]) == ("NVO", "NYSE", "dk")
-    assert [a["ticker"] for a in nvo["alternates"]] == ["NOVO-B.CO"]
-    assert s.search("NOVO-B.CO")["results"][0]["ticker"] == "NOVO-B.CO"
+    # A company shows its most traded listing (GMAB), its home and country
+    # kept; GE9.DE trades too little to list. A typed ticker stays as typed.
+    gmab = s.search("genmab")["results"][0]
+    assert (gmab["ticker"], gmab["exchange_name"], gmab["region"]) == ("GMAB", "NYSE", "dk")
+    assert [a["ticker"] for a in gmab["alternates"]] == ["GMAB.CO"]
+    assert s.search("GMAB.CO")["results"][0]["ticker"] == "GMAB.CO"
     assert yahoo["calls"] == []
 
 
@@ -216,23 +216,23 @@ def test_a_theme_goes_to_the_llm_and_its_picks_are_verified(monkeypatch, yahoo):
         "types": [],
         "rank": {"field": "mcap", "dir": "desc", "why": ""},
         "picks": [
-            {"ticker": "LLY", "name": "Eli Lilly", "why": "Tirzepatide"},
-            {"ticker": "NVO", "name": "Novo Nordisk", "why": "Semaglutide"},
+            {"ticker": "LLY", "name": "Eli Lilly", "why": "Antibodies"},
+            {"ticker": "GMAB", "name": "Genmab", "why": "Antibody platform"},
             {"ticker": "ZZZZ", "name": "Made Up Pharma", "why": "hallucinated"},
             {"ticker": "MSFT", "name": "Microsoft", "why": "off theme"},  # Software
         ],
         "ignored": [],
     }
     calls = _ai(monkeypatch, reply)
-    out = s.search("GLP-1 drug makers")
+    out = s.search("antibody drug makers")
     eu = s.search("", query={**out["query"], "regions": ["dk"]})  # a chip edit: home region
-    assert [c["ticker"] for c in eu["results"]] == ["NVO"]  # a Danish company, its US line
+    assert [c["ticker"] for c in eu["results"]] == ["GMAB"]  # a Danish company, its US line
     assert calls and calls[0]["record"] is False and calls[0]["tag"] == "search"
     assert "de" in str(calls[0]["schema"])  # the field enum is the registry
     assert out["query"]["engine"] == "ai" and out["query"]["kind"] == "theme"
     assert [(c["ticker"], c["why"]) for c in out["results"]] == [
-        ("LLY", "Tirzepatide"),
-        ("NVO", "Semaglutide"),  # shown as its most traded listing
+        ("LLY", "Antibodies"),
+        ("GMAB", "Antibody platform"),  # shown as its most traded listing
     ]
     assert any("1 AI-named company not found" in w for w in out["warnings"])
     assert any("outside the theme's sectors and industries: MSFT" in w for w in out["warnings"])
@@ -301,7 +301,7 @@ def test_api_search_round_trip(yahoo):
         assert post({"q": "microsft"})["results"][0]["ticker"] == "MSFT"
         edited = post({"q": "european banks"})["query"]
         edited["regions"] = ["fr"]
-        assert [c["ticker"] for c in post({"query": edited})["results"]] == ["BNP.PA"]
+        assert [c["ticker"] for c in post({"query": edited})["results"]] == ["ACA.PA"]
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -339,9 +339,9 @@ def test_ai_is_skipped_while_nim_is_rate_limited(monkeypatch, yahoo):
 def test_an_ai_theme_carries_no_forced_rank(monkeypatch, yahoo):
     reply = {"kind": "theme", "filters": [], "sectors": [], "industries": [], "regions": [],
              "types": [], "rank": {"field": "roe", "dir": "desc", "why": "x"},
-             "picks": [{"ticker": "LLY", "name": "Eli Lilly", "why": "GLP-1"}], "ignored": []}  # fmt: skip
+             "picks": [{"ticker": "LLY", "name": "Eli Lilly", "why": "Antibodies"}], "ignored": []}  # fmt: skip
     _ai(monkeypatch, reply)
-    out = s.search("GLP-1 drug makers")
+    out = s.search("antibody drug makers")
     assert out["query"]["rank"] is None and not any(c["kind"] == "rank" for c in out["chips"])
 
 
@@ -356,10 +356,10 @@ def test_name_results_drop_far_weaker_matches(yahoo):
 
 # ------------------------------------------------------------------ pasted lists
 def test_a_pasted_list_resolves_each_part_and_names_the_misses(yahoo):
-    out = s.search("NVO, microsft\nZZZZ")
+    out = s.search("GMAB, microsft\nZZZZ")
     assert out["query"]["kind"] == "list" and out["query"]["engine"] == "rules"
-    # An exact ticker keeps that listing (NVO, not the home NOVO-B.CO).
-    assert [c["ticker"] for c in out["results"]] == ["NVO", "MSFT"]
+    # An exact ticker keeps that listing (GMAB, not the home GMAB.CO).
+    assert [c["ticker"] for c in out["results"]] == ["GMAB", "MSFT"]
     assert out["warnings"] == ["Not found: ZZZZ."]
     assert yahoo["calls"] == []
 
@@ -369,12 +369,12 @@ def test_criteria_with_commas_are_not_a_list(yahoo):
 
 
 def test_tickers_separated_by_spaces_are_a_list(yahoo):
-    out = s.search("NVO MSFT")
+    out = s.search("GMAB MSFT")
     assert out["query"]["kind"] == "list"
-    assert [c["ticker"] for c in out["results"]] == ["NVO", "MSFT"]
+    assert [c["ticker"] for c in out["results"]] == ["GMAB", "MSFT"]
 
 
-@pytest.mark.parametrize("text", ["NVO ZZZZ", "US REITS", "nvo msft", "NVO, MSFT ZZZZ"])
+@pytest.mark.parametrize("text", ["GMAB ZZZZ", "US REITS", "gmab msft", "GMAB, MSFT ZZZZ"])
 def test_a_space_list_needs_every_token_to_be_an_exact_upper_case_ticker(text):
     assert s._ticker_run(text) is None
 
@@ -385,7 +385,7 @@ def test_a_two_word_description_goes_to_the_llm(monkeypatch, yahoo):
     description. A real two-word name still never calls the model."""
     calls = _ai(monkeypatch, None)
     s.parse("microsoft corporation")
-    s.parse("novo nordsk")
+    s.parse("genmb")
     assert calls == []
     s.parse("cybersecurity companies")
     assert len(calls) == 1
@@ -528,7 +528,7 @@ _FUNDS = [
     ["SPY", "SPDR S&P 500 ETF Trust", "etf", "PCX", "us", None, None, None, None, 908, 1],
     ["SPPE.DE", "SPDR S&P 500 UCITS ETF", "etf", "GER", "de", None, None, None, None, 909, 1],
     ["5425.TWO", "Taiwan Semiconductor Co., Ltd.", "stock", "TWO", "tw", "Technology", "Semiconductors", 8e8, None, 910, 1],
-    ["MU", "Micron Technology, Inc.", "stock", "NMS", "us", "Technology", "Semiconductors", 1.2e12, None, 911, 1],
+    ["AVGO", "Broadcom Inc.", "stock", "NMS", "us", "Technology", "Semiconductors", 1.2e12, None, 911, 1],
 ]  # fmt: skip
 
 
@@ -545,14 +545,14 @@ def _tickers(text):
     return [c["ticker"] for c in out["results"]], out["warnings"]
 
 
-def test_the_owners_paste_resolves_every_part(funds, yahoo):
+def test_a_long_paste_resolves_every_part(funds, yahoo):
     """Two six-word fund names used to fail the old five-words-a-part rule, and
     the rule parser then read Nasdaq / ETF / Taiwan / Technology as a screen."""
     text = ("Invesco NASDAQ 100 Acc UCITS ETF, NVIDIA, HSBC S&P 500 Dist UCITS ETF, Apple, "
-            "Alphabet (Class A), Taiwan Semiconductor, Micron Technology")  # fmt: skip
+            "Alphabet (Class A), Taiwan Semiconductor, Broadcom")  # fmt: skip
     # TSMC, not the $0.8B "Taiwan Semiconductor Co." (here its home line: the
     # test pack has no ADR volume to prefer TSM).
-    assert _tickers(text) == (["EQAC.SW", "NVDA", "HSPX.L", "AAPL", "GOOGL", "2330.TW", "MU"], [])
+    assert _tickers(text) == (["EQAC.SW", "NVDA", "HSPX.L", "AAPL", "GOOGL", "2330.TW", "AVGO"], [])
 
 
 @pytest.mark.parametrize(
@@ -577,8 +577,8 @@ def test_category_words_alone_stay_a_screen(funds, yahoo):
 
 
 def test_a_long_paste_is_not_cut_at_300_characters(funds, yahoo):
-    text = ", ".join(["Apple Inc"] * 40 + ["Micron Technology"])
-    assert len(text) > 300 and _tickers(text)[0] == ["AAPL", "MU"]
+    text = ", ".join(["Apple Inc"] * 40 + ["Broadcom"])
+    assert len(text) > 300 and _tickers(text)[0] == ["AAPL", "AVGO"]
 
 
 # Review findings (2026-10-19): guesses, ticker forms, thin fund lines, themes.
@@ -630,9 +630,9 @@ def test_every_card_says_how_it_matched(more):
 
 
 def test_ticker_forms_brokers_and_spreadsheets_write(more):
-    text = "NOV IBIS, BRK.B, AAPL US Equity, MSF GY Equity, Microsoft Corporation (MSFT), Nvidia (NVDA)"
+    text = "GE9 IBIS, BRK.B, AAPL US Equity, MSF GY Equity, Microsoft Corporation (MSFT), Nvidia (NVDA)"
     got = [(c["ticker"], c["match"]) for c in _list(text)["results"]]
-    assert got == [("NOV.DE", "exact"), ("BRK-B", "exact"), ("AAPL", "exact"), ("MSF.DE", "exact"),
+    assert got == [("GE9.DE", "exact"), ("BRK-B", "exact"), ("AAPL", "exact"), ("MSF.DE", "exact"),
                    ("MSFT", "exact"), ("NVDA", "exact")]  # fmt: skip
     # The ticker in brackets belongs to another company: the name decides.
     assert [c["ticker"] for c in _list("BRK/B, Apple Inc. (NVDA)")["results"]] == ["BRK-B", "AAPL"]
@@ -663,8 +663,8 @@ def test_share_classes_duplicates_and_csv_rows(more):
     assert [(c["ticker"], c["match"]) for c in out["results"]] == [("AAPL", "exact")]
     assert out["warnings"] == []
     # The row's ticker is another listing of the named company: that listing.
-    out = _list("Novo Nordisk, NOV IBIS, Microsoft")
-    assert [c["ticker"] for c in out["results"]] == ["NOV.DE", "MSFT"] and out["warnings"] == []
+    out = _list("Genmab, GE9 IBIS, Microsoft")
+    assert [c["ticker"] for c in out["results"]] == ["GE9.DE", "MSFT"] and out["warnings"] == []
     # Unless the name asks for a share class: then both, as typed.
     assert [c["ticker"] for c in _list("GOOGL, Alphabet Class C")["results"]] == ["GOOGL", "GOOG"]
 

@@ -14,7 +14,7 @@ and publishes two files to the rolling `reference-pack` release:
 Each row carries ticker, name, type, exchange, region, sector, industry,
 size in USD (market cap; net assets for funds), a company group id and a
 `home` flag. Listings of one company share a group; exactly one of them is
-its home listing (NOVO-B.CO, not NVO or NOV.DE). Search shows home listings
+its home listing (GMAB.CO, not GMAB or GE9.DE). Search shows home listings
 and offers the rest as alternates.
 
 App side
@@ -410,7 +410,7 @@ def _fold(s: str) -> str:
 
 
 def name_key(name: str) -> str:
-    """'Novo Nordisk A/S' -> 'novo nordisk': folded, legal forms dropped."""
+    """'Genmab A/S' -> 'genmab': folded, legal forms dropped."""
     f = _fold(name)
     return " ".join(_SUFFIX.sub(" ", f).split()) or f
 
@@ -533,7 +533,7 @@ def same_company(a: str | None, b: str | None) -> bool:
         return True
     # Or the same first two words, when they name the company rather than
     # its kind or place: one company's lines under a translated legal name
-    # ("Richter Gedeon Vegyeszeti Gyar" on Stuttgart), but Bank of America
+    # ("Richter Gedeon Vegyeszeti Gyar" on Stuttgart), but Bank of New York
     # is not Bank of Ireland, nor China Resources Beverage China Resources
     # Land (adversarial review, 2026-10-10).
     return ka[:2] == kb[:2] and all(w not in _GENERIC and len(w) > 2 for w in ka[:2])
@@ -618,8 +618,8 @@ def _hit(row, score: float) -> Hit:
 
 
 def lookup(query: str, *, limit: int = 5, min_score: float = 72.0) -> list[Hit]:
-    """Fuzzy listing search. An exact ticker (any listing, NVO as well as
-    NOVO-B.CO) comes first; names match home listings only."""
+    """Fuzzy listing search. An exact ticker (any listing, GMAB as well as
+    GMAB.CO) comes first; names match home listings only."""
     q = (query or "").strip()
     return list(_lookup(q, min_score, _sig())[:limit]) if q else []
 
@@ -771,8 +771,8 @@ def listings(group: int) -> list[Hit]:
 
 
 def top(group: int, exchanges=()) -> Hit | None:
-    """The company's most traded listing — what a card shows and adds (NVO
-    for Novo Nordisk, 7203.T for Toyota); its home listing when none trades.
+    """The company's most traded listing — what a card shows and adds (TSM
+    for Taiwan Semiconductor, 7203.T for Toyota); its home listing when none trades.
     With `exchanges`, the most traded listing there (SKHY for SK hynix on a
     Nasdaq screen), when it has one."""
     rows = _listings(group)
@@ -820,7 +820,7 @@ def research_candidates(symbol: str) -> list[str]:
     its US line, home first. Pack only, never the network; empty for a
     listing that is its own home, or one the pack doesn't group.
 
-    NOV.DE -> [NOVO-B.CO, NVO]; CCC3.DE -> [KO]."""
+    GE9.DE -> [GMAB.CO, GMAB]; APC.DE -> [AAPL]."""
     s = (symbol or "").upper()
     me = get(s) if s else None
     if me is None or me.group == YAHOO_GROUP or me.type != "stock":
@@ -839,9 +839,9 @@ def logo_tickers(symbol: str) -> list[str]:
     """Which tickers to ask the logo hosts for, best first: the company's US
     line, the listing itself, then its other lines (research_candidates).
     Always this company's: the logo hosts key on the exact ticker, so cutting
-    the suffix off asks about whoever owns the short one (SU.PA is Schneider,
-    SU is Suncor). A US line usually beats the listing's own image, which can
-    be an old brand (TTE.PA) or a tiny icon (AIR.PA). Pack only, never the
+    the suffix off asks about whoever owns the short one (AI.PA is Air Liquide,
+    AI is C3.ai). A US line usually beats the listing's own image, which can
+    be an old brand or a tiny icon (AIR.PA). Pack only, never the
     network; without a pack it is just the symbol."""
     s = (symbol or "").strip().upper()
     if not s:
@@ -859,19 +859,19 @@ def get(ticker: str) -> Hit | None:
     return _hit(row, 100.0) if row else None
 
 
-# Exchange lines before OTC ones when a company has several US lines (TTE
-# over a TTE pink sheet); the home line beats both (KO for CCC3.DE).
+# Exchange lines before OTC ones when a company has several US lines (SNY
+# over a SNY pink sheet); the home line beats both (AAPL for APC.DE).
 _US_EXCHANGES = {"NYQ", "NMS", "NGM", "NCM", "NAS", "ASE", "BTS", "PCX"}
 # US lines found off the hot path by a name lookup (the pack misses some
-# ADRs: SCGLY for Société Générale). {symbol: US ticker}, this process only.
+# ADRs: CRARY for Credit Agricole). {symbol: US ticker}, this process only.
 _US_LEARNED: dict[str, str] = {}
 
 
 def us_line(symbol: str) -> str | None:
     """The same company's US line, for sources that only cover US tickers
-    (Finnhub's free plan answers 403 to REP.MC, but REPYY has its analysts
-    and news). A US ticker is its own line; a company with none (Philogen,
-    a UCITS ETF) is None. Reads only the pack (and what `learn_us_line`
+    (Finnhub's free plan answers 403 to IBE.MC, but IBDRY has its analysts
+    and news). A US ticker is its own line; a company with none (a small
+    European name, a UCITS ETF) is None. Reads only the pack (and what `learn_us_line`
     found), never the network: `fetch_one`'s hot path calls it."""
     s = (symbol or "").upper()
     if s in _US_LEARNED:
@@ -881,8 +881,8 @@ def us_line(symbol: str) -> str | None:
 
 def discover_us_line(symbol: str) -> str | None:
     """`us_line`, plus Yahoo's live Lookup by the company's name when the
-    pack has no US line for a company that may have one (SCGLY, Société
-    Générale's ADR, is missing from the screener). A network call, so never
+    pack has no US line for a company that may have one (CRARY, Credit
+    Agricole's ADR, is missing from the screener). A network call, so never
     from the hot path: the news refresh asks, and the answer (a miss too)
     is kept for this process, where `us_line` then finds it."""
     s = (symbol or "").upper()
@@ -897,7 +897,7 @@ def discover_us_line(symbol: str) -> str | None:
     except Exception:
         return None  # a timeout is asked again next time
     us = [h for h in hits if _looks_us(h.ticker) and same_company(h.name, me.name)]
-    # Exchange lines, then sponsored ADRs (five letters ending in Y: SCGLY,
+    # Exchange lines, then sponsored ADRs (five letters ending in Y: CRARY,
     # not the ordinary-share pink sheet SCGLF), then Yahoo's order.
     us.sort(key=lambda h: (h.exchange not in _US_EXCHANGES, not h.ticker.endswith("Y")))
     _US_LEARNED[s] = us[0].ticker if us else ""
@@ -935,7 +935,7 @@ def us_lines(symbol: str) -> list[str]:
 
 
 # Yahoo's screener leaves `region` empty for its OTC "OID" board (1,029
-# lines, 2026-10-11): sponsored ADRs like NSRGY, ISNPY and SCGLY, which a
+# lines, 2026-10-11): sponsored ADRs like NSRGY, ISNPY and CRARY, which a
 # region = 'us' filter alone never saw. They count as US lines.
 @lru_cache(maxsize=2048)
 def _us_lines(s: str, sig) -> tuple[str, ...]:

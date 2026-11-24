@@ -309,7 +309,7 @@ _LENS = "-2 very negative, 0 neutral, +2 very positive."
 COLUMN_DEFS: dict[str, tuple[str, str, str]] = {
     "symbol": (
         "",
-        "Yahoo Finance ticker, with the exchange suffix outside the US (e.g. SHEL.L).",
+        "Yahoo Finance ticker, with the exchange suffix outside the US (e.g. BP.L).",
         "",
     ),
     "name": ("", "Company or fund name as Yahoo reports it.", ""),

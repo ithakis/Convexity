@@ -22,7 +22,7 @@ exchange, OTC, an international board or a depositary-receipt line); quoted
 in the reporting currency, unless that currency is USD — many foreign
 companies report in USD (Shell, Zurich, Genmab), so there it says nothing
 about home — and only if liquid; then the highest traded value (3-month
-average volume x price, in USD). So NOVO-B.CO over NVO, 2330.TW over TSM,
+average volume x price, in USD). So GMAB.CO over GMAB, 2330.TW over TSM,
 LLY over LLY.DE, ZURN.SW over ZURVY, 9988.HK/BABA over 89988.HK.
 
 A degraded run is never published: a sweep that returns fewer than 95% of
@@ -236,8 +236,8 @@ def group(listings: list[dict]) -> list[list]:
     """Pack rows: listings grouped into companies, one home listing each.
 
     A company is every listing with the same cleaned name, whatever Yahoo
-    calls its type (it files Canadian depositary receipts like NOVO.TO as
-    ETFs): NOVO-B.CO, NVO, NOV.DE and NOVO.TO; SPY and SPY.BA. Its sector,
+    calls its type (it files Canadian depositary receipts like GMAB.TO as
+    ETFs): GMAB.CO, GMAB, GE9.DE and GMAB.TO; SPY and SPY.BA. Its sector,
     industry and size fill in from whichever listing has them. Dropped:
     - stock/ETF groups with no primary listing at all (re-listings under a
       variant name: MOH.SG for LVMH, 0KZC.L for SPY),

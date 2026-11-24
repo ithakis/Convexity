@@ -6,7 +6,7 @@ Two benchmarks, both through the production transport (news_sentiment.
 read_headlines: strict json_schema, thinking off, two passes):
 
 1. Gold set — tests/data/news_gold.jsonl: ~150 real headlines from the app's
-   own cache across 50 tickers, hand-labelled with a lens and a direction
+   own cache across 50 tickers (a few US names swapped for other\n   companies, consistently, so the set does not mirror any real book),\n   hand-labelled with a lens and a direction
    (-1/0/+1). Several headlines appear twice with different targets on
    purpose (a Datadog story is `none` for NVDA and `financials` for DDOG):
    target attribution is the failure the old engine had. Headlines are

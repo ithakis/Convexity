@@ -78,7 +78,7 @@ def test_due_once_after_the_close_and_never_at_night_or_weekends():
 
 def test_due_follows_each_listing_market():
     london_morning = _utc(2026, 10, 13, 9, 0)  # 10:00 London, 05:00 New York
-    assert notify.due(london_morning, ["SHEL.L"], None) == "session"
+    assert notify.due(london_morning, ["BP.L"], None) == "session"
     assert notify.due(london_morning, ["AAPL"], None) is None
 
 
@@ -142,7 +142,7 @@ def test_plan_targets_notify(_clean):
 
 def test_more_than_three_fold_into_one(_clean):
     _armed()
-    ps = [_pos(s, 20.0 + i) for i, s in enumerate(["AAPL", "MSFT", "NVDA", "KO", "JNJ"])]
+    ps = [_pos(s, 20.0 + i) for i, s in enumerate(["AAPL", "MSFT", "NVDA", "PEP", "JNJ"])]
     assert notify.notify_rail(_att(ps), s=QUIET_OFF) == 5
     assert [m["kind"] for m in _clean] == ["item", "item", "item", "more"]
     assert _clean[-1]["title"] == "+2 more need a look" and _clean[-1]["key"] == notify.RAIL_KEY
@@ -173,7 +173,7 @@ def test_items_read_overnight_leave_no_summary_for_later(_clean, monkeypatch):
     monkeypatch.setattr(inv, "computed_page", lambda ccy=None: out)
     notify._quiet_ended(datetime.now(UTC), QUIET_OFF)
     assert _clean == []
-    assert notify.notify_rail(_att([_pos("MSFT", 24.0), _pos("KO", 24.0)]), s=QUIET_OFF) == 2
+    assert notify.notify_rail(_att([_pos("MSFT", 24.0), _pos("PEP", 24.0)]), s=QUIET_OFF) == 2
     assert [m["kind"] for m in _clean] == ["item", "item"]
 
 
@@ -419,9 +419,9 @@ def _recap_page(last: date = date(2026, 10, 16)):
     fri = "2026-10-16"
     ps = [_pos("NVDA", 30.0, xray={"day_date": fri, "week_pct": 6.2}),
           _pos("AAPL", 30.0, xray={"day_date": fri, "week_pct": -3.1}),
-          _pos("KO", 30.0, xray={"day_date": "2026-10-15", "week_pct": 9.0})]  # fmt: skip
-    entries = [{"type": "dividend", "date": "2026-10-14", "cash": 48.0, "symbol": "KO"},
-               {"type": "dividend", "date": "2026-10-09", "cash": 30.0, "symbol": "KO"}]  # fmt: skip
+          _pos("PEP", 30.0, xray={"day_date": "2026-10-15", "week_pct": 9.0})]  # fmt: skip
+    entries = [{"type": "dividend", "date": "2026-10-14", "cash": 48.0, "symbol": "PEP"},
+               {"type": "dividend", "date": "2026-10-09", "cash": 30.0, "symbol": "PEP"}]  # fmt: skip
     return {"ccy": "USD", "base_ccy": "USD", "positions": ps, "entries": entries,
             "benchmark": {"label": "S&P 500"},
             "series": {"dates": dates, "twr_index": idx, "bench_index": bench, "value": value, "flows": flows},
@@ -447,7 +447,7 @@ def test_recap_figures_are_the_pages_own():
         (ser["bench_index"][e] / ser["bench_index"][s] - 1) * 100
     )
     assert r["gain"] == pytest.approx(5 * 150.0 - 1_000.0)  # value change less the money put in
-    # KO's last close isn't that Friday: it can't be a mover (no made-up week).
+    # PEP's last close isn't that Friday: it can't be a mover (no made-up week).
     assert r["best"]["symbol"] == "NVDA" and r["worst"]["symbol"] == "AAPL"
     assert r["dividends"] == {"amount": 48.0, "ccy": "USD", "count": 1}
     assert r["needs_look"] == 2
@@ -498,7 +498,7 @@ def test_a_recap_is_not_sent_once_the_next_week_is_under_way(_clean, monkeypatch
 def test_recap_dividends_are_in_one_currency_or_a_dash():
     out = _recap_page()
     out["entries"] += [{"type": "dividend", "date": "2026-10-15", "cash": 10.0, "ccy": "GBP",
-                        "fx_rate": 1.3, "symbol": "SHEL.L"}]  # fmt: skip
+                        "fx_rate": 1.3, "symbol": "BP.L"}]  # fmt: skip
     r = notify.build_recap(out, date(2026, 10, 16), date(2026, 10, 17))
     assert r["dividends"] == {"amount": pytest.approx(61.0), "ccy": "USD", "count": 2}
     out["entries"][-1].pop("fx_rate")  # that day's rate: a fetch, so no total

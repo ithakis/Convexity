@@ -29,7 +29,7 @@ not reintroduce one; the engines answer different questions.
   retained set is `relevance.window_sample(60, min_recent=15)` — a
   window-spanning sample, not newest-N.
 - **yfinance `get_news` returns `[]` for every ticker** (2026-10-11, yfinance
-  1.7.0: Yahoo's `xhr/ncp` answers 404, KO included). `_yf_search_news` then
+  1.7.0: Yahoo's `xhr/ncp` answers 404, AAPL included). `_yf_search_news` then
   takes Yahoo's search-box news, keeping only items tagged with the ticker
   (`relatedTickers`): it covers US lines and returns nothing for European
   ones, so when the ticker finds nothing the company's name is searched

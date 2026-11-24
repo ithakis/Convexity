@@ -17,8 +17,8 @@ The rules that are load-bearing
 * **By time, not by Item.** Finnhub's filings carry no Items (no "2.02") and
   no exhibit list. Results 8-Ks are accepted minutes after the release
   (AAPL 16:30 for a 16:00 release, P&G 07:02), so the results filing is the
-  first 8-K accepted in [report time - 3 h, + 3 days] (a 6-K: + 7 days, SAP
-  files its quarterly 6-K 1-6 days late). Same-day ties prefer a file name
+  first 8-K accepted in [report time - 3 h, + 3 days] (a 6-K: + 7 days, some
+  foreign filers send their quarterly 6-K 1-6 days late). Same-day ties prefer a file name
   that looks like results; names that plainly aren't (remuneration report,
   AGM, buy-back...) are skipped. 281/282 reports in the research.
 * **The periodic form follows the fiscal quarter**: Q1-Q3 the first 10-Q
@@ -34,7 +34,7 @@ The rules that are load-bearing
   degraded `.info` gives no label, never a guessed one.
 * **The SEC line is the company's US line** (`symbol_db.us_line`): Finnhub's
   free plan answers US listings only, and a foreign company files through
-  its ADR (SAP.DE -> SAP, APC.DE -> AAPL).
+  its ADR (ASME.DE -> ASML, APC.DE -> AAPL).
 * **A failed call is never "none"** (the 2026-10-30 rule): `unavailable`,
   nothing cached. A genuine "no filings at all" (an unsponsored ADR) is
   cached a day. No key is a flag the page explains.
@@ -175,7 +175,7 @@ def fiscal(report_day: date, fye: date | None, naming: str | None = None) -> dic
     The quarter is the last quarter end on the fiscal-year grid at least 7
     days before the report. The fiscal YEAR's name is the company's own
     convention, which has no universal rule for years ending in January to
-    March: WMT and NVDA name theirs by the end (FY2026 ends Jan 2026), HD,
+    March: CRM and NVDA name theirs by the end (FY2026 ends Jan 2026), HD,
     TGT and LOW by the start (HD's fiscal 2025 ends 1 Feb 2026). For those,
     ``naming`` is what the company's own 10-Ks say ("end" / "start",
     `fiscal_naming`); unknown, there is no fiscal year and no label, and the
@@ -263,7 +263,7 @@ def fiscal_naming(line: str | None) -> str | None:
 def learn_naming(line: str) -> str | None:
     """Ask the company's 10-Ks how it names its fiscal years: Finnhub's
     reported annual financials carry each 10-K's fiscal year (the filer's
-    own, HD 2025 for the year to 2026-02-01, WMT 2026 for 2026-01-31) and
+    own, HD 2025 for the year to 2026-02-01, CRM 2026 for 2026-01-31) and
     its end date. One call, 0.5-0.9 s and ~200 KB (`from` is ignored),
     asked only for years ending in January to March, beside the filings
     lookup (never on the window's path), kept 90 days. The last three 10-Ks

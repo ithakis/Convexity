@@ -130,13 +130,13 @@ def test_a_missed_symbol_is_retried_alone_on_local_dates(monkeypatch):
             return hist
 
     monkeypatch.setattr(A.yf, "Ticker", T)
-    raw = A._bulk_close(["SHEL.L"], "1Y", adjusted=False)
-    adj = A._bulk_close(["SHEL.L"], "1Y")
+    raw = A._bulk_close(["BP.L"], "1Y", adjusted=False)
+    adj = A._bulk_close(["BP.L"], "1Y")
     assert [c["auto_adjust"] for c in calls] == [False, True] and calls[0]["actions"] is True
     for df in (raw, adj):
         assert list(df.index.strftime("%Y-%m-%d")) == ["2026-01-05", "2026-01-06"]
-    assert list(A.dividends_cached("SHEL.L")) == [27.0]
-    assert cache._bulk_bars_get("SHEL.L", "1y") is not None  # bars for the adjusted path only
+    assert list(A.dividends_cached("BP.L")) == [27.0]
+    assert cache._bulk_bars_get("BP.L", "1y") is not None  # bars for the adjusted path only
 
 
 def test_a_short_fetch_never_shrinks_the_cached_dividends():

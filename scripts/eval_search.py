@@ -62,7 +62,7 @@ CASES = [
     ("nyse energy giants",
      lambda q: q["exchanges"] == ["NYSE"] and q["sectors"] == ["Energy"] and rank(q) == ("mcap", "desc")),
     ("GLP-1 drug makers",
-     lambda q: q["kind"] == "theme" and {p["ticker"] for p in q["picks"]} & {"LLY", "NVO", "NOVO-B.CO"}),
+     lambda q: q["kind"] == "theme" and {p["ticker"] for p in q["picks"]} & {"LLY", "AMGN", "VKTX"}),
     ("uranium miners",
      lambda q: q["kind"] in ("theme", "screen") and (q["picks"] or q["industries"])),
     ("companies making AI chips",

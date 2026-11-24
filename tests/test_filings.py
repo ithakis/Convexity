@@ -64,7 +64,7 @@ APPLE_FYE = date(2026, 9, 26)  # a 52/53-week year: late September
         ("2026-10-21", date(2025, 12, 31), None, "Q3 FY2026"),  # calendar year
         # January-March year ends: the company's own naming, or no year at all.
         ("2026-08-27", date(2026, 1, 25), "end", "Q2 FY2027"),  # NVDA
-        ("2025-08-21", date(2026, 1, 31), "end", "Q2 FY2026"),  # WMT
+        ("2025-08-21", date(2026, 1, 31), "end", "Q2 FY2026"),  # CRM
         ("2025-08-19", date(2026, 2, 1), "start", "Q2 FY2025"),  # HD: fiscal 2025 ends 1 Feb 2026
         ("2025-08-20", date(2026, 1, 31), "start", "Q2 FY2025"),  # TGT
         ("2025-08-19", date(2026, 2, 1), None, None),  # not known: never a guessed year

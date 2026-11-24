@@ -538,15 +538,15 @@ def _fetch_yf_news(symbol: str, days: int, cancel=None) -> list[dict]:
 def _yf_search_news(symbol: str, count: int, cancel=None) -> list:
     """Yahoo's search-box news, for when get_news() comes back empty: its
     `xhr/ncp` endpoint answered 404 for every ticker when checked on
-    2026-10-11 (yfinance 1.7.0, KO included). Search is a keyword match, so only items
-    Yahoo tags with this ticker are kept. It covers US lines (KO: ~50 over
-    five days) and returns nothing for European tickers.
+    2026-10-11 (yfinance 1.7.0, AAPL included). Search is a keyword match, so only items
+    Yahoo tags with this ticker are kept. It covers US lines (~50 items over
+    five days for a large cap) and returns nothing for European tickers.
 
     When the ticker finds nothing, the company's NAME is searched instead
-    ("repsol", "societe generale"), keeping items Yahoo tags with any listing
-    of the company (REP.MC, GLE.PA, DEO for Diageo). Checked 2026-10-11: 23
-    of 25 Engie items, 39 of 40 Repsol, 50 of 50 Diageo were tagged to the
-    company; Finnhub on their thin OTC ADRs gave 3-4 a week. US names almost
+    ("iberdrola", "credit agricole"), keeping items Yahoo tags with any
+    listing of the company (its home line, its ADR). Checked 2026-10-11 on
+    three European names: 23 of 25, 39 of 40 and 50 of 50 items were tagged
+    to the company; Finnhub on their thin OTC ADRs gave 3-4 a week. US names almost
     always answer the ticker query, so the reference pack's S&P 500 set
     (which shares this path) is unchanged."""
     import yfinance as yf
@@ -600,7 +600,7 @@ def collect_company_news(
     article set the app would — train/serve-style parity for the anchor.
     `finnhub_symbol` lets the builder pass Finnhub's class-share spelling
     (BRK.B) for a Yahoo ticker (BRK-B), and the app the company's US line
-    (TTE for TTE.PA: Finnhub's free plan answers 403 to every other
+    (SNY for SAN.PA: Finnhub's free plan answers 403 to every other
     listing). An empty string means the company has none: Finnhub is not
     asked."""
     to_date = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -642,7 +642,7 @@ def collect_company_news(
 def _finnhub_line(symbol: str) -> str:
     """The ticker Finnhub is asked for this row's news: the company's US
     line ("" when it has none). The Yahoo Lookup that finds an ADR missing
-    from the symbol pack (SCGLY) runs here, off the table's hot path; the
+    from the symbol pack (CRARY) runs here, off the table's hot path; the
     table's Rec and MSPR then use it too (symbol_db.us_line)."""
     try:
         from convexity import finnhub_adapter, symbol_db

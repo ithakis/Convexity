@@ -229,7 +229,7 @@ def test_relative_partial_and_identity():
 
 def test_dividend_yield_raw_is_percent():
     """
-    yfinance >= 1.0 reports dividendYield in PERCENT (AAPL 0.32 = 0.32%, KO
+    yfinance >= 1.0 reports dividendYield in PERCENT (AAPL 0.32 = 0.32%, PEP
     2.41 = 2.41%): always / 100. The old size heuristic read 0.32 as 32%.
     Source: helpers._normalize_dividend_yield
     """
@@ -258,7 +258,7 @@ def test_dividend_yield_rate_over_price():
 
 def test_dividend_yield_minor_unit_price():
     """
-    SHEL.L (live, 2026-09-29): price 3654.5 GBp, dividendRate 1.16 GBP,
+    A London line (synthetic, shaped like a live answer): price 3654.5 GBp, dividendRate 1.16 GBP,
     dividendYield 3.2. The price is in pence, the rate in pounds: 1.16/36.545.
     """
     result = _normalize_dividend_yield(
@@ -285,7 +285,7 @@ def test_dividend_yield_trailing_skipped_across_currencies():
 
 
 def test_dividend_yield_trailing_same_currency():
-    """KO-style: forward fields missing, same currency → trailing rate / price."""
+    """PEP-style: forward fields missing, same currency → trailing rate / price."""
     result = _normalize_dividend_yield(
         None, price=87.18, trailing_rate=2.08, currency="USD", financial_currency="USD"
     )
@@ -293,7 +293,7 @@ def test_dividend_yield_trailing_same_currency():
 
 
 def test_dividend_yield_trailing_yield_is_fraction():
-    """trailingAnnualDividendYield is a fraction (KO 0.0237 = 2.37%)."""
+    """trailingAnnualDividendYield is a fraction (PEP 0.0237 = 2.37%)."""
     result = _normalize_dividend_yield(raw_yield=None, trailing_yield=0.0237)
     assert abs(result - 0.0237) < 1e-12
 

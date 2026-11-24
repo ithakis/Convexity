@@ -437,7 +437,7 @@ Examples (request -> query):
   the most of it)
 - profitable small caps with strong growth -> screen, filters [mcap lt 2e9,
   net_margin gt 0, revenue_growth gt 15], rank revenue_growth desc
-- GLP-1 drug makers -> theme, picks [LLY, NVO, ...]
+- GLP-1 drug makers -> theme, picks [LLY, AMGN, ...]
 Never invent fields. Never return prose outside the JSON."""
 
 
@@ -583,7 +583,7 @@ def _ticker_run(text: str) -> list[str] | None:
 # Pasted lists ------------------------------------------------------------
 _LIST_MAX = 50  # parts searched; the rest is reported, not silently dropped
 _LIST_TEXT = 4000  # characters of a paste kept in the query
-# A trailing weight or amount is not part of a name ("Apple 25%", "SAP
+# A trailing weight or amount is not part of a name ("Apple 25%", "ASML
 # €1,200.50"); a bare whole number may be ("S&P 500", "FTSE 100"), so it is
 # dropped only after a ticker ("AAPL 100").
 _AMOUNT = re.compile(r"\s+(?:[$€£]\s?\d[\d.,]*|\d[\d.,]*\s?%|\d+\.\d+)$")
@@ -681,7 +681,7 @@ def parse(text: str) -> dict:
     ):
         return _list_query(text, parts)
     if left and not q["filters"]:
-        # "deutsche bank", "bank of america", "american express": category
+        # "deutsche bank", "bank of new york", "american express": category
         # words inside a company name. A near-exact name wins over the parse.
         top = sdb.lookup(q["text"], limit=1)
         if top and top[0].score >= _SURE:
@@ -931,7 +931,7 @@ def _dash(t: str) -> str:
 
 def _pack_match(part: str) -> tuple[str, sdb.Hit | None, bool]:
     """One pasted part read offline: (match, hit, keep). "exact": a ticker in
-    any form a broker, Bloomberg or a spreadsheet writes it (LSE:HSPX, GLE
+    any form a broker, Bloomberg or a spreadsheet writes it (LSE:HSPX, AIR
     SBF, AAPL US Equity, BRK.B, Apple Inc. (AAPL)). "hit": a sure name match,
     or a bare European ETF ticker (VWCE is VWCE.DE). "guess": the closest
     name, shown as such. `keep`: show that listing, not the company's most
@@ -1064,7 +1064,7 @@ def _run_list(q: dict, t0: float) -> dict:
     wait(futs, timeout=_LIST_DEADLINE_S)
     pool.shutdown(wait=False, cancel_futures=True)  # a late Yahoo call ends on its own
     got = [f.result() if f.done() and not f.cancelled() else "late" for f in futs]
-    # A spreadsheet row names a company twice ("NOV IBIS" and "Novo Nordisk"):
+    # A spreadsheet row names a company twice ("ASME IBIS" and "ASML Holding"):
     # the listing typed as a ticker is the one meant, not the most traded.
     typed = {c.get("group") for c in got if isinstance(c, dict) and c["match"] == "exact"} - {None}
     cards, at, missing, late, warnings = [], {}, [], [], list(q["notes"])
@@ -1101,7 +1101,7 @@ def _hit_fields(h: sdb.Hit) -> dict:
 
 def _card(h: sdb.Hit, why: str = "", keep: bool = False, exchanges=()) -> dict:
     """One result. A company shows (and Add adds) its most traded listing —
-    NVO for Novo Nordisk — unless the user typed a ticker (`keep`); region,
+    TSM for Taiwan Semiconductor — unless the user typed a ticker (`keep`); region,
     sector and size stay the company's own."""
     lst = h if keep or h.type != "stock" else (sdb.top(h.group, exchanges) or h)
     alts = sdb.alternates(h.group, exclude=lst.ticker) if h.type == "stock" else []

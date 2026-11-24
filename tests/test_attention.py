@@ -42,7 +42,7 @@ def _ev(page, **kw):
     return attention.evaluate(page, kw.pop("state", None) or _state(), kw.pop("events", {}), TODAY)
 
 
-CALM = _page([_pos(s, 12.0, sector=f"S{i}") for i, s in enumerate(["AAPL", "MSFT", "NVDA", "KO", "JNJ",
+CALM = _page([_pos(s, 12.0, sector=f"S{i}") for i, s in enumerate(["AAPL", "MSFT", "NVDA", "PEP", "JNJ",
                                                                      "XOM", "JPM", "PG"])])  # fmt: skip
 
 
@@ -62,7 +62,7 @@ def test_single_name_above_limit():
 
 def test_sector_cluster_needs_two_names():
     ps = [_pos("NVDA", 14.0, sector="Technology"), _pos("MSFT", 14.0, sector="Technology"),
-          _pos("ASML.AS", 10.0, sector="Technology"), _pos("KO", 10.0, sector="Consumer")]  # fmt: skip
+          _pos("ASML.AS", 10.0, sector="Technology"), _pos("PEP", 10.0, sector="Consumer")]  # fmt: skip
     att = _ev(_page(ps))
     assert _keys(att) == ["sector|Technology"]
     assert "Nvda, Msft and Asml.As" in att["high"][0]["sub"]
@@ -73,7 +73,7 @@ def test_sector_cluster_needs_two_names():
 
 
 def test_currency_cluster_skips_the_display_currency_and_counts_cash():
-    ps = [_pos("SHEL.L", 40.0, quote_ccy="GBp"), _pos("ULVR.L", 25.0, quote_ccy="GBp"),
+    ps = [_pos("BP.L", 40.0, quote_ccy="GBp"), _pos("ULVR.L", 25.0, quote_ccy="GBp"),
           _pos("AAPL", 30.0)]  # fmt: skip
     st = _state(holding=90)
     att = _ev(_page(ps), state=st)
@@ -88,7 +88,7 @@ def test_currency_cluster_skips_the_display_currency_and_counts_cash():
 
 def test_drawdowns_from_cost_and_from_peak():
     ps = [_pos("INTC", 10.0, return_pct=-31.0, xray={"peak_pct": -40.0, "peak_date": "2026-07-02"}),
-          _pos("KO", 10.0, return_pct=-5.0, xray={"peak_pct": -8.0, "peak_date": "2026-09-01"})]  # fmt: skip
+          _pos("PEP", 10.0, return_pct=-5.0, xray={"peak_pct": -8.0, "peak_date": "2026-09-01"})]  # fmt: skip
     att = _ev(_page(ps))
     assert [it["key"] for it in att["high"]] == ["from_cost|INTC|in:USD"]
     assert [it["key"] for it in att["info"]] == ["from_peak|INTC"]
@@ -115,14 +115,14 @@ def _news(tier, days_ago=1.0, **kw):
 
 def test_news_read_divergence():
     x = {"week_pct": -6.1, "week_z": -1.8, "week_sigma_pct": 3.4}
-    att = _ev(_page([_pos("SHEL.L", 10.0, xray=x, news_sentiment=_news("bullish"))]))
+    att = _ev(_page([_pos("BP.L", 10.0, xray=x, news_sentiment=_news("bullish"))]))
     assert [it["rule"] for it in att["info"]] == ["divergence"]
     it = att["info"][0]
-    assert it["ai"] and it["text"] == "Shel.L: News read bullish, price −6.1% this week"
+    assert it["ai"] and it["text"] == "Bp.L: News read bullish, price −6.1% this week"
     # Agreeing, mixed, too old or flagged stale: quiet.
     for news in (_news("bearish"), _news("neutral"), _news("bullish", days_ago=10),
                  _news("bullish", stale=True), None):  # fmt: skip
-        assert _ev(_page([_pos("SHEL.L", 10.0, xray=x, news_sentiment=news)]))["info"] == []
+        assert _ev(_page([_pos("BP.L", 10.0, xray=x, news_sentiment=news)]))["info"] == []
 
 
 def test_rules_switch_off_and_pending_rows_are_skipped():
@@ -189,12 +189,12 @@ def test_set_rules_validates_and_clamps():
 
 
 def test_upcoming_events_window():
-    page = _page([_pos("MSFT", 10.0), _pos("SHEL.L", 10.0)])
+    page = _page([_pos("MSFT", 10.0), _pos("BP.L", 10.0)])
     events = {"MSFT": {"earnings": "2026-10-23", "ex_div": "2026-08-14"},
-              "SHEL.L": {"earnings": "2026-11-30", "ex_div": "2026-10-13"}}  # fmt: skip
+              "BP.L": {"earnings": "2026-11-30", "ex_div": "2026-10-13"}}  # fmt: skip
     up = attention.evaluate(page, _state(), events, TODAY)["upcoming"]
     assert [(u["symbol"], u["what"], u["date"]) for u in up] == [
-        ("SHEL.L", "ex-dividend", "2026-10-13"), ("MSFT", "earnings", "2026-10-23")]  # fmt: skip
+        ("BP.L", "ex-dividend", "2026-10-13"), ("MSFT", "earnings", "2026-10-23")]  # fmt: skip
     attention.dismiss(up[0]["key"], 0)
     assert len(attention.evaluate(page, None, events, TODAY)["upcoming"]) == 1
     assert attention.evaluate(page, _state(events=7), events, TODAY)["upcoming"] == []
@@ -324,22 +324,22 @@ def test_sector_and_fund_are_read_when_asked_not_when_computed(monkeypatch):
 def test_prune_forgets_only_what_the_page_could_check():
     """Adversarial review, 2026-10-13: a currency switch, a holding without
     prices for a day, or a rule switched off used to forget dismissals."""
-    for k, lvl in (("currency|USD|in:GBP", 10.0), ("from_cost|SHEL.L|in:USD", 5.0),
+    for k, lvl in (("currency|USD|in:GBP", 10.0), ("from_cost|BP.L|in:USD", 5.0),
                    ("from_peak|NVDA", 15.0), ("holding|NVDA", 5.0)):  # fmt: skip
         attention.dismiss(k, lvl)
     # A fresh EUR page where NVDA has no prices today (no xray, a note) and
-    # nothing fires: it can't speak for GBP's currencies, SHEL.L's cost in
+    # nothing fires: it can't speak for GBP's currencies, BP.L's cost in
     # USD or NVDA's peak; it did check NVDA's weight.
-    page = _page([_pos("NVDA", 5.0, note="No price from Yahoo"), _pos("SHEL.L", 5.0, quote_ccy="GBp")],
+    page = _page([_pos("NVDA", 5.0, note="No price from Yahoo"), _pos("BP.L", 5.0, quote_ccy="GBp")],
                  ccy="EUR")  # fmt: skip
     att = attention.evaluate(page, None, {}, TODAY)
     attention.prune(set(att["firing"]), set(att["checked"]))
     assert attention.load_state()["dismissed"] == {"currency|USD|in:GBP": 10.0,
-                                                   "from_cost|SHEL.L|in:USD": 5.0,
+                                                   "from_cost|BP.L|in:USD": 5.0,
                                                    "from_peak|NVDA": 15.0}  # fmt: skip
     # The same in USD with prices: checked and quiet, so forgotten.
     page = _page([_pos("NVDA", 5.0, xray={"peak_pct": -1.0, "peak_date": "2026-10-01"}),
-                  _pos("SHEL.L", 5.0, quote_ccy="GBp")])  # fmt: skip
+                  _pos("BP.L", 5.0, quote_ccy="GBp")])  # fmt: skip
     att = attention.evaluate(page, None, {}, TODAY)
     attention.prune(set(att["firing"]), set(att["checked"]))
     assert attention.load_state()["dismissed"] == {"currency|USD|in:GBP": 10.0}
@@ -377,9 +377,11 @@ def test_an_empty_calendar_does_not_wipe_known_dates():
     # Once the known date has passed, an empty calendar is believed.
     attention._EVENTS_TRIED.clear()
     past = (date.today() - timedelta(days=1)).isoformat()
-    attention.refresh_events(["KO"], fetch=lambda s: {"earnings": past, "ex_div": None})
-    attention.refresh_events(["KO"], force=True, fetch=lambda s: {"earnings": None, "ex_div": None})
-    assert attention.load_events()["KO"]["earnings"] is None
+    attention.refresh_events(["PEP"], fetch=lambda s: {"earnings": past, "ex_div": None})
+    attention.refresh_events(
+        ["PEP"], force=True, fetch=lambda s: {"earnings": None, "ex_div": None}
+    )
+    assert attention.load_events()["PEP"]["earnings"] is None
 
 
 def test_xray_adds_dividends_back():
@@ -479,7 +481,7 @@ def test_a_forced_refresh_during_another_runs_before_it_ends():
 
 
 def test_old_dated_keys_are_cleaned_up():
-    attention.dismiss("divergence|SHEL.L|2026-01-02", 0)
+    attention.dismiss("divergence|BP.L|2026-01-02", 0)
     attention.dismiss(f"move|NVDA|{date.today().isoformat()}", 0)
     attention.prune(set(), set())
     assert list(attention.load_state()["dismissed"]) == [f"move|NVDA|{date.today().isoformat()}"]
@@ -516,9 +518,9 @@ def test_target_and_review_fire_and_stay_quiet_between():
 
 
 def test_levels_are_in_the_quote_unit():
-    attention.set_plan("SHEL.L", {"review": 2500}, 2600)
-    att = _ev(_page([_px("SHEL.L", 8.0, 2450.0, quote_ccy="GBp")]))
-    assert att["high"][0]["text"] == "Shel.L fell below your 2,500p review level"
+    attention.set_plan("BP.L", {"review": 2500}, 2600)
+    att = _ev(_page([_px("BP.L", 8.0, 2450.0, quote_ccy="GBp")]))
+    assert att["high"][0]["text"] == "Bp.L fell below your 2,500p review level"
 
 
 def test_max_weight_overrides_the_book_limit_funds_included():
@@ -690,18 +692,18 @@ def test_prune_drops_snoozes_past_their_day():
 
 
 def test_events_read_the_report_date_from_the_primary_line(monkeypatch):
-    """WMT.DE's own calendar is empty on Yahoo: the report date is Walmart's.
+    """CTO.DE's own calendar is empty on Yahoo: the report date is Costco's.
     The listing's own ex-dividend date wins when it has one."""
     from convexity import capm
 
-    monkeypatch.setattr(capm, "primary_line", lambda s: "WMT" if s == "WMT.DE" else s)
-    cals = {"WMT.DE": {"earnings": None, "ex_div": "2026-12-05"},
-            "WMT": {"earnings": "2026-11-19", "ex_div": "2026-12-04"}}  # fmt: skip
+    monkeypatch.setattr(capm, "primary_line", lambda s: "COST" if s == "CTO.DE" else s)
+    cals = {"CTO.DE": {"earnings": None, "ex_div": "2026-12-05"},
+            "COST": {"earnings": "2026-11-19", "ex_div": "2026-12-04"}}  # fmt: skip
     monkeypatch.setattr(attention, "_calendar", lambda s: cals.get(s))
-    assert REAL_FETCH("WMT.DE") == {"earnings": "2026-11-19", "ex_div": "2026-12-05"}
-    assert REAL_FETCH("WMT") == cals["WMT"]
-    cals["WMT.DE"] = None  # the own call failed: the company's dates still answer
-    assert REAL_FETCH("WMT.DE") == {"earnings": "2026-11-19", "ex_div": "2026-12-04"}
+    assert REAL_FETCH("CTO.DE") == {"earnings": "2026-11-19", "ex_div": "2026-12-05"}
+    assert REAL_FETCH("COST") == cals["COST"]
+    cals["CTO.DE"] = None  # the own call failed: the company's dates still answer
+    assert REAL_FETCH("CTO.DE") == {"earnings": "2026-11-19", "ex_div": "2026-12-04"}
 
 
 # ---------------------------------------------------- the five-day big move
@@ -789,8 +791,8 @@ def test_close_to_a_limit_is_within_fifteen_percent_and_not_past_it():
     att = _ev(_page(list(near.values())))
     got = {(n["symbol"], n["rule"]) for n in att["near"]}
     assert got == {("MSFT", "holding"), ("JPM", "from_cost"), ("JPM", "from_peak")}
-    wmt = next(n for n in att["near"] if n["symbol"] == "MSFT")
-    assert wmt["text"] == "14.2% of your book, limit 15%" and wmt["limit"] == 15.0
+    top = next(n for n in att["near"] if n["symbol"] == "MSFT")
+    assert top["text"] == "14.2% of your book, limit 15%" and top["limit"] == 15.0
 
 
 def test_a_fund_is_not_close_to_the_holding_limit_and_a_switched_off_rule_says_nothing():
@@ -809,7 +811,7 @@ def test_a_plan_s_max_weight_replaces_the_limit_for_close_too():
 
 
 def test_limits_read_the_biggest_of_each_as_the_rules_do():
-    ps = [_pos("MSFT", 14.0, sector="Consumer", quote_ccy="USD"), _pos("KO", 6.0, sector="Consumer", quote_ccy="USD"),
+    ps = [_pos("MSFT", 14.0, sector="Consumer", quote_ccy="USD"), _pos("PEP", 6.0, sector="Consumer", quote_ccy="USD"),
           _pos("SOLO", 30.0, sector="Energy", quote_ccy="EUR"), _pos("ETF", 40.0, fund=True, quote_ccy="EUR")]  # fmt: skip
     pg = {**_page(ps), "ccy": "EUR"}
     lim = {x["key"]: x for x in _ev(pg)["limits"]}
@@ -823,9 +825,9 @@ def test_limits_read_the_biggest_of_each_as_the_rules_do():
 
 
 def test_next_dates_reach_past_the_rail_window_and_never_back():
-    ev = {"MSFT": {"earnings": "2026-11-19", "ex_div": "2026-01-02"}, "KO": {"earnings": "bad"}}
+    ev = {"MSFT": {"earnings": "2026-11-19", "ex_div": "2026-01-02"}, "PEP": {"earnings": "bad"}}
     att = attention.evaluate(
-        _page([_pos("MSFT", 5.0), _pos("KO", 5.0)]), events=ev, today=date(2026, 10, 12), plans={}
+        _page([_pos("MSFT", 5.0), _pos("PEP", 5.0)]), events=ev, today=date(2026, 10, 12), plans={}
     )
     assert att["next"] == {"MSFT": {"earnings": "2026-11-19"}} and att["upcoming"] == []
 

@@ -96,11 +96,11 @@ EXPIRY_TRIES = 4  # expiries in the window tried, nearest the horizon first
 # maturity, or grown at the last expiry's average rate past it (flat vol).
 EXTRAP_MIN = 0.5
 LINE_TTL = 86400.0  # the chosen chain listing, a day
-# Quote hygiene. A deep OTM option quoted at the minimum tick (NVO's K=90
+# Quote hygiene. A deep OTM option quoted at the minimum tick (an ADR's K=90
 # January call at 0.03/0.04 on a $39 stock) has an implied vol that is pure
-# tick noise: two such quotes put a 14.7 vol-pt outlier in NVO's surface and
+# tick noise: two such quotes put a 14.7 vol-pt outlier in its surface and
 # failed it (2.2 vol pts). Below the premium floor, or past MAX_K_SD ATM
-# standard deviations, a quote is dropped; that alone took NVO's surface to
+# standard deviations, a quote is dropped; that alone took that surface to
 # 1.1 vol pts and SPY's (all 21 expiries) from 4.7 to 0.6 (2026-10-18).
 MIN_PREMIUM = 0.05  # or 0.5% of spot, whichever is smaller (a $5 stock's ticks)
 MAX_K_SD = 3.5
@@ -181,7 +181,7 @@ def _monotone(rows, F: float) -> list:
     """Drop quotes that break static no-arbitrage by more than the spread.
 
     Walking out from the forward, an OTM put (call) further from the money
-    can't bid above the ask of the one before it. DELL's 12M chain had one
+    can't bid above the ask of the one before it. A US large cap's 12M chain had one
     stale put (K=165 bid 12.15 while K=170 asked 4.40): the SVI bent into a
     Lee-slope kink to chase it, and the density's mean fell 9% below F."""
     keep = []
@@ -347,7 +347,7 @@ def _slice(S0: float, T: float, rf: float, calls, puts, asof: float | None = Non
 def _liquidity(sl: dict) -> float:
     """How much an expiry's quotes can be trusted, for picking anchors: open
     interest x usable quotes / median relative spread (the most liquid of
-    NVO's 12M neighbours is the Jan-28 LEAP, 178k contracts at a 10% spread,
+    one ADR's 12M neighbours is the Jan-28 LEAP, 178k contracts at a 10% spread,
     not the 22k-contract September nearest the horizon)."""
     rs = float(np.median(sl["rs"])) if len(sl.get("rs", ())) else 1.0
     return (sl.get("oi", 0.0) + 1.0) * len(sl["k"]) / max(rs, 1e-3)
@@ -810,7 +810,7 @@ def _own_analysts(
 ) -> tuple[dict | None, bool]:
     """Analysts for a window whose options are another line's (a non-US name
     on its US chain): the listing's OWN block, the number its row shows (its
-    research line's, scaled, when it has none: NOV.DE reads NOVO-B.CO's, like
+    research line's, scaled, when it has none: ASME.DE reads ASML.AS's, like
     the row), put in the chain's units (the page multiplies by ``ratio``
     back), the chain line's only when neither has one. The flag says whether
     the block is the listing's own (or its research line's), the rule its
@@ -818,8 +818,8 @@ def _own_analysts(
     not its company's primary line reads the primary line's block first."""
     from convexity import analyst_targets, fetcher
 
-    # The company's primary line first (WMT's for WMT.DE, SHEL.L's for the
-    # SHEL receipt), the rule its row uses.
+    # The company's primary line first (AAPL's for APC.DE, BP.L's for the
+    # BP receipt), the rule its row uses.
     if fetcher.analyst_line(symbol):
         prim = None
         with contextlib.suppress(Exception):
@@ -855,7 +855,7 @@ def _analysts_unknown(symbol: str, chain_sym: str) -> bool:
 
 def _research_analysts(symbol: str, S0: float) -> dict | None:
     """The firms' targets from the company's research line (fetcher.research_line:
-    NOVO-B.CO for NOV.DE), scaled to this listing by the two last prices so
+    ASML.AS for ASME.DE), scaled to this listing by the two last prices so
     they read in its currency and units, like the options path's ``ratio``."""
     import yfinance as yf
 
@@ -1384,7 +1384,7 @@ def _options_rn(tk, sym: str, exps, horizon: int, S0: float, rf: float):
        it has MIN_QUOTES, then the SSVI surface at it.
     2. Else the surface read at the exact horizon between the most liquid
        expiry on each side (`_liquidity`), the tails placed from whichever of
-       the two reaches furthest. NVO's 12M nearest expiry is a thin September;
+       the two reaches furthest. One ADR's 12M nearest expiry is a thin September;
        its neighbours June and the Jan-28 LEAP carry 8x the open interest.
     3. Else the old order: up to EXPIRY_TRIES window expiries, nearest first.
     4. With no expiry in the window, the surface extrapolated (`surface_at`).

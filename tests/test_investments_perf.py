@@ -532,7 +532,7 @@ def risk_book(monkeypatch):
 
     idx = pd.bdate_range(end=TODAY, periods=300)
     state = {"fetches": 0, "closes": {"AAPL": np.linspace(50.0, 100.0, 300),
-                                      "SAP.DE": np.linspace(100.0, 120.0, 300)}}  # fmt: skip
+                                      "SIE.DE": np.linspace(100.0, 120.0, 300)}}  # fmt: skip
 
     def fetch(syms, period, retry=True):
         state["fetches"] += 1
@@ -542,7 +542,7 @@ def risk_book(monkeypatch):
 
     page = {"ccy": "USD", "positions": [
         {"symbol": "AAPL", "name": "Apple", "quote_ccy": "USD"},
-        {"symbol": "SAP.DE", "name": "SAP", "quote_ccy": "EUR"},
+        {"symbol": "SIE.DE", "name": "Siemens", "quote_ccy": "EUR"},
     ]}  # fmt: skip
     monkeypatch.setitem(inv._LAST_PAGE, "v", (None, page))
     monkeypatch.setattr(inv, "_total_closes", fetch)
@@ -561,7 +561,7 @@ def risk_book(monkeypatch):
 
 def test_holding_risk_whole_answer_is_cached(risk_book):
     first = inv.holding_risk_payload("USD")
-    assert set(first["risk"]) == {"AAPL", "SAP.DE"} and first["missing"] == []
+    assert set(first["risk"]) == {"AAPL", "SIE.DE"} and first["missing"] == []
     assert inv.holding_risk_payload("USD") == first
     assert risk_book["fetches"] == 1
 
@@ -570,26 +570,26 @@ def test_holding_risk_partial_answer_is_not_cached(risk_book):
     # One holding missing from Yahoo's answer: named, and asked again.
     gone = risk_book["closes"].pop("AAPL")
     got = inv.holding_risk_payload("USD")
-    assert set(got["risk"]) == {"SAP.DE"} and got["missing"] == ["AAPL"]
+    assert set(got["risk"]) == {"SIE.DE"} and got["missing"] == ["AAPL"]
     risk_book["closes"]["AAPL"] = gone
-    assert set(inv.holding_risk_payload("USD")["risk"]) == {"AAPL", "SAP.DE"}
+    assert set(inv.holding_risk_payload("USD")["risk"]) == {"AAPL", "SIE.DE"}
     assert risk_book["fetches"] == 2
 
 
 def test_holding_risk_empty_answer_names_every_holding(risk_book):
     risk_book["closes"].clear()
-    assert inv.holding_risk_payload("USD") == {"risk": {}, "missing": ["AAPL", "SAP.DE"]}
+    assert inv.holding_risk_payload("USD") == {"risk": {}, "missing": ["AAPL", "SIE.DE"]}
     inv.holding_risk_payload("USD")
     assert risk_book["fetches"] == 2
 
 
 def test_holding_risk_converts_to_the_display_currency(risk_book):
-    # SAP flat in euros, the euro halving: a 50% fall for a dollar holder.
+    # Siemens flat in euros, the euro halving: a 50% fall for a dollar holder.
     n = 300
-    risk_book["closes"]["SAP.DE"] = np.full(n, 100.0)
+    risk_book["closes"]["SIE.DE"] = np.full(n, 100.0)
     idx = pd.bdate_range(end=TODAY, periods=n)
     risk_book["rate"] = pd.Series(np.linspace(2.0, 1.0, n), index=idx)
-    got = inv.holding_risk("USD")["SAP.DE"]
+    got = inv.holding_risk("USD")["SIE.DE"]
     assert got["mdd_pct"] == pytest.approx(-50.0, abs=0.01)
 
 
@@ -597,9 +597,9 @@ def test_holding_risk_with_no_rate_is_missing_not_unconverted(risk_book):
     # Without EURUSD the closes would stay in euros and be called dollars.
     risk_book["rate"] = None
     got = inv.holding_risk_payload("USD")
-    assert set(got["risk"]) == {"AAPL"} and got["missing"] == ["SAP.DE"]
+    assert set(got["risk"]) == {"AAPL"} and got["missing"] == ["SIE.DE"]
     risk_book["rate"] = pd.Series(1.10, index=pd.bdate_range(end=TODAY, periods=300))
-    assert set(inv.holding_risk_payload("USD")["risk"]) == {"AAPL", "SAP.DE"}
+    assert set(inv.holding_risk_payload("USD")["risk"]) == {"AAPL", "SIE.DE"}
 
 
 @pytest.mark.parametrize(

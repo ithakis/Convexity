@@ -53,8 +53,8 @@ ROWS = [
         1,
     ],
     [
-        "NOVO-B.CO",
-        "Novo Nordisk A/S",
+        "GMAB.CO",
+        "Genmab A/S",
         "stock",
         "CPH",
         "dk",
@@ -65,8 +65,8 @@ ROWS = [
         1,
     ],
     [
-        "NVO",
-        "Novo Nordisk A/S",
+        "GMAB",
+        "Genmab A/S",
         "stock",
         "NYQ",
         "us",
@@ -77,8 +77,8 @@ ROWS = [
         0,
     ],
     [
-        "NOV.DE",
-        "Novo Nordisk A/S",
+        "GE9.DE",
+        "Genmab A/S",
         "stock",
         "GER",
         "de",
@@ -200,7 +200,7 @@ ROWS = [
     ["XLK", "Technology Select Sector SPDR Fund", "etf", "PCX", "us", None, None, 7e10, 11, 1],
     ["^GSPC", "S&P 500", "index", "SNP", "us", None, None, None, 12, 1],
     ["HSBA.L", "HSBC Holdings plc", "stock", "LSE", "gb", _FIN, "Banks—Diversified", 2e11, 13, 1],
-    ["BNP.PA", "BNP Paribas SA", "stock", "PAR", "fr", _FIN, "Banks—Regional", 8e10, 14, 1],
+    ["ACA.PA", "Credit Agricole S.A.", "stock", "PAR", "fr", _FIN, "Banks—Regional", 8e10, 14, 1],
     ["JPM", "JPMorgan Chase & Co.", "stock", "NYQ", "us", _FIN, "Banks—Diversified", 7e11, 15, 1],
     ["NVDA", "NVIDIA Corporation", "stock", "NMS", "us", _TECH, "Semiconductors", 4.4e12, 16, 1],
     [
@@ -216,9 +216,9 @@ ROWS = [
         1,
     ],
 ]
-# adv_usd (average daily traded value) sits after mcap_usd: Novo's US ADR
+# adv_usd (average daily traded value) sits after mcap_usd: Genmab's US ADR
 # trades more than its Copenhagen home (real 2026-10 ratios), Frankfurt little.
-ADV = {"NVO": 4.6e8, "NOVO-B.CO": 1.7e8, "NOV.DE": 6.5e6}
+ADV = {"GMAB": 4.6e8, "GMAB.CO": 1.7e8, "GE9.DE": 6.5e6}
 ROWS = [r[:8] + [ADV.get(r[0])] + r[8:] for r in ROWS]
 
 
@@ -308,13 +308,13 @@ def test_an_old_format_file_reads_as_empty(tmp_path):
     [
         ("microsft", "MSFT"),
         ("microsoft", "MSFT"),
-        ("novo nordsk", "NOVO-B.CO"),
+        ("genmb", "GMAB.CO"),
         ("berkshire", "BRK-B"),
         ("google", "GOOGL"),
         ("deutsche bank", "DBK.DE"),
         ("tsmc", "2330.TW"),
         ("apple", "AAPL"),
-        ("NVO", "NVO"),  # an exact ticker wins, even a secondary listing
+        ("GMAB", "GMAB"),  # an exact ticker wins, even a secondary listing
         ("jp morgan", "JPM"),
     ],
 )
@@ -323,20 +323,20 @@ def test_gold_queries_rank_first(db, query, ticker):
 
 
 def test_names_show_home_listings_only(db):
-    tickers = [h.ticker for h in sdb.lookup("novo nordisk")]
-    assert "NOVO-B.CO" in tickers and "NVO" not in tickers and "NOV.DE" not in tickers
+    tickers = [h.ticker for h in sdb.lookup("genmab")]
+    assert "GMAB.CO" in tickers and "GMAB" not in tickers and "GE9.DE" not in tickers
 
 
 def test_alternates_and_category(db):
-    # The card shows the most traded listing; NOV.DE trades under 5% of it.
-    assert sdb.top(3).ticker == "NVO"
-    assert [a["ticker"] for a in sdb.alternates(3, exclude="NVO")] == ["NOVO-B.CO"]
+    # The card shows the most traded listing; GE9.DE trades under 5% of it.
+    assert sdb.top(3).ticker == "GMAB"
+    assert [a["ticker"] for a in sdb.alternates(3, exclude="GMAB")] == ["GMAB.CO"]
     assert sdb.relisting("0KZC.L", "LSE") and sdb.relisting("AAPL34.SA", "SAO")
-    assert sdb.relisting("NOV.F", "FRA") and not sdb.relisting("NOV.DE", "GER")
+    assert sdb.relisting("GE9.F", "FRA") and not sdb.relisting("GE9.DE", "GER")
     banks = sdb.category(
         industries=["Banks—Regional", "Banks—Diversified"], regions=["de", "fr", "gb"]
     )
-    assert [h.ticker for h in banks] == ["HSBA.L", "BNP.PA", "DBK.DE"]
+    assert [h.ticker for h in banks] == ["HSBA.L", "ACA.PA", "DBK.DE"]
 
 
 def test_no_file_means_no_hits():

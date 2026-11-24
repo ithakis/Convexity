@@ -138,7 +138,7 @@ def test_the_listing_target_is_used_in_its_own_units(rn, monkeypatch):
         return {"mu": 0.09, "mu_capm": 0.09, "alpha": 0.0}
 
     monkeypatch.setattr(capm, "model", fake)
-    od._model_curves("NOV.DE", rn, "EUR", 0.9, {"mean": 120.0}, {"prefs": {}}, 0.92, 0.01)
+    od._model_curves("SIE.DE", rn, "EUR", 0.9, {"mean": 120.0}, {"prefs": {}}, 0.92, 0.01)
     assert seen == {"s0": pytest.approx(S0 * 0.9), "target": pytest.approx(108.0), "ccy": "EUR"}
 
 
@@ -266,7 +266,7 @@ def test_tails_keep_a_flat_vol_chain_lognormal(rn):
 
 
 def test_a_stale_quote_breaking_monotonicity_is_dropped():
-    # DELL 12M: one stale far put (bid above the next strike's ask) bent the
+    # A US large cap's 12M chain: one stale far put (bid above the next strike's ask) bent the
     # smile into a Lee-slope kink and the mean 9% below F.
     calls, puts = bs_chain(np.arange(40.0, 251.0, 2.5))
     clean = od.fit_density(S0, T, R, calls, puts)
@@ -487,7 +487,7 @@ def test_maturities_count_from_the_quotes_session_not_the_calendar():
 
 
 def test_min_tick_wings_and_dead_strikes_are_not_a_market():
-    # NVO's January call at K=90 on a $39 stock, 0.03/0.04: its implied vol is
+    # A real ADR's January call at K=90 on a $39 stock, 0.03/0.04: its implied vol is
     # tick noise (a 14.7 vol-pt outlier that failed the whole surface).
     asof = _ny_ts("2026-10-16")
     live = {"strike": 40.0, "bid": 2.41, "ask": 2.5, "ts": asof, "oi": 15258.0}
@@ -524,7 +524,7 @@ def _surface_chains(days_quotes, session="2026-10-16"):
 
 
 def test_12m_reads_the_surface_between_the_liquid_anchors(monkeypatch):
-    # The nearest expiry to a year is thin (NVO's September: 9 quotes);
+    # The nearest expiry to a year is thin (a real ADR's September: 9 quotes);
     # June and the January LEAP either side are deep. 12M comes off the
     # surface at exactly 365 days, anchored on those two.
     chains = _surface_chains([(62, 22, 50), (90, 22, 400), (153, 22, 90), (243, 22, 130),

@@ -77,8 +77,8 @@ def _raw_info(tk: yf.Ticker) -> dict:
 
 def _safe_info(tk: yf.Ticker) -> dict:
     """``.info`` plus fast_info's gaps. A share's answer without its
-    fundamentals (helpers.fundamentals_missing: Yahoo dropped MU's for a few
-    minutes on 2026-10-30) is asked once more on a fresh Ticker (yfinance
+    fundamentals (helpers.fundamentals_missing: Yahoo dropped a US large cap's for a
+    few minutes on 2026-10-30) is asked once more on a fresh Ticker (yfinance
     keeps the first answer on the object); one that stays degraded carries
     ``_fundamentals_missing`` so no cache keeps it as the truth. The retry
     costs the hot path a request only at the start of a lapse, and a line that
@@ -127,7 +127,7 @@ def _safe_info(tk: yf.Ticker) -> dict:
 def _market_cap(info: dict, currency: str) -> float | None:
     """Market cap in the MAJOR unit of the listing currency.
 
-    Yahoo's ``marketCap`` is already in the major unit (SHEL.L: GBP, not GBp).
+    Yahoo's ``marketCap`` is already in the major unit (BP.L: GBP, not GBp).
     The ``fast_info`` fallback ``_safe_info`` copies in when it is missing is
     shares x last price, i.e. in the QUOTE unit — pence for an LSE name — so it
     is scaled like a price."""
@@ -152,8 +152,8 @@ def _currency_consistent(info: dict, out: dict, currency: str) -> None:
     """Fill the fields that combine a market price with the financial statements.
 
     Most listings report in their trading currency. Those that do not — ADRs
-    (TSM reports in TWD, TM in JPY, BABA in CNY, NVO in DKK) and London names
-    reporting in USD (SHEL.L) — get multiples from Yahoo that divide a
+    (TSM reports in TWD, TM in JPY, BABA in CNY, SNY in EUR) and London names
+    reporting in USD (BP.L) — get multiples from Yahoo that divide a
     trading-currency market cap by home-currency statements. Verified on
     2026-09-29: TM's EV/EBITDA 6.3 and P/B 15.3 against 11.9 and 0.91 for the
     same company's Tokyo line (7203.T); TSM's EV/EBITDA 5.2 against ~23.
@@ -351,7 +351,7 @@ _FUNDAMENTAL_FIELDS = (
 def _carry_fundamentals(out: dict, symbol: str) -> None:
     """A row whose ``.info`` came back without fundamentals even on retry
     keeps the last saved row's values for the gaps, never blanks: a Refresh
-    while Yahoo misbehaves would otherwise save MU with no analysts and no
+    while Yahoo misbehaves would otherwise save a share with no analysts and no
     margins until the next one. ``fundamentals_asof`` says when they are
     from (that view's save); prices and technicals are always this fetch's."""
     from convexity import persistence
@@ -408,9 +408,9 @@ def _yf_rec_trend(tk) -> list[dict]:
 # ------------------------------ Research line ------------------------------
 #
 # Yahoo carries a company's analysts, and much of its fundamentals, on its
-# home or US line only: NOV.DE and CCC3.DE (like every Xetra or Vienna line
-# of a foreign company tried) came back with no target, no rating and no
-# analyst count, while NOVO-B.CO had 24 analysts and KO 23 (checked live
+# home or US line only: every Xetra or Vienna line of a foreign company
+# tried came back with no target, no rating and no analyst count, while
+# the same companies' home lines had 20+ analysts (checked live
 # 2026-10-18). The price, returns and currency stay on the
 # owner's listing; analysts and the fundamentals it lacks come from the same
 # company's best-covered line, its targets scaled by the two prices
@@ -435,7 +435,7 @@ _RESEARCH_TARGETS = ("target_mean_price", "target_low", "target_high", "target_m
 _RESEARCH_TARGET_META = ("target_n_firms", "target_source", "target_age_days", "target_n_stale",
                          "target_raised_90d", "target_lowered_90d")  # fmt: skip
 # The company's primary line wins over a listing's own analysts when it has
-# at least this many (2026-10-29): WMT's 40 for WMT.DE, SHEL.L's for the SHEL
+# at least this many (2026-10-29): AAPL's for APC.DE, BP.L's for the BP
 # receipt. A thinner primary line leaves the old rule (own, else the most).
 PRIMARY_MIN_ANALYSTS = 3
 
@@ -808,9 +808,9 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             out["rating_dist"] = rating_dist
 
             # Finnhub answers only US lines, so both are asked of the
-            # company's US line (TTE for TTE.PA). With none, the trend falls
-            # back to Yahoo's for this listing, already fetched above (REP.MC,
-            # GLE.PA, PHIL.MI): no extra request on the hot path.
+            # company's US line (SNY for SAN.PA). With none, the trend falls
+            # back to Yahoo's for this listing, already fetched above (a
+            # European line with no US listing): no extra request on the hot path.
             out["insider_mspr"] = _fh.get_insider_sentiment(symbol)
             fh_trend = _fh.get_recommendation_trend(symbol)
             fsym = _fh.finnhub_symbol(symbol)
@@ -823,7 +823,7 @@ def fetch_one(symbol: str, max_attempts: int = 3) -> dict:
             else:
                 out["rec_trend_fh"] = None
             out["us_line"] = fsym
-            # A secondary listing (NOV.DE, CCC3.DE) has no analysts
+            # A secondary listing (ASME.DE, APC.DE) has no analysts
             # and gaps in its fundamentals: the same company's best-covered
             # line fills them, its targets scaled to this listing's price.
             _apply_research(out, symbol)
@@ -1639,8 +1639,8 @@ def fetch_events(symbol: str) -> dict:
     out["earnings"] = _earnings_rows(tk)
     reported = lambda rows: sum(e["actual"] is not None for e in rows)  # noqa: E731
     if reported(out["earnings"]) < 2:
-        # A secondary listing has no reporting history of its own (NOV.DE
-        # lists only the next date): the company's research line has it.
+        # A secondary listing has no reporting history of its own (a Xetra
+        # line lists only the next date): the company's research line has it.
         # The dates are the company's, not the venue's.
         with contextlib.suppress(Exception):
             line = research_line(symbol)

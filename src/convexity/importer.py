@@ -22,7 +22,7 @@ breaker (one quota, shared with the News read and company search):
 Then plain code decides what to trust, the same rule as company search: the
 model may suggest, never decide.
 - Every ticker is checked against the symbol pack, and the listing is
-  chosen by the currency the row is in (a £ price makes "Shell" SHEL.L, not
+  chosen by the currency the row is in (a £ price makes "BP" BP.L, not
   the NYSE line, which is the pack's home listing for the name).
 - qty x price is checked against the row's total; a mismatch is flagged
   with the price the total implies (a misread digit is the usual cause).
@@ -481,7 +481,7 @@ Rules:
   read them day first unless the account is in US dollars or a day is over
   12 in the month position; if you can't tell, set date_guessed true.
 - ticker: the ticker if shown (for a row from a London account in pence it is
-  still the plain ticker, like SHEL). If not shown, your best guess of the
+  still the plain ticker, like BP). If not shown, your best guess of the
   ticker and ticker_guessed true. name: the company as written.
 - currency: the ISO code the price or amount is shown in (USD, GBP, EUR; GBX
   for pence), "" if you can't tell.
@@ -614,8 +614,8 @@ def _exch_ccy(hit) -> str | None:
 def _company_words(name: str, ticker: str, code: str) -> str:
     """The name as a company name, or the bare ticker when it is only the
     ticker and its exchange code. A positions screen's instrument cell is
-    "GLE SBF"; the model copies it as the name, and checking Société
-    Générale against "GLE SBF" marked every row of a correctly read
+    "AIR SBF"; the model copies it as the name, and checking Airbus
+    against "AIR SBF" marked every row of a correctly read
     screenshot as the AI's guess (owner's screenshot, 2026-10-10)."""
     words = re.findall(r"[A-Za-z0-9]+", name or "")
     drop = {w.upper() for w in re.findall(r"[A-Za-z0-9]+", f"{ticker} {code}")}
@@ -626,7 +626,7 @@ def _company_words(name: str, ticker: str, code: str) -> str:
 
 def alias_key(name: str | None) -> str:
     """How a name as written is remembered: lower-case words only, so
-    "Shell", "SHELL" and "Shell " are one alias."""
+    "Airbus", "AIRBUS" and "Airbus " are one alias."""
     return " ".join(re.findall(r"[a-z0-9]+", (name or "").lower()))[:60]
 
 
@@ -784,7 +784,7 @@ _CORP_WORDS = frozenset(["the", "inc", "incorporated", "corp", "corporation", "c
 
 
 def _stem(name: str | None) -> str:
-    """A company's name without its legal form, so "Shell plc" on London and
+    """A company's name without its legal form, so "BP p.l.c." on London and
     New York match while "Apple Hospitality REIT" is not "Apple Inc."."""
     words = re.findall(r"[a-z0-9]+", (name or "").lower())
     return " ".join(w for w in words if w not in _CORP_WORDS and len(w) > 1 or w.isdigit())

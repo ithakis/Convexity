@@ -25,12 +25,12 @@ def _hit(ticker, name, exchange, type_="stock"):
 
 PACK = {h.ticker: h for h in [
     _hit("AAPL", "Apple Inc.", "NMS"), _hit("APLE", "Apple Hospitality REIT", "NYQ"),
-    _hit("SHEL", "Shell plc", "NYQ"), _hit("SHEL.L", "Shell plc", "LSE"),
+    _hit("BP", "BP p.l.c.", "NYQ"), _hit("BP.L", "BP p.l.c.", "LSE"),
     _hit("MSFT", "Microsoft Corporation", "NMS"), _hit("NVDA", "NVIDIA Corporation", "NMS"),
     _hit("ASML", "ASML Holding N.V.", "NMS"), _hit("ASML.AS", "ASML Holding N.V.", "AMS"),
     _hit("VUSA.L", "Vanguard S&P 500 UCITS ETF", "LSE", "etf"),
 ]}  # fmt: skip
-NAMES = {"apple": ["AAPL", "APLE"], "shell": ["SHEL", "SHEL.L"], "microsoft": ["MSFT"],
+NAMES = {"apple": ["AAPL", "APLE"], "bp": ["BP", "BP.L"], "microsoft": ["MSFT"],
          "nvidia": ["NVDA"], "asml": ["ASML", "ASML.AS"]}  # fmt: skip
 
 
@@ -80,9 +80,9 @@ def _file(name, data, mime):
 
 
 def test_pence_become_pounds_and_the_currency_picks_the_london_line(monkeypatch):
-    _model(monkeypatch, [_row(name="Shell", ticker="SHEL", currency="GBX", price=2610.0, qty=40)])
-    r = im.read("Shell SHEL 40 at 2610p")["items"][0]
-    assert r["symbol"] == "SHEL.L" and r["ccy"] == "GBP"
+    _model(monkeypatch, [_row(name="BP", ticker="BP", currency="GBX", price=2610.0, qty=40)])
+    r = im.read("BP 40 at 2610p")["items"][0]
+    assert r["symbol"] == "BP.L" and r["ccy"] == "GBP"
     assert r["price"] == pytest.approx(26.10)
     # The ticker was read and the line chosen by code from the currency: not an AI guess.
     assert "symbol" not in r["guessed"]
@@ -104,10 +104,10 @@ def test_the_euro_line_of_a_dual_listing(monkeypatch):
 def test_a_remembered_name_wins_and_is_not_a_guess(monkeypatch):
     _model(
         monkeypatch,
-        [_row(name="Shell", ticker="", currency="", price=24.1, qty=150, type="holding", date="")],
+        [_row(name="BP", ticker="", currency="", price=24.1, qty=150, type="holding", date="")],
     )
-    r = im.read("Shell 150 avg 24.10", aliases={"shell": "SHEL.L"})["items"][0]
-    assert r["symbol"] == "SHEL.L" and "symbol" not in r["guessed"]
+    r = im.read("BP 150 avg 24.10", aliases={"bp": "BP.L"})["items"][0]
+    assert r["symbol"] == "BP.L" and "symbol" not in r["guessed"]
 
 
 def test_no_listing_question_for_a_name_alike(monkeypatch):
@@ -249,7 +249,7 @@ def test_sheet_parts_read_csv_and_each_xlsx_sheet_with_its_header():
     assert label == "a.csv" and "AAPL" in text
     buf = io.BytesIO()
     with pd.ExcelWriter(buf) as xw:
-        pd.DataFrame({"Ticker": ["KO"] * 200, "Qty": range(200)}).to_excel(
+        pd.DataFrame({"Ticker": ["PEP"] * 200, "Qty": range(200)}).to_excel(
             xw, sheet_name="Trades", index=False
         )
         pd.DataFrame({"Ticker": ["JNJ"], "Qty": [5]}).to_excel(
@@ -297,17 +297,17 @@ def test_an_entry_left_out_out_of_doubt_is_read_again(monkeypatch):
     def structure(text, today, base):
         calls.append(text)
         if "Last time these entries" not in text:
-            return {"items": [_row(type="holding", date="", name="Shell", ticker="SHEL", currency="GBP", qty=300, price=25.4)],
-                    "skipped": ["Coca-Cola holding skipped: can't confirm the ticker"]}  # fmt: skip
-        return {"items": [_row(type="holding", date="", name="Shell", ticker="SHEL", currency="GBP", qty=300, price=25.4),
-                          _row(type="holding", date="", name="Coca-Cola", ticker="KO", qty=40, price=61.15)],
+            return {"items": [_row(type="holding", date="", name="BP", ticker="BP", currency="GBP", qty=300, price=25.4)],
+                    "skipped": ["PepsiCo holding skipped: can't confirm the ticker"]}  # fmt: skip
+        return {"items": [_row(type="holding", date="", name="BP", ticker="BP", currency="GBP", qty=300, price=25.4),
+                          _row(type="holding", date="", name="PepsiCo", ticker="PEP", qty=40, price=61.15)],
                 "skipped": []}  # fmt: skip
 
     monkeypatch.setattr(im, "_structure", structure)
-    out = im.read("300 Shell at 25.40 pounds and 40 Coca-Cola at 61.15")
+    out = im.read("300 BP at 25.40 pounds and 40 PepsiCo at 61.15")
     rereads = [c for c in calls if "Last time these entries" in c]
-    assert len(rereads) == 1 and "Coca-Cola holding skipped" in rereads[0]
-    assert [r["name"] for r in out["items"]] == ["Shell plc", "Coca-Cola"]
+    assert len(rereads) == 1 and "PepsiCo holding skipped" in rereads[0]
+    assert [r["name"] for r in out["items"]] == ["BP p.l.c.", "PepsiCo"]
 
 
 def test_a_line_left_out_as_a_balance_is_not_read_again(monkeypatch):
@@ -339,8 +339,8 @@ def test_other_listings_are_the_same_company_only(monkeypatch):
     # Verify finding: the picker offered Apple Hospitality as an Apple listing.
     _model(monkeypatch, [_row()])
     assert im.read("Bought 10 AAPL at 182.40")["items"][0]["alts"] == []
-    _model(monkeypatch, [_row(name="Shell", ticker="SHEL", currency="GBP", price=24.1)])
-    assert [a["symbol"] for a in im.read("Shell SHEL")["items"][0]["alts"]] == ["SHEL"]
+    _model(monkeypatch, [_row(name="BP", ticker="BP", currency="GBP", price=24.1)])
+    assert [a["symbol"] for a in im.read("BP")["items"][0]["alts"]] == ["BP"]
 
 
 # ---------------------------------------------------- the exchange shown
@@ -602,4 +602,4 @@ def test_a_name_that_is_only_ticker_and_exchange_is_not_a_company_name(monkeypat
     assert im._company_words("NVDA NASDAQ.NMS", "NVDA", "NASDAQ.NMS") == "NVDA"
     assert im._company_words("Airbus SE", "AIR", "SBF") == "Airbus SE"
     assert im._company_words("SBF", "", "SBF") == "SBF"  # no ticker: never an empty name
-    assert im._company_words("Shell", "SHELL", "AEB") == "SHELL"
+    assert im._company_words("Bp", "BP", "LSE") == "BP"

@@ -186,8 +186,8 @@ def test_track_record_scores_relative_upside_against_the_next_year():
 
 
 def test_a_listing_without_its_own_target_never_takes_the_parents_firms():
-    """CCC3.DE: Yahoo's summary is empty for the Xetra line, but its
-    upgrades_downgrades is Coca-Cola's, in USD. Read as euros it put the
+    """PEP.DE: Yahoo's summary is empty for the Xetra line, but its
+    upgrades_downgrades is PepsiCo's, in USD. Read as euros it put the
     target ~11% high; the block must be None so the research line (scaled
     into euros) stands in, as on the grid row."""
     import datetime as dt

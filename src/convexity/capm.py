@@ -483,15 +483,15 @@ _LINES_DISK: dict[str, str] | None = None
 def primary_line(symbol: str) -> str:
     """THE company's primary listing, the one line every fact about the
     company is read from (beta, the rate's currency, analyst targets, the
-    options chain, report dates), wherever the owner bought it: WMT for
-    WMT.DE, SHEL.L for SHEL. What the owner holds (price, returns, P&L, the
+    options chain, report dates), wherever the owner bought it: AAPL for
+    APC.DE, BP.L for BP. What the owner holds (price, returns, P&L, the
     optimizer's correlations) stays on their own listing. A listing that is
     its own primary line, a fund and an index return themselves.
 
     See ``_pack_line``; plus what ``learn_line`` found by name for a
     listing the pack doesn't know (a US company's Milan line -> its US line)
-    and what ``learn_country_line`` decided by the company's country (Shell's
-    receipt -> SHEL.L), this process or, for a week, on disk
+    and what ``learn_country_line`` decided by the company's country (BP's
+    receipt -> BP.L), this process or, for a week, on disk
     (``state/beta_lines.json``). No network: before the country is learned
     (``ensure``, in the background) it is the pack's home line."""
     s = (symbol or "").upper()
@@ -715,9 +715,9 @@ def learn_country_line(symbol: str) -> str | None:
 def _pack_line(symbol: str) -> str:
     """The listing whose returns carry the company's beta: its home line when
     ``symbol`` is a secondary listing of a stock (the symbol pack's company
-    group; NVD.DE -> NVDA, CCC3.DE -> KO, NSRGY -> NESN.SW, NOV.DE ->
-    NOVO-B.CO), else ``symbol`` itself. Measured on the Vienna line against
-    the ATX, Micron read as an Austrian stock; the home principle the
+    group; NVD.DE -> NVDA, APC.DE -> AAPL, NSRGY -> NESN.SW, ASME.DE ->
+    ASML.AS), else ``symbol`` itself. Measured on the Vienna line against
+    the ATX, a US chipmaker read as an Austrian stock; the home principle the
     backtest chose is the company's market, not the venue's. Funds keep their
     own line (a UCITS ETF's other listings are the same fund). Pack only, no
     network, cached: safe on the streaming path."""
@@ -1121,7 +1121,7 @@ def rate_ccy(symbol: str, ccy: str | None, beta_meta: dict | None = None) -> tup
 
     The rate is the primary line's currency, not the listing's (2026-10-29):
     beta, premium and the FX layer all describe the company on its home
-    market with no expected currency move, so WMT.DE takes the US bill, not
+    market with no expected currency move, so APC.DE takes the US bill, not
     the euro rate. Taking the euro rate there would assume the dollar falls
     by the rate gap every year, which the FX layer says it does not (and
     forwards forecast currencies worse than a random walk). A primary line on

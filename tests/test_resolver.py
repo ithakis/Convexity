@@ -1,5 +1,5 @@
-"""A broker's exchange codes in the Add box: "IBIS:NOV" used to fall through
-to a name search and become NOV Inc. instead of Novo Nordisk's Xetra line.
+"""A broker's exchange codes in the Add box: "IBIS:SIE" used to fall through
+to a name search and become a different company than the Xetra line typed.
 Plain parsing only, no network (well-known public tickers, CLAUDE.md §18)."""
 
 import pytest
@@ -13,8 +13,8 @@ from convexity import resolver as r
         ("SBF:AIR", "AIR.PA"),
         ("AIR:SBF", "AIR.PA"),
         ("AIR SBF", "AIR.PA"),  # as the broker's positions screen shows it
-        ("IBIS:SAP", "SAP.DE"),
-        ("SAP IBIS", "SAP.DE"),
+        ("IBIS:SIE", "SIE.DE"),
+        ("SIE IBIS", "SIE.DE"),
         ("BM:ITX", "ITX.MC"),
         ("ENI BVME", "ENI.MI"),
         ("ASML AEB", "ASML.AS"),
@@ -30,6 +30,8 @@ def test_broker_codes(entry, symbol):
     assert mapped is not None and mapped[0] == symbol
 
 
-@pytest.mark.parametrize("entry", ["SAP SE", "bank of america", "Shell plc", "NOVO NORDISK"])
+@pytest.mark.parametrize(
+    "entry", ["Airbus SE", "bank of new york", "Unilever PLC", "ROCHE HOLDING"]
+)
 def test_names_are_not_read_as_codes(entry):
     assert r._broker_pair(entry) is None  # SE is Stockholm only in the dotted form

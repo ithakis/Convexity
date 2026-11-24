@@ -73,8 +73,7 @@ def test_a_line_with_no_other_listing_is_left_alone(market, monkeypatch):
 
 
 def _holed(market):
-    """YNG.DE with junk early prices, then no close for 100 rows (Yahoo's
-    NOT.DE has none from Sep 2019 to Jan 2025), then the real line."""
+    """YNG.DE with junk early prices, then no close for 100 rows (a real Xetra\n    line had none for five years), then the real line."""
     line = market["YNG"] / 1.10
     junk = pd.Series(0.5, index=IDX).where(IDX < IDX[100])
     return line.where(IDX >= IDX[200]).fillna(junk)
@@ -206,7 +205,7 @@ def test_a_good_pack_match_does_not_ask_yahoo(monkeypatch):
     ("a", "b", "same"),
     [("Iberdrola, S.A.", "Iberdrola", True), ("Richter Gedeon", "Richter Gedeon Chemical Factory", True),
      ("Apple Inc.", "Apple Hospitality REIT, Inc.", False), ("Airbus SE", "Airbus", True),
-     ("Shell plc", "Shell plc", True), ("", "Shell", False),
+     ("Unilever PLC", "Unilever PLC", True), ("", "Unilever", False),
      ("Richter Gedeon Vegyeszeti Gyar", "Richter Gedeon Chemical Factory", True),
      ("First Citizens BancShares", "First Republic Bank", False),
      ("Acme Acquisition Corp II", "Acme Acquisition Corp. III", False),
@@ -245,7 +244,7 @@ def test_a_ticker_nobody_knows_is_not_fetched_twice(market, monkeypatch):
 
 @pytest.mark.parametrize(
     ("a", "b"),
-    [("Bank of America Corporation", "Bank of Ireland Group plc"),
+    [("Bank of New York Mellon Corporation", "Bank of Ireland Group plc"),
      ("China Resources Beverage", "China Resources Land Limited"),
      ("Grupo Financiero Banorte", "Grupo Financiero Inbursa"),
      ("Royal Bank of Canada", "Royal Bank of Scotland"),
@@ -408,7 +407,7 @@ def test_window_stand_in_younger_than_the_reach_keeps_its_dividends(monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "ticker", ["FITB-PM", "BAC-PL", "ACHR-WT", "XYZ-WS", "AAC-UN", "XYZ-RI", "ABC-PR-A.TO", "ABC-WT.TO",
+    "ticker", ["FITB-PM", "WFC-PL", "ACHR-WT", "XYZ-WS", "AAC-UN", "XYZ-RI", "ABC-PR-A.TO", "ABC-WT.TO",
                "RGTIW", "BRRWW", "BTSGU", "GENVR", "BN-PFA.TO", "MET-PF", "GOOGM", "FCNCN", "AGNCO", "CHTRP"],
 )  # fmt: skip
 def test_preferreds_warrants_rights_and_units_are_not_the_share(ticker):

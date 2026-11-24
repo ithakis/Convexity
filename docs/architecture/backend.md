@@ -91,8 +91,8 @@ Tries each layer in order, short-circuiting on first hit:
 2. **`_normalize_google_colon`** — `"BME: SAN"` → `"BME.SAN"`. Just a
    pre-pass so the next layer can recognise it.
 3. **`_normalize_exchange_prefix`** — accepts BOTH orderings:
-   - Forward: `"XETRA.SAP"`, `"NASDAQ.MSFT"`, `"Euronext Amsterdam.IMAE"`
-   - Reverse: `"SAP.XETRA"`, `"MSFT.NASDAQ"`, `"IMAE.Euronext Amsterdam"`
+   - Forward: `"XETRA.SIE"`, `"NASDAQ.MSFT"`, `"Euronext Amsterdam.IMAE"`
+   - Reverse: `"SIE.XETRA"`, `"MSFT.NASDAQ"`, `"IMAE.Euronext Amsterdam"`
    Looks up the prefix in `_EXCHANGE_SUFFIX` (60+ exchanges), composes
    `tail + suffix` for yfinance.
 4. **`_yf_symbol_has_data`** — single `fast_info.last_price` ping to
@@ -150,13 +150,13 @@ without re-detecting anything:
 | statement figures (revenue, FCF, debt, EBITDA) | `financialCurrency` | `financial_currency` on the row |
 
 - `_normalize_dividend_yield`: `dividendRate / price` first (the price scaled
-  from pence to pounds for minor-unit listings — SHEL.L: 1.16 / 36.545 =
+  from pence to pounds for minor-unit listings — a London line: 1.16 / 36.545 =
   3.2%, not 0.03%), then `dividendYield / 100` **always** (the old `> 1`
   guess read every yield under 1% as a fraction: 0.32 → 32%), then the
   trailing fields only when the statements share the listing currency (an
   ADR's trailing rate is in the home currency: TSM 26 TWD over a USD price).
-- **ADRs and cross-currency listings** (TSM/TWD, TM/JPY, BABA/CNY, NVO/DKK,
-  SHEL.L reporting in USD): Yahoo's own EV/EBITDA, EV/Revenue, P/S and P/B
+- **ADRs and cross-currency listings** (TSM/TWD, TM/JPY, BABA/CNY, SNY/EUR,
+  BP.L reporting in USD): Yahoo's own EV/EBITDA, EV/Revenue, P/S and P/B
   divide a trading-currency market cap by home-currency statements (TM: 6.3 and
   15.3 against 11.9 and 0.91 on the Tokyo line). `fetcher._currency_consistent`
   rebuilds them in the statement currency — EV = MC·fx + Total Debt − Total
@@ -172,7 +172,7 @@ without re-detecting anything:
   forward multiple in the trailing column for exactly the loss-makers).
 - The 52-week range and ATH are the max/min of **dividend-adjusted daily
   closes** (`auto_adjust=True`), not Yahoo's intraday `fiftyTwoWeekHigh`
-  (which is 0.0 for SHEL.L's low — unusable). Returns (`pct_*`) are
+  (which was 0.0 for one London line's low — unusable). Returns (`pct_*`) are
   therefore total returns; YTD is measured from the previous year's last
   close (`helpers._ytd_change`).
 
@@ -343,7 +343,7 @@ its Copenhagen line over its US ADR when Copenhagen has more analysts.
   - The frontend logo falls back to the research line's (`LOGO_ALIAS`:
     a young Xetra line borrows its US line's).
 - **OID lines.** `_us_lines` also counts OID-board lines whose `region` is
-  empty (1,029 OTC ADRs such as NSRGY, ISNPY and SCGLY were invisible to it).
+  empty (1,029 OTC ADRs such as NSRGY, ISNPY and CRARY were invisible to it).
 
 ### Yahoo answers without fundamentals (2026-10-30)
 
@@ -351,7 +351,7 @@ Yahoo sometimes answers a share's `quoteSummary` without its `financialData`
 module for a few minutes: identity and multiples arrive, but no revenue,
 margins, FCF, financial currency, analyst targets or count. yfinance turns
 that into an `.info` with those keys missing and an `analyst_price_targets`
-of `{}`, the same shape as "this listing has no analysts". On MU (45
+of `{}`, the same shape as "this listing has no analysts". On a US large cap (45
 analysts) the stock window then showed "no analyst targets, so no tilt", n/a
 fundamentals and no coverage card, and σ/μ cached a model price without the
 analysts' α for 15 minutes, while the saved row (built the night before)
@@ -1772,15 +1772,15 @@ has no option history, so anything needing history is built forward.
   - **Hygiene** (`_live`, `_slice`). A quote whose mid is under
     `MIN_PREMIUM` ($0.05, or 0.5% of spot) is dropped, and so is one more
     than `MAX_K_SD` (3.5) ATM sd from the forward. Two minimum-tick
-    deep-OTM calls (NVO's K=90 January at 0.03/0.04 on a $39 stock) put a
-    14.7 vol-pt outlier in NVO's surface; the rule took it from 2.2 to 1.1
+    deep-OTM calls (an ADR's K=90 January at 0.03/0.04 on a $39 stock) put a
+    14.7 vol-pt outlier in its surface; the rule took it from 2.2 to 1.1
     vol pts and SPY's from 4.7 to 0.6.
   - **Dead strikes.** One untraded for 14 days with no open interest is
     dropped. The trade-recency filter of the owner's Heston notebook alone
     did not help: the wings were live min-tick quotes, not stale ones.
   - **Weights.** SSVI residuals are weighted 1 / (1 + spread/mid / 0.2),
     tight quotes up. Not 1/spread², which favours exactly the min-tick wings.
-  - **The anchored horizon.** NVO 12M now passes at 365 days between
+  - **The anchored horizon.** That ADR's 12M now passes at 365 days between
     June-27 and the Jan-28 LEAP; the thin September nearest the horizon had
     failed it.
   - **Snapshots.** A chain that passes is kept as
@@ -1792,7 +1792,7 @@ has no option history, so anything needing history is built forward.
     `quality.anchors`. The footnote says "Options as of the Fri 16 Oct
     close", and names the anchors.
 - **Stale quotes**: walking out from the forward, a put or call further OTM
-  can't bid above the previous one's ask. DELL 12M had a K=165 put bid 12.15
+  can't bid above the previous one's ask. A US large cap's 12M chain had a K=165 put bid 12.15
   next to a K=170 ask of 4.40. The SVI bent into a Lee-slope kink to chase it,
   giving a smile fit of 1.5 vol pts and a mean 9% below F.
 - **Analysts' μ (before 1.29, replaced by `capm.py`)**: one B-tilt per firm (latest target ≤ 12 months old, from
@@ -1819,7 +1819,7 @@ has no option history, so anything needing history is built forward.
 - **Gate**: quotes ≥ 30, SVI RMSE < 1 vol pt, |E_Q/F − 1| < 1%. A failure is
   `{"ok": false, "reason": "thin"}` and is never drawn. It runs after the
   tails. Before them, long chains failed often: on 2026-10-17 SPY was +2.1%,
-  QQQ +3.1% and DELL had a 1.5 vol-pt smile fit and −9.1%. With the tails and
+  QQQ +3.1% and a US large cap had a 1.5 vol-pt smile fit and −9.1%. With the tails and
   the stale-quote filter, all three pass (+0.2%, −0.1% and +0.1%). When a
   12M chain still fails, the page opens on 3M and says why.
 - **Non-US listings** have no chains (Yahoo carries no Eurex or Euronext
@@ -1955,7 +1955,7 @@ CAPM and the per-firm analyst mixture with its trust control:
   within 0.05 of the best for 79%, the pack's for 69%. Re-run it after any
   change to the line rules, `HOME` or the pack. Funds keep
   their own line. `beta_meta.via` names the line; the window, the grid tip and
-  the export say "via MU". More home indices, all probed live: Oslo
+  the export say "via AAPL". More home indices, all probed live: Oslo
   (OSEBX.OL), Dublin, Lisbon, Singapore, Taiwan, NZ, Jakarta, KL, Mexico,
   Tel Aviv, Johannesburg (Equinor read −0.52 vs STOXX 600, 1.82 vs OSEBX), and
   (2026-10-27) Shanghai, Shenzhen, Istanbul and KOSDAQ (weekly R² vs the S&P
@@ -1977,12 +1977,12 @@ CAPM and the per-firm analyst mixture with its trust control:
     The model block carries `rf_ccy` and `rf_line`; the card says which.
   - **Analysts:** `fetcher.analyst_line`: the primary line when it has
     `PRIMARY_MIN_ANALYSTS` (3) analysts, then it replaces a listing's own
-    (the SHEL receipt reads SHEL.L's, TSM 2330.TW's), scaled by the two
+    (the BP receipt reads BP.L's, TSM 2330.TW's), scaled by the two
     prices; a thinner primary line leaves the old rule (own, else the
     most-covered line). `research_line` returns it first, so the row, the
     window, σ/μ and the model's alpha agree.
   - **Options:** `_resolve_chain` probes the primary line first; a receipt
-    keeps its own chain when the primary line lists none (SHEL).
+    keeps its own chain when the primary line lists none (BP).
   - **Report dates:** `attention.fetch_events` takes the earnings date from
     the primary line, the ex-dividend date from the listing when it has one.
   - News already goes to the US line (`symbol_db.us_line`, Finnhub's free
@@ -2137,7 +2137,7 @@ history button, **never when the window opens**.
 - **The SEC line is the company's US line** (`filings._sec_line`: `symbol_db.us_line`
   in the pack's DASH spelling. `/stock/filings` answers class shares only by the
   dash: BRK.B 0 rows, BRK-B 6; BF.B 0, BF-B 1. Finnhub's other endpoints keep
-  `finnhub_symbol`'s BRK.B): APC.DE asks AAPL, SAP.DE asks SAP, a
+  `finnhub_symbol`'s BRK.B): APC.DE asks AAPL, ASME.DE asks ASML, a
   no-SEC company's unsponsored ADR (RHM.DE -> RNMBY) answers `[]` everywhere: a
   clean "none". A listing with no US line at all (ENI.MI) is `no_line`. A
   secondary listing shares its US line's cache entry (APC.DE after AAPL: 0 calls).
@@ -2145,10 +2145,10 @@ history button, **never when the window opens**.
   Items, no exhibits, no period. Results 8-Ks are accepted minutes after the
   release (AAPL 16:30, P&G 07:02), so: the first 8-K accepted in [report time -
   3 h, + 3 days] (Yahoo's exact time in New York; midnight when it gave none);
-  a 6-K in [- 3 h, + 7 days] (SAP files its quarterly 6-K 1-6 days late, every
-  time). Same-day ties prefer a file name that looks like results; names that
+  a 6-K in [- 3 h, + 7 days] (some foreign filers send their quarterly 6-K 1-6
+  days late, every time). Same-day ties prefer a file name that looks like results; names that
   plainly aren't (remuneration report, AGM, buy-back, notice…) are skipped (they
-  had given NVO's Q4 its remuneration report). A non-results 8-K accepted
+  had given a foreign filer's Q4 its remuneration report). A non-results 8-K accepted
   between the release and the results 8-K would be picked: none in the sample
   (JPM's and P&G's second same-day 8-K come later).
 - **The periodic form follows the fiscal quarter** (the owner's rule): Q1-Q3 the
@@ -2165,7 +2165,7 @@ history button, **never when the window opens**.
   quarter is the last quarter end on that grid at least 7 days before the
   report; a 52/53-week year ending in a month's first week (2026-01-03) belongs
   to the month before. The YEAR's name follows the company, and for years ending
-  in **January to March there is no universal rule**: WMT and NVDA name theirs
+  in **January to March there is no universal rule**: CRM and NVDA name theirs
   by the end (FY2026 ends Jan 2026), HD, TGT and LOW by the start (HD's fiscal
   2025 ends 1 Feb 2026). For those, `filings.learn_naming` asks the company's
   10-Ks once (Finnhub `financials-reported`, annual: each 10-K's fiscal year and
@@ -2229,7 +2229,7 @@ history button, **never when the window opens**.
   **Structured fields only**: every word is app.js's. Price reactions are not in
   it: the page measures them on the held line's closes, like the E card.
 - **Speed** (live, 2026-11-17): Finnhub part 0.8-4.7 s cold (AAPL 2.6, MSFT 1.6,
-  CSCO 2.7, AMAT 0.8, SAP 1.4, RNMBY 4.7), the whole route warm 20-30 ms. With
+  CSCO 2.7, AMAT 0.8, RNMBY 4.7), the whole route warm 20-30 ms. With
   the window open (events and `.info` cached) the route's cold cost is the
   Finnhub part only; asked cold from nothing (JPM, curl) 8.7 s.
 - **Not covered**: filer transitions (SHOP's older 6-Ks once it files 10-Qs),
@@ -2271,7 +2271,7 @@ industry, mcap_usd, group, home. **Rules learned from the data:**
 - `marketCap` is in the listing's currency (OTP in HUF); converted to USD once
   at build time through `fx.usd_per_unit`. ETFs/funds/indices carry no size.
 - **A company = every listing with the same cleaned name**, whatever Yahoo
-  calls its type (it files Canadian depositary receipts like NOVO.TO as ETFs).
+  calls its type (it files Canadian depositary receipts like GMAB.TO as ETFs).
   Sector, industry and size fill in from whichever listing has them.
 - **Re-listings** (`symbol_build._secondary`): German regional exchanges,
   Cboe/Aquis/LSE international boards (incl. `0XXX.L` order-book lines), OTC,
@@ -2285,7 +2285,7 @@ industry, mcap_usd, group, home. **Rules learned from the data:**
   **unless that is USD** (BP, Zurich, Genmab report in USD but list at home
   elsewhere) **and only if liquid** (≥10% of the group's top traded value —
   Alibaba's RMB counter 89988.HK is "local" but thin), then the highest
-  3-month traded value in USD. Gold set: NVO→NOVO-B.CO, TSM→2330.TW, LLY.F→LLY,
+  3-month traded value in USD. Gold set: GMAB→GMAB.CO, TSM→2330.TW, LLY.F→LLY,
   ZURVY→ZURN.SW, 89988.HK→9988.HK (`test_symbol_build.py`).
 - Result (2026-10): 472,558 listings → 378,606 searchable homes (43k
   companies, 18k ETFs, 317k funds, 40 indices), 8.5 MB gzipped, ~50 min.
@@ -2334,7 +2334,7 @@ the page shows it as chips, every search prints one `[search]` line.
   enums are the registry and the screener vocabulary; output re-validated.
   Every AI pick must exist in the pack and is shown as its home listing; a
   theme's picks outside the sectors/industries the model itself set are
-  dropped and named in a warning (a live test offered Philip Morris as a GLP-1
+  dropped and named in a warning (a live test offered a tobacco company as a GLP-1
   maker). The rules' placeholder rank (market cap for "best") is left out of
   the hint, or the model copies it back instead of choosing a metric.
   Reuses `news_sentiment._nvidia_call(..., record=False, tag="search")`, so a
@@ -2391,8 +2391,8 @@ the page shows it as chips, every search prints one `[search]` line.
   Each list card carries `match` ("exact" a typed ticker in some form, "hit" a
   sure match, "guess" a name under 85 or tied within a point) and `query` (the
   part as typed); the page pre-picks exact and hit only and labels a guess
-  "Closest match to …". Formats read like the Add box: broker pairs (`NOV
-  IBIS`, `GLE SBF` via `resolver._broker_pair`), class tickers (BRK.B, BF/B →
+  "Closest match to …". Formats read like the Add box: broker pairs (`SIE
+  IBIS`, `AIR SBF` via `resolver._broker_pair`), class tickers (BRK.B, BF/B →
   -B), Bloomberg `X CC Equity` (`_BBG_SUFFIX`; the resolver's "GR" is
   Greece), `Name (TICKER)` when it is the same company, ISINs (yfinance
   Search), bare European ETF tickers (VWCE → VWCE.DE: the main venues, the
@@ -2440,7 +2440,7 @@ under 85; a Yahoo name containing the typed words ranks first), AI picks the
 pack lacks, the Add popover, an import row, and a history stand-in.
 `same_company(a, b)`: equal names without legal forms, the shorter (two
 words or more) inside the longer, or the same first two words when neither
-is generic (`_GENERIC`: Bank of America is not Bank of Ireland, China
+is generic (`_GENERIC`: Bank of New York is not Bank of Ireland, China
 Resources Beverage not China Resources Land); one shared word is never
 enough (Apple vs Apple Hospitality REIT). An AI pick or a pasted name that
 only Yahoo knows must match by ticker or name, never Lookup's first hit.

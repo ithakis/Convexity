@@ -6,7 +6,7 @@ A line-by-line review of the math in `fetcher.py`, `helpers.py`, `fx.py`,
 `analytics.py`, `frontier.py`, `mpt.py`, `news_diagnostics.py`,
 `xlsx_export.py` and every formula shown in the app (tooltips, the Guide, the
 optimizer Guide, the Methodology). Yahoo's units were checked against live
-data (AAPL, KO, TSM, TM, 7203.T, SHEL.L, BABA, NVO, 005930.KS, ASML.AS).
+data (AAPL, PEP, TSM, TM, 7203.T, BP.L, BABA, SNY, 005930.KS, ASML.AS).
 Regression tests: `tests/test_finance_math.py`.
 
 ### Wrong numbers, fixed
@@ -14,11 +14,11 @@ Regression tests: `tests/test_finance_math.py`.
 | Area | What was wrong | Fix |
 |---|---|---|
 | D/E | Yahoo's `debtToEquity` is in percent (78.4 = 0.78×); the app showed "78.40" under the formula Debt/Equity, which gives 0.78 | Shown as "78.4%", formula × 100%, description says 100% = 1.0× |
-| Dividend yield | yfinance ≥ 1.0 reports `dividendYield` in percent; the `> 1 ⇒ /100` guess read every yield under 1% as a fraction (0.32 → 32%). LSE names divided a pound rate by a pence price (SHEL.L 0.03% instead of 3.2%). ADRs used a home-currency trailing rate over a USD price | Raw yield always / 100; minor-unit prices scaled; trailing fields only in one currency |
+| Dividend yield | yfinance ≥ 1.0 reports `dividendYield` in percent; the `> 1 ⇒ /100` guess read every yield under 1% as a fraction (0.32 → 32%). LSE names divided a pound rate by a pence price (a London line: 0.03% instead of 3.2%). ADRs used a home-currency trailing rate over a USD price | Raw yield always / 100; minor-unit prices scaled; trailing fields only in one currency |
 | ADR / cross-currency multiples | Yahoo's EV/EBITDA, EV/Revenue, P/S, P/B mix a USD cap with TWD/JPY/CNY statements (TM 6.3 and 15.3 vs 11.9 and 0.91 on 7203.T; TSM 5.2 and 93 vs ~23 and ~12) | Rebuilt in the statement currency with spot FX (`fetcher._currency_consistent`); None without a rate |
 | FCF yield | FCF (statement ccy) ÷ market cap (trading ccy): TSM 31%, TM −1614% | Same currency before dividing |
 | Cap weights | Raw caps in mixed currencies: a Tokyo name (¥34T) took ~87% of a book with AAPL | USD caps everywhere (app, analytics buckets, Excel, BL prior) |
-| Market cap display | LSE caps (GBP) formatted as pence: SHEL.L £2.1B instead of £208B; ADR revenue/FCF labelled $ while in yen | `majorCcy()`, statement currency for statement figures |
+| Market cap display | LSE caps (GBP) formatted as pence: a London large cap at £2.1B instead of £208B; ADR revenue/FCF labelled $ while in yen | `majorCcy()`, statement currency for statement figures |
 | Size buckets / wtd market cap | Local-currency caps against dollar thresholds; average of mixed currencies | USD caps; average returned in the display currency |
 | YTD (table, detail, analytics) and every period return | Base = first close of the window, dropping the first session's move (YTD missed the year's first trading day) | Base = last close on or before the window start |
 | P/E column | `trailingPE or forwardPE`: loss-makers showed a forward multiple under "trailing" | Trailing only; negative multiples n/a |

@@ -361,7 +361,7 @@ Each of these has cost real debugging time; the link goes to the full story.
   [backend.md → research line](docs/architecture/backend.md#streaming-row-build-apiquotes-stream-ndjson) ·
   [backend.md → options density](docs/architecture/backend.md#real-world-price-distribution-options_densitypy-get-apidensity)
 - **A share's `.info` without `financialData` is a degraded answer, never
-  "no analysts"** (MU, 2026-10-30: 45 analysts, but the window cached "no
+  "no analysts"** (a US large cap, 2026-10-30: 45 analysts, but the window cached "no
   analyst targets", n/a fundamentals and a model price with no α).
   `helpers.fundamentals_missing` detects it (a share has the module, even
   NVD.DE; a fund never does); `_safe_info` asks once more on a fresh
@@ -428,7 +428,7 @@ Each of these has cost real debugging time; the link goes to the full story.
   Finnhub's filings carry no Items, so the results 8-K is the first accepted in
   [report - 3 h, + 3 d] (6-K + 7 d), and the periodic form follows the fiscal
   quarter (Q1-Q3 10-Q, Q4 10-K, foreign Q4 20-F/40-F). **A January-March year
-  end has no universal naming** (HD's fiscal 2025 ends Feb 2026, WMT's fiscal
+  end has no universal naming** (HD's fiscal 2025 ends Feb 2026, CRM's fiscal
   2026 ends Jan 2026): the year is the company's own 10-Ks' word
   (`learn_naming`, `state/fiscal_naming.json`), else no FY at all ("Q2 · quarter
   to 3 Aug 2025"). Finnhub is asked by form, for the company's **US line**
@@ -577,7 +577,7 @@ overrides it):
 │   ├── events.json             ← held shares' next earnings / ex-dividend dates from Yahoo (a cache, market data only)
 │   ├── betas.json              ← the app's beta per symbol and window, recomputed daily (capm.py; a cache, market data only)
 │   ├── policy_rates.json       ← central-bank policy rates from the BIS, refreshed daily: rf for currencies without a CME future (options_density.py; market data only)
-│   ├── beta_lines.json         ← home lines found by name (a US company's Milan line → its US line) or by the company's country (SHEL → SHEL.L), a week (capm.py; market data only)
+│   ├── beta_lines.json         ← home lines found by name (a US company's Milan line → its US line) or by the company's country (BP → BP.L), a week (capm.py; market data only)
 │   ├── fiscal_naming.json      ← how each Jan-Mar year-end company names its fiscal years, from its 10-Ks, 90 days (filings.py; market data only)
 │   ├── target_history.jsonl    ← one line per day and symbol: the analyst-target block when first computed (market data only; analyst_targets.record)
 │   ├── long_run.json           ← each holding's recoveries from max history and the 3-year covariance, monthly (long_run.py; a cache, market data only)

@@ -20,9 +20,9 @@ from convexity import investments as inv
 from convexity import paths, server
 
 SEED = Path(__file__).resolve().parents[1] / "scripts" / "seed_demo_book.py"
-QUOTE = {"AAPL": "USD", "MSFT": "USD", "NVDA": "USD", "SHEL.L": "GBp", "VWCE.DE": "EUR",
+QUOTE = {"AAPL": "USD", "MSFT": "USD", "NVDA": "USD", "REL.L": "GBp", "VWCE.DE": "EUR",
          "GOOGL": "USD"}  # fmt: skip
-LAST = {"AAPL": 250.0, "MSFT": 500.0, "NVDA": 180.0, "SHEL.L": 2700.0, "VWCE.DE": 140.0,
+LAST = {"AAPL": 250.0, "MSFT": 500.0, "NVDA": 180.0, "REL.L": 2700.0, "VWCE.DE": 140.0,
         "GOOGL": 240.0}  # fmt: skip
 FX = {"USD": 1.0, "GBP": 1.3, "EUR": 1.1}
 
@@ -266,7 +266,7 @@ def test_only_known_sources_are_stored():
 
 
 def test_changing_the_company_of_an_entry_takes_the_new_currency():
-    b = inv.add(BUY | {"symbol": "SHEL.L", "fx_rate": 1.25}, 0)
+    b = inv.add(BUY | {"symbol": "REL.L", "fx_rate": 1.25}, 0)
     eid = b["entries"][0]["id"]
     inv.update(eid, {"symbol": "VWCE.DE"}, 1)
     e = _raw()["entries"][0]
@@ -275,7 +275,7 @@ def test_changing_the_company_of_an_entry_takes_the_new_currency():
 
 def test_a_pence_holding_without_a_yahoo_price_is_shown_in_pence(monkeypatch):
     monkeypatch.setattr(inv, "_closes", lambda symbols, period: pd.DataFrame())
-    b = inv.add(BUY | {"symbol": "SHEL.L", "price": 25.0, "fee": 0}, 0)
+    b = inv.add(BUY | {"symbol": "REL.L", "price": 25.0, "fee": 0}, 0)
     p = b["positions"][0]
     assert p["quote_ccy"] == "GBp" and p["price"] == pytest.approx(2500)
     assert p["avg_price"] == pytest.approx(2500) and p["note"]
@@ -290,8 +290,8 @@ def test_seeded_demo_book_replays_through_the_engine():
     assert b["demo"] is True and b["empty"] is False and not b["warnings"]
     pos = {p["symbol"]: p for p in b["positions"]}
     assert pos["NVDA"]["shares"] == 120  # 20 pre-split x 10, less 80 sold
-    assert pos["MSFT"]["shares"] == 50 and pos["SHEL.L"]["shares"] == 300
-    assert pos["SHEL.L"]["avg_price"] == pytest.approx(2541.0)  # pence, fee included
+    assert pos["MSFT"]["shares"] == 50 and pos["REL.L"]["shares"] == 300
+    assert pos["REL.L"]["avg_price"] == pytest.approx(2661.0)  # pence, fee included
     h = b["headline"]
     # Value = positions + cash; weights + cash = 100%; profit = value - money in.
     assert sum(p["value"] for p in b["positions"]) + h["cash"] == pytest.approx(h["value"])
@@ -669,7 +669,7 @@ def test_good_split_lists_survive_a_restart_and_a_bad_file_is_ignored(monkeypatc
     inv._SPLITS.clear()
     inv._SPLITS_GOOD.clear()
     monkeypatch.setattr(inv, "_splits_loaded", None)
-    _yahoo_down_for(monkeypatch, "NVDA", "MSFT", "AAPL", "SHEL.L", "VWCE.DE")
+    _yahoo_down_for(monkeypatch, "NVDA", "MSFT", "AAPL", "REL.L", "VWCE.DE")
     assert not inv.book()["splits_pending"]
     paths.state_file("splits").write_text("{not json", encoding="utf-8")
     inv._SPLITS.clear()

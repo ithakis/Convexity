@@ -18,16 +18,16 @@ def L(ticker, name, exchange, ccy, fin, traded=0.0, typ="stock", industry="Indus
 LISTINGS = [
     # Traded values are illustrative; the ADRs are the busier line where that
     # is the hard case (TSM) — the reporting currency must still win there.
-    L("NOVO-B.CO", "Novo Nordisk A/S", "CPH", "DKK", "DKK", 4e8),
-    L("NVO", "Novo Nordisk A/S", "NYQ", "USD", "DKK", 5e8),
-    L("NOV.DE", "Novo Nordisk A/S", "GER", "EUR", "DKK", 1e7),
+    L("GMAB.CO", "Genmab A/S", "CPH", "DKK", "DKK", 4e8),
+    L("GMAB", "Genmab A/S", "NYQ", "USD", "DKK", 5e8),
+    L("GE9.DE", "Genmab A/S", "GER", "EUR", "DKK", 1e7),
     L("2330.TW", "Taiwan Semiconductor Manufacturing Company Limited", "TAI", "TWD", "TWD", 1e9),
     L("TSM", "Taiwan Semiconductor Manufacturing Company Limited", "NYQ", "USD", "TWD", 3e9),
     L("LLY", "Eli Lilly and Company", "NYQ", "USD", "USD", 2e9),
     L("LLY.F", "Eli Lilly and Company", "FRA", "EUR", "USD", 1e6),
     L("LLY.DE", "Eli Lilly and Company", "GER", "EUR", "USD", 5e6),
-    L("SAP.DE", "SAP SE", "GER", "EUR", "EUR", 3e8),
-    L("SAP.F", "SAP SE", "FRA", "EUR", "EUR", 1e6),
+    L("SIE.DE", "Siemens AG", "GER", "EUR", "EUR", 3e8),
+    L("SIE.F", "Siemens AG", "FRA", "EUR", "EUR", 1e6),
     # Reports in USD, listed at home in CHF: USD reporting says nothing.
     L("ZURN.SW", "Zurich Insurance Group AG", "EBS", "CHF", "USD", 2e8),
     L("ZURVY", "Zurich Insurance Group AG", "OQX", "USD", "USD", 3e6),
@@ -58,8 +58,8 @@ LISTINGS = [
     L("9988.HK", "Alibaba Group Holding Limited", "HKG", "HKD", "CNY", 1.2e9),
     L("89988.HK", "Alibaba Group Holding Limited", "HKG", "CNY", "CNY", 9e5),
     L("BABA", "Alibaba Group Holding Limited", "NYQ", "USD", "CNY", 1.1e9),
-    # Yahoo files Canadian depositary receipts as ETFs: still Novo Nordisk.
-    L("NOVO.TO", "Novo Nordisk A/S", "TOR", "CAD", "DKK", 2e5, typ="etf"),
+    # Yahoo files Canadian depositary receipts as ETFs: still Genmab.
+    L("GMAB.TO", "Genmab A/S", "TOR", "CAD", "DKK", 2e5, typ="etf"),
     # An LSE international-order-book line with no primary listing: dropped.
     L("0KZC.L", "SPDR S&P 500 ETF Trust", "LSE", "USD", "USD", 5e7, typ="etf", industry=None),
     # A CEDEAR still named as before a rename: SPY trades in the US -> dropped.
@@ -84,7 +84,7 @@ def _homes(rows):
 
 
 @pytest.mark.parametrize(
-    "ticker", ["NOVO-B.CO", "2330.TW", "LLY", "SAP.DE", "ZURN.SW", "XLK", "9988.HK"]
+    "ticker", ["GMAB.CO", "2330.TW", "LLY", "SIE.DE", "ZURN.SW", "XLK", "9988.HK"]
 )
 def test_home_listing_gold(ticker):
     assert ticker in _homes(sb.group(LISTINGS))
@@ -103,8 +103,8 @@ def test_one_home_per_company_and_alternates_share_a_group():
     for r in rows:
         groups.setdefault(r[-2], []).append(r)
     assert all(sum(r[-1] for r in g) == 1 for g in groups.values())
-    novo = next(g for g in groups.values() if any(r[0] == "NVO" for r in g))
-    assert {r[0] for r in novo} == {"NOVO-B.CO", "NVO", "NOV.DE", "NOVO.TO"}
+    genmab = next(g for g in groups.values() if any(r[0] == "GMAB" for r in g))
+    assert {r[0] for r in genmab} == {"GMAB.CO", "GMAB", "GE9.DE", "GMAB.TO"}
     bax = next(g for g in groups.values() if any(r[0] == "BTL.SG" for r in g))
     assert {r[0]: r[-1] for r in bax} == {"BAX": 1, "BTL.SG": 0}
 
@@ -174,7 +174,7 @@ def test_cli_builds_a_pack_the_app_can_install(tmp_path, monkeypatch, capsys):
     )  # warrant, 0KZC.L, SPY.BA
     sdb.write_db(sdb.iter_rows(blob), raw, expect=m["rows"])
     sdb._invalidate()
-    assert sdb.lookup("novo nordisk")[0].ticker == "NOVO-B.CO"
+    assert sdb.lookup("genmab")[0].ticker == "GMAB.CO"
     assert f"{len(LISTINGS) - 3} listings" in capsys.readouterr().out
 
 

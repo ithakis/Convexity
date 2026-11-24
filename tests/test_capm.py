@@ -100,7 +100,7 @@ def test_glitch_returns_are_ignored():
         ("SPY", "^GSPC", "us"),
         ("SAN.PA", "^FCHI", "home"),
         ("DBK.DE", "^GDAXI", "home"),
-        ("NOV.DE", "^GDAXI", "home"),
+        ("BAS.DE", "^GDAXI", "home"),
         ("SAN.MC", "^IBEX", "home"),
         ("ISP.MI", "FTSEMIB.MI", "home"),
         ("ADYEN.AS", "^AEX", "home"),
@@ -109,7 +109,7 @@ def test_glitch_returns_are_ignored():
         ("EBS.VI", "^ATX", "home"),
         ("NESN.SW", "^SSMI", "home"),
         ("VOLV-B.ST", "^OMX", "home"),
-        ("NOVO-B.CO", "^OMXC25", "home"),
+        ("DSV.CO", "^OMXC25", "home"),
         ("HSBA.L", "^FTAS", "home"),
         ("7203.T", "1306.T", "home"),
         ("PKO.WA", "^STOXX", "regional"),
@@ -696,21 +696,21 @@ def _country_env(monkeypatch, lines, home, country, tmp=None):
 
 
 def test_a_company_reporting_in_dollars_is_measured_in_its_own_country(monkeypatch, tmp_path):
-    """Shell reports in USD, so the pack took its most traded line, the New
-    York receipt. Every Shell line is measured on London, against the FTSE."""
+    """HSBC reports in USD, so the pack took its most traded line, the New
+    York receipt. Every HSBC line is measured on London, against the FTSE."""
     _country_env(
         monkeypatch,
-        [("SHEL", "us", 700e6), ("SHEL.L", "gb", 520e6), ("SHELL.AS", "nl", 230e6)],
-        "SHEL",
+        [("HSBC", "us", 700e6), ("HSBA.L", "gb", 520e6), ("0005.HK", "hk", 230e6)],
+        "HSBC",
         "United Kingdom",
         tmp_path,
     )
-    for s in ("SHEL", "SHEL.L", "SHELL.AS"):
-        assert capm.learn_country_line(s) == "SHEL.L"
-        assert capm.beta_line(s) == "SHEL.L"
-    assert capm.home_proxy(capm.beta_line("SHEL"))["name"] == "FTSE All-Share"
+    for s in ("HSBC", "HSBA.L", "0005.HK"):
+        assert capm.learn_country_line(s) == "HSBA.L"
+        assert capm.beta_line(s) == "HSBA.L"
+    assert capm.home_proxy(capm.beta_line("HSBC"))["name"] == "FTSE All-Share"
     capm._LINES_DISK = None  # a restart: the answer comes back from disk
-    assert capm.beta_line("SHELL.AS") == "SHEL.L"
+    assert capm.beta_line("0005.HK") == "HSBA.L"
 
 
 def test_a_token_line_in_the_home_country_does_not_carry_the_beta(monkeypatch):
@@ -722,10 +722,10 @@ def test_a_token_line_in_the_home_country_does_not_carry_the_beta(monkeypatch):
 
 def test_a_us_company_bought_in_germany_stays_on_its_us_line(monkeypatch):
     _country_env(
-        monkeypatch, [("WMT", "us", 2.8e9), ("WMT.DE", "de", 0.5e6)], "WMT", "United States"
+        monkeypatch, [("COST", "us", 2.8e9), ("CTO.DE", "de", 0.5e6)], "COST", "United States"
     )
-    assert capm.learn_country_line("WMT.DE") == "WMT"
-    assert capm.home_proxy(capm.beta_line("WMT.DE"))["name"] == "S&P 500"
+    assert capm.learn_country_line("CTO.DE") == "COST"
+    assert capm.home_proxy(capm.beta_line("CTO.DE"))["name"] == "S&P 500"
 
 
 def test_a_company_listed_only_abroad_keeps_the_packs_line(monkeypatch):
@@ -754,25 +754,25 @@ def test_one_market_only_never_asks_yahoo(monkeypatch):
 
 def test_a_failed_country_lookup_is_not_kept(monkeypatch):
     asked = _country_env(
-        monkeypatch, [("SHEL", "us", 700e6), ("SHEL.L", "gb", 520e6)], "SHEL", None
+        monkeypatch, [("HSBC", "us", 700e6), ("HSBA.L", "gb", 520e6)], "HSBC", None
     )
-    assert capm.learn_country_line("SHEL") is None
-    assert capm.beta_line("SHEL") == "SHEL"
-    assert capm.learn_country_line("SHEL") is None and len(asked) == 2  # asked again
+    assert capm.learn_country_line("HSBC") is None
+    assert capm.beta_line("HSBC") == "HSBC"
+    assert capm.learn_country_line("HSBC") is None and len(asked) == 2  # asked again
 
 
 # --------------------------------------- the rate is the primary line's (1.29)
 
 
 def test_the_rate_is_in_the_primary_lines_currency(monkeypatch):
-    """WMT.DE: beta on WMT, so the US bill, not the euro rate. A listing that
+    """CTO.DE: beta on COST, so the US bill, not the euro rate. A listing that
     is its own primary line, or whose primary line has no market in the app
     (Riyadh), keeps its own currency."""
-    lines = {"WMT.DE": "WMT", "SAP": "SAP.DE", "2222X.DE": "2222.SR"}
+    lines = {"CTO.DE": "COST", "ASML": "ASML.AS", "2222X.DE": "2222.SR"}
     monkeypatch.setattr(capm, "primary_line", lambda s: lines.get(s.upper(), s.upper()))
-    assert capm.rate_ccy("WMT.DE", "EUR") == ("USD", "WMT")
-    assert capm.rate_ccy("SAP", "USD") == ("EUR", "SAP.DE")
-    assert capm.rate_ccy("SHEL.L", "GBp") == ("GBp", None)
+    assert capm.rate_ccy("CTO.DE", "EUR") == ("USD", "COST")
+    assert capm.rate_ccy("ASML", "USD") == ("EUR", "ASML.AS")
+    assert capm.rate_ccy("BP.L", "GBp") == ("GBp", None)
     assert capm.rate_ccy("2222X.DE", "EUR") == ("EUR", None)
     # beta_meta's "via" is the line the beta used, and wins
     assert capm.rate_ccy("XYZ.DE", "EUR", {"via": "XYZ"}) == ("USD", "XYZ")
@@ -781,7 +781,7 @@ def test_the_rate_is_in_the_primary_lines_currency(monkeypatch):
 def test_model_takes_the_primary_lines_rate(monkeypatch):
     from convexity import options_density
 
-    monkeypatch.setattr(capm, "primary_line", lambda s: "WMT" if s.upper() == "WMT.DE" else s)
+    monkeypatch.setattr(capm, "primary_line", lambda s: "COST" if s.upper() == "CTO.DE" else s)
     asked = []
 
     def rate(c):
@@ -789,11 +789,11 @@ def test_model_takes_the_primary_lines_rate(monkeypatch):
         return {"USD": (0.04, "US 3-month bill"), "EUR": (0.024, "CME futures")}[c or "USD"]
 
     monkeypatch.setattr(options_density, "_local_rate", rate)
-    bm = {"beta": 0.5, "via": "WMT", "proxy": "^GSPC"}
+    bm = {"beta": 0.5, "via": "COST", "proxy": "^GSPC"}
     rates: dict = {}
-    m = capm.model("WMT.DE", 1.0, s0=100.0, ccy="EUR", beta_meta=bm, rates=rates)
-    assert m["rf"] == 0.04 and m["rf_ccy"] == "USD" and m["rf_line"] == "WMT"
-    capm.model("WMT.DE", 1.0, s0=100.0, ccy="EUR", beta_meta=bm, rates=rates)
+    m = capm.model("CTO.DE", 1.0, s0=100.0, ccy="EUR", beta_meta=bm, rates=rates)
+    assert m["rf"] == 0.04 and m["rf_ccy"] == "USD" and m["rf_line"] == "COST"
+    capm.model("CTO.DE", 1.0, s0=100.0, ccy="EUR", beta_meta=bm, rates=rates)
     assert asked == ["USD"]  # one rate per currency across a batch
-    own = capm.model("SAP.DE", 1.0, s0=100.0, ccy="EUR", beta_meta={"beta": 1.0, "via": None})
+    own = capm.model("BAS.DE", 1.0, s0=100.0, ccy="EUR", beta_meta={"beta": 1.0, "via": None})
     assert own["rf"] == 0.024 and own["rf_line"] is None

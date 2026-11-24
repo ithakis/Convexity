@@ -157,7 +157,7 @@ def _fh_call(
 
 def finnhub_symbol(symbol: str) -> str | None:
     """The ticker to ask Finnhub for a row: the company's US line
-    (symbol_db.us_line: TTE for TTE.PA, KO for CCC3.DE), in Finnhub's
+    (symbol_db.us_line: SNY for SAN.PA, AAPL for APC.DE), in Finnhub's
     class-share spelling (BRK.B). None when the company has no US line —
     the free plan answers 403 to every other listing, so there is nothing
     to ask."""
@@ -185,8 +185,8 @@ def get_insider_sentiment(symbol: str) -> dict | None:
 
     Asked of the company's US line (`finnhub_symbol`); ``via`` names it when
     it is not the row's own ticker. MSPR comes from SEC Form 4, which only
-    US companies file: an ADR (TTE, NVO) has none, but KO answers for
-    CCC3.DE.
+    US companies file: an ADR (SNY, ASML) has none, but AAPL answers for
+    APC.DE.
     """
     fsym = finnhub_symbol(symbol)
     if not FINNHUB_API_KEY or not fsym:
@@ -235,7 +235,7 @@ def get_recommendation_trend(symbol: str) -> list[dict] | None:
     returned by Finnhub (already newest-first). ``None`` if no data.
 
     Asked of the company's US line (`finnhub_symbol`): Finnhub answers an
-    ADR with the company's worldwide consensus (TTE comes back as TTE.PA).
+    ADR with the company's worldwide consensus (SNY comes back as SAN.PA).
     """
     fsym = finnhub_symbol(symbol)
     if not FINNHUB_API_KEY or not fsym:

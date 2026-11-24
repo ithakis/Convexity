@@ -1513,8 +1513,8 @@ function fxConvert(amount, fromCcy) {
 }
 
 /* Yahoo quotes LSE / JSE / TASE prices in pence / cents / agorot, but market
-   caps, dividend rates and statement figures in the major unit (SHEL.L:
-   price 3654.5 GBp, market cap 208e9 GBP). Amounts of the second kind are
+   caps, dividend rates and statement figures in the major unit (a London
+   line: price 3654.5 GBp, market cap 208e9 GBP). Amounts of the second kind are
    formatted with majorCcy(), or they would be shown 100x too small. */
 const MINOR_CCY = { GBp: "GBP", GBX: "GBP", ZAc: "ZAR", ILA: "ILS" };
 function majorCcy(ccy) { return MINOR_CCY[ccy] || String(ccy || "USD").toUpperCase(); }
@@ -1724,8 +1724,8 @@ function viaTip(r, html, scaled) {
 }
 
 /* A logo is the company's, not the ticker's: the hosts key on the exact ticker,
-   and a cut-off suffix asks about whoever owns the short one (SU.PA is
-   Schneider, SU is Suncor; NOV.DE is Novo Nordisk, NOV is NOV Inc.). So the
+   and a cut-off suffix asks about whoever owns the short one (AI.PA is
+   Air Liquide, AI is C3.ai; AIR.DE is Airbus, AIR is AAR Corp.). So the
    tickers come from the symbol pack (symbol_db.logo_tickers) and everything
    goes through logoImg with the row's full symbol. An <img> rendered before
    the answer has no src yet; logoLinesFetch fills it. */
@@ -1918,7 +1918,7 @@ function epsSurpriseBars(arr) {
 }
 
 /* The company's US line when Finnhub was asked for it instead of the row's
-   own listing (TTE for TTE.PA: the free plan covers US lines only), else
+   own listing (SNY for SAN.PA: the free plan covers US lines only), else
    null. `row.us_line` is in Finnhub's spelling (BRK.B for BRK-B). */
 function fhVia(row) {
   const u = row && row.us_line;
@@ -2121,7 +2121,7 @@ function nsHoverCardHtml(sym, s, row) {
 }
 
 /* Where a non-US row's headlines come from: Finnhub's free plan covers US
-   listings only, so it is asked for the company's US line (TTE for TTE.PA). */
+   listings only, so it is asked for the company's US line (SNY for SAN.PA). */
 function nsSourceNote(row) {
   if (!row || row.us_line === undefined || !/[.]/.test(row.symbol || "")) return "";
   return row.us_line
@@ -4271,7 +4271,7 @@ function ehEnsure(force, ext) {
 /* The quarter's name: "Q4 FY2026" when the fiscal year is certain (the
  * payload's, which knows the company's own naming, over the events' row);
  * a January-March year end whose naming isn't known has no FY (HD calls the
- * year to Feb 2026 "fiscal 2025", WMT "fiscal 2026"), so the quarter is
+ * year to Feb 2026 "fiscal 2025", CRM "fiscal 2026"), so the quarter is
  * named by its end, and only when that end is exact (a 52/53-week quarter's
  * comes from its 10-Q's file name). Never a guessed year. */
 function ehLabel(e) {
@@ -4580,7 +4580,7 @@ function ensureDensity(h) {
     DETAIL.fc[h] = d;
     if (d.ok) loadModelAux(d);   // the model card's charts (bill, premiums, beta pairs)
     // 12M is the default, but long chains are often too thin to trust their
-    // tails (SPY, DELL today); then the window opens on 3M and says why.
+    // tails (SPY and a US large cap today); then the window opens on 3M and says why.
     const was = DETAIL.fcH;
     if (DETAIL.fcAuto && DETAIL.fc[365] && !DETAIL.fc[365].ok && DETAIL.fc[91]?.ok) DETAIL.fcH = 91;
     // 12M landing under a 3M view redraws too: the inset's band reads it.
@@ -7377,7 +7377,7 @@ function refreshNeeded() {
 }
 function syncRefreshNeeded() { $("#refresh").classList.toggle("needs-refresh", refreshNeeded()); }
 
-/* "Novo Nordisk A/S" -> "Novo Nordisk": legal forms only cost chip width. */
+/* "Genmab A/S" -> "Genmab": legal forms only cost chip width. */
 function shortName(n) {
   return String(n || "").replace(/[,.]?\s+(inc|corp|corporation|co|company|ltd|limited|plc|ag|sa|s\.a|nv|n\.v|se|a\/s|asa|ab|spa|s\.p\.a|holdings?|group)\.?$/i, "").trim() || n;
 }
@@ -16725,7 +16725,7 @@ async function renderSettingsModel(el) {
   const theory = `<div class="settings-row model-theory" data-item="model-theory"><div class="settings-row-main">
     <div class="settings-row-label">How it is built</div>
     <div class="model-formula">${tx(String.raw`\mu = r_{f,\text{local}} + \beta\cdot\text{ERP} + \alpha`, "μ = r_f + β·ERP + α")}<span></span>${tx(String.raw`P_T = S_0\,e^{\mu T}`, "P_T = S_0 e^{μT}")}</div>
-    <div class="settings-row-help">r<sub>f</sub> is the short rate in the currency of the company’s primary line (WMT.DE: the US bill), the asset’s own for a fund; β is measured against its home market (a secondary listing: the company’s home line; a fund: the index it tracks); α is the analysts’ small relative tilt, 0 without targets. μ off in a stock window is pure CAPM (α = 0). The options shape the distribution only: their curve, widened by κ, is tilted once so its mean is P<sub>T</sub>.</div>
+    <div class="settings-row-help">r<sub>f</sub> is the short rate in the currency of the company’s primary line (APC.DE: the US bill), the asset’s own for a fund; β is measured against its home market (a secondary listing: the company’s home line; a fund: the index it tracks); α is the analysts’ small relative tilt, 0 without targets. μ off in a stock window is pure CAPM (α = 0). The options shape the distribution only: their curve, widened by κ, is tilted once so its mean is P<sub>T</sub>.</div>
     <details class="model-why" open><summary>Why the home index, three years of daily returns and a 0.9 shrink</summary><ul>
       <li>A backtest of 164 names (US, Europe, UK, Japan and 25 European banks), one forecast a year from 2008 to 2025, scored against the realised beta over the next 3 and 12 months: the mean squared error falls <b>51% at 12M and 57% at 3M</b> against Yahoo’s 5-year monthly beta vs the S&amp;P 500.</li>
       <li>The home index explains far more of a stock than the S&amp;P 500: European banks R² .52 vs .29; Japan’s daily beta vs the S&amp;P reads 0.25 against 1.02 vs TOPIX, since Tokyo closes before New York opens.</li>
