@@ -4,8 +4,8 @@ Version history — see CHANGELOG.md for the full PR-by-PR mapping.
 X bumps on a major new feature/release, Y bumps on smaller polish/fixes.
 """
 
-__version__ = "1.37.0"
-__version_date__ = "2026-11-23"  # release date of __version__, ISO yyyy-mm-dd
+__version__ = "1.38.0"
+__version_date__ = "2026-11-26"  # release date of __version__, ISO yyyy-mm-dd
 
 
 def _format_version_date(date_str: str) -> str:

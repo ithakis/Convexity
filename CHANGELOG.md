@@ -9,6 +9,11 @@ Versions 1.13.1 onward were developed on the `distribution` branch and are
 released together as **v2.0.0** when `distribution` becomes `main` (the app's
 launch); until then they have no tags or GitHub Releases of their own.
 
+## 1.38.0 — 2026-11-26
+
+- **Drive Convexity from Claude.** `convexity mcp` is a Model Context Protocol server, so Claude Code or Claude Desktop can work with the app you have open: build, rename and delete portfolios, run their analytics with any weighting, start a refresh and follow it, search companies, read a company's detail and the saved news reads, and in My Investments list, show, create and rename portfolios, read a book's overview and ledger, add entries, delete one, undo and redo. Register it once with `claude mcp add --scope user convexity -- ~/.local/share/uv/tools/convexity/bin/convexity mcp` (README → Use with Claude).
+- **It goes through the app, never around it.** Every change is made by the running app the same way the window makes it, so it shows at once and My Investments' Undo takes it back. It only talks to the Convexity that uses your data folder, a change to a book is never sent to another one, and it spends no API quota except when it runs a refresh or a company search, like the buttons. If Convexity isn't open, Claude can start it.
+
 ## 1.37.0 — 2026-11-23
 
 - **Recent events in My Investments.** Below Upcoming, the rail lists up to five events from the last 30 days that moved your holdings most for their weight: results with how they compared with the estimate, dividends that were raised, cut or special, and very large price moves. Each shows its Market Reaction.
