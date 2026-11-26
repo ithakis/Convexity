@@ -4,6 +4,8 @@
     convexity build-symbols     build the weekly symbol pack (CI)
     convexity build-reference-pack
                                 build the daily S&P 500 reference pack (CI)
+    convexity mcp               MCP server over stdio: lets Claude drive the
+                                running app (mcp_server.py)
 
 The desktop window is the separate `convexity-app` command (desktop.py).
 
@@ -16,6 +18,7 @@ import sys
 
 USAGE = """\
 usage: convexity [build-symbols --out DIR [--previous DIR] [--limit N]]
+       convexity mcp
        convexity build-reference-pack (--out DIR [--previous DIR] | --returns-only) [--limit N]
 
   (no command)          run the dashboard server and print its URL
@@ -24,6 +27,8 @@ usage: convexity [build-symbols --out DIR [--previous DIR] [--limit N]]
   build-reference-pack  build the reference pack (the Market read of the
                         S&P 500) — run by CI; needs FINNHUB_API_KEY in the
                         environment (`--help` for its options)
+  mcp                   Model Context Protocol server over stdio, so Claude
+                        Code / Claude Desktop can drive the running app
 """
 
 
@@ -42,6 +47,10 @@ def main(argv: list[str] | None = None) -> int:
         from .reference_build import main as build_reference_pack
 
         return build_reference_pack(args[1:])
+    if args[0] == "mcp":
+        from .mcp_server import main as mcp_main
+
+        return mcp_main(args[1:])
     if args[0] in ("-h", "--help", "help"):
         print(USAGE, end="")
         return 0

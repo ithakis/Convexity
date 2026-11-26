@@ -93,6 +93,7 @@ market-risk line tell you what changed before you open a single article.
 - **Track record:** how both news reads have actually predicted returns, so you know how far to trust them
 - **Excel export:** every portfolio, its analytics and sentiment in one `.xlsx`
 - **Light, dark and Bloomberg themes**, multiple portfolios as tabs, keyboard shortcuts
+- **Drive it from Claude:** `convexity mcp` is an MCP server, so Claude Code or Claude Desktop can build portfolios, run analytics and refreshes, and add trades to My Investments in the app you have open (see [Use with Claude](#use-with-claude))
 
 ---
 
@@ -217,6 +218,28 @@ shorter-horizon returns. Settings → Guide in the app has every formula.
    sentiment; long-press it (or `Shift+R`) to refresh every saved portfolio.
 4. The portfolio is saved as you edit and restored on the next launch. Remove a
    company with the ✕ on its chip.
+
+### Use with Claude
+
+Convexity includes an [MCP](https://modelcontextprotocol.io) server, so Claude
+can work with the app you have open: "build a portfolio of European banks and
+compare it with the S&P 500 over 3 years", "add yesterday's buy of 2 NVDA at
+$150 to my book", "how is my book doing this year?". Register it once:
+
+```bash
+claude mcp add --scope user convexity -- ~/.local/share/uv/tools/convexity/bin/convexity mcp
+```
+
+For Claude Desktop, add the same command to `claude_desktop_config.json`:
+
+```json
+{"mcpServers": {"convexity": {"command": "~/.local/share/uv/tools/convexity/bin/convexity", "args": ["mcp"]}}}
+```
+
+(write the path out in full: Claude Desktop doesn't expand `~`). It only ever
+talks to Convexity on this computer, through the same steps the window uses,
+so every change shows in the app and My Investments' Undo takes it back. If
+Convexity isn't open, Claude can start it.
 
 ### Reading the numbers
 

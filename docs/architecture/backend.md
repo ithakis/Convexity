@@ -2239,6 +2239,58 @@ history button, **never when the window opens**.
 dates, no-SEC, the Finnhub miss with EDGAR's list, no key, failures never
 cached, the URL allow-list, the throttle and the US line of a secondary listing.
 
+### The MCP server (`mcp_server.py`, `convexity mcp`, 2026-11-26)
+
+`convexity mcp` speaks the Model Context Protocol over stdio, so Claude Code,
+Claude Desktop or any MCP client can read and drive the app: list, build,
+rename, delete and analyse Portfolios-page portfolios, run a refresh and follow
+it, search companies, read a symbol's detail and the cached news reads, and in
+My Investments list, show, create and rename books, read a book's page and
+ledger, add entries, delete one, undo and redo. Register it once per user:
+
+```bash
+claude mcp add --scope user convexity -- ~/.local/share/uv/tools/convexity/bin/convexity mcp
+```
+
+(Claude Desktop: the same command and args under `mcpServers` in
+`claude_desktop_config.json`.) Rules, each load-bearing:
+
+- **A client of the running app's HTTP API, never a second writer.** The app's
+  locks are in-process, so a second process writing `views.json` or a book file
+  would race it; going through the routes keeps the rev checks, the journal
+  (an MCP change is undoable in the window), the degraded-batch guard and the
+  request-origin guard (POSTs send `Content-Type: application/json`, no
+  `Origin`). A new tool calls a route; it never imports a writer.
+- **Only the app of this data folder.** Discovery probes 127.0.0.1:8765-8780
+  and takes the server whose `/api/health` `data_dir` equals `paths.data_dir()`
+  in the MCP process, so `CONVEXITY_HOME` selects a test server and a dev or
+  review server on another port is never written to (verified live with two
+  others running). `CONVEXITY_URL` overrides it and must be loopback. Nothing
+  running: every tool says so and names `start_app`, which launches the window
+  (or the bare server) with the MCP's own interpreter and waits for it.
+- **My Investments writes go to the book showing**, because the server refuses
+  any other (`books.expect`). A tool that names a book shows it first, then
+  writes with that page's `rev` and `book_id`. A stale rev is re-read and sent
+  once more; **"the portfolio showing changed" is never retried** — a retry
+  could land the entries in another person's book. Entries go through
+  `/api/investments/import/apply`: one journal item, one Undo.
+- **Same quota as the buttons.** News and sentiment are cache-only; only
+  `refresh` (the Refresh job; `my_investments: true` is the page's own
+  `__investments__` prices-and-FX job, no news) and `search_companies` (its AI
+  step) spend anything.
+- **stdlib only, stdout is the protocol.** Newline-delimited JSON-RPC 2.0
+  (`initialize`, `ping`, `tools/list`, `tools/call`; protocol 2025-06-18, older
+  versions echoed): the SDK would add ~15 packages for four methods.
+  `sys.stdout` is pointed at stderr while serving, so a stray `print` can't
+  corrupt a frame.
+- **Replies are trimmed for a model's context**: no chart series or
+  sparklines, price histories named by length, rows cut to `ROW_FIELDS` unless
+  `all_fields`, book pages in the app's display currency (`prefs.default_ccy`,
+  so the window's cached computation is reused).
+
+`tests/test_mcp_server.py` holds the protocol, discovery and both write rules
+against a stub app.
+
 ## 6. Symbol pack + company search (`symbol_db.py`, `symbol_build.py`, `search.py`)
 
 ### Why

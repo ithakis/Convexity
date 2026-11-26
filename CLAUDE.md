@@ -442,6 +442,11 @@ Each of these has cost real debugging time; the link goes to the full story.
   (`#eh-bg`, z 89) closes on Esc before the window (capture phase on `window`).
   [backend.md → Earnings filings](docs/architecture/backend.md#earnings-filings-filingspy-get-apiearnings-history-phase-5) ·
   [frontend.md → σ/μ, E/D flags](docs/architecture/frontend.md#σμ-in-the-stock-window-appjs-σμ-the-real-world-price-distribution)
+- **The MCP server (`convexity mcp`) is a client of the running app's HTTP
+  API, never a second writer**, and it talks only to the app whose `data_dir`
+  is its own. A My Investments write retries a stale rev once and never a
+  "portfolio showing changed" refusal.
+  [backend.md → MCP server](docs/architecture/backend.md#the-mcp-server-mcp_serverpy-convexity-mcp-2026-11-26)
 - **ruff check + format are blocking in CI.** [ci.md](docs/architecture/ci.md)
 
 ---
@@ -477,7 +482,8 @@ sub-decision.
 ├── src/convexity/               ← The package (src layout since Phase 7). Everything below is imported by server.py or desktop.py.
 │   ├── __init__.py
 │   ├── __main__.py              ← `python -m convexity [build-symbols]` → cli.main()
-│   ├── cli.py                   ← The `convexity` command: no args = server, `build-symbols` (symbol pack, CI) — §6, `build-reference-pack`
+│   ├── cli.py                   ← The `convexity` command: no args = server, `build-symbols` (symbol pack, CI) — §6, `build-reference-pack`, `mcp`
+│   ├── mcp_server.py            ← `convexity mcp`: MCP server over stdio so Claude drives the running app, a client of its HTTP API — §4
 │   ├── server.py                ← HTTP server, route handlers, start_server()/shutdown_server() — §4, §14
 │   ├── fetcher.py                ← fetch_one() per-symbol row builder — §4
 │   ├── analyst_targets.py       ← THE analyst target (each firm's latest, split-adjusted; summary fallback), read by every surface; BL tilts; dated record + track record — §4
